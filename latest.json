@@ -1,8 +1,8 @@
 {
     "ci":"22.06.0.1289",
-    "ci_url" : "https://github.com/variar/klogg/releases/tag/continuous",
+    "ci_url" : "https://github.com/ZEACENT/klogg/releases/tag/continuous",
     "stable": "22.06.0.1289",
-    "stable_url" : "https://github.com/variar/klogg/releases/tag/v22.06",
+    "stable_url" : "https://github.com/ZEACENT/klogg/releases/tag/v22.06",
     "releases": [
         "17.12.0.245", 
         "19.2.0.366", 

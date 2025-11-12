@@ -2,12 +2,12 @@ cmake_minimum_required(VERSION 3.12)
 
 project(
   klogg
-  VERSION 24.11.0
+  VERSION 25.11.12
   DESCRIPTION "klogg log viewer"
   LANGUAGES C CXX ASM
 )
 
-set(PROJECT_HOMEPAGE_URL "https://github.com/variar/klogg")
+set(PROJECT_HOMEPAGE_URL "https://github.com/ZEACENT/klogg")
 
 string(TIMESTAMP PRODUCT_CURRENT_YEAR "%Y")
 set(COMPANY "Anton Filimonov")
@@ -291,7 +291,7 @@ if(UNIX)
     #deb
     set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
     set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "http://github.com/variar/klogg")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "http://github.com/ZEACENT/klogg")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Anton Filimonov <${CPACK_PACKAGE_CONTACT}>")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS YES)
 
@@ -300,7 +300,7 @@ if(UNIX)
     set(CPACK_RPM_PACKAGE_LICENSE "GPLv3")
     set(CPACK_RPM_PACKAGE_AUTOREQ YES)
     #set(CPACK_RPM_PACKAGE_REQUIRES "qt5-qtbase >= ${KLOGG_QT_VERSION}")
-    set(CPACK_RPM_PACKAGE_URL "http://github.com/variar/klogg")
+    set(CPACK_RPM_PACKAGE_URL "http://github.com/ZEACENT/klogg")
     set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
         /usr/share/applications
         /usr/share/icons

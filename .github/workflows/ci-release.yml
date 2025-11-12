@@ -11,7 +11,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Download artifacts for last successful CI workflow
       if: ${{ !github.event.inputs.ci-run-id }}
       uses: dawidd6/action-download-artifact@v2
@@ -143,7 +143,7 @@ jobs:
     - name: Discord notification
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
-        DISCORD_EMBEDS: '[{"title": "Windows", "url": "https://github.com/variar/klogg/releases/tag/continuous-win"}, {"title": "Linux", "url": "https://github.com/variar/klogg/releases/tag/continuous-linux"}, {"title": "Mac", "url": "https://github.com/variar/klogg/releases/tag/continuous-osx"}]'
+        DISCORD_EMBEDS: '[{"title": "Windows", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-win"}, {"title": "Linux", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-linux"}, {"title": "Mac", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-osx"}]'
       uses: Ilshidur/action-discord@master
       with:
         args: 'New CI build {{KLOGG_VERSION}} has been released!'
