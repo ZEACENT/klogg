@@ -39,6 +39,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <qcoreapplication.h>
 #include <qsemaphore.h>
 #include <utility>
 
@@ -181,8 +182,17 @@ LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
 {
     try {
         interruptRequested_.set();
-        ScopedLock locker( operationsMutex_ );
-        operationsPool_.waitForDone();
+        {
+            ScopedLock locker( operationsMutex_ );
+            operationsPool_.waitForDone();
+        }
+        
+        // Process any pending Qt events to ensure queued signals are delivered
+        // before we destroy the worker. This prevents use-after-free with
+        // Qt::QueuedConnection signals from SearchOperation objects.
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents( this, QEvent::DeferredDelete );
+        
         LOG_INFO << "LogFilteredDataWorker shutdown";
     } catch ( const std::exception& e ) {
         LOG_ERROR << "Failed to destroy LogFilteredDataWorker: " << e.what();

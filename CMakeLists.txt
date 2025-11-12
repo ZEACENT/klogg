@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.12)
 
+# Allow dependencies with older minimum CMake requirements
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 project(
   klogg
   VERSION 25.11.12
@@ -257,6 +262,7 @@ if(UNIX)
     set(CPACK_SYSTEM_NAME "OSX")
     set(CPACK_DMG_BACKGROUND_IMAGE "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_background.tif")
     set(CPACK_DMG_DS_STORE_SETUP_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_setup.scpt")
+    set(CPACK_INSTALL_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPackDMGSetup.cmake")
 
   else()
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/16x16/klogg.png

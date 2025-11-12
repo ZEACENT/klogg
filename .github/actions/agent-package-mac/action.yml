@@ -2,22 +2,22 @@ name: "Prepare klogg mac packages"
 description: ""
 inputs:
   p12-file-base64:
-    required: true
+    required: false
   p12-password:
-    required: true
+    required: false
   notarization-username:
-    required: true
+    required: false
   notarization-team:
-    required: true
+    required: false
   notarization-password:
-    required: true
+    required: false
     
 runs:
   using: "composite"
   steps:
     - name: Mac prepare codesign
       id: prepare-codesign
-      if: ${{ github.event_name != 'pull_request' }} 
+      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
       uses: apple-actions/import-codesign-certs@v1
       with: 
         p12-file-base64: ${{ inputs.p12-file-base64 }}
@@ -50,7 +50,7 @@ runs:
         echo "KLOGG_PKG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}.pkg" >> $GITHUB_ENV
 
     - name: Mac codesign binaries
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
       shell: sh
       run: |
         cd $KLOGG_BUILD_ROOT
@@ -63,7 +63,7 @@ runs:
         cpack --verbose -G "DragNDrop"
 
     - name: Mac codesign dmg
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
       shell: sh
       run: |
         cd $KLOGG_BUILD_ROOT
@@ -71,7 +71,7 @@ runs:
         codesign -v -f -o runtime --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./packages/${{ env.KLOGG_DMG }}
     
     - name: Mac notarize DMG 
-      if: ${{ github.event_name != 'pull_request' }} 
+      if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
       shell: sh
       run: |
         xcrun notarytool submit --wait --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}" | tee dmg_notary.log
@@ -80,7 +80,7 @@ runs:
         cat "dmg_notary.log.json"
 
     - name: Mac staple DMG 
-      if: ${{ github.event_name != 'pull_request' }} 
+      if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
       shell: sh
       run: |
         xcrun stapler staple "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
@@ -120,5 +120,13 @@ runs:
       shell: sh
       run: |
         cd $KLOGG_BUILD_ROOT
-        cp -a ./output/klogg.dSym ./packages/klogg-${{ env.KLOGG_ARCH }}.dSym
-        cp -a ./output/klogg.app ./packages/klogg-${{ env.KLOGG_ARCH }}.app
+        if [ -d ./output/klogg.dSym ]; then
+          cp -a ./output/klogg.dSym ./packages/klogg-${{ env.KLOGG_ARCH }}.dSym
+        else
+          echo "Warning: klogg.dSym not found - skipping dSYM copy"
+        fi
+        if [ -d ./output/klogg.app ]; then
+          cp -a ./output/klogg.app ./packages/klogg-${{ env.KLOGG_ARCH }}.app
+        else
+          echo "Warning: klogg.app not found - skipping app copy"
+        fi
