@@ -10,6 +10,9 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v4
     - name: Download artifacts for last successful CI workflow
@@ -33,7 +36,17 @@ jobs:
     - name: Display structure of downloaded files
       run: ls -R ./packages-*
 
+    - name: Decompress debug symbols
+      shell: sh
+      run: |
+        xz -d ./packages-focal/klogg_focal.debug.xz
+        xz -d ./packages-jammy/klogg_jammy.debug.xz
+        xz -d ./packages-noble/klogg_noble.debug.xz
+        xz -d ./packages-oracle/klogg_oracle.debug.xz
+        xz -d ./packages-appimage/klogg_appimage.debug.xz
+
     - name: Setup Sentry CLI
+      if: env.SENTRY_TOKEN != ''
       uses: mathrix-education/setup-sentry-cli@0.1.0
       env:
         ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
@@ -43,19 +56,16 @@ jobs:
         project: klogg
 
     - name: Create Sentry release
+      if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
         sentry-cli releases new $KLOGG_VERSION
         sentry-cli releases set-commits --auto $KLOGG_VERSION
 
     - name: Upload symbols linux
+      if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
-        xz -d ./packages-focal/klogg_focal.debug.xz
-        xz -d ./packages-jammy/klogg_jammy.debug.xz
-        xz -d ./packages-noble/klogg_noble.debug.xz
-        xz -d ./packages-oracle/klogg_oracle.debug.xz
-        xz -d ./packages-appimage/klogg_appimage.debug.xz
         sentry-cli upload-dif ./packages-focal/klogg_focal.debug ./packages-focal/klogg_focal
         sentry-cli upload-dif ./packages-jammy/klogg_jammy.debug ./packages-jammy/klogg_jammy
         sentry-cli upload-dif ./packages-noble/klogg_noble.debug  ./packages-noble/klogg_noble
@@ -63,6 +73,7 @@ jobs:
         sentry-cli upload-dif ./packages-appimage/klogg_appimage.debug  ./packages-appimage/klogg_appimage
 
     - name: Upload symbols mac
+      if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
         if [ -d ./packages-macos-intel-qt6 ] && [ -f ./packages-macos-intel-qt6/klogg-x64.app/Contents/MacOS/klogg ]; then
@@ -77,6 +88,7 @@ jobs:
         fi
 
     - name: Upload symbols win
+      if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
         sentry-cli upload-dif ./packages-windows-x86-qt5/klogg-$KLOGG_VERSION-x86-Qt5-pdb.zip 
@@ -119,6 +131,7 @@ jobs:
         sha256sum --binary ./packages-bin/* ./packages-focal/* ./packages-jammy/* ./packages-noble/* ./packages-oracle/* ./packages-appimage/*  > ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt
         
     - name: Release win
+      if: env.GITHUB_TOKEN != ''
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
@@ -129,6 +142,7 @@ jobs:
           ./packages-windows-x64-qt6/*
 
     - name: Release linux
+      if: env.GITHUB_TOKEN != ''
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
@@ -144,7 +158,7 @@ jobs:
           ./linux-debug/*
 
     - name: Release mac
-      if: hashFiles('./packages-macos-intel-qt6/*') != '' || hashFiles('./packages-macos-arm-qt6/*') != ''
+      if: env.GITHUB_TOKEN != '' && (hashFiles('./packages-macos-intel-qt6/*') != '' || hashFiles('./packages-macos-arm-qt6/*') != '')
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
         repo_token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
@@ -155,6 +169,7 @@ jobs:
           ./packages-macos-arm-qt6/*
 
     - name: Discord notification
+      if: env.GITHUB_TOKEN != ''
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
         DISCORD_EMBEDS: '[{"title": "Windows", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-win"}, {"title": "Linux", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-linux"}, {"title": "Mac", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-osx"}]'
