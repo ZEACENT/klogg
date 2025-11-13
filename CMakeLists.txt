@@ -20,6 +20,14 @@ set(COPYRIGHT "Copyright (c) ${PRODUCT_CURRENT_YEAR} Nicolas Bonnefon, Anton Fil
 set(IDENTIFIER "com.github.variar.klogg")
 set(PROJECT_DESCRIPTION "${PROJECT_NAME} log viewer")
 
+# macOS RPATH configuration to ensure LC_RPATH entries exist for CPack/install_name_tool
+if(APPLE)
+  set(CMAKE_MACOSX_RPATH ON)
+  set(CMAKE_INSTALL_RPATH "@executable_path/../Frameworks;@executable_path/../lib")
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+endif()
+
 option(KLOGG_BUILD_TESTS "Build tests" ON)
 option(KLOGG_USE_LTO "Use link time optimization" ON)
 option(KLOGG_USE_SENTRY "Use Sentry" OFF)
@@ -257,12 +265,11 @@ if(UNIX)
 
   if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
-    set(CPACK_DMG_FORMAT "UDBZ")
+    set(CPACK_DMG_FORMAT "UDZO")  # Use UDZO (gzip) for better compatibility on CI runners
     set(CPACK_DMG_VOLUME_NAME "${PROJECT_NAME}")
     set(CPACK_SYSTEM_NAME "OSX")
     set(CPACK_DMG_BACKGROUND_IMAGE "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_background.tif")
     set(CPACK_DMG_DS_STORE_SETUP_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_setup.scpt")
-    set(CPACK_INSTALL_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CPackDMGSetup.cmake")
 
   else()
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/16x16/klogg.png

@@ -52,8 +52,8 @@ static constexpr QLatin1String OsSuffix = QLatin1String( "-osx", 4 );
 static constexpr QLatin1String OsSuffix = QLatin1String( "-linux", 6 );
 #endif
 
-static constexpr QLatin1String VERSION_URL
-    = QLatin1String( "https://raw.githubusercontent.com/variar/klogg/master/latest.json", 65 );
+const QLatin1String kReleaseFile
+    = QLatin1String( "https://raw.githubusercontent.com/ZEACENT/klogg/master/latest.json", 67 );
 static constexpr std::time_t CHECK_INTERVAL_S = 3600 * 24 * 7; /* 7 days */
 
 bool isVersionNewer( const QString& current_version, const QString& new_version )
@@ -115,10 +115,10 @@ void VersionChecker::startCheck()
             connect( manager_, &QNetworkAccessManager::finished, this,
                      &VersionChecker::downloadFinished );
 
-            LOG_DEBUG << "Requesting new version info from " << VERSION_URL;
+            LOG_DEBUG << "Requesting new version info from " << kReleaseFile;
 
             QNetworkRequest request;
-            request.setUrl( QUrl( VERSION_URL ) );
+            request.setUrl( QUrl( kReleaseFile ) );
             manager_->get( request );
         }
         else {

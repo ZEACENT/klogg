@@ -1,26 +1,26 @@
 ![media_small](https://user-images.githubusercontent.com/1620716/119145300-2d98b800-ba52-11eb-8d87-abe72cf65dd1.png)
 
-[![GitHub license](https://img.shields.io/github/license/variar/klogg.svg?style=flat)](https://github.com/variar/klogg/blob/master/COPYING)
-[![C++](https://img.shields.io/github/languages/top/variar/klogg?style=flat)]()
-[![GitHub contributors](https://img.shields.io/github/contributors/variar/klogg.svg?style=flat)](https://github.com/variar/klogg/graphs/contributors/)
+[![GitHub license](https://img.shields.io/github/license/ZEACENT/klogg.svg?style=flat)](https://github.com/ZEACENT/klogg/blob/master/COPYING)
+[![C++](https://img.shields.io/github/languages/top/ZEACENT/klogg?style=flat)]()
+[![GitHub contributors](https://img.shields.io/github/contributors/ZEACENT/klogg.svg?style=flat)](https://github.com/ZEACENT/klogg/graphs/contributors/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](http://makeapullrequest.com)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/f6db6ef0be3a4a5abff94111a5291c45)](https://www.codacy.com/manual/variar/klogg?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=variar/klogg&amp;utm_campaign=Badge_Grade)
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/f6db6ef0be3a4a5abff94111a5291c45)](https://www.codacy.com/manual/ZEACENT/klogg?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=ZEACENT/klogg&amp;utm_campaign=Badge_Grade)
 
 
-[![Github all releases](https://img.shields.io/github/downloads/variar/klogg/total?style=flat)](https://github.com/variar/klogg/releases/)
-[ ![Github](https://img.shields.io/github/v/release/variar/klogg?style=flat&label=Stable%20release&)](https://github.com/variar/klogg/releases/latest)
+[![Github all releases](https://img.shields.io/github/downloads/ZEACENT/klogg/total?style=flat)](https://github.com/ZEACENT/klogg/releases/)
+[ ![Github](https://img.shields.io/github/v/release/ZEACENT/klogg?style=flat&label=Stable%20release&)](https://github.com/ZEACENT/klogg/releases/latest)
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/klogg.svg)](https://repology.org/project/klogg/versions)
 
-Check [GitHub releases](https://github.com/variar/klogg/releases/latest) for Windows installers and Linux/Mac packages.
+Check [GitHub releases](https://github.com/ZEACENT/klogg/releases/latest) for Windows installers and Linux/Mac packages.
 
 Development status
 
-[![Next milestone](https://img.shields.io/github/milestones/progress-percent/variar/klogg/4?style=flat&)](https://github.com/variar/klogg/milestone/4)
-[![Ready for testing](https://img.shields.io/github/issues-raw/variar/klogg/status:%20ready%20for%20testing?color=green&label=issues%20ready%20for%20testing&style=flat)](https://github.com/variar/klogg/issues?q=is%3Aopen+is%3Aissue+label%3A%22status%3A+ready+for+testing%22)
-[![Need documentation](https://img.shields.io/github/issues-search/variar/klogg?color=yellow&label=features%20need%20documentation&query=is%3Aissue%20label%3A%22status%3A%20need%20documentation%22&style=flat)](https://github.com/variar/klogg/issues?q=is%3Aissue+label%3A%22status%3A+need+documentation%22)
-[![GitHub commits](https://img.shields.io/github/commits-since/variar/klogg/v22.06.svg?style=flat)](https://github.com/variar/klogg/commits/)
-[![CI Build and Release](https://github.com/variar/klogg/actions/workflows/ci-build.yml/badge.svg)](https://github.com/variar/klogg/actions/workflows/ci-build.yml)
+[![Next milestone](https://img.shields.io/github/milestones/progress-percent/ZEACENT/klogg/4?style=flat&)](https://github.com/ZEACENT/klogg/milestone/4)
+[![Ready for testing](https://img.shields.io/github/issues-raw/ZEACENT/klogg/status:%20ready%20for%20testing?color=green&label=issues%20ready%20for%20testing&style=flat)](https://github.com/ZEACENT/klogg/issues?q=is%3Aopen+is%3Aissue+label%3A%22status%3A+ready+for+testing%22)
+[![Need documentation](https://img.shields.io/github/issues-search/ZEACENT/klogg?color=yellow&label=features%20need%20documentation&query=is%3Aissue%20label%3A%22status%3A%20need%20documentation%22&style=flat)](https://github.com/ZEACENT/klogg/issues?q=is%3Aissue+label%3A%22status%3A+need+documentation%22)
+[![GitHub commits](https://img.shields.io/github/commits-since/ZEACENT/klogg/v22.06.svg?style=flat)](https://github.com/ZEACENT/klogg/commits/)
+[![CI Build and Release](https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml/badge.svg)](https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml)
 
 [![Chat on Discord](https://img.shields.io/discord/838452586944266260?label=Discord&style=flat)](https://discord.gg/DruNyQftzB) [![Join the chat at https://gitter.im/klogg_log_viewer/community](https://badges.gitter.im/klogg_log_viewer/community.svg)](https://gitter.im/klogg_log_viewer/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
@@ -41,7 +41,7 @@ page for how to use Klogg.
 
 | Windows | Linux | Mac |
 | ------------- |------------- | ------------- |
-| [continuous-win](https://github.com/variar/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/variar/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/variar/klogg/releases/tag/continuous-osx) |
+| [continuous-win](https://github.com/ZEACENT/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/ZEACENT/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/ZEACENT/klogg/releases/tag/continuous-osx) |
 
 I try to keep a [changelog](CHANGELOG.md) with monthly changes. 
 
@@ -101,28 +101,28 @@ Here is a small demo showing how much faster klogg is (searching in ~1Gb file st
 
 https://user-images.githubusercontent.com/1620716/117588567-bea39100-b12c-11eb-990a-90a667bcaeaa.mp4
 
-List of glogg issues that have been fixed/implemented in klogg can be found [here](https://github.com/variar/klogg/discussions/302).
+List of glogg issues that have been fixed/implemented in klogg can be found [here](https://github.com/ZEACENT/klogg/discussions/302).
 
-List of all changes can be found [here](https://github.com/variar/klogg/milestone/8?closed=1).
+List of all changes can be found [here](https://github.com/ZEACENT/klogg/milestone/8?closed=1).
 
 **[Back to top](#table-of-contents)**
 
 ## Installation
 
-This project uses [Calendar Versioning](https://calver.org/). For a list of available versions, see the [repository tag list](https://github.com/variar/klogg/tags).
+This project uses [Calendar Versioning](https://calver.org/). For a list of available versions, see the [repository tag list](https://github.com/ZEACENT/klogg/tags).
 
 ### Current stable release builds
 
 Binaries for all platforms can be downloaded from GitHub releases.
 
-[ ![Release](https://img.shields.io/github/v/release/variar/klogg?style=flat)](https://github.com/variar/klogg/releases/latest)
+[ ![Release](https://img.shields.io/github/v/release/ZEACENT/klogg?style=flat)](https://github.com/ZEACENT/klogg/releases/latest)
 
 #### Windows
 Windows installer is also available from:
 
 * [ ![Chocolatey](https://img.shields.io/chocolatey/v/klogg?style=flat)](https://chocolatey.org/packages/klogg)
 * [ ![Scoop Extras bucket](https://img.shields.io/scoop/v/klogg?bucket=extras)](https://scoopsearch.github.io/#/apps?q=klogg)
-* [Winget package](https://winget.run/pkg/variar/klogg) 
+* [Winget package](https://winget.run/pkg/ZEACENT/klogg) 
 
 #### Mac OS
 Package for Mac can be installed from Homebrew
@@ -177,11 +177,11 @@ As indicated by this link from the official appimage documentation: https://docs
 
 ### Testing builds
 
-![CI Build and Release](https://github.com/variar/klogg/workflows/CI%20Build%20and%20Release/badge.svg)
+![CI Build and Release](https://github.com/ZEACENT/klogg/workflows/CI%20Build%20and%20Release/badge.svg)
 
 | Windows | Linux | Mac |
 | ------------- |------------- | ------------- |
-| [continuous-win](https://github.com/variar/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/variar/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/variar/klogg/releases/tag/continuous-osx) |
+| [continuous-win](https://github.com/ZEACENT/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/ZEACENT/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/ZEACENT/klogg/releases/tag/continuous-osx) |
 
 **[Back to top](#table-of-contents)**
 
@@ -197,7 +197,7 @@ First, please refer to the
 [documentation](DOCUMENTATION.md)
 page.
 
-You can open issues using [klogg issues page](https://github.com/variar/klogg/issues)
+You can open issues using [klogg issues page](https://github.com/ZEACENT/klogg/issues)
 or post questions to glogg development [mailing list](http://groups.google.co.uk/group/glogg-devel).
 
 ## Contributing

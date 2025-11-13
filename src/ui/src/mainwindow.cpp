@@ -736,6 +736,41 @@ void MainWindow::loadIcons()
     showScratchPadAction->setIcon( iconLoader_.load( "icons8-create" ) );
     addToFavoritesAction->setIcon( iconLoader_.load( "icons8-star" ) );
     addToFavoritesMenuAction->setIcon( iconLoader_.load( "icons8-star" ) );
+
+#ifdef Q_OS_MACOS
+    // Improve toggle action visibility on macOS by adding distinct styling
+    // for checked/unchecked states with background color and border
+    const QString toggleActionStyle = R"(
+        QToolButton:checked {
+            background-color: rgba(0, 122, 255, 0.2);
+            border: 1px solid rgba(0, 122, 255, 0.5);
+            border-radius: 3px;
+        }
+        QToolButton:!checked {
+            background-color: transparent;
+            border: 1px solid transparent;
+        }
+        QToolButton:checked:hover {
+            background-color: rgba(0, 122, 255, 0.3);
+        }
+    )";
+    
+    // Apply styling to toolbar after it's created
+    // This will be called after createToolBars() sets up the toolbar
+    QTimer::singleShot(0, this, [this, toggleActionStyle]() {
+        if (toolBar) {
+            // Find the QToolButton widgets for checkable actions and apply styling
+            for (QAction* action : { followAction, addToFavoritesAction, showScratchPadAction }) {
+                if (action && action->isCheckable()) {
+                    QWidget* widget = toolBar->widgetForAction(action);
+                    if (widget) {
+                        widget->setStyleSheet(toggleActionStyle);
+                    }
+                }
+            }
+        }
+    });
+#endif
 }
 
 void MainWindow::createMenus()
@@ -1220,7 +1255,7 @@ void MainWindow::about()
         tr( "<h2>klogg %1</h2>"
             "<p>A fast, advanced log explorer.</p>"
             "<p>Built %2 from %3</p>"
-            "<p><a href=\"https://github.com/variar/klogg\">https://github.com/variar/klogg</a></p>"
+            "<p><a href=\"https://github.com/ZEACENT/klogg\">https://github.com/ZEACENT/klogg</a></p>"
             "<p>This is fork of glogg</p>"
             "<p><a href=\"http://glogg.bonnefon.org/\">http://glogg.bonnefon.org/</a></p>"
             "<p>Using icons from <a href=\"https://icons8.com\">icons8.com</a> project</p>"

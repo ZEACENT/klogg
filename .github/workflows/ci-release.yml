@@ -13,6 +13,7 @@ jobs:
     env:
       SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN }}
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+      DISCORD_NEW_VERSIONS_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
     steps:
     - uses: actions/checkout@v4
     - name: Download artifacts for last successful CI workflow
@@ -169,7 +170,7 @@ jobs:
           ./packages-macos-arm-qt6/*
 
     - name: Discord notification
-      if: env.GITHUB_TOKEN != ''
+      if: env.DISCORD_NEW_VERSIONS_WEBHOOK != ''
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
         DISCORD_EMBEDS: '[{"title": "Windows", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-win"}, {"title": "Linux", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-linux"}, {"title": "Mac", "url": "https://github.com/ZEACENT/klogg/releases/tag/continuous-osx"}]'

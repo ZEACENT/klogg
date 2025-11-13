@@ -59,7 +59,7 @@ void runSearch( LogFilteredData* filtered_data, const QString& regexp,
 {
 
     QTimer::singleShot(
-        50, [ & ]() { filtered_data->runSearch( RegularExpressionPattern( regexp ) ); } );
+        50, [filtered_data, regexp]() { filtered_data->runSearch( RegularExpressionPattern( regexp ) ); } );
 
     int progress = 0;
     do {
@@ -232,24 +232,28 @@ SCENARIO( "search for regex", "[logdata]" )
             auto filtered_lines = filtered_data->getNbLine();
             REQUIRE( filtered_lines.get() == 0 );
 
-            SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
-                                              &LogFilteredData::searchProgressed };
-
-            runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
-
-            THEN( "Matched lines are in data" )
+            // Use a scope to ensure spy is destroyed before filtered_data
             {
-                QList<QVariant> progressArgs = searchProgressSpy.last();
-                REQUIRE( qvariant_cast<LinesCount>( progressArgs.at( 0 ) ) == 50_lcount );
+                SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                                  &LogFilteredData::searchProgressed };
 
-                const auto matches_count = filtered_data->getNbMatches();
-                REQUIRE( matches_count == 50_lcount );
+                runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
 
-                const auto lines = filtered_data->getExpandedLines( 0_lnum, matches_count );
-                for ( const auto& l : lines ) {
-                    REQUIRE( l.endsWith( '9' ) );
+                THEN( "Matched lines are in data" )
+                {
+                    REQUIRE( searchProgressSpy.count() > 0 );
+                    QList<QVariant> progressArgs = searchProgressSpy.last();
+                    REQUIRE( qvariant_cast<LinesCount>( progressArgs.at( 0 ) ) == 50_lcount );
+
+                    const auto matches_count = filtered_data->getNbMatches();
+                    REQUIRE( matches_count == 50_lcount );
+
+                    const auto lines = filtered_data->getExpandedLines( 0_lnum, matches_count );
+                    for ( const auto& l : lines ) {
+                        REQUIRE( l.endsWith( '9' ) );
+                    }
                 }
-            }
+            } // Spy destroyed here, before filtered_data
         }
     }
 }
