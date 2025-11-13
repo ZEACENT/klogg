@@ -2144,21 +2144,28 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
     const LineLength visibleColumns = getNbVisibleCols();
     if ( useTextWrap_ ) {
         const auto totalLines = logData_->getNbLine();
-        LinesCount wrappedVisibleLines;
-        LinesCount unwrappedLines;
+        if ( totalLines.get() == 0 ) {
+            return LinesCount{ 0 };
+        }
+
+        LinesCount wrappedLinesCount;
+        LinesCount unwrappedLinesCount;
         LineNumber unwrappedLineNumber{ logData_->getNbLine().get() - 1 };
-        while ( unwrappedLines < totalLines && unwrappedLines < visibleLines ) {
+        while ( wrappedLinesCount < visibleLines ) {
             QString expandedLine = logData_->getExpandedLineString( unwrappedLineNumber );
             WrappedString wrapped{ expandedLine, visibleColumns };
-            wrappedVisibleLines += LinesCount(
+            wrappedLinesCount += LinesCount(
                 type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped.wrappedLinesCount() ) );
-            unwrappedLines++;
+            unwrappedLinesCount++;
+
+            if ( unwrappedLineNumber.get() == 0 ) {
+                break;
+            }
             unwrappedLineNumber--;
         }
 
-        LOG_INFO << "Bottom visible lines " << visibleLines.get() << " wrapped "
-                 << wrappedVisibleLines.get();
-        return wrappedVisibleLines;
+        LOG_INFO << "Bottom unwrapped visible lines " << unwrappedLinesCount.get();
+        return unwrappedLinesCount;
     }
     else {
         return visibleLines;
@@ -2173,14 +2180,19 @@ void AbstractLogView::updateScrollBars()
         verticalScrollBar()->setRange( 0, 0 );
     }
     else {
-        const auto visibleWrappedLines = getNbBottomWrappedVisibleLines();
-        const auto wrappedLinesScrollAdjust = ( visibleWrappedLines - visibleLines ).get();
-
-        verticalScrollBar()->setRange(
-            0, static_cast<int>( std::min( logData_->getNbLine().get() - visibleLines.get()
-                                               + LinesCount::UnderlyingType{ 1 }
-                                               + wrappedLinesScrollAdjust,
-                                           maxValue<LinesCount>().get() ) ) );
+        if ( useTextWrap_ ) {
+            const auto unwrappedLinesAtBottom = getNbBottomWrappedVisibleLines();
+            verticalScrollBar()->setRange(
+                0, static_cast<int>( std::min(
+                           ( logData_->getNbLine() - unwrappedLinesAtBottom ).get(),
+                           maxValue<LinesCount>().get() ) ) );
+        }
+        else {
+            verticalScrollBar()->setRange(
+                0, static_cast<int>( std::min(
+                           ( logData_->getNbLine() - visibleLines ).get(),
+                           maxValue<LinesCount>().get() ) ) );
+        }
     }
 
     int64_t hScrollMaxValue = 0;
