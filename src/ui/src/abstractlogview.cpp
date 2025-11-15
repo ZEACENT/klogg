@@ -1030,7 +1030,9 @@ void AbstractLogView::scrollContentsBy( int dx, int dy )
 {
     LOG_DEBUG << "scrollContentsBy received " << dy << "position " << verticalScrollBar()->value();
 
-    const auto lastTopLine = ( logData_->getNbLine() - getNbVisibleLines() );
+    const auto lastTopLine = useTextWrap_ 
+        ? ( logData_->getNbLine() - getNbBottomWrappedVisibleLines() )
+        : ( logData_->getNbLine() - getNbVisibleLines() );
 
     const auto scrollPosition = verticalScrollToLineNumber( verticalScrollBar()->value() );
 
@@ -2151,11 +2153,24 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
         LinesCount wrappedLinesCount;
         LinesCount unwrappedLinesCount;
         LineNumber unwrappedLineNumber{ logData_->getNbLine().get() - 1 };
+        
+        // Count from bottom: how many unwrapped lines fit when viewport is filled with wrapped lines
         while ( wrappedLinesCount < visibleLines ) {
             QString expandedLine = logData_->getExpandedLineString( unwrappedLineNumber );
             WrappedString wrapped{ expandedLine, visibleColumns };
-            wrappedLinesCount += LinesCount(
+            const auto thisLineWrappedCount = LinesCount(
                 type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped.wrappedLinesCount() ) );
+            
+            // Check if adding this line would overshoot the viewport
+            if ( wrappedLinesCount + thisLineWrappedCount > visibleLines ) {
+                // Line causes overshoot - only count it if at least partially visible
+                if ( wrappedLinesCount < visibleLines ) {
+                    unwrappedLinesCount++;
+                }
+                break;
+            }
+            
+            wrappedLinesCount += thisLineWrappedCount;
             unwrappedLinesCount++;
 
             if ( unwrappedLineNumber.get() == 0 ) {
@@ -2164,7 +2179,8 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
             unwrappedLineNumber--;
         }
 
-        LOG_INFO << "Bottom unwrapped visible lines " << unwrappedLinesCount.get();
+        LOG_INFO << "Bottom unwrapped visible lines " << unwrappedLinesCount.get() 
+                 << " (wrapped: " << wrappedLinesCount.get() << ")";
         return unwrappedLinesCount;
     }
     else {
@@ -2249,7 +2265,14 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     if ( firstLine_ >= linesInFile )
         firstLine_ = LineNumber( linesInFile.get() ? linesInFile.get() - 1 : 0 );
 
-    const auto nbLines = qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
+    // When text wrapping is enabled, we need to fetch more lines than visible
+    // because wrapped lines take up more vertical space. The loop will stop
+    // when yPos exceeds viewport height, ensuring we draw all wrapped lines
+    // of the last visible unwrapped line.
+    const auto maxLinesToFetch = useTextWrap_ 
+        ? ( linesInFile - LinesCount( firstLine_.get() ) )
+        : qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
+    const auto nbLines = maxLinesToFetch;
 
     const int bottomOfTextPx = static_cast<int>( nbLines.get() ) * fontHeight;
 
@@ -2579,7 +2602,12 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         }
 
         yPos += finalLineHeight;
-        if ( yPos > viewport()->height() ) {
+        
+        // Check if we should stop drawing. However, if this is the last line in the file
+        // and text wrapping is enabled, we should draw all wrapped lines even if they
+        // exceed the viewport height, so the user can see the complete last line.
+        const bool isLastLineInFile = ( lineNumber.get() + 1 ) >= linesInFile.get();
+        if ( yPos > viewport()->height() && !( useTextWrap_ && isLastLineInFile ) ) {
             break;
         }
     } // For each line

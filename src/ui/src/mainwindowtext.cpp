@@ -30,7 +30,7 @@ const char* action::newWindowText = QT_TR_NOOP( "&New window" );
 const char* action::newWindowStatusTip = QT_TR_NOOP( "Create new klogg window" );
 const char* action::openText = QT_TR_NOOP( "&Open..." );
 const char* action::openStatusTip = QT_TR_NOOP( "Open a file" );
-const char* action::recentFilesCleanupText = QT_TR_NOOP("Clear List");
+const char* action::recentFilesCleanupText = QT_TR_NOOP("Clear list");
 const char* action::closeText = QT_TR_NOOP( "&Close" );
 const char* action::closeStatusTip = QT_TR_NOOP( "Close document" );
 const char* action::closeAllText = QT_TR_NOOP( "Close &All" );
@@ -64,7 +64,7 @@ const char* action::overviewVisibleText = QT_TR_NOOP( "Matches &overview" );
 const char* action::lineNumbersVisibleInMainText = QT_TR_NOOP( "Line &numbers in main view" );
 const char* action::lineNumbersVisibleInFilteredText
     = QT_TR_NOOP( "Line &numbers in filtered view" );
-const char* action::followText = QT_TR_NOOP( "&Follow File" );
+const char* action::followText = QT_TR_NOOP( "&Follow file" );
 const char* action::wrapText = QT_TR_NOOP( "&Wrap text" );
 const char* action::reloadText = QT_TR_NOOP( "&Reload" );
 const char* action::stopText = QT_TR_NOOP( "&Stop" );
@@ -80,12 +80,12 @@ const char* action::aboutQtText = QT_TR_NOOP( "About &Qt" );
 const char* action::aboutQtStatusTip = QT_TR_NOOP( "Show the Qt library's About box" );
 const char* action::reportIssueText = QT_TR_NOOP( "Report issue..." );
 const char* action::reportIssueStatusTip = QT_TR_NOOP( "Report an issue on GitHub" );
-const char* action::joinDiscordText = QT_TR_NOOP( "Join Discord community..." );
+const char* action::joinDiscordText = QT_TR_NOOP( "Join Discord Community..." );
 const char* action::joinDiscordStatusTip
-    = QT_TR_NOOP( "Join Klogg development community at Discord" );
-const char* action::joinTelegramText = QT_TR_NOOP( "Join Telegram community..." );
+    = QT_TR_NOOP( "Join Klogg Development Community at Discord" );
+const char* action::joinTelegramText = QT_TR_NOOP( "Join Telegram Community..." );
 const char* action::joinTelegramStatusTip
-    = QT_TR_NOOP( "Join Klogg development community at Telegram" );
+    = QT_TR_NOOP( "Join Klogg Development Community at Telegram" );
 const char* action::generateDumpText = QT_TR_NOOP( "Generate crash dump" );
 const char* action::generateDumpStatusTip = QT_TR_NOOP( "Generate diagnostic crash dump" );
 const char* action::showScratchPadText = QT_TR_NOOP( "Scratchpad" );

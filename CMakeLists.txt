@@ -5,6 +5,13 @@ if(POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD)
 endif()
 
+# Generate version from current date if not provided
+if(NOT DEFINED BUILD_VERSION OR BUILD_VERSION STREQUAL "")
+  string(TIMESTAMP KLOGG_AUTO_VERSION "%y.%m.%d" UTC)
+  set(BUILD_VERSION "${KLOGG_AUTO_VERSION}")
+  message(STATUS "Auto-generated version from build date: ${BUILD_VERSION}")
+endif()
+
 project(
   klogg
   VERSION 25.11.12

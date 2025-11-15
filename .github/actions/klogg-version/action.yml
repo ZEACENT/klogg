@@ -6,4 +6,7 @@ runs:
     - name: Set klogg version
       shell: sh
       run: |
-        echo "KLOGG_VERSION=25.11.12.$((${{ github.run_number }} + 717))" >> $GITHUB_ENV 
+        # Generate version from build date: YY.MM.DD.BUILD_NUMBER
+        BUILD_DATE=$(date -u '+%y.%m.%d')
+        BUILD_NUMBER=$((${{ github.run_number }} + 717))
+        echo "KLOGG_VERSION=${BUILD_DATE}.${BUILD_NUMBER}" >> $GITHUB_ENV 
