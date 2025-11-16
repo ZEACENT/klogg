@@ -58,14 +58,6 @@ set(COPYRIGHT "Copyright (c) ${PRODUCT_CURRENT_YEAR} Nicolas Bonnefon, Anton Fil
 set(IDENTIFIER "com.github.variar.klogg")
 set(PROJECT_DESCRIPTION "${PROJECT_NAME} log viewer")
 
-# macOS RPATH configuration to ensure LC_RPATH entries exist for CPack/install_name_tool
-if(APPLE)
-  set(CMAKE_MACOSX_RPATH ON)
-  set(CMAKE_INSTALL_RPATH "@executable_path/../Frameworks;@executable_path/../lib")
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
-  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
-endif()
-
 option(KLOGG_BUILD_TESTS "Build tests" ON)
 option(KLOGG_USE_LTO "Use link time optimization" ON)
 option(KLOGG_USE_SENTRY "Use Sentry" OFF)
