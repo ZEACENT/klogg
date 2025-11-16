@@ -5,16 +5,47 @@ if(POLICY CMP0169)
   cmake_policy(SET CMP0169 OLD)
 endif()
 
-# Generate version from current date if not provided
-if(NOT DEFINED BUILD_VERSION OR BUILD_VERSION STREQUAL "")
+# Read version from environment variable (set by CI/CD) or generate from current date
+set(BUILD_VERSION
+    $ENV{KLOGG_VERSION}
+    CACHE STRING "build version"
+)
+
+# Generate version from current date if not provided via environment variable
+if(NOT BUILD_VERSION OR BUILD_VERSION STREQUAL "")
   string(TIMESTAMP KLOGG_AUTO_VERSION "%y.%m.%d" UTC)
-  set(BUILD_VERSION "${KLOGG_AUTO_VERSION}")
+  set(BUILD_VERSION "${KLOGG_AUTO_VERSION}" CACHE STRING "build version" FORCE)
   message(STATUS "Auto-generated version from build date: ${BUILD_VERSION}")
+else()
+  message(STATUS "Using version from environment: ${BUILD_VERSION}")
 endif()
 
+# Parse BUILD_VERSION to extract major.minor.patch for project() call
+# BUILD_VERSION format is typically YY.MM.DD or YY.MM.DD.BUILD_NUMBER
+string(REGEX MATCHALL "[0-9]+" _versionComponents "${BUILD_VERSION}")
+list(LENGTH _versionComponents _len)
+
+# Extract version components with defaults
+if(${_len} GREATER 0)
+  list(GET _versionComponents 0 _major)
+else()
+  set(_major "0")
+endif()
+if(${_len} GREATER 1)
+  list(GET _versionComponents 1 _minor)
+else()
+  set(_minor "0")
+endif()
+if(${_len} GREATER 2)
+  list(GET _versionComponents 2 _patch)
+else()
+  set(_patch "0")
+endif()
+
+# Use parsed version for project() call (will be overridden by prepare_version.cmake if BUILD_VERSION is set)
 project(
   klogg
-  VERSION 25.11.12
+  VERSION ${_major}.${_minor}.${_patch}
   DESCRIPTION "klogg log viewer"
   LANGUAGES C CXX ASM
 )
@@ -60,10 +91,8 @@ else()
     option(KLOGG_USE_VECTORSCAN "Use Vectorscan" ON)
 endif()
 
-set(BUILD_VERSION
-    $ENV{KLOGG_VERSION}
-    CACHE STRING "build version"
-)
+# BUILD_VERSION is already set above from environment variable or date
+# BUILD_NUMBER is extracted from BUILD_VERSION by prepare_version.cmake
 set(BUILD_NUMBER
     ""
     CACHE STRING "build number"
