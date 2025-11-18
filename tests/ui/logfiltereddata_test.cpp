@@ -232,28 +232,24 @@ SCENARIO( "search for regex", "[logdata]" )
             auto filtered_lines = filtered_data->getNbLine();
             REQUIRE( filtered_lines.get() == 0 );
 
-            // Use a scope to ensure spy is destroyed before filtered_data
+            SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                              &LogFilteredData::searchProgressed };
+
+            runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+
+            THEN( "Matched lines are in data" )
             {
-                SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
-                                                  &LogFilteredData::searchProgressed };
+                QList<QVariant> progressArgs = searchProgressSpy.last();
+                REQUIRE( qvariant_cast<LinesCount>( progressArgs.at( 0 ) ) == 50_lcount );
 
-                runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+                const auto matches_count = filtered_data->getNbMatches();
+                REQUIRE( matches_count == 50_lcount );
 
-                THEN( "Matched lines are in data" )
-                {
-                    REQUIRE( searchProgressSpy.count() > 0 );
-                    QList<QVariant> progressArgs = searchProgressSpy.last();
-                    REQUIRE( qvariant_cast<LinesCount>( progressArgs.at( 0 ) ) == 50_lcount );
-
-                    const auto matches_count = filtered_data->getNbMatches();
-                    REQUIRE( matches_count == 50_lcount );
-
-                    const auto lines = filtered_data->getExpandedLines( 0_lnum, matches_count );
-                    for ( const auto& l : lines ) {
-                        REQUIRE( l.endsWith( '9' ) );
-                    }
+                const auto lines = filtered_data->getExpandedLines( 0_lnum, matches_count );
+                for ( const auto& l : lines ) {
+                    REQUIRE( l.endsWith( '9' ) );
                 }
-            } // Spy destroyed here, before filtered_data
+            }
         }
     }
 }

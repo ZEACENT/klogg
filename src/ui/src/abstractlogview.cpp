@@ -1036,10 +1036,19 @@ void AbstractLogView::scrollContentsBy( int dx, int dy )
 
     const auto scrollPosition = verticalScrollToLineNumber( verticalScrollBar()->value() );
 
-    if ( ( lastTopLine.get() > 0 ) && scrollPosition.get() > lastTopLine.get() ) {
+    if ( ( lastTopLine.get() > 0 ) && scrollPosition.get() >= lastTopLine.get() ) {
         // The user is going further than the last line, we need to lock the last line at the bottom
         LOG_DEBUG << "scrollContentsBy beyond!";
-        firstLine_ = scrollPosition;
+        // When text wrapping is enabled, anchor to the dynamically calculated lastTopLine
+        // instead of using the stale scrollPosition. This ensures correct display when
+        // the viewport height changes, as getNbBottomWrappedVisibleLines() recalculates
+        // based on the current viewport size.
+        if ( useTextWrap_ ) {
+            firstLine_ = LineNumber( lastTopLine.get() );
+        }
+        else {
+            firstLine_ = scrollPosition;
+        }
         lastLineAligned_ = true;
     }
     else {
@@ -1144,9 +1153,11 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // This is the case where the user is on the 'extra' slot at the end
     // and is aligned on the last line (but no elastic shown)
     else if ( lastLineAligned_ && !followElasticHook_.isHooked() ) {
-        drawingTopOffset_ = -( wholeHeight - viewport()->height() );
+        // Use actual drawn height when text wrapping is enabled to handle variable line heights
+        const int effectiveHeight = useTextWrap_ ? textAreaCache_.actual_height_ : wholeHeight;
+        drawingTopOffset_ = -( effectiveHeight - viewport()->height() );
         drawingTopPosition += drawingTopOffset_;
-        drawingPullToFollowTopPosition = drawingTopPosition + wholeHeight;
+        drawingPullToFollowTopPosition = drawingTopPosition + effectiveHeight;
     }
     else {
         drawingTopOffset_ = -pullToFollowHeight;
@@ -1649,12 +1660,29 @@ void AbstractLogView::updateDisplaySize()
 
     // Our text area cache is now invalid
     textAreaCache_.invalid_ = true;
-    textAreaCache_.pixmap_ = QPixmap{
-        static_cast<int>( std::ceil( viewport()->width() * viewport()->devicePixelRatio() ) ),
-        static_cast<int>( std::ceil( static_cast<int>( getNbVisibleLines().get() ) * charHeight_
-                                     * viewport()->devicePixelRatio() ) )
-    };
-    textAreaCache_.pixmap_.setDevicePixelRatio( viewport()->devicePixelRatio() );
+
+    // If we were aligned to the bottom, we want to stay aligned to the bottom
+    // even if the viewport size has changed (which changes the 'lastTopLine').
+    // We force the scrollbar to the new maximum, which will trigger scrollContentsBy
+    // and correctly re-anchor 'firstLine_' and 'lastLineAligned_'.
+    if ( useTextWrap_ && lastLineAligned_ && !followMode_ ) {
+         verticalScrollBar()->setValue( verticalScrollBar()->maximum() );
+    }
+
+    // When text wrapping is enabled, we can't pre-calculate the correct pixmap height
+    // since wrapped lines have variable heights. Create a null pixmap and let drawTextArea
+    // determine the correct size based on actual wrapped content.
+    if ( useTextWrap_ ) {
+        textAreaCache_.pixmap_ = QPixmap{};
+    }
+    else {
+        textAreaCache_.pixmap_ = QPixmap{
+            static_cast<int>( std::ceil( viewport()->width() * viewport()->devicePixelRatio() ) ),
+            static_cast<int>( std::ceil( static_cast<int>( getNbVisibleLines().get() ) * charHeight_
+                                         * viewport()->devicePixelRatio() ) )
+        };
+        textAreaCache_.pixmap_.setDevicePixelRatio( viewport()->devicePixelRatio() );
+    }
 }
 
 LineNumber AbstractLogView::getTopLine() const
@@ -2226,6 +2254,24 @@ void AbstractLogView::updateScrollBars()
 
 void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 {
+    // When text wrapping is enabled, create pixmap with sufficient height for wrapped content.
+    // We can't pre-calculate this in updateDisplaySize because wrapped line count is variable.
+    // Allocate height for all remaining lines to ensure complete rendering.
+    if ( useTextWrap_ && paintDevice == &textAreaCache_.pixmap_ && textAreaCache_.pixmap_.isNull() ) {
+        const auto linesInFile = logData_->getNbLine();
+        const auto remainingLines = LineNumber( linesInFile.get() ) >= firstLine_ 
+            ? linesInFile - LinesCount( firstLine_.get() )
+            : 0_lcount;
+        // Allocate height assuming worst-case: each line could wrap to viewport height
+        // This is oversized but ensures no clipping. Actual used height tracked in actual_height_.
+        const int estimatedHeight = std::max( viewport()->height(), 
+                                             static_cast<int>( remainingLines.get() ) * charHeight_ );
+        textAreaCache_.pixmap_ = QPixmap{
+            static_cast<int>( std::ceil( viewport()->width() * viewport()->devicePixelRatio() ) ),
+            static_cast<int>( std::ceil( estimatedHeight * viewport()->devicePixelRatio() ) )
+        };
+        textAreaCache_.pixmap_.setDevicePixelRatio( viewport()->devicePixelRatio() );
+    }
     // LOG_DEBUG << "devicePixelRatio: " << viewport()->devicePixelRatio();
     // LOG_DEBUG << "viewport size: " << viewport()->size().width();
     // LOG_DEBUG << "pixmap size: " << textPixmap.width();
@@ -2606,11 +2652,17 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         // Check if we should stop drawing. However, if this is the last line in the file
         // and text wrapping is enabled, we should draw all wrapped lines even if they
         // exceed the viewport height, so the user can see the complete last line.
+        // Also, if lastLineAligned_ is true, we are in "bottom alignment" mode where
+        // paintEvent will shift the content up. We must ensure we draw enough content
+        // (potentially exceeding viewport height) to support this shift.
         const bool isLastLineInFile = ( lineNumber.get() + 1 ) >= linesInFile.get();
-        if ( yPos > viewport()->height() && !( useTextWrap_ && isLastLineInFile ) ) {
+        if ( yPos > viewport()->height() && !( useTextWrap_ && ( isLastLineInFile || lastLineAligned_ ) ) ) {
             break;
         }
     } // For each line
+    
+    // Store the actual drawn height for proper alignment in paintEvent
+    textAreaCache_.actual_height_ = yPos;
 }
 
 // Draw the "pull to follow" bar and return a pixmap.

@@ -148,13 +148,13 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - os: macos-13
+          - os: macos-15-intel
             qt_version: 6.7.3
             qt_arch: clang_64
             qt_modules: qt5compat
             arch: x64
             artifacts_id: macos-intel-qt6
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=13.0
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
           - os: macos-latest
             qt_version: 6.7.3
             qt_arch: clang_64

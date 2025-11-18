@@ -88,28 +88,6 @@ LogFilteredData::LogFilteredData( const LogData* logData )
              &LogFilteredData::handleSearchProgressedThrottled );
 }
 
-LogFilteredData::~LogFilteredData()
-{
-    // Disconnect all signals from workerThread_ to this object FIRST to prevent
-    // signals being delivered to a partially-destroyed object during shutdown.
-    // This must be done before interrupting to avoid race conditions where
-    // signals are queued after disconnection but before operations complete.
-    disconnect( &workerThread_, nullptr, this, nullptr );
-    disconnect( this, nullptr, &workerThread_, nullptr );
-    
-    // Also disconnect the throttler signals
-    disconnect( &searchProgressThrottler_, nullptr, this, nullptr );
-    disconnect( this, nullptr, &searchProgressThrottler_, nullptr );
-    
-    // Now interrupt any ongoing search (signals are already disconnected)
-    interruptSearch();
-    
-    // Detach reader if attached (must be done before workerThread_ destruction)
-    detachReader();
-    
-    // workerThread_ destructor will wait for operations to complete
-}
-
 void LogFilteredData::runSearch( const RegularExpressionPattern& regExp )
 {
     runSearch( regExp, 0_lnum, LineNumber( getNbTotalLines().get() ) );
