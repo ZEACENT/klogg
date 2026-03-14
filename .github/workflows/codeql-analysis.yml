@@ -18,7 +18,8 @@ jobs:
             arch: x64
             qt_version: 6.9.3
             qt_arch: linux_gcc_64
-            qt_modules: qt5compat qtsvg
+            qt_modules: qt5compat
+            qt_archives: qtbase icu qtsvg qttools qttranslations
 
     steps:
     - name: Checkout repository
