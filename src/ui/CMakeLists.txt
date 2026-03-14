@@ -1,6 +1,9 @@
 add_library(
   klogg_ui STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatsource.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersdialog.h
@@ -17,6 +20,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/infoline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logmainview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/livesourcetransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindow.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindowtext.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/menu.h
@@ -57,6 +61,9 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfiltersdialog.ui
   ${CMAKE_CURRENT_SOURCE_DIR}/include/optionsdialog.ui
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatdialog.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adbprocesstransport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightersdialog.cpp
@@ -72,6 +79,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/infoline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/pathline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logmainview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/menu.cpp

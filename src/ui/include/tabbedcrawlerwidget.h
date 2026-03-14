@@ -69,26 +69,29 @@ class TabbedCrawlerWidget : public QTabWidget {
     TabbedCrawlerWidget();
 
     template <typename T>
-    int addCrawler( T* crawler, const QString& fileName )
+    int addCrawler( T* crawler, const QString& documentId, const QString& displayName = {},
+                    const QString& toolTip = {} )
     {
         const auto index = QTabWidget::addTab( crawler, QString{} );
 
-        connect( crawler, &T::dataStatusChanged, this, [ this, fileName ]( DataStatus status ) {
-            const auto tabsCount = count();
-            for ( int i = 0; i < tabsCount; ++i ) {
-                if ( tabPathAt( i ) == fileName ) {
-                    setTabDataStatus( i, status );
-                    return;
-                }
-            }
-        } );
+        connect( crawler, &T::dataStatusChanged, this,
+                 [ this, documentId ]( DataStatus status ) {
+                     const auto tabsCount = count();
+                     for ( int i = 0; i < tabsCount; ++i ) {
+                         if ( tabPathAt( i ) == documentId ) {
+                             setTabDataStatus( i, status );
+                             return;
+                         }
+                     }
+                 } );
 
-        addTabBarItem( index, fileName );
+        addTabBarItem( index, documentId, displayName, toolTip );
 
         return index;
     }
 
     void removeCrawler( int index );
+    void updateCrawler( int index, const QString& displayName, const QString& toolTip );
 
   Q_SIGNALS:
     void tabsReordered();
@@ -99,7 +102,8 @@ class TabbedCrawlerWidget : public QTabWidget {
     void changeEvent( QEvent* event ) override;
 
   private:
-    void addTabBarItem( int index, const QString& fileName );
+    void addTabBarItem( int index, const QString& documentId, const QString& displayName,
+                        const QString& toolTip );
     QString tabPathAt( int index ) const;
     int tabIndexForPath( const QString& tabPath ) const;
     void setTabVisibleCompat( int index, bool visible );

@@ -1,6 +1,7 @@
 add_library(
   klogg_logdata STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogdata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/capturestore.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/concatenatedlogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
@@ -12,10 +13,13 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logfiltereddata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logfiltereddataworker.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linetypes.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/searchablelogdata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/streaminglogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/fileholder.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filedigest.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/readablesize.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogdata.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/capturestore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/concatenatedlogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressedlinestorage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/encodingdetector.cpp
@@ -24,6 +28,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdataworker.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logfiltereddata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logfiltereddataworker.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/searchablelogdata.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/streaminglogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/fileholder.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filedigest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/readablesize.cpp

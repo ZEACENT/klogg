@@ -52,6 +52,7 @@
 
 namespace {
 constexpr QLatin1String PathKey = QLatin1String( "path", 4 );
+constexpr QLatin1String TitleKey = QLatin1String( "title", 5 );
 constexpr QLatin1String StatusKey = QLatin1String( "status", 6 );
 constexpr QLatin1String GroupIdKey = QLatin1String( "groupId", 7 );
 constexpr QLatin1String GroupColorKey = QLatin1String( "groupColor", 10 );
@@ -216,17 +217,22 @@ void TabbedCrawlerWidget::changeEvent( QEvent* event )
     QWidget::changeEvent( event );
 }
 
-void TabbedCrawlerWidget::addTabBarItem( int index, const QString& fileName )
+void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
+                                         const QString& displayName, const QString& toolTip )
 {
-    const auto tabLabel = QFileInfo( fileName ).fileName();
-    const auto tabName = TabNameMapping::getSynced().tabName( fileName );
+    const auto tabLabel = displayName.isEmpty() ? QFileInfo( documentId ).fileName() : displayName;
+    const auto tabName
+        = displayName.isEmpty() ? TabNameMapping::getSynced().tabName( documentId ) : QString{};
+    const auto nativeToolTip
+        = toolTip.isEmpty() ? QDir::toNativeSeparators( documentId ) : QDir::toNativeSeparators( toolTip );
 
     myTabBar_.setTabIcon( index, olddata_icon_ );
     myTabBar_.setTabText( index, tabName.isEmpty() ? tabLabel : tabName );
-    myTabBar_.setTabToolTip( index, QDir::toNativeSeparators( fileName ) );
+    myTabBar_.setTabToolTip( index, nativeToolTip );
 
     QVariantMap tabData;
-    tabData[ PathKey ] = fileName;
+    tabData[ PathKey ] = documentId;
+    tabData[ TitleKey ] = tabLabel;
     tabData[ StatusKey ] = static_cast<int>( DataStatus::OLD_DATA );
 
     myTabBar_.setTabData( index, tabData );
@@ -247,6 +253,24 @@ void TabbedCrawlerWidget::removeCrawler( int index )
         myTabBar_.hide();
 
     onGroupsChanged();
+}
+
+void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
+                                         const QString& toolTip )
+{
+    if ( index < 0 || index >= count() ) {
+        return;
+    }
+
+    auto tabData = myTabBar_.tabData( index ).toMap();
+    tabData[ TitleKey ] = displayName;
+    myTabBar_.setTabData( index, tabData );
+    myTabBar_.setTabToolTip( index, QDir::toNativeSeparators( toolTip ) );
+
+    const auto documentId = tabData.value( PathKey ).toString();
+    if ( TabNameMapping::getSynced().tabName( documentId ).isEmpty() ) {
+        myTabBar_.setTabText( index, displayName );
+    }
 }
 
 void TabbedCrawlerWidget::mouseReleaseEvent( QMouseEvent* event )
@@ -572,10 +596,14 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
 
     connect( openContainingFolder, &QAction::triggered, this,
              [ this, tab ] { showPathInFileExplorer( tabToolTip( tab ) ); } );
+    openContainingFolder->setEnabled( QFileInfo( tabToolTip( tab ) ).isAbsolute() );
 
     connect( renameTab, &QAction::triggered, this, [ this, tab, tabPath ] {
         const auto currentName = TabNameMapping::getSynced().tabName( tabPath );
-        const auto defaultName = currentName.isEmpty() ? QFileInfo( tabPath ).fileName() : currentName;
+        const auto defaultName
+            = currentName.isEmpty()
+                  ? myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString()
+                  : currentName;
         bool isNameEntered = false;
         auto newName = QInputDialog::getText( this, "Rename tab", "Tab name", QLineEdit::Normal,
                                               defaultName, &isNameEntered );
@@ -593,7 +621,7 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
 
     connect( resetTabName, &QAction::triggered, this, [ this, tab, tabPath ] {
         TabNameMapping::getSynced().setTabName( tabPath, "" ).save();
-        myTabBar_.setTabText( tab, QFileInfo( tabPath ).fileName() );
+        myTabBar_.setTabText( tab, myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString() );
     } );
 
     menu.exec( globalPoint );

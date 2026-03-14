@@ -88,6 +88,8 @@
 
 #include "mainwindow.h"
 
+#include "adblogcatdialog.h"
+#include "adblogcatsource.h"
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
@@ -267,13 +269,20 @@ void MainWindow::reloadSession()
         = session_.restore( [] { return new CrawlerWidget(); }, &current_file_index );
 
     for ( const auto& open_file : openedFiles ) {
-        QString file_name = { open_file.first };
+        const auto& documentInfo = open_file.first;
         auto* crawler_widget = static_cast<CrawlerWidget*>( open_file.second );
 
         if ( crawler_widget ) {
-            mainTabWidget_.addCrawler( crawler_widget, file_name );
+            mainTabWidget_.addCrawler(
+                crawler_widget, documentInfo.documentId,
+                documentInfo.kind == DocumentKind::File ? QString{} : documentInfo.displayName,
+                documentInfo.toolTip );
 
-            if ( followFileOnLoad ) {
+            if ( documentInfo.kind == DocumentKind::AdbLogcat ) {
+                registerAdbLogcatSource( crawler_widget );
+            }
+
+            if ( followFileOnLoad && documentInfo.kind == DocumentKind::File ) {
                 signalCrawlerToFollowFile( crawler_widget );
             }
         }
@@ -331,6 +340,8 @@ void MainWindow::reTranslateUI()
 
     openAction->setText( transAction( action::openText ) );
     openAction->setStatusTip( transAction( action::openStatusTip ) );
+    openAdbLogcatAction->setText( tr( "Open ADB Logcat..." ) );
+    openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
 
     recentFilesCleanup->setText( transAction( action::recentFilesCleanupText ) );
 
@@ -357,6 +368,12 @@ void MainWindow::reTranslateUI()
 
     clearLogAction->setText( transAction( action::clearLogText ) );
     clearLogAction->setStatusTip( transAction( action::clearLogStatusTip ) );
+    saveCurrentLiveLogAction->setText( tr( "Save Live Log As..." ) );
+    saveCurrentLiveLogAction->setStatusTip( tr( "Persist the current live capture to a file" ) );
+    disconnectSourceAction->setText( tr( "Disconnect Source" ) );
+    disconnectSourceAction->setStatusTip( tr( "Stop streaming from the current live source" ) );
+    reconnectSourceAction->setText( tr( "Reconnect Source" ) );
+    reconnectSourceAction->setStatusTip( tr( "Reconnect the current live source" ) );
 
     openContainingFolderAction->setText( transAction( action::openContainingFolderText ) );
     openContainingFolderAction->setStatusTip(
@@ -491,6 +508,11 @@ void MainWindow::createActions()
     openAction->setStatusTip( tr( action::openStatusTip ) );
     connect( openAction, &QAction::triggered, [ this ]( auto ) { this->open(); } );
 
+    openAdbLogcatAction = new QAction( tr( "Open ADB Logcat..." ), this );
+    openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
+    connect( openAdbLogcatAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->openAdbLogcat(); } );
+
     recentFilesCleanup = new QAction( tr( action::recentFilesCleanupText ), this );
     connect( recentFilesCleanup, &QAction::triggered, this,
              [ this ]( auto ) { this->clearRecentFileActions(); } );
@@ -539,6 +561,23 @@ void MainWindow::createActions()
     clearLogAction = new QAction( tr( action::clearLogText ), this );
     clearLogAction->setStatusTip( tr( action::clearLogStatusTip ) );
     connect( clearLogAction, &QAction::triggered, this, [ this ]( auto ) { this->clearLog(); } );
+
+    saveCurrentLiveLogAction = new QAction( tr( "Save Live Log As..." ), this );
+    saveCurrentLiveLogAction->setStatusTip(
+        tr( "Persist the current live capture to a file" ) );
+    connect( saveCurrentLiveLogAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->saveCurrentLiveLog(); } );
+
+    disconnectSourceAction = new QAction( tr( "Disconnect Source" ), this );
+    disconnectSourceAction->setStatusTip(
+        tr( "Stop streaming from the current live source" ) );
+    connect( disconnectSourceAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->disconnectCurrentSource(); } );
+
+    reconnectSourceAction = new QAction( tr( "Reconnect Source" ), this );
+    reconnectSourceAction->setStatusTip( tr( "Reconnect the current live source" ) );
+    connect( reconnectSourceAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->reconnectCurrentSource(); } );
 
     openContainingFolderAction = new QAction( tr( action::openContainingFolderText ), this );
     openContainingFolderAction->setStatusTip( tr( action::openContainingFolderStatusTip ) );
@@ -789,6 +828,7 @@ void MainWindow::createMenus()
     fileMenu->setToolTipsVisible( true );
     fileMenu->addAction( newWindowAction );
     fileMenu->addAction( openAction );
+    fileMenu->addAction( openAdbLogcatAction );
     fileMenu->addAction( openClipboardAction );
     fileMenu->addAction( openUrlAction );
     recentFilesMenu = fileMenu->addMenu( tr( "Open Recent" ) );
@@ -822,7 +862,10 @@ void MainWindow::createMenus()
     editMenu->addAction( openContainingFolderAction );
     editMenu->addSeparator();
     editMenu->addAction( openInEditorAction );
+    editMenu->addAction( saveCurrentLiveLogAction );
     editMenu->addAction( clearLogAction );
+    editMenu->addAction( disconnectSourceAction );
+    editMenu->addAction( reconnectSourceAction );
     editMenu->setEnabled( false );
 
     viewMenu = menuBar()->addMenu( tr( menu::viewTitle ) );
@@ -981,9 +1024,11 @@ void MainWindow::open()
 
     // Default to the path of the current file if there is one
     if ( auto current = currentCrawlerWidget() ) {
-        QString current_file = session_.getFilename( current );
+        QString current_file = session_.getAssociatedPath( current );
         QFileInfo fileInfo = QFileInfo( current_file );
-        defaultDir = fileInfo.path();
+        if ( fileInfo.exists() ) {
+            defaultDir = fileInfo.path();
+        }
     }
 
     const auto selectedFiles = QFileDialog::getOpenFileUrls(
@@ -1002,6 +1047,14 @@ void MainWindow::open()
 
     for ( const auto& remoteFile : remoteFiles ) {
         openRemoteFile( remoteFile );
+    }
+}
+
+void MainWindow::openAdbLogcat()
+{
+    AdbLogcatDialog dialog( this );
+    if ( dialog.exec() == QDialog::Accepted ) {
+        openAdbLogcatSource( dialog.sessionData(), true );
     }
 }
 
@@ -1044,7 +1097,15 @@ void MainWindow::switchToOpenedFile( QAction* action )
         return;
     }
 
-    loadFile( action->data().toString() );
+    const auto documentId = action->data().toString();
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        const auto* crawler = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
+        if ( crawler && session_.getDocumentId( crawler ) == documentId ) {
+            mainTabWidget_.setCurrentIndex( index );
+            activateWindow();
+            return;
+        }
+    }
 }
 
 void MainWindow::openFileFromRecent( QAction* action )
@@ -1151,32 +1212,150 @@ void MainWindow::find()
 
 void MainWindow::clearLog()
 {
-    const auto current_file = session_.getFilename( currentCrawlerWidget() );
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler ) {
+        return;
+    }
+
+    if ( session_.getDocumentKind( crawler ) == DocumentKind::AdbLogcat ) {
+        const auto displayName = session_.getDisplayName( crawler );
+        const auto userAction = QMessageBox::question(
+            this, tr( "klogg - clear logcat buffer" ),
+            tr( "Clear device log buffer for %1? Local cached log will also be removed." )
+                .arg( displayName ),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
+
+        if ( userAction == QMessageBox::Yes ) {
+            if ( auto* adbSource = session_.getAdbLogcatSource( crawler );
+                 adbSource != nullptr && !adbSource->clearAndRestart() ) {
+                QMessageBox::critical(
+                    this, tr( "klogg - clear logcat buffer" ),
+                    adbSource->lastError().isEmpty() ? tr( "Failed to clear logcat buffer" )
+                                                     : adbSource->lastError() );
+            }
+        }
+        return;
+    }
+
+    const auto currentFile = session_.getFilename( crawler );
     const auto userAction = QMessageBox::question(
         this, tr( "klogg - clear file" ),
         tr( "Clear file %1? File content will be removed from disk, this is irreversible" )
-            .arg( current_file ),
+            .arg( currentFile ),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
 
     if ( userAction == QMessageBox::Yes ) {
-        QFile::resize( current_file, 0 );
+        QFile::resize( currentFile, 0 );
+    }
+}
+
+void MainWindow::saveCurrentLiveLog()
+{
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
+        return;
+    }
+
+    auto* adbSource = session_.getAdbLogcatSource( crawler );
+    if ( !adbSource ) {
+        return;
+    }
+
+    auto suggestedPath = adbSource->sessionData().boundOutputFile;
+    if ( suggestedPath.isEmpty() ) {
+        suggestedPath
+            = QDir::home().filePath( session_.getDisplayName( crawler ) + QStringLiteral( ".log" ) );
+    }
+
+    const auto outputPath
+        = QFileDialog::getSaveFileName( this, tr( "Save live log" ), suggestedPath,
+                                        tr( "Log files (*.log *.txt);;All files (*)" ) );
+    if ( outputPath.isEmpty() ) {
+        return;
+    }
+
+    if ( !adbSource->bindOutputFile( outputPath ) ) {
+        QMessageBox::critical( this, tr( "Save live log" ),
+                               tr( "Failed to bind live capture to %1" ).arg( outputPath ) );
+        return;
+    }
+
+    const auto toolTip = session_.getAssociatedPath( crawler ).isEmpty()
+                             ? session_.getDisplayName( crawler )
+                             : session_.getAssociatedPath( crawler );
+    mainTabWidget_.updateCrawler( mainTabWidget_.currentIndex(), session_.getDisplayName( crawler ),
+                                  toolTip );
+    updateMenuBarFromDocument( crawler );
+    updateOpenedFilesMenu();
+    updateInfoLine();
+    persistSessionState();
+}
+
+void MainWindow::disconnectCurrentSource()
+{
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
+        return;
+    }
+
+    if ( auto* adbSource = session_.getAdbLogcatSource( crawler ) ) {
+        adbSource->disconnectSource();
+        updateMenuBarFromDocument( crawler );
+    }
+}
+
+void MainWindow::reconnectCurrentSource()
+{
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
+        return;
+    }
+
+    if ( auto* adbSource = session_.getAdbLogcatSource( crawler ) ) {
+        if ( !adbSource->reconnectSource() && !adbSource->lastError().isEmpty() ) {
+            QMessageBox::warning( this, tr( "Reconnect source" ), adbSource->lastError() );
+        }
+        updateMenuBarFromDocument( crawler );
     }
 }
 
 void MainWindow::copyFullPath()
 {
-    const auto current_file = session_.getFilename( currentCrawlerWidget() );
-    sendTextToClipboard( QDir::toNativeSeparators( current_file ) );
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler ) {
+        return;
+    }
+
+    const auto associatedPath = session_.getAssociatedPath( crawler );
+    const auto text
+        = associatedPath.isEmpty() ? session_.getDocumentId( crawler ) : associatedPath;
+    sendTextToClipboard( QDir::toNativeSeparators( text ) );
 }
 
 void MainWindow::openContainingFolder()
 {
-    showPathInFileExplorer( session_.getFilename( currentCrawlerWidget() ) );
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler ) {
+        return;
+    }
+
+    const auto associatedPath = session_.getAssociatedPath( crawler );
+    if ( !associatedPath.isEmpty() ) {
+        showPathInFileExplorer( associatedPath );
+    }
 }
 
 void MainWindow::openInEditor()
 {
-    openFileInDefaultApplication( session_.getFilename( currentCrawlerWidget() ) );
+    auto* crawler = currentCrawlerWidget();
+    if ( !crawler ) {
+        return;
+    }
+
+    const auto associatedPath = session_.getAssociatedPath( crawler );
+    if ( !associatedPath.isEmpty() ) {
+        openFileInDefaultApplication( associatedPath );
+    }
 }
 
 void MainWindow::tryOpenClipboard( int tryTimes )
@@ -1402,7 +1581,10 @@ void MainWindow::toggleFilteredLineNumbersVisibility( bool isVisible )
 void MainWindow::changeFollowMode( bool follow )
 {
     auto& config = Configuration::get();
-    if ( follow && !( config.nativeFileWatchEnabled() || config.pollingEnabled() ) ) {
+    const auto currentCrawler = currentCrawlerWidget();
+    const auto isLiveSource
+        = currentCrawler && session_.getDocumentKind( currentCrawler ) == DocumentKind::AdbLogcat;
+    if ( follow && !isLiveSource && !( config.nativeFileWatchEnabled() || config.pollingEnabled() ) ) {
         LOG_WARNING << "File watch disabled in settings";
     }
 
@@ -1452,13 +1634,13 @@ void MainWindow::updateLoadingProgress( int progress )
 {
     LOG_DEBUG << "Loading progress: " << progress;
 
-    QString current_file
-        = QDir::toNativeSeparators( session_.getFilename( currentCrawlerWidget() ) );
+    const auto currentFile
+        = QDir::toNativeSeparators( session_.getDisplayName( currentCrawlerWidget() ) );
 
     // We ignore 0% and 100% to avoid a flash when the file (or update)
     // is very short.
     if ( progress > 0 && progress < 100 ) {
-        infoLine->setText( current_file + tr( " - Indexing lines... (%1 %)" ).arg( progress ) );
+        infoLine->setText( currentFile + tr( " - Indexing lines... (%1 %)" ).arg( progress ) );
         infoLine->displayGauge( progress );
 
         showInfoLabels( false );
@@ -1520,7 +1702,10 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
     assert( widget );
 
-    const QString fileName = session_.getFilename( widget );
+    const auto documentId = session_.getDocumentId( widget );
+    const auto displayName = session_.getDisplayName( widget );
+    const auto associatedPath = session_.getAssociatedPath( widget );
+    const auto documentKind = session_.getDocumentKind( widget );
 
     // Show confirmation dialog for user-initiated closes if enabled
     if ( initiator == ActionInitiator::User ) {
@@ -1528,7 +1713,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         if ( config.confirmTabClose() ) {
             QMessageBox msgBox( this );
             msgBox.setWindowTitle( tr( "Confirm Close" ) );
-            msgBox.setText( tr( "Close \"%1\"?" ).arg( QFileInfo( fileName ).fileName() ) );
+            msgBox.setText( tr( "Close \"%1\"?" ).arg( displayName ) );
             msgBox.setStandardButtons( QMessageBox::Yes | QMessageBox::No );
             msgBox.setDefaultButton( QMessageBox::Yes );
 
@@ -1549,14 +1734,23 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
     widget->stopLoading();
     mainTabWidget_.removeCrawler( index );
 
-    if ( initiator == ActionInitiator::User ) {
-        addRecentFile( fileName );
+    if ( initiator == ActionInitiator::User && documentKind == DocumentKind::File ) {
+        addRecentFile( associatedPath );
     }
 
     if ( !shutdownInProgress_ ) {
         auto& groupManager = TabGroupManager::get();
-        groupManager.removeTabFromGroup( fileName );
+        groupManager.removeTabFromGroup( documentId );
         groupManager.save();
+    }
+
+    if ( documentKind == DocumentKind::AdbLogcat ) {
+        if ( auto* adbSource = session_.getAdbLogcatSource( widget ) ) {
+            adbSource->disconnectSource();
+            if ( !session_.exitRequested() ) {
+                adbSource->deleteCaptureFiles();
+            }
+        }
     }
 
     session_.close( widget );
@@ -1582,7 +1776,7 @@ void MainWindow::currentTabChanged( int index )
         Q_EMIT optionsChanged();
 
         updateMenuBarFromDocument( crawler_widget );
-        updateTitleBar( session_.getFilename( crawler_widget ) );
+        updateTitleBar( session_.getDisplayName( crawler_widget ) );
         updateFavoritesMenu();
 
         editMenu->setEnabled( true );
@@ -1599,8 +1793,15 @@ void MainWindow::currentTabChanged( int index )
         updateTitleBar( QString() );
 
         editMenu->setEnabled( false );
+        followAction->setChecked( false );
+        followAction->setEnabled( Configuration::get().anyFileWatchEnabled() );
         addToFavoritesAction->setEnabled( false );
         addToFavoritesMenuAction->setEnabled( false );
+        saveCurrentLiveLogAction->setEnabled( false );
+        disconnectSourceAction->setEnabled( false );
+        reconnectSourceAction->setEnabled( false );
+        openContainingFolderAction->setEnabled( false );
+        openInEditorAction->setEnabled( false );
     }
 
     persistSessionState();
@@ -1921,8 +2122,7 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
             // tab during loading. (maybe FIXME)
             // mainTabWidget_.setEnabled( false );
 
-            int index = mainTabWidget_.addCrawler( crawler_widget, fileName );
-
+            int index = mainTabWidget_.addCrawler( crawler_widget, fileName, {}, fileName );
             // Setting the new tab, the user will see a blank page for the duration
             // of the loading, with no way to switch to another tab
             mainTabWidget_.setCurrentIndex( index );
@@ -1949,6 +2149,41 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
     }
 }
 
+bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, bool startConnected )
+{
+    CrawlerWidget* crawlerWidget = static_cast<CrawlerWidget*>(
+        session_.openAdbLogcat( sessionData, []() { return new CrawlerWidget(); }, startConnected ) );
+
+    if ( !crawlerWidget ) {
+        return false;
+    }
+
+    crawlerWidget->hide();
+
+    const auto toolTip = session_.getAssociatedPath( crawlerWidget ).isEmpty()
+                             ? session_.getDisplayName( crawlerWidget )
+                             : session_.getAssociatedPath( crawlerWidget );
+    const auto index = mainTabWidget_.addCrawler(
+        crawlerWidget, session_.getDocumentId( crawlerWidget ), session_.getDisplayName( crawlerWidget ),
+        toolTip );
+    mainTabWidget_.setCurrentIndex( index );
+
+    registerAdbLogcatSource( crawlerWidget );
+    signalCrawlerToFollowFile( crawlerWidget );
+    followAction->setChecked( true );
+
+    updateOpenedFilesMenu();
+    persistSessionState();
+
+    if ( auto* adbSource = session_.getAdbLogcatSource( crawlerWidget );
+         adbSource != nullptr && adbSource->state() == AdbLogcatSource::State::Error
+         && !adbSource->lastError().isEmpty() ) {
+        QMessageBox::warning( this, tr( "Open ADB Logcat" ), adbSource->lastError() );
+    }
+
+    return true;
+}
+
 // Strips the passed filename from its directory part.
 QString MainWindow::strippedName( const QString& fullFileName ) const
 {
@@ -1969,6 +2204,9 @@ void MainWindow::updateTitleBar( const QString& file_name )
     QString shownName = tr( "Untitled" );
     if ( !file_name.isEmpty() ) {
         shownName = strippedName( file_name );
+        if ( shownName.isEmpty() ) {
+            shownName = file_name;
+        }
     }
 
     QString indexPart = "";
@@ -1986,6 +2224,32 @@ void MainWindow::addRecentFile( const QString& fileName )
     recentFiles.addRecent( fileName );
     recentFiles.save();
     updateRecentFileActions();
+}
+
+void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
+{
+    if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
+        return;
+    }
+
+    auto* adbSource = session_.getAdbLogcatSource( crawler );
+    if ( !adbSource ) {
+        return;
+    }
+
+    connect( adbSource, &AdbLogcatSource::stateChanged, this, [ this, crawler ] {
+        if ( currentCrawlerWidget() == crawler ) {
+            updateMenuBarFromDocument( crawler );
+            updateInfoLine();
+        }
+        updateOpenedFilesMenu();
+    } );
+    connect( adbSource, &AdbLogcatSource::errorOccurred, this,
+             [ this, crawler ]( const QString& error ) {
+                 if ( currentCrawlerWidget() == crawler && !error.isEmpty() ) {
+                     QMessageBox::warning( this, tr( "ADB logcat" ), error );
+                 }
+             } );
 }
 
 // Updates the actions for the recent files.
@@ -2034,6 +2298,11 @@ void MainWindow::clearRecentFileActions()
 void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
 {
     const auto encodingMib = crawler->encodingMib();
+    const auto documentKind = session_.getDocumentKind( crawler );
+    const auto associatedPath = session_.getAssociatedPath( crawler );
+    const auto hasFilesystemPath = !associatedPath.isEmpty();
+    const auto isFileDocument = documentKind == DocumentKind::File;
+    const auto isLiveDocument = documentKind == DocumentKind::AdbLogcat;
 
     auto encodingActions = encodingGroup->actions();
     auto encodingItem = std::find_if( encodingActions.begin(), encodingActions.end(),
@@ -2049,6 +2318,21 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
 
     followAction->setChecked( crawler->isFollowEnabled() );
     textWrapAction->setChecked( crawler->isTextWrapEnabled() );
+    followAction->setEnabled( isLiveDocument || Configuration::get().anyFileWatchEnabled() );
+    copyPathToClipboardAction->setEnabled( true );
+    openContainingFolderAction->setEnabled( hasFilesystemPath );
+    openInEditorAction->setEnabled( hasFilesystemPath );
+    addToFavoritesAction->setEnabled( isFileDocument );
+    addToFavoritesMenuAction->setEnabled( isFileDocument );
+    saveCurrentLiveLogAction->setEnabled( isLiveDocument );
+
+    auto* adbSource = isLiveDocument ? session_.getAdbLogcatSource( crawler ) : nullptr;
+    const auto sourceState
+        = adbSource ? adbSource->state() : AdbLogcatSource::State::Disconnected;
+    disconnectSourceAction->setEnabled( isLiveDocument
+                                        && sourceState == AdbLogcatSource::State::Connected );
+    reconnectSourceAction->setEnabled( isLiveDocument
+                                       && sourceState != AdbLogcatSource::State::Connected );
 }
 
 // Update the top info line from the session
@@ -2058,19 +2342,21 @@ void MainWindow::updateInfoLine()
 
     // Following should always work as we will only receive enter
     // this slot if there is a crawler connected.
-    QString current_file
-        = QDir::toNativeSeparators( session_.getFilename( currentCrawlerWidget() ) );
+    auto* crawler = currentCrawlerWidget();
+    const auto associatedPath = session_.getAssociatedPath( crawler );
+    const auto currentFile = QDir::toNativeSeparators(
+        associatedPath.isEmpty() ? session_.getDisplayName( crawler ) : associatedPath );
 
     uint64_t fileSize;
     uint64_t fileNbLine;
     QDateTime lastModified;
 
-    session_.getFileInfo( currentCrawlerWidget(), &fileSize, &fileNbLine, &lastModified );
+    session_.getFileInfo( crawler, &fileSize, &fileNbLine, &lastModified );
 
-    infoLine->setText( current_file );
-    infoLine->setPath( current_file );
+    infoLine->setText( currentFile );
+    infoLine->setPath( currentFile );
     sizeField->setText( readableSize( fileSize ) );
-    encodingField->setText( currentCrawlerWidget()->encodingText() );
+    encodingField->setText( crawler->encodingText() );
 
     if ( lastModified.isValid() ) {
         const QString date = defaultLocale.toString( lastModified, QLocale::NarrowFormat );
@@ -2086,7 +2372,7 @@ void MainWindow::updateOpenedFilesMenu()
 {
     openedFilesMenu->clear();
 
-    const auto& files = session_.openedFiles();
+    const auto files = session_.openedDocuments();
 
     openedFilesMenu->setEnabled( !files.empty() );
 
@@ -2094,12 +2380,11 @@ void MainWindow::updateOpenedFilesMenu()
     openedFilesMenu->addSeparator();
 
     for ( const auto& file : files ) {
-        const auto displayFile = DisplayFilePath{ file };
-        auto action = openedFilesMenu->addAction( displayFile.displayName() );
+        auto action = openedFilesMenu->addAction( file.displayName );
 
         action->setActionGroup( openedFilesGroup );
-        action->setToolTip( displayFile.nativeFullPath() );
-        action->setData( displayFile.fullPath() );
+        action->setToolTip( file.toolTip );
+        action->setData( file.documentId );
     }
 
     selectOpenFileAction->setDisabled( files.empty() );
@@ -2131,13 +2416,15 @@ void MainWindow::updateFavoritesMenu()
 
     const auto& favorites = FavoriteFiles::getSynced().favorites();
     auto crawler = currentCrawlerWidget();
+    const auto isFileDocument
+        = crawler && session_.getDocumentKind( crawler ) == DocumentKind::File;
 
-    addToFavoritesAction->setEnabled( crawler != nullptr );
-    addToFavoritesMenuAction->setEnabled( crawler != nullptr );
+    addToFavoritesAction->setEnabled( isFileDocument );
+    addToFavoritesMenuAction->setEnabled( isFileDocument );
     removeFromFavoritesAction->setEnabled( !favorites.empty() );
 
-    if ( crawler ) {
-        const auto path = session_.getFilename( crawler );
+    if ( isFileDocument ) {
+        const auto path = session_.getAssociatedPath( crawler );
         if ( std::any_of( favorites.begin(), favorites.end(), FullPathComparator( path ) ) ) {
 
             addToFavoritesAction->setText( QApplication::translate(
@@ -2163,9 +2450,10 @@ void MainWindow::updateFavoritesMenu()
 
 void MainWindow::addToFavorites()
 {
-    if ( const auto crawler = currentCrawlerWidget() ) {
+    if ( const auto crawler = currentCrawlerWidget();
+         crawler != nullptr && session_.getDocumentKind( crawler ) == DocumentKind::File ) {
         auto& favorites = FavoriteFiles::get();
-        const auto path = session_.getFilename( crawler );
+        const auto path = session_.getAssociatedPath( crawler );
 
         if ( addToFavoritesAction->data().toBool() ) {
             favorites.add( path );
@@ -2190,8 +2478,9 @@ void MainWindow::removeFromFavorites()
 
     auto currentIndex = 0;
 
-    if ( const auto crawler = currentCrawlerWidget() ) {
-        const auto currentPath = session_.getFilename( crawler );
+    if ( const auto crawler = currentCrawlerWidget();
+         crawler != nullptr && session_.getDocumentKind( crawler ) == DocumentKind::File ) {
+        const auto currentPath = session_.getAssociatedPath( crawler );
         const auto currentItem
             = std::find_if( favorites.begin(), favorites.end(), FullPathComparator( currentPath ) );
         if ( currentItem != favorites.end() ) {
@@ -2234,16 +2523,16 @@ void MainWindow::removeFromRecent( const QString& pathToRemove )
 
 void MainWindow::selectOpenedFile()
 {
-    auto openedFilesPaths = session_.openedFiles();
-    std::vector<DisplayFilePath> openedFiles;
-    openedFiles.reserve( openedFilesPaths.size() );
-    std::transform( openedFilesPaths.cbegin(), openedFilesPaths.cend(),
-                    std::back_inserter( openedFiles ),
-                    []( const auto& path ) { return DisplayFilePath{ path }; } );
-
+    const auto openedDocuments = session_.openedDocuments();
     QStringList filesToShow;
-    std::transform( openedFiles.cbegin(), openedFiles.cend(), std::back_inserter( filesToShow ),
-                    []( const auto& f ) { return f.nativeFullPath(); } );
+    std::transform(
+        openedDocuments.cbegin(), openedDocuments.cend(), std::back_inserter( filesToShow ),
+        []( const auto& info ) {
+            if ( info.toolTip.isEmpty() || info.toolTip == info.displayName ) {
+                return info.displayName;
+            }
+            return QStringLiteral( "%1 (%2)" ).arg( info.displayName, info.toolTip );
+        } );
 
     auto selectFileDialog = std::make_unique<QDialog>( this );
     selectFileDialog->setWindowTitle( tr( "klogg -- switch to file" ) );
@@ -2279,22 +2568,28 @@ void MainWindow::selectOpenedFile()
     dispatchToMainThread( [ edit = filterEdit.get() ]() { edit->setFocus(); } );
 
     connect( selectFileDialog.get(), &QDialog::finished,
-             [ this, openedFiles, dialog = selectFileDialog.get(), model = filteredModel.get(),
+             [ this, openedDocuments, dialog = selectFileDialog.get(), model = filteredModel.get(),
                view = filesView.get() ]( auto result ) {
                  dialog->deleteLater();
                  if ( result != QDialog::Accepted || !view->selectionModel()->hasSelection() ) {
                      return;
                  }
-                 const auto& selectedPath
-                     = model->data( view->selectionModel()->selectedIndexes().front() ).toString();
-                 const auto selectedFile
-                     = std::find_if( openedFiles.begin(), openedFiles.end(),
-                                     [ selectedPath ]( const DisplayFilePath& f ) {
-                                         return f.nativeFullPath() == selectedPath;
-                                     } );
-
-                 if ( selectedFile != openedFiles.end() ) {
-                     loadFile( selectedFile->fullPath() );
+                 const auto sourceIndex
+                     = model->mapToSource( view->selectionModel()->selectedIndexes().front() );
+                 if ( sourceIndex.isValid() && sourceIndex.row() >= 0
+                      && sourceIndex.row() < klogg::isize( openedDocuments ) ) {
+                     const auto& selectedDocument
+                         = openedDocuments[ static_cast<size_t>( sourceIndex.row() ) ];
+                     for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+                         const auto* crawler
+                             = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
+                         if ( crawler
+                              && session_.getDocumentId( crawler ) == selectedDocument.documentId ) {
+                             mainTabWidget_.setCurrentIndex( index );
+                             activateWindow();
+                             break;
+                         }
+                     }
                  }
              } );
 
@@ -2519,18 +2814,19 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
 void MainWindow::mergeTabs()
 {
     const int tabCount = mainTabWidget_.count();
-    if ( tabCount < 2 ) {
-        QMessageBox::information( this, tr( "Merge Tabs" ),
-                                  tr( "At least 2 open tabs are required to merge." ) );
-        return;
-    }
-
     QStringList tabFiles;
     for ( int i = 0; i < tabCount; ++i ) {
         auto* crawler = dynamic_cast<CrawlerWidget*>( mainTabWidget_.widget( i ) );
-        if ( !crawler )
+        if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::File ) {
             continue;
-        tabFiles.append( session_.getFilename( crawler ) );
+        }
+        tabFiles.append( session_.getAssociatedPath( crawler ) );
+    }
+
+    if ( tabFiles.size() < 2 ) {
+        QMessageBox::information( this, tr( "Merge Tabs" ),
+                                  tr( "At least 2 file-backed tabs are required to merge." ) );
+        return;
     }
 
     auto filesToMerge = showMergeFilesDialog( tabFiles );
@@ -2554,7 +2850,7 @@ bool MainWindow::executeMerge( const std::vector<QString>& filesToMerge )
         crawler_widget->hide();
 
         const auto mergedFilePath = session_.getFilename( crawler_widget );
-        int index = mainTabWidget_.addCrawler( crawler_widget, mergedFilePath );
+        int index = mainTabWidget_.addCrawler( crawler_widget, mergedFilePath, {}, mergedFilePath );
 
         QStringList shortNames;
         for ( const auto& fn : filesToMerge ) {

@@ -275,6 +275,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
 
     verifySslPeers_
         = settings.value( "net.verifySslPeers", DefaultConfiguration.verifySslPeers_ ).toBool();
+    adbExecutable_ = settings.value( "adb.executable", DefaultConfiguration.adbExecutable_ ).toString();
+    adbLogcatExtraArgs_
+        = settings.value( "adb.logcatExtraArgs", DefaultConfiguration.adbLogcatExtraArgs_ )
+              .toString();
 
     // View settings
     overviewVisible_
@@ -441,6 +445,8 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "perf.optimizeForNotLatinEncodings", optimizeForNotLatinEncodings_ );
 
     settings.setValue( "net.verifySslPeers", verifySslPeers_ );
+    settings.setValue( "adb.executable", adbExecutable_ );
+    settings.setValue( "adb.logcatExtraArgs", adbLogcatExtraArgs_ );
 
     settings.setValue( "view.overviewVisible", overviewVisible_ );
     settings.setValue( "view.lineNumbersVisibleInMain", lineNumbersVisibleInMain_ );

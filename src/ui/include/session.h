@@ -35,9 +35,23 @@
 
 class ViewInterface;
 class ViewContextInterface;
-class LogData;
+class SearchableLogData;
 class LogFilteredData;
 class SavedSearches;
+class AdbLogcatSource;
+struct AdbLogcatSessionData;
+
+enum class DocumentKind {
+    File,
+    AdbLogcat,
+};
+
+struct OpenedDocumentInfo {
+    QString documentId;
+    QString displayName;
+    QString toolTip;
+    DocumentKind kind = DocumentKind::File;
+};
 
 // File unreadable error
 class FileUnreadableErr {
@@ -80,9 +94,17 @@ class Session : public std::enable_shared_from_this<Session> {
     ViewInterface* openMerged( const std::vector<QString>& fileNames,
                                const std::function<ViewInterface*()>& view_factory,
                                const QString& tempDir );
+    ViewInterface* openAdbLogcat( const AdbLogcatSessionData& sessionData,
+                                  const std::function<ViewInterface*()>& view_factory,
+                                  bool startConnected, const QString& viewContext = {} );
 
     // Get the file name for the passed view.
     QString getFilename( const ViewInterface* view ) const;
+    QString getDocumentId( const ViewInterface* view ) const;
+    QString getDisplayName( const ViewInterface* view ) const;
+    QString getAssociatedPath( const ViewInterface* view ) const;
+    DocumentKind getDocumentKind( const ViewInterface* view ) const;
+    AdbLogcatSource* getAdbLogcatSource( const ViewInterface* view ) const;
 
     // Get the size (in bytes) and number of lines in the current file.
     // The file is identified by the view attached to it.
@@ -100,6 +122,9 @@ class Session : public std::enable_shared_from_this<Session> {
         return *savedSearches_;
     }
 
+    OpenedDocumentInfo openedDocumentInfo( const ViewInterface* view ) const;
+    std::vector<OpenedDocumentInfo> openedDocuments() const;
+
     std::vector<WindowSession> windowSessions();
 
     bool exitRequested() const
@@ -115,8 +140,13 @@ class Session : public std::enable_shared_from_this<Session> {
   private:
     struct OpenFile {
         QString fileName;
-        std::shared_ptr<LogData> logData;
+        QString documentId;
+        QString displayName;
+        QString associatedPath;
+        DocumentKind kind = DocumentKind::File;
+        std::shared_ptr<SearchableLogData> logData;
         std::shared_ptr<LogFilteredData> logFilteredData;
+        std::shared_ptr<AdbLogcatSource> adbLogcatSource;
         ViewInterface* view;
     };
 
@@ -124,6 +154,9 @@ class Session : public std::enable_shared_from_this<Session> {
     ViewInterface* openAlways( const QString& file_name,
                                const std::function<ViewInterface*()>& view_factory,
                                const QString& view_context );
+    ViewInterface* openAdbAlways( const AdbLogcatSessionData& sessionData,
+                                  const std::function<ViewInterface*()>& view_factory,
+                                  bool startConnected, const QString& viewContext );
 
     // Find an open file from its associated view
     OpenFile* findOpenFileFromView( const ViewInterface* view );
@@ -145,6 +178,7 @@ class Session : public std::enable_shared_from_this<Session> {
 };
 
 using OpenedFilesList = std::vector<std::pair<QString, ViewInterface*>>;
+using OpenedDocumentsList = std::vector<std::pair<OpenedDocumentInfo, ViewInterface*>>;
 using SaveFileInfo
     = std::tuple<const ViewInterface*, uint64_t, std::shared_ptr<const ViewContextInterface>>;
 
@@ -160,15 +194,15 @@ class WindowSession {
     ViewInterface* open( const QString& file_name,
                          const std::function<ViewInterface*()>& view_factory )
     {
-        openedFiles_.push_back( file_name );
+        openedDocuments_.push_back( file_name );
         return appSession_->open( file_name, view_factory );
     }
 
     void close( const ViewInterface* view )
     {
-        auto it = std::find( openedFiles_.begin(), openedFiles_.end(), getFilename( view ) );
-        if (it != openedFiles_.end()) {
-            openedFiles_.erase(it);
+        auto it = std::find( openedDocuments_.begin(), openedDocuments_.end(), getDocumentId( view ) );
+        if ( it != openedDocuments_.end() ) {
+            openedDocuments_.erase( it );
         }
 
         appSession_->close( view );
@@ -180,7 +214,18 @@ class WindowSession {
     {
         auto* view = appSession_->openMerged( fileNames, view_factory, tempDir );
         if ( view ) {
-            openedFiles_.push_back( appSession_->getFilename( view ) );
+            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
+        }
+        return view;
+    }
+
+    ViewInterface* openAdbLogcat( const AdbLogcatSessionData& sessionData,
+                                  const std::function<ViewInterface*()>& view_factory,
+                                  bool startConnected )
+    {
+        auto* view = appSession_->openAdbLogcat( sessionData, view_factory, startConnected );
+        if ( view ) {
+            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
         }
         return view;
     }
@@ -190,15 +235,52 @@ class WindowSession {
         return appSession_->getFilename( view );
     }
 
+    QString getDocumentId( const ViewInterface* view ) const
+    {
+        return appSession_->getDocumentId( view );
+    }
+
+    QString getDisplayName( const ViewInterface* view ) const
+    {
+        return appSession_->getDisplayName( view );
+    }
+
+    QString getAssociatedPath( const ViewInterface* view ) const
+    {
+        return appSession_->getAssociatedPath( view );
+    }
+
+    DocumentKind getDocumentKind( const ViewInterface* view ) const
+    {
+        return appSession_->getDocumentKind( view );
+    }
+
+    AdbLogcatSource* getAdbLogcatSource( const ViewInterface* view ) const
+    {
+        return appSession_->getAdbLogcatSource( view );
+    }
+
     void getFileInfo( const ViewInterface* view, uint64_t* fileSize, uint64_t* fileNbLine,
                       QDateTime* lastModified ) const
     {
         return appSession_->getFileInfo( view, fileSize, fileNbLine, lastModified );
     }
 
-    std::vector<QString> openedFiles() const
+    std::vector<OpenedDocumentInfo> openedDocuments() const
     {
-        return openedFiles_;
+        std::vector<OpenedDocumentInfo> documents;
+        documents.reserve( openedDocuments_.size() );
+        for ( const auto& documentId : openedDocuments_ ) {
+            const auto it = std::find_if(
+                appSession_->openFiles_.cbegin(), appSession_->openFiles_.cend(),
+                [ &documentId ]( const auto& openFile ) {
+                    return openFile.second.documentId == documentId;
+                } );
+            if ( it != appSession_->openFiles_.cend() ) {
+                documents.push_back( appSession_->openedDocumentInfo( it->first ) );
+            }
+        }
+        return documents;
     }
 
     // Get a (non-const) reference to the QuickFind pattern.
@@ -217,12 +299,17 @@ class WindowSession {
         return windowIndex_;
     }
 
+    bool exitRequested() const
+    {
+        return appSession_->exitRequested();
+    }
+
     // Open all the files listed in the stored session
     // (see ::open)
     // returns a vector of pairs (file_name, view) and the index of the
     // current file (or -1 if none).
-    OpenedFilesList restore( const std::function<ViewInterface*()>& view_factory,
-                             int* current_file_index );
+    OpenedDocumentsList restore( const std::function<ViewInterface*()>& view_factory,
+                                 int* current_file_index );
 
     // Get the geometry string from persistent storage for this session.
     void restoreGeometry( QByteArray* geometry ) const;
@@ -243,7 +330,7 @@ class WindowSession {
     QString windowId_;
     size_t windowIndex_;
 
-    std::vector<QString> openedFiles_;
+    std::vector<QString> openedDocuments_;
 };
 
 #endif

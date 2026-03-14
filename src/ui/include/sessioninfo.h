@@ -57,10 +57,15 @@ class SessionInfo : public Persistable<SessionInfo, session_settings> {
     }
 
     struct OpenFile {
-        OpenFile( const QString& file, uint64_t top, const QString& context )
+        OpenFile( const QString& file, uint64_t top, const QString& context,
+                  const QString& type = {}, const QString& display = {},
+                  const QString& spec = {} )
             : fileName{ file }
             , topLine{ top }
             , viewContext{ context }
+            , sourceType{ type }
+            , displayName{ display }
+            , sourceSpec{ spec }
         {
         }
 
@@ -70,6 +75,9 @@ class SessionInfo : public Persistable<SessionInfo, session_settings> {
         // The view context contains parameter specific to the view's
         // implementation (such as geometry...)
         QString viewContext;
+        QString sourceType;
+        QString displayName;
+        QString sourceSpec;
     };
 
     struct Window {

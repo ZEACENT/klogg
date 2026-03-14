@@ -52,12 +52,12 @@
 #include <string_view>
 #include <vector>
 
-#include "abstractlogdata.h"
 #include "fileholder.h"
 #include "filewatcher.h"
 #include "loadingstatus.h"
 #include "logdataoperation.h"
 #include "logdataworker.h"
+#include "searchablelogdata.h"
 
 class LogFilteredData;
 
@@ -67,7 +67,7 @@ class CantReattachErr {
 
 // Represents a complete set of data to be displayed (ie. a log file content)
 // This class is thread-safe.
-class LogData : public AbstractLogData {
+class LogData : public SearchableLogData {
     Q_OBJECT
 
   public:
@@ -88,52 +88,24 @@ class LogData : public AbstractLogData {
     void attachFile( const QString& fileName );
     // Interrupt the loading and report a null file.
     // Does nothing if no loading in progress.
-    void interruptLoading();
+    void interruptLoading() override;
     // Creates a new filtered data.
     // ownership is passed to the caller
-    std::unique_ptr<LogFilteredData> getNewFilteredData() const;
+    std::unique_ptr<LogFilteredData> getNewFilteredData() const override;
     // Returns the size if the file in bytes
-    qint64 getFileSize() const;
+    qint64 getFileSize() const override;
     // Returns the last modification date for the file.
     // Null if the file is not on disk.
-    QDateTime getLastModifiedDate() const;
+    QDateTime getLastModifiedDate() const override;
     // Throw away all the file data and reload/reindex.
-    void reload( QTextCodec* forcedEncoding = nullptr );
+    void reload( QTextCodec* forcedEncoding = nullptr ) override;
 
     // Get the auto-detected encoding for the indexed text.
-    QTextCodec* getDetectedEncoding() const;
+    QTextCodec* getDetectedEncoding() const override;
 
-    void setPrefilter(const QString& prefilterPattern);
+    void setPrefilter( const QString& prefilterPattern ) override;
 
-    struct RawLines {
-        LineNumber startLine;
-
-        klogg::vector<char> buffer;
-        klogg::vector<qint64> endOfLines;
-
-        TextDecoder textDecoder;
-
-        QRegularExpression prefilterPattern;
-
-      public:
-        klogg::vector<QString> decodeLines() const;
-        klogg::vector<std::string_view> buildUtf8View() const;
-
-      private:
-        mutable klogg::vector<char> utf8Data_;
-    };
-
-    RawLines getLinesRaw( LineNumber first, LinesCount number ) const;
-
-  Q_SIGNALS:
-    // Sent during the 'attach' process to signal progress
-    // percent being the percentage of completion.
-    void loadingProgressed( int percent );
-    // Signal the client the file is fully loaded and available.
-    void loadingFinished( LoadingStatus status );
-    // Sent when the file on disk has changed, will be followed
-    // by loadingProgressed if needed and then a loadingFinished.
-    void fileChanged( MonitoredFileStatus status );
+    RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
 
   private Q_SLOTS:
     // Consider reloading the file when it changes on disk updated

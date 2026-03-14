@@ -60,11 +60,11 @@
 #include "iconloader.h"
 #include "linetypes.h"
 #include "loadingstatus.h"
-#include "logdata.h"
 #include "logfiltereddata.h"
 #include "logmainview.h"
 #include "overview.h"
 #include "predefinedfilterscombobox.h"
+#include "searchablelogdata.h"
 #include "signalmux.h"
 #include "viewinterface.h"
 
@@ -136,7 +136,7 @@ class CrawlerWidget : public QSplitter,
 
   protected:
     // Implementation of the ViewInterface functions
-    void doSetData( std::shared_ptr<LogData> logData,
+    void doSetData( std::shared_ptr<SearchableLogData> logData,
                     std::shared_ptr<LogFilteredData> filteredData ) override;
     void doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp ) override;
     void doSetSavedSearches( SavedSearches* savedSearches ) override;
@@ -370,7 +370,7 @@ class CrawlerWidget : public QSplitter,
 
     SavedSearches* savedSearches_ = nullptr;
 
-    std::shared_ptr<LogData> logData_;
+    std::shared_ptr<SearchableLogData> logData_;
     std::shared_ptr<LogFilteredData> logFilteredData_;
 
     // Matches overview

@@ -58,7 +58,7 @@
 #include "logfiltereddataworker.h"
 #include "synchronization.h"
 
-class LogData;
+class SearchableLogData;
 class QTimer;
 
 // A list of matches found in a LogData, it stores all the matching lines,
@@ -71,7 +71,7 @@ class LogFilteredData : public AbstractLogData {
 
   public:
     // Constructor used by LogData
-    explicit LogFilteredData( const LogData* logData );
+    explicit LogFilteredData( const SearchableLogData* logData );
     ~LogFilteredData();
 
     // Starts the async search, sending newDataAvailable() when new data found.
@@ -192,7 +192,7 @@ class LogFilteredData : public AbstractLogData {
     SearchResultArray marks_;
     SearchResultArray marks_and_matches_;
 
-    const LogData* sourceLogData_;
+    const SearchableLogData* sourceLogData_;
 
     RegularExpressionPattern currentRegExp_;
     LineLength maxLength_;

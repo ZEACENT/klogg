@@ -19,6 +19,7 @@
 
 #include "session.h"
 
+#include "adblogcatsource.h"
 #include "log.h"
 
 #include <algorithm>
@@ -27,12 +28,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 
 
 #include "logdata.h"
 #include "logfiltereddata.h"
 #include "savedsearches.h"
 #include "sessioninfo.h"
+#include "streaminglogdata.h"
 #include "viewinterface.h"
 
 Session::Session()
@@ -66,7 +69,7 @@ ViewInterface* Session::getViewIfOpen( const QString& file_name ) const
 ViewInterface* Session::open( const QString& file_name,
                               const std::function<ViewInterface*()>& view_factory )
 {
-    return openAlways( file_name, view_factory, nullptr );
+    return openAlways( file_name, view_factory, {} );
 }
 
 void Session::close( const ViewInterface* view )
@@ -75,8 +78,8 @@ void Session::close( const ViewInterface* view )
 }
 
 ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
-                                     const std::function<ViewInterface*()>& view_factory,
-                                     const QString& tempDir )
+                                    const std::function<ViewInterface*()>& view_factory,
+                                    const QString& tempDir )
 {
     if ( fileNames.empty() ) {
         return nullptr;
@@ -129,6 +132,13 @@ ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
     return openAlways( tempFilePath, view_factory, {} );
 }
 
+ViewInterface* Session::openAdbLogcat( const AdbLogcatSessionData& sessionData,
+                                       const std::function<ViewInterface*()>& view_factory,
+                                       bool startConnected, const QString& viewContext )
+{
+    return openAdbAlways( sessionData, view_factory, startConnected, viewContext );
+}
+
 QString Session::getFilename( const ViewInterface* view ) const
 {
     const OpenFile* file = findOpenFileFromView( view );
@@ -136,6 +146,59 @@ QString Session::getFilename( const ViewInterface* view ) const
     assert( file );
 
     return file->fileName;
+}
+
+QString Session::getDocumentId( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+
+    assert( file );
+
+    return file->documentId;
+}
+
+QString Session::getDisplayName( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+
+    assert( file );
+
+    if ( file->kind == DocumentKind::AdbLogcat && file->adbLogcatSource ) {
+        return file->adbLogcatSource->sessionData().displayName();
+    }
+
+    return file->displayName;
+}
+
+QString Session::getAssociatedPath( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+
+    assert( file );
+
+    if ( file->kind == DocumentKind::AdbLogcat && file->adbLogcatSource ) {
+        return file->adbLogcatSource->sessionData().associatedPath();
+    }
+
+    return file->associatedPath;
+}
+
+DocumentKind Session::getDocumentKind( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+
+    assert( file );
+
+    return file->kind;
+}
+
+AdbLogcatSource* Session::getAdbLogcatSource( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+
+    assert( file );
+
+    return file->adbLogcatSource.get();
 }
 
 void Session::getFileInfo( const ViewInterface* view, uint64_t* fileSize, uint64_t* fileNbLine,
@@ -148,6 +211,25 @@ void Session::getFileInfo( const ViewInterface* view, uint64_t* fileSize, uint64
     *fileSize = static_cast<uint64_t>( file->logData->getFileSize() );
     *fileNbLine = file->logData->getNbLine().get();
     *lastModified = file->logData->getLastModifiedDate();
+}
+
+OpenedDocumentInfo Session::openedDocumentInfo( const ViewInterface* view ) const
+{
+    return OpenedDocumentInfo{ getDocumentId( view ),
+                               getDisplayName( view ),
+                               getAssociatedPath( view ).isEmpty() ? getDisplayName( view )
+                                                                    : getAssociatedPath( view ),
+                               getDocumentKind( view ) };
+}
+
+std::vector<OpenedDocumentInfo> Session::openedDocuments() const
+{
+    std::vector<OpenedDocumentInfo> documents;
+    documents.reserve( openFiles_.size() );
+    for ( const auto& [ view, openFile ] : openFiles_ ) {
+        documents.emplace_back( openedDocumentInfo( view ) );
+    }
+    return documents;
 }
 
 ViewInterface* Session::openAlways( const QString& file_name,
@@ -167,10 +249,57 @@ ViewInterface* Session::openAlways( const QString& file_name,
         view->setViewContext( view_context );
 
     // Insert in the hash
-    openFiles_.insert( { view, { file_name, log_data, log_filtered_data, view } } );
+    openFiles_.insert( { view,
+                         { file_name,
+                           file_name,
+                           QFileInfo( file_name ).fileName(),
+                           file_name,
+                           DocumentKind::File,
+                           log_data,
+                           log_filtered_data,
+                           {},
+                           view } } );
 
     // Start loading the file
     log_data->attachFile( file_name );
+
+    return view;
+}
+
+ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
+                                       const std::function<ViewInterface*()>& view_factory,
+                                       bool startConnected, const QString& viewContext )
+{
+    auto logData = std::make_shared<StreamingLogData>( sessionData.captureId );
+    if ( !sessionData.boundOutputFile.isEmpty() ) {
+        logData->bindOutputFile( sessionData.boundOutputFile );
+    }
+    auto logFilteredData = std::shared_ptr<LogFilteredData>( logData->getNewFilteredData() );
+    auto adbSource = std::make_shared<AdbLogcatSource>( sessionData, logData );
+
+    ViewInterface* view = view_factory();
+    view->setData( logData, logFilteredData );
+    view->setQuickFindPattern( quickFindPattern_ );
+    view->setSavedSearches( savedSearches_ );
+
+    if ( !viewContext.isEmpty() ) {
+        view->setViewContext( viewContext );
+    }
+
+    openFiles_.insert( { view,
+                         { sessionData.documentId(),
+                           sessionData.documentId(),
+                           sessionData.displayName(),
+                           sessionData.associatedPath(),
+                           DocumentKind::AdbLogcat,
+                           logData,
+                           logFilteredData,
+                           adbSource,
+                           view } } );
+
+    if ( startConnected ) {
+        adbSource->connectSource();
+    }
 
     return view;
 }
@@ -231,7 +360,17 @@ void WindowSession::save(
         assert( file );
 
         LOG_DEBUG << "Saving " << file->fileName.toLocal8Bit().data() << " in session.";
-        session_files.emplace_back( file->fileName, top_line, view_context->toString() );
+        session_files.emplace_back( file->documentId, top_line, view_context->toString(),
+                                    file->kind == DocumentKind::AdbLogcat
+                                        ? QStringLiteral( "adb_logcat" )
+                                        : QString{},
+                                    file->displayName,
+                                    file->adbLogcatSource
+                                        ? QString::fromUtf8( QJsonDocument(
+                                                                 file->adbLogcatSource->sessionData()
+                                                                     .toJson() )
+                                                                 .toJson( QJsonDocument::Compact ) )
+                                        : QString{} );
     }
 
     auto& session = SessionInfo::getSynced();
@@ -241,7 +380,7 @@ void WindowSession::save(
     session.save();
 }
 
-std::vector<std::pair<QString, ViewInterface*>>
+OpenedDocumentsList
 WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
                         int* current_file_index )
 {
@@ -249,14 +388,22 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
 
     std::vector<SessionInfo::OpenFile> session_files = session.openFiles( windowId_ );
     LOG_DEBUG << "Session returned " << session_files.size();
-    std::vector<std::pair<QString, ViewInterface*>> result;
+    OpenedDocumentsList result;
 
     for ( const auto& file : session_files ) {
         LOG_DEBUG << "Create view for " << file.fileName;
-        ViewInterface* view
-            = appSession_->openAlways( file.fileName, view_factory, file.viewContext );
-        result.emplace_back( file.fileName, view );
-        openedFiles_.emplace_back( file.fileName );
+        ViewInterface* view = nullptr;
+        if ( file.sourceType == QStringLiteral( "adb_logcat" ) ) {
+            view = appSession_->openAdbAlways( AdbLogcatSessionData::fromJson( file.sourceSpec ),
+                                               view_factory, false, file.viewContext );
+        }
+        else {
+            view = appSession_->openAlways( file.fileName, view_factory, file.viewContext );
+        }
+
+        const auto info = appSession_->openedDocumentInfo( view );
+        result.emplace_back( info, view );
+        openedDocuments_.emplace_back( info.documentId );
     }
 
     const auto restoredCurrentIndex = session.currentFileIndex( windowId_ );

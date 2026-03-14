@@ -1,0 +1,199 @@
+/*
+ * Copyright (C) 2026
+ *
+ * This file is part of klogg.
+ *
+ * klogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * klogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <catch2/catch.hpp>
+
+#include <QComboBox>
+#include <QCoreApplication>
+#include <QDialogButtonBox>
+#include <QGuiApplication>
+#include <QLineEdit>
+#include <QPushButton>
+
+#include "adbprocesstransport.h"
+#include "adblogcatdialog.h"
+#include "configuration.h"
+#include "optionsdialog.h"
+#include "recentfiles.h"
+#include "savedsearches.h"
+#include "test_utils.h"
+
+namespace {
+class ScopedAdbConfigurationGuard {
+  public:
+    ScopedAdbConfigurationGuard()
+        : config_( Configuration::getSynced() )
+        , executable_( config_.adbExecutable() )
+        , extraArgs_( config_.adbLogcatExtraArgs() )
+    {
+    }
+
+    ~ScopedAdbConfigurationGuard()
+    {
+        config_.setAdbExecutable( executable_ );
+        config_.setAdbLogcatExtraArgs( extraArgs_ );
+        config_.save();
+    }
+
+  private:
+    Configuration& config_;
+    QString executable_;
+    QString extraArgs_;
+};
+
+class TestAdbProcessTransport : public AdbProcessTransport {
+  public:
+    using AdbProcessTransport::AdbProcessTransport;
+    using Command = ProcessLiveSourceTransport::Command;
+
+    Command streamingCommandForTest() const
+    {
+        return streamingCommand();
+    }
+
+    Command clearCommandForTest() const
+    {
+        return clearCommand();
+    }
+};
+} // namespace
+
+TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
+{
+    TestAdbProcessTransport transport( QString{}, QStringLiteral( "emulator-5554" ),
+                                       QStringLiteral( "-v threadtime *:I" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.program == QStringLiteral( "adb" ) );
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "*:I" ) } );
+
+    const auto clear = transport.clearCommandForTest();
+    REQUIRE( clear.program == QStringLiteral( "adb" ) );
+    REQUIRE( clear.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-c" ) } );
+}
+
+TEST_CASE( "AdbProcessTransport reports startup failures through the transport interface" )
+{
+    TestAdbProcessTransport transport( QStringLiteral( "/path/that/does/not/exist/adb" ),
+                                       QStringLiteral( "serial" ), {} );
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    REQUIRE_FALSE( transport.connectTransport() );
+    REQUIRE( errorSpy.safeWait() );
+    REQUIRE( stateSpy.count() >= 1 );
+    REQUIRE_FALSE( transport.lastError().isEmpty() );
+}
+
+TEST_CASE( "AdbProcessTransport listDevices returns an error when adb cannot start" )
+{
+    QString error;
+    const auto devices
+        = AdbProcessTransport::listDevices( QStringLiteral( "/path/that/does/not/exist/adb" ),
+                                            &error );
+
+    REQUIRE( devices.isEmpty() );
+    REQUIRE_FALSE( error.isEmpty() );
+}
+
+TEST_CASE( "OptionsDialog loads and persists adb settings" )
+{
+    if ( QGuiApplication::screens().isEmpty() ) {
+        WARN( "OptionsDialog requires an available screen in this test environment" );
+        return;
+    }
+
+    ScopedAdbConfigurationGuard configGuard;
+    auto& savedSearches = SavedSearches::getSynced();
+    auto& recentFiles = RecentFiles::getSynced();
+    Q_UNUSED( savedSearches );
+    Q_UNUSED( recentFiles );
+    auto& config = Configuration::getSynced();
+    config.setAdbExecutable( QStringLiteral( "/initial/adb" ) );
+    config.setAdbLogcatExtraArgs( QStringLiteral( "-v brief" ) );
+    config.save();
+
+    OptionsDialog dialog;
+    auto* adbExecutableLineEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableLineEdit" ) );
+    auto* adbLogcatArgsLineEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbLogcatArgsLineEdit" ) );
+
+    REQUIRE( adbExecutableLineEdit != nullptr );
+    REQUIRE( adbLogcatArgsLineEdit != nullptr );
+    REQUIRE( adbExecutableLineEdit->text() == QStringLiteral( "/initial/adb" ) );
+    REQUIRE( adbLogcatArgsLineEdit->text() == QStringLiteral( "-v brief" ) );
+
+    adbExecutableLineEdit->setText( QStringLiteral( "/updated/adb" ) );
+    adbLogcatArgsLineEdit->setText( QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
+
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
+
+    auto& restoredConfig = Configuration::getSynced();
+    REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/updated/adb" ) );
+    REQUIRE( restoredConfig.adbLogcatExtraArgs()
+             == QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
+}
+
+TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edits on accept" )
+{
+    ScopedAdbConfigurationGuard configGuard;
+    auto& config = Configuration::getSynced();
+    config.setAdbExecutable( QStringLiteral( "/configured/adb" ) );
+    config.setAdbLogcatExtraArgs( QStringLiteral( "-v color" ) );
+    config.save();
+
+    AdbLogcatDialog dialog;
+    auto* adbExecutableEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableEdit" ) );
+    auto* extraArgsEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "extraArgsEdit" ) );
+    auto* deviceCombo = dialog.findChild<QComboBox*>( QStringLiteral( "deviceCombo" ) );
+    auto* buttonBox = dialog.findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
+
+    REQUIRE( adbExecutableEdit != nullptr );
+    REQUIRE( extraArgsEdit != nullptr );
+    REQUIRE( deviceCombo != nullptr );
+    REQUIRE( buttonBox != nullptr );
+    REQUIRE( adbExecutableEdit->text() == QStringLiteral( "/configured/adb" ) );
+    REQUIRE( extraArgsEdit->text() == QStringLiteral( "-v color" ) );
+
+    adbExecutableEdit->setText( QStringLiteral( "/saved/adb" ) );
+    extraArgsEdit->setText( QStringLiteral( "-v threadtime *:I" ) );
+    deviceCombo->addItem( QStringLiteral( "Pixel 8 (ABC123)" ), QStringLiteral( "ABC123" ) );
+    deviceCombo->setCurrentIndex( 0 );
+    QCoreApplication::processEvents();
+
+    const auto sessionData = dialog.sessionData();
+    REQUIRE( sessionData.adbExecutable == QStringLiteral( "/saved/adb" ) );
+    REQUIRE( sessionData.deviceSerial == QStringLiteral( "ABC123" ) );
+    REQUIRE( sessionData.deviceDescription == QStringLiteral( "Pixel 8 (ABC123)" ) );
+    REQUIRE( sessionData.extraArgs == QStringLiteral( "-v threadtime *:I" ) );
+    REQUIRE_FALSE( sessionData.captureId.isEmpty() );
+
+    auto* okButton = buttonBox->button( QDialogButtonBox::Ok );
+    REQUIRE( okButton != nullptr );
+    REQUIRE( okButton->isEnabled() );
+    okButton->click();
+
+    auto& restoredConfig = Configuration::getSynced();
+    REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/saved/adb" ) );
+    REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
+}

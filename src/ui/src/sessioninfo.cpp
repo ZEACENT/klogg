@@ -23,7 +23,7 @@
 
 #include "log.h"
 
-constexpr int OPENFILES_VERSION = 1;
+constexpr int OPENFILES_VERSION = 2;
 constexpr int SESSION_VERSION = 2;
 namespace {
 constexpr auto WINDOWS_ARRAY_KEY = "windowList";
@@ -58,7 +58,8 @@ void SessionInfo::retrieveFromStorage( QSettings& settings )
 
             if ( settings.contains( "OpenFiles/version" ) ) {
                 settings.beginGroup( "OpenFiles" );
-                if ( settings.value( "version" ).toInt() == OPENFILES_VERSION ) {
+                const auto openFilesVersion = settings.value( "version" ).toInt();
+                if ( openFilesVersion == 1 || openFilesVersion == OPENFILES_VERSION ) {
                     int size = settings.beginReadArray( OPENFILES_ARRAY_KEY );
                     if ( size == 0 ) {
                         settings.endArray();
@@ -70,7 +71,17 @@ void SessionInfo::retrieveFromStorage( QSettings& settings )
                         QString file_name = settings.value( "fileName" ).toString();
                         uint64_t top_line = settings.value( "topLine" ).toULongLong();
                         QString view_context = settings.value( "viewContext" ).toString();
-                        window.openFiles.emplace_back( file_name, top_line, view_context );
+                        const auto sourceType
+                            = openFilesVersion >= 2 ? settings.value( "sourceType" ).toString()
+                                                    : QString{};
+                        const auto displayName
+                            = openFilesVersion >= 2 ? settings.value( "displayName" ).toString()
+                                                    : QString{};
+                        const auto sourceSpec
+                            = openFilesVersion >= 2 ? settings.value( "sourceSpec" ).toString()
+                                                    : QString{};
+                        window.openFiles.emplace_back( file_name, top_line, view_context,
+                                                       sourceType, displayName, sourceSpec );
                     }
                     settings.endArray();
                 }
@@ -120,6 +131,9 @@ void SessionInfo::saveToStorage( QSettings& settings ) const
             settings.setValue( "fileName", open_file->fileName );
             settings.setValue( "topLine", qint64( open_file->topLine ) );
             settings.setValue( "viewContext", open_file->viewContext );
+            settings.setValue( "sourceType", open_file->sourceType );
+            settings.setValue( "displayName", open_file->displayName );
+            settings.setValue( "sourceSpec", open_file->sourceSpec );
         }
         settings.endArray();
         settings.endGroup(); // OpenFiles

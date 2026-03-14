@@ -22,7 +22,7 @@
 
 #include <memory>
 
-class LogData;
+class SearchableLogData;
 class LogFilteredData;
 class SavedSearches;
 class QuickFindPattern;
@@ -44,7 +44,7 @@ class ViewInterface {
   public:
     // Set the log data and filtered data to associate to this view
     // Ownership stay with the caller but is shared
-    void setData( std::shared_ptr<LogData> log_data,
+    void setData( std::shared_ptr<SearchableLogData> log_data,
                   std::shared_ptr<LogFilteredData> filtered_data )
     {
         doSetData( log_data, filtered_data );
@@ -78,7 +78,7 @@ class ViewInterface {
 
   protected:
     // Virtual functions (using NVI)
-    virtual void doSetData( std::shared_ptr<LogData> log_data,
+    virtual void doSetData( std::shared_ptr<SearchableLogData> log_data,
                             std::shared_ptr<LogFilteredData> filtered_data )
         = 0;
     virtual void doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp ) = 0;

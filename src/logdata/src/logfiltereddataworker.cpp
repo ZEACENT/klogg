@@ -54,8 +54,8 @@
 #include "log.h"
 #include "progress.h"
 
-#include "logdata.h"
 #include "regularexpression.h"
+#include "searchablelogdata.h"
 
 #include "logfiltereddataworker.h"
 #include "synchronization.h"
@@ -78,7 +78,7 @@ struct PartialSearchResults {
 
 struct SearchBlockData {
     SearchBlockData() = default;
-    SearchBlockData( LineNumber start, LogData::RawLines blockLines )
+    SearchBlockData( LineNumber start, SearchableLogData::RawLines blockLines )
         : chunkStart( start )
         , lines( std::move( blockLines ) )
     {
@@ -91,12 +91,13 @@ struct SearchBlockData {
     SearchBlockData& operator=( SearchBlockData&& ) = default;
 
     LineNumber chunkStart;
-    LogData::RawLines lines;
+    SearchableLogData::RawLines lines;
 
     PartialSearchResults searchResults;
 };
 
-PartialSearchResults filterLines( const PatternMatcher& matcher, const LogData::RawLines& rawLines,
+PartialSearchResults filterLines( const PatternMatcher& matcher,
+                                  const SearchableLogData::RawLines& rawLines,
                                   LineNumber chunkStart )
 {
     LOG_DEBUG << "Filter lines at " << chunkStart;
@@ -171,7 +172,7 @@ void SearchData::clear()
     newMatches_ = {};
 }
 
-LogFilteredDataWorker::LogFilteredDataWorker( const LogData& sourceLogData )
+LogFilteredDataWorker::LogFilteredDataWorker( const SearchableLogData& sourceLogData )
     : sourceLogData_( sourceLogData )
 {
 }
@@ -317,7 +318,8 @@ SearchResults LogFilteredDataWorker::getSearchResults() const
 // Operations implementation
 //
 
-SearchOperation::SearchOperation( const LogData& sourceLogData, AtomicFlag& interruptRequested,
+SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
+                                  AtomicFlag& interruptRequested,
                                   const RegularExpressionPattern& regExp, LineNumber startLine,
                                   LineNumber endLine )
 

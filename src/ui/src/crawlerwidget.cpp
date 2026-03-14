@@ -72,6 +72,7 @@
 
 #include "configuration.h"
 #include "dispatch_to.h"
+#include "filewatcher.h"
 #include "filterdiffdialog.h"
 #include "fontutils.h"
 #include "infoline.h"
@@ -322,7 +323,7 @@ void CrawlerWidget::goToLine()
 //
 // Protected functions
 //
-void CrawlerWidget::doSetData( std::shared_ptr<LogData> logData,
+void CrawlerWidget::doSetData( std::shared_ptr<SearchableLogData> logData,
                                std::shared_ptr<LogFilteredData> filteredData )
 {
     logData_ = std::move( logData );
@@ -360,7 +361,8 @@ void CrawlerWidget::doSetViewContext( const QString& view_context )
     searchRefreshChangedHandler( context.autoRefresh() );
 
     const auto& config = Configuration::get();
-    logMainView_->followSet( context.followFile() && config.anyFileWatchEnabled() );
+    const auto allowFollow = logData_ && ( logData_->isLiveSource() || config.anyFileWatchEnabled() );
+    logMainView_->followSet( context.followFile() && allowFollow );
 
     const auto savedMarks = context.marks();
     std::transform( savedMarks.cbegin(), savedMarks.cend(), std::back_inserter( savedMarkedLines_ ),
@@ -761,7 +763,7 @@ void CrawlerWidget::applyConfiguration()
 
     logMainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
 
-    const auto isFollowModeAllowed = config.anyFileWatchEnabled();
+    const auto isFollowModeAllowed = logData_ && ( logData_->isLiveSource() || config.anyFileWatchEnabled() );
     logMainView_->allowFollowMode( isFollowModeAllowed );
     overview_.setVisible( config.isOverviewVisible() );
     logMainView_->refreshOverview();
@@ -1423,10 +1425,12 @@ void CrawlerWidget::setup()
              &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
 
     // Sent load file update to MainWindow (for status update)
-    connect( logData_.get(), &LogData::loadingProgressed, this, &CrawlerWidget::loadingProgressed );
-    connect( logData_.get(), &LogData::loadingFinished, this,
+    connect( logData_.get(), &SearchableLogData::loadingProgressed, this,
+             &CrawlerWidget::loadingProgressed );
+    connect( logData_.get(), &SearchableLogData::loadingFinished, this,
              &CrawlerWidget::loadingFinishedHandler );
-    connect( logData_.get(), &LogData::fileChanged, this, &CrawlerWidget::fileChangedHandler );
+    connect( logData_.get(), &SearchableLogData::fileChanged, this,
+             &CrawlerWidget::fileChangedHandler );
 
     // Search auto-refresh
     connect( searchRefreshButton_, &QPushButton::toggled, this,

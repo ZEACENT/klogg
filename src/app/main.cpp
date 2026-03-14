@@ -55,7 +55,9 @@
 
 #include "tbb/global_control.h"
 
+#include "adblogcatsource.h"
 #include "configuration.h"
+#include "capturestore.h"
 #include "logger.h"
 #include "mainwindow.h"
 #include "sessioninfo.h"
@@ -112,6 +114,28 @@ void setApplicationAttributes( bool enableQtHdpi, int scaleFactorRounding )
 #endif
 
     QCoreApplication::setAttribute( Qt::AA_DontShowIconsInMenus );
+}
+
+QSet<QString> retainedAdbCaptureIds( const SessionInfo& sessionInfo )
+{
+    QSet<QString> captureIds;
+
+    const auto windows = sessionInfo.windows();
+    for ( const auto& windowId : windows ) {
+        const auto openFiles = sessionInfo.openFiles( windowId );
+        for ( const auto& openFile : openFiles ) {
+            if ( openFile.sourceType != QStringLiteral( "adb_logcat" ) ) {
+                continue;
+            }
+
+            const auto sessionData = AdbLogcatSessionData::fromJson( openFile.sourceSpec );
+            if ( !sessionData.captureId.isEmpty() ) {
+                captureIds.insert( sessionData.captureId );
+            }
+        }
+    }
+
+    return captureIds;
 }
 
 int main( int argc, char* argv[] )
@@ -179,15 +203,20 @@ int main( int argc, char* argv[] )
         sessionInfo.save();
         trackSessionDirtyState = true;
 
+        const auto shouldReloadSession
+            = parameters.load_session
+              || ( !parameters.new_session
+                   && ( previousRunCrashed
+                        || ( parameters.filenames.empty() && config.loadLastSession() ) ) );
+        CaptureStore::cleanupUnusedCaptures(
+            shouldReloadSession ? retainedAdbCaptureIds( sessionInfo ) : QSet<QString>{} );
+
         // Apply theme based on theme mode
         StyleManager::applyStyle( config.style() );
 
         auto startNewSession = true;
         MainWindow* mw = nullptr;
-        if ( parameters.load_session
-             || ( !parameters.new_session
-                  && ( previousRunCrashed
-                       || ( parameters.filenames.empty() && config.loadLastSession() ) ) ) ) {
+        if ( shouldReloadSession ) {
             mw = app.reloadSession();
             startNewSession = false;
         }

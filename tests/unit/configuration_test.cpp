@@ -91,3 +91,29 @@ TEST_CASE( "Configuration clamps line spacing percent to supported bounds" )
 
     REQUIRE( restoredConfig.lineSpacingPercent() == Configuration::MaxLineSpacingPercent );
 }
+
+TEST_CASE( "Configuration stores and restores adb defaults" )
+{
+    const auto dirPath = makeTestDir( "configuration_adb" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-adb.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setAdbExecutable( QStringLiteral( "/opt/android/platform-tools/adb" ) );
+        config.setAdbLogcatExtraArgs( QStringLiteral( "-v threadtime *:I" ) );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredConfig.adbExecutable()
+             == QStringLiteral( "/opt/android/platform-tools/adb" ) );
+    REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
+}

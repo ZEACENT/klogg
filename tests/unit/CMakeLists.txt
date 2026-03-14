@@ -1,5 +1,7 @@
 # Add test cpp file
 add_executable(klogg_tests
+    adb_ui_transport_test.cpp
+    capturestore_test.cpp
     cli_test.cpp
     colorlabelsmanager_test.cpp
     configuration_test.cpp
@@ -15,6 +17,7 @@ add_executable(klogg_tests
 
 target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging Catch2 Qt${QT_VERSION_MAJOR}::Test test_utils)
 target_include_directories(klogg_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/app")
+target_include_directories(klogg_tests PRIVATE "${CMAKE_BINARY_DIR}/src/ui/klogg_ui_autogen/include")
 set_target_properties(klogg_tests PROPERTIES AUTOMOC ON)
 klogg_configure_test_target(klogg_tests)
 

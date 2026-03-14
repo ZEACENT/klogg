@@ -107,6 +107,7 @@ class MainWindow : public QMainWindow {
 
   private Q_SLOTS:
     void open();
+    void openAdbLogcat();
     void openFileFromRecent( QAction* action );
     void openFileFromFavorites( QAction* action );
     void switchToOpenedFile( QAction* action );
@@ -116,6 +117,9 @@ class MainWindow : public QMainWindow {
     void copy();
     void find();
     void clearLog();
+    void saveCurrentLiveLog();
+    void disconnectCurrentSource();
+    void reconnectCurrentSource();
     void copyFullPath();
     void openContainingFolder();
     void openInEditor();
@@ -200,6 +204,8 @@ class MainWindow : public QMainWindow {
     void readSettings();
     void writeSettings();
     bool loadFile( const QString& fileName, bool followFile = false );
+    bool openAdbLogcatSource( const AdbLogcatSessionData& sessionData,
+                              bool startConnected = true );
     bool extractAndLoadFile( const QString& fileName );
     void openRemoteFile( const QUrl& url );
     void updateTitleBar( const QString& fileName );
@@ -221,6 +227,7 @@ class MainWindow : public QMainWindow {
     void tryOpenClipboard( int tryTimes );
     void updateShortcuts();
     void persistSessionState();
+    void registerAdbLogcatSource( CrawlerWidget* crawler );
 
     WindowSession session_;
     QString loadingFileName;
@@ -249,6 +256,7 @@ class MainWindow : public QMainWindow {
 
     QAction* newWindowAction;
     QAction* openAction;
+    QAction* openAdbLogcatAction;
     QAction* closeAction;
     QAction* closeAllAction;
     QAction* exitAction;
@@ -257,6 +265,9 @@ class MainWindow : public QMainWindow {
     QAction* goToLineAction;
     QAction* findAction;
     QAction* clearLogAction;
+    QAction* saveCurrentLiveLogAction;
+    QAction* disconnectSourceAction;
+    QAction* reconnectSourceAction;
     QAction* copyPathToClipboardAction;
     QAction* openContainingFolderAction;
     QAction* openInEditorAction;

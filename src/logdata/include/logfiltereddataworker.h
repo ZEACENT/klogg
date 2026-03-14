@@ -56,7 +56,7 @@
 #include "regularexpression.h"
 #include "synchronization.h"
 
-class LogData;
+class SearchableLogData;
 
 // Class encapsulating a single matching line
 // Contains the line number the line was found in and its content.
@@ -131,7 +131,7 @@ private:
 class SearchOperation : public QObject {
     Q_OBJECT
 public:
-    SearchOperation( const LogData& sourceLogData, AtomicFlag& interruptRequested,
+    SearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                      const RegularExpressionPattern& regExp, LineNumber startLine,
                      LineNumber endLine );
 
@@ -150,7 +150,7 @@ protected:
 
     AtomicFlag& interruptRequested_;
     const RegularExpressionPattern regexp_;
-    const LogData& sourceLogData_;
+    const SearchableLogData& sourceLogData_;
     LineNumber startLine_;
     LineNumber endLine_;
 };
@@ -158,7 +158,7 @@ protected:
 class FullSearchOperation : public SearchOperation {
     Q_OBJECT
 public:
-    FullSearchOperation( const LogData& sourceLogData, AtomicFlag& interruptRequested,
+    FullSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                          const RegularExpressionPattern& regExp, LineNumber startLine,
                          LineNumber endLine )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine )
@@ -171,7 +171,7 @@ public:
 class UpdateSearchOperation : public SearchOperation {
     Q_OBJECT
 public:
-    UpdateSearchOperation( const LogData& sourceLogData, AtomicFlag& interruptRequested,
+    UpdateSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                            const RegularExpressionPattern& regExp, LineNumber startLine,
                            LineNumber endLine, LineNumber position )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine )
@@ -189,7 +189,7 @@ class LogFilteredDataWorker : public QObject {
     Q_OBJECT
 
 public:
-    explicit LogFilteredDataWorker( const LogData& sourceLogData );
+    explicit LogFilteredDataWorker( const SearchableLogData& sourceLogData );
     ~LogFilteredDataWorker() noexcept override;
 
     LogFilteredDataWorker( const LogFilteredDataWorker& ) = delete;
@@ -237,7 +237,7 @@ private:
     // outlive any running task (the task lambda captures them by reference).  opThread_
     // is declared last so its destructor runs first; but more importantly the destructor
     // body explicitly joins opThread_ before any other members are destroyed.
-    const LogData& sourceLogData_;
+    const SearchableLogData& sourceLogData_;
     AtomicFlag interruptRequested_;
     Mutex operationsMutex_;
 

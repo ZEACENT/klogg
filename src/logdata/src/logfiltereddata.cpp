@@ -55,15 +55,15 @@
 #include <tuple>
 #include <vector>
 
-#include "logdata.h"
 #include "logfiltereddata.h"
+#include "searchablelogdata.h"
 
 #include "configuration.h"
 #include "readablesize.h"
 #include "synchronization.h"
 
 // Usual constructor: just copy the data, the search is started by runSearch()
-LogFilteredData::LogFilteredData( const LogData* logData )
+LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     : AbstractLogData()
     , matching_lines_( SearchResultArray() )
     , currentRegExp_()

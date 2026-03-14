@@ -429,6 +429,8 @@ void OptionsDialog::updateDialogFromConfig()
 
     // downloads
     verifySslCheckBox->setChecked( config.verifySslPeers() );
+    adbExecutableLineEdit->setText( config.adbExecutable() );
+    adbLogcatArgsLineEdit->setText( config.adbLogcatExtraArgs() );
 
     const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
     encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
@@ -609,6 +611,8 @@ void OptionsDialog::updateConfigFromDialog()
     config.setVersionCheckingEnabled( checkForNewVersionCheckBox->isChecked() );
 
     config.setVerifySslPeers( verifySslCheckBox->isChecked() );
+    config.setAdbExecutable( adbExecutableLineEdit->text().trimmed() );
+    config.setAdbLogcatExtraArgs( adbLogcatArgsLineEdit->text().trimmed() );
 
     const auto selectedStyle = styleComboBox->currentData().toString();
     restartAppMessage = config.style() != selectedStyle;

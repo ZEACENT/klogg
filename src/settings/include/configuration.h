@@ -400,6 +400,24 @@ class Configuration final : public Persistable<Configuration> {
         verifySslPeers_ = verify;
     }
 
+    QString adbExecutable() const
+    {
+        return adbExecutable_;
+    }
+    void setAdbExecutable( QString adbExecutable )
+    {
+        adbExecutable_ = std::move( adbExecutable );
+    }
+
+    QString adbLogcatExtraArgs() const
+    {
+        return adbLogcatExtraArgs_;
+    }
+    void setAdbLogcatExtraArgs( QString adbLogcatExtraArgs )
+    {
+        adbLogcatExtraArgs_ = std::move( adbLogcatExtraArgs );
+    }
+
     bool forceFontAntialiasing() const
     {
         return forceFontAntialiasing_;
@@ -618,6 +636,8 @@ class Configuration final : public Persistable<Configuration> {
     bool extractArchivesAlways_ = false;
 
     bool verifySslPeers_ = true;
+    QString adbExecutable_;
+    QString adbLogcatExtraArgs_;
 
     bool forceFontAntialiasing_ = false;
     bool enableQtHighDpi_ = true;
