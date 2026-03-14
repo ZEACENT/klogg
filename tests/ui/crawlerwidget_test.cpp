@@ -738,6 +738,10 @@ SCENARIO( "Crawler widget search", "[ui]" )
                     crawlerVisitor.scrollFilteredVerticallyToBottom();
                     crawlerVisitor.render();
 
+                    // Re-scroll after render: grab() may trigger a relayout that
+                    // changes the scrollbar maximum, leaving value < new max.
+                    crawlerVisitor.scrollFilteredVerticallyToBottom();
+
                     // Simulate state-reset paths where lastLineAligned_ is cleared while
                     // the scrollbar is still at the bottom.
                     crawlerVisitor.setFilteredLastLineAligned( false );
