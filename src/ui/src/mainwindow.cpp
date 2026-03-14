@@ -1743,40 +1743,11 @@ void MainWindow::dropEvent( QDropEvent* event )
 
         if ( userAction == QMessageBox::Yes ) {
             auto filesToMerge = showMergeFilesDialog( fileNames );
-            if ( filesToMerge.empty() ) {
+            if ( !filesToMerge.empty() ) {
+                executeMerge( filesToMerge );
                 return;
             }
-
-            try {
-                auto* crawler_widget = static_cast<CrawlerWidget*>( session_.openMerged(
-                    filesToMerge, []() { return new CrawlerWidget(); }, tempDir_.path() ) );
-
-                if ( !crawler_widget ) {
-                    QMessageBox::warning( this, tr( "Merge Files" ),
-                                          tr( "Failed to create merged view." ) );
-                    return;
-                }
-
-                crawler_widget->hide();
-
-                const auto mergedFilePath = session_.getFilename( crawler_widget );
-                int index = mainTabWidget_.addCrawler( crawler_widget, mergedFilePath );
-
-                QStringList shortNames;
-                for ( const auto& fn : filesToMerge ) {
-                    shortNames << QFileInfo( fn ).fileName();
-                }
-                mainTabWidget_.setTabText(
-                    index, QString( "[Merged] %1" ).arg( shortNames.join( " + " ) ) );
-
-                mainTabWidget_.setCurrentIndex( index );
-                updateOpenedFilesMenu();
-            } catch ( const std::exception& e ) {
-                LOG_ERROR << "Failed to merge dropped files: " << e.what();
-                QMessageBox::warning( this, tr( "Merge Files" ),
-                                      tr( "Failed to merge files: %1" ).arg( e.what() ) );
-            }
-            return;
+            // User cancelled merge dialog — fall through to open files separately
         }
     }
 
@@ -2470,6 +2441,7 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
 
     // Lambda to update sequence numbers on checked items
     auto updateSequenceNumbers = [ listWidget ]() {
+        listWidget->blockSignals( true );
         int seq = 1;
         for ( int i = 0; i < listWidget->count(); ++i ) {
             auto* item = listWidget->item( i );
@@ -2481,6 +2453,7 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
                 item->setText( originalName );
             }
         }
+        listWidget->blockSignals( false );
     };
 
     connect( listWidget, &QListWidget::itemChanged, [ updateSequenceNumbers ]( QListWidgetItem* ) {
@@ -2561,29 +2534,28 @@ void MainWindow::mergeTabs()
     }
 
     auto filesToMerge = showMergeFilesDialog( tabFiles );
-    if ( filesToMerge.empty() ) {
-        return;
+    if ( !filesToMerge.empty() ) {
+        executeMerge( filesToMerge );
     }
+}
 
-    // Create the merged view
+bool MainWindow::executeMerge( const std::vector<QString>& filesToMerge )
+{
     try {
         auto* crawler_widget = static_cast<CrawlerWidget*>( session_.openMerged(
             filesToMerge, []() { return new CrawlerWidget(); }, tempDir_.path() ) );
 
         if ( !crawler_widget ) {
-            QMessageBox::warning( this, tr( "Merge Tabs" ),
+            QMessageBox::warning( this, tr( "Merge Files" ),
                                   tr( "Failed to create merged view." ) );
-            return;
+            return false;
         }
 
         crawler_widget->hide();
 
-        // Use the real temp file path for tab bookkeeping (tooltip, copy path, etc.)
         const auto mergedFilePath = session_.getFilename( crawler_widget );
-
         int index = mainTabWidget_.addCrawler( crawler_widget, mergedFilePath );
 
-        // Set a human-readable tab title while keeping the real path for bookkeeping
         QStringList shortNames;
         for ( const auto& fn : filesToMerge ) {
             shortNames << QFileInfo( fn ).fileName();
@@ -2592,11 +2564,12 @@ void MainWindow::mergeTabs()
                                    QString( "[Merged] %1" ).arg( shortNames.join( " + " ) ) );
 
         mainTabWidget_.setCurrentIndex( index );
-
         updateOpenedFilesMenu();
+        return true;
     } catch ( const std::exception& e ) {
-        LOG_ERROR << "Failed to merge tabs: " << e.what();
-        QMessageBox::warning( this, tr( "Merge Tabs" ),
-                              tr( "Failed to merge tabs: %1" ).arg( e.what() ) );
+        LOG_ERROR << "Failed to merge files: " << e.what();
+        QMessageBox::warning( this, tr( "Merge Files" ),
+                              tr( "Failed to merge files: %1" ).arg( e.what() ) );
+        return false;
     }
 }

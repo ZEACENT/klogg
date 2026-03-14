@@ -127,6 +127,7 @@ class MainWindow : public QMainWindow {
     void exportFilterFavorites();
     void mergeTabs();
     std::vector<QString> showMergeFilesDialog( const QStringList& filePaths );
+    bool executeMerge( const std::vector<QString>& filesToMerge );
     void options();
     void about();
     void aboutQt();
