@@ -31,6 +31,7 @@
 #include <QPainter>
 #include <QPalette>
 #include <QSet>
+#include <QSizePolicy>
 #include <QToolButton>
 #include <QVariant>
 #include <qobjectdefs.h>
@@ -800,14 +801,6 @@ bool TabbedCrawlerWidget::updateGroupChip( int tabIndex, const TabGroup* group )
         }
     }
 
-    auto* chip = new QToolButton( &myTabBar_ );
-    chip->setProperty( GroupChipPropertyKey, true );
-    chip->setAutoRaise( true );
-    chip->setFocusPolicy( Qt::NoFocus );
-    chip->setCursor( Qt::PointingHandCursor );
-    chip->setToolButtonStyle( Qt::ToolButtonTextBesideIcon );
-    myTabBar_.setTabButton( tabIndex, chipSide, chip );
-
     const auto textColor = groupChipTextColor( group->color );
     const auto styleSheet = QStringLiteral(
                                 "QToolButton {"
@@ -824,10 +817,26 @@ bool TabbedCrawlerWidget::updateGroupChip( int tabIndex, const TabGroup* group )
                                       QString::number( group->color.green() ),
                                       QString::number( group->color.blue() ) );
 
+    auto* chip = new QToolButton( &myTabBar_ );
+    chip->setProperty( GroupChipPropertyKey, true );
+    chip->setAutoRaise( true );
+    chip->setFocusPolicy( Qt::NoFocus );
+    chip->setCursor( Qt::PointingHandCursor );
     chip->setText( group->name );
     chip->setIcon( makeGroupColorIcon( group->color ) );
+    chip->setIconSize( QSize( 10, 10 ) );
+    chip->setToolButtonStyle( Qt::ToolButtonTextBesideIcon );
+    chip->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Fixed );
     chip->setStyleSheet( styleSheet );
     chip->setToolTip( tr( "Group: %1 (click to collapse/expand)" ).arg( group->name ) );
+    chip->ensurePolished();
+    const auto chipSizeHint = chip->sizeHint();
+    chip->setMinimumWidth( chipSizeHint.width() );
+    chip->adjustSize();
+
+    myTabBar_.setTabButton( tabIndex, chipSide, chip );
+    chip->updateGeometry();
+    myTabBar_.updateGeometry();
 
     QObject::disconnect( chip, nullptr, this, nullptr );
     connect( chip, &QToolButton::clicked, this, [ groupId = group->id ] {
@@ -836,6 +845,7 @@ bool TabbedCrawlerWidget::updateGroupChip( int tabIndex, const TabGroup* group )
         groupManager.save();
     } );
 
+    myTabBar_.update();
     return true;
 }
 
