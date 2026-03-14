@@ -125,6 +125,7 @@ class CrawlerWidget : public QSplitter,
 
     void focusSearchEdit();
     void goToLine();
+    void jumpToTop();
 
     // Instructs the widget to reconfigure itself because Config() has changed.
     void applyConfiguration();

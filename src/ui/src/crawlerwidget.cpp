@@ -296,6 +296,11 @@ void CrawlerWidget::focusSearchEdit()
     searchLineEdit_->setFocus( Qt::ShortcutFocusReason );
 }
 
+void CrawlerWidget::jumpToTop()
+{
+    logMainView_->selectAndDisplayLine( 0_lnum );
+}
+
 void CrawlerWidget::goToLine()
 {
     bool isLineSelected = true;

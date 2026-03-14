@@ -253,6 +253,13 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
         {
+            MainWindowGoToTop,
+            {
+                QApplication::tr( "Jump to the beginning of the file" ),
+                QStringList{ QKeySequence( Qt::Key_T ).toString() },
+            },
+        },
+        {
             MainWindowTextWrap,
             {
                 QApplication::tr( "Toggle text wrap" ),

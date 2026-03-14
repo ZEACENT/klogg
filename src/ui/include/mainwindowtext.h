@@ -62,6 +62,7 @@ extern const char* overviewVisibleText;
 extern const char* lineNumbersVisibleInMainText;
 extern const char* lineNumbersVisibleInFilteredText;
 extern const char* followText;
+extern const char* goToTopText;
 extern const char* reloadText;
 extern const char* wrapText;
 extern const char* stopText;

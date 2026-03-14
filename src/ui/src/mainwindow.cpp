@@ -589,6 +589,9 @@ void MainWindow::createActions()
     followAction->setEnabled( config.anyFileWatchEnabled() );
     connect( followAction, &QAction::toggled, this, &MainWindow::followSet );
 
+    goToTopAction = new QAction( tr( action::goToTopText ), this );
+    signalMux_.connect( goToTopAction, SIGNAL( triggered() ), SLOT( jumpToTop() ) );
+
     textWrapAction = new QAction( tr( action::wrapText ), this );
     textWrapAction->setCheckable( true );
     textWrapAction->setEnabled( true );
@@ -754,6 +757,7 @@ void MainWindow::updateShortcuts()
     setShortcuts( openClipboardAction, ShortcutAction::MainWindowOpenFromClipboard );
     setShortcuts( openUrlAction, ShortcutAction::MainWindowOpenFromUrl );
     setShortcuts( followAction, ShortcutAction::MainWindowFollowFile );
+    setShortcuts( goToTopAction, ShortcutAction::MainWindowGoToTop );
     setShortcuts( textWrapAction, ShortcutAction::MainWindowTextWrap );
     setShortcuts( reloadAction, ShortcutAction::MainWindowReload );
     setShortcuts( stopAction, ShortcutAction::MainWindowStop );
@@ -769,6 +773,7 @@ void MainWindow::loadIcons()
     stopAction->setIcon( iconLoader_.load( "icons8-delete" ) );
     reloadAction->setIcon( iconLoader_.load( "icons8-restore-page" ) );
     followAction->setIcon( iconLoader_.load( "icons8-fast-forward" ) );
+    goToTopAction->setIcon( iconLoader_.load( "icons8-up" ) );
     textWrapAction->setIcon( iconLoader_.load( "text-wrap" ) );
     showScratchPadAction->setIcon( iconLoader_.load( "icons8-create" ) );
     addToFavoritesAction->setIcon( iconLoader_.load( "icons8-star" ) );
@@ -831,6 +836,7 @@ void MainWindow::createMenus()
     viewMenu->addAction( textWrapAction );
     viewMenu->addSeparator();
     viewMenu->addAction( followAction );
+    viewMenu->addAction( goToTopAction );
     viewMenu->addSeparator();
     viewMenu->addAction( reloadAction );
 
@@ -902,6 +908,7 @@ void MainWindow::createToolBars()
     toolBar->addAction( openAction );
     toolBar->addAction( reloadAction );
     toolBar->addAction( followAction );
+    toolBar->addAction( goToTopAction );
     toolBar->addAction( textWrapAction );
     toolBar->addAction( addToFavoritesAction );
     toolBar->addWidget( infoLine );
@@ -1715,11 +1722,65 @@ void MainWindow::dropEvent( QDropEvent* event )
 {
     const QList<QUrl> urls = event->mimeData()->urls();
 
+    QStringList fileNames;
     for ( const auto& url : urls ) {
         auto fileName = url.toLocalFile();
-        if ( fileName.isEmpty() )
-            continue;
+        if ( !fileName.isEmpty() ) {
+            fileNames.append( fileName );
+        }
+    }
 
+    if ( fileNames.size() > 1 ) {
+        const auto userAction = QMessageBox::question(
+            this, tr( "Multiple Files" ),
+            tr( "You dropped %1 files. Do you want to merge them into a single view?" )
+                .arg( fileNames.size() ),
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes );
+
+        if ( userAction == QMessageBox::Cancel ) {
+            return;
+        }
+
+        if ( userAction == QMessageBox::Yes ) {
+            auto filesToMerge = showMergeFilesDialog( fileNames );
+            if ( filesToMerge.empty() ) {
+                return;
+            }
+
+            try {
+                auto* crawler_widget = static_cast<CrawlerWidget*>( session_.openMerged(
+                    filesToMerge, []() { return new CrawlerWidget(); }, tempDir_.path() ) );
+
+                if ( !crawler_widget ) {
+                    QMessageBox::warning( this, tr( "Merge Files" ),
+                                          tr( "Failed to create merged view." ) );
+                    return;
+                }
+
+                crawler_widget->hide();
+
+                const auto mergedFilePath = session_.getFilename( crawler_widget );
+                int index = mainTabWidget_.addCrawler( crawler_widget, mergedFilePath );
+
+                QStringList shortNames;
+                for ( const auto& fn : filesToMerge ) {
+                    shortNames << QFileInfo( fn ).fileName();
+                }
+                mainTabWidget_.setTabText(
+                    index, QString( "[Merged] %1" ).arg( shortNames.join( " + " ) ) );
+
+                mainTabWidget_.setCurrentIndex( index );
+                updateOpenedFilesMenu();
+            } catch ( const std::exception& e ) {
+                LOG_ERROR << "Failed to merge dropped files: " << e.what();
+                QMessageBox::warning( this, tr( "Merge Files" ),
+                                      tr( "Failed to merge files: %1" ).arg( e.what() ) );
+            }
+            return;
+        }
+    }
+
+    for ( const auto& fileName : fileNames ) {
         loadFile( fileName );
     }
 }
@@ -2385,36 +2446,46 @@ void MainWindow::generateDump()
     }
 }
 
-void MainWindow::mergeTabs()
+std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePaths )
 {
-    const int tabCount = mainTabWidget_.count();
-    if ( tabCount < 2 ) {
-        QMessageBox::information( this, tr( "Merge Tabs" ),
-                                  tr( "At least 2 open tabs are required to merge." ) );
-        return;
-    }
-
-    // Build a dialog with a list of open tabs and up/down ordering buttons
     QDialog dialog( this );
-    dialog.setWindowTitle( tr( "Merge Tabs" ) );
+    dialog.setWindowTitle( tr( "Merge Files" ) );
     dialog.setMinimumWidth( 400 );
 
     auto* layout = new QVBoxLayout( &dialog );
-    layout->addWidget( new QLabel( tr( "Select and order tabs to merge:" ) ) );
+    layout->addWidget( new QLabel( tr( "Select and order files to merge:" ) ) );
 
     auto* listWidget = new QListWidget( &dialog );
-    for ( int i = 0; i < tabCount; ++i ) {
-        auto* crawler = dynamic_cast<CrawlerWidget*>( mainTabWidget_.widget( i ) );
-        if ( !crawler )
-            continue;
-        const auto fileName = session_.getFilename( crawler );
-        auto* item = new QListWidgetItem( QFileInfo( fileName ).fileName() );
-        item->setData( Qt::UserRole, fileName );
-        item->setCheckState( Qt::Checked );
+
+    for ( const auto& filePath : filePaths ) {
+        const auto displayName = QFileInfo( filePath ).fileName();
+        auto* item = new QListWidgetItem( displayName );
+        item->setData( Qt::UserRole, filePath );
+        item->setData( Qt::UserRole + 1, displayName );
+        item->setCheckState( Qt::Unchecked );
         item->setFlags( item->flags() | Qt::ItemIsUserCheckable );
         listWidget->addItem( item );
     }
     layout->addWidget( listWidget );
+
+    // Lambda to update sequence numbers on checked items
+    auto updateSequenceNumbers = [ listWidget ]() {
+        int seq = 1;
+        for ( int i = 0; i < listWidget->count(); ++i ) {
+            auto* item = listWidget->item( i );
+            const auto originalName = item->data( Qt::UserRole + 1 ).toString();
+            if ( item->checkState() == Qt::Checked ) {
+                item->setText( QString( "%1. %2" ).arg( seq++ ).arg( originalName ) );
+            }
+            else {
+                item->setText( originalName );
+            }
+        }
+    };
+
+    connect( listWidget, &QListWidget::itemChanged, [ updateSequenceNumbers ]( QListWidgetItem* ) {
+        updateSequenceNumbers();
+    } );
 
     // Up/Down buttons
     auto* buttonLayout = new QHBoxLayout();
@@ -2424,21 +2495,23 @@ void MainWindow::mergeTabs()
     buttonLayout->addWidget( downButton );
     layout->addLayout( buttonLayout );
 
-    connect( upButton, &QPushButton::clicked, [ listWidget ]() {
+    connect( upButton, &QPushButton::clicked, [ listWidget, updateSequenceNumbers ]() {
         const int row = listWidget->currentRow();
         if ( row > 0 ) {
             auto* item = listWidget->takeItem( row );
             listWidget->insertItem( row - 1, item );
             listWidget->setCurrentRow( row - 1 );
+            updateSequenceNumbers();
         }
     } );
 
-    connect( downButton, &QPushButton::clicked, [ listWidget ]() {
+    connect( downButton, &QPushButton::clicked, [ listWidget, updateSequenceNumbers ]() {
         const int row = listWidget->currentRow();
         if ( row >= 0 && row < listWidget->count() - 1 ) {
             auto* item = listWidget->takeItem( row );
             listWidget->insertItem( row + 1, item );
             listWidget->setCurrentRow( row + 1 );
+            updateSequenceNumbers();
         }
     } );
 
@@ -2449,21 +2522,46 @@ void MainWindow::mergeTabs()
     layout->addWidget( dialogButtons );
 
     if ( dialog.exec() != QDialog::Accepted ) {
-        return;
+        return {};
     }
 
     // Collect checked files in order
-    std::vector<QString> filesToMerge;
+    std::vector<QString> result;
     for ( int i = 0; i < listWidget->count(); ++i ) {
         auto* item = listWidget->item( i );
         if ( item->checkState() == Qt::Checked ) {
-            filesToMerge.push_back( item->data( Qt::UserRole ).toString() );
+            result.push_back( item->data( Qt::UserRole ).toString() );
         }
     }
 
-    if ( filesToMerge.size() < 2 ) {
+    if ( result.size() < 2 ) {
+        QMessageBox::information( this, tr( "Merge Files" ),
+                                  tr( "Please select at least 2 files to merge." ) );
+        return {};
+    }
+
+    return result;
+}
+
+void MainWindow::mergeTabs()
+{
+    const int tabCount = mainTabWidget_.count();
+    if ( tabCount < 2 ) {
         QMessageBox::information( this, tr( "Merge Tabs" ),
-                                  tr( "Please select at least 2 tabs to merge." ) );
+                                  tr( "At least 2 open tabs are required to merge." ) );
+        return;
+    }
+
+    QStringList tabFiles;
+    for ( int i = 0; i < tabCount; ++i ) {
+        auto* crawler = dynamic_cast<CrawlerWidget*>( mainTabWidget_.widget( i ) );
+        if ( !crawler )
+            continue;
+        tabFiles.append( session_.getFilename( crawler ) );
+    }
+
+    auto filesToMerge = showMergeFilesDialog( tabFiles );
+    if ( filesToMerge.empty() ) {
         return;
     }
 

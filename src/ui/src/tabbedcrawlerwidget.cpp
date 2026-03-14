@@ -946,7 +946,7 @@ void TabbedCrawlerWidget::onGroupsChanged()
         }
 
         if ( group->collapsed && isAnchor ) {
-            myTabBar_.setTabText( i, chipAttached ? QString{} : group->name );
+            myTabBar_.setTabText( i, group->name );
         }
         else if ( isChipOwner && !chipAttached ) {
             myTabBar_.setTabText( i, tr( "[%1] %2" ).arg( group->name, originalTabLabel ) );

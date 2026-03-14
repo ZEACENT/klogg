@@ -66,6 +66,7 @@ struct ShortcutAction {
     static constexpr auto MainWindowFocusSearchInput = "qf.focus_search";
     static constexpr auto MainWindowClearFile = "mainwindow.clear_file";
     static constexpr auto MainWindowFollowFile = "mainwindow.follow_file";
+    static constexpr auto MainWindowGoToTop = "mainwindow.go_to_top";
     static constexpr auto MainWindowTextWrap = "mainwindow.text_wrap";
     static constexpr auto MainWindowReload = "mainwindow.reload";
     static constexpr auto MainWindowStop = "mainwindow.stop";
