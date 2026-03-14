@@ -27,12 +27,18 @@ jobs:
   SaveVersion:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
+    outputs:
+      klogg_version: ${{ steps.save-version.outputs.klogg_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/klogg-version
 
-      - name: Save version 
-        run: echo $KLOGG_VERSION > klogg_version.txt
+      - name: Save version
+        id: save-version
+        shell: sh
+        run: |
+          echo "klogg_version=$KLOGG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "$KLOGG_VERSION" > klogg_version.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -41,8 +47,11 @@ jobs:
           if-no-files-found: error
 
   Linux:
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -100,7 +109,6 @@ jobs:
           cd ${{ matrix.config.container_root }}
           docker build -t ${{ matrix.config.container }} .
 
-      - uses: ./.github/actions/klogg-version
       - uses: ./.github/actions/prepare-workspace-env
       - uses: ./.github/actions/docker-build
       - uses: ./.github/actions/docker-run-tests
@@ -114,8 +122,11 @@ jobs:
           if-no-files-found: error      
 
   Mac:
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -166,7 +177,6 @@ jobs:
           brew install ragel
 
       - uses: ./.github/actions/agent-setup
-      - uses: ./.github/actions/klogg-version
       - uses: ./.github/actions/prepare-workspace-env
       
       - name: Disable Sentry on macOS
@@ -192,8 +202,11 @@ jobs:
           if-no-files-found: warn
 
   Windows:
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -256,7 +269,6 @@ jobs:
           echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV 
 
       - uses: ./.github/actions/agent-setup
-      - uses: ./.github/actions/klogg-version
       - uses: ./.github/actions/prepare-workspace-env
       
       - name: Prepare dev cmd
@@ -414,14 +426,14 @@ jobs:
 
   ci-gate:
     if: always()
-    needs: [SaveVersion, Linux, Mac, Windows]
+    needs: [Linux, Mac, Windows]
     runs-on: ubuntu-22.04
     steps:
       - name: Check CI results
         run: |
           results="${{ join(needs.*.result, ' ') }}"
           for r in $results; do
-            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+            if [ "$r" != "success" ]; then
               echo "CI failed: found result '$r'"
               exit 1
             fi
@@ -430,7 +442,7 @@ jobs:
 
   CreatePreRelease:
     if: "!contains(github.event.head_commit.message, '[skip ci]') && github.event_name == 'push'"
-    needs: [Linux, Mac, Windows]
+    needs: [ci-gate]
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
