@@ -10,8 +10,10 @@ add_executable(klogg_tests
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     sessioninfo_test.cpp
+    streaminglogdata_test.cpp
     tabgroupdropresolver_test.cpp
     tabgroupmanager_test.cpp
+    tabbedcrawlerwidget_test.cpp
     tests_main.cpp
 )
 

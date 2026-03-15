@@ -1,5 +1,7 @@
 #include "streaminglogdata.h"
 
+#include <QMetaObject>
+
 #include "logfiltereddata.h"
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
@@ -8,7 +10,7 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     , codec_( QTextCodec::codecForName( "UTF-8" ) )
 {
     captureStore_.loadFromDisk();
-    Q_EMIT loadingFinished( LoadingStatus::Successful );
+    scheduleLoadingFinished();
 }
 
 void StreamingLogData::appendUtf8( const QByteArray& data )
@@ -17,6 +19,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     captureStore_.appendUtf8( data );
     if ( captureStore_.lineCount() != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
+        scheduleLoadingFinished();
     }
 }
 
@@ -24,6 +27,7 @@ void StreamingLogData::clearCapture()
 {
     captureStore_.clear();
     Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
+    scheduleLoadingFinished();
 }
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
@@ -75,7 +79,7 @@ void StreamingLogData::reload( QTextCodec* forcedEncoding )
     if ( forcedEncoding ) {
         codec_.setCodec( forcedEncoding );
     }
-    Q_EMIT loadingFinished( LoadingStatus::Successful );
+    scheduleLoadingFinished();
 }
 
 QTextCodec* StreamingLogData::getDetectedEncoding() const
@@ -155,6 +159,22 @@ void StreamingLogData::doAttachReader() const
 
 void StreamingLogData::doDetachReader() const
 {
+}
+
+void StreamingLogData::scheduleLoadingFinished()
+{
+    if ( loadingFinishedQueued_ ) {
+        return;
+    }
+
+    loadingFinishedQueued_ = true;
+    QMetaObject::invokeMethod(
+        this,
+        [ this ] {
+            loadingFinishedQueued_ = false;
+            Q_EMIT loadingFinished( LoadingStatus::Successful );
+        },
+        Qt::QueuedConnection );
 }
 
 klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount number ) const

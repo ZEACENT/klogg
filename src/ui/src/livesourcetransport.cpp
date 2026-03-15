@@ -1,11 +1,16 @@
 #include "livesourcetransport.h"
 
+#include <QCoreApplication>
+#include <QMetaType>
 #include <QProcess>
 
 #include "log.h"
 
 LiveSourceTransport::LiveSourceTransport( QObject* parent ) : QObject( parent )
 {
+    static const auto registered = qRegisterMetaType<LiveSourceTransport::State>(
+        "LiveSourceTransport::State" );
+    Q_UNUSED( registered );
 }
 
 ProcessLiveSourceTransport::ProcessLiveSourceTransport( QObject* parent )
@@ -37,12 +42,30 @@ ProcessLiveSourceTransport::ProcessLiveSourceTransport( QObject* parent )
 
     connect( process_.get(),
              qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this,
-             [ this ]( int, QProcess::ExitStatus ) {
+             [ this ]( int exitCode, QProcess::ExitStatus exitStatus ) {
                  if ( destroyed_ ) {
                      return;
                  }
-                 if ( state_ == State::Connected || state_ == State::Connecting ) {
+
+                 const auto disconnectRequested = disconnectRequested_;
+                 disconnectRequested_ = false;
+
+                 if ( disconnectRequested ) {
                      setState( State::Disconnected );
+                     return;
+                 }
+
+                 if ( state_ == State::Connected || state_ == State::Connecting ) {
+                     if ( exitStatus != QProcess::NormalExit || exitCode != 0 || !lastError_.isEmpty() ) {
+                         if ( lastError_.isEmpty() ) {
+                             lastError_ = tr( "Live source exited unexpectedly (%1)" ).arg( exitCode );
+                         }
+                         setState( State::Error );
+                         Q_EMIT errorOccurred( lastError_ );
+                     }
+                     else {
+                         setState( State::Disconnected );
+                     }
                  }
              } );
 }
@@ -63,6 +86,7 @@ bool ProcessLiveSourceTransport::connectTransport()
     lastError_.clear();
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
+    disconnectRequested_ = false;
     setState( State::Connecting );
     process_->start();
 
@@ -73,6 +97,18 @@ bool ProcessLiveSourceTransport::connectTransport()
         return false;
     }
 
+    process_->waitForFinished( 50 );
+    QCoreApplication::processEvents();
+    if ( state_ == State::Error || process_->state() == QProcess::NotRunning ) {
+        if ( lastError_.isEmpty() ) {
+            const auto stdErr = QString::fromUtf8( process_->readAllStandardError() ).trimmed();
+            lastError_ = stdErr.isEmpty() ? tr( "Live source terminated during startup" ) : stdErr;
+            setState( State::Error );
+            Q_EMIT errorOccurred( lastError_ );
+        }
+        return false;
+    }
+
     setState( State::Connected );
     return true;
 }
@@ -80,16 +116,19 @@ bool ProcessLiveSourceTransport::connectTransport()
 void ProcessLiveSourceTransport::disconnectTransport()
 {
     if ( !process_ || process_->state() == QProcess::NotRunning ) {
+        disconnectRequested_ = false;
         setState( State::Disconnected );
         return;
     }
 
+    disconnectRequested_ = true;
     process_->terminate();
     if ( !process_->waitForFinished( 1500 ) ) {
         process_->kill();
         process_->waitForFinished( 1500 );
     }
 
+    disconnectRequested_ = false;
     setState( State::Disconnected );
 }
 
@@ -129,7 +168,14 @@ bool ProcessLiveSourceTransport::runBlockingCommand( const Command& command, QBy
         return false;
     }
 
-    process.waitForFinished( 5000 );
+    if ( !process.waitForFinished( 5000 ) ) {
+        process.kill();
+        process.waitForFinished( 1500 );
+        if ( stdErr ) {
+            *stdErr = QObject::tr( "Timed out waiting for %1" ).arg( command.program ).toUtf8();
+        }
+        return false;
+    }
     if ( stdErr ) {
         *stdErr = process.readAllStandardError();
     }

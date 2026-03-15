@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <QByteArray>
+#include <QMetaType>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -61,6 +62,9 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     State state_{ State::Disconnected };
     QString lastError_;
     bool destroyed_ = false;
+    bool disconnectRequested_ = false;
 };
+
+Q_DECLARE_METATYPE( LiveSourceTransport::State )
 
 #endif

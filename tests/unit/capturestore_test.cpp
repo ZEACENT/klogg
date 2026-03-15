@@ -19,7 +19,10 @@
 
 #include <catch2/catch.hpp>
 
+#include <atomic>
+#include <thread>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QTextCodec>
@@ -47,6 +50,15 @@ QStringList segmentFiles( const QString& capturePath )
 {
     return QDir( capturePath ).entryList( QStringList{ "segment_*.log" }, QDir::Files,
                                           QDir::Name | QDir::IgnoreCase );
+}
+
+QString readUtf8File( const QString& filePath )
+{
+    QFile file( filePath );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return {};
+    }
+    return QString::fromUtf8( file.readAll() );
 }
 } // namespace
 
@@ -126,4 +138,62 @@ TEST_CASE( "CaptureStore deleteCaptureFiles suppresses destructor persistence" )
     }
 
     REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+}
+
+TEST_CASE( "CaptureStore bindOutputFile overwrites existing files and replays spilled segments" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 8;
+
+    const auto rootPath = makeTestDir( "capturestore_bind_output" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "saved.log" ) );
+
+    QFile staleOutput( outputPath );
+    REQUIRE( staleOutput.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( staleOutput.write( QByteArrayLiteral( "stale-data\n" ) ) > 0 );
+    staleOutput.close();
+
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    store.appendUtf8( QByteArrayLiteral( "alpha\nbeta\ngamma\ndelta\n" ) );
+    REQUIRE_FALSE( segmentFiles( store.capturePath() ).empty() );
+
+    REQUIRE( store.bindOutputFile( outputPath ) );
+    store.appendUtf8( QByteArrayLiteral( "epsilon\n" ) );
+    REQUIRE( store.bindOutputFile( QString{} ) );
+
+    REQUIRE( QFileInfo::exists( outputPath ) );
+    REQUIRE( readUtf8File( outputPath )
+             == QStringLiteral( "alpha\nbeta\ngamma\ndelta\nepsilon\n" ) );
+}
+
+TEST_CASE( "CaptureStore serializes concurrent append and read access" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 32;
+    limits.memoryBudgetBytes = 64;
+
+    const auto rootPath = makeTestDir( "capturestore_concurrent" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    std::atomic<bool> writerDone{ false };
+    std::thread writer( [ &store, &writerDone ] {
+        for ( int i = 0; i < 200; ++i ) {
+            store.appendUtf8( QStringLiteral( "line-%1\n" ).arg( i ).toUtf8() );
+        }
+        writerDone = true;
+    } );
+
+    while ( !writerDone.load() ) {
+        const auto lines = store.lineCount();
+        if ( lines > 0_lcount ) {
+            const auto rawLines = store.buildRawLines( 0_lnum, lines, codec, QRegularExpression{} );
+            REQUIRE( rawLines.endOfLines.size() <= static_cast<size_t>( lines.get() ) );
+        }
+    }
+
+    writer.join();
+    REQUIRE( store.lineCount().get() == 200 );
+    REQUIRE( store.lineAt( LineNumber( 199 ), codec, QRegularExpression{} ) == QStringLiteral( "line-199" ) );
 }

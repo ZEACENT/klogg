@@ -7,6 +7,73 @@ QString normalizedExecutable( const QString& adbExecutable )
 {
     return adbExecutable.trimmed().isEmpty() ? QStringLiteral( "adb" ) : adbExecutable.trimmed();
 }
+
+bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
+{
+    if ( process.waitForFinished( timeoutMs ) ) {
+        return true;
+    }
+
+    process.kill();
+    process.waitForFinished( 1500 );
+    return false;
+}
+
+QStringList splitCommandArguments( const QString& arguments )
+{
+    QStringList tokens;
+    QString currentToken;
+    QChar quoteChar;
+    bool escaping = false;
+
+    for ( const auto ch : arguments ) {
+        if ( escaping ) {
+            currentToken.append( ch );
+            escaping = false;
+            continue;
+        }
+
+        if ( ch == QLatin1Char( '\\' ) ) {
+            escaping = true;
+            continue;
+        }
+
+        if ( !quoteChar.isNull() ) {
+            if ( ch == quoteChar ) {
+                quoteChar = QChar{};
+            }
+            else {
+                currentToken.append( ch );
+            }
+            continue;
+        }
+
+        if ( ch == QLatin1Char( '"' ) || ch == QLatin1Char( '\'' ) ) {
+            quoteChar = ch;
+            continue;
+        }
+
+        if ( ch.isSpace() ) {
+            if ( !currentToken.isEmpty() ) {
+                tokens.push_back( currentToken );
+                currentToken.clear();
+            }
+            continue;
+        }
+
+        currentToken.append( ch );
+    }
+
+    if ( escaping ) {
+        currentToken.append( QLatin1Char( '\\' ) );
+    }
+
+    if ( !currentToken.isEmpty() ) {
+        tokens.push_back( currentToken );
+    }
+
+    return tokens;
+}
 } // namespace
 
 AdbProcessTransport::AdbProcessTransport( QString adbExecutable, QString deviceSerial,
@@ -30,7 +97,13 @@ QList<AdbDeviceInfo> AdbProcessTransport::listDevices( const QString& adbExecuta
         return {};
     }
 
-    process.waitForFinished( 5000 );
+    if ( !waitForFinishedOrKill( process, 5000 ) ) {
+        if ( error ) {
+            *error = QObject::tr( "Timed out waiting for adb devices output" );
+        }
+        return {};
+    }
+
     if ( process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 ) {
         if ( error ) {
             const auto stdErr = QString::fromUtf8( process.readAllStandardError() ).trimmed();
@@ -110,7 +183,7 @@ QStringList AdbProcessTransport::logcatArguments() const
     QStringList arguments{ QStringLiteral( "-s" ), deviceSerial_, QStringLiteral( "logcat" ) };
     const auto trimmedExtraArgs = extraArgs_.trimmed();
     if ( !trimmedExtraArgs.isEmpty() ) {
-        arguments.append( QProcess::splitCommand( trimmedExtraArgs ) );
+        arguments.append( splitCommandArguments( trimmedExtraArgs ) );
     }
     return arguments;
 }

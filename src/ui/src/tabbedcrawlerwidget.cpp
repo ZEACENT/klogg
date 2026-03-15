@@ -53,6 +53,7 @@
 namespace {
 constexpr QLatin1String PathKey = QLatin1String( "path", 4 );
 constexpr QLatin1String TitleKey = QLatin1String( "title", 5 );
+constexpr QLatin1String ToolTipKey = QLatin1String( "toolTip", 7 );
 constexpr QLatin1String StatusKey = QLatin1String( "status", 6 );
 constexpr QLatin1String GroupIdKey = QLatin1String( "groupId", 7 );
 constexpr QLatin1String GroupColorKey = QLatin1String( "groupColor", 10 );
@@ -233,6 +234,7 @@ void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
     QVariantMap tabData;
     tabData[ PathKey ] = documentId;
     tabData[ TitleKey ] = tabLabel;
+    tabData[ ToolTipKey ] = nativeToolTip;
     tabData[ StatusKey ] = static_cast<int>( DataStatus::OLD_DATA );
 
     myTabBar_.setTabData( index, tabData );
@@ -264,6 +266,7 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
 
     auto tabData = myTabBar_.tabData( index ).toMap();
     tabData[ TitleKey ] = displayName;
+    tabData[ ToolTipKey ] = QDir::toNativeSeparators( toolTip );
     myTabBar_.setTabData( index, tabData );
     myTabBar_.setTabToolTip( index, QDir::toNativeSeparators( toolTip ) );
 
@@ -945,12 +948,17 @@ void TabbedCrawlerWidget::onGroupsChanged()
     for ( int i = 0; i < count(); ++i ) {
         const auto tabPath = tabPathAt( i );
         const auto* group = groupManager.groupForTab( tabPath );
+        auto tabData = myTabBar_.tabData( i ).toMap();
 
         const auto customName = tabNameMapping.tabName( tabPath );
-        const auto originalTabLabel = customName.isEmpty() ? QFileInfo( tabPath ).fileName() : customName;
-        const auto originalTooltip = QDir::toNativeSeparators( tabPath );
-
-        auto tabData = myTabBar_.tabData( i ).toMap();
+        const auto storedTitle = tabData.value( TitleKey ).toString();
+        const auto storedToolTip = tabData.value( ToolTipKey ).toString();
+        const auto originalTabLabel
+            = customName.isEmpty()
+                  ? ( storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName() : storedTitle )
+                  : customName;
+        const auto originalTooltip
+            = storedToolTip.isEmpty() ? QDir::toNativeSeparators( tabPath ) : storedToolTip;
 
         if ( !group ) {
             setTabVisibleCompat( i, true );

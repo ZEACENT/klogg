@@ -42,6 +42,10 @@
 #include <QFileOpenEvent>
 #endif
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 #include "configuration.h"
 #include "crashhandler.h"
 #include "klogg_version.h"

@@ -29,12 +29,21 @@
 #include "adbprocesstransport.h"
 #include "adblogcatdialog.h"
 #include "configuration.h"
+#include "livesourcetransport.h"
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
 #include "test_utils.h"
 
 namespace {
+bool isHeadlessDialogTestEnvironment()
+{
+    return QGuiApplication::screens().isEmpty()
+           || QGuiApplication::platformName().compare( QStringLiteral( "offscreen" ),
+                                                       Qt::CaseInsensitive )
+                  == 0;
+}
+
 class ScopedAdbConfigurationGuard {
   public:
     ScopedAdbConfigurationGuard()
@@ -77,14 +86,16 @@ class TestAdbProcessTransport : public AdbProcessTransport {
 TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
 {
     TestAdbProcessTransport transport( QString{}, QStringLiteral( "emulator-5554" ),
-                                       QStringLiteral( "-v threadtime *:I" ) );
+                                       QStringLiteral( "-v threadtime -T \"2026-03-15 12:34:56.000\" *:I" ) );
 
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.program == QStringLiteral( "adb" ) );
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
-                             QStringLiteral( "threadtime" ), QStringLiteral( "*:I" ) } );
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-T" ),
+                             QStringLiteral( "2026-03-15 12:34:56.000" ),
+                             QStringLiteral( "*:I" ) } );
 
     const auto clear = transport.clearCommandForTest();
     REQUIRE( clear.program == QStringLiteral( "adb" ) );
@@ -117,10 +128,26 @@ TEST_CASE( "AdbProcessTransport listDevices returns an error when adb cannot sta
     REQUIRE_FALSE( error.isEmpty() );
 }
 
+TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transport errors" )
+{
+#ifdef Q_OS_WIN
+    TestAdbProcessTransport transport( QStringLiteral( "whoami.exe" ), QStringLiteral( "serial-123" ), {} );
+#else
+    TestAdbProcessTransport transport( QStringLiteral( "false" ), QStringLiteral( "serial-123" ), {} );
+#endif
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    REQUIRE_FALSE( transport.connectTransport() );
+    REQUIRE( errorSpy.safeWait() );
+    REQUIRE( stateSpy.count() >= 1 );
+    REQUIRE_FALSE( transport.lastError().isEmpty() );
+}
+
 TEST_CASE( "OptionsDialog loads and persists adb settings" )
 {
-    if ( QGuiApplication::screens().isEmpty() ) {
-        WARN( "OptionsDialog requires an available screen in this test environment" );
+    if ( isHeadlessDialogTestEnvironment() ) {
+        WARN( "OptionsDialog UI coverage is skipped on headless/offscreen platforms" );
         return;
     }
 
@@ -156,6 +183,11 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
 
 TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edits on accept" )
 {
+    if ( isHeadlessDialogTestEnvironment() ) {
+        WARN( "AdbLogcatDialog UI coverage is skipped on headless/offscreen platforms" );
+        return;
+    }
+
     ScopedAdbConfigurationGuard configGuard;
     auto& config = Configuration::getSynced();
     config.setAdbExecutable( QStringLiteral( "/configured/adb" ) );

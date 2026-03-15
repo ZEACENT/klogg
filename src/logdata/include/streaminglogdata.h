@@ -48,12 +48,14 @@ class StreamingLogData : public SearchableLogData {
     void doDetachReader() const override;
 
   private:
+    void scheduleLoadingFinished();
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
 
   private:
     CaptureStore captureStore_;
     TextCodecHolder codec_;
     QRegularExpression prefilterPattern_;
+    bool loadingFinishedQueued_ = false;
 };
 
 #endif

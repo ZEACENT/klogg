@@ -2,6 +2,7 @@
 #define CAPTURESTORE_H
 
 #include <memory>
+#include <mutex>
 
 #include <QByteArray>
 #include <QDateTime>
@@ -81,6 +82,8 @@ class CaptureStore {
     void persistBufferedSegments();
     void scanSegment( Segment& segment );
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
+    bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
+    bool writeCaptureToDevice( QIODevice* device ) const;
     void appendOutputBytes( const QByteArray& bytes );
 
   private:
@@ -100,6 +103,7 @@ class CaptureStore {
     int nextSegmentId_ = 0;
     QDateTime lastModified_;
     bool persistBufferedSegmentsOnDestroy_ = true;
+    mutable std::recursive_mutex mutex_;
 };
 
 #endif

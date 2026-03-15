@@ -1,6 +1,7 @@
 #include "capturestore.h"
 
 #include <algorithm>
+#include <array>
 
 #include <QDir>
 #include <QFileInfo>
@@ -65,6 +66,7 @@ CaptureStore::CaptureStore( QString captureId, QString rootPath, Limits limits )
 
 CaptureStore::~CaptureStore()
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( persistBufferedSegmentsOnDestroy_ ) {
         persistBufferedSegments();
     }
@@ -73,6 +75,7 @@ CaptureStore::~CaptureStore()
 
 bool CaptureStore::loadFromDisk()
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     ensureCaptureDir();
 
     segments_.clear();
@@ -105,6 +108,7 @@ bool CaptureStore::loadFromDisk()
 
 void CaptureStore::appendUtf8( const QByteArray& data )
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( data.isEmpty() ) {
         return;
     }
@@ -150,6 +154,7 @@ void CaptureStore::appendUtf8( const QByteArray& data )
 
 void CaptureStore::flush()
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( boundOutputHandle_ ) {
         boundOutputHandle_->flush();
     }
@@ -157,6 +162,7 @@ void CaptureStore::flush()
 
 void CaptureStore::clear()
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     flush();
 
     partialLine_.clear();
@@ -185,6 +191,7 @@ void CaptureStore::clear()
 
 bool CaptureStore::bindOutputFile( const QString& outputPath )
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     boundOutputHandle_.reset();
     boundOutputFile_ = outputPath;
     if ( boundOutputFile_.isEmpty() ) {
@@ -193,17 +200,14 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
 
     QDir().mkpath( QFileInfo( boundOutputFile_ ).absolutePath() );
     auto outputFile = std::make_unique<QFile>( boundOutputFile_ );
-    if ( !outputFile->open( QIODevice::WriteOnly | QIODevice::Append ) ) {
+    if ( !outputFile->open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
         boundOutputFile_.clear();
         return false;
     }
 
-    if ( outputFile->size() == 0 ) {
-        const auto rawLines = buildRawLines( 0_lnum, lineCount(), QTextCodec::codecForName( "UTF-8" ),
-                                             QRegularExpression{} );
-        outputFile->write( rawLines.buffer.data(),
-                           type_safe::narrow_cast<qint64>( rawLines.buffer.size() ) );
-        outputFile->flush();
+    if ( !writeCaptureToDevice( outputFile.get() ) || !outputFile->flush() ) {
+        boundOutputFile_.clear();
+        return false;
     }
 
     boundOutputHandle_ = std::move( outputFile );
@@ -212,6 +216,7 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
 
 QString CaptureStore::boundOutputFile() const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     return boundOutputFile_;
 }
 
@@ -232,6 +237,7 @@ QString CaptureStore::rootPath() const
 
 void CaptureStore::deleteCaptureFiles()
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     flush();
     boundOutputHandle_.reset();
     persistBufferedSegmentsOnDestroy_ = false;
@@ -253,6 +259,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                                                          QTextCodec* codec,
                                                          const QRegularExpression& prefilterPattern ) const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     SearchableLogData::RawLines rawLines;
     rawLines.startLine = first;
     const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
@@ -279,6 +286,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
 QString CaptureStore::lineAt( LineNumber line, QTextCodec* codec,
                               const QRegularExpression& prefilterPattern ) const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( line < 0_lnum || line >= lineCount() ) {
         return {};
     }
@@ -303,6 +311,7 @@ QString CaptureStore::lineAt( LineNumber line, QTextCodec* codec,
 
 LineLength CaptureStore::lineLength( LineNumber line ) const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( line < 0_lnum || line >= lineCount() ) {
         return 0_length;
     }
@@ -328,16 +337,19 @@ LineLength CaptureStore::lineLength( LineNumber line ) const
 
 LinesCount CaptureStore::lineCount() const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     return LinesCount( static_cast<LinesCount::UnderlyingType>( totalLines_ ) );
 }
 
 LineLength CaptureStore::maxLineLength() const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     return LineLength( maxLineLength_ );
 }
 
 CaptureStore::Stats CaptureStore::stats() const
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     return Stats{ fileSize_, memoryBytes_, totalLines_, maxLineLength_, lastModified_ };
 }
 
@@ -485,6 +497,49 @@ QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine 
     const auto lineLength = segment.lineLengths[ static_cast<size_t>( localLine ) ];
     file.seek( lineOffset );
     return file.read( lineLength );
+}
+
+bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* device ) const
+{
+    if ( !device ) {
+        return false;
+    }
+
+    if ( segment.memoryData ) {
+        return device->write( *segment.memoryData ) == segment.memoryData->size();
+    }
+
+    QFile file( segment.filePath );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return false;
+    }
+
+    std::array<char, 64 * 1024> buffer{};
+    while ( true ) {
+        const auto bytesRead = file.read( buffer.data(), type_safe::narrow_cast<qint64>( buffer.size() ) );
+        if ( bytesRead < 0 ) {
+            return false;
+        }
+        if ( bytesRead == 0 ) {
+            break;
+        }
+        if ( device->write( buffer.data(), bytesRead ) != bytesRead ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool CaptureStore::writeCaptureToDevice( QIODevice* device ) const
+{
+    for ( const auto& segment : segments_ ) {
+        if ( !writeSegmentToDevice( segment, device ) ) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void CaptureStore::appendOutputBytes( const QByteArray& bytes )
