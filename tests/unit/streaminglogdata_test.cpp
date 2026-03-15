@@ -75,3 +75,23 @@ TEST_CASE( "StreamingLogData refreshes listeners after append and clear operatio
     REQUIRE( loadingSpy.safeWait() );
     REQUIRE( logData.getNbLine().get() == 0 );
 }
+
+TEST_CASE( "StreamingLogData exposes a trailing partial line when input finishes" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "partial" ) );
+    REQUIRE( logData.getNbLine().get() == 0 );
+
+    logData.finishInput();
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine().get() == 1 );
+    REQUIRE( logData.getLineString( LineNumber( 0 ) ) == QStringLiteral( "partial" ) );
+}

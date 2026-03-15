@@ -1,10 +1,16 @@
 #include "livesourcetransport.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QMetaType>
 #include <QProcess>
 
 #include "log.h"
+
+namespace {
+constexpr int StartupFailureGracePeriodMs = 250;
+constexpr int StartupFailurePollIntervalMs = 10;
+}
 
 LiveSourceTransport::LiveSourceTransport( QObject* parent ) : QObject( parent )
 {
@@ -97,8 +103,14 @@ bool ProcessLiveSourceTransport::connectTransport()
         return false;
     }
 
-    process_->waitForFinished( 50 );
-    QCoreApplication::processEvents();
+    QElapsedTimer startupTimer;
+    startupTimer.start();
+    while ( state_ != State::Error && process_->state() != QProcess::NotRunning
+            && startupTimer.elapsed() < StartupFailureGracePeriodMs ) {
+        process_->waitForFinished( StartupFailurePollIntervalMs );
+        QCoreApplication::processEvents();
+    }
+
     if ( state_ == State::Error || process_->state() == QProcess::NotRunning ) {
         if ( lastError_.isEmpty() ) {
             const auto stdErr = QString::fromUtf8( process_->readAllStandardError() ).trimmed();

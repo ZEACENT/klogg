@@ -23,6 +23,16 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     }
 }
 
+void StreamingLogData::finishInput()
+{
+    const auto previousLineCount = captureStore_.lineCount();
+    captureStore_.finishInput();
+    if ( captureStore_.lineCount() != previousLineCount ) {
+        Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
+        scheduleLoadingFinished();
+    }
+}
+
 void StreamingLogData::clearCapture()
 {
     captureStore_.clear();

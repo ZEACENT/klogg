@@ -53,6 +53,7 @@ class CaptureStore {
 
     bool loadFromDisk();
     void appendUtf8( const QByteArray& data );
+    void finishInput();
     void flush();
     void clear();
     bool bindOutputFile( const QString& outputPath );
@@ -73,6 +74,7 @@ class CaptureStore {
     Stats stats() const;
 
   private:
+    void commitLine( const QByteArray& lineBytes, bool terminated );
     void ensureCaptureDir();
     Segment& ensureActiveSegment();
     void rotateSegmentIfNeeded();

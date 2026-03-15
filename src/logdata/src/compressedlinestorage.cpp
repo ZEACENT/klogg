@@ -17,7 +17,6 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QtEndian>
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -27,6 +26,8 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+
+#include <QtEndian>
 
 #include "compressedlinestorage.h"
 #include "containers.h"

@@ -104,6 +104,21 @@ TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" 
                              QStringLiteral( "logcat" ), QStringLiteral( "-c" ) } );
 }
 
+TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
+{
+    TestAdbProcessTransport transport(
+        QString{}, QStringLiteral( "serial-123" ),
+        QStringLiteral( "--path C:\\temp\\log.txt --pattern regex\\d+ --title hello\\ world" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "--path" ),
+                             QStringLiteral( "C:\\temp\\log.txt" ),
+                             QStringLiteral( "--pattern" ), QStringLiteral( "regex\\d+" ),
+                             QStringLiteral( "--title" ), QStringLiteral( "hello world" ) } );
+}
+
 TEST_CASE( "AdbProcessTransport reports startup failures through the transport interface" )
 {
     TestAdbProcessTransport transport( QStringLiteral( "/path/that/does/not/exist/adb" ),

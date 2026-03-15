@@ -16,6 +16,7 @@ class StreamingLogData : public SearchableLogData {
     ~StreamingLogData() override = default;
 
     void appendUtf8( const QByteArray& data );
+    void finishInput();
     void clearCapture();
     bool bindOutputFile( const QString& outputPath );
     QString boundOutputFile() const;

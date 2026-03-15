@@ -19,22 +19,40 @@ bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
     return false;
 }
 
+bool canEscapeArgumentCharacter( const QChar nextChar, const QChar quoteChar )
+{
+    if ( quoteChar == QLatin1Char( '"' ) ) {
+        return nextChar == QLatin1Char( '"' ) || nextChar == QLatin1Char( '\\' );
+    }
+
+    if ( quoteChar == QLatin1Char( '\'' ) ) {
+        return false;
+    }
+
+    return nextChar.isSpace() || nextChar == QLatin1Char( '"' )
+           || nextChar == QLatin1Char( '\'' ) || nextChar == QLatin1Char( '\\' );
+}
+
 QStringList splitCommandArguments( const QString& arguments )
 {
     QStringList tokens;
     QString currentToken;
     QChar quoteChar;
-    bool escaping = false;
 
-    for ( const auto ch : arguments ) {
-        if ( escaping ) {
-            currentToken.append( ch );
-            escaping = false;
-            continue;
-        }
-
+    for ( int i = 0; i < arguments.size(); ++i ) {
+        const auto ch = arguments.at( i );
         if ( ch == QLatin1Char( '\\' ) ) {
-            escaping = true;
+            const auto nextIndex = i + 1;
+            if ( nextIndex < arguments.size() ) {
+                const auto nextChar = arguments.at( nextIndex );
+                if ( canEscapeArgumentCharacter( nextChar, quoteChar ) ) {
+                    currentToken.append( nextChar );
+                    ++i;
+                    continue;
+                }
+            }
+
+            currentToken.append( ch );
             continue;
         }
 
@@ -62,10 +80,6 @@ QStringList splitCommandArguments( const QString& arguments )
         }
 
         currentToken.append( ch );
-    }
-
-    if ( escaping ) {
-        currentToken.append( QLatin1Char( '\\' ) );
     }
 
     if ( !currentToken.isEmpty() ) {

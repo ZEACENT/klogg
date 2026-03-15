@@ -167,6 +167,52 @@ TEST_CASE( "CaptureStore bindOutputFile overwrites existing files and replays sp
              == QStringLiteral( "alpha\nbeta\ngamma\ndelta\nepsilon\n" ) );
 }
 
+TEST_CASE( "CaptureStore finishInput commits a trailing partial line without adding a newline" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 64;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir( "capturestore_partial_finish" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "saved.log" ) );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    store.appendUtf8( QByteArrayLiteral( "partial-line" ) );
+    REQUIRE( store.lineCount().get() == 0 );
+
+    store.finishInput();
+
+    REQUIRE( store.lineCount().get() == 1 );
+    REQUIRE( store.lineAt( LineNumber( 0 ), codec, QRegularExpression{} )
+             == QStringLiteral( "partial-line" ) );
+    REQUIRE( readUtf8File( outputPath ) == QStringLiteral( "partial-line" ) );
+}
+
+TEST_CASE( "CaptureStore persists a trailing partial line on destruction" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 64;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir( "capturestore_partial_restore" );
+    const auto captureId = makeCaptureId();
+
+    {
+        CaptureStore store( captureId, rootPath, limits );
+        store.appendUtf8( QByteArrayLiteral( "tail-fragment" ) );
+    }
+
+    CaptureStore restored( captureId, rootPath, limits );
+    REQUIRE( restored.loadFromDisk() );
+    REQUIRE( restored.lineCount().get() == 1 );
+    REQUIRE( restored.lineAt( LineNumber( 0 ), QTextCodec::codecForName( "UTF-8" ),
+                              QRegularExpression{} )
+             == QStringLiteral( "tail-fragment" ) );
+}
+
 TEST_CASE( "CaptureStore serializes concurrent append and read access" )
 {
     CaptureStore::Limits limits;

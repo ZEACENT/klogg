@@ -197,13 +197,21 @@ void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
         setState( State::Connected );
         break;
     case LiveSourceTransport::State::Error:
+        if ( logData_ ) {
+            logData_->finishInput();
+        }
         if ( transport_ ) {
             lastError_ = transport_->lastError();
         }
         setState( State::Error );
         break;
     case LiveSourceTransport::State::Connecting:
+        setState( State::Disconnected );
+        break;
     case LiveSourceTransport::State::Disconnected:
+        if ( logData_ ) {
+            logData_->finishInput();
+        }
         setState( State::Disconnected );
         break;
     }

@@ -68,6 +68,7 @@ CaptureStore::~CaptureStore()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( persistBufferedSegmentsOnDestroy_ ) {
+        finishInput();
         persistBufferedSegments();
     }
     flush();
@@ -124,32 +125,25 @@ void CaptureStore::appendUtf8( const QByteArray& data )
             lineBytes.chop( 1 );
         }
 
-        auto& segment = ensureActiveSegment();
-        if ( !segment.memoryData ) {
-            segment.memoryData = std::make_shared<QByteArray>();
-        }
-
-        const auto offset = segment.memoryData->size();
-        segment.memoryData->append( lineBytes );
-        segment.memoryData->append( '\n' );
-        segment.lineOffsets.push_back( offset );
-        segment.lineLengths.push_back( static_cast<int>( lineBytes.size() ) );
-        segment.byteSize = segment.memoryData->size();
-        segment.spilled = false;
-
-        appendOutputBytes( lineBytes + '\n' );
-
-        fileSize_ += lineBytes.size() + 1;
-        totalLines_ += 1;
-        maxLineLength_ = qMax( maxLineLength_, static_cast<int>( lineBytes.size() ) );
-        lastModified_ = QDateTime::currentDateTime();
-
-        rebuildCumulativeLineCounts();
-        rotateSegmentIfNeeded();
-        enforceMemoryBudget();
-
+        commitLine( lineBytes, true );
         newlineIndex = partialLine_.indexOf( '\n' );
     }
+}
+
+void CaptureStore::finishInput()
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( partialLine_.isEmpty() ) {
+        return;
+    }
+
+    auto lineBytes = partialLine_;
+    partialLine_.clear();
+    if ( lineBytes.endsWith( '\r' ) ) {
+        lineBytes.chop( 1 );
+    }
+
+    commitLine( lineBytes, false );
 }
 
 void CaptureStore::flush()
@@ -353,6 +347,35 @@ CaptureStore::Stats CaptureStore::stats() const
     return Stats{ fileSize_, memoryBytes_, totalLines_, maxLineLength_, lastModified_ };
 }
 
+void CaptureStore::commitLine( const QByteArray& lineBytes, bool terminated )
+{
+    auto& segment = ensureActiveSegment();
+    if ( !segment.memoryData ) {
+        segment.memoryData = std::make_shared<QByteArray>();
+    }
+
+    const auto offset = segment.memoryData->size();
+    segment.memoryData->append( lineBytes );
+    if ( terminated ) {
+        segment.memoryData->append( '\n' );
+    }
+    segment.lineOffsets.push_back( offset );
+    segment.lineLengths.push_back( static_cast<int>( lineBytes.size() ) );
+    segment.byteSize = segment.memoryData->size();
+    segment.spilled = false;
+
+    appendOutputBytes( terminated ? lineBytes + '\n' : lineBytes );
+
+    fileSize_ += lineBytes.size() + ( terminated ? 1 : 0 );
+    totalLines_ += 1;
+    maxLineLength_ = qMax( maxLineLength_, static_cast<int>( lineBytes.size() ) );
+    lastModified_ = QDateTime::currentDateTime();
+
+    rebuildCumulativeLineCounts();
+    rotateSegmentIfNeeded();
+    enforceMemoryBudget();
+}
+
 void CaptureStore::ensureCaptureDir()
 {
     QDir().mkpath( capturePath_ );
@@ -437,7 +460,7 @@ void CaptureStore::scanSegment( Segment& segment )
         }
         segment.lineOffsets.push_back( offset );
         segment.lineLengths.push_back( type_safe::narrow_cast<int>( lineLength ) );
-        fileSize_ += lineLength + 1;
+        fileSize_ += lineBytes.size();
         maxLineLength_ = qMax( maxLineLength_, type_safe::narrow_cast<int>( lineLength ) );
         offset += lineBytes.size();
     }
