@@ -641,6 +641,7 @@ jobs:
       - name: Download all package artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: packages-*
           path: ./packages-all
 
       - name: Clean up package artifacts
@@ -654,8 +655,8 @@ jobs:
           find ./packages-all -type f -name "Qt*" ! -name "*.dmg" ! -name "*.deb" ! -name "*.rpm" ! -name "*.AppImage" -delete 2>/dev/null || true
           # Remove standalone klogg binary (should be inside packages, not standalone)
           find ./packages-all -type f -name "klogg" ! -name "*.AppImage" ! -name "*.deb" ! -name "*.rpm" -delete 2>/dev/null || true
-          # Keep only final package files: .dmg, .deb, .rpm, .AppImage, .exe, .zip, .txt, .xz, .tar.xz
-          find ./packages-all -type f ! \( -name "*.dmg" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.exe" -o -name "*.zip" -o -name "*.txt" -o -name "*.xz" -o -name "*.tar.xz" \) -delete 2>/dev/null || true
+          # Keep only final package files: .dmg, .deb, .rpm, .AppImage, .exe, .zip, .xz, .tar.xz
+          find ./packages-all -type f ! \( -name "*.dmg" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.exe" -o -name "*.zip" -o -name "*.xz" -o -name "*.tar.xz" \) -delete 2>/dev/null || true
 
       - name: Delete existing continuous release
         if: env.GITHUB_TOKEN != ''
