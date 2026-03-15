@@ -99,8 +99,15 @@ if(WIN32)
   target_sources(klogg_grep PRIVATE ${ProductVersionResourceFiles})
 
 elseif(APPLE)
-  set_target_properties(klogg PROPERTIES SKIP_INSTALL_RPATH ON)
-  set_target_properties(klogg_portable PROPERTIES SKIP_INSTALL_RPATH ON)
+  # macdeployqt handles rpath adjustment and Qt framework bundling.
+  # BUILD_WITH_INSTALL_RPATH ensures the build binary already has the
+  # install rpath (@executable_path/../Frameworks), so cmake's install
+  # step has no rpath changes to make — avoiding install_name_tool
+  # -delete_rpath errors when CPack runs after macdeployqt.
+  set_target_properties(klogg klogg_portable PROPERTIES
+    INSTALL_RPATH "@executable_path/../Frameworks"
+    BUILD_WITH_INSTALL_RPATH ON
+  )
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
   set_source_files_properties(${COPYING_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
