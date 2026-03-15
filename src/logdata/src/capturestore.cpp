@@ -571,6 +571,10 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes )
         return;
     }
 
-    boundOutputHandle_->write( bytes );
-    boundOutputHandle_->flush();
+    if ( boundOutputHandle_->write( bytes ) != bytes.size()
+         || !boundOutputHandle_->flush() ) {
+        LOG_WARNING << "Bound output file write failed, unbinding: " << boundOutputFile_;
+        boundOutputHandle_.reset();
+        boundOutputFile_.clear();
+    }
 }

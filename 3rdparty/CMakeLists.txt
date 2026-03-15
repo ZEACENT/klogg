@@ -84,11 +84,6 @@ if(KLOGG_USE_VECTORSCAN)
     d29730e1cb9daaa66bda63426cdce83505d2c809
     EXCLUDE_FROM_ALL
     YES
-    PATCH_COMMAND
-    ${CMAKE_COMMAND}
-    -DREPO_DIR=.
-    -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
     OPTIONS
     "BUILD_STATIC_LIBS ON"
     "BUILD_UNIT OFF"
@@ -103,6 +98,21 @@ if(KLOGG_USE_VECTORSCAN)
     "FAT_RUNTIME OFF"
   )
 
+  # Apply both patches via execute_process (not PATCH_COMMAND) so the
+  # cpmaddpackage UNPARSED_ARGUMENTS stay empty and the CPM source-cache
+  # hash matches the prefetch project.
+  execute_process(
+    COMMAND
+      ${CMAKE_COMMAND}
+      -DREPO_DIR=${vectorscan_SOURCE_DIR}
+      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+    RESULT_VARIABLE _vectorscan_warning_patch_result
+  )
+  if(NOT _vectorscan_warning_patch_result EQUAL 0)
+    message(FATAL_ERROR "Failed to apply VectorScan warning flags patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch")
+  endif()
+
   execute_process(
     COMMAND
       ${CMAKE_COMMAND}
@@ -112,7 +122,7 @@ if(KLOGG_USE_VECTORSCAN)
     RESULT_VARIABLE _vectorscan_patch_result
   )
   if(NOT _vectorscan_patch_result EQUAL 0)
-    message(FATAL_ERROR "Failed to apply VectorScan patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch")
+    message(FATAL_ERROR "Failed to apply VectorScan aligned_free patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch")
   endif()
  
   message("Adding alias for vectorscan")
@@ -160,13 +170,21 @@ cpmaddpackage(
   f546bf6ae66a8d34b43da5a41afcfbf4e1a47906
   EXCLUDE_FROM_ALL
   YES
-  PATCH_COMMAND
-  ${CMAKE_COMMAND}
-  -DREPO_DIR=.
-  -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_karchive_qt6.patch
-  -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
 )
-if(NOT KF5Archive_ADDED)
+if(KF5Archive_ADDED)
+  execute_process(
+    COMMAND
+      ${CMAKE_COMMAND}
+      -DREPO_DIR=${KF5Archive_SOURCE_DIR}
+      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_karchive_qt6.patch
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+    RESULT_VARIABLE _karchive_patch_result
+  )
+  if(NOT _karchive_patch_result EQUAL 0)
+    message(FATAL_ERROR "Failed to apply KArchive Qt6 patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_karchive_qt6.patch")
+  endif()
+else()
+  # KF5Archive_ADDED is false — use system package
   find_package(KF5Archive)
   add_library(klogg_karchive INTERFACE)
   target_link_libraries(klogg_karchive INTERFACE KF5::Archive)
