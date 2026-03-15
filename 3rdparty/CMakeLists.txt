@@ -75,6 +75,11 @@ if(KLOGG_USE_VECTORSCAN)
       "Vectorscan toolchain: C_COMPILER_ID=${CMAKE_C_COMPILER_ID}, C_COMPILER=${CMAKE_C_COMPILER}, MSVC=${MSVC}"
   )
 
+  # Download vectorscan source without processing its cmake files.
+  # Patches must be applied BEFORE add_subdirectory so that cmake-level
+  # fixes (e.g. MSVC warning flags) take effect during configuration.
+  # Using DOWNLOAD_ONLY keeps UNPARSED_ARGUMENTS empty, matching the
+  # prefetch project's CPM source-cache hash.
   cpmaddpackage(
     NAME
     vectorscan
@@ -82,25 +87,10 @@ if(KLOGG_USE_VECTORSCAN)
     VectorCamp/vectorscan
     GIT_TAG
     d29730e1cb9daaa66bda63426cdce83505d2c809
-    EXCLUDE_FROM_ALL
+    DOWNLOAD_ONLY
     YES
-    OPTIONS
-    "BUILD_STATIC_LIBS ON"
-    "BUILD_UNIT OFF"
-    "BUILD_TOOLS OFF"
-    "BUILD_EXAMPLES OFF"
-    "BUILD_BENCHMARKS OFF"
-    "BUILD_DOC OFF"
-    "BUILD_CHIMERA OFF"
-    "BUILD_AVX2 ${VECTORSCAN_BUILD_AVX2}"
-    "BUILD_AVX512 ${VECTORSCAN_BUILD_AVX512}"
-    "BUILD_AVX512VBMI ${VECTORSCAN_BUILD_AVX512}"
-    "FAT_RUNTIME OFF"
   )
 
-  # Apply both patches via execute_process (not PATCH_COMMAND) so the
-  # cpmaddpackage UNPARSED_ARGUMENTS stay empty and the CPM source-cache
-  # hash matches the prefetch project.
   execute_process(
     COMMAND
       ${CMAKE_COMMAND}
@@ -124,7 +114,22 @@ if(KLOGG_USE_VECTORSCAN)
   if(NOT _vectorscan_patch_result EQUAL 0)
     message(FATAL_ERROR "Failed to apply VectorScan aligned_free patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch")
   endif()
- 
+
+  # Set vectorscan build options before processing its cmake files
+  set(BUILD_STATIC_LIBS ON CACHE INTERNAL "" FORCE)
+  set(BUILD_UNIT OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_TOOLS OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_EXAMPLES OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_BENCHMARKS OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_DOC OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_CHIMERA OFF CACHE INTERNAL "" FORCE)
+  set(BUILD_AVX2 ${VECTORSCAN_BUILD_AVX2} CACHE INTERNAL "" FORCE)
+  set(BUILD_AVX512 ${VECTORSCAN_BUILD_AVX512} CACHE INTERNAL "" FORCE)
+  set(BUILD_AVX512VBMI ${VECTORSCAN_BUILD_AVX512} CACHE INTERNAL "" FORCE)
+  set(FAT_RUNTIME OFF CACHE INTERNAL "" FORCE)
+
+  add_subdirectory(${vectorscan_SOURCE_DIR} ${vectorscan_BINARY_DIR} EXCLUDE_FROM_ALL)
+
   message("Adding alias for vectorscan")
   add_library(klogg_vectorscan INTERFACE)
   target_link_libraries(klogg_vectorscan INTERFACE hs)
