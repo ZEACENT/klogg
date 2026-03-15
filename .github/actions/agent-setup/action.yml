@@ -30,18 +30,30 @@ runs:
         echo "BOOST_URL=https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download" >> $GITHUB_ENV
 
     - name: Restore Boost cache
+      if: ${{ env.KLOGG_REQUIRE_PREFETCHED_BOOST != 'ON' }}
       uses: actions/cache@v4
       id: cache-boost
       with:
         path: ${{env.BOOST_ROOT}}
         key: ${{env.BOOST_URL}}
 
+    - name: Restore CPM cache
+      if: ${{ env.KLOGG_REQUIRE_PREFETCHED_CPM != 'ON' }}
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/cpm_cache
+        key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
+
     - name: Install Boost
       shell: bash
       run: |
-        if echo ${{ steps.cache-boost.outputs.cache-hit }} | grep -c "true"
+        if [ -f "$BOOST_ROOT/boost/version.hpp" ]
         then
-          echo "Using boost from cache"
+          echo "Using boost from preloaded path"
+        elif [ "${KLOGG_REQUIRE_PREFETCHED_BOOST:-OFF}" = "ON" ]
+        then
+          echo "Prefetched Boost artifact is required but not available at $BOOST_ROOT" >&2
+          exit 1
         else
           echo "Downloading boost"
           if [ "$OS" == "Windows_NT" ]; then
@@ -56,5 +68,3 @@ runs:
           rm -rf boost_*/* download.tar.bz2 download.tar
         fi
         
-
-

@@ -270,12 +270,16 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
                                        const std::function<ViewInterface*()>& view_factory,
                                        bool startConnected, const QString& viewContext )
 {
-    auto logData = std::make_shared<StreamingLogData>( sessionData.captureId );
-    if ( !sessionData.boundOutputFile.isEmpty() ) {
-        logData->bindOutputFile( sessionData.boundOutputFile );
+    auto restoredSessionData = sessionData;
+    auto logData = std::make_shared<StreamingLogData>( restoredSessionData.captureId );
+    if ( !restoredSessionData.boundOutputFile.isEmpty()
+         && !logData->bindOutputFile( restoredSessionData.boundOutputFile ) ) {
+        LOG_WARNING << "Failed to restore ADB output file binding "
+                    << restoredSessionData.boundOutputFile;
+        restoredSessionData.boundOutputFile.clear();
     }
     auto logFilteredData = std::shared_ptr<LogFilteredData>( logData->getNewFilteredData() );
-    auto adbSource = std::make_shared<AdbLogcatSource>( sessionData, logData );
+    auto adbSource = std::make_shared<AdbLogcatSource>( restoredSessionData, logData );
 
     ViewInterface* view = view_factory();
     view->setData( logData, logFilteredData );
@@ -287,10 +291,10 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
     }
 
     openFiles_.insert( { view,
-                         { sessionData.documentId(),
-                           sessionData.documentId(),
-                           sessionData.displayName(),
-                           sessionData.associatedPath(),
+                         { restoredSessionData.documentId(),
+                           restoredSessionData.documentId(),
+                           restoredSessionData.displayName(),
+                           restoredSessionData.associatedPath(),
                            DocumentKind::AdbLogcat,
                            logData,
                            logFilteredData,

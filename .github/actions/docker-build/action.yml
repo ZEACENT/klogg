@@ -6,7 +6,21 @@ runs:
     - name: configure
       shell: sh
       run: |
-        docker run --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env KLOGG_CMAKE_OPTS="$KLOGG_CMAKE_OPTS" -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"
+        attempt=1
+        max_attempts=3
+        while [ $attempt -le $max_attempts ]; do
+          if docker run --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env KLOGG_CMAKE_OPTS="$KLOGG_CMAKE_OPTS" -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -lc "rm -rf /usr/local/$KLOGG_BUILD_ROOT && mkdir -p /usr/local/$KLOGG_BUILD_ROOT && cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"; then
+            exit 0
+          fi
+
+          if [ $attempt -eq $max_attempts ]; then
+            exit 1
+          fi
+
+          echo "Container configure attempt $attempt failed, retrying after backoff..."
+          attempt=$((attempt + 1))
+          sleep $((attempt * 10))
+        done
 
     - name: build
       shell: sh

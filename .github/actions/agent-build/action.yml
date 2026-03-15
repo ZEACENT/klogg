@@ -13,9 +13,25 @@ runs:
     - name: configure
       shell: sh
       run: |
-        mkdir $KLOGG_BUILD_ROOT
-        cd $KLOGG_BUILD_ROOT
-        cmake $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=$KLOGG_WORKSPACE/cpm_cache -DKLOGG_OVERRIDE_MALLOC=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $KLOGG_WORKSPACE
+        attempt=1
+        max_attempts=3
+        while [ $attempt -le $max_attempts ]; do
+          rm -rf "$KLOGG_BUILD_ROOT"
+          mkdir -p "$KLOGG_BUILD_ROOT"
+          cd "$KLOGG_BUILD_ROOT"
+
+          if cmake $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=$KLOGG_WORKSPACE/cpm_cache -DKLOGG_OVERRIDE_MALLOC=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $KLOGG_WORKSPACE; then
+            exit 0
+          fi
+
+          if [ $attempt -eq $max_attempts ]; then
+            exit 1
+          fi
+
+          echo "Configure attempt $attempt failed, retrying after backoff..."
+          attempt=$((attempt + 1))
+          sleep $((attempt * 10))
+        done
 
     - name: build
       shell: sh

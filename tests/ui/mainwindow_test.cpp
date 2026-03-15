@@ -23,6 +23,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QKeySequence>
 #include <QSignalSpy>
 #include <QTabBar>
@@ -35,6 +36,8 @@
 
 #include "test_utils.h"
 
+#include "adblogcatsource.h"
+#include "capturestore.h"
 #include "crawlerwidget.h"
 #include "log.h"
 #include "mainwindow.h"
@@ -557,4 +560,123 @@ SCENARIO( "MainWindow close keeps persisted open files for session restore", "[u
 
     config.setMinimizeToTray( previousMinimizeToTray );
     config.save();
+}
+
+SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session][adb]" )
+{
+    auto appSession = std::make_shared<Session>();
+    auto& sessionInfo = SessionInfo::getSynced();
+    auto windowIds = sessionInfo.windows();
+    const auto windowId = windowIds.isEmpty()
+                              ? QString( "close-adb-session-%1" ).arg(
+                                    QUuid::createUuid().toString( QUuid::WithoutBraces ) )
+                              : windowIds.front();
+
+    if ( windowIds.isEmpty() ) {
+        sessionInfo.add( windowId );
+    }
+    else {
+        for ( auto i = windowIds.size() - 1; i > 0; --i ) {
+            sessionInfo.remove( windowIds.at( i ) );
+        }
+    }
+
+    const auto captureId = QString( "adb_capture_%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    QString capturePath;
+    {
+        CaptureStore captureStore( captureId );
+        captureStore.appendUtf8( QByteArray( "line\n" ) );
+        captureStore.finishInput();
+        capturePath = captureStore.capturePath();
+    }
+    REQUIRE( QDir{ capturePath }.exists() );
+
+    const AdbLogcatSessionData adbSessionData{
+        QStringLiteral( "adb" ),
+        QStringLiteral( "serial-1" ),
+        QStringLiteral( "Pixel Test" ),
+        QString{},
+        captureId,
+        QString{},
+    };
+    const auto sourceSpec = QString::fromUtf8(
+        QJsonDocument( adbSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
+
+    sessionInfo.setOpenFiles(
+        windowId, { SessionInfo::OpenFile( adbSessionData.documentId(), 0, {}, "adb_logcat",
+                                           adbSessionData.displayName(), sourceSpec ) } );
+    sessionInfo.setCurrentFileIndex( windowId, 0 );
+    sessionInfo.save();
+
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    auto& config = Configuration::get();
+    const auto previousMinimizeToTray = config.minimizeToTray();
+    config.setMinimizeToTray( false );
+    config.save();
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    runInUiThread( [&mainWindow] { mainWindow->reloadSession(); } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+
+    runInUiThread( [&mainWindow] { mainWindow->close(); } );
+    REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
+
+    REQUIRE( QDir{ capturePath }.exists() );
+    const auto persistedOpenFiles = SessionInfo::getSynced().openFiles( windowId );
+    REQUIRE( persistedOpenFiles.size() == 1 );
+    REQUIRE( persistedOpenFiles.front().sourceType == QStringLiteral( "adb_logcat" ) );
+
+    config.setMinimizeToTray( previousMinimizeToTray );
+    config.save();
+}
+
+SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][session][adb]" )
+{
+    auto appSession = std::make_shared<Session>();
+    const auto tempDirPath = makeTestDir( "restore_adb_output" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+
+    const auto parentAsFile = QDir{ tempDirPath }.filePath( "not_a_directory" );
+    {
+        QFile parentFile( parentAsFile );
+        REQUIRE( parentFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        parentFile.write( "x" );
+    }
+
+    const AdbLogcatSessionData adbSessionData{
+        QStringLiteral( "adb" ),
+        QStringLiteral( "serial-restore" ),
+        QStringLiteral( "Restore Device" ),
+        QString{},
+        QString( "restore_capture_%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) ),
+        QDir{ parentAsFile }.filePath( "capture.log" ),
+    };
+
+    auto* view = appSession->openAdbLogcat( adbSessionData, []() { return new CrawlerWidget(); },
+                                            false );
+    REQUIRE( view != nullptr );
+
+    REQUIRE( appSession->getAssociatedPath( view ).isEmpty() );
+    auto* adbSource = appSession->getAdbLogcatSource( view );
+    REQUIRE( adbSource != nullptr );
+    REQUIRE( adbSource->sessionData().boundOutputFile.isEmpty() );
+
+    appSession->close( view );
 }

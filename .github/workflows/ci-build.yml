@@ -25,6 +25,7 @@ on:
 
 jobs:
   SaveVersion:
+    needs: [PrefetchDeps]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
     outputs:
@@ -44,6 +45,118 @@ jobs:
         with:
           name: klogg_version
           path: 'klogg_version.txt'
+          if-no-files-found: error
+
+  PrefetchDeps:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch shared CPM cache"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
+      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore shared CPM cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/cpm_cache
+          key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
+
+      - name: Restore Boost prefetch cache
+        id: cache-boost-prefetch
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/boost
+          key: boost-prefetch-1-86-0
+
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-prefetch-1-1-1w
+
+      - uses: ./.github/actions/prefetch-cpm-cache
+
+      - name: Prefetch Boost artifact
+        if: ${{ steps.cache-boost-prefetch.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          BOOST_ROOT="$PREFETCH_ROOT/boost"
+          BOOST_ARCHIVE="$PREFETCH_ROOT/boost.tar.bz2"
+
+          mkdir -p "$BOOST_ROOT"
+
+          attempt=1
+          max_attempts=3
+          while [ $attempt -le $max_attempts ]; do
+            rm -rf "$BOOST_ROOT"
+            mkdir -p "$BOOST_ROOT"
+
+            if curl --progress-bar --location --output "$BOOST_ARCHIVE" "$BOOST_URL"; then
+              tar -xjf "$BOOST_ARCHIVE" -C "$PREFETCH_ROOT"
+              cp -r "$PREFETCH_ROOT"/boost_*/* "$BOOST_ROOT"/
+              rm -rf "$PREFETCH_ROOT"/boost_* "$BOOST_ARCHIVE"
+              exit 0
+            fi
+
+            rm -f "$BOOST_ARCHIVE"
+
+            if [ $attempt -eq $max_attempts ]; then
+              exit 1
+            fi
+
+            echo "Boost prefetch attempt $attempt failed, retrying after backoff..."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
+
+      - name: Prefetch OpenSSL artifact
+        if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
+        shell: sh
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          OPENSSL_ARCHIVE="$PREFETCH_ROOT/openssl.zip"
+
+          mkdir -p "$PREFETCH_ROOT"
+
+          attempt=1
+          max_attempts=3
+          while [ $attempt -le $max_attempts ]; do
+            if curl --progress-bar --location --output "$OPENSSL_ARCHIVE" "$OPENSSL_URL"; then
+              exit 0
+            fi
+
+            rm -f "$OPENSSL_ARCHIVE"
+
+            if [ $attempt -eq $max_attempts ]; then
+              exit 1
+            fi
+
+            echo "OpenSSL prefetch attempt $attempt failed, retrying after backoff..."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpm-cache
+          path: cpm_cache
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boost-root
+          path: prefetch_artifacts/boost
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openssl-archive
+          path: prefetch_artifacts/openssl.zip
           if-no-files-found: error
 
   Linux:
@@ -100,6 +213,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: cpm-cache
+          path: ${{ github.workspace }}
+
       #- uses: satackey/action-docker-layer-caching@v0.0.11
       #  # Ignore the failure of a step and avoid terminating the job.
       #  continue-on-error: true
@@ -110,6 +228,10 @@ jobs:
           docker build -t ${{ matrix.config.container }} .
 
       - uses: ./.github/actions/prepare-workspace-env
+      - name: Lock CPM downloads to prefetched cache
+        shell: sh
+        run: |
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
       - uses: ./.github/actions/docker-build
       - uses: ./.github/actions/docker-run-tests
       - uses: ./.github/actions/docker-package
@@ -176,14 +298,29 @@ jobs:
         run: |
           brew install ragel
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: boost-root
+          path: ${{ github.workspace }}/3rdparty/boost
+
+      - name: Require prefetched dependency artifacts
+        shell: sh
+        run: |
+          echo "KLOGG_REQUIRE_PREFETCHED_BOOST=ON" >> $GITHUB_ENV
+          echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
+
       - uses: ./.github/actions/agent-setup
+      - uses: actions/download-artifact@v4
+        with:
+          name: cpm-cache
+          path: ${{ github.workspace }}
       - uses: ./.github/actions/prepare-workspace-env
       
       - name: Disable Sentry on macOS
         shell: sh
         run: |
           # Disable Sentry on macOS due to Crashpad incompatibility with newer Xcode SDKs
-          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
+          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
       
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
@@ -240,17 +377,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache openssl
-        id: cache-openssl
-        uses: actions/cache@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: ${{ github.workspace }}\openssl-1.1
-          key: OpensslCache-1-1-1w
+          name: openssl-archive
+          path: ${{ github.workspace }}
 
-      - name: Download openssl
-        if: ${{ steps.cache-openssl.outputs.cache-hit != 'true' }} 
+      - name: Unpack prefetched openssl
         run: |
-          Invoke-WebRequest -Uri "https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip" -OutFile openssl.zip
+          if ( !(Test-Path openssl.zip) ) {
+            Write-Error "Prefetched OpenSSL artifact is required but openssl.zip is missing"
+            exit 1
+          }
           7z x openssl.zip 
 
       - name: Setup MSYS2 and install tools
@@ -268,8 +405,28 @@ jobs:
           echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ matrix.config.arch }}\bin" >> $GITHUB_ENV
           echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV 
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: boost-root
+          path: ${{ github.workspace }}/3rdparty/boost
+
+      - name: Require prefetched dependency artifacts
+        shell: sh
+        run: |
+          echo "KLOGG_REQUIRE_PREFETCHED_BOOST=ON" >> $GITHUB_ENV
+          echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
+
       - uses: ./.github/actions/agent-setup
+      - uses: actions/download-artifact@v4
+        with:
+          name: cpm-cache
+          path: ${{ github.workspace }}
       - uses: ./.github/actions/prepare-workspace-env
+
+      - name: Lock CPM downloads to prefetched cache
+        shell: sh
+        run: |
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
       
       - name: Prepare dev cmd
         uses: ilammy/msvc-dev-cmd@v1

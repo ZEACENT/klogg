@@ -1747,7 +1747,8 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
     if ( documentKind == DocumentKind::AdbLogcat ) {
         if ( auto* adbSource = session_.getAdbLogcatSource( widget ) ) {
             adbSource->disconnectSource();
-            if ( !session_.exitRequested() ) {
+            // Preserve captures during app shutdown so restored ADB tabs keep their history.
+            if ( initiator == ActionInitiator::User && !session_.exitRequested() ) {
                 adbSource->deleteCaptureFiles();
             }
         }
