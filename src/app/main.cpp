@@ -208,8 +208,7 @@ int main( int argc, char* argv[] )
               || ( !parameters.new_session
                    && ( previousRunCrashed
                         || ( parameters.filenames.empty() && config.loadLastSession() ) ) );
-        CaptureStore::cleanupUnusedCaptures(
-            shouldReloadSession ? retainedAdbCaptureIds( sessionInfo ) : QSet<QString>{} );
+        CaptureStore::cleanupUnusedCaptures( retainedAdbCaptureIds( sessionInfo ) );
 
         // Apply theme based on theme mode
         StyleManager::applyStyle( config.style() );
