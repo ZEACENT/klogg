@@ -216,7 +216,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/cpm_cache
 
       #- uses: satackey/action-docker-layer-caching@v0.0.11
       #  # Ignore the failure of a step and avoid terminating the job.
@@ -313,9 +313,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/cpm_cache
       - uses: ./.github/actions/prepare-workspace-env
-      
+
       - name: Disable Sentry on macOS
         shell: sh
         run: |
@@ -420,14 +420,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/cpm_cache
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Lock CPM downloads to prefetched cache
         shell: sh
         run: |
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
-      
+
       - name: Prepare dev cmd
         uses: ilammy/msvc-dev-cmd@v1
         with:
