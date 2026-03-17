@@ -41,6 +41,9 @@ ProcessLiveSourceTransport::ProcessLiveSourceTransport( QObject* parent )
     } );
 
     connect( process_.get(), &QProcess::errorOccurred, this, [ this ]( QProcess::ProcessError ) {
+        if ( disconnectRequested_ ) {
+            return;
+        }
         lastError_ = process_->errorString();
         setState( State::Error );
         Q_EMIT errorOccurred( lastError_ );

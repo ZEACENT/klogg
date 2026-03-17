@@ -255,6 +255,11 @@ void MainWindow::reloadGeometry()
 
     session_.restoreGeometry( &geometry );
     restoreGeometry( geometry );
+
+    // Prevent restoring in minimized state (can happen if session was saved while minimized)
+    if ( windowState().testFlag( Qt::WindowMinimized ) ) {
+        setWindowState( windowState() & ~Qt::WindowMinimized );
+    }
 }
 
 void MainWindow::reloadSession()
@@ -804,6 +809,8 @@ void MainWindow::updateShortcuts()
     setShortcuts( selectOpenFileAction, ShortcutAction::MainWindowSelectOpenFile );
     setShortcuts( goToLineAction, ShortcutAction::LogViewJumpToLine );
     setShortcuts( optionsAction, ShortcutAction::MainWindowPreference );
+    setShortcuts( disconnectSourceAction, ShortcutAction::MainWindowDisconnectSource );
+    setShortcuts( reconnectSourceAction, ShortcutAction::MainWindowReconnectSource );
 }
 
 void MainWindow::loadIcons()
@@ -2238,17 +2245,45 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
         return;
     }
 
-    connect( adbSource, &AdbLogcatSource::stateChanged, this, [ this, crawler ] {
-        if ( currentCrawlerWidget() == crawler ) {
-            updateMenuBarFromDocument( crawler );
-            updateInfoLine();
-        }
-        updateOpenedFilesMenu();
-    } );
+    connect( adbSource, &AdbLogcatSource::stateChanged, this,
+             [ this, crawler ]( AdbLogcatSource::State state ) {
+                 if ( currentCrawlerWidget() == crawler ) {
+                     updateMenuBarFromDocument( crawler );
+                     updateInfoLine();
+                 }
+                 updateOpenedFilesMenu();
+
+                 const auto tabIndex = mainTabWidget_.indexOf( crawler );
+                 if ( tabIndex >= 0 ) {
+                     const auto displayName = session_.getDisplayName( crawler );
+                     const auto toolTip = session_.getAssociatedPath( crawler ).isEmpty()
+                                              ? displayName
+                                              : session_.getAssociatedPath( crawler );
+                     if ( state == AdbLogcatSource::State::Error ) {
+                         mainTabWidget_.updateCrawler( tabIndex, displayName + tr( " [error]" ),
+                                                       toolTip );
+                     }
+                     else if ( state == AdbLogcatSource::State::Disconnected ) {
+                         mainTabWidget_.updateCrawler(
+                             tabIndex, displayName + tr( " [disconnected]" ), toolTip );
+                     }
+                     else {
+                         mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip );
+                     }
+                 }
+             } );
     connect( adbSource, &AdbLogcatSource::errorOccurred, this,
              [ this, crawler ]( const QString& error ) {
-                 if ( currentCrawlerWidget() == crawler && !error.isEmpty() ) {
-                     QMessageBox::warning( this, tr( "ADB logcat" ), error );
+                 if ( currentCrawlerWidget() == crawler ) {
+                     updateInfoLine();
+                 }
+                 if ( !error.isEmpty() ) {
+                     const auto tabIndex = mainTabWidget_.indexOf( crawler );
+                     if ( tabIndex >= 0 ) {
+                         const auto currentTip = mainTabWidget_.tabToolTip( tabIndex );
+                         mainTabWidget_.setTabToolTip(
+                             tabIndex, tr( "%1\nError: %2" ).arg( currentTip, error ) );
+                     }
                  }
              } );
 }
@@ -2720,69 +2755,78 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     dialog.setMinimumWidth( 400 );
 
     auto* layout = new QVBoxLayout( &dialog );
-    layout->addWidget( new QLabel( tr( "Select and order files to merge:" ) ) );
+    layout->addWidget( new QLabel( tr( "Check files in desired merge order:" ) ) );
 
     auto* listWidget = new QListWidget( &dialog );
+    // Qt::UserRole = file path, Qt::UserRole+1 = original display name, Qt::UserRole+2 = check order
+    int checkCounter = 0;
 
     for ( const auto& filePath : filePaths ) {
         const auto displayName = QFileInfo( filePath ).fileName();
         auto* item = new QListWidgetItem( displayName );
         item->setData( Qt::UserRole, filePath );
         item->setData( Qt::UserRole + 1, displayName );
+        item->setData( Qt::UserRole + 2, 0 );
         item->setCheckState( Qt::Unchecked );
         item->setFlags( item->flags() | Qt::ItemIsUserCheckable );
         listWidget->addItem( item );
     }
     layout->addWidget( listWidget );
 
-    // Lambda to update sequence numbers on checked items
+    // Lambda to update sequence numbers based on check order
     auto updateSequenceNumbers = [ listWidget ]() {
+        // Collect checked items with their check order
+        std::vector<std::pair<int, int>> checkedItems; // (check order, list index)
+        for ( int i = 0; i < listWidget->count(); ++i ) {
+            auto* item = listWidget->item( i );
+            if ( item->checkState() == Qt::Checked ) {
+                checkedItems.emplace_back( item->data( Qt::UserRole + 2 ).toInt(), i );
+            }
+        }
+        std::sort( checkedItems.begin(), checkedItems.end() );
+
         listWidget->blockSignals( true );
-        int seq = 1;
+        // Reset all to original names first
         for ( int i = 0; i < listWidget->count(); ++i ) {
             auto* item = listWidget->item( i );
             const auto originalName = item->data( Qt::UserRole + 1 ).toString();
-            if ( item->checkState() == Qt::Checked ) {
-                item->setText( QString( "%1. %2" ).arg( seq++ ).arg( originalName ) );
-            }
-            else {
+            if ( item->checkState() != Qt::Checked ) {
                 item->setText( originalName );
             }
+        }
+        // Number checked items by check order
+        int seq = 1;
+        for ( const auto& [ order, idx ] : checkedItems ) {
+            auto* item = listWidget->item( idx );
+            const auto originalName = item->data( Qt::UserRole + 1 ).toString();
+            item->setText( QString( "%1. %2" ).arg( seq++ ).arg( originalName ) );
         }
         listWidget->blockSignals( false );
     };
 
-    connect( listWidget, &QListWidget::itemChanged, [ updateSequenceNumbers ]( QListWidgetItem* ) {
-        updateSequenceNumbers();
-    } );
-
-    // Up/Down buttons
-    auto* buttonLayout = new QHBoxLayout();
-    auto* upButton = new QPushButton( tr( "Move Up" ), &dialog );
-    auto* downButton = new QPushButton( tr( "Move Down" ), &dialog );
-    buttonLayout->addWidget( upButton );
-    buttonLayout->addWidget( downButton );
-    layout->addLayout( buttonLayout );
-
-    connect( upButton, &QPushButton::clicked, [ listWidget, updateSequenceNumbers ]() {
-        const int row = listWidget->currentRow();
-        if ( row > 0 ) {
-            auto* item = listWidget->takeItem( row );
-            listWidget->insertItem( row - 1, item );
-            listWidget->setCurrentRow( row - 1 );
-            updateSequenceNumbers();
-        }
-    } );
-
-    connect( downButton, &QPushButton::clicked, [ listWidget, updateSequenceNumbers ]() {
-        const int row = listWidget->currentRow();
-        if ( row >= 0 && row < listWidget->count() - 1 ) {
-            auto* item = listWidget->takeItem( row );
-            listWidget->insertItem( row + 1, item );
-            listWidget->setCurrentRow( row + 1 );
-            updateSequenceNumbers();
-        }
-    } );
+    // checkCounter lives on the stack of showMergeFilesDialog; safe because
+    // dialog.exec() blocks until the dialog closes, keeping it alive.
+    connect( listWidget, &QListWidget::itemChanged,
+             [ &checkCounter, listWidget, updateSequenceNumbers ]( QListWidgetItem* item ) {
+                 if ( item->checkState() == Qt::Checked ) {
+                     item->setData( Qt::UserRole + 2, ++checkCounter );
+                 }
+                 else {
+                     // Uncheck: compact remaining order values so re-check gets the next slot
+                     const int removedOrder = item->data( Qt::UserRole + 2 ).toInt();
+                     item->setData( Qt::UserRole + 2, 0 );
+                     // Shift down orders above the removed item
+                     for ( int i = 0; i < listWidget->count(); ++i ) {
+                         auto* other = listWidget->item( i );
+                         const int otherOrder = other->data( Qt::UserRole + 2 ).toInt();
+                         if ( otherOrder > removedOrder ) {
+                             other->setData( Qt::UserRole + 2, otherOrder - 1 );
+                         }
+                     }
+                     --checkCounter;
+                 }
+                 updateSequenceNumbers();
+             } );
 
     auto* dialogButtons
         = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog );
@@ -2794,13 +2838,21 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
         return {};
     }
 
-    // Collect checked files in order
-    std::vector<QString> result;
+    // Collect checked files sorted by check order
+    std::vector<std::pair<int, QString>> checkedFiles;
     for ( int i = 0; i < listWidget->count(); ++i ) {
         auto* item = listWidget->item( i );
         if ( item->checkState() == Qt::Checked ) {
-            result.push_back( item->data( Qt::UserRole ).toString() );
+            checkedFiles.emplace_back( item->data( Qt::UserRole + 2 ).toInt(),
+                                       item->data( Qt::UserRole ).toString() );
         }
+    }
+    std::sort( checkedFiles.begin(), checkedFiles.end() );
+
+    std::vector<QString> result;
+    result.reserve( checkedFiles.size() );
+    for ( auto& [ order, path ] : checkedFiles ) {
+        result.push_back( std::move( path ) );
     }
 
     if ( result.size() < 2 ) {

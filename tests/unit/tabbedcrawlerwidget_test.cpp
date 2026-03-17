@@ -60,4 +60,47 @@ TEST_CASE( "TabbedCrawlerWidget keeps live tab title and tooltip across group re
              == QDir::toNativeSeparators( QStringLiteral( "/tmp/pixel-saved.log" ) ) );
 }
 
+TEST_CASE( "TabbedCrawlerWidget updateCrawler reflects disconnect and error state in tab text" )
+{
+    TabbedCrawlerWidget tabWidget;
+    auto* crawler = new DummyCrawlerWidget();
+
+    const auto index = tabWidget.addCrawler( crawler, QStringLiteral( "adb://capture-456" ),
+                                             QStringLiteral( "Galaxy S24" ),
+                                             QStringLiteral( "/tmp/galaxy.log" ) );
+
+    SECTION( "tab text shows [disconnected] suffix" )
+    {
+        tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [disconnected]" ),
+                                 QStringLiteral( "/tmp/galaxy.log" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [disconnected]" ) );
+    }
+
+    SECTION( "tab text shows [error] suffix" )
+    {
+        tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
+                                 QStringLiteral( "/tmp/galaxy.log" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [error]" ) );
+    }
+
+    SECTION( "tab text restores to normal on reconnect" )
+    {
+        tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [disconnected]" ),
+                                 QStringLiteral( "/tmp/galaxy.log" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [disconnected]" ) );
+
+        tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24" ),
+                                 QStringLiteral( "/tmp/galaxy.log" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
+    }
+
+    SECTION( "tab text persists across group refreshes" )
+    {
+        tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
+                                 QStringLiteral( "/tmp/galaxy.log" ) );
+        tabWidget.onGroupsChanged();
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [error]" ) );
+    }
+}
+
 #include "tabbedcrawlerwidget_test.moc"

@@ -196,6 +196,61 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
              == QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
 }
 
+namespace {
+// A minimal ProcessLiveSourceTransport subclass that runs a long-lived process
+// without ADB-specific argument decoration, for testing disconnect behavior.
+class LongRunningTestTransport : public ProcessLiveSourceTransport {
+  public:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "ping" ), { QStringLiteral( "-n" ), QStringLiteral( "60" ),
+                                             QStringLiteral( "127.0.0.1" ) } };
+#else
+        return { QStringLiteral( "sleep" ), { QStringLiteral( "60" ) } };
+#endif
+    }
+
+    Command clearCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ), { QStringLiteral( "/c" ), QStringLiteral( "echo" ) } };
+#else
+        return { QStringLiteral( "true" ), {} };
+#endif
+    }
+};
+} // namespace
+
+TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intentional disconnect" )
+{
+    LongRunningTestTransport transport;
+
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    // Connect — the long-running process starts successfully
+    REQUIRE( transport.connectTransport() );
+
+    // Disconnect — sets disconnectRequested_ = true before terminating
+    transport.disconnectTransport();
+
+    // Process events to let any queued signals through
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+
+    // Verify: no errorOccurred signals should have been emitted during disconnect
+    // (the disconnectRequested_ guard should suppress them)
+    CHECK( errorSpy.count() == 0 );
+
+    // The final state should be Disconnected (not Error)
+    REQUIRE( stateSpy.count() >= 1 );
+    const auto lastState
+        = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
+    CHECK( lastState == LiveSourceTransport::State::Disconnected );
+}
+
 TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edits on accept" )
 {
     if ( isHeadlessDialogTestEnvironment() ) {

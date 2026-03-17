@@ -245,6 +245,20 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
         {
+            MainWindowDisconnectSource,
+            {
+                QApplication::tr( "Disconnect live source" ),
+                QStringList{ "Ctrl+Shift+D" },
+            },
+        },
+        {
+            MainWindowReconnectSource,
+            {
+                QApplication::tr( "Reconnect live source" ),
+                QStringList{ "Ctrl+Shift+R" },
+            },
+        },
+        {
             MainWindowFollowFile,
             {
                 QApplication::tr( "Monitor file changes" ),
@@ -312,21 +326,21 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             CrawlerChangeVisibilityToMarksAndMatches,
             {
                 QApplication::tr( "Change filtered lines visibility to marks and matches" ),
-                QStringList{ QKeySequence( Qt::Key_1 ).toString() },
+                QStringList{ "Ctrl+Shift+1" },
             },
         },
         {
             CrawlerChangeVisibilityToMarks,
             {
                 QApplication::tr( "Change filtered lines visibility to marks" ),
-                QStringList{ QKeySequence( Qt::Key_2 ).toString() },
+                QStringList{ "Ctrl+Shift+2" },
             },
         },
         {
             CrawlerChangeVisibilityToMatches,
             {
                 QApplication::tr( "Change filtered lines visibility to matches" ),
-                QStringList{ QKeySequence( Qt::Key_3 ).toString() },
+                QStringList{ "Ctrl+Shift+3" },
             },
         },
         {
@@ -347,42 +361,42 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             CrawlerEnableCaseMatching,
             {
                 QApplication::tr( "Enable case matching" ),
-                QStringList{ QKeySequence( Qt::Key_4 ).toString() },
+                QStringList{ "Ctrl+Shift+4" },
             },
         },
         {
             CrawlerEnableRegex,
             {
                 QApplication::tr( "Enable regex" ),
-                QStringList{ QKeySequence( Qt::Key_5 ).toString() },
+                QStringList{ "Ctrl+Shift+5" },
             },
         },
         {
             CrawlerEnableInverseMatching,
             {
                 QApplication::tr( "Enable inverse matching" ),
-                QStringList{ QKeySequence( Qt::Key_6 ).toString() },
+                QStringList{ "Ctrl+Shift+6" },
             },
         },
         {
             CrawlerEnableRegexCombining,
             {
                 QApplication::tr( "Enable regex combining" ),
-                QStringList{ QKeySequence( Qt::Key_7 ).toString() },
+                QStringList{ "Ctrl+Shift+7" },
             },
         },
         {
             CrawlerEnableAutoRefresh,
             {
                 QApplication::tr( "Enable auto refresh" ),
-                QStringList{ QKeySequence( Qt::Key_8 ).toString() },
+                QStringList{ "Ctrl+Shift+8" },
             },
         },
         {
             CrawlerKeepResults,
             {
                 QApplication::tr( "Keep search results" ),
-                QStringList{ QKeySequence( Qt::Key_9 ).toString() },
+                QStringList{ "Ctrl+Shift+9" },
             },
         },
         // remove by commit 0b75b9d6
@@ -544,63 +558,63 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewAddColorLabel1,
             {
                 QApplication::tr( "Highlight text with color 1" ),
-                QStringList{ "Ctrl+Shift+1" },
+                QStringList{ QKeySequence( Qt::Key_1 ).toString() },
             },
         },
         {
             LogViewAddColorLabel2,
             {
                 QApplication::tr( "Highlight text with color 2" ),
-                QStringList{ "Ctrl+Shift+2" },
+                QStringList{ QKeySequence( Qt::Key_2 ).toString() },
             },
         },
         {
             LogViewAddColorLabel3,
             {
                 QApplication::tr( "Highlight text with color 3" ),
-                QStringList{ "Ctrl+Shift+3" },
+                QStringList{ QKeySequence( Qt::Key_3 ).toString() },
             },
         },
         {
             LogViewAddColorLabel4,
             {
                 QApplication::tr( "Highlight text with color 4" ),
-                QStringList{ "Ctrl+Shift+4" },
+                QStringList{ QKeySequence( Qt::Key_4 ).toString() },
             },
         },
         {
             LogViewAddColorLabel5,
             {
                 QApplication::tr( "Highlight text with color 5" ),
-                QStringList{ "Ctrl+Shift+5" },
+                QStringList{ QKeySequence( Qt::Key_5 ).toString() },
             },
         },
         {
             LogViewAddColorLabel6,
             {
                 QApplication::tr( "Highlight text with color 6" ),
-                QStringList{ "Ctrl+Shift+6" },
+                QStringList{ QKeySequence( Qt::Key_6 ).toString() },
             },
         },
         {
             LogViewAddColorLabel7,
             {
                 QApplication::tr( "Highlight text with color 7" ),
-                QStringList{ "Ctrl+Shift+7" },
+                QStringList{ QKeySequence( Qt::Key_7 ).toString() },
             },
         },
         {
             LogViewAddColorLabel8,
             {
                 QApplication::tr( "Highlight text with color 8" ),
-                QStringList{ "Ctrl+Shift+8" },
+                QStringList{ QKeySequence( Qt::Key_8 ).toString() },
             },
         },
         {
             LogViewAddColorLabel9,
             {
                 QApplication::tr( "Highlight text with color 9" ),
-                QStringList{ "Ctrl+Shift+9" },
+                QStringList{ QKeySequence( Qt::Key_9 ).toString() },
             },
         },
         {

@@ -1,0 +1,6 @@
+language: en
+reviews:
+  profile: chill
+  auto_review:
+    enabled: true
+    drafts: false

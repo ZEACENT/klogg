@@ -615,7 +615,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             }
 
             colorLablesActionGroup = new QActionGroup( colorLabelsMenu_ );
-            colorLablesActionGroup->setExclusive( true );
+            colorLablesActionGroup->setExclusive( false );
             connect( colorLablesActionGroup, &QActionGroup::triggered, this,
                      &AbstractLogView::setColorLabel );
 

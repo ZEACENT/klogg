@@ -77,6 +77,8 @@ struct ShortcutAction {
     static constexpr auto MainWindowCopyPathToClipboard = "mainwindow.copy_path_to_clipboard";
     static constexpr auto MainWindowOpenFromClipboard = "mainwindow.open_from_clipboard";
     static constexpr auto MainWindowOpenFromUrl = "mainwindow.open_from_url";
+    static constexpr auto MainWindowDisconnectSource = "mainwindow.disconnect_source";
+    static constexpr auto MainWindowReconnectSource = "mainwindow.reconnect_source";
 
     static constexpr auto LogViewMark = "logview.mark";
     static constexpr auto LogViewDeleteMark = "logview.delete_mark";
