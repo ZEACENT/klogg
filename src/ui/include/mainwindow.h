@@ -228,6 +228,7 @@ class MainWindow : public QMainWindow {
     void updateShortcuts();
     void persistSessionState();
     void registerAdbLogcatSource( CrawlerWidget* crawler );
+    void updateLiveTabAppearance( CrawlerWidget* crawler );
 
     WindowSession session_;
     QString loadingFileName;

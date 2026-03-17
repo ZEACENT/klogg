@@ -1287,11 +1287,7 @@ void MainWindow::saveCurrentLiveLog()
         return;
     }
 
-    const auto toolTip = session_.getAssociatedPath( crawler ).isEmpty()
-                             ? session_.getDisplayName( crawler )
-                             : session_.getAssociatedPath( crawler );
-    mainTabWidget_.updateCrawler( mainTabWidget_.currentIndex(), session_.getDisplayName( crawler ),
-                                  toolTip );
+    updateLiveTabAppearance( crawler );
     updateMenuBarFromDocument( crawler );
     updateOpenedFilesMenu();
     updateInfoLine();
@@ -2234,6 +2230,37 @@ void MainWindow::addRecentFile( const QString& fileName )
     updateRecentFileActions();
 }
 
+void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
+{
+    const auto tabIndex = mainTabWidget_.indexOf( crawler );
+    if ( tabIndex < 0 ) {
+        return;
+    }
+
+    auto* source = session_.getAdbLogcatSource( crawler );
+    const auto displayName = session_.getDisplayName( crawler );
+    const auto baseTip = session_.getAssociatedPath( crawler ).isEmpty()
+                             ? displayName
+                             : session_.getAssociatedPath( crawler );
+
+    QString title = displayName;
+    QString toolTip = baseTip;
+    if ( source ) {
+        const auto state = source->state();
+        if ( state == AdbLogcatSource::State::Error ) {
+            title += tr( " [error]" );
+            if ( !source->lastError().isEmpty() ) {
+                toolTip = tr( "%1\nError: %2" ).arg( baseTip, source->lastError() );
+            }
+        }
+        else if ( state == AdbLogcatSource::State::Disconnected ) {
+            title += tr( " [disconnected]" );
+        }
+    }
+
+    mainTabWidget_.updateCrawler( tabIndex, title, toolTip );
+}
+
 void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
 {
     if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
@@ -2246,45 +2273,20 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
     }
 
     connect( adbSource, &AdbLogcatSource::stateChanged, this,
-             [ this, crawler ]( AdbLogcatSource::State state ) {
+             [ this, crawler ]( AdbLogcatSource::State ) {
                  if ( currentCrawlerWidget() == crawler ) {
                      updateMenuBarFromDocument( crawler );
                      updateInfoLine();
                  }
                  updateOpenedFilesMenu();
-
-                 const auto tabIndex = mainTabWidget_.indexOf( crawler );
-                 if ( tabIndex >= 0 ) {
-                     const auto displayName = session_.getDisplayName( crawler );
-                     const auto toolTip = session_.getAssociatedPath( crawler ).isEmpty()
-                                              ? displayName
-                                              : session_.getAssociatedPath( crawler );
-                     if ( state == AdbLogcatSource::State::Error ) {
-                         mainTabWidget_.updateCrawler( tabIndex, displayName + tr( " [error]" ),
-                                                       toolTip );
-                     }
-                     else if ( state == AdbLogcatSource::State::Disconnected ) {
-                         mainTabWidget_.updateCrawler(
-                             tabIndex, displayName + tr( " [disconnected]" ), toolTip );
-                     }
-                     else {
-                         mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip );
-                     }
-                 }
+                 updateLiveTabAppearance( crawler );
              } );
     connect( adbSource, &AdbLogcatSource::errorOccurred, this,
-             [ this, crawler ]( const QString& error ) {
+             [ this, crawler ]( const QString& ) {
                  if ( currentCrawlerWidget() == crawler ) {
                      updateInfoLine();
                  }
-                 if ( !error.isEmpty() ) {
-                     const auto tabIndex = mainTabWidget_.indexOf( crawler );
-                     if ( tabIndex >= 0 ) {
-                         const auto currentTip = mainTabWidget_.tabToolTip( tabIndex );
-                         mainTabWidget_.setTabToolTip(
-                             tabIndex, tr( "%1\nError: %2" ).arg( currentTip, error ) );
-                     }
-                 }
+                 updateLiveTabAppearance( crawler );
              } );
 }
 
