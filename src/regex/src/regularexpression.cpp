@@ -228,6 +228,14 @@ PatternMatcher::PatternMatcher( const RegularExpression& expression )
     else {
         hasMatchImpl_ = isInverse_ ? matching::hasInverseCombinedMatch : matching::hasCombinedMatch;
     }
+
+#ifdef KLOGG_HAS_VECTORSCAN
+    // Create buffer scanner for bulk scanning if available and not in
+    // prefilter mode (prefilter requires per-line Qt regex confirmation).
+    if ( useVectorscanEngine && !isBooleanCombination_ && !isInverse_ ) {
+        bufferScanner_ = expression.hsExpression_.createBufferScanner();
+    }
+#endif
 }
 
 PatternMatcher::~PatternMatcher() = default;
@@ -235,6 +243,34 @@ PatternMatcher::~PatternMatcher() = default;
 bool PatternMatcher::hasMatch( std::string_view line ) const
 {
     return hasMatchImpl_( line, matcher_, evaluator_.get() );
+}
+
+bool PatternMatcher::hasBufferScan() const
+{
+#ifdef KLOGG_HAS_VECTORSCAN
+    return bufferScanner_ != nullptr;
+#else
+    return false;
+#endif
+}
+
+bool PatternMatcher::scanBuffer( const char* data, unsigned int size,
+                                  const klogg::vector<qint64>& endOfLines,
+                                  klogg::vector<uint64_t>& matchedLineIndices ) const
+{
+#ifdef KLOGG_HAS_VECTORSCAN
+    if ( !bufferScanner_ ) {
+        return false;
+    }
+    bufferScanner_->scan( data, size, endOfLines, matchedLineIndices );
+    return true;
+#else
+    Q_UNUSED( data );
+    Q_UNUSED( size );
+    Q_UNUSED( endOfLines );
+    Q_UNUSED( matchedLineIndices );
+    return false;
+#endif
 }
 
 MultiRegularExpression::MultiRegularExpression(

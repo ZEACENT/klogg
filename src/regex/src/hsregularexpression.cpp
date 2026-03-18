@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <limits>
 #include <numeric>
 #include <qregularexpression.h>
 #include <string_view>
@@ -58,6 +59,54 @@ int matchMultiCallback( unsigned int id, unsigned long long from, unsigned long 
 
     matchContext->matchingPatterns[ id ] = true;
 
+    return 0;
+}
+
+// Callback for buffer scanning — records which lines contain matches.
+// The context carries endOfLines offsets for binary-search mapping.
+struct BufferScanContext {
+    const klogg::vector<qint64>* endOfLines;
+    klogg::vector<uint64_t>* matchedLineIndices;
+    // For multi-pattern boolean mode:
+    std::vector<MatchedPatterns>* perLinePatterns;
+    uint64_t lastMatchedLine; // dedup within same line
+};
+
+int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned long long to,
+                               unsigned int flags, void* context )
+{
+    Q_UNUSED( id );
+    Q_UNUSED( from );
+    Q_UNUSED( flags );
+
+    auto* ctx = static_cast<BufferScanContext*>( context );
+    // Binary search: find the line that contains byte offset 'to - 1'
+    const auto matchByte = static_cast<qint64>( to > 0 ? to - 1 : to );
+    auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
+    const auto lineIndex = static_cast<uint64_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
+
+    // Deduplicate: multiple matches in the same line produce multiple callbacks
+    if ( lineIndex != ctx->lastMatchedLine ) {
+        ctx->lastMatchedLine = lineIndex;
+        ctx->matchedLineIndices->push_back( lineIndex );
+    }
+    return 0; // continue scanning
+}
+
+int bufferScanMultiCallback( unsigned int id, unsigned long long from, unsigned long long to,
+                              unsigned int flags, void* context )
+{
+    Q_UNUSED( from );
+    Q_UNUSED( flags );
+
+    auto* ctx = static_cast<BufferScanContext*>( context );
+    const auto matchByte = static_cast<qint64>( to > 0 ? to - 1 : to );
+    auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
+    const auto lineIndex = static_cast<size_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
+
+    if ( lineIndex < ctx->perLinePatterns->size() && id < ( *ctx->perLinePatterns )[ lineIndex ].size() ) {
+        ( *ctx->perLinePatterns )[ lineIndex ][ id ] = 1;
+    }
     return 0;
 }
 
@@ -138,6 +187,50 @@ MatchedPatterns HsPrefilterMatcher::match( const std::string_view& utf8Data ) co
     }
 
     return matchingPatterns;
+}
+
+HsBufferScanner::HsBufferScanner( HsDatabase database, HsScratch scratch,
+                                   std::size_t numberOfPatterns )
+    : database_( std::move( database ) )
+    , scratch_( std::move( scratch ) )
+    , numberOfPatterns_( numberOfPatterns )
+{
+}
+
+void HsBufferScanner::scan( const char* data, unsigned int size,
+                             const klogg::vector<qint64>& endOfLines,
+                             klogg::vector<uint64_t>& matchedLineIndices ) const
+{
+    if ( !isValid() || size == 0 ) {
+        return;
+    }
+
+    BufferScanContext ctx{};
+    ctx.endOfLines = &endOfLines;
+    ctx.matchedLineIndices = &matchedLineIndices;
+    ctx.perLinePatterns = nullptr;
+    ctx.lastMatchedLine = std::numeric_limits<uint64_t>::max();
+
+    hs_scan( database_.get(), data, size, 0, scratch_.get(), bufferScanSingleCallback,
+             static_cast<void*>( &ctx ) );
+}
+
+void HsBufferScanner::scanMulti( const char* data, unsigned int size,
+                                  const klogg::vector<qint64>& endOfLines,
+                                  std::vector<MatchedPatterns>& perLinePatterns ) const
+{
+    if ( !isValid() || size == 0 ) {
+        return;
+    }
+
+    BufferScanContext ctx{};
+    ctx.endOfLines = &endOfLines;
+    ctx.matchedLineIndices = nullptr;
+    ctx.perLinePatterns = &perLinePatterns;
+    ctx.lastMatchedLine = std::numeric_limits<uint64_t>::max();
+
+    hs_scan( database_.get(), data, size, 0, scratch_.get(), bufferScanMultiCallback,
+             static_cast<void*>( &ctx ) );
 }
 
 HsRegularExpression::HsRegularExpression( const RegularExpressionPattern& pattern )
@@ -229,20 +322,80 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         LOG_WARNING << "Cpu doesn't have sse2 or ssse3, use qt regex engine";
     }
 
+    auto allocScratchForDb = []( hs_database_t* db ) -> hs_scratch_t* {
+        hs_scratch_t* scratch = nullptr;
+        const auto scratchResult = hs_alloc_scratch( db, &scratch );
+        if ( scratchResult != HS_SUCCESS ) {
+            LOG_ERROR << "Failed to allocate scratch";
+            return nullptr;
+        }
+        return scratch;
+    };
+
     if ( database_ ) {
-        scratch_ = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
-            []( hs_database_t* db ) -> hs_scratch_t* {
-                hs_scratch_t* scratch = nullptr;
+        scratch_ = makeUniqueResource<hs_scratch_t, hs_free_scratch>( allocScratchForDb,
+                                                                       database_.get() );
+    }
 
-                const auto scratchResult = hs_alloc_scratch( db, &scratch );
-                if ( scratchResult != HS_SUCCESS ) {
-                    LOG_ERROR << "Failed to allocate scratch";
-                    return nullptr;
-                }
+    // Compile a second database WITHOUT HS_FLAG_SINGLEMATCH for bulk buffer scanning.
+    // This allows hs_scan to report all match occurrences across the buffer
+    // (one per line that matches), not just the first match overall.
+    if ( !isPrefilter_ ) {
+        auto compileBlockDatabase
+            = []( const klogg::vector<RegularExpressionPattern>& expressions,
+                  QString& errorMessage ) -> hs_database_t* {
+            hs_database_t* db = nullptr;
+            hs_compile_error_t* error = nullptr;
 
-                return scratch;
-            },
-            database_.get() );
+            klogg::vector<unsigned> flags( expressions.size() );
+            std::transform( expressions.cbegin(), expressions.cend(), flags.begin(),
+                            []( const auto& expression ) {
+                                auto expressionFlags = HS_FLAG_UTF8 | HS_FLAG_UCP;
+                                if ( !expression.isCaseSensitive ) {
+                                    expressionFlags |= HS_FLAG_CASELESS;
+                                }
+                                return expressionFlags;
+                            } );
+
+            klogg::vector<QByteArray> utf8Patterns( expressions.size() );
+            std::transform( expressions.cbegin(), expressions.cend(), utf8Patterns.begin(),
+                            []( const auto& expression ) {
+                                auto p = expression.pattern;
+                                if ( expression.isPlainText ) {
+                                    p = QRegularExpression::escape( expression.pattern );
+                                }
+                                return p.toUtf8();
+                            } );
+
+            klogg::vector<const char*> patternPointers( utf8Patterns.size() );
+            std::transform( utf8Patterns.cbegin(), utf8Patterns.cend(), patternPointers.begin(),
+                            []( const auto& utf8Pattern ) { return utf8Pattern.data(); } );
+
+            klogg::vector<unsigned> expressionIds( expressions.size() );
+            std::iota( expressionIds.begin(), expressionIds.end(), 0u );
+
+            const auto compileResult = hs_compile_multi(
+                patternPointers.data(), flags.data(), expressionIds.data(),
+                static_cast<unsigned>( expressions.size() ), HS_MODE_BLOCK, nullptr, &db,
+                &error );
+
+            if ( compileResult != HS_SUCCESS ) {
+                LOG_WARNING << "Failed to compile block database: " << error->message;
+                errorMessage = error->message;
+                hs_free_compile_error( error );
+                return nullptr;
+            }
+            return db;
+        };
+
+        QString blockErrorMessage;
+        blockDatabase_ = HsDatabase{ makeUniqueResource<hs_database_t, hs_free_database>(
+            compileBlockDatabase, patterns, blockErrorMessage ) };
+
+        if ( blockDatabase_ ) {
+            blockScratch_ = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
+                allocScratchForDb, blockDatabase_.get() );
+        }
     }
 
     if ( !isHsValid() ) {
@@ -268,6 +421,33 @@ bool HsRegularExpression::isValid() const
 bool HsRegularExpression::isHsValid() const
 {
     return database_ != nullptr && scratch_ != nullptr;
+}
+
+bool HsRegularExpression::hasBufferScanner() const
+{
+    return blockDatabase_ != nullptr && blockScratch_ != nullptr;
+}
+
+std::unique_ptr<HsBufferScanner> HsRegularExpression::createBufferScanner() const
+{
+    if ( !hasBufferScanner() ) {
+        return nullptr;
+    }
+
+    auto scannerScratch = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
+        []( hs_scratch_t* prototype ) -> hs_scratch_t* {
+            hs_scratch_t* scratch = nullptr;
+            const auto err = hs_clone_scratch( prototype, &scratch );
+            if ( err != HS_SUCCESS ) {
+                LOG_ERROR << "hs_clone_scratch failed for buffer scanner";
+                return nullptr;
+            }
+            return scratch;
+        },
+        blockScratch_.get() );
+
+    return std::make_unique<HsBufferScanner>( blockDatabase_, std::move( scannerScratch ),
+                                               patterns_.size() );
 }
 
 QString HsRegularExpression::errorString() const

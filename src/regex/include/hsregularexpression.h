@@ -139,6 +139,43 @@ class HsPrefilterMatcher {
     HsMultiMatcher hsMatcher_;
 };
 
+// Buffer scanner for bulk scanning — scans an entire multi-line buffer in one
+// hs_scan() call and maps match positions back to line numbers via binary
+// search on endOfLines offsets.
+class HsBufferScanner {
+  public:
+    HsBufferScanner() = default;
+    HsBufferScanner( HsDatabase database, HsScratch scratch, std::size_t numberOfPatterns );
+
+    HsBufferScanner( const HsBufferScanner& ) = delete;
+    HsBufferScanner& operator=( const HsBufferScanner& ) = delete;
+
+    HsBufferScanner( HsBufferScanner&& other ) = default;
+    HsBufferScanner& operator=( HsBufferScanner&& other ) = default;
+
+    bool isValid() const { return database_ != nullptr && scratch_ != nullptr; }
+
+    // Scan the entire buffer and populate matchedLineIndices with local line
+    // indices (0-based within the buffer) that matched.  For single-pattern
+    // mode, any match marks the line.  For multi-pattern boolean mode,
+    // perLinePatterns is populated instead (caller evaluates the boolean).
+    void scan( const char* data, unsigned int size,
+               const klogg::vector<qint64>& endOfLines,
+               klogg::vector<uint64_t>& matchedLineIndices ) const;
+
+    // Multi-pattern variant: fills perLinePatterns[lineIndex][patternId] = 1
+    void scanMulti( const char* data, unsigned int size,
+                    const klogg::vector<qint64>& endOfLines,
+                    std::vector<MatchedPatterns>& perLinePatterns ) const;
+
+    std::size_t numberOfPatterns() const { return numberOfPatterns_; }
+
+  private:
+    HsDatabase database_;
+    HsScratch scratch_;
+    std::size_t numberOfPatterns_ = 0;
+};
+
 using MatcherVariant
     = std::variant<DefaultRegularExpressionMatcher, HsNoopMatcher, HsSingleMatcher, HsMultiMatcher, HsPrefilterMatcher>;
 
@@ -160,12 +197,23 @@ class HsRegularExpression {
 
     MatcherVariant createMatcher() const;
 
+    // Create a buffer scanner for bulk scanning (no HS_FLAG_SINGLEMATCH).
+    // Returns a valid scanner only when Vectorscan is available and the
+    // database compiled successfully.
+    std::unique_ptr<HsBufferScanner> createBufferScanner() const;
+
+    bool hasBufferScanner() const;
+
   private:
     bool isHsValid() const;
 
   private:
     HsDatabase database_;
     HsScratch scratch_;
+
+    // Block database compiled WITHOUT HS_FLAG_SINGLEMATCH for buffer scanning.
+    HsDatabase blockDatabase_;
+    HsScratch blockScratch_;
 
     klogg::vector<RegularExpressionPattern> patterns_;
 

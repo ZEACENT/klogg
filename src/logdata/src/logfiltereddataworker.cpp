@@ -105,6 +105,29 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
     results.chunkStart = chunkStart;
     results.processedLines = LinesCount{ rawLines.endOfLines.size() };
 
+    // Try bulk buffer scanning first — one Vectorscan call for the
+    // entire chunk instead of per-line calls.
+    if ( matcher.hasBufferScan() && !rawLines.buffer.empty() ) {
+        klogg::vector<uint64_t> matchedLineIndices;
+        const bool scanned = matcher.scanBuffer(
+            rawLines.buffer.data(), static_cast<unsigned int>( rawLines.buffer.size() ),
+            rawLines.endOfLines, matchedLineIndices );
+
+        if ( scanned ) {
+            const auto& lines = rawLines.buildUtf8View();
+            for ( const auto localIndex : matchedLineIndices ) {
+                const auto lineNumber = chunkStart + LinesCount{ localIndex };
+                results.matchingLines.add( lineNumber.get() );
+                if ( localIndex < lines.size() ) {
+                    results.maxLength
+                        = qMax( results.maxLength, getUntabifiedLength( lines[ localIndex ] ) );
+                }
+            }
+            return results;
+        }
+    }
+
+    // Fallback: per-line matching
     const auto& lines = rawLines.buildUtf8View();
 
     for ( auto offset = 0u; offset < lines.size(); ++offset ) {
@@ -116,8 +139,6 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
             results.maxLength = qMax( results.maxLength, getUntabifiedLength( line ) );
             const auto lineNumber = chunkStart + LinesCount{ offset };
             results.matchingLines.add( lineNumber.get() );
-
-            // LOG_INFO << "Match at " << lineNumber << ": " << line;
         }
     }
     return results;

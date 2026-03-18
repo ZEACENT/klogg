@@ -68,6 +68,16 @@ class PatternMatcher {
 
     bool hasMatch( std::string_view line ) const;
 
+    // Buffer scanning: scan a contiguous multi-line UTF-8 buffer in one
+    // Vectorscan call.  Returns true if buffer scanning was performed;
+    // false if not available (caller should fall back to per-line hasMatch).
+    // matchedLineIndices receives 0-based line indices within the buffer.
+    bool scanBuffer( const char* data, unsigned int size,
+                     const klogg::vector<qint64>& endOfLines,
+                     klogg::vector<uint64_t>& matchedLineIndices ) const;
+
+    bool hasBufferScan() const;
+
   private:
     using MatchFunc = bool ( * )( std::string_view line, const MatcherVariant& matcher, BooleanExpressionEvaluator* evaluator );
     MatchFunc hasMatchImpl_;
@@ -80,6 +90,10 @@ class PatternMatcher {
 
     MatcherVariant matcher_;
     std::unique_ptr<BooleanExpressionEvaluator> evaluator_;
+
+#ifdef KLOGG_HAS_VECTORSCAN
+    std::unique_ptr<HsBufferScanner> bufferScanner_;
+#endif
 };
 
 class MultiRegularExpression {
