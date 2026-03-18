@@ -224,12 +224,15 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
 
     LOG_INFO << "Search requested";
+    compiledExpression_ = std::make_shared<RegularExpression>( regExp );
     QSemaphore operationStarted;
-    opThread_ = std::thread( [ this, &operationStarted, regExp, startLine, endLine, generation ] {
+    auto compiled = compiledExpression_;
+    opThread_ = std::thread( [ this, &operationStarted, regExp, startLine, endLine, generation,
+                               compiled ] {
         operationStarted.release();
         ScopedLock operationLock( operationsMutex_ );
         auto operationRequested = std::make_unique<FullSearchOperation>(
-            sourceLogData_, interruptRequested_, regExp, startLine, endLine );
+            sourceLogData_, interruptRequested_, regExp, startLine, endLine, compiled );
         connectSignalsAndRun( operationRequested.get(), generation );
     } );
     operationStarted.acquire();
@@ -239,6 +242,12 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
                                           LineNumber startLine, LineNumber endLine,
                                           LineNumber position )
 {
+    // Signal any running search to stop at the next chunk boundary so that
+    // operationsMutex_ is released quickly.  Without this, the main thread
+    // blocks here until the entire previous search finishes — the root cause
+    // of UI freezes during live-source streaming (ADB logcat, etc.).
+    interruptRequested_.set();
+
     ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
     if ( opThread_.joinable() ) {
         opThread_.join();
@@ -249,12 +258,13 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
     LOG_INFO << "Search update requested from " << position.get();
 
     QSemaphore operationStarted;
+    auto compiled = compiledExpression_; // reuse compiled expression from previous search/update
     opThread_ = std::thread( [ this, &operationStarted, regExp, startLine, endLine, position,
-                               generation ] {
+                               generation, compiled ] {
         operationStarted.release();
         ScopedLock operationLock( operationsMutex_ );
         auto operationRequested = std::make_unique<UpdateSearchOperation>(
-            sourceLogData_, interruptRequested_, regExp, startLine, endLine, position );
+            sourceLogData_, interruptRequested_, regExp, startLine, endLine, position, compiled );
         connectSignalsAndRun( operationRequested.get(), generation );
     } );
 
@@ -321,14 +331,15 @@ SearchResults LogFilteredDataWorker::getSearchResults() const
 SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
                                   AtomicFlag& interruptRequested,
                                   const RegularExpressionPattern& regExp, LineNumber startLine,
-                                  LineNumber endLine )
+                                  LineNumber endLine,
+                                  std::shared_ptr<RegularExpression> compiledRegExp )
 
     : interruptRequested_( interruptRequested )
     , regexp_( regExp )
     , sourceLogData_( sourceLogData )
     , startLine_( startLine )
     , endLine_( endLine )
-
+    , compiledRegExp_( std::move( compiledRegExp ) )
 {
 }
 
@@ -377,7 +388,13 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         auto reportedMatches = nbMatches;
         int reportedPercentage = 0;
 
-        RegularExpression regularExpression{ regexp_ };
+        // Reuse pre-compiled expression if available, avoiding expensive
+        // Vectorscan database recompilation on incremental search updates.
+        std::shared_ptr<RegularExpression> ownedExpression;
+        if ( !compiledRegExp_ ) {
+            ownedExpression = std::make_shared<RegularExpression>( regexp_ );
+        }
+        const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
         auto matcher = regularExpression.createMatcher();
 
         auto chunkStart = initialLine;
@@ -490,7 +507,11 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
     klogg::vector<MatcherData> matcherData;
     matcherData.reserve( matchingThreadsCount );
-    RegularExpression regularExpression{ regexp_ };
+    std::shared_ptr<RegularExpression> ownedExpression2;
+    if ( !compiledRegExp_ ) {
+        ownedExpression2 = std::make_shared<RegularExpression>( regexp_ );
+    }
+    const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression2;
     for ( auto index = 0u; index < matchingThreadsCount; ++index ) {
         matcherData.push_back( { regularExpression.createMatcher(), microseconds{ 0 } } );
     }

@@ -70,6 +70,13 @@ runs:
         fi
         # Remove any existing DMG files to avoid conflicts
         rm -f ./packages/*.dmg 2>/dev/null || true
+        # Proactively remove Qt build rpath if present (macdeployqt may have already removed it)
+        # This prevents install_name_tool -delete_rpath errors during CPack
+        for qt_dir in "${QT_ROOT_DIR}" "${Qt6_DIR}" "${Qt5_DIR}"; do
+            if [ -n "${qt_dir}" ]; then
+                install_name_tool -delete_rpath "${qt_dir}/lib" ./output/klogg.app/Contents/MacOS/klogg 2>/dev/null || true
+            fi
+        done
         # Run cpack - capture exit code but continue even if detach fails
         set +e
         cpack --verbose -G "DragNDrop"

@@ -78,7 +78,7 @@ class CaptureStore {
     void ensureCaptureDir();
     Segment& ensureActiveSegment();
     void rotateSegmentIfNeeded();
-    void rebuildCumulativeLineCounts();
+    void rebuildCumulativeLineCounts( bool onlyLast = false );
     void enforceMemoryBudget();
     bool spillSegmentToDisk( Segment& segment );
     void persistBufferedSegments();

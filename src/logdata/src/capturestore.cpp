@@ -253,23 +253,90 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                                                          QTextCodec* codec,
                                                          const QRegularExpression& prefilterPattern ) const
 {
-    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    // Snapshot-based two-phase read: take lightweight references under the lock,
+    // then build the output buffer without holding the mutex.  This prevents the
+    // search worker thread from blocking appendUtf8() on the main thread.
+
+    struct LineRef {
+        std::shared_ptr<QByteArray> memoryData;
+        QString filePath;
+        qint64 offset;
+        int length;
+    };
+
+    LinesCount::UnderlyingType requestedLines = 0;
+    std::vector<LineRef> lineRefs;
+
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        const auto totalLines = lineCount();
+        const auto availableLines = qMax<LineNumber::UnderlyingType>(
+            0, totalLines.get() - qMin( first.get(), totalLines.get() ) );
+        requestedLines
+            = qMin( number.get(), static_cast<LinesCount::UnderlyingType>( availableLines ) );
+        lineRefs.reserve( requestedLines );
+
+        for ( LinesCount::UnderlyingType lineOffset = 0; lineOffset < requestedLines;
+              ++lineOffset ) {
+            const auto lineNum = first + LinesCount( lineOffset );
+            if ( lineNum < 0_lnum || lineNum >= totalLines ) {
+                break;
+            }
+
+            const auto segmentIt = std::lower_bound(
+                segments_.cbegin(), segments_.cend(), lineNum.get(),
+                []( const Segment& segment, qint64 value ) {
+                    return segment.cumulativeEndLine <= value;
+                } );
+            if ( segmentIt == segments_.cend() ) {
+                break;
+            }
+
+            const auto segmentIndex
+                = static_cast<size_t>( std::distance( segments_.cbegin(), segmentIt ) );
+            const qint64 previousEndLine
+                = segmentIndex == 0 ? 0LL : segments_[ segmentIndex - 1 ].cumulativeEndLine;
+            const auto localLine = static_cast<int>( lineNum.get<qint64>() - previousEndLine );
+
+            if ( localLine < 0 || localLine >= klogg::isize( segmentIt->lineOffsets ) ) {
+                break;
+            }
+
+            LineRef ref;
+            ref.memoryData = segmentIt->memoryData; // shared_ptr copy keeps data alive
+            ref.filePath = segmentIt->filePath;
+            ref.offset = segmentIt->lineOffsets[ static_cast<size_t>( localLine ) ];
+            ref.length = segmentIt->lineLengths[ static_cast<size_t>( localLine ) ];
+            lineRefs.push_back( std::move( ref ) );
+        }
+    }
+    // mutex released — main thread can now append data freely
+
+    const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
+
     SearchableLogData::RawLines rawLines;
     rawLines.startLine = first;
-    const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
     rawLines.textDecoder.decoder.reset( effectiveCodec->makeDecoder() );
     rawLines.textDecoder.encodingParams = EncodingParameters( effectiveCodec );
     rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
     rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
     rawLines.prefilterPattern = prefilterPattern;
 
-    const auto availableLines
-        = qMax<LineNumber::UnderlyingType>( 0, lineCount().get() - qMin( first.get(), lineCount().get() ) );
-    const auto requestedLines = qMin( number.get(), static_cast<LinesCount::UnderlyingType>( availableLines ) );
-    for ( LinesCount::UnderlyingType lineOffset = 0; lineOffset < requestedLines; ++lineOffset ) {
-        const auto lineData = lineAt( first + LinesCount( lineOffset ), codec, prefilterPattern );
-        const auto utf8Line = lineData.toUtf8();
-        rawLines.buffer.insert( rawLines.buffer.end(), utf8Line.begin(), utf8Line.end() );
+    for ( const auto& ref : lineRefs ) {
+        QByteArray utf8Line;
+        if ( ref.memoryData ) {
+            utf8Line = ref.memoryData->mid( type_safe::narrow_cast<int>( ref.offset ), ref.length );
+        }
+        else {
+            QFile file( ref.filePath );
+            if ( file.open( QIODevice::ReadOnly ) ) {
+                file.seek( ref.offset );
+                utf8Line = file.read( ref.length );
+            }
+        }
+        const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
+        const auto lineUtf8 = lineStr.toUtf8();
+        rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
         rawLines.buffer.push_back( '\n' );
         rawLines.endOfLines.push_back( klogg::ssize( rawLines.buffer ) );
     }
@@ -367,11 +434,12 @@ void CaptureStore::commitLine( const QByteArray& lineBytes, bool terminated )
     appendOutputBytes( terminated ? lineBytes + '\n' : lineBytes );
 
     fileSize_ += lineBytes.size() + ( terminated ? 1 : 0 );
+    memoryBytes_ += lineBytes.size() + ( terminated ? 1 : 0 );
     totalLines_ += 1;
     maxLineLength_ = qMax( maxLineLength_, static_cast<int>( lineBytes.size() ) );
     lastModified_ = QDateTime::currentDateTime();
 
-    rebuildCumulativeLineCounts();
+    rebuildCumulativeLineCounts( true );
     rotateSegmentIfNeeded();
     enforceMemoryBudget();
 }
@@ -408,8 +476,21 @@ void CaptureStore::rotateSegmentIfNeeded()
     segments_.push_back( std::move( segment ) );
 }
 
-void CaptureStore::rebuildCumulativeLineCounts()
+void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
 {
+    if ( onlyLast && !segments_.empty() ) {
+        // O(1) fast path: only update the active (last) segment.
+        // commitLine() tracks memoryBytes_ incrementally, so we only need to
+        // fix up cumulativeEndLine for the last segment.
+        auto& last = segments_.back();
+        const qint64 prevEnd = segments_.size() > 1
+                                   ? segments_[ segments_.size() - 2 ].cumulativeEndLine
+                                   : 0;
+        last.cumulativeEndLine = prevEnd + klogg::ssize( last.lineOffsets );
+        return;
+    }
+
+    // Full rebuild — used after loadFromDisk(), clear(), etc.
     qint64 cumulative = 0;
     memoryBytes_ = 0;
     for ( auto& segment : segments_ ) {

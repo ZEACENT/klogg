@@ -595,8 +595,26 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
         if ( progress > 0 ) {
             // Some languages translate the plural the same as the singular, so use the full string
 
+            // For live sources / growing files, show remaining lines instead of
+            // percentage since the percentage becomes misleading when the file
+            // keeps growing.  For static files, show the classic percentage.
+            const auto totalLines = logData_->getNbLine();
+            const auto linesProcessed = static_cast<LinesCount::UnderlyingType>(
+                totalLines.get() * static_cast<LinesCount::UnderlyingType>( progress ) / 100 );
+            const auto remaining = totalLines.get() - linesProcessed;
+
+            QString progressText;
+            if ( logData_->isLiveSource() && remaining > 0 ) {
+                progressText = tr( "Search in progress — %1 lines pending..." )
+                                   .arg( QString::number( remaining ) );
+            }
+            else {
+                progressText
+                    = tr( "Search in progress (%1 %)..." ).arg( QString::number( progress ) );
+            }
+
             searchInfoLine_->setText(
-                tr( "Search in progress (%1 %)..." ).arg( QString::number( progress ) )
+                progressText
                 + ( nbMatches.get() > 1 ? tr( " %1 matches found so far." )
                                               .arg( QString::number( nbMatches.get() ) )
                                         : tr( " %1 match found so far." )

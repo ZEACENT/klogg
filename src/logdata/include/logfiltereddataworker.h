@@ -133,7 +133,8 @@ class SearchOperation : public QObject {
 public:
     SearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                      const RegularExpressionPattern& regExp, LineNumber startLine,
-                     LineNumber endLine );
+                     LineNumber endLine,
+                     std::shared_ptr<RegularExpression> compiledRegExp = nullptr );
 
     // Run the search operation, returns true if it has been done
     // and false if it has been cancelled (results not copied)
@@ -153,6 +154,7 @@ protected:
     const SearchableLogData& sourceLogData_;
     LineNumber startLine_;
     LineNumber endLine_;
+    std::shared_ptr<RegularExpression> compiledRegExp_;
 };
 
 class FullSearchOperation : public SearchOperation {
@@ -160,8 +162,10 @@ class FullSearchOperation : public SearchOperation {
 public:
     FullSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                          const RegularExpressionPattern& regExp, LineNumber startLine,
-                         LineNumber endLine )
-        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine )
+                         LineNumber endLine,
+                         std::shared_ptr<RegularExpression> compiledRegExp = nullptr )
+        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
+                           std::move( compiledRegExp ) )
     {
     }
 
@@ -173,8 +177,10 @@ class UpdateSearchOperation : public SearchOperation {
 public:
     UpdateSearchOperation( const SearchableLogData& sourceLogData, AtomicFlag& interruptRequested,
                            const RegularExpressionPattern& regExp, LineNumber startLine,
-                           LineNumber endLine, LineNumber position )
-        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine )
+                           LineNumber endLine, LineNumber position,
+                           std::shared_ptr<RegularExpression> compiledRegExp = nullptr )
+        : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
+                           std::move( compiledRegExp ) )
         , initialPosition_( position )
     {
     }
@@ -245,6 +251,11 @@ private:
     SearchData searchData_;
 
     std::atomic<OperationGeneration> operationGeneration_{ 0 };
+
+    // Cached compiled regular expression to avoid recompilation on incremental
+    // search updates.  The Vectorscan database compilation is expensive; caching
+    // it here means UpdateSearchOperation reuses the compiled database.
+    std::shared_ptr<RegularExpression> compiledExpression_;
 
     // Declared last so it is destroyed first.  The destructor body joins this thread
     // before other members are destroyed, guaranteeing the task has fully exited.
