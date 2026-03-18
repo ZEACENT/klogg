@@ -194,6 +194,14 @@ class Configuration final : public Persistable<Configuration> {
     {
         useParallelSearch_ = enabled;
     }
+    bool useBlockScan() const
+    {
+        return useBlockScan_;
+    }
+    void setUseBlockScan( bool enabled )
+    {
+        useBlockScan_ = enabled;
+    }
     bool useSearchResultsCache() const
     {
         return useSearchResultsCache_;
@@ -621,6 +629,7 @@ class Configuration final : public Persistable<Configuration> {
     bool useSearchResultsCache_ = true;
     unsigned searchResultsCacheLines_ = 1000000;
     bool useParallelSearch_ = true;
+    bool useBlockScan_ = true;
     int indexReadBufferSizeMb_ = 16;
     int searchReadBufferSizeLines_ = 10000;
     int searchThreadPoolSize_ = 0;

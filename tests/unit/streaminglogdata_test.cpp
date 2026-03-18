@@ -95,3 +95,52 @@ TEST_CASE( "StreamingLogData exposes a trailing partial line when input finishes
     REQUIRE( logData.getNbLine().get() == 1 );
     REQUIRE( logData.getLineString( LineNumber( 0 ) ) == QStringLiteral( "partial" ) );
 }
+
+TEST_CASE( "StreamingLogData getLinesRaw returns correct RawLines for search worker" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "first\nsecond\nthird\nfourth\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine().get() == 4 );
+
+    // getLinesRaw is the API the search worker uses for block scanning.
+    const auto rawLines = logData.getLinesRaw( 0_lnum, LinesCount( 4 ) );
+    REQUIRE( rawLines.endOfLines.size() == 4 );
+
+    // Verify decoded lines match getLineString output.
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 4 );
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "first" ) );
+    REQUIRE( decoded[ 1 ] == QStringLiteral( "second" ) );
+    REQUIRE( decoded[ 2 ] == QStringLiteral( "third" ) );
+    REQUIRE( decoded[ 3 ] == QStringLiteral( "fourth" ) );
+}
+
+TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getFileSize() == 0 );
+
+    loadingSpy.clear();
+    const QByteArray payload = QByteArrayLiteral( "hello\nworld\n" );
+    logData.appendUtf8( payload );
+    REQUIRE( loadingSpy.safeWait() );
+
+    REQUIRE( logData.getFileSize() > 0 );
+    REQUIRE( logData.getLastModifiedDate().isValid() );
+    REQUIRE( logData.getNbLine().get() == 2 );
+}

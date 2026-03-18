@@ -243,3 +243,164 @@ TEST_CASE( "CaptureStore serializes concurrent append and read access" )
     REQUIRE( store.lineCount().get() == 200 );
     REQUIRE( store.lineAt( LineNumber( 199 ), codec, QRegularExpression{} ) == QStringLiteral( "line-199" ) );
 }
+
+TEST_CASE( "CaptureStore buildRawLines snapshot consistency under concurrent append" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 32;
+    limits.memoryBudgetBytes = 256;
+
+    const auto rootPath = makeTestDir( "capturestore_snapshot_consistency" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // Pre-populate some data so buildRawLines has something to read from the start.
+    for ( int i = 0; i < 50; ++i ) {
+        store.appendUtf8( QStringLiteral( "seed-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    std::atomic<bool> writerDone{ false };
+    std::atomic<int> readerIterations{ 0 };
+    bool readerHadError = false;
+
+    std::thread writer( [ &store, &writerDone ] {
+        for ( int i = 50; i < 300; ++i ) {
+            store.appendUtf8( QStringLiteral( "concurrent-%1\n" ).arg( i ).toUtf8() );
+        }
+        writerDone = true;
+    } );
+
+    // Reader thread: repeatedly call buildRawLines and verify internal consistency.
+    std::thread reader( [ &store, &writerDone, &readerIterations, &readerHadError, codec ] {
+        while ( !writerDone.load() || readerIterations.load() < 10 ) {
+            const auto lines = store.lineCount();
+            if ( lines <= 0_lcount ) {
+                continue;
+            }
+
+            // Request a subset of lines from the middle of the store.
+            const auto startLine = LineNumber( lines.get() / 2 );
+            const auto count = LinesCount(
+                qMin( static_cast<LinesCount::UnderlyingType>( 10 ), lines.get() - startLine.get() ) );
+            if ( count <= 0_lcount ) {
+                continue;
+            }
+
+            const auto rawLines
+                = store.buildRawLines( startLine, count, codec, QRegularExpression{} );
+
+            // Verify snapshot consistency: the number of endOfLines entries
+            // must not exceed the requested count, and must match the buffer's
+            // newline-terminated structure.
+            if ( static_cast<LinesCount::UnderlyingType>( rawLines.endOfLines.size() ) > count.get() ) {
+                readerHadError = true;
+                break;
+            }
+
+            // Verify that each endOfLines offset is within the buffer.
+            const auto bufferSize = static_cast<qint64>( rawLines.buffer.size() );
+            for ( const auto& eol : rawLines.endOfLines ) {
+                if ( eol > bufferSize ) {
+                    readerHadError = true;
+                    break;
+                }
+            }
+            if ( readerHadError ) {
+                break;
+            }
+
+            readerIterations.fetch_add( 1 );
+        }
+    } );
+
+    writer.join();
+    reader.join();
+
+    REQUIRE_FALSE( readerHadError );
+    REQUIRE( readerIterations.load() >= 10 );
+    REQUIRE( store.lineCount().get() == 300 );
+}
+
+TEST_CASE( "CaptureStore incremental rebuildCumulativeLineCounts stays correct across many segments" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir( "capturestore_incremental_cumulative" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // Append lines one at a time to force many segment rotations.
+    constexpr int totalLines = 60;
+    for ( int i = 0; i < totalLines; ++i ) {
+        store.appendUtf8( QStringLiteral( "line-%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) ).toUtf8() );
+
+        // Verify cumulative line count is correct after every append.
+        REQUIRE( store.lineCount().get() == static_cast<LinesCount::UnderlyingType>( i + 1 ) );
+    }
+
+    // Verify every single line is addressable and contains the expected content.
+    for ( int i = 0; i < totalLines; ++i ) {
+        INFO( "Checking line " << i );
+        const auto expected
+            = QStringLiteral( "line-%1" ).arg( i, 3, 10, QLatin1Char( '0' ) );
+        REQUIRE( store.lineAt( LineNumber( static_cast<LineNumber::UnderlyingType>( i ) ), codec,
+                              QRegularExpression{} )
+                 == expected );
+    }
+
+    // Also verify buildRawLines covers the full range correctly.
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( totalLines ), codec,
+                                                QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == static_cast<size_t>( totalLines ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines snapshot spans in-memory and spilled segments" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 24;
+
+    const auto rootPath = makeTestDir( "capturestore_snapshot_spill" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // Append enough data to ensure some segments get spilled to disk.
+    const QStringList expectedLines = {
+        QStringLiteral( "alpha" ),   QStringLiteral( "bravo" ),
+        QStringLiteral( "charlie" ), QStringLiteral( "delta" ),
+        QStringLiteral( "echo" ),    QStringLiteral( "foxtrot" ),
+        QStringLiteral( "golf" ),    QStringLiteral( "hotel" ),
+        QStringLiteral( "india" ),   QStringLiteral( "juliet" ),
+    };
+
+    for ( const auto& line : expectedLines ) {
+        store.appendUtf8( ( line + QLatin1Char( '\n' ) ).toUtf8() );
+    }
+
+    // Confirm spilling actually happened.
+    REQUIRE_FALSE( segmentFiles( store.capturePath() ).empty() );
+    REQUIRE( store.lineCount().get() == 10 );
+
+    // Build raw lines spanning the entire range (both spilled and in-memory).
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( static_cast<uint64_t>( expectedLines.size() ) ),
+                                                codec, QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 10 );
+
+    // Decode and verify every line matches the original.
+    const auto decodedLines = rawLines.decodeLines();
+    REQUIRE( decodedLines.size() == 10 );
+    for ( size_t i = 0; i < decodedLines.size(); ++i ) {
+        INFO( "Verifying decoded line " << i );
+        REQUIRE( decodedLines[ i ] == expectedLines[ static_cast<int>( i ) ] );
+    }
+
+    // Also verify individual lineAt access for a few spilled lines.
+    REQUIRE( store.lineAt( LineNumber( 0 ), codec, QRegularExpression{} )
+             == QStringLiteral( "alpha" ) );
+    REQUIRE( store.lineAt( LineNumber( 4 ), codec, QRegularExpression{} )
+             == QStringLiteral( "echo" ) );
+    REQUIRE( store.lineAt( LineNumber( 9 ), codec, QRegularExpression{} )
+             == QStringLiteral( "juliet" ) );
+}

@@ -232,7 +232,8 @@ PatternMatcher::PatternMatcher( const RegularExpression& expression )
 #ifdef KLOGG_HAS_VECTORSCAN
     // Create buffer scanner for bulk scanning if available and not in
     // prefilter mode (prefilter requires per-line Qt regex confirmation).
-    if ( useVectorscanEngine && !isBooleanCombination_ && !isInverse_ ) {
+    if ( useVectorscanEngine && !isBooleanCombination_ && !isInverse_
+         && config.useBlockScan() ) {
         bufferScanner_ = expression.hsExpression_.createBufferScanner();
     }
 #endif

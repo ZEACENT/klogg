@@ -80,6 +80,7 @@ struct ProfileSpec {
 
 struct BenchmarkOptions {
     QString engine;
+    QString scanMode; // "auto", "per-line", "block"
     QString label;
     QString tmpfsDir;
     QString outputPath;
@@ -170,6 +171,20 @@ class ConfigGuard {
         }
         else {
             throw std::runtime_error( QString( "Unknown engine: %1" ).arg( engine ).toStdString() );
+        }
+    }
+
+    void setScanMode( const QString& scanMode )
+    {
+        if ( scanMode == QLatin1String( "per-line" ) ) {
+            config_.setUseBlockScan( false );
+        }
+        else if ( scanMode == QLatin1String( "block" ) || scanMode == QLatin1String( "auto" ) ) {
+            config_.setUseBlockScan( true );
+        }
+        else {
+            throw std::runtime_error(
+                QString( "Unknown scan-mode: %1" ).arg( scanMode ).toStdString() );
         }
     }
 
@@ -307,12 +322,18 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
         QLatin1String( "Deterministic seed for generated corpora." ),
         QLatin1String( "seed" ),
         QLatin1String( "20260301" ) );
+    const QCommandLineOption scanModeOption(
+        QStringList{ QLatin1String( "scan-mode" ) },
+        QLatin1String( "Scan mode: auto (default), per-line, or block." ),
+        QLatin1String( "mode" ),
+        QLatin1String( "auto" ) );
     const QCommandLineOption keepFilesOption(
         QStringList{ QLatin1String( "keep-files" ) },
         QLatin1String( "Keep generated log files after the benchmark finishes." ) );
 
     parser.addOption( engineOption );
     parser.addOption( labelOption );
+    parser.addOption( scanModeOption );
     parser.addOption( tmpfsDirOption );
     parser.addOption( sizesOption );
     parser.addOption( profilesOption );
@@ -326,9 +347,13 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
 
     BenchmarkOptions options;
     options.engine = parser.value( engineOption ).trimmed().toLower();
+    options.scanMode = parser.value( scanModeOption ).trimmed().toLower();
     options.label = parser.value( labelOption ).trimmed();
     if ( options.label.isEmpty() ) {
         options.label = options.engine;
+        if ( options.scanMode != QLatin1String( "auto" ) ) {
+            options.label += QLatin1String( "-" ) + options.scanMode;
+        }
     }
     options.tmpfsDir = QDir::cleanPath( parser.value( tmpfsDirOption ).trimmed() );
     options.outputPath = parser.value( outputOption ).trimmed();
@@ -830,6 +855,7 @@ QJsonObject buildJsonReport( const BenchmarkOptions& options, const QVector<Case
         { QLatin1String( "generated_at_utc" ),
           QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) },
         { QLatin1String( "engine" ), options.engine },
+        { QLatin1String( "scan_mode" ), options.scanMode },
         { QLatin1String( "label" ), options.label },
         { QLatin1String( "tmpfs_dir" ), options.tmpfsDir },
         { QLatin1String( "iterations" ), options.iterations },
@@ -930,6 +956,7 @@ int main( int argc, char* argv[] )
         const auto options = parseOptions( app );
         ConfigGuard configGuard;
         configGuard.setEngine( options.engine );
+        configGuard.setScanMode( options.scanMode );
 
         QVector<CaseResult> results;
         QStringList touchedFiles;

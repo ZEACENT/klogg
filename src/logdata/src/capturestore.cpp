@@ -453,10 +453,13 @@ CaptureStore::Segment& CaptureStore::ensureActiveSegment()
 {
     if ( segments_.empty() || segments_.back().byteSize >= limits_.segmentTargetBytes
          || segments_.back().spilled || !segments_.back().memoryData ) {
+        const auto prevCumulative
+            = segments_.empty() ? 0LL : segments_.back().cumulativeEndLine;
         Segment segment;
         segment.id = nextSegmentId_++;
         segment.filePath = QDir( capturePath_ ).filePath( makeSegmentFileName( segment.id ) );
         segment.memoryData = std::make_shared<QByteArray>();
+        segment.cumulativeEndLine = prevCumulative;
         segments_.push_back( std::move( segment ) );
     }
 
@@ -469,10 +472,16 @@ void CaptureStore::rotateSegmentIfNeeded()
         return;
     }
 
+    // Carry forward the cumulative line count so the new (empty) segment
+    // doesn't break the sorted cumulativeEndLine invariant that lineAt()
+    // and buildRawLines() rely on for binary search.
+    const auto prevCumulative = segments_.back().cumulativeEndLine;
+
     Segment segment;
     segment.id = nextSegmentId_++;
     segment.filePath = QDir( capturePath_ ).filePath( makeSegmentFileName( segment.id ) );
     segment.memoryData = std::make_shared<QByteArray>();
+    segment.cumulativeEndLine = prevCumulative;
     segments_.push_back( std::move( segment ) );
 }
 
