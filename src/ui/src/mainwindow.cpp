@@ -2288,6 +2288,10 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                  }
                  updateLiveTabAppearance( crawler );
              } );
+
+    // Sync tab appearance immediately in case the source is already
+    // in Error or Disconnected state (e.g. during session restore).
+    updateLiveTabAppearance( crawler );
 }
 
 // Updates the actions for the recent files.
@@ -2810,22 +2814,26 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     // dialog.exec() blocks until the dialog closes, keeping it alive.
     connect( listWidget, &QListWidget::itemChanged,
              [ &checkCounter, listWidget, updateSequenceNumbers ]( QListWidgetItem* item ) {
-                 if ( item->checkState() == Qt::Checked ) {
-                     item->setData( Qt::UserRole + 2, ++checkCounter );
-                 }
-                 else {
-                     // Uncheck: compact remaining order values so re-check gets the next slot
-                     const int removedOrder = item->data( Qt::UserRole + 2 ).toInt();
-                     item->setData( Qt::UserRole + 2, 0 );
-                     // Shift down orders above the removed item
-                     for ( int i = 0; i < listWidget->count(); ++i ) {
-                         auto* other = listWidget->item( i );
-                         const int otherOrder = other->data( Qt::UserRole + 2 ).toInt();
-                         if ( otherOrder > removedOrder ) {
-                             other->setData( Qt::UserRole + 2, otherOrder - 1 );
-                         }
+                 // Block signals while mutating item data to prevent recursive
+                 // itemChanged from corrupting checkCounter.
+                 {
+                     const QSignalBlocker blocker( listWidget );
+                     if ( item->checkState() == Qt::Checked ) {
+                         item->setData( Qt::UserRole + 2, ++checkCounter );
                      }
-                     --checkCounter;
+                     else {
+                         // Uncheck: compact remaining order values so re-check gets the next slot
+                         const int removedOrder = item->data( Qt::UserRole + 2 ).toInt();
+                         item->setData( Qt::UserRole + 2, 0 );
+                         for ( int i = 0; i < listWidget->count(); ++i ) {
+                             auto* other = listWidget->item( i );
+                             const int otherOrder = other->data( Qt::UserRole + 2 ).toInt();
+                             if ( otherOrder > removedOrder ) {
+                                 other->setData( Qt::UserRole + 2, otherOrder - 1 );
+                             }
+                         }
+                         --checkCounter;
+                     }
                  }
                  updateSequenceNumbers();
              } );
