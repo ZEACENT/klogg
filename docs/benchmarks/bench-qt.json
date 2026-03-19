@@ -1,0 +1,473 @@
+{
+    "benchmark": "regex_search_benchmark",
+    "cases": [
+        {
+            "actual_bytes": 52436809,
+            "generation_ms": 0,
+            "hit_rate": 0.08727505918628196,
+            "index_ms": 58,
+            "match_count": 19870,
+            "pattern": "ERROR",
+            "profile_description": "Single-token severity match",
+            "profile_id": "simple",
+            "profile_label": "Simple",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_ms": {
+                "max": 320.12105299999996,
+                "mean": 283.3769902,
+                "median": 276.065918,
+                "min": 267.947776,
+                "stddev": 18.73915676514926
+            },
+            "search_ms_iterations": [
+                279.211343,
+                273.538861,
+                320.12105299999996,
+                267.947776,
+                276.065918
+            ],
+            "searched_line_count": 227671,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 186.63203227184127,
+                "mean": 177.182223861572,
+                "median": 181.14383093678407,
+                "min": 156.21477409547347,
+                "stddev": 10.770992302673468
+            },
+            "throughput_mib_per_s_iterations": [
+                179.10317482194876,
+                182.81730718181242,
+                156.21477409547347,
+                186.63203227184127,
+                181.14383093678407
+            ]
+        },
+        {
+            "actual_bytes": 52436809,
+            "generation_ms": 0,
+            "hit_rate": 0.030003821303547663,
+            "index_ms": 58,
+            "match_count": 6831,
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false",
+            "profile_description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "profile_id": "normal",
+            "profile_label": "Normal",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_ms": {
+                "max": 332.124522,
+                "mean": 305.82291,
+                "median": 299.356744,
+                "min": 287.481951,
+                "stddev": 15.158769758461457
+            },
+            "search_ms_iterations": [
+                332.124522,
+                311.314572,
+                298.83676099999997,
+                287.481951,
+                299.356744
+            ],
+            "searched_line_count": 227671,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 173.95053081993345,
+                "mean": 163.90891134039256,
+                "median": 167.0503136471851,
+                "min": 150.56894226437183,
+                "stddev": 7.8887627573429535
+            },
+            "throughput_mib_per_s_iterations": [
+                150.56894226437183,
+                160.6337848444823,
+                167.34098512599022,
+                173.95053081993345,
+                167.0503136471851
+            ]
+        },
+        {
+            "actual_bytes": 52436809,
+            "generation_ms": 0,
+            "hit_rate": 0.040005095071396886,
+            "index_ms": 58,
+            "match_count": 9108,
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)",
+            "profile_description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "profile_id": "complex",
+            "profile_label": "Complex",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_ms": {
+                "max": 551.733241,
+                "mean": 533.3910721999999,
+                "median": 530.1951409999999,
+                "min": 515.357894,
+                "stddev": 13.689589353688675
+            },
+            "search_ms_iterations": [
+                546.258474,
+                551.733241,
+                523.410611,
+                515.357894,
+                530.1951409999999
+            ],
+            "searched_line_count": 227671,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 97.03477633661724,
+                "mean": 93.81581247148577,
+                "median": 94.31930644117332,
+                "min": 90.63734838046508,
+                "stddev": 2.402099906498366
+            },
+            "throughput_mib_per_s_iterations": [
+                91.5457431926266,
+                90.63734838046508,
+                95.54188800654653,
+                97.03477633661724,
+                94.31930644117332
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "generation_ms": 0,
+            "hit_rate": 0.08727250366212277,
+            "index_ms": 315,
+            "match_count": 198692,
+            "pattern": "ERROR",
+            "profile_description": "Single-token severity match",
+            "profile_id": "simple",
+            "profile_label": "Simple",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_ms": {
+                "max": 2943.023444,
+                "mean": 2780.0306379999997,
+                "median": 2758.422094,
+                "min": 2696.477434,
+                "stddev": 85.31015412760927
+            },
+            "search_ms_iterations": [
+                2696.477434,
+                2769.852431,
+                2943.023444,
+                2732.377787,
+                2758.422094
+            ],
+            "searched_line_count": 2276685,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 185.45472854388447,
+                "mean": 180.04467877887652,
+                "median": 181.29005406203802,
+                "min": 169.91862282534376,
+                "stddev": 5.337506464328448
+            },
+            "throughput_mib_per_s_iterations": [
+                185.45472854388447,
+                180.54192524857297,
+                169.91862282534376,
+                183.01806321454336,
+                181.29005406203802
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "generation_ms": 0,
+            "hit_rate": 0.030000197655802186,
+            "index_ms": 315,
+            "match_count": 68301,
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false",
+            "profile_description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "profile_id": "normal",
+            "profile_label": "Normal",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_ms": {
+                "max": 2999.5717609999997,
+                "mean": 2976.7208533999997,
+                "median": 2994.156831,
+                "min": 2942.746991,
+                "stddev": 24.328223860619858
+            },
+            "search_ms_iterations": [
+                2994.156831,
+                2995.461655,
+                2951.6670289999997,
+                2999.5717609999997,
+                2942.746991
+            ],
+            "searched_line_count": 2276685,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 169.93458563600316,
+                "mean": 168.0063528164309,
+                "median": 167.01679931046343,
+                "min": 166.7152948461099,
+                "stddev": 1.37796630677614
+            },
+            "throughput_mib_per_s_iterations": [
+                167.01679931046343,
+                166.94404674233098,
+                169.42103754724704,
+                166.7152948461099,
+                169.93458563600316
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "generation_ms": 0,
+            "hit_rate": 0.04000026354106958,
+            "index_ms": 315,
+            "match_count": 91068,
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)",
+            "profile_description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "profile_id": "complex",
+            "profile_label": "Complex",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_ms": {
+                "max": 5417.993843,
+                "mean": 5285.078188,
+                "median": 5237.271855,
+                "min": 5224.774355,
+                "stddev": 74.31780705169278
+            },
+            "search_ms_iterations": [
+                5417.993843,
+                5237.271855,
+                5315.800013,
+                5224.774355,
+                5229.550874
+            ],
+            "searched_line_count": 2276685,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 95.7121698602389,
+                "mean": 94.63855134583059,
+                "median": 95.48377559774012,
+                "min": 92.29882961075563,
+                "stddev": 1.3140418619360927
+            },
+            "throughput_mib_per_s_iterations": [
+                92.29882961075563,
+                95.48377559774012,
+                94.07323250013697,
+                95.7121698602389,
+                95.62474916028137
+            ]
+        },
+        {
+            "actual_bytes": 5369516790,
+            "generation_ms": 0,
+            "hit_rate": 0.08727274006293922,
+            "index_ms": 3290,
+            "match_count": 2034614,
+            "pattern": "ERROR",
+            "profile_description": "Single-token severity match",
+            "profile_id": "simple",
+            "profile_label": "Simple",
+            "requested_bytes": 5368709120,
+            "reused_input": true,
+            "search_ms": {
+                "max": 33824.391112,
+                "mean": 30247.818136199996,
+                "median": 30031.957951999997,
+                "min": 27627.020946999997,
+                "stddev": 2267.7758427089075
+            },
+            "search_ms_iterations": [
+                30031.957951999997,
+                28184.74914,
+                27627.020946999997,
+                31570.97153,
+                33824.391112
+            ],
+            "searched_line_count": 23313282,
+            "size_id": "5GB",
+            "size_label": "5GB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 185.35368920010873,
+                "mean": 170.22835340053555,
+                "median": 170.51070270941526,
+                "min": 151.392828837011,
+                "stddev": 12.48504960994704
+            },
+            "throughput_mib_per_s_iterations": [
+                170.51070270941526,
+                181.68585530774504,
+                185.35368920010873,
+                162.19869094839768,
+                151.392828837011
+            ]
+        },
+        {
+            "actual_bytes": 5369516790,
+            "generation_ms": 0,
+            "hit_rate": 0.0300000231627619,
+            "index_ms": 3290,
+            "match_count": 699399,
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false",
+            "profile_description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "profile_id": "normal",
+            "profile_label": "Normal",
+            "requested_bytes": 5368709120,
+            "reused_input": true,
+            "search_ms": {
+                "max": 37997.531155,
+                "mean": 33319.2781206,
+                "median": 31773.951501,
+                "min": 31301.560996,
+                "stddev": 2549.350713667745
+            },
+            "search_ms_iterations": [
+                31433.360407,
+                31301.560996,
+                31773.951501,
+                37997.531155,
+                34089.986544
+            ],
+            "searched_line_count": 23313282,
+            "size_id": "5GB",
+            "size_label": "5GB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 163.59472471003954,
+                "mean": 154.52904373144443,
+                "median": 161.16252503167473,
+                "min": 134.76586763614776,
+                "stddev": 11.005617669192175
+            },
+            "throughput_mib_per_s_iterations": [
+                162.90877551210752,
+                163.59472471003954,
+                161.16252503167473,
+                134.76586763614776,
+                150.21332576725263
+            ]
+        },
+        {
+            "actual_bytes": 5369516790,
+            "generation_ms": 0,
+            "hit_rate": 0.04000003088368253,
+            "index_ms": 3290,
+            "match_count": 932532,
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)",
+            "profile_description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "profile_id": "complex",
+            "profile_label": "Complex",
+            "requested_bytes": 5368709120,
+            "reused_input": true,
+            "search_ms": {
+                "max": 61045.391526,
+                "mean": 56809.8971808,
+                "median": 54854.980058,
+                "min": 54631.40453,
+                "stddev": 2616.331956917152
+            },
+            "search_ms_iterations": [
+                54854.980058,
+                54794.954391,
+                54631.40453,
+                58722.755398999994,
+                61045.391526
+            ],
+            "searched_line_count": 23313282,
+            "size_id": "5GB",
+            "size_label": "5GB",
+            "skip_reason": "",
+            "status": "ok",
+            "throughput_mib_per_s": {
+                "max": 93.73308810545295,
+                "mean": 90.32491580109117,
+                "median": 93.35105488545926,
+                "min": 83.88463283021342,
+                "stddev": 4.044424911911574
+            },
+            "throughput_mib_per_s_iterations": [
+                93.35105488545926,
+                93.45331720864085,
+                93.73308810545295,
+                87.20248597568931,
+                83.88463283021342
+            ]
+        }
+    ],
+    "engine": "qt",
+    "generated_at_utc": "2026-03-18T16:48:17Z",
+    "host": {
+        "cpu_architecture": "x86_64",
+        "kernel_type": "darwin",
+        "kernel_version": "25.3.0",
+        "product_name": "macOS Tahoe (26.3.1)",
+        "qt_version": "6.10.1"
+    },
+    "iterations": 5,
+    "keep_files": true,
+    "label": "qt",
+    "profiles": [
+        {
+            "description": "Single-token severity match",
+            "id": "simple",
+            "label": "Simple",
+            "pattern": "ERROR"
+        },
+        {
+            "description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "id": "normal",
+            "label": "Normal",
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false"
+        },
+        {
+            "description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "id": "complex",
+            "label": "Complex",
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)"
+        }
+    ],
+    "scan_mode": "auto",
+    "seed": 20260301,
+    "sizes": [
+        {
+            "id": "50MB",
+            "label": "50MB",
+            "requested_bytes": 52428800
+        },
+        {
+            "id": "500MB",
+            "label": "500MB",
+            "requested_bytes": 524288000
+        },
+        {
+            "id": "5GB",
+            "label": "5GB",
+            "requested_bytes": 5368709120
+        }
+    ],
+    "tmpfs_dir": "/tmp/klogg-bench",
+    "version": "v1",
+    "warmup": 1
+}

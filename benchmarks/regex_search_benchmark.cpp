@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +28,7 @@
 #include <memory>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <QCommandLineOption>
@@ -55,6 +58,7 @@
 #include "logfiltereddata.h"
 #include "persistentinfo.h"
 #include "regularexpressionpattern.h"
+#include "streaminglogdata.h"
 
 const bool PersistentInfo::ForcePortable = true;
 
@@ -80,7 +84,8 @@ struct ProfileSpec {
 
 struct BenchmarkOptions {
     QString engine;
-    QString scanMode; // "auto", "per-line", "block"
+    QString scanMode;   // "auto", "per-line", "block"
+    QString searchMode; // "full", "incremental", "streaming", "all"
     QString label;
     QString tmpfsDir;
     QString outputPath;
@@ -116,6 +121,7 @@ struct Stats {
 struct CaseResult {
     QString sizeId;
     QString sizeLabel;
+    QString searchMode = "full"; // "full" or "incremental"
     quint64 requestedBytes = 0;
     quint64 actualBytes = 0;
     quint64 searchedLineCount = 0;
@@ -327,6 +333,11 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
         QLatin1String( "Scan mode: auto (default), per-line, or block." ),
         QLatin1String( "mode" ),
         QLatin1String( "auto" ) );
+    const QCommandLineOption searchModeOption(
+        QStringList{ QLatin1String( "search-mode" ) },
+        QLatin1String( "Search mode: full (default), incremental, streaming, or all." ),
+        QLatin1String( "mode" ),
+        QLatin1String( "full" ) );
     const QCommandLineOption keepFilesOption(
         QStringList{ QLatin1String( "keep-files" ) },
         QLatin1String( "Keep generated log files after the benchmark finishes." ) );
@@ -334,6 +345,7 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     parser.addOption( engineOption );
     parser.addOption( labelOption );
     parser.addOption( scanModeOption );
+    parser.addOption( searchModeOption );
     parser.addOption( tmpfsDirOption );
     parser.addOption( sizesOption );
     parser.addOption( profilesOption );
@@ -348,6 +360,7 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     BenchmarkOptions options;
     options.engine = parser.value( engineOption ).trimmed().toLower();
     options.scanMode = parser.value( scanModeOption ).trimmed().toLower();
+    options.searchMode = parser.value( searchModeOption ).trimmed().toLower();
     options.label = parser.value( labelOption ).trimmed();
     if ( options.label.isEmpty() ) {
         options.label = options.engine;
@@ -795,11 +808,212 @@ CaseResult benchmarkCase( const FilePrepResult& filePrepResult, const IndexedLog
     return result;
 }
 
+// Incremental search benchmark: full search on first 90% of lines, then
+// updateSearch on the remaining 10%.  Measures only the incremental portion.
+CaseResult benchmarkCaseIncremental( const FilePrepResult& filePrepResult,
+                                      const IndexedLogData& indexedLog,
+                                      const BenchmarkOptions& options, const SizeSpec& size,
+                                      const ProfileSpec& profile, QTextStream& err )
+{
+    CaseResult result;
+    result.sizeId = size.id;
+    result.sizeLabel = size.label;
+    result.requestedBytes = size.requestedBytes;
+    result.actualBytes = filePrepResult.actualBytes;
+    result.profileId = profile.id;
+    result.profileLabel = profile.label;
+    result.profileDescription = profile.description;
+    result.pattern = profile.pattern;
+    result.reusedInput = filePrepResult.reusedInput;
+    result.generationMs = filePrepResult.generationMs;
+    result.indexMs = indexedLog.indexMs;
+
+    const auto totalLines = indexedLog.logData->getNbLine();
+    const auto splitLine = LineNumber( static_cast<LineNumber::UnderlyingType>( totalLines.get() * 9 / 10 ) );
+    const auto endLine = LineNumber( totalLines.get() );
+    result.searchedLineCount = static_cast<quint64>( totalLines.get() - splitLine.get() );
+
+    err << "Running incremental " << options.label << " size=" << size.label
+        << " profile=" << profile.id << " split=" << splitLine.get() << "/" << totalLines.get()
+        << " warmup=" << options.warmup << " iterations=" << options.iterations
+        << QLatin1Char( '\n' );
+
+    const auto incrementalMib
+        = static_cast<double>( filePrepResult.actualBytes ) / 10.0 / ( 1024.0 * 1024.0 );
+
+    for ( int iteration = 0; iteration < options.iterations; ++iteration ) {
+        auto filteredData = indexedLog.logData->getNewFilteredData();
+        const RegularExpressionPattern pattern{ profile.pattern };
+
+        // Phase 1: full search on first 90% (establishes watermark)
+        if ( !startAndWaitForSearch( *filteredData, static_cast<int>( SearchTimeoutMs ),
+                                     [ &filteredData, &pattern, &splitLine ] {
+                                         filteredData->runSearch( pattern, 0_lnum, splitLine );
+                                     } ) ) {
+            throw std::runtime_error( "Incremental: initial search timed out" );
+        }
+
+        // Phase 2: measure only the incremental update (remaining 10%)
+        QElapsedTimer timer;
+        timer.start();
+        if ( !startAndWaitForSearch( *filteredData, static_cast<int>( SearchTimeoutMs ),
+                                     [ &filteredData, &endLine ] {
+                                         filteredData->updateSearch( 0_lnum, endLine );
+                                     } ) ) {
+            throw std::runtime_error( "Incremental: update search timed out" );
+        }
+
+        const auto searchMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
+        result.matchCount = filteredData->getNbMatches().get();
+        result.searchMsIterations.push_back( searchMs );
+        result.throughputMiBsIterations.push_back( incrementalMib / ( searchMs / 1000.0 ) );
+    }
+
+    if ( result.searchedLineCount > 0 ) {
+        result.hitRate = static_cast<double>( result.matchCount )
+                       / static_cast<double>( totalLines.get() );
+    }
+
+    result.searchMs = computeStats( result.searchMsIterations );
+    result.throughputMiBs = computeStats( result.throughputMiBsIterations );
+    return result;
+}
+
+// Streaming benchmark: simulates ADB logcat live source.
+// A writer thread appends data at a fixed rate while search runs concurrently.
+// Measures: total search time to cover all lines, search lag (watermark behind data).
+CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSpec& size,
+                                    const ProfileSpec& profile, QTextStream& err )
+{
+    CaseResult result;
+    result.sizeId = size.id;
+    result.sizeLabel = size.label;
+    result.searchMode = QLatin1String( "streaming" );
+    result.requestedBytes = size.requestedBytes;
+    result.profileId = profile.id;
+    result.profileLabel = profile.label;
+    result.profileDescription = profile.description;
+    result.pattern = profile.pattern;
+
+    // Use a smaller target for streaming to keep wall-clock time reasonable
+    const auto streamBytes = qMin( size.requestedBytes, static_cast<quint64>( 50 ) * 1024 * 1024 );
+    const auto targetLines = static_cast<quint64>( streamBytes / 200 ); // ~200 bytes/line average
+
+    err << "Running streaming " << options.label << " size=" << size.label
+        << " profile=" << profile.id << " targetLines=" << targetLines
+        << " iterations=" << options.iterations << QLatin1Char( '\n' );
+
+    const auto streamMib = static_cast<double>( streamBytes ) / ( 1024.0 * 1024.0 );
+
+    for ( int iteration = 0; iteration < options.iterations; ++iteration ) {
+        auto captureId = QString( "bench-stream-%1" ).arg( iteration );
+        auto streamingLogData = std::make_unique<StreamingLogData>( captureId );
+        auto filteredData = streamingLogData->getNewFilteredData();
+
+        // Pre-generate all lines to remove generation overhead from measurement
+        std::vector<QByteArray> allLines;
+        allLines.reserve( targetLines );
+        std::array<char, 512> lineBuffer{};
+        for ( quint64 i = 0; i < targetLines; ++i ) {
+            const auto length
+                = formatLogLine( i, options.seed, lineBuffer.data(), lineBuffer.size() );
+            allLines.emplace_back( lineBuffer.data(), length );
+        }
+
+        // Start search with auto-refresh
+        const RegularExpressionPattern pattern{ profile.pattern };
+        std::atomic<bool> searchDone{ false };
+        std::atomic<int> searchUpdates{ 0 };
+
+        QObject::connect( filteredData.get(), &LogFilteredData::searchProgressed,
+                          [ &searchDone, &searchUpdates ]( LinesCount, int progress, LineNumber ) {
+                              searchUpdates.fetch_add( 1 );
+                              if ( progress >= 100 ) {
+                                  searchDone.store( true );
+                              }
+                          } );
+
+        QElapsedTimer timer;
+        timer.start();
+
+        // Feed all lines in batches simulating ~5000 lines/sec rate
+        constexpr int batchSize = 50;
+        constexpr auto batchDelay = std::chrono::microseconds( 10000 ); // 50 lines per 10ms = 5000/s
+        quint64 linesWritten = 0;
+
+        for ( quint64 i = 0; i < targetLines; i += batchSize ) {
+            QByteArray batch;
+            const auto end = qMin( i + batchSize, targetLines );
+            for ( quint64 j = i; j < end; ++j ) {
+                batch.append( allLines[ j ] );
+            }
+            streamingLogData->appendUtf8( batch );
+            linesWritten = end;
+
+            // Trigger search update (simulates loadingFinished → updateSearch)
+            if ( i == 0 ) {
+                filteredData->runSearch( pattern, 0_lnum,
+                                         LineNumber( streamingLogData->getNbLine().get() ) );
+            }
+            else {
+                filteredData->updateSearch( 0_lnum,
+                                             LineNumber( streamingLogData->getNbLine().get() ) );
+            }
+
+            // Process Qt events (signals, search progress)
+            QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
+
+            // Simulate rate limiting
+            std::this_thread::sleep_for( batchDelay );
+        }
+
+        // Stop feeding, then do a final catch-up search that won't be
+        // interrupted.  Loop updateSearch until the watermark covers all lines.
+        streamingLogData->finishInput();
+        const auto finalEnd = LineNumber( streamingLogData->getNbLine().get() );
+
+        // Keep running updateSearch until all lines are covered
+        for ( int catchup = 0; catchup < 100; ++catchup ) {
+            searchDone.store( false );
+            if ( !startAndWaitForSearch( *filteredData, static_cast<int>( SearchTimeoutMs ),
+                                         [ &filteredData, &finalEnd ] {
+                                             filteredData->updateSearch( 0_lnum, finalEnd );
+                                         } ) ) {
+                break;
+            }
+            // Check if search covered all lines (progress == 100)
+            if ( searchDone.load() ) {
+                break;
+            }
+        }
+
+        const auto totalMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
+        result.matchCount = filteredData->getNbMatches().get();
+        result.searchedLineCount = static_cast<quint64>( linesWritten );
+        result.actualBytes = streamBytes;
+        result.searchMsIterations.push_back( totalMs );
+        result.throughputMiBsIterations.push_back( streamMib / ( totalMs / 1000.0 ) );
+
+        // Cleanup capture files
+        streamingLogData->deleteCaptureFiles();
+    }
+
+    if ( result.searchedLineCount > 0 ) {
+        result.hitRate = static_cast<double>( result.matchCount )
+                       / static_cast<double>( result.searchedLineCount );
+    }
+
+    result.searchMs = computeStats( result.searchMsIterations );
+    result.throughputMiBs = computeStats( result.throughputMiBsIterations );
+    return result;
+}
+
 QJsonObject caseResultToJson( const CaseResult& result )
 {
     return QJsonObject{
         { QLatin1String( "size_id" ), result.sizeId },
         { QLatin1String( "size_label" ), result.sizeLabel },
+        { QLatin1String( "search_mode" ), result.searchMode },
         { QLatin1String( "requested_bytes" ), static_cast<qint64>( result.requestedBytes ) },
         { QLatin1String( "actual_bytes" ), static_cast<qint64>( result.actualBytes ) },
         { QLatin1String( "searched_line_count" ),
@@ -856,6 +1070,7 @@ QJsonObject buildJsonReport( const BenchmarkOptions& options, const QVector<Case
           QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) },
         { QLatin1String( "engine" ), options.engine },
         { QLatin1String( "scan_mode" ), options.scanMode },
+        { QLatin1String( "search_mode" ), options.searchMode },
         { QLatin1String( "label" ), options.label },
         { QLatin1String( "tmpfs_dir" ), options.tmpfsDir },
         { QLatin1String( "iterations" ), options.iterations },
@@ -991,9 +1206,26 @@ int main( int argc, char* argv[] )
 
             const auto indexedLog = indexLogFile( filePrepResult.path );
 
+            const auto isAll = options.searchMode == QLatin1String( "all" );
+            const bool runFull = isAll || options.searchMode == QLatin1String( "full" );
+            const bool runIncremental = isAll || options.searchMode == QLatin1String( "incremental" );
+            const bool runStreaming = isAll || options.searchMode == QLatin1String( "streaming" );
+
             for ( const auto& profile : options.profiles ) {
-                results.push_back(
-                    benchmarkCase( filePrepResult, indexedLog, options, size, profile, err ) );
+                if ( runFull ) {
+                    results.push_back(
+                        benchmarkCase( filePrepResult, indexedLog, options, size, profile, err ) );
+                }
+                if ( runIncremental ) {
+                    auto incrResult = benchmarkCaseIncremental( filePrepResult, indexedLog, options,
+                                                                size, profile, err );
+                    incrResult.searchMode = QLatin1String( "incremental" );
+                    results.push_back( std::move( incrResult ) );
+                }
+                if ( runStreaming ) {
+                    results.push_back(
+                        benchmarkCaseStreaming( options, size, profile, err ) );
+                }
             }
         }
 

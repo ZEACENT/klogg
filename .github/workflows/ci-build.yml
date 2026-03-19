@@ -321,7 +321,10 @@ jobs:
         shell: sh
         run: |
           # Disable Sentry on macOS due to Crashpad incompatibility with newer Xcode SDKs
-          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
+          # macOS 15+ requires at least 2018 Macs (Kaby Lake / Apple Silicon),
+          # all of which support AVX2 / NEON.  Use GENERIC_CPU=OFF to enable
+          # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
+          echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
       
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
