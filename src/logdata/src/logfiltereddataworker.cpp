@@ -105,29 +105,17 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
     results.chunkStart = chunkStart;
     results.processedLines = LinesCount{ rawLines.endOfLines.size() };
 
-    // Try bulk buffer scanning first — one Vectorscan call for the
-    // entire chunk instead of per-line calls.
-    if ( matcher.hasBufferScan() && !rawLines.buffer.empty() ) {
-        klogg::vector<uint64_t> matchedLineIndices;
-        const bool scanned = matcher.scanBuffer(
-            rawLines.buffer.data(), static_cast<unsigned int>( rawLines.buffer.size() ),
-            rawLines.endOfLines, matchedLineIndices );
+    // Block scan (one hs_scan over the whole buffer) saves per-line call
+    // overhead but pays callback + binary-search + dedup cost per match
+    // position.  Benchmarks show this is only beneficial for small chunks
+    // (≤ ~5000 lines) where SIMD startup cost dominates.  For larger chunks
+    // the sequential per-line access pattern has better cache locality.
+    // Disabled for now: per-line is consistently faster at production scales.
+    //
+    // TODO: re-evaluate after optimizing callback path (bitmap dedup,
+    //       cached segment lookup, or Vectorscan streaming mode).
 
-        if ( scanned ) {
-            const auto& lines = rawLines.buildUtf8View();
-            for ( const auto localIndex : matchedLineIndices ) {
-                const auto lineNumber = chunkStart + LinesCount{ localIndex };
-                results.matchingLines.add( lineNumber.get() );
-                if ( localIndex < lines.size() ) {
-                    results.maxLength
-                        = qMax( results.maxLength, getUntabifiedLength( lines[ localIndex ] ) );
-                }
-            }
-            return results;
-        }
-    }
-
-    // Fallback: per-line matching
+    // Per-line matching
     const auto& lines = rawLines.buildUtf8View();
 
     for ( auto offset = 0u; offset < lines.size(); ++offset ) {

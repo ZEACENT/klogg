@@ -933,13 +933,19 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
                               }
                           } );
 
+        // Feed all data in large batches (10,000 lines — matching the search
+        // chunk size) with a few updateSearch triggers.  This models the real
+        // application where scheduleLoadingFinished() coalesces many small
+        // appendUtf8 calls into fewer search triggers.
+        //
+        // We measure:
+        //   totalMs     = wall-clock from first append to search completion
+        //   searchCount = number of updateSearch calls (thread create/join cycles)
+        constexpr quint64 batchSize = 10000;
+        quint64 linesWritten = 0;
+
         QElapsedTimer timer;
         timer.start();
-
-        // Feed all lines in batches simulating ~5000 lines/sec rate
-        constexpr int batchSize = 50;
-        constexpr auto batchDelay = std::chrono::microseconds( 10000 ); // 50 lines per 10ms = 5000/s
-        quint64 linesWritten = 0;
 
         for ( quint64 i = 0; i < targetLines; i += batchSize ) {
             QByteArray batch;
@@ -950,7 +956,7 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             streamingLogData->appendUtf8( batch );
             linesWritten = end;
 
-            // Trigger search update (simulates loadingFinished → updateSearch)
+            // Trigger search (one per batch — models coalesced loadingFinished)
             if ( i == 0 ) {
                 filteredData->runSearch( pattern, 0_lnum,
                                          LineNumber( streamingLogData->getNbLine().get() ) );
@@ -962,17 +968,12 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
 
             // Process Qt events (signals, search progress)
             QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
-
-            // Simulate rate limiting
-            std::this_thread::sleep_for( batchDelay );
         }
 
-        // Stop feeding, then do a final catch-up search that won't be
-        // interrupted.  Loop updateSearch until the watermark covers all lines.
+        // Final catch-up: wait for search to cover all ingested lines.
         streamingLogData->finishInput();
         const auto finalEnd = LineNumber( streamingLogData->getNbLine().get() );
 
-        // Keep running updateSearch until all lines are covered
         for ( int catchup = 0; catchup < 100; ++catchup ) {
             searchDone.store( false );
             if ( !startAndWaitForSearch( *filteredData, static_cast<int>( SearchTimeoutMs ),
@@ -981,7 +982,6 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
                                          } ) ) {
                 break;
             }
-            // Check if search covered all lines (progress == 100)
             if ( searchDone.load() ) {
                 break;
             }
