@@ -528,11 +528,11 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
     klogg::vector<MatcherData> matcherData;
     matcherData.reserve( matchingThreadsCount );
-    std::shared_ptr<RegularExpression> ownedExpression2;
+    std::shared_ptr<RegularExpression> ownedExpression;
     if ( !compiledRegExp_ ) {
-        ownedExpression2 = std::make_shared<RegularExpression>( regexp_ );
+        ownedExpression = std::make_shared<RegularExpression>( regexp_ );
     }
-    const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression2;
+    const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
     for ( auto index = 0u; index < matchingThreadsCount; ++index ) {
         matcherData.push_back( { regularExpression.createMatcher(), microseconds{ 0 } } );
     }

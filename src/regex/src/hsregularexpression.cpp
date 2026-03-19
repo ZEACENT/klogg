@@ -23,6 +23,7 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <qregularexpression.h>
 #include <string_view>
 
@@ -69,7 +70,10 @@ struct BufferScanContext {
     klogg::vector<uint64_t>* matchedLineIndices;
     // For multi-pattern boolean mode:
     std::vector<MatchedPatterns>* perLinePatterns;
-    uint64_t lastMatchedLine; // dedup within same line
+    // Robust dedup: Vectorscan reports matches in byte-offset order for block
+    // mode, but we use a set to be safe against any future pattern type that
+    // could produce out-of-order callbacks.
+    std::set<uint64_t>* seenLines;
 };
 
 int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned long long to,
@@ -86,8 +90,7 @@ int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned
     const auto lineIndex = static_cast<uint64_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
 
     // Deduplicate: multiple matches in the same line produce multiple callbacks
-    if ( lineIndex != ctx->lastMatchedLine ) {
-        ctx->lastMatchedLine = lineIndex;
+    if ( ctx->seenLines->insert( lineIndex ).second ) {
         ctx->matchedLineIndices->push_back( lineIndex );
     }
     return 0; // continue scanning
@@ -205,11 +208,12 @@ void HsBufferScanner::scan( const char* data, unsigned int size,
         return;
     }
 
+    std::set<uint64_t> seenLines;
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
     ctx.matchedLineIndices = &matchedLineIndices;
     ctx.perLinePatterns = nullptr;
-    ctx.lastMatchedLine = std::numeric_limits<uint64_t>::max();
+    ctx.seenLines = &seenLines;
 
     hs_scan( database_.get(), data, size, 0, scratch_.get(), bufferScanSingleCallback,
              static_cast<void*>( &ctx ) );
@@ -227,7 +231,7 @@ void HsBufferScanner::scanMulti( const char* data, unsigned int size,
     ctx.endOfLines = &endOfLines;
     ctx.matchedLineIndices = nullptr;
     ctx.perLinePatterns = &perLinePatterns;
-    ctx.lastMatchedLine = std::numeric_limits<uint64_t>::max();
+    ctx.seenLines = nullptr; // multi callback doesn't need dedup (idempotent set)
 
     hs_scan( database_.get(), data, size, 0, scratch_.get(), bufferScanMultiCallback,
              static_cast<void*>( &ctx ) );

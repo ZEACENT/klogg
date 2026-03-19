@@ -276,6 +276,11 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             = qMin( number.get(), static_cast<LinesCount::UnderlyingType>( availableLines ) );
         lineRefs.reserve( requestedLines );
 
+        // Cache the current segment to avoid repeated binary searches.
+        // Consecutive lines almost always fall within the same segment.
+        auto cachedSegIt = segments_.cend();
+        qint64 cachedPrevEnd = 0;
+
         for ( LinesCount::UnderlyingType lineOffset = 0; lineOffset < requestedLines;
               ++lineOffset ) {
             const auto lineNum = first + LinesCount( lineOffset );
@@ -283,30 +288,34 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                 break;
             }
 
-            const auto segmentIt = std::lower_bound(
-                segments_.cbegin(), segments_.cend(), lineNum.get(),
-                []( const Segment& segment, qint64 value ) {
-                    return segment.cumulativeEndLine <= value;
-                } );
-            if ( segmentIt == segments_.cend() ) {
-                break;
+            // Advance the cached segment iterator if the line is beyond it.
+            if ( cachedSegIt == segments_.cend()
+                 || lineNum.get<qint64>() >= cachedSegIt->cumulativeEndLine ) {
+                cachedSegIt = std::lower_bound(
+                    segments_.cbegin(), segments_.cend(), lineNum.get(),
+                    []( const Segment& segment, qint64 value ) {
+                        return segment.cumulativeEndLine <= value;
+                    } );
+                if ( cachedSegIt == segments_.cend() ) {
+                    break;
+                }
+                const auto segIdx
+                    = static_cast<size_t>( std::distance( segments_.cbegin(), cachedSegIt ) );
+                cachedPrevEnd = segIdx == 0 ? 0LL : segments_[ segIdx - 1 ].cumulativeEndLine;
             }
 
-            const auto segmentIndex
-                = static_cast<size_t>( std::distance( segments_.cbegin(), segmentIt ) );
-            const qint64 previousEndLine
-                = segmentIndex == 0 ? 0LL : segments_[ segmentIndex - 1 ].cumulativeEndLine;
-            const auto localLine = static_cast<int>( lineNum.get<qint64>() - previousEndLine );
+            const auto localLine
+                = static_cast<int>( lineNum.get<qint64>() - cachedPrevEnd );
 
-            if ( localLine < 0 || localLine >= klogg::isize( segmentIt->lineOffsets ) ) {
+            if ( localLine < 0 || localLine >= klogg::isize( cachedSegIt->lineOffsets ) ) {
                 break;
             }
 
             LineRef ref;
-            ref.memoryData = segmentIt->memoryData; // shared_ptr copy keeps data alive
-            ref.filePath = segmentIt->filePath;
-            ref.offset = segmentIt->lineOffsets[ static_cast<size_t>( localLine ) ];
-            ref.length = segmentIt->lineLengths[ static_cast<size_t>( localLine ) ];
+            ref.memoryData = cachedSegIt->memoryData; // shared_ptr copy keeps data alive
+            ref.filePath = cachedSegIt->filePath;
+            ref.offset = cachedSegIt->lineOffsets[ static_cast<size_t>( localLine ) ];
+            ref.length = cachedSegIt->lineLengths[ static_cast<size_t>( localLine ) ];
             lineRefs.push_back( std::move( ref ) );
         }
     }
