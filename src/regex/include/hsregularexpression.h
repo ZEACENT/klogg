@@ -163,7 +163,8 @@ class HsBufferScanner {
                const klogg::vector<qint64>& endOfLines,
                klogg::vector<uint64_t>& matchedLineIndices ) const;
 
-    // Multi-pattern variant: fills perLinePatterns[lineIndex][patternId] = 1
+    // Multi-pattern variant: sets perLinePatterns[lineIndex][patternId] to
+    // a non-zero char (MatchedPatterns is a packed boolean std::string)
     void scanMulti( const char* data, unsigned int size,
                     const klogg::vector<qint64>& endOfLines,
                     std::vector<MatchedPatterns>& perLinePatterns ) const;

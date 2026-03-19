@@ -764,11 +764,14 @@ jobs:
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
           # Retry to handle brief API propagation delay
+          draft=""
+          prerelease=""
           for i in 1 2 3; do
-            draft="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft' 2>/dev/null)" && break
+            draft="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft' 2>/dev/null)" \
+              && prerelease="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease' 2>/dev/null)" \
+              && break
             sleep 3
           done
-          prerelease="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')"
 
           echo "continuous release flags: draft=${draft} prerelease=${prerelease}"
           if [ "${draft}" != "false" ] || [ "${prerelease}" != "true" ]; then

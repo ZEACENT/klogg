@@ -331,16 +331,27 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
     rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
     rawLines.prefilterPattern = prefilterPattern;
 
+    // Cache file handle for spilled segments to avoid repeated open/close
+    // when consecutive lines come from the same segment file.
+    QString cachedFilePath;
+    std::unique_ptr<QFile> cachedFile;
+
     for ( const auto& ref : lineRefs ) {
         QByteArray utf8Line;
         if ( ref.memoryData ) {
             utf8Line = ref.memoryData->mid( type_safe::narrow_cast<int>( ref.offset ), ref.length );
         }
         else {
-            QFile file( ref.filePath );
-            if ( file.open( QIODevice::ReadOnly ) ) {
-                file.seek( ref.offset );
-                utf8Line = file.read( ref.length );
+            if ( cachedFilePath != ref.filePath || !cachedFile ) {
+                cachedFile = std::make_unique<QFile>( ref.filePath );
+                if ( !cachedFile->open( QIODevice::ReadOnly ) ) {
+                    cachedFile.reset();
+                }
+                cachedFilePath = ref.filePath;
+            }
+            if ( cachedFile && cachedFile->isOpen() ) {
+                cachedFile->seek( ref.offset );
+                utf8Line = cachedFile->read( ref.length );
             }
         }
         const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );

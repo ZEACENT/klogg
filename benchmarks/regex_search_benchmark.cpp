@@ -852,6 +852,7 @@ CaseResult benchmarkCaseIncremental( const FilePrepResult& filePrepResult,
                                      } ) ) {
             throw std::runtime_error( "Incremental: initial search timed out" );
         }
+        const auto matchesBefore = filteredData->getNbMatches().get();
 
         // Phase 2: measure only the incremental update (remaining 10%)
         QElapsedTimer timer;
@@ -864,7 +865,8 @@ CaseResult benchmarkCaseIncremental( const FilePrepResult& filePrepResult,
         }
 
         const auto searchMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
-        result.matchCount = filteredData->getNbMatches().get();
+        const auto matchesAfter = filteredData->getNbMatches().get();
+        result.matchCount = matchesAfter - matchesBefore;
         result.searchMsIterations.push_back( searchMs );
         result.throughputMiBsIterations.push_back( incrementalMib / ( searchMs / 1000.0 ) );
     }

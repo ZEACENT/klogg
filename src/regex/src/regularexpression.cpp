@@ -259,6 +259,7 @@ bool PatternMatcher::scanBuffer( const char* data, unsigned int size,
                                   const klogg::vector<qint64>& endOfLines,
                                   klogg::vector<uint64_t>& matchedLineIndices ) const
 {
+    matchedLineIndices.clear();
 #ifdef KLOGG_HAS_VECTORSCAN
     if ( !bufferScanner_ ) {
         return false;

@@ -326,7 +326,7 @@ Each `hasMatch()` call invokes `hs_scan()` on the individual line buffer.
 
 | Variant          | Flags                                        | Purpose                        |
 |------------------|----------------------------------------------|--------------------------------|
-| Primary          | `HS_FLAG_UTF8 | HS_FLAG_UCP | HS_FLAG_SINGLEMATCH` | Exact matching, terminates on first match |
+| Primary          | `HS_FLAG_UTF8 \| HS_FLAG_UCP \| HS_FLAG_SINGLEMATCH` | Exact matching, terminates on first match |
 | Prefilter        | Same + `HS_FLAG_PREFILTER`                   | Fallback when primary compilation fails (unsupported syntax) |
 
 The primary database is tried first.  If `hs_compile_multi` fails (e.g. the

@@ -77,6 +77,10 @@ runs:
                 install_name_tool -delete_rpath "${qt_dir}/lib" ./output/klogg.app/Contents/MacOS/klogg 2>/dev/null || true
             fi
         done
+        # Re-sign after rpath modification (install_name_tool invalidates the code signature)
+        if [ -n "${{ env.KLOGG_CODESIGN }}" ]; then
+            codesign -v -f -o runtime --deep --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./output/klogg.app 2>/dev/null || true
+        fi
         # Run cpack - capture exit code but continue even if detach fails
         set +e
         cpack --verbose -G "DragNDrop"

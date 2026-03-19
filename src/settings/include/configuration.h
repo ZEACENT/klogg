@@ -629,7 +629,7 @@ class Configuration final : public Persistable<Configuration> {
     bool useSearchResultsCache_ = true;
     unsigned searchResultsCacheLines_ = 1000000;
     bool useParallelSearch_ = true;
-    bool useBlockScan_ = true;
+    bool useBlockScan_ = false;
     int indexReadBufferSizeMb_ = 16;
     int searchReadBufferSizeLines_ = 10000;
     int searchThreadPoolSize_ = 0;
