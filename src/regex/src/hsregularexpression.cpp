@@ -450,6 +450,10 @@ std::unique_ptr<HsBufferScanner> HsRegularExpression::createBufferScanner() cons
         },
         blockScratch_.get() );
 
+    if ( !scannerScratch ) {
+        return nullptr;
+    }
+
     return std::make_unique<HsBufferScanner>( blockDatabase_, std::move( scannerScratch ),
                                                patterns_.size() );
 }

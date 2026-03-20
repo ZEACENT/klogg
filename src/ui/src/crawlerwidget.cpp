@@ -597,11 +597,13 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
 
             // For live sources / growing files, show remaining lines instead of
             // percentage since the percentage becomes misleading when the file
-            // keeps growing.  For static files, show the classic percentage.
-            const auto totalLines = logData_->getNbLine();
+            // keeps growing.  Use the active search window (searchStartLine_ to
+            // searchEndLine_) rather than the full file to avoid overstating
+            // pending work during incremental/autorefresh searches.
+            const auto windowSize = searchEndLine_.get() - searchStartLine_.get();
             const auto linesProcessed = static_cast<LinesCount::UnderlyingType>(
-                totalLines.get() * static_cast<LinesCount::UnderlyingType>( progress ) / 100 );
-            const auto remaining = totalLines.get() - linesProcessed;
+                windowSize * static_cast<LinesCount::UnderlyingType>( progress ) / 100 );
+            const auto remaining = windowSize - linesProcessed;
 
             QString progressText;
             if ( logData_->isLiveSource() && remaining > 0 ) {

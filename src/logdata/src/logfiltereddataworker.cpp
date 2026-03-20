@@ -112,8 +112,14 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
     // the sequential per-line access pattern has better cache locality.
     // Disabled for now: per-line is consistently faster at production scales.
     //
-    // TODO: re-evaluate after optimizing callback path (bitmap dedup,
-    //       cached segment lookup, or Vectorscan streaming mode).
+    // Known issue: block scan produces ~10% fewer matches for complex
+    // patterns (alternations, optional groups) due to the `to-1` byte
+    // offset in the callback not always landing inside the matching line
+    // for multi-position match reports.
+    //
+    // TODO: re-evaluate after fixing the callback offset logic and
+    //       optimizing the callback path (bitmap dedup, cached segment
+    //       lookup, or Vectorscan streaming mode).
 
     // Per-line matching
     const auto& lines = rawLines.buildUtf8View();

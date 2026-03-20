@@ -242,6 +242,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     useParallelSearch_
         = settings.value( "perf.useParallelSearch", DefaultConfiguration.useParallelSearch_ )
               .toBool();
+    useBlockScan_
+        = settings.value( "perf.useBlockScan", DefaultConfiguration.useBlockScan_ ).toBool();
     useSearchResultsCache_
         = settings
               .value( "perf.useSearchResultsCache", DefaultConfiguration.useSearchResultsCache_ )
@@ -435,6 +437,7 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "archives.extractAlways", extractArchivesAlways_ );
 
     settings.setValue( "perf.useParallelSearch", useParallelSearch_ );
+    settings.setValue( "perf.useBlockScan", useBlockScan_ );
     settings.setValue( "perf.useSearchResultsCache", useSearchResultsCache_ );
     settings.setValue( "perf.searchResultsCacheLines", searchResultsCacheLines_ );
     settings.setValue( "perf.indexReadBufferSizeMb", indexReadBufferSizeMb_ );

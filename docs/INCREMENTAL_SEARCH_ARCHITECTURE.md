@@ -21,7 +21,7 @@ The design achieves three goals simultaneously:
 
 ## Architecture Diagram
 
-```
+```text
   Data sources
   ============
   File on disk            CaptureStore (live stream)
@@ -93,7 +93,7 @@ The design achieves three goals simultaneously:
   |  | HsPrefilterMatcher                    |
   |  | DefaultRegularExpressionMatcher        |
   +------------------------------------------+
-```
+```text
 
 ---
 
@@ -142,13 +142,13 @@ Key properties:
 
 When `UpdateSearchOperation::run()` starts, it computes:
 
-```
+```text
 initialLine = max(searchData.getLastProcessedLine(), initialPosition_)
 if initialLine >= 1:
     initialLine--                     // re-check last line (may not have been LF-terminated)
     searchData.deleteMatch(initialLine)  // avoid double-counting
 doSearch(searchData, initialLine)
-```
+```text
 
 The one-line backup handles the edge case where the previously-last line was
 incomplete (no trailing newline) and has since had more bytes appended to it.
@@ -163,7 +163,7 @@ buffering.
 
 ### Timeline
 
-```
+```text
   Time ---->
 
   Data source:  [lines 0..999]  [lines 1000..1999]  [lines 2000..2999]
@@ -181,7 +181,7 @@ buffering.
   Search worker: |---UpdateSearch---X    |--UpdateSearch--|
                   watermark=0->700       watermark=700->2000
                   (interrupted at 700)   (resumes from 700)
-```
+```text
 
 ### The Interrupt Mechanism
 
@@ -251,7 +251,7 @@ being indexed.
 Locks must always be acquired in the order shown below (outermost first).
 Acquiring them in a different order risks deadlock.
 
-```
+```text
   operationsMutex_          (LogFilteredDataWorker -- Mutex)
       |
       v
@@ -262,7 +262,7 @@ Acquiring them in a different order risks deadlock.
       |
       v
   searchProgressMutex_      (LogFilteredData -- Mutex -- protects searchProgress_ tuple)
-```
+```text
 
 ### operationGeneration_ Atomic Counter
 
@@ -274,7 +274,7 @@ current value:
 
 ```cpp
 if (generation != operationGeneration_.load()) return;  // stale, discard
-```
+```text
 
 This filters out progress/finished signals from a search that has already been
 superseded, avoiding races where a delayed signal from search N arrives after
@@ -316,7 +316,7 @@ for (auto offset = 0u; offset < lines.size(); ++offset) {
         results.matchingLines.add(lineNumber.get());
     }
 }
-```
+```text
 
 Each `hasMatch()` call invokes `hs_scan()` on the individual line buffer.
 
