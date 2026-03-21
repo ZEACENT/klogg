@@ -167,7 +167,8 @@ void ProcessLiveSourceTransport::disconnectTransport()
 
         // Async cleanup, non-blocking
         dying->terminate();
-        QObject::connect( dying, &QProcess::finished,
+        QObject::connect( dying,
+                          qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
                           dying, &QObject::deleteLater );
         QPointer<QProcess> guard( dying );
         QTimer::singleShot( 1500, dying, [ guard ] {
