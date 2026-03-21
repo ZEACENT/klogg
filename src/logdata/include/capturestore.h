@@ -1,6 +1,7 @@
 #ifndef CAPTURESTORE_H
 #define CAPTURESTORE_H
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 
@@ -87,6 +88,13 @@ class CaptureStore {
     bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
     bool writeCaptureToDevice( QIODevice* device ) const;
     void appendOutputBytes( const QByteArray& bytes );
+    void flushOutputIfNeeded();
+    void resetOutputFlushCounters();
+
+    static constexpr qint64 OutputFlushBytesThreshold = 64 * 1024;
+    static constexpr int OutputFlushLinesThreshold = 100;
+    static constexpr std::chrono::steady_clock::duration OutputFlushTimeThreshold
+        = std::chrono::seconds( 1 );
 
   private:
     QString captureId_;
@@ -106,6 +114,10 @@ class CaptureStore {
     QDateTime lastModified_;
     bool persistBufferedSegmentsOnDestroy_ = true;
     mutable std::recursive_mutex mutex_;
+
+    qint64 unflushedOutputBytes_ = 0;
+    int unflushedOutputLines_ = 0;
+    std::chrono::steady_clock::time_point lastOutputFlushTime_{};
 };
 
 #endif

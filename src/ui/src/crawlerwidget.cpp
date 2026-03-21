@@ -576,11 +576,17 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
     searchInfoLine_->show();
 
     if ( progress == 100 ) {
+        // Reset pending lines when search completes
+        if ( searchPendingLines_ != 0 ) {
+            searchPendingLines_ = 0;
+            Q_EMIT searchPendingLinesChanged();
+        }
+
         // Searching done - apply context lines if mode is active
         if ( contextLinesMode_ > 0 && contextLinesSpinBox_->value() > 0 ) {
             applyContextLines();
         }
-        
+
         printSearchInfoMessage( nbMatches );
         searchInfoLine_->hideGauge();
         // De-activate the stop button
@@ -602,6 +608,13 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
             const auto totalLines = logData_->getNbLine();
             const auto remaining = totalLines.get()
                                  * static_cast<LinesCount::UnderlyingType>( 100 - progress ) / 100;
+
+            // Update pending lines for status bar display
+            const auto newPending = static_cast<qint64>( remaining );
+            if ( newPending != searchPendingLines_ ) {
+                searchPendingLines_ = newPending;
+                Q_EMIT searchPendingLinesChanged();
+            }
 
             QString progressText;
             if ( logData_->isLiveSource() && remaining > 0 ) {

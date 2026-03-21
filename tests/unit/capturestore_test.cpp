@@ -404,3 +404,105 @@ TEST_CASE( "CaptureStore buildRawLines snapshot spans in-memory and spilled segm
     REQUIRE( store.lineAt( LineNumber( 9 ), codec, QRegularExpression{} )
              == QStringLiteral( "juliet" ) );
 }
+
+TEST_CASE( "CaptureStore batched output defers flush below threshold" )
+{
+    const auto rootPath = makeTestDir( "capturestore_batched_flush" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "batched.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    // Append a small amount of data (well below 64KB and 100 lines)
+    for ( int i = 0; i < 10; ++i ) {
+        store.appendUtf8( QStringLiteral( "short-line-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    // Before explicit flush, data may not yet be on disk (deferred)
+    {
+        QFile preFlush( outputPath );
+        REQUIRE( preFlush.open( QIODevice::ReadOnly ) );
+        // The file exists (bindOutputFile wrote existing data), but the 10 new
+        // lines should not have been flushed yet since we are below all thresholds.
+        const auto preContent = QString::fromUtf8( preFlush.readAll() );
+        CHECK_FALSE( preContent.contains( QStringLiteral( "short-line-9" ) ) );
+    }
+
+    // After explicit flush, all data should be on disk
+    store.flush();
+    const auto content = readUtf8File( outputPath );
+    REQUIRE( content.contains( QStringLiteral( "short-line-9" ) ) );
+}
+
+TEST_CASE( "CaptureStore batched output auto-flushes after byte threshold" )
+{
+    const auto rootPath = makeTestDir( "capturestore_byte_threshold" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "big.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    // Append more than 64KB of data to trigger auto-flush
+    const QByteArray bigLine = QByteArray( 1024, 'X' ) + "\n";
+    for ( int i = 0; i < 70; ++i ) {
+        store.appendUtf8( bigLine );
+    }
+
+    // Data should have been auto-flushed (70KB > 64KB threshold)
+    QFile output( outputPath );
+    REQUIRE( output.open( QIODevice::ReadOnly ) );
+    REQUIRE( output.size() > 64 * 1024 );
+}
+
+TEST_CASE( "CaptureStore batched output auto-flushes after line threshold" )
+{
+    const auto rootPath = makeTestDir( "capturestore_line_threshold" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "lines.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    // Append more than 100 lines (each small enough to stay under 64KB total)
+    for ( int i = 0; i < 110; ++i ) {
+        store.appendUtf8( QStringLiteral( "ln-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    // Data should have been auto-flushed (110 lines > 100 line threshold)
+    const auto content = readUtf8File( outputPath );
+    REQUIRE( content.contains( QStringLiteral( "ln-0" ) ) );
+}
+
+TEST_CASE( "CaptureStore finishInput flushes pending output data" )
+{
+    const auto rootPath = makeTestDir( "capturestore_finish_flush" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "finish.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    // Append small amount (under all thresholds)
+    store.appendUtf8( QByteArrayLiteral( "pending-data\n" ) );
+
+    // finishInput should flush remaining data
+    store.finishInput();
+
+    const auto content = readUtf8File( outputPath );
+    REQUIRE( content.contains( QStringLiteral( "pending-data" ) ) );
+}
+
+TEST_CASE( "CaptureStore clear flushes and resets output" )
+{
+    const auto rootPath = makeTestDir( "capturestore_clear_flush" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "clear.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    store.appendUtf8( QByteArrayLiteral( "before-clear\n" ) );
+    store.clear();
+
+    // After clear, the output file should have been truncated
+    QFile output( outputPath );
+    REQUIRE( output.open( QIODevice::ReadOnly ) );
+    REQUIRE( output.size() == 0 );
+}

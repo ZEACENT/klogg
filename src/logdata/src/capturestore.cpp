@@ -133,17 +133,21 @@ void CaptureStore::appendUtf8( const QByteArray& data )
 void CaptureStore::finishInput()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    if ( partialLine_.isEmpty() ) {
-        return;
+    if ( !partialLine_.isEmpty() ) {
+        auto lineBytes = partialLine_;
+        partialLine_.clear();
+        if ( lineBytes.endsWith( '\r' ) ) {
+            lineBytes.chop( 1 );
+        }
+
+        commitLine( lineBytes, false );
     }
 
-    auto lineBytes = partialLine_;
-    partialLine_.clear();
-    if ( lineBytes.endsWith( '\r' ) ) {
-        lineBytes.chop( 1 );
+    // Flush any pending output data
+    if ( boundOutputHandle_ && unflushedOutputBytes_ > 0 ) {
+        boundOutputHandle_->flush();
+        resetOutputFlushCounters();
     }
-
-    commitLine( lineBytes, false );
 }
 
 void CaptureStore::flush()
@@ -151,6 +155,7 @@ void CaptureStore::flush()
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( boundOutputHandle_ ) {
         boundOutputHandle_->flush();
+        resetOutputFlushCounters();
     }
 }
 
@@ -205,6 +210,7 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
     }
 
     boundOutputHandle_ = std::move( outputFile );
+    resetOutputFlushCounters();
     return true;
 }
 
@@ -681,10 +687,41 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes )
         return;
     }
 
-    if ( boundOutputHandle_->write( bytes ) != bytes.size()
-         || !boundOutputHandle_->flush() ) {
+    if ( boundOutputHandle_->write( bytes ) != bytes.size() ) {
         LOG_WARNING << "Bound output file write failed, unbinding: " << boundOutputFile_;
         boundOutputHandle_.reset();
         boundOutputFile_.clear();
+        return;
     }
+
+    unflushedOutputBytes_ += bytes.size();
+    unflushedOutputLines_++;
+    flushOutputIfNeeded();
+}
+
+void CaptureStore::flushOutputIfNeeded()
+{
+    if ( !boundOutputHandle_ || unflushedOutputBytes_ == 0 ) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if ( unflushedOutputBytes_ >= OutputFlushBytesThreshold
+         || unflushedOutputLines_ >= OutputFlushLinesThreshold
+         || now - lastOutputFlushTime_ >= OutputFlushTimeThreshold ) {
+        if ( !boundOutputHandle_->flush() ) {
+            LOG_WARNING << "Bound output file flush failed, unbinding: " << boundOutputFile_;
+            boundOutputHandle_.reset();
+            boundOutputFile_.clear();
+            return;
+        }
+        resetOutputFlushCounters();
+    }
+}
+
+void CaptureStore::resetOutputFlushCounters()
+{
+    unflushedOutputBytes_ = 0;
+    unflushedOutputLines_ = 0;
+    lastOutputFlushTime_ = std::chrono::steady_clock::now();
 }

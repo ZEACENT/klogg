@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <QRegularExpression>
+#include <QTimer>
 
 #include "capturestore.h"
 #include "searchablelogdata.h"
@@ -50,6 +51,8 @@ class StreamingLogData : public SearchableLogData {
 
   private:
     void scheduleLoadingFinished();
+    void startOutputFlushTimer();
+    void stopOutputFlushTimer();
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
 
   private:
@@ -57,6 +60,7 @@ class StreamingLogData : public SearchableLogData {
     TextCodecHolder codec_;
     QRegularExpression prefilterPattern_;
     bool loadingFinishedQueued_ = false;
+    QTimer outputFlushTimer_;
 };
 
 #endif

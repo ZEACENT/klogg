@@ -22,6 +22,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QLineEdit>
 #include <QPushButton>
@@ -249,6 +250,45 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     const auto lastState
         = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
     CHECK( lastState == LiveSourceTransport::State::Disconnected );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
+{
+    LongRunningTestTransport transport;
+
+    REQUIRE( transport.connectTransport() );
+
+    QElapsedTimer timer;
+    timer.start();
+    transport.disconnectTransport();
+    const auto elapsed = timer.elapsed();
+
+    // Disconnect should complete in well under 100ms (no blocking waitForFinished)
+    CHECK( elapsed < 100 );
+
+    // Process events to let async cleanup finish
+    QCoreApplication::processEvents();
+    QTest::qWait( 2000 );
+    QCoreApplication::processEvents();
+}
+
+TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async disconnect" )
+{
+    LongRunningTestTransport transport;
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    REQUIRE( transport.connectTransport() );
+    transport.disconnectTransport();
+
+    // Immediately reconnect — should work since createProcess() made a fresh QProcess
+    REQUIRE( transport.connectTransport() );
+
+    transport.disconnectTransport();
+
+    // Process events to let async cleanup finish
+    QCoreApplication::processEvents();
+    QTest::qWait( 2000 );
+    QCoreApplication::processEvents();
 }
 
 TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edits on accept" )

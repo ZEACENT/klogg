@@ -157,6 +157,7 @@ class MainWindow : public QMainWindow {
     // Must be passed as the internal (starts at 0) line number.
     void lineNumberHandler( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                             LineLength nSymbols );
+    void refreshLineNumberField();
 
     // Instructs the widget to update the loading progress gauge
     void updateLoadingProgress( int progress );
@@ -250,6 +251,12 @@ class MainWindow : public QMainWindow {
     QLabel* lineNbField;
     QLabel* sizeField;
     QLabel* dateField;
+
+    // Last known selection for refreshing line number field
+    LineNumber lastStartLine_{ 0 };
+    LinesCount lastNLines_{ 0 };
+    LineColumn lastStartCol_{ 0 };
+    LineLength lastNSymbols_{ 0 };
     QLabel* encodingField;
     std::vector<QAction*> infoToolbarSeparators;
 

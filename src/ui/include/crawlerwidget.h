@@ -112,6 +112,8 @@ class CrawlerWidget : public QSplitter,
 
     bool isTextWrapEnabled() const;
 
+    qint64 searchPendingLines() const { return searchPendingLines_; }
+
     void registerShortcuts();
 
   public Q_SLOTS:
@@ -172,6 +174,8 @@ class CrawlerWidget : public QSplitter,
 
     void sendToScratchpad( QString );
     void replaceDataInScratchpad( QString );
+
+    void searchPendingLinesChanged();
 
     // "auto-refresh" check has been changed
     void searchRefreshChanged( bool isRefreshing );
@@ -451,6 +455,8 @@ class CrawlerWidget : public QSplitter,
     QString encodingText_;
 
     ColorLabelsManager colorLabelsManager_;
+
+    qint64 searchPendingLines_ = 0;
 };
 
 #endif

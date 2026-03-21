@@ -176,6 +176,8 @@ MainWindow::MainWindow( WindowSession session )
     signalMux_.connect(
         SIGNAL( newSelection( LineNumber, LinesCount, LineColumn, LineLength ) ), this,
         SLOT( lineNumberHandler( LineNumber, LinesCount, LineColumn, LineLength ) ) );
+    signalMux_.connect( SIGNAL( searchPendingLinesChanged() ), this,
+                        SLOT( refreshLineNumberField() ) );
     signalMux_.connect( SIGNAL( sendToScratchpad( QString ) ), this,
                         SLOT( sendToScratchpad( QString ) ) );
 
@@ -1597,6 +1599,11 @@ void MainWindow::changeFollowMode( bool follow )
 void MainWindow::lineNumberHandler( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                                     LineLength nSymbols )
 {
+    lastStartLine_ = startLine;
+    lastNLines_ = nLines;
+    lastStartCol_ = startCol;
+    lastNSymbols_ = nSymbols;
+
     // The line number received is the internal (starts at 0)
     uint64_t fileSize{};
     uint64_t fileNbLine{};
@@ -1605,32 +1612,46 @@ void MainWindow::lineNumberHandler( LineNumber startLine, LinesCount nLines, Lin
     session_.getFileInfo( currentCrawlerWidget(), &fileSize, &fileNbLine, &lastModified );
 
     if ( fileNbLine != 0 ) {
+        QString lineText;
         if ( nSymbols.get() == 0 ) {
-            lineNbField->setText( tr( "Ln:%1/%2" ).arg( startLine.get() + 1 ).arg( fileNbLine ) );
+            lineText = tr( "Ln:%1/%2" ).arg( startLine.get() + 1 ).arg( fileNbLine );
         }
         else {
             if ( nLines.get() == 1 ) {
-                // portion selection on one line
-                lineNbField->setText( tr( "Ln:%1/%2 Col:%3 Sel:%4|%5" )
-                                          .arg( startLine.get() + 1 )
-                                          .arg( fileNbLine )
-                                          .arg( startCol.get() )
-                                          .arg( nSymbols.get() )
-                                          .arg( nLines.get() ) );
+                lineText = tr( "Ln:%1/%2 Col:%3 Sel:%4|%5" )
+                               .arg( startLine.get() + 1 )
+                               .arg( fileNbLine )
+                               .arg( startCol.get() )
+                               .arg( nSymbols.get() )
+                               .arg( nLines.get() );
             }
             else {
-                // multiple lines selection
-                lineNbField->setText( tr( "Ln:%1/%2 Sel:%4|%5" )
-                                          .arg( startLine.get() + 1 )
-                                          .arg( fileNbLine )
-                                          .arg( nSymbols.get() )
-                                          .arg( nLines.get() ) );
+                lineText = tr( "Ln:%1/%2 Sel:%4|%5" )
+                               .arg( startLine.get() + 1 )
+                               .arg( fileNbLine )
+                               .arg( nSymbols.get() )
+                               .arg( nLines.get() );
             }
         }
+
+        const auto* crawler = currentCrawlerWidget();
+        if ( crawler ) {
+            const auto pending = crawler->searchPendingLines();
+            if ( pending > 0 ) {
+                lineText += tr( " (+%1 pending)" ).arg( pending );
+            }
+        }
+
+        lineNbField->setText( lineText );
     }
     else {
         lineNbField->clear();
     }
+}
+
+void MainWindow::refreshLineNumberField()
+{
+    lineNumberHandler( lastStartLine_, lastNLines_, lastStartCol_, lastNSymbols_ );
 }
 
 void MainWindow::updateLoadingProgress( int progress )

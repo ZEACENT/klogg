@@ -56,6 +56,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
 
   private:
     void setState( State state );
+    void createProcess();
 
   private:
     std::unique_ptr<QProcess> process_;

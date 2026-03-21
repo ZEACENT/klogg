@@ -11,6 +11,11 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
 {
     captureStore_.loadFromDisk();
     scheduleLoadingFinished();
+
+    outputFlushTimer_.setInterval( 1000 );
+    connect( &outputFlushTimer_, &QTimer::timeout, this, [this] {
+        captureStore_.flush();
+    } );
 }
 
 void StreamingLogData::appendUtf8( const QByteArray& data )
@@ -25,6 +30,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 
 void StreamingLogData::finishInput()
 {
+    stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
     captureStore_.finishInput();
     if ( captureStore_.lineCount() != previousLineCount ) {
@@ -35,6 +41,7 @@ void StreamingLogData::finishInput()
 
 void StreamingLogData::clearCapture()
 {
+    stopOutputFlushTimer();
     captureStore_.clear();
     Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     scheduleLoadingFinished();
@@ -42,7 +49,12 @@ void StreamingLogData::clearCapture()
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
 {
-    return captureStore_.bindOutputFile( outputPath );
+    stopOutputFlushTimer();
+    const auto result = captureStore_.bindOutputFile( outputPath );
+    if ( !outputPath.isEmpty() && result ) {
+        startOutputFlushTimer();
+    }
+    return result;
 }
 
 QString StreamingLogData::boundOutputFile() const
@@ -185,6 +197,18 @@ void StreamingLogData::scheduleLoadingFinished()
             Q_EMIT loadingFinished( LoadingStatus::Successful );
         },
         Qt::QueuedConnection );
+}
+
+void StreamingLogData::startOutputFlushTimer()
+{
+    if ( !outputFlushTimer_.isActive() ) {
+        outputFlushTimer_.start();
+    }
+}
+
+void StreamingLogData::stopOutputFlushTimer()
+{
+    outputFlushTimer_.stop();
 }
 
 klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount number ) const

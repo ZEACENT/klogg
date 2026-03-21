@@ -2892,8 +2892,8 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
         const auto isWholeLineSelected = selection_.isLineSelected( lineNumber );
 
+        // Set base colors
         if ( isWholeLineSelected ) {
-            // Reverse the selected line
             foreColor = palette.color( QPalette::HighlightedText );
             backColor = palette.color( QPalette::Highlight );
             painter->setPen( palette.color( QPalette::Text ) );
@@ -2901,33 +2901,33 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         else {
             foreColor = palette.color( QPalette::Text );
             backColor = palette.color( QPalette::Base );
+        }
 
-            // Apply search range graying only if the view type allows it (LogMainView only, not FilteredView)
-            // and the line is outside the search range
-            if ( shouldApplySearchRangeGraying() && ( lineNumber < searchStartIndex || lineNumber >= searchEndIndex ) ) {
-                foreColor = palette.brush( QPalette::Disabled, QPalette::Text ).color();
+        // Apply search range graying for lines outside the search range
+        const auto isOutsideSearchRange = shouldApplySearchRangeGraying()
+            && ( lineNumber < searchStartIndex || lineNumber >= searchEndIndex );
+        if ( !isWholeLineSelected && isOutsideSearchRange ) {
+            foreColor = palette.brush( QPalette::Disabled, QPalette::Text ).color();
+        }
+        else if ( !isOutsideSearchRange ) {
+            const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
+
+            // LineMatch whole-line coloring only applies when not selected
+            if ( highlightType == HighlighterMatchType::LineMatch && !isWholeLineSelected ) {
+                foreColor = highlighterMatches.front().foreColor();
+                backColor = highlighterMatches.front().backColor();
             }
-            else {
-                const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
 
-                if ( highlightType == HighlighterMatchType::LineMatch ) {
-                    // color applies to whole line
-                    foreColor = highlighterMatches.front().foreColor();
-                    backColor = highlighterMatches.front().backColor();
-                }
+            if ( patternHighlight ) {
+                klogg::vector<HighlightedMatch> patternMatches;
+                patternHighlight->matchLine( logLine, patternMatches );
+                highlighterMatches.addMatches( patternMatches );
+            }
 
-                if ( patternHighlight ) {
-                    klogg::vector<HighlightedMatch> patternMatches;
-                    patternHighlight->matchLine( logLine, patternMatches );
-                    highlighterMatches.addMatches( patternMatches );
-                }
-
-                // highlighterMatches.reserve( additionalHighlighters.size() );
-                for ( const auto& highlighter : additionalHighlighters ) {
-                    klogg::vector<HighlightedMatch> patternMatches;
-                    highlighter.matchLine( logLine, patternMatches );
-                    highlighterMatches.addMatches( patternMatches );
-                }
+            for ( const auto& highlighter : additionalHighlighters ) {
+                klogg::vector<HighlightedMatch> patternMatches;
+                highlighter.matchLine( logLine, patternMatches );
+                highlighterMatches.addMatches( patternMatches );
             }
         }
 

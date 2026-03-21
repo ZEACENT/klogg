@@ -186,3 +186,32 @@ TEST_CASE( "HighlighterSetCollection restore compiles the active set",
     REQUIRE( matchType == HighlighterMatchType::WordMatch );
     REQUIRE_FALSE( matches.empty() );
 }
+
+TEST_CASE( "HighlighterSet matchLine produces matches regardless of selection context",
+           "[vectorscan][highlighter]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    QTemporaryDir tempDir( QDir::tempPath() + QStringLiteral( "/vectorscan-selection-XXXXXX" ) );
+    REQUIRE( tempDir.isValid() );
+
+    auto collection = loadHighlighterSetCollection(
+        tempDir.filePath( QStringLiteral( "collection.ini" ) ), makeRegressionPatterns() );
+
+    const auto& set = collection.currentActiveSet();
+
+    // matchLine should always return matches — it has no knowledge of selection state
+    const auto testLine = QStringLiteral( "ERROR at https://example.com/path?q=1" );
+
+    HighlightedMatchRanges matches1;
+    const auto type1 = set.matchLine( testLine, matches1 );
+    REQUIRE( type1 == HighlighterMatchType::WordMatch );
+    REQUIRE_FALSE( matches1.empty() );
+
+    // Call again — results should be consistent
+    HighlightedMatchRanges matches2;
+    const auto type2 = set.matchLine( testLine, matches2 );
+    REQUIRE( type2 == type1 );
+    REQUIRE( matches2.matches().size() == matches1.matches().size() );
+}
