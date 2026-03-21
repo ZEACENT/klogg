@@ -16,6 +16,13 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     connect( &outputFlushTimer_, &QTimer::timeout, this, [this] {
         captureStore_.flush();
     } );
+
+    captureStore_.setOutputFlushedCallback( [this] {
+        // Restart timer so the 1-second countdown begins after each threshold flush
+        if ( outputFlushTimer_.isActive() ) {
+            outputFlushTimer_.start();
+        }
+    } );
 }
 
 void StreamingLogData::appendUtf8( const QByteArray& data )

@@ -153,7 +153,7 @@ void CaptureStore::finishInput()
 void CaptureStore::flush()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    if ( boundOutputHandle_ ) {
+    if ( boundOutputHandle_ && unflushedOutputBytes_ > 0 ) {
         boundOutputHandle_->flush();
         resetOutputFlushCounters();
     }
@@ -212,6 +212,11 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
     boundOutputHandle_ = std::move( outputFile );
     resetOutputFlushCounters();
     return true;
+}
+
+void CaptureStore::setOutputFlushedCallback( std::function<void()> callback )
+{
+    outputFlushedCallback_ = std::move( callback );
 }
 
 QString CaptureStore::boundOutputFile() const
@@ -705,10 +710,10 @@ void CaptureStore::flushOutputIfNeeded()
         return;
     }
 
-    const auto now = std::chrono::steady_clock::now();
+    // Time-based flushing is handled by StreamingLogData's QTimer,
+    // so only check byte and line thresholds here.
     if ( unflushedOutputBytes_ >= OutputFlushBytesThreshold
-         || unflushedOutputLines_ >= OutputFlushLinesThreshold
-         || now - lastOutputFlushTime_ >= OutputFlushTimeThreshold ) {
+         || unflushedOutputLines_ >= OutputFlushLinesThreshold ) {
         if ( !boundOutputHandle_->flush() ) {
             LOG_WARNING << "Bound output file flush failed, unbinding: " << boundOutputFile_;
             boundOutputHandle_.reset();
@@ -716,6 +721,9 @@ void CaptureStore::flushOutputIfNeeded()
             return;
         }
         resetOutputFlushCounters();
+        if ( outputFlushedCallback_ ) {
+            outputFlushedCallback_();
+        }
     }
 }
 
@@ -723,5 +731,4 @@ void CaptureStore::resetOutputFlushCounters()
 {
     unflushedOutputBytes_ = 0;
     unflushedOutputLines_ = 0;
-    lastOutputFlushTime_ = std::chrono::steady_clock::now();
 }

@@ -1,7 +1,7 @@
 #ifndef CAPTURESTORE_H
 #define CAPTURESTORE_H
 
-#include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -58,6 +58,7 @@ class CaptureStore {
     void flush();
     void clear();
     bool bindOutputFile( const QString& outputPath );
+    void setOutputFlushedCallback( std::function<void()> callback );
     QString boundOutputFile() const;
     QString captureId() const;
     QString capturePath() const;
@@ -93,8 +94,6 @@ class CaptureStore {
 
     static constexpr qint64 OutputFlushBytesThreshold = 64 * 1024;
     static constexpr int OutputFlushLinesThreshold = 100;
-    static constexpr std::chrono::steady_clock::duration OutputFlushTimeThreshold
-        = std::chrono::seconds( 1 );
 
   private:
     QString captureId_;
@@ -117,7 +116,7 @@ class CaptureStore {
 
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
-    std::chrono::steady_clock::time_point lastOutputFlushTime_{};
+    std::function<void()> outputFlushedCallback_;
 };
 
 #endif
