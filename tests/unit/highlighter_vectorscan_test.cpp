@@ -207,11 +207,11 @@ TEST_CASE( "HighlighterSet matchLine produces matches regardless of selection co
     HighlightedMatchRanges matches1;
     const auto type1 = set.matchLine( testLine, matches1 );
     REQUIRE( type1 == HighlighterMatchType::WordMatch );
-    REQUIRE_FALSE( matches1.empty() );
+    REQUIRE( matches1.matches().size() == 2 );
 
     // Call again — results should be consistent
     HighlightedMatchRanges matches2;
     const auto type2 = set.matchLine( testLine, matches2 );
     REQUIRE( type2 == type1 );
-    REQUIRE( matches2.matches().size() == matches1.matches().size() );
+    REQUIRE( matches2.matches().size() == 2 );
 }

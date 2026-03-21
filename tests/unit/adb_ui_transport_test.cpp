@@ -275,7 +275,6 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
 TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async disconnect" )
 {
     LongRunningTestTransport transport;
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
 
     REQUIRE( transport.connectTransport() );
     transport.disconnectTransport();

@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QMetaType>
+#include <QPointer>
 #include <QProcess>
 #include <QTimer>
 
@@ -168,9 +169,10 @@ void ProcessLiveSourceTransport::disconnectTransport()
         dying->terminate();
         QObject::connect( dying, &QProcess::finished,
                           dying, &QObject::deleteLater );
-        QTimer::singleShot( 1500, dying, [ dying ] {
-            if ( dying->state() != QProcess::NotRunning ) {
-                dying->kill();
+        QPointer<QProcess> guard( dying );
+        QTimer::singleShot( 1500, dying, [ guard ] {
+            if ( guard && guard->state() != QProcess::NotRunning ) {
+                guard->kill();
             }
         } );
     }
