@@ -119,6 +119,13 @@ bool ProcessLiveSourceTransport::connectTransport()
             && startupTimer.elapsed() < StartupFailureGracePeriodMs ) {
         process_->waitForFinished( StartupFailurePollIntervalMs );
         QCoreApplication::processEvents();
+
+        // A disconnect may have been processed during processEvents(),
+        // swapping process_ with a fresh idle instance.  Bail out cleanly
+        // instead of misdiagnosing the new process as a startup failure.
+        if ( state_ == State::Disconnected ) {
+            return false;
+        }
     }
 
     if ( state_ == State::Error || process_->state() == QProcess::NotRunning ) {
