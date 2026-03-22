@@ -99,22 +99,11 @@ if(WIN32)
   target_sources(klogg_grep PRIVATE ${ProductVersionResourceFiles})
 
 elseif(APPLE)
-  # Use an empty install rpath so that CMake's install step strips build-tree
-  # rpaths.  This prevents CPack's DragNDrop generator from calling
-  # install_name_tool -delete_rpath on paths that macdeployqt already removed,
-  # which causes cascading hdiutil detach failures.
-  # SKIP_INSTALL_RPATH was used before but left the build-tree rpath in place
-  # for tests; BUILD_WITH_INSTALL_RPATH+empty INSTALL_RPATH achieves the same
-  # test compatibility (Qt frameworks found via macdeployqt-deployed paths or
-  # the build tree's own rpath at test time) without confusing CPack.
-  set_target_properties(klogg PROPERTIES
-    INSTALL_RPATH ""
-    BUILD_WITH_INSTALL_RPATH OFF
-  )
-  set_target_properties(klogg_portable PROPERTIES
-    INSTALL_RPATH ""
-    BUILD_WITH_INSTALL_RPATH OFF
-  )
+  # Do not let CMake touch rpaths at install time.  macdeployqt handles
+  # rpath adjustment; DMG creation uses hdiutil directly (not CPack),
+  # so there is no install step that needs rpath manipulation.
+  set_target_properties(klogg PROPERTIES SKIP_INSTALL_RPATH ON)
+  set_target_properties(klogg_portable PROPERTIES SKIP_INSTALL_RPATH ON)
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
   set_source_files_properties(${COPYING_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)

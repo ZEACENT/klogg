@@ -340,12 +340,9 @@ if(UNIX)
   set(CPACK_STRIP_FILES "bin/klogg")
 
   if(APPLE)
-    set(CPACK_GENERATOR "DragNDrop")
-    set(CPACK_DMG_FORMAT "UDZO")  # Use UDZO (gzip) for better compatibility on CI runners
-    set(CPACK_DMG_VOLUME_NAME "${PROJECT_NAME}")
+    # macOS DMG is created directly with hdiutil in CI (not CPack).
+    # See .github/actions/agent-package-mac/action.yml.
     set(CPACK_SYSTEM_NAME "OSX")
-    set(CPACK_DMG_BACKGROUND_IMAGE "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_background.tif")
-    set(CPACK_DMG_DS_STORE_SETUP_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/dmg_setup.scpt")
 
   else()
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/16x16/klogg.png

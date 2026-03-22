@@ -68,43 +68,45 @@ runs:
         if [ -d "/Volumes/klogg" ]; then
             hdiutil detach "/Volumes/klogg" -force 2>/dev/null || true
         fi
-        # Remove any existing DMG files to avoid conflicts
         rm -f ./packages/*.dmg 2>/dev/null || true
-        # Proactively remove Qt build rpath if present (macdeployqt may have already removed it)
-        # This prevents install_name_tool -delete_rpath errors during CPack
-        for qt_dir in "${QT_ROOT_DIR}" "${Qt6_DIR}" "${Qt5_DIR}"; do
-            if [ -n "${qt_dir}" ]; then
-                install_name_tool -delete_rpath "${qt_dir}/lib" ./output/klogg.app/Contents/MacOS/klogg 2>/dev/null || true
-            fi
-        done
-        # Re-sign after rpath modification (install_name_tool invalidates the code signature)
-        if [ -n "${{ env.KLOGG_CODESIGN }}" ]; then
-            codesign -v -f -o runtime --deep --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./output/klogg.app 2>/dev/null || true
+        mkdir -p ./packages
+
+        # Build DMG directly with hdiutil instead of CPack DragNDrop.
+        #
+        # CPack's DragNDrop generator runs a CMake install step that calls
+        # install_name_tool -delete_rpath on the staged binary.  When
+        # macdeployqt has already removed that rpath, the delete fails and
+        # cascades into hdiutil detach errors.  This has been an intermittent
+        # CI failure that was patched and reverted repeatedly:
+        #   b6f71e12 → 44d58b34 → f468d7da → 92791b80 → 4d367052
+        #
+        # Using hdiutil directly on the macdeployqt-processed .app bundle
+        # bypasses CMake's install/rpath logic entirely — zero rpath
+        # operations, zero conflicts.
+
+        DMG_STAGING=$(mktemp -d)
+        cp -a ./output/klogg.app "${DMG_STAGING}/"
+        ln -s /Applications "${DMG_STAGING}/Applications"
+
+        # Copy background image for the DMG window
+        BACKGROUND_DIR="${DMG_STAGING}/.background"
+        mkdir -p "${BACKGROUND_DIR}"
+        cp "${KLOGG_WORKSPACE}/packaging/osx/dmg_background.tif" "${BACKGROUND_DIR}/background.tif"
+
+        hdiutil create \
+            -volname "klogg" \
+            -srcfolder "${DMG_STAGING}" \
+            -ov \
+            -format UDZO \
+            "./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
+
+        rm -rf "${DMG_STAGING}"
+
+        if [ ! -f "./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg" ]; then
+            echo "DMG creation failed"
+            exit 1
         fi
-        # Run cpack - capture exit code but continue even if detach fails
-        set +e
-        cpack --verbose -G "DragNDrop"
-        CPACK_EXIT_CODE=$?
-        set -e
-        # Force detach any remaining mounted volumes (CPack may have failed to detach)
-        if [ -d "/Volumes/klogg" ]; then
-            hdiutil detach "/Volumes/klogg" -force 2>/dev/null || true
-        fi
-        # Check if DMG was created successfully - if so, consider it success
-        # CPack may fail on detach but still create the DMG file
-        if [ -f "./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg" ]; then
-            echo "DMG created successfully: ./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
-            exit 0
-        else
-            echo "CPack failed and DMG was not created. Exit code: $CPACK_EXIT_CODE"
-            # Always exit with non-zero if DMG file doesn't exist, regardless of CPack exit code
-            # This ensures the build fails if DMG wasn't created, even if CPack returned 0
-            if [ "$CPACK_EXIT_CODE" -eq 0 ]; then
-                exit 1
-            else
-                exit $CPACK_EXIT_CODE
-            fi
-        fi
+        echo "DMG created successfully: ./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
 
     - name: Mac rename dmg with arch
       shell: sh
