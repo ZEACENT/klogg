@@ -28,13 +28,18 @@
 #include <qnamespace.h>
 #include <qtestmouse.h>
 
+#include <QElapsedTimer>
+#include <QUuid>
+
 #include "savedsearches.h"
 #include "session.h"
 #include "test_utils.h"
 
+#include "adblogcatsource.h"
 #include "configuration.h"
 #include "logdata.h"
 #include "logfiltereddata.h"
+#include "streaminglogdata.h"
 
 #include "crawlerwidget.h"
 #include "shortcuts.h"
@@ -146,6 +151,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     LinesCount getLogFilteredNbLines()
     {
         return crawler->logFilteredData_->getNbLine();
+    }
+
+    SearchableLogData* rawLogData()
+    {
+        return crawler->logData_.get();
+    }
+
+    LogFilteredData* rawFilteredData()
+    {
+        return crawler->logFilteredData_.get();
     }
 
     void selectAllInMainView()
@@ -804,4 +819,95 @@ SCENARIO( "Crawler widget search", "[ui]" )
             }
         }
     }
+}
+
+SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
+{
+    // Use production-like search buffer so each search chunk takes noticeable time.
+    // RAII guard restores the original value even if REQUIRE fails early.
+    auto& config = Configuration::getSynced();
+    const auto savedBufferSize = config.searchReadBufferSizeLines();
+    config.setSearchReadBufferSizeLines( 10000 );
+    struct BufferSizeGuard {
+        Configuration& cfg;
+        int saved;
+        ~BufferSizeGuard() { cfg.setSearchReadBufferSizeLines( saved ); }
+    } bufferGuard{ config, savedBufferSize };
+
+    Session session;
+    AdbLogcatSessionData adbSession;
+    adbSession.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+
+    // Create CrawlerWidget backed by StreamingLogData (startConnected=false, no real ADB)
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.openAdbLogcat( adbSession, []() { return new CrawlerWidget(); }, false ) ) );
+
+    waitUiState( [ & ]() { return visitor.isLoadingFinished(); } );
+
+    auto* logData = dynamic_cast<StreamingLogData*>( visitor.rawLogData() );
+    REQUIRE( logData != nullptr );
+    REQUIRE( logData->isLiveSource() );
+
+    // Seed initial data so the search has a meaningful index
+    QByteArray seedData;
+    for ( int i = 0; i < 5000; i++ ) {
+        seedData.append(
+            QStringLiteral( "seed log line %1\n" ).arg( i, 6, 10, QChar( '0' ) ).toUtf8() );
+    }
+    logData->appendUtf8( seedData );
+    QTest::qWait( 200 );
+
+    // Start a search with auto-refresh
+    visitor.setSearchPattern( "seed" );
+    visitor.runSearch();
+
+    GIVEN( "active search on a live source with continuous streaming" )
+    {
+        // Spy on searchProgressed to count how many search operations complete.
+        // Each updateSearch() call starts a search that eventually emits
+        // searchProgressed with progress == 100.
+        SafeQSignalSpy searchSpy( visitor.rawFilteredData(),
+                                  SIGNAL( searchProgressed( LinesCount, int, LineNumber ) ) );
+
+        QElapsedTimer elapsed;
+        elapsed.start();
+        int batchCount = 0;
+
+        // Stream data continuously for 2 seconds with small batches
+        while ( elapsed.elapsed() < 2000 ) {
+            QByteArray batch;
+            for ( int j = 0; j < 20; j++ ) {
+                batch.append( QStringLiteral( "streaming line %1-%2\n" )
+                                  .arg( batchCount )
+                                  .arg( j )
+                                  .toUtf8() );
+            }
+            logData->appendUtf8( batch );
+            batchCount++;
+            QTest::qWait( 5 );
+        }
+
+        // Let any pending searches finish
+        QTest::qWait( 500 );
+
+        // Count completed searches (progress == 100)
+        int completions = 0;
+        for ( int i = 0; i < searchSpy.count(); i++ ) {
+            if ( searchSpy.at( i ).at( 1 ).toInt() == 100 ) {
+                completions++;
+            }
+        }
+
+        THEN( "search updates are throttled for live sources" )
+        {
+            // Without throttle: one updateSearch per loadingFinished, potentially
+            // hundreds of completions over 2 seconds (one per ~5ms batch).
+            // With throttle (250ms interval): max ~2000/250 = 8 fires plus
+            // the initial search, so ~9 completions; cap at 12 with margin.
+            INFO( "batchCount=" << batchCount << " completions=" << completions );
+            REQUIRE( completions <= 12 );
+        }
+    }
+
 }

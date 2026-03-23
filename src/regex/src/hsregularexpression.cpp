@@ -63,7 +63,7 @@ int matchMultiCallback( unsigned int id, unsigned long long from, unsigned long 
     return 0;
 }
 
-// Callback for buffer scanning — records which lines contain matches.
+// Callback for buffer scanning -- records which lines contain matches.
 // The context carries endOfLines offsets for binary-search mapping.
 struct BufferScanContext {
     const klogg::vector<qint64>* endOfLines;

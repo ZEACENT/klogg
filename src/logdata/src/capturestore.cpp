@@ -330,7 +330,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             lineRefs.push_back( std::move( ref ) );
         }
     }
-    // mutex released — main thread can now append data freely
+    // mutex released -- main thread can now append data freely
 
     const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
 
@@ -530,7 +530,7 @@ void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
         return;
     }
 
-    // Full rebuild — used after loadFromDisk(), clear(), etc.
+    // Full rebuild -- used after loadFromDisk(), clear(), etc.
     qint64 cumulative = 0;
     memoryBytes_ = 0;
     for ( auto& segment : segments_ ) {

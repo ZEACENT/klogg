@@ -190,7 +190,7 @@ LogDataWorker::~LogDataWorker() noexcept
 {
     // Signal any running task to stop, then wait for the thread to fully exit
     // before any other members are destroyed.  std::thread::join() guarantees
-    // the OS thread has completely exited — no race with internal Qt thread-pool
+    // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequest_.set();
     if ( opThread_.joinable() ) {

@@ -935,7 +935,7 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
                               }
                           } );
 
-        // Feed all data in large batches (10,000 lines — matching the search
+        // Feed all data in large batches (10,000 lines -- matching the search
         // chunk size) with a few updateSearch triggers.  This models the real
         // application where scheduleLoadingFinished() coalesces many small
         // appendUtf8 calls into fewer search triggers.
@@ -958,7 +958,7 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             streamingLogData->appendUtf8( batch );
             linesWritten = end;
 
-            // Trigger search (one per batch — models coalesced loadingFinished)
+            // Trigger search (one per batch -- models coalesced loadingFinished)
             if ( i == 0 ) {
                 filteredData->runSearch( pattern, 0_lnum,
                                          LineNumber( streamingLogData->getNbLine().get() ) );

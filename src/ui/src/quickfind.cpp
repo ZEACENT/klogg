@@ -157,11 +157,16 @@ Selection QuickFind::incrementalSearchAbort()
     }
 }
 
+void QuickFind::interruptAndWait()
+{
+    interruptRequested_.set();
+    operationWatcher_.waitForFinished();
+}
+
 void QuickFind::stopSearch()
 {
     LOG_INFO << "Stop search for quickfind " << this;
-    interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    interruptAndWait();
 }
 
 void QuickFind::onSearchFutureReady()
@@ -183,8 +188,7 @@ void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatche
 {
     LOG_DEBUG << "QuickFind::incrementallySearchForward";
 
-    interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    interruptAndWait();
 
     // Position where we start the search from
     FilePosition start_position = selection.getNextPosition();
@@ -217,8 +221,7 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
 {
     LOG_DEBUG << "QuickFind::incrementallySearchBackward";
 
-    interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    interruptAndWait();
 
     // Position where we start the search from
     FilePosition start_position = selection.getPreviousPosition();
@@ -249,8 +252,7 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
 void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
 {
     incrementalSearchStatus_ = IncrementalSearchStatus();
-    interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    interruptAndWait();
 
 #if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchForward, selection, matcher );
@@ -265,8 +267,7 @@ void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
 void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
 {
     incrementalSearchStatus_ = IncrementalSearchStatus();
-    interruptRequested_.set();
-    operationWatcher_.waitForFinished();
+    interruptAndWait();
 
 #if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchBackward, selection, matcher );

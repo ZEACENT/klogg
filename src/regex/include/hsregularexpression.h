@@ -139,7 +139,7 @@ class HsPrefilterMatcher {
     HsMultiMatcher hsMatcher_;
 };
 
-// Buffer scanner for bulk scanning — scans an entire multi-line buffer in one
+// Buffer scanner for bulk scanning -- scans an entire multi-line buffer in one
 // hs_scan() call and maps match positions back to line numbers via binary
 // search on endOfLines offsets.
 class HsBufferScanner {

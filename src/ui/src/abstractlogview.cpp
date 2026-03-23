@@ -799,7 +799,7 @@ void AbstractLogView::timerEvent( QTimerEvent* timerEvent )
         if ( delta >= 0 ) {
             if ( delta < 7 )
                 delta = 7;
-            int timeout = 4900 / ( delta * delta );
+            int timeout = qMax( 30, 4900 / ( delta * delta ) );
             autoScrollTimer_.start( timeout, this );
 
             if ( deltaX > 0 )
@@ -2490,7 +2490,7 @@ void AbstractLogView::updateScrollBars()
     const bool scrollBarWasVisible = verticalScrollBar()->isVisible();
     
     // Track if scrollbar visibility changed during calculation
-    // This is needed because visibility can change multiple times (e.g., visible → hidden → visible)
+    // This is needed because visibility can change multiple times (e.g., visible -> hidden -> visible)
     // and we need to invalidate cache even if final state matches initial state
     bool scrollBarVisibilityChanged = false;
     
@@ -2616,7 +2616,7 @@ void AbstractLogView::updateScrollBars()
     // setRange() may show/hide the scrollbar based on range (0,0) vs (0,>0)
     // which affects the available width for columns calculation
     // If visibility changed at any point during calculation, invalidate cache and recalculate
-    // This handles cases where visibility changes multiple times (e.g., visible → hidden → visible)
+    // This handles cases where visibility changes multiple times (e.g., visible -> hidden -> visible)
     // and ensures cache is invalidated even if final state matches initial state
     if ( scrollBarVisibilityChanged ) {
         cachedVisibleColsValid_ = false;

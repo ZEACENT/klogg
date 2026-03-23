@@ -108,7 +108,7 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
     // Block scan (one hs_scan over the whole buffer) saves per-line call
     // overhead but pays callback + binary-search + dedup cost per match
     // position.  Benchmarks show this is only beneficial for small chunks
-    // (≤ ~5000 lines) where SIMD startup cost dominates.  For larger chunks
+    // (<= ~5000 lines) where SIMD startup cost dominates.  For larger chunks
     // the sequential per-line access pattern has better cache locality.
     // Disabled for now: per-line is consistently faster at production scales.
     //
@@ -196,7 +196,7 @@ LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
 {
     // Signal any running task to stop, then wait for the thread to fully exit
     // before any other members are destroyed.  std::thread::join() guarantees
-    // the OS thread has completely exited — no race with internal Qt thread-pool
+    // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequested_.set();
     if ( opThread_.joinable() ) {
@@ -259,7 +259,7 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
 {
     // Signal any running search to stop at the next chunk boundary so that
     // operationsMutex_ is released quickly.  Without this, the main thread
-    // blocks here until the entire previous search finishes — the root cause
+    // blocks here until the entire previous search finishes -- the root cause
     // of UI freezes during live-source streaming (ADB logcat, etc.).
     interruptRequested_.set();
 
@@ -514,7 +514,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     // Storing it directly in a vector via emplace_back would copy-construct it from
     // a temporary (which registers+deregisters with the graph), causing TBB internal
     // node-list corruption when matchingThreadsCount >= 2.  Use unique_ptr so each
-    // node is constructed directly in-place on the heap — no copy, no move.
+    // node is constructed directly in-place on the heap -- no copy, no move.
     struct MatcherData {
         PatternMatcherPtr matcher;
         microseconds matchTime{};

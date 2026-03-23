@@ -26,6 +26,7 @@
 void ElasticHook::move( int value )
 {
     static constexpr int MAX_POSITION = 2000;
+    const auto oldPosition = position_;
 
     if ( timer_id_ == 0 )
         timer_id_ = startTimer( TIMER_PERIOD_MS );
@@ -61,7 +62,9 @@ void ElasticHook::move( int value )
 
     LOG_DEBUG << "ElasticHook::move: new value " << position_;
 
-    Q_EMIT lengthChanged();
+    if ( position_ != oldPosition ) {
+        Q_EMIT lengthChanged();
+    }
 }
 
 void ElasticHook::timerEvent( QTimerEvent* )
@@ -79,6 +82,7 @@ void ElasticHook::timerEvent( QTimerEvent* )
 void ElasticHook::decreasePosition()
 {
     static constexpr int PROP_RATIO = 10;
+    const auto oldPosition = position_;
 
     // position_ -= DECREASE_RATE + ( ( position_/SQUARE_RATIO ) * ( position_/SQUARE_RATIO ) );
     if ( std::abs( position_ ) < DECREASE_RATE ) {
@@ -93,5 +97,7 @@ void ElasticHook::decreasePosition()
 
     LOG_DEBUG << "ElasticHook::timerEvent: new value " << position_;
 
-    Q_EMIT lengthChanged();
+    if ( position_ != oldPosition ) {
+        Q_EMIT lengthChanged();
+    }
 }

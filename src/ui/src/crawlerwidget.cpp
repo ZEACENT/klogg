@@ -84,6 +84,10 @@
 
 static constexpr char AnsiColorSequenceRegex[] = "\\x1B\\[([0-9]{1,4}((;|:)[0-9]{1,3})*)?[mK]";
 
+// Throttle intervals (ms) for coalescing search updates during live streaming.
+static constexpr int kSearchThrottleActiveMs = 250;
+static constexpr int kSearchThrottleInactiveMs = 1000;
+
 // Palette for error signaling (yellow background)
 const QPalette CrawlerWidget::ErrorPalette( Qt::darkYellow );
 
@@ -270,6 +274,8 @@ void CrawlerWidget::stopLoading()
 
 void CrawlerWidget::reload()
 {
+    searchUpdateThrottleTimer_.stop();
+    searchUpdatePending_ = false;
     searchState_.resetState();
     constexpr auto DropCache = true;
     logFilteredData_->clearSearch( DropCache );
@@ -388,6 +394,8 @@ void CrawlerWidget::startNewSearch()
     if ( keepSearchResultsButton_->isChecked() ) {
         keepSearchResultsButton_->setChecked( false );
 
+        searchUpdateThrottleTimer_.stop();
+        searchUpdatePending_ = false;
         logFilteredData_->interruptSearch();
         logFilteredData_ = logData_->getNewFilteredData();
 
@@ -433,6 +441,8 @@ void CrawlerWidget::updatePredefinedFiltersWidget()
 
 void CrawlerWidget::stopSearch()
 {
+    searchUpdateThrottleTimer_.stop();
+    searchUpdatePending_ = false;
     logFilteredData_->interruptSearch();
     searchState_.stopSearch();
     printSearchInfoMessage();
@@ -859,11 +869,27 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
     // See if we need to auto-refresh the search
     if ( searchState_.isAutorefreshAllowed() ) {
         searchEndLine_ = LineNumber( logData_->getNbLine().get() );
-        if ( searchState_.isFileTruncated() )
+        if ( searchState_.isFileTruncated() ) {
             // We need to restart the search
+            searchUpdateThrottleTimer_.stop();
+            searchUpdatePending_ = false;
             replaceCurrentSearch( searchLineEdit_->currentText() );
-        else
+        }
+        else if ( logData_->isLiveSource() ) {
+            // For live sources, defer search updates through a throttle timer
+            // to prevent the main thread from blocking repeatedly on
+            // operationsMutex_ inside LogFilteredDataWorker::updateSearch().
+            pendingSearchEndLine_ = searchEndLine_;
+            searchUpdatePending_ = true;
+            if ( !searchUpdateThrottleTimer_.isActive() ) {
+                searchUpdateThrottleTimer_.start(
+                    window()->isActiveWindow() ? kSearchThrottleActiveMs
+                                               : kSearchThrottleInactiveMs );
+            }
+        }
+        else {
             logFilteredData_->updateSearch( searchStartLine_, searchEndLine_ );
+        }
     }
 
     // Set the encoding for the views
@@ -885,6 +911,18 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 
     loadingInProgress_ = false;
     Q_EMIT loadingFinished( status );
+}
+
+void CrawlerWidget::fireThrottledSearchUpdate()
+{
+    if ( !searchUpdatePending_ || !searchState_.isAutorefreshAllowed() ) {
+        searchUpdatePending_ = false;
+        return;
+    }
+    searchUpdatePending_ = false;
+    // searchStartLine_ is stable here -- it is only modified by
+    // setSearchLimits() which resets the throttle timer.
+    logFilteredData_->updateSearch( searchStartLine_, pendingSearchEndLine_ );
 }
 
 void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
@@ -1455,6 +1493,11 @@ void CrawlerWidget::setup()
     connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
              &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
 
+    // Throttle timer for search updates during live streaming
+    searchUpdateThrottleTimer_.setSingleShot( true );
+    connect( &searchUpdateThrottleTimer_, &QTimer::timeout, this,
+             &CrawlerWidget::fireThrottledSearchUpdate );
+
     // Sent load file update to MainWindow (for status update)
     connect( logData_.get(), &SearchableLogData::loadingProgressed, this,
              &CrawlerWidget::loadingProgressed );
@@ -1506,6 +1549,8 @@ void CrawlerWidget::setup()
 
 void CrawlerWidget::changeFilteredView( int tabIndex )
 {
+    searchUpdateThrottleTimer_.stop();
+    searchUpdatePending_ = false;
     logFilteredData_->interruptSearch();
     if ( tabIndex >= 0 ) {
         auto* tabFilteredView
@@ -1773,17 +1818,17 @@ void CrawlerWidget::loadIcons()
 void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 {
     LOG_INFO << "replacing current search with " << searchText;
+    searchUpdateThrottleTimer_.stop();
+    searchUpdatePending_ = false;
     // Interrupt the search if it's ongoing
     logFilteredData_->interruptSearch();
 
-    // We have to wait for the last search update (100%)
-    // before clearing/restarting to avoid having remaining results.
-
-    // FIXME: this is a bit of a hack, we call processEvents
-    // for Qt to empty its event queue, including (hopefully)
-    // the search update event sent by logFilteredData_. It saves
-    // us the overhead of having proper sync.
-    QApplication::processEvents( QEventLoop::ExcludeUserInputEvents );
+    // Temporarily disconnect searchProgressed so that stale queued signals
+    // from the interrupted search do not update the view during the
+    // clear/restart window.  This avoids the re-entrant processEvents()
+    // hack that was here previously (see git log for history).
+    disconnect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
+                &CrawlerWidget::updateFilteredView );
 
     nbMatches_ = 0_lcount;
 
@@ -1852,6 +1897,12 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
         searchState_.resetState();
         printSearchInfoMessage();
     }
+
+    // Reconnect searchProgressed now that the clear/restart is complete.
+    // Any stale queued signals from the old search are harmlessly discarded
+    // because the slot was disconnected while they were in the queue.
+    connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
+             &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
 }
 
 // Updates the content of the drop down list for the saved searches,

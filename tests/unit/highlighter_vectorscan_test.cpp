@@ -201,7 +201,7 @@ TEST_CASE( "HighlighterSet matchLine produces matches regardless of selection co
 
     const auto& set = collection.currentActiveSet();
 
-    // matchLine should always return matches — it has no knowledge of selection state
+    // matchLine should always return matches -- it has no knowledge of selection state
     const auto testLine = QStringLiteral( "ERROR at https://example.com/path?q=1" );
 
     HighlightedMatchRanges matches1;
@@ -209,7 +209,7 @@ TEST_CASE( "HighlighterSet matchLine produces matches regardless of selection co
     REQUIRE( type1 == HighlighterMatchType::WordMatch );
     REQUIRE( matches1.matches().size() == 2 );
 
-    // Call again — results should be consistent
+    // Call again -- results should be consistent
     HighlightedMatchRanges matches2;
     const auto type2 = set.matchLine( testLine, matches2 );
     REQUIRE( type2 == type1 );

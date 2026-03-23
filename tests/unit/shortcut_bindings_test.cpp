@@ -138,7 +138,7 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();
 
-    // Build a map from key binding → list of actions that use it
+    // Build a map from key binding -> list of actions that use it
     std::map<QString, std::vector<std::string>> keyToActions;
     for ( const auto& [ action, shortcut ] : shortcuts ) {
         for ( const auto& key : shortcut.keySequence ) {

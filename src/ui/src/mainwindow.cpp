@@ -1973,7 +1973,7 @@ void MainWindow::dropEvent( QDropEvent* event )
                 executeMerge( filesToMerge );
                 return;
             }
-            // User cancelled merge dialog — fall through to open files separately
+            // User cancelled merge dialog -- fall through to open files separately
         }
     }
 

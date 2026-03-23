@@ -52,6 +52,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -286,6 +287,8 @@ class CrawlerWidget : public QSplitter,
     void contextLinesValueChanged(int value);
     void applyContextLines();
 
+    void fireThrottledSearchUpdate();
+
   private:
     // State machine holding the state of the search, used to allow/disallow
     // auto-refresh and inform the user via the info line.
@@ -457,6 +460,13 @@ class CrawlerWidget : public QSplitter,
     ColorLabelsManager colorLabelsManager_;
 
     qint64 searchPendingLines_ = 0;
+
+    // Throttle timer for search update coalescing during live streaming.
+    // Prevents the main thread from blocking repeatedly on operationsMutex_
+    // inside LogFilteredDataWorker::updateSearch().
+    QTimer searchUpdateThrottleTimer_;
+    bool searchUpdatePending_ = false;
+    LineNumber pendingSearchEndLine_;
 };
 
 #endif

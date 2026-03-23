@@ -230,10 +230,10 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
     SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
 
-    // Connect — the long-running process starts successfully
+    // Connect -- the long-running process starts successfully
     REQUIRE( transport.connectTransport() );
 
-    // Disconnect — sets disconnectRequested_ = true before terminating
+    // Disconnect -- sets disconnectRequested_ = true before terminating
     transport.disconnectTransport();
 
     // Process events to let any queued signals through
@@ -279,7 +279,7 @@ TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async discon
     REQUIRE( transport.connectTransport() );
     transport.disconnectTransport();
 
-    // Immediately reconnect — should work since createProcess() made a fresh QProcess
+    // Immediately reconnect -- should work since createProcess() made a fresh QProcess
     REQUIRE( transport.connectTransport() );
 
     transport.disconnectTransport();

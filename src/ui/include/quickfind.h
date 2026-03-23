@@ -144,6 +144,11 @@ class QuickFind : public QObject {
     void onSearchFutureReady();
 
   private:
+    // Interrupt any running search and wait for it to finish.
+    // The interrupt flag ensures the search stops at the next line boundary,
+    // so the wait is bounded by single-line processing time.
+    void interruptAndWait();
+
     enum QFDirection {
         None,
         Forward,
