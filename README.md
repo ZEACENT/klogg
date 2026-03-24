@@ -245,4 +245,42 @@ This project is licensed under the GPLv3 or later - see [COPYING](COPYING) file 
 
 See also the list of [contributors](https://klogg.filimonov.dev/docs/getting_involved/#contributors) who participated in this project.
 
+## Backlog
+
+| ID | Task | Priority | Status | Related |
+|----|------|----------|--------|---------|
+| TASK-001 | [Search generation ID refactoring](#task-001-search-generation-id-refactoring) | Low | Planned | [PR #11](https://github.com/ZEACENT/klogg/pull/11) |
+
+### TASK-001: Search generation ID refactoring
+
+**Scenario:**
+`CrawlerWidget::replaceCurrentSearch()` needs to discard stale `searchProgressed`
+signals from an interrupted search before starting a new one. The current approach
+temporarily disconnects and reconnects the
+`LogFilteredData::searchProgressed` / `CrawlerWidget::updateFilteredView` slot.
+
+**Problem:**
+With `Qt::QueuedConnection`, `disconnect()` does not remove already-posted
+`QMetaCallEvent`s from the receiver's event queue — they will still be delivered
+after reconnect. Currently the window between disconnect and reconnect is very
+small (a few synchronous calls in `replaceCurrentSearch()`), so the practical
+impact is negligible. However, the pattern is fragile and could become a real bug
+if the window widens in future refactors.
+
+**Code context:**
+- Signal: `LogFilteredData::searchProgressed(LinesCount, int, LineNumber)` — `src/logdata/include/logfiltereddata.h:149`
+- Emit sites (6+): `src/logdata/src/logfiltereddata.cpp` (lines 164, 634, 646, 666), `src/logdata/src/logfiltereddataworker.cpp` (lines 319, 456, 485, 623, 708)
+- Disconnect/reconnect: `src/ui/src/crawlerwidget.cpp` (lines 1830–1831, 1904–1905)
+- Slot: `CrawlerWidget::updateFilteredView()` — `src/ui/src/crawlerwidget.cpp:630`
+
+**Proposed fix:**
+1. Add a monotonic `uint64_t` generation counter to `LogFilteredData`, incremented by `runSearch()` / `updateSearch()`
+2. Extend `searchProgressed` signal to carry the generation ID
+3. In `CrawlerWidget::updateFilteredView()`, ignore signals where `generation != activeSearchGeneration_`
+4. Remove the disconnect/reconnect calls in `replaceCurrentSearch()`
+
+**Trade-offs:**
+Cross-cutting change touching signal signature, all emit sites, and all connected slots.
+Should be done in a dedicated PR with thorough regression testing.
+
 **[Back to top](#table-of-contents)**
