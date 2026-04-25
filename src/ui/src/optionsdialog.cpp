@@ -101,6 +101,17 @@ OptionsDialog::OptionsDialog( QWidget* parent )
                 tr( "No adb found at well-known install locations. Set the path manually." ) );
             return;
         }
+        const auto current = adbExecutableLineEdit->text().trimmed();
+        if ( !current.isEmpty() && current != resolved ) {
+            const auto answer = QMessageBox::question(
+                this, tr( "Detect ADB executable" ),
+                tr( "Replace the configured path\n\n    %1\n\nwith the auto-detected path?\n\n    %2" )
+                    .arg( current, resolved ),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
+            if ( answer != QMessageBox::Yes ) {
+                return;
+            }
+        }
         adbExecutableLineEdit->setText( resolved );
     } );
 

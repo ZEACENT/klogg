@@ -49,6 +49,8 @@ Windows almost never trips the bare-basename trap. Linux trips it occasionally f
 
 The reference implementation is `findAdbAtKnownLocation()` at `src/ui/src/adbprocesstransport.cpp:24`, called from the resolver at `src/ui/src/adbprocesstransport.cpp:80`. New external-tool integrations should mirror its structure.
 
+**Trust boundary.** The probe consults environment variables (`ANDROID_SDK_ROOT`, `ANDROID_HOME`, `LOCALAPPDATA`, `ProgramFiles`) and follows whatever paths the user supplies through them. This is intentional and matches the trust model of the underlying tool itself: an attacker who can rewrite the user's shell rc files or launchd session env can already inject a malicious `adb`/`git`/etc. directly via PATH. Future contributors should NOT try to "harden" the resolver by skipping env-var probes -- the reduced functionality (Android Studio's standard SDK env var no longer being honored) is not paid for by any real security gain.
+
 ## 5. Adding a new external tool — checklist
 
 Copy this into the PR description that introduces a new external-process dependency:
@@ -56,9 +58,9 @@ Copy this into the PR description that introduces a new external-process depende
 - [ ] Tool path is configurable via Configuration / OptionsDialog.
 - [ ] A default-empty configuration value triggers known-location probing rather than failing immediately.
 - [ ] The known-location list covers, at minimum:
-  - Windows: relevant environment variables (e.g. `ANDROID_SDK_ROOT`), `%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LocalAppData%`.
+  - Windows: relevant environment variables (e.g. `ANDROID_SDK_ROOT`), `%ProgramFiles%`, `%LocalAppData%\Android\Sdk\platform-tools`.
   - macOS: `/usr/local/bin` (Homebrew Intel), `/opt/homebrew/bin` (Apple Silicon), and any tool-specific user directory (e.g. `~/Library/Android/sdk/platform-tools`).
-  - Linux: `/usr/bin`, `/usr/local/bin`, and a common user-local directory (e.g. `~/Android/Sdk/platform-tools`, `~/.local/bin`).
+  - Linux: `/usr/local/bin`, `/usr/bin`, and a common user-local directory (e.g. `~/Android/Sdk/platform-tools`). User-provided locations like `~/.local/bin` are deliberately NOT auto-probed -- they are too tool-agnostic and would be surprising as a default; users running tools out of `~/.local/bin` should set the explicit path or extend `PATH` for klogg's own launch.
 - [ ] A unit test asserts that, when the tool is installed at a known location (or the test fakes one via a temp directory and an env-var override), the resolver returns an absolute, existing path.
 - [ ] `QProcess::ProcessError` from `errorOccurred` is surfaced to the user with a message that names the tool and points at the configuration entry.
 - [ ] No naked `QProcess::start("toolname")` anywhere in `src/`. A grep for `QProcess::start\("[a-z]` should not find any new occurrences in the diff.
