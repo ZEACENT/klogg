@@ -98,9 +98,19 @@ TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" 
     // from a well-known install location).  The argument decoration is what
     // this test exists to verify.
     REQUIRE_FALSE( streaming.program.isEmpty() );
-    REQUIRE( ( streaming.program == QStringLiteral( "adb" )
-               || streaming.program.endsWith( QStringLiteral( "/adb" ) )
-               || streaming.program.endsWith( QStringLiteral( "\\adb.exe" ) ) ) );
+    // Either bare "adb"/"adb.exe" (host has adb on PATH and findAdbAtKnownLocation()
+    // returned empty) or an absolute path resolved from a well-known install
+    // location.  Qt normalizes paths to forward slashes on Windows too, so the
+    // path-suffix check uses "/adb" / "/adb.exe" on every platform.
+    {
+        const auto& program = streaming.program;
+        const QFileInfo info( program );
+        const auto leaf = info.fileName().toLower();
+        REQUIRE( ( program == QStringLiteral( "adb" ) || program == QStringLiteral( "adb.exe" )
+                   || ( info.isAbsolute()
+                        && ( leaf == QStringLiteral( "adb" )
+                             || leaf == QStringLiteral( "adb.exe" ) ) ) ) );
+    }
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
@@ -245,7 +255,7 @@ TEST_CASE( "OptionsDialog adb detect button fills the executable field with the 
     const auto filled = adbExecutableLineEdit->text();
     INFO( "Filled value after detect click: " << filled.toStdString() );
     REQUIRE_FALSE( filled.isEmpty() );
-    REQUIRE( filled.startsWith( QLatin1Char( '/' ) ) );
+    REQUIRE( QFileInfo( filled ).isAbsolute() );
     REQUIRE( QFile::exists( filled ) );
     REQUIRE( QFileInfo( filled ).isExecutable() );
 }
@@ -452,7 +462,7 @@ TEST_CASE( "AdbProcessTransport resolves to an absolute path when adb is install
 
     // Bare "adb" silently fails when klogg.app is started from Finder/Dock,
     // because the inherited launchd PATH does not contain adb's directory.
-    REQUIRE( streaming.program.startsWith( QLatin1Char( '/' ) ) );
+    REQUIRE( QFileInfo( streaming.program ).isAbsolute() );
     REQUIRE( QFile::exists( streaming.program ) );
     REQUIRE( QFileInfo( streaming.program ).isExecutable() );
 }

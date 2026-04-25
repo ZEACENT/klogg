@@ -80,7 +80,10 @@ void runSearch( LogFilteredData* filtered_data, const QString& regexp,
 
     // Drain any pending throttled signals to avoid a use-after-free when the
     // LogFilteredData teardown races with a still-pending throttler timer.
-    searchProgressSpy.clear();
+    // Do NOT clear() the spy first -- callers (e.g. the TASK-001 generation
+    // SCENARIOs) need to introspect the signals captured during the consume
+    // loop, and on Windows the throttler may not emit any extra signal after
+    // the unthrottled progress==100 emit, leaving spy.count() == 0 if cleared.
     QElapsedTimer drainTimer;
     drainTimer.start();
     const int idleTimeoutMs = 500;
