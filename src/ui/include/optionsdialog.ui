@@ -720,6 +720,16 @@
               </property>
              </widget>
             </item>
+            <item>
+             <widget class="QPushButton" name="adbDetectButton">
+              <property name="toolTip">
+               <string>Probe well-known install locations and fill the path automatically.</string>
+              </property>
+              <property name="text">
+               <string>Detect</string>
+              </property>
+             </widget>
+            </item>
            </layout>
           </item>
           <item>

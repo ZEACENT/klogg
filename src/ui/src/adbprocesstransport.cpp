@@ -7,20 +7,7 @@
 #include <QProcessEnvironment>
 
 namespace {
-// Probe well-known adb install locations and return the first executable hit.
-//
-// macOS GUI apps inherit launchd's session PATH (typically just
-// /usr/bin:/bin:/usr/sbin:/sbin) when launched from Finder/Dock/Spotlight.
-// /etc/paths is consumed by path_helper(1), which only runs in shell rc
-// files -- it has no effect on GUI-spawned processes.  As a result,
-// /usr/local/bin (Homebrew Intel), /opt/homebrew/bin (Apple Silicon),
-// and ~/Library/Android/sdk/platform-tools are all invisible to a bare
-// QProcess::start("adb", ...) call from inside klogg.app.
-//
-// Windows users typically have %ANDROID_SDK_ROOT%\platform-tools added to
-// the System PATH by Android Studio's SDK installer; that PATH IS inherited
-// by GUI-launched apps, so bare "adb" resolves correctly there.  The probe
-// below is a no-op on hosts where adb is already reachable via PATH.
+// See AdbProcessTransport::detectAdbExecutable for rationale and probe order.
 QString findAdbAtKnownLocation()
 {
     const auto env = QProcessEnvironment::systemEnvironment();
@@ -271,6 +258,11 @@ ProcessLiveSourceTransport::Command AdbProcessTransport::clearCommand() const
 QString AdbProcessTransport::normalizedAdbExecutable() const
 {
     return normalizedExecutable( adbExecutable_ );
+}
+
+QString AdbProcessTransport::detectAdbExecutable()
+{
+    return findAdbAtKnownLocation();
 }
 
 QStringList AdbProcessTransport::logcatArguments() const

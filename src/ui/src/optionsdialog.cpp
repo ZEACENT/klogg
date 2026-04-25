@@ -42,6 +42,7 @@
 #include <QToolButton>
 #include <QtGui>
 
+#include "adbprocesstransport.h"
 #include "encodings.h"
 #include "fontutils.h"
 #include "highlighteredit.h"
@@ -91,6 +92,17 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 
     connect( mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
     connect( quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
+
+    connect( adbDetectButton, &QPushButton::clicked, this, [ this ] {
+        const auto resolved = AdbProcessTransport::detectAdbExecutable();
+        if ( resolved.isEmpty() ) {
+            QMessageBox::information(
+                this, tr( "Detect ADB executable" ),
+                tr( "No adb found at well-known install locations. Set the path manually." ) );
+            return;
+        }
+        adbExecutableLineEdit->setText( resolved );
+    } );
 
     connect( restoreShortcutsDefaults, &QPushButton::clicked, this, [ this ]() {
         auto ret = QMessageBox::question(

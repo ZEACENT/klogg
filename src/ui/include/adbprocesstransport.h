@@ -20,6 +20,13 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
 
     static QList<AdbDeviceInfo> listDevices( const QString& adbExecutable, QString* error );
 
+    // Probe well-known adb install locations and return the absolute path of
+    // the first executable hit.  Returns an empty string when no candidate
+    // exists.  Useful for "Detect adb" UI affordances; see docs/PORTABILITY.md
+    // for the rationale (macOS GUI launchd PATH does not include the typical
+    // SDK / Homebrew install directories).
+    static QString detectAdbExecutable();
+
   protected:
     Command streamingCommand() const override;
     Command clearCommand() const override;

@@ -207,6 +207,49 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
              == QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
 }
 
+TEST_CASE( "OptionsDialog adb detect button fills the executable field with the resolved adb path" )
+{
+    if ( isHeadlessDialogTestEnvironment() ) {
+        WARN( "OptionsDialog UI coverage is skipped on headless/offscreen platforms" );
+        return;
+    }
+
+    if ( AdbProcessTransport::detectAdbExecutable().isEmpty() ) {
+        WARN( "No adb installed at a well-known location -- skipping detect button test" );
+        return;
+    }
+
+    ScopedAdbConfigurationGuard configGuard;
+    auto& savedSearches = SavedSearches::getSynced();
+    auto& recentFiles = RecentFiles::getSynced();
+    Q_UNUSED( savedSearches );
+    Q_UNUSED( recentFiles );
+    auto& config = Configuration::getSynced();
+    config.setAdbExecutable( QString{} );
+    config.save();
+
+    OptionsDialog dialog;
+    auto* adbExecutableLineEdit
+        = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableLineEdit" ) );
+    auto* adbDetectButton
+        = dialog.findChild<QPushButton*>( QStringLiteral( "adbDetectButton" ) );
+
+    REQUIRE( adbExecutableLineEdit != nullptr );
+    REQUIRE( adbDetectButton != nullptr );
+    REQUIRE( adbDetectButton->isEnabled() );
+    REQUIRE( adbExecutableLineEdit->text().isEmpty() );
+
+    adbDetectButton->click();
+    QCoreApplication::processEvents();
+
+    const auto filled = adbExecutableLineEdit->text();
+    INFO( "Filled value after detect click: " << filled.toStdString() );
+    REQUIRE_FALSE( filled.isEmpty() );
+    REQUIRE( filled.startsWith( QLatin1Char( '/' ) ) );
+    REQUIRE( QFile::exists( filled ) );
+    REQUIRE( QFileInfo( filled ).isExecutable() );
+}
+
 namespace {
 // A minimal ProcessLiveSourceTransport subclass that runs a long-lived process
 // without ADB-specific argument decoration, for testing disconnect behavior.
