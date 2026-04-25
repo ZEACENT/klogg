@@ -45,6 +45,7 @@
 #include "active_screen.h"
 #include "linetypes.h"
 #include "log.h"
+#include "searchgeneration.h"
 
 #include <algorithm>
 #include <cassert>
@@ -411,7 +412,8 @@ void CrawlerWidget::startNewSearch()
         tabbedFilteredView_->setCurrentIndex( index );
 
         connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-                 &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
+                 &CrawlerWidget::updateFilteredView,
+                 static_cast<Qt::ConnectionType>( Qt::QueuedConnection | Qt::UniqueConnection ) );
 
         logMainView_->useNewFiltering( logFilteredData_.get() );
 
@@ -582,14 +584,17 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
                                         LineNumber initialPosition,
                                         quint64 generation )
 {
-    if ( logFilteredData_ && generation != logFilteredData_->currentSearchGeneration() ) {
-        // Stale signal from a search that has since been replaced.  Without
-        // this gate, queued metacalls from the previous SearchOperation can
-        // land in updateFilteredView() after replaceCurrentSearch() has
-        // started a new search, corrupting match counts and progress UI.
-        LOG_DEBUG << "updateFilteredView dropping stale signal: gen " << generation
-                  << " != active " << logFilteredData_->currentSearchGeneration();
-        return;
+    if ( logFilteredData_ ) {
+        const auto activeGeneration = logFilteredData_->currentSearchGeneration();
+        if ( klogg::isStaleSearchGeneration( generation, activeGeneration ) ) {
+            // Stale signal from a search that has since been replaced.  Without
+            // this gate, queued metacalls from the previous SearchOperation can
+            // land in updateFilteredView() after replaceCurrentSearch() has
+            // started a new search, corrupting match counts and progress UI.
+            LOG_DEBUG << "updateFilteredView dropping stale signal: gen " << generation
+                      << " != active " << activeGeneration;
+            return;
+        }
     }
 
     LOG_DEBUG << "updateFilteredView received.";
@@ -1502,7 +1507,8 @@ void CrawlerWidget::setup()
     connect( logMainView_, &LogMainView::changeFontSize, this, &CrawlerWidget::changeFontSize );
 
     connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-             &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
+             &CrawlerWidget::updateFilteredView,
+             static_cast<Qt::ConnectionType>( Qt::QueuedConnection | Qt::UniqueConnection ) );
 
     // Throttle timer for search updates during live streaming
     searchUpdateThrottleTimer_.setSingleShot( true );

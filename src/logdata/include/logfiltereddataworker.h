@@ -238,6 +238,14 @@ public:
     // when the search was replaced.
     OperationGeneration currentGeneration() const { return operationGeneration_.load(); }
 
+    // Advance the generation counter without launching a worker thread.
+    // Used by LogFilteredData when a cached result is delivered without
+    // touching the worker -- without this bump, queued progress signals
+    // from a previous real search would still match the active generation
+    // and corrupt the freshly-displayed cached state.  Returns the new
+    // generation value.
+    OperationGeneration bumpGeneration() { return operationGeneration_.fetch_add( 1 ) + 1; }
+
 Q_SIGNALS:
     // Sent during the indexing process to signal progress
     // percent being the percentage of completion.

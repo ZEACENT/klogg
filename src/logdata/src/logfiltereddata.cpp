@@ -161,8 +161,14 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
 
             marks_and_matches_ = matching_lines_ | marks_;
 
+            // Advance the generation counter even though no worker thread
+            // runs.  Without this, queued progress signals from the previous
+            // real search still carry the current generation and pass the
+            // staleness gate in the receiver, corrupting the just-displayed
+            // cached result.
+            const auto cachedGeneration = workerThread_.bumpGeneration();
             Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine,
-                                     workerThread_.currentGeneration() );
+                                     cachedGeneration );
         }
     }
 

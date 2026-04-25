@@ -868,7 +868,7 @@ SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
         // Each updateSearch() call starts a search that eventually emits
         // searchProgressed with progress == 100.
         SafeQSignalSpy searchSpy( visitor.rawFilteredData(),
-                                  SIGNAL( searchProgressed( LinesCount, int, LineNumber ) ) );
+                                  SIGNAL( searchProgressed( LinesCount, int, LineNumber, quint64 ) ) );
 
         QElapsedTimer elapsed;
         elapsed.start();

@@ -9,6 +9,7 @@ add_executable(klogg_tests
     linepositionarray_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
+    searchgeneration_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
     streaminglogdata_test.cpp
