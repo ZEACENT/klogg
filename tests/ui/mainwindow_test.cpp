@@ -277,7 +277,13 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
         groupManager.save();
     } );
 
-    REQUIRE( !groupId.isEmpty() );
+    // runInUiThread's internal QTest::qWait(100) is not always enough on
+    // slow runners (Ubuntu 20.04 docker has missed the 100 ms budget,
+    // leaving groupId empty before this REQUIRE).  waitUiState polls
+    // up to 10 s, so the assertion either succeeds quickly on a healthy
+    // runner or fails with a clear timeout instead of a misleading
+    // "groupId is empty" diagnostic.
+    REQUIRE( waitUiState( [ & ] { return !groupId.isEmpty(); } ) );
 
     auto verifyGroupChipName = [ tabBar ]( const QString& expectedName ) -> int {
         REQUIRE( waitUiState( [ tabBar, &expectedName ] {

@@ -144,15 +144,42 @@ KLOGG_REQUIRE_OR_WARN_SKIP(
 
 The `KLOGG_REQUIRE_OR_WARN_SKIP` helper lives in `tests/helpers/test_utils.h`. Use it whenever the predicate is "is the environment in the shape my test needs?" rather than "does the production code under test behave correctly?"; reserve plain `REQUIRE` / `CHECK` for the latter.
 
-### 8.4 Why these three rules and not more
+### 8.4 UI-thread sync via predicate, not fixed millisecond budget
+
+```cpp
+// AVOID -- runInUiThread internally pumps events for QTest::qWait(100),
+// then control returns regardless of whether the queued lambda actually
+// ran.  On a slow runner (Ubuntu 20.04 docker, busy CI host) the lambda
+// has not been pumped within 100ms; the immediately-following REQUIRE
+// then fires with a confusing "value is empty" diagnostic that has
+// nothing to do with the production code under test.
+runInUiThread( [&] { groupId = TabGroupManager::get().groups().back().id; } );
+REQUIRE( !groupId.isEmpty() );
+
+// PREFER -- waitUiState polls up to 10 s for the predicate.  On a
+// healthy runner this returns within milliseconds; on a slow runner
+// it absorbs the variance instead of producing a flake.
+runInUiThread( [&] { groupId = TabGroupManager::get().groups().back().id; } );
+REQUIRE( waitUiState( [&] { return !groupId.isEmpty(); } ) );
+```
+
+The same rule applies any time a test depends on a queued lambda
+having been pumped, an event-loop-driven cache having been refreshed,
+a layout-pass having run, etc.  When the assertion is "the world
+should reach state X eventually", `waitUiState` (or any equivalent
+poll-with-deadline helper) is the right tool; a fixed `QTest::qWait`
+is not.
+
+### 8.5 Why these four rules and not more
 
 Every rule in this section is the *direct generalisation* of a specific past klogg bug:
 
 - §8.1 generalises PR #12's two Windows-only ctest failures (`adb_ui_transport_test.cpp:103, 248, 455` in the original branch).
 - §8.2 generalises PR #12's `runSearch()` helper drain-and-reread bug.
 - §8.3 generalises PR #12's `StreamingScriptTransport.connectTransport()` Windows flake.
+- §8.4 generalises PR #12's third-round `mainwindow_test.cpp:280` Tab-group-chip flake on the slow Ubuntu 20.04 runner.
 
-When the next platform-specific failure shows up, add a §8.4+ rule grounded in the actual incident. Do not pre-emptively add abstract anti-patterns -- the value of this section is that each rule has a paid-for receipt.
+When the next platform-specific failure shows up, add a §8.6+ rule grounded in the actual incident. Do not pre-emptively add abstract anti-patterns -- the value of this section is that each rule has a paid-for receipt.
 
 ---
 
