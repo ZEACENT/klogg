@@ -64,8 +64,8 @@ class VersionCheckerConfig final : public Persistable<VersionCheckerConfig, sess
     }
 
     // Reads/writes the current config in the QSettings object passed
-    virtual void saveToStorage( QSettings& settings ) const;
-    virtual void retrieveFromStorage( QSettings& settings );
+    void saveToStorage( QSettings& settings ) const;
+    void retrieveFromStorage( QSettings& settings );
 
   private:
     std::time_t next_deadline_ = {};
