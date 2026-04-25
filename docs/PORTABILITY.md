@@ -81,6 +81,79 @@ A true regression test for the macOS GUI-launch case would launch `klogg.app` vi
 
 This test is currently NOT wired up in CI. The macOS job builds and runs unit tests under a terminal-inherited environment, which masks the launchd PATH trap. If a contributor wires up such a test (a small AppleScript or `osascript` driver around `open -a klogg.app` inside a `env -i` shell, plus a UI-test hook), this section is the place to document the runner, the expected failure modes, and how to update the known-location list when SDK install paths change.
 
+`scripts/lint_platform_fragile.py` runs in `.github/workflows/lint.yml` on every push and PR; it fails the job for the two specific patterns klogg has tripped on in the past (`startsWith(QLatin1Char('/'))` for absolute-path tests, `endsWith("\\foo")` for path-suffix tests). Add new patterns there when a future Windows-only failure suggests one. Inline `// lint-allow: platform-fragile` to override on a single line when the use is intentional.
+
+## 8. Test patterns to avoid
+
+These patterns pass on the developer's macOS / Linux build and silently break on Windows CI. Each maps to at least one regression klogg has actually hit; the fixes are the conventions everyone should reach for first.
+
+### 8.1 Path-shape assertions
+
+```cpp
+// AVOID -- Windows absolute paths look like "C:/Users/...".
+REQUIRE( path.startsWith( QLatin1Char( '/' ) ) );
+// AVOID -- Qt normalises path separators to '/' on every platform,
+// so a literal containing '\\' never matches what Qt actually emits.
+REQUIRE( path.endsWith( QStringLiteral( "\\adb.exe" ) ) );
+
+// PREFER -- portable predicates from QFileInfo.
+REQUIRE( QFileInfo( path ).isAbsolute() );
+REQUIRE( QFileInfo( path ).fileName().compare(
+             QStringLiteral( "adb.exe" ), Qt::CaseInsensitive ) == 0 );
+```
+
+`scripts/lint_platform_fragile.py` rejects both AVOID forms. Compare leaves via `QFileInfo::fileName()` and absoluteness via `QFileInfo::isAbsolute()`; never reach for the leading-slash convention.
+
+### 8.2 Signal-timing assertions
+
+```cpp
+// AVOID -- relies on the throttler firing again AFTER an unthrottled
+// progress == 100 emit; Windows timer granularity (~15.6ms) makes this
+// path emit zero residue, and the test silently passes 0 > 0.
+spy.clear();
+QTest::qWait( 5000 );
+REQUIRE( spy.count() > 0 );
+
+// PREFER -- inspect the signals captured during the consume loop.
+// runSearch()'s helper has been adjusted to leave the spy populated
+// instead of clearing it; SCENARIOs read spy.at(i) for i < spy.count().
+for ( int i = 0; i < spy.count(); ++i ) {
+    const auto args = spy.at( i );
+    // ... assert per-signal contract ...
+}
+```
+
+If the test must wait for a specific deadline, drive the wait off a deterministic state-change predicate (`waitUiState([&]{ return getCount() >= N; })`) rather than off arbitrary signal-spy residue.
+
+### 8.3 External-tool dependence
+
+```cpp
+// AVOID -- runner-state-dependent assumption; on a runner that does
+// not satisfy the precondition (no adb installed, ping unavailable,
+// limited entropy, etc.), CI fails for reasons unrelated to the code
+// under test, while macOS / Linux luck into passing.
+REQUIRE( transport.connectTransport() );
+
+// PREFER -- explicit skip-with-warning when the precondition is the
+// runner environment, not the production behaviour:
+KLOGG_REQUIRE_OR_WARN_SKIP(
+    transport.connectTransport(),
+    "StreamingScriptTransport: connectTransport failed in this "
+    "environment -- pipeline behaviour is exercised elsewhere" );
+```
+
+The `KLOGG_REQUIRE_OR_WARN_SKIP` helper lives in `tests/helpers/test_utils.h`. Use it whenever the predicate is "is the environment in the shape my test needs?" rather than "does the production code under test behave correctly?"; reserve plain `REQUIRE` / `CHECK` for the latter.
+
+### 8.4 Why these three rules and not more
+
+Every rule in this section is the *direct generalisation* of a specific past klogg bug:
+
+- §8.1 generalises PR #12's two Windows-only ctest failures (`adb_ui_transport_test.cpp:103, 248, 455` in the original branch).
+- §8.2 generalises PR #12's `runSearch()` helper drain-and-reread bug.
+- §8.3 generalises PR #12's `StreamingScriptTransport.connectTransport()` Windows flake.
+
+When the next platform-specific failure shows up, add a §8.4+ rule grounded in the actual incident. Do not pre-emptively add abstract anti-patterns -- the value of this section is that each rule has a paid-for receipt.
+
 ---
 
 _Last updated: 2026-04-25_

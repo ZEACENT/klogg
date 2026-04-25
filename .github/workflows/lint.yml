@@ -1,0 +1,22 @@
+name: lint
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Cheap, sub-minute lint job that gates obvious cross-platform pitfalls
+# before the heavyweight Windows / macOS / Linux build matrix runs.  Targets
+# the specific failure patterns that have actually slipped past macOS / Linux
+# CI in the past (see scripts/lint_platform_fragile.py for the rationale and
+# docs/PORTABILITY.md for the broader guidance).
+jobs:
+  platform-fragile:
+    name: platform-fragile patterns
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run lint
+        run: python3 scripts/lint_platform_fragile.py

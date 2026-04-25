@@ -8,7 +8,25 @@
 #include <QSignalSpy>
 #include <QTest>
 
+#include <catch2/catch.hpp>
+
 #include <configuration.h>
+
+// Soft precondition for environment-dependent tests.  Use in place of REQUIRE
+// when the predicate is checking something the test environment is supposed
+// to provide (an installed external tool, a runner-specific assumption, etc.)
+// rather than the production code under test.  When the predicate is false,
+// emits a Catch2 WARN with the supplied message and returns from the
+// enclosing function -- the SCENARIO is silently skipped instead of failing
+// CI.  Mechanises the inline `WARN(...); return;` pattern already used at
+// several existing skip-points in tests/unit/adb_ui_transport_test.cpp.
+#define KLOGG_REQUIRE_OR_WARN_SKIP( cond, msg )                                                    \
+    do {                                                                                            \
+        if ( !( cond ) ) {                                                                          \
+            WARN( msg );                                                                            \
+            return;                                                                                 \
+        }                                                                                           \
+    } while ( 0 )
 /*
 struct TestTimer {
     TestTimer()
