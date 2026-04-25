@@ -22,7 +22,10 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QLineEdit>
 #include <QPushButton>
@@ -90,7 +93,14 @@ TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" 
                                        QStringLiteral( "-v threadtime -T \"2026-03-15 12:34:56.000\" *:I" ) );
 
     const auto streaming = transport.streamingCommandForTest();
-    REQUIRE( streaming.program == QStringLiteral( "adb" ) );
+    // When no explicit path is configured, the program is either bare "adb"
+    // (host has adb on PATH) or the absolute path of an installed adb (resolved
+    // from a well-known install location).  The argument decoration is what
+    // this test exists to verify.
+    REQUIRE_FALSE( streaming.program.isEmpty() );
+    REQUIRE( ( streaming.program == QStringLiteral( "adb" )
+               || streaming.program.endsWith( QStringLiteral( "/adb" ) )
+               || streaming.program.endsWith( QStringLiteral( "\\adb.exe" ) ) ) );
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
@@ -99,7 +109,7 @@ TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" 
                              QStringLiteral( "*:I" ) } );
 
     const auto clear = transport.clearCommandForTest();
-    REQUIRE( clear.program == QStringLiteral( "adb" ) );
+    REQUIRE( clear.program == streaming.program );
     REQUIRE( clear.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-c" ) } );
@@ -337,4 +347,126 @@ TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edit
     auto& restoredConfig = Configuration::getSynced();
     REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/saved/adb" ) );
     REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
+}
+
+// ----------------------------------------------------------------------------
+// macOS GUI-launch reproduction:
+//
+// When klogg.app is launched from Finder/Dock/Spotlight, it inherits the
+// launchd GUI session environment.  That environment does NOT include
+// /usr/local/bin (Homebrew Intel), /opt/homebrew/bin (Homebrew Apple Silicon),
+// or ~/Library/Android/sdk/platform-tools (Android SDK default).
+// `/etc/paths` is consumed by path_helper(1), which only runs in shell rc
+// files -- it has no effect on GUI-spawned processes.
+//
+// Result: when the user has not configured an explicit adb path, klogg ends
+// up calling QProcess::start("adb", ...) with a PATH that does not contain
+// adb anywhere, and the process fails to start.  Live streaming never
+// connects.  Windows is unaffected because Android Studio/SDK Manager adds
+// platform-tools to System PATH, which IS inherited by GUI apps.
+//
+// The fix: when no explicit adb is configured, probe the well-known install
+// locations on disk and use the absolute path of whichever one exists.
+// Falling back to bare "adb" only as a last resort preserves Linux/Windows
+// behavior on hosts where adb is reachable via PATH.
+// ----------------------------------------------------------------------------
+
+TEST_CASE( "AdbProcessTransport preserves a user-configured adb executable verbatim" )
+{
+    TestAdbProcessTransport transport( QStringLiteral( "/explicit/path/to/adb" ),
+                                       QStringLiteral( "serial" ), {} );
+    REQUIRE( transport.streamingCommandForTest().program
+             == QStringLiteral( "/explicit/path/to/adb" ) );
+}
+
+TEST_CASE( "AdbProcessTransport resolves to an absolute path when adb is installed at a "
+           "well-known location and the user has not configured one" )
+{
+    static const QStringList knownAdbInstallLocations{
+        QStringLiteral( "/usr/local/bin/adb" ),
+        QStringLiteral( "/opt/homebrew/bin/adb" ),
+        QDir::homePath() + QStringLiteral( "/Library/Android/sdk/platform-tools/adb" ),
+    };
+
+    QString availableLocation;
+    for ( const auto& candidate : knownAdbInstallLocations ) {
+        if ( QFile::exists( candidate ) && QFileInfo( candidate ).isExecutable() ) {
+            availableLocation = candidate;
+            break;
+        }
+    }
+
+    if ( availableLocation.isEmpty() ) {
+        WARN( "No adb installed at a well-known location -- skipping GUI-launch repro." );
+        return;
+    }
+
+    TestAdbProcessTransport transport( QString{}, QStringLiteral( "emulator-5554" ), {} );
+    const auto streaming = transport.streamingCommandForTest();
+
+    INFO( "Resolved adb program: " << streaming.program.toStdString() );
+    INFO( "Available installed adb at: " << availableLocation.toStdString() );
+
+    // Bare "adb" silently fails when klogg.app is started from Finder/Dock,
+    // because the inherited launchd PATH does not contain adb's directory.
+    REQUIRE( streaming.program.startsWith( QLatin1Char( '/' ) ) );
+    REQUIRE( QFile::exists( streaming.program ) );
+    REQUIRE( QFileInfo( streaming.program ).isExecutable() );
+}
+
+namespace {
+class StreamingScriptTransport : public ProcessLiveSourceTransport {
+  public:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ),
+                 { QStringLiteral( "/c" ),
+                   QStringLiteral( "for /L %i in (1,1,5) do @(echo line %i & ping -n 1 -w 50 "
+                                   "127.0.0.1 > nul)" ) } };
+#else
+        return { QStringLiteral( "/bin/sh" ),
+                 { QStringLiteral( "-c" ),
+                   QStringLiteral(
+                       "i=1; while [ $i -le 5 ]; do echo line $i; i=$((i+1)); sleep 0.05; done" ) } };
+#endif
+    }
+
+    Command clearCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ), { QStringLiteral( "/c" ), QStringLiteral( "echo" ) } };
+#else
+        return { QStringLiteral( "true" ), {} };
+#endif
+    }
+};
+} // namespace
+
+TEST_CASE( "ProcessLiveSourceTransport delivers every line of a slow streaming process via "
+           "bytesReceived" )
+{
+    StreamingScriptTransport transport;
+    QByteArray accumulated;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [ &accumulated ]( const QByteArray& data ) { accumulated += data; } );
+
+    REQUIRE( transport.connectTransport() );
+
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( accumulated.count( '\n' ) < 5 && deadline.elapsed() < 5000 ) {
+        QCoreApplication::processEvents();
+        QTest::qWait( 50 );
+    }
+
+    INFO( "Accumulated bytes: " << accumulated.toStdString() );
+    CHECK( accumulated.contains( QByteArrayLiteral( "line 1" ) ) );
+    CHECK( accumulated.contains( QByteArrayLiteral( "line 5" ) ) );
+    CHECK( accumulated.count( '\n' ) == 5 );
+
+    transport.disconnectTransport();
+    QCoreApplication::processEvents();
+    QTest::qWait( 1500 );
+    QCoreApplication::processEvents();
 }

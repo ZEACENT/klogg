@@ -1,11 +1,92 @@
 #include "adbprocesstransport.h"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QProcess>
+#include <QProcessEnvironment>
 
 namespace {
+// Probe well-known adb install locations and return the first executable hit.
+//
+// macOS GUI apps inherit launchd's session PATH (typically just
+// /usr/bin:/bin:/usr/sbin:/sbin) when launched from Finder/Dock/Spotlight.
+// /etc/paths is consumed by path_helper(1), which only runs in shell rc
+// files -- it has no effect on GUI-spawned processes.  As a result,
+// /usr/local/bin (Homebrew Intel), /opt/homebrew/bin (Apple Silicon),
+// and ~/Library/Android/sdk/platform-tools are all invisible to a bare
+// QProcess::start("adb", ...) call from inside klogg.app.
+//
+// Windows users typically have %ANDROID_SDK_ROOT%\platform-tools added to
+// the System PATH by Android Studio's SDK installer; that PATH IS inherited
+// by GUI-launched apps, so bare "adb" resolves correctly there.  The probe
+// below is a no-op on hosts where adb is already reachable via PATH.
+QString findAdbAtKnownLocation()
+{
+    const auto env = QProcessEnvironment::systemEnvironment();
+
+#if defined( Q_OS_WIN )
+    const QString exe = QStringLiteral( "adb.exe" );
+#else
+    const QString exe = QStringLiteral( "adb" );
+#endif
+
+    QStringList candidates;
+    const auto appendDir = [ &candidates, &exe ]( const QString& dir ) {
+        if ( !dir.isEmpty() ) {
+            candidates.append( QDir::cleanPath( dir + QLatin1Char( '/' ) + exe ) );
+        }
+    };
+    const auto appendEnvDir
+        = [ &env, &appendDir ]( const char* envVar, const QString& suffix ) {
+              const auto value = env.value( QString::fromLatin1( envVar ) );
+              if ( !value.isEmpty() ) {
+                  appendDir( value + suffix );
+              }
+          };
+
+    appendEnvDir( "ANDROID_SDK_ROOT", QStringLiteral( "/platform-tools" ) );
+    appendEnvDir( "ANDROID_HOME", QStringLiteral( "/platform-tools" ) );
+
+#if defined( Q_OS_WIN )
+    appendEnvDir( "LOCALAPPDATA", QStringLiteral( "/Android/Sdk/platform-tools" ) );
+    appendEnvDir( "ProgramFiles", QStringLiteral( "/Android/android-sdk/platform-tools" ) );
+#elif defined( Q_OS_MAC )
+    candidates.append( QStringLiteral( "/usr/local/bin/adb" ) );
+    candidates.append( QStringLiteral( "/opt/homebrew/bin/adb" ) );
+    appendDir( QDir::homePath() + QStringLiteral( "/Library/Android/sdk/platform-tools" ) );
+#else
+    candidates.append( QStringLiteral( "/usr/local/bin/adb" ) );
+    candidates.append( QStringLiteral( "/usr/bin/adb" ) );
+    appendDir( QDir::homePath() + QStringLiteral( "/Android/Sdk/platform-tools" ) );
+#endif
+
+    for ( const auto& candidate : candidates ) {
+        const QFileInfo info( candidate );
+        if ( info.exists() && info.isFile() && info.isExecutable() ) {
+            return info.absoluteFilePath();
+        }
+    }
+    return {};
+}
+
 QString normalizedExecutable( const QString& adbExecutable )
 {
-    return adbExecutable.trimmed().isEmpty() ? QStringLiteral( "adb" ) : adbExecutable.trimmed();
+    const auto trimmed = adbExecutable.trimmed();
+    if ( !trimmed.isEmpty() ) {
+        return trimmed;
+    }
+
+    const auto resolved = findAdbAtKnownLocation();
+    if ( !resolved.isEmpty() ) {
+        return resolved;
+    }
+
+    // Last resort: bare "adb" lets QProcess fall back to PATH lookup.  This
+    // matches the historical behavior on hosts where the user's shell PATH
+    // (Linux from terminal) or System PATH (Windows with Android SDK) is
+    // already correctly configured.
+    return QStringLiteral( "adb" );
 }
 
 bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
