@@ -201,7 +201,13 @@ class CrawlerWidget : public QSplitter,
     // QuickFind is being closed.
     void exitingQuickFind();
     // Called when new data must be displayed in the filtered window.
-    void updateFilteredView( LinesCount nbMatches, int progress, LineNumber initialPosition );
+    // The generation matches the LogFilteredData::currentSearchGeneration() at
+    // the time the underlying SearchOperation started -- stale signals from a
+    // superseded search carry an older generation and are dropped.  The wire
+    // type is plain quint64 to round-trip cleanly through queued connections
+    // (see LogFilteredDataWorker::OperationGeneration).
+    void updateFilteredView( LinesCount nbMatches, int progress, LineNumber initialPosition,
+                             quint64 generation );
     // Called when a new line has been selected in the filtered view,
     // to instruct the main view to jump to the matching line.
     void jumpToMatchingLine( LineNumber filteredLineNb, LinesCount nLines, LineColumn startCol,

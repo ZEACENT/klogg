@@ -1117,3 +1117,54 @@ SCENARIO( "getLineLength works with context lines", "[logdata][context]" )
         }
     }
 }
+
+// ----------------------------------------------------------------------------
+// TASK-001: Search generation IDs
+//
+// Each call to runSearch() / updateSearch() advances a monotonic generation
+// counter on LogFilteredData.  Every searchProgressed signal carries the
+// generation that was active when the underlying SearchOperation started, so
+// receivers (CrawlerWidget) can drop stale signals from a superseded search
+// without relying on the disconnect/reconnect-around-replaceCurrentSearch
+// hack.
+// ----------------------------------------------------------------------------
+
+SCENARIO( "search generation increments on each runSearch", "[logdata][search-generation]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    REQUIRE( filtered_data->currentSearchGeneration() == 0 );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+    const auto firstGen = filtered_data->currentSearchGeneration();
+    REQUIRE( firstGen > 0 );
+
+    runSearch( filtered_data.get(), "this is line [0-9]{5}3", searchProgressSpy );
+    const auto secondGen = filtered_data->currentSearchGeneration();
+    REQUIRE( secondGen > firstGen );
+}
+
+SCENARIO( "searchProgressed signal carries the search generation",
+          "[logdata][search-generation]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+
+    REQUIRE( searchProgressSpy.count() > 0 );
+    const auto activeGeneration = filtered_data->currentSearchGeneration();
+    for ( int i = 0; i < searchProgressSpy.count(); ++i ) {
+        const auto args = searchProgressSpy.at( i );
+        REQUIRE( args.size() == 4 );
+        const auto gen = args.at( 3 ).toULongLong();
+        REQUIRE( gen == activeGeneration );
+    }
+}

@@ -143,14 +143,31 @@ class LogFilteredData : public AbstractLogData {
     int contextLinesAfter() const { return contextLinesAfter_; }
 
     void iterateOverLines( const std::function<void( LineNumber )>& callback ) const;
+
+    // Alias kept for callers that prefer a self-documenting name; signals
+    // use plain quint64 (see LogFilteredDataWorker::OperationGeneration for
+    // the rationale).
+    using SearchGeneration = LogFilteredDataWorker::OperationGeneration;
+
+    // Generation of the search currently active.  Each runSearch() /
+    // updateSearch() call advances the worker's generation counter; this
+    // accessor returns that value.  Receivers of searchProgressed can compare
+    // the signal-supplied generation against this value to drop stale signals
+    // that were queued before the search was replaced.
+    SearchGeneration currentSearchGeneration() const { return workerThread_.currentGeneration(); }
+
   Q_SIGNALS:
     // Sent when the search has progressed, give the number of matches (so far)
-    // and the percentage of completion
-    void searchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine );
+    // and the percentage of completion.  The generation identifies which
+    // runSearch() / updateSearch() call produced this signal -- see
+    // currentSearchGeneration().
+    void searchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine,
+                           quint64 generation );
     void searchProgressedThrottled();
 
   private Q_SLOTS:
-    void handleSearchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine );
+    void handleSearchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine,
+                                 quint64 generation );
     void handleSearchProgressedThrottled();
 
   private:
@@ -212,7 +229,7 @@ class LogFilteredData : public AbstractLogData {
     mutable LineLength maxLengthContext_ = 0_length;
 
     Mutex searchProgressMutex_;
-    std::tuple<LinesCount, int, LineNumber> searchProgress_;
+    std::tuple<LinesCount, int, LineNumber, quint64> searchProgress_;
 
     KDToolBox::KDSignalThrottler searchProgressThrottler_;
 

@@ -316,7 +316,7 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
                 waitForDone();
             }
 
-            Q_EMIT searchProgressed( nbMatches, percent, initialLine );
+            Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
         },
         this );
 }

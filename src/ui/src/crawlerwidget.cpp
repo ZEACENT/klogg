@@ -579,8 +579,19 @@ void CrawlerWidget::showSearchContextMenu()
 
 // When receiving the 'newDataAvailable' signal from LogFilteredData
 void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
-                                        LineNumber initialPosition )
+                                        LineNumber initialPosition,
+                                        quint64 generation )
 {
+    if ( logFilteredData_ && generation != logFilteredData_->currentSearchGeneration() ) {
+        // Stale signal from a search that has since been replaced.  Without
+        // this gate, queued metacalls from the previous SearchOperation can
+        // land in updateFilteredView() after replaceCurrentSearch() has
+        // started a new search, corrupting match counts and progress UI.
+        LOG_DEBUG << "updateFilteredView dropping stale signal: gen " << generation
+                  << " != active " << logFilteredData_->currentSearchGeneration();
+        return;
+    }
+
     LOG_DEBUG << "updateFilteredView received.";
 
     searchInfoLine_->show();
@@ -1820,15 +1831,11 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     LOG_INFO << "replacing current search with " << searchText;
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
-    // Interrupt the search if it's ongoing
+    // Interrupt the search if it's ongoing.  The next runSearch() will advance
+    // the worker's generation counter; stale queued searchProgressed signals
+    // from the interrupted run carry the old generation and are filtered out
+    // by updateFilteredView() (see TASK-001 in README backlog).
     logFilteredData_->interruptSearch();
-
-    // Temporarily disconnect searchProgressed so that stale queued signals
-    // from the interrupted search do not update the view during the
-    // clear/restart window.  This avoids the re-entrant processEvents()
-    // hack that was here previously (see git log for history).
-    disconnect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-                &CrawlerWidget::updateFilteredView );
 
     nbMatches_ = 0_lcount;
 
@@ -1897,12 +1904,6 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
         searchState_.resetState();
         printSearchInfoMessage();
     }
-
-    // Reconnect searchProgressed now that the clear/restart is complete.
-    // Any stale queued signals from the old search are harmlessly discarded
-    // because the slot was disconnected while they were in the queue.
-    connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-             &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
 }
 
 // Updates the content of the drop down list for the saved searches,

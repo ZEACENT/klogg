@@ -141,6 +141,8 @@ public:
     virtual void run( SearchData& result ) = 0;
 
 Q_SIGNALS:
+    // Operations are unaware of search generations -- the worker assigns and
+    // forwards the generation when re-emitting these onto the owner thread.
     void searchProgressed( LinesCount nbMatches, int percent, LineNumber initialLine );
     void searchFinished();
 
@@ -221,17 +223,34 @@ public:
     // get the current indexing data
     SearchResults getSearchResults() const;
 
+    // Alias kept for callers that prefer a self-documenting name; the wire
+    // type used in signals is plain quint64 because moc / QSignalSpy treat
+    // typedefs of non-builtin types as unregistered metatypes (the wire-side
+    // QVariant decodes back to 0).  Built-in Qt types like quint64 round-trip
+    // cleanly through queued connections without explicit qRegisterMetaType.
+    using OperationGeneration = quint64;
+
+    // Generation of the search currently active (most recently started via
+    // search() / updateSearch()).  Stale signals from superseded searches
+    // carry an older generation and are filtered out by the worker before
+    // re-emission; downstream consumers can additionally compare against
+    // this value to drop signals that were already in their event queue
+    // when the search was replaced.
+    OperationGeneration currentGeneration() const { return operationGeneration_.load(); }
+
 Q_SIGNALS:
     // Sent during the indexing process to signal progress
     // percent being the percentage of completion.
-    void searchProgressed( LinesCount nbMatches, int percent, LineNumber initialLine );
+    // The generation identifies which search() / updateSearch() call this
+    // signal belongs to so receivers can drop stale queued signals from a
+    // search that has since been replaced.
+    void searchProgressed( LinesCount nbMatches, int percent, LineNumber initialLine,
+                           quint64 generation );
     // Sent when indexing is finished, signals the client
     // to copy the new data back.
     void searchFinished();
 
 private:
-    using OperationGeneration = uint64_t;
-
     void connectSignalsAndRun( SearchOperation* operationRequested, OperationGeneration generation );
     void emitSearchProgressedOnOwnerThread( LinesCount nbMatches, int percent,
                                             LineNumber initialLine,

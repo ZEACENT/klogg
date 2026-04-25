@@ -161,7 +161,8 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
 
             marks_and_matches_ = matching_lines_ | marks_;
 
-            Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine );
+            Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine,
+                                     workerThread_.currentGeneration() );
         }
     }
 
@@ -600,7 +601,8 @@ void LogFilteredData::updateSearchResultsCache()
 // Q_SLOTS:
 //
 void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress,
-                                              LineNumber initialLine )
+                                              LineNumber initialLine,
+                                              quint64 generation )
 {
     if ( shuttingDown_ ) {
         return;
@@ -624,14 +626,14 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
 
     {
         ScopedLock lock( searchProgressMutex_ );
-        searchProgress_ = std::make_tuple( nbMatches, progress, initialLine );
+        searchProgress_ = std::make_tuple( nbMatches, progress, initialLine, generation );
     }
 
     if ( progress == 100 ) {
         // Do not rely solely on the throttler timer for the terminal update: tests and
         // shutdown paths need a deterministic completion signal even if the throttler
         // event is delayed or dropped during teardown.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine );
+        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
         detachReaderIfNeeded();
 
         LOG_INFO << "Matches size " << readableSize( matching_lines_.getSizeInBytes( false ) )
@@ -643,7 +645,7 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
         // Windows test runs have hit repeated QObject/KDSignalThrottler teardown
         // crashes after many create/search/destroy cycles. Emit progress directly
         // instead of using the throttler on Windows.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine );
+        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
 #else
         Q_EMIT searchProgressedThrottled();
 #endif
@@ -659,11 +661,12 @@ void LogFilteredData::handleSearchProgressedThrottled()
     LinesCount nbMatches;
     int progress;
     LineNumber initialLine;
+    quint64 generation;
     {
         ScopedLock lock( searchProgressMutex_ );
-        std::tie( nbMatches, progress, initialLine ) = searchProgress_;
+        std::tie( nbMatches, progress, initialLine, generation ) = searchProgress_;
     }
-    Q_EMIT searchProgressed( nbMatches, progress, initialLine );
+    Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
 }
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const
