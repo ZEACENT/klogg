@@ -1837,10 +1837,20 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     LOG_INFO << "replacing current search with " << searchText;
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
-    // Interrupt the search if it's ongoing.  The next runSearch() will advance
-    // the worker's generation counter; stale queued searchProgressed signals
-    // from the interrupted run carry the old generation and are filtered out
-    // by updateFilteredView() (see TASK-001 in README backlog).
+
+    // Advance the generation counter BEFORE interrupting.  Every code path
+    // out of this function abandons the prior search results (clearSearch()
+    // is called below regardless of whether the user typed empty text, an
+    // invalid regex, or a valid one); progress signals already queued from
+    // the prior search must therefore be treated as stale.
+    //
+    // The follow-up runSearch() on the valid-regex path will advance the
+    // counter again, which is harmless -- only equality matters for the
+    // staleness gate.  The bump must NOT live inside interruptSearch():
+    // CrawlerWidget::stopSearch also calls interruptSearch() and depends
+    // on the final progress signal reaching updateFilteredView() to run
+    // the Stop-button UI cleanup.
+    logFilteredData_->bumpSearchGeneration();
     logFilteredData_->interruptSearch();
 
     nbMatches_ = 0_lcount;

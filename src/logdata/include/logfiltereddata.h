@@ -156,6 +156,15 @@ class LogFilteredData : public AbstractLogData {
     // that were queued before the search was replaced.
     SearchGeneration currentSearchGeneration() const { return workerThread_.currentGeneration(); }
 
+    // Advance the generation counter without launching a search.  Called by
+    // CrawlerWidget::replaceCurrentSearch (and any other "abandon all
+    // in-flight progress signals from the previous search outright"
+    // pathway) so that queued metacalls still on the receiver's event queue
+    // are recognised as stale and dropped.  Does NOT advance for the
+    // Stop-button pathway -- that one wants the final progress signal to
+    // reach the receiver and trigger UI cleanup.
+    void bumpSearchGeneration() { workerThread_.bumpGeneration(); }
+
   Q_SIGNALS:
     // Sent when the search has progressed, give the number of matches (so far)
     // and the percentage of completion.  The generation identifies which

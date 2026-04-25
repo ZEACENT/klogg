@@ -1132,6 +1132,43 @@ SCENARIO( "getLineLength works with context lines", "[logdata][context]" )
 // hack.
 // ----------------------------------------------------------------------------
 
+SCENARIO( "interruptSearch does not advance the search generation",
+          "[logdata][search-generation]" )
+{
+    // Codifies the Stop-button vs Replace-button contract: interruptSearch()
+    // must leave the generation untouched so the final progress signal from
+    // the in-flight search still reaches CrawlerWidget::updateFilteredView()
+    // and triggers UI cleanup (hide gauge, hide Stop button, show Search /
+    // Clear buttons).  Replace-flows that need stale signals dropped use
+    // bumpSearchGeneration() explicitly.
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+
+    const auto generationAfterSearch = filtered_data->currentSearchGeneration();
+    REQUIRE( generationAfterSearch > 0 );
+
+    filtered_data->interruptSearch();
+    REQUIRE( filtered_data->currentSearchGeneration() == generationAfterSearch );
+}
+
+SCENARIO( "bumpSearchGeneration advances by exactly one",
+          "[logdata][search-generation]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    const auto before = filtered_data->currentSearchGeneration();
+    filtered_data->bumpSearchGeneration();
+    REQUIRE( filtered_data->currentSearchGeneration() == before + 1 );
+
+    filtered_data->bumpSearchGeneration();
+    REQUIRE( filtered_data->currentSearchGeneration() == before + 2 );
+}
+
 SCENARIO( "search generation increments on each runSearch", "[logdata][search-generation]" )
 {
     LogDataLoader logDataLoader;

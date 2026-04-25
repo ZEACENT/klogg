@@ -290,13 +290,13 @@ void LogFilteredDataWorker::interrupt()
 {
     LOG_INFO << "Search interruption requested";
     interruptRequested_.set();
-    // Advance the generation counter so any progress signals already in
-    // flight from the interrupted search become stale at the receiver.
-    // search() / updateSearch() do their own fetch_add and do not call
-    // interrupt(); this bump only fires for external callers
-    // (LogFilteredData::interruptSearch and shutdown paths) whose intent
-    // is "abandon the current search outright -- its signals are moot".
-    operationGeneration_.fetch_add( 1 );
+    // Intentionally NOT advancing the generation here.  A user pressing the
+    // Stop button calls this path and still needs the in-flight progress
+    // signal (typically progress < 100, but completion semantics live in
+    // CrawlerWidget::updateFilteredView) to reach the receiver -- otherwise
+    // the Stop-button UI cleanup never runs.  The replaceCurrentSearch
+    // pathway, which DOES want stale signals dropped, calls
+    // LogFilteredData::bumpSearchGeneration() explicitly.
 }
 
 void LogFilteredDataWorker::waitForDone()
