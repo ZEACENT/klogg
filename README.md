@@ -249,7 +249,7 @@ See also the list of [contributors](https://klogg.filimonov.dev/docs/getting_inv
 
 | ID | Task | Priority | Status | Related |
 |----|------|----------|--------|---------|
-| TASK-001 | [Search generation ID refactoring](#task-001-search-generation-id-refactoring) | Low | Planned | [PR #11](https://github.com/ZEACENT/klogg/pull/11) |
+| TASK-001 | [Search generation ID refactoring](#task-001-search-generation-id-refactoring) | Low | Done | [PR #11](https://github.com/ZEACENT/klogg/pull/11) |
 
 ### TASK-001: Search generation ID refactoring
 
@@ -282,5 +282,15 @@ if the window widens in future refactors.
 **Trade-offs:**
 Cross-cutting change touching signal signature, all emit sites, and all connected slots.
 Should be done in a dedicated PR with thorough regression testing.
+
+**Resolution:**
+Implemented in branch `docs/backlog-generation-id`.  The wire type for the
+generation argument is plain `quint64` rather than the
+`LogFilteredDataWorker::OperationGeneration` typedef, because moc treats
+typedefs of non-builtin types as unregistered metatypes and `QSignalSpy`
+decodes the `QVariant` back to 0; the typedef alias is kept for
+code-readability but does not appear in any `Q_SIGNAL` signature.  Two
+new SCENARIOs in `tests/ui/logfiltereddata_test.cpp` cover generation
+increment and signal payload.
 
 **[Back to top](#table-of-contents)**
