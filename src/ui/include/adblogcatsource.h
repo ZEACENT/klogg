@@ -10,6 +10,11 @@
 
 class StreamingLogData;
 
+enum class LiveLogSourceType {
+    AdbLogcat,
+    IosLogStream,
+};
+
 struct AdbLogcatSessionData {
     QString adbExecutable;
     QString deviceSerial;
@@ -17,10 +22,12 @@ struct AdbLogcatSessionData {
     QString extraArgs;
     QString captureId;
     QString boundOutputFile;
+    LiveLogSourceType sourceType = LiveLogSourceType::AdbLogcat;
 
     QString displayName() const;
     QString documentId() const;
     QString associatedPath() const;
+    QString persistedSourceType() const;
 
     QJsonObject toJson() const;
     static AdbLogcatSessionData fromJson( const QString& json );

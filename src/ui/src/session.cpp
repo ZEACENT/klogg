@@ -365,8 +365,8 @@ void WindowSession::save(
 
         LOG_DEBUG << "Saving " << file->fileName.toLocal8Bit().data() << " in session.";
         session_files.emplace_back( file->documentId, top_line, view_context->toString(),
-                                    file->kind == DocumentKind::AdbLogcat
-                                        ? QStringLiteral( "adb_logcat" )
+                                    file->kind == DocumentKind::AdbLogcat && file->adbLogcatSource
+                                        ? file->adbLogcatSource->sessionData().persistedSourceType()
                                         : QString{},
                                     file->displayName,
                                     file->adbLogcatSource
@@ -397,7 +397,8 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
     for ( const auto& file : session_files ) {
         LOG_DEBUG << "Create view for " << file.fileName;
         ViewInterface* view = nullptr;
-        if ( file.sourceType == QStringLiteral( "adb_logcat" ) ) {
+        if ( file.sourceType == QStringLiteral( "adb_logcat" )
+             || file.sourceType == QStringLiteral( "ios_log_stream" ) ) {
             view = appSession_->openAdbAlways( AdbLogcatSessionData::fromJson( file.sourceSpec ),
                                                view_factory, false, file.viewContext );
         }

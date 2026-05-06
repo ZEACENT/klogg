@@ -50,6 +50,9 @@
 
 #include "ui_optionsdialog.h"
 
+class QGroupBox;
+class QLineEdit;
+
 class KeySequencePresenter : public QWidget {
     Q_OBJECT
   public:
@@ -64,7 +67,10 @@ class KeySequencePresenter : public QWidget {
     void showEditor();
 
   private:
+    void setKeySequence( const QString& keySequence );
+
     QLabel* keySequenceLabel_;
+    QString keySequence_;
 };
 
 // Implements the main option dialog box
@@ -93,6 +99,11 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
 
     void checkShortcutsOnDuplicate() const;
     void openLogFile();
+    void resetGeneralDefaults();
+    void resetViewDefaults();
+    void resetFileDefaults();
+    void resetShortcutsDefaults();
+    void resetAdvancedDefaults();
 
   private:
     void setupTabs();
@@ -105,10 +116,14 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void setupStyles();
     void setupEncodings();
     void setupLanguageList();
+    void setupIosLogSettings();
+    void setupPanelResetButtons();
 
     int updateTranslate();
 
     void buildShortcutsTable(bool useDefaultsOnly);
+    void updateDialogFromConfiguration( const Configuration& config );
+    void updateFontSizePreservingSelection( const QString& fontFamily, int preferredPointSize );
 
     int getRegexpTypeIndex( SearchRegexpType syntax ) const;
     SearchRegexpType getRegexpTypeFromIndex( int index ) const;
@@ -120,6 +135,9 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
 
     QColor mainSearchColor_;
     QColor qfSearchColor_;
+    QGroupBox* iosLogGroupBox_ = nullptr;
+    QLineEdit* iosLogExecutableLineEdit_ = nullptr;
+    QLineEdit* iosLogArgsLineEdit_ = nullptr;
 };
 
 #endif

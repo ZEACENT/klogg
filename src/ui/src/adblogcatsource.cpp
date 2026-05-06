@@ -4,9 +4,46 @@
 #include <QJsonDocument>
 
 #include "adbprocesstransport.h"
+#include "ioslogprocesstransport.h"
 #include "log.h"
 #include "livesourcetransport.h"
 #include "streaminglogdata.h"
+
+namespace {
+QString sourceTypeToString( LiveLogSourceType sourceType )
+{
+    switch ( sourceType ) {
+    case LiveLogSourceType::IosLogStream:
+        return QStringLiteral( "ios_log_stream" );
+    case LiveLogSourceType::AdbLogcat:
+        return QStringLiteral( "adb_logcat" );
+    }
+
+    return QStringLiteral( "adb_logcat" );
+}
+
+LiveLogSourceType sourceTypeFromString( const QString& sourceType )
+{
+    if ( sourceType == QStringLiteral( "ios_log_stream" ) ) {
+        return LiveLogSourceType::IosLogStream;
+    }
+
+    return LiveLogSourceType::AdbLogcat;
+}
+
+std::unique_ptr<LiveSourceTransport> makeTransport( const AdbLogcatSessionData& sessionData )
+{
+    if ( sessionData.sourceType == LiveLogSourceType::IosLogStream ) {
+        return std::make_unique<IosLogProcessTransport>( sessionData.adbExecutable,
+                                                         sessionData.deviceSerial,
+                                                         sessionData.extraArgs );
+    }
+
+    return std::make_unique<AdbProcessTransport>( sessionData.adbExecutable,
+                                                  sessionData.deviceSerial,
+                                                  sessionData.extraArgs );
+}
+} // namespace
 
 QString AdbLogcatSessionData::displayName() const
 {
@@ -15,7 +52,9 @@ QString AdbLogcatSessionData::displayName() const
 
 QString AdbLogcatSessionData::documentId() const
 {
-    return QStringLiteral( "adb://%1" ).arg( captureId );
+    const auto scheme = sourceType == LiveLogSourceType::IosLogStream ? QStringLiteral( "ios-log" )
+                                                                      : QStringLiteral( "adb" );
+    return QStringLiteral( "%1://%2" ).arg( scheme, captureId );
 }
 
 QString AdbLogcatSessionData::associatedPath() const
@@ -23,9 +62,15 @@ QString AdbLogcatSessionData::associatedPath() const
     return boundOutputFile;
 }
 
+QString AdbLogcatSessionData::persistedSourceType() const
+{
+    return sourceTypeToString( sourceType );
+}
+
 QJsonObject AdbLogcatSessionData::toJson() const
 {
     return QJsonObject{
+        { QStringLiteral( "sourceType" ), sourceTypeToString( sourceType ) },
         { QStringLiteral( "adbExecutable" ), adbExecutable },
         { QStringLiteral( "deviceSerial" ), deviceSerial },
         { QStringLiteral( "deviceDescription" ), deviceDescription },
@@ -45,6 +90,7 @@ AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
         jsonObject.value( QStringLiteral( "extraArgs" ) ).toString(),
         jsonObject.value( QStringLiteral( "captureId" ) ).toString(),
         jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString(),
+        sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() ),
     };
 }
 
@@ -53,9 +99,7 @@ AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
     : QObject( parent )
     , sessionData_( std::move( sessionData ) )
     , logData_( std::move( logData ) )
-    , transport_( std::make_unique<AdbProcessTransport>( sessionData_.adbExecutable,
-                                                         sessionData_.deviceSerial,
-                                                         sessionData_.extraArgs ) )
+    , transport_( makeTransport( sessionData_ ) )
 {
     connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
              [ this ]( const QByteArray& data ) {

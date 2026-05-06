@@ -124,7 +124,8 @@ QSet<QString> retainedAdbCaptureIds( const SessionInfo& sessionInfo )
     for ( const auto& windowId : windows ) {
         const auto openFiles = sessionInfo.openFiles( windowId );
         for ( const auto& openFile : openFiles ) {
-            if ( openFile.sourceType != QStringLiteral( "adb_logcat" ) ) {
+            if ( openFile.sourceType != QStringLiteral( "adb_logcat" )
+                 && openFile.sourceType != QStringLiteral( "ios_log_stream" ) ) {
                 continue;
             }
 

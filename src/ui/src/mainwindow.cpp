@@ -100,6 +100,7 @@
 #include "highlightersdialog.h"
 #include "highlightersmenu.h"
 #include "issuereporter.h"
+#include "ioslogdialog.h"
 #include "klogg_version.h"
 #include "logger.h"
 #include "mainwindowtext.h"
@@ -349,6 +350,8 @@ void MainWindow::reTranslateUI()
     openAction->setStatusTip( transAction( action::openStatusTip ) );
     openAdbLogcatAction->setText( tr( "Open ADB Logcat..." ) );
     openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
+    openIosLogStreamAction->setText( tr( "Open iOS Log Stream..." ) );
+    openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
 
     recentFilesCleanup->setText( transAction( action::recentFilesCleanupText ) );
 
@@ -519,6 +522,14 @@ void MainWindow::createActions()
     openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
     connect( openAdbLogcatAction, &QAction::triggered, this,
              [ this ]( auto ) { this->openAdbLogcat(); } );
+
+    openIosLogStreamAction = new QAction( tr( "Open iOS Log Stream..." ), this );
+    openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
+#ifndef Q_OS_MAC
+    openIosLogStreamAction->setVisible( false );
+#endif
+    connect( openIosLogStreamAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->openIosLogStream(); } );
 
     recentFilesCleanup = new QAction( tr( action::recentFilesCleanupText ), this );
     connect( recentFilesCleanup, &QAction::triggered, this,
@@ -838,6 +849,7 @@ void MainWindow::createMenus()
     fileMenu->addAction( newWindowAction );
     fileMenu->addAction( openAction );
     fileMenu->addAction( openAdbLogcatAction );
+    fileMenu->addAction( openIosLogStreamAction );
     fileMenu->addAction( openClipboardAction );
     fileMenu->addAction( openUrlAction );
     recentFilesMenu = fileMenu->addMenu( tr( "Open Recent" ) );
@@ -1065,6 +1077,19 @@ void MainWindow::openAdbLogcat()
     if ( dialog.exec() == QDialog::Accepted ) {
         openAdbLogcatSource( dialog.sessionData(), true );
     }
+}
+
+void MainWindow::openIosLogStream()
+{
+#ifdef Q_OS_MAC
+    IosLogDialog dialog( this );
+    if ( dialog.exec() == QDialog::Accepted ) {
+        openAdbLogcatSource( dialog.sessionData(), true );
+    }
+#else
+    QMessageBox::information( this, tr( "Open iOS Log Stream" ),
+                              tr( "iOS log streaming is supported only on macOS." ) );
+#endif
 }
 
 void MainWindow::openRemoteFile( const QUrl& url )

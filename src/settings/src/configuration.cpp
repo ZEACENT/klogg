@@ -281,6 +281,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     adbLogcatExtraArgs_
         = settings.value( "adb.logcatExtraArgs", DefaultConfiguration.adbLogcatExtraArgs_ )
               .toString();
+    iosLogExecutable_
+        = settings.value( "iosLog.executable", DefaultConfiguration.iosLogExecutable_ ).toString();
+    iosLogExtraArgs_
+        = settings.value( "iosLog.extraArgs", DefaultConfiguration.iosLogExtraArgs_ ).toString();
 
     // View settings
     overviewVisible_
@@ -450,6 +454,8 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "net.verifySslPeers", verifySslPeers_ );
     settings.setValue( "adb.executable", adbExecutable_ );
     settings.setValue( "adb.logcatExtraArgs", adbLogcatExtraArgs_ );
+    settings.setValue( "iosLog.executable", iosLogExecutable_ );
+    settings.setValue( "iosLog.extraArgs", iosLogExtraArgs_ );
 
     settings.setValue( "view.overviewVisible", overviewVisible_ );
     settings.setValue( "view.lineNumbersVisibleInMain", lineNumbersVisibleInMain_ );

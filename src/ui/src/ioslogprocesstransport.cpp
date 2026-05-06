@@ -1,0 +1,324 @@
+#include "ioslogprocesstransport.h"
+
+#include <QDir>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QProcess>
+#include <QStandardPaths>
+
+#include <utility>
+
+namespace {
+bool canEscapeArgumentCharacter( const QChar nextChar, const QChar quoteChar )
+{
+    if ( quoteChar == QLatin1Char( '"' ) ) {
+        return nextChar == QLatin1Char( '"' ) || nextChar == QLatin1Char( '\\' );
+    }
+
+    if ( quoteChar == QLatin1Char( '\'' ) ) {
+        return false;
+    }
+
+    return nextChar.isSpace() || nextChar == QLatin1Char( '"' )
+           || nextChar == QLatin1Char( '\'' ) || nextChar == QLatin1Char( '\\' );
+}
+
+QStringList splitCommandArguments( const QString& arguments )
+{
+    QStringList tokens;
+    QString currentToken;
+    QChar quoteChar;
+
+    for ( int i = 0; i < arguments.size(); ++i ) {
+        const auto ch = arguments.at( i );
+        if ( ch == QLatin1Char( '\\' ) ) {
+            const auto nextIndex = i + 1;
+            if ( nextIndex < arguments.size() ) {
+                const auto nextChar = arguments.at( nextIndex );
+                if ( canEscapeArgumentCharacter( nextChar, quoteChar ) ) {
+                    currentToken.append( nextChar );
+                    ++i;
+                    continue;
+                }
+            }
+
+            currentToken.append( ch );
+            continue;
+        }
+
+        if ( !quoteChar.isNull() ) {
+            if ( ch == quoteChar ) {
+                quoteChar = QChar{};
+            }
+            else {
+                currentToken.append( ch );
+            }
+            continue;
+        }
+
+        if ( ch == QLatin1Char( '"' ) || ch == QLatin1Char( '\'' ) ) {
+            quoteChar = ch;
+            continue;
+        }
+
+        if ( ch.isSpace() ) {
+            if ( !currentToken.isEmpty() ) {
+                tokens.push_back( currentToken );
+                currentToken.clear();
+            }
+            continue;
+        }
+
+        currentToken.append( ch );
+    }
+
+    if ( !currentToken.isEmpty() ) {
+        tokens.push_back( currentToken );
+    }
+
+    return tokens;
+}
+
+bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
+{
+    if ( process.waitForFinished( timeoutMs ) ) {
+        return true;
+    }
+
+    process.kill();
+    process.waitForFinished( 1500 );
+    return false;
+}
+
+QString findExecutableAtKnownLocation( const QString& executable )
+{
+#ifdef Q_OS_MAC
+    const QStringList candidates{
+        QDir::cleanPath( QStringLiteral( "/opt/homebrew/bin/" ) + executable ),
+        QDir::cleanPath( QStringLiteral( "/usr/local/bin/" ) + executable ),
+    };
+
+    for ( const auto& candidate : candidates ) {
+        const QFileInfo info( candidate );
+        if ( info.exists() && info.isFile() && info.isExecutable() ) {
+            return info.absoluteFilePath();
+        }
+    }
+
+    const auto fromPath = QStandardPaths::findExecutable( executable );
+    if ( !fromPath.isEmpty() ) {
+        return fromPath;
+    }
+#else
+    Q_UNUSED( executable );
+#endif
+
+    return {};
+}
+
+QString normalizedIosSyslogExecutable( const QString& executable )
+{
+    const auto trimmed = executable.trimmed();
+    if ( !trimmed.isEmpty() ) {
+        return trimmed;
+    }
+
+    const auto detected = findExecutableAtKnownLocation( QStringLiteral( "pymobiledevice3" ) );
+    if ( !detected.isEmpty() ) {
+        return detected;
+    }
+
+    return QStringLiteral( "pymobiledevice3" );
+}
+
+QString firstStringValue( const QJsonObject& object, std::initializer_list<const char*> keys )
+{
+    for ( const auto* key : keys ) {
+        const auto value = object.value( QLatin1String( key ) );
+        if ( value.isString() ) {
+            const auto text = value.toString().trimmed();
+            if ( !text.isEmpty() ) {
+                return text;
+            }
+        }
+    }
+
+    return {};
+}
+
+QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
+{
+    const auto document = QJsonDocument::fromJson( output );
+    if ( !document.isArray() ) {
+        return {};
+    }
+
+    QList<IosDeviceInfo> devices;
+    for ( const auto& value : document.array() ) {
+        QString udid;
+        QString name;
+
+        if ( value.isString() ) {
+            udid = value.toString().trimmed();
+        }
+        else if ( value.isObject() ) {
+            const auto object = value.toObject();
+            udid = firstStringValue( object, { "Identifier", "UDID", "UniqueDeviceID",
+                                               "SerialNumber", "serial", "udid" } );
+            name = firstStringValue( object, { "DeviceName", "Name", "ProductName", "name" } );
+        }
+
+        if ( udid.isEmpty() ) {
+            continue;
+        }
+
+        const auto displayName = name.isEmpty() ? udid : QStringLiteral( "%1 (%2)" ).arg( name, udid );
+        devices.push_back( IosDeviceInfo{ udid, displayName, name.isEmpty() ? udid : name } );
+    }
+
+    return devices;
+}
+
+QList<IosDeviceInfo> parsePymobiledeviceSimpleDeviceList( const QByteArray& output )
+{
+    const auto parsed = parsePymobiledeviceDeviceList( output );
+    if ( !parsed.isEmpty() ) {
+        return parsed;
+    }
+
+    QList<IosDeviceInfo> devices;
+    const auto lines = QString::fromUtf8( output ).split( '\n' );
+    for ( auto line : lines ) {
+        const auto udid = line.trimmed();
+        if ( udid.isEmpty() || udid.startsWith( QLatin1Char( '[' ) )
+             || udid.startsWith( QLatin1Char( ']' ) ) ) {
+            continue;
+        }
+
+        devices.push_back( IosDeviceInfo{ udid, udid, udid } );
+    }
+
+    return devices;
+}
+
+bool runPymobiledeviceListCommand( const QString& executable, const QStringList& arguments,
+                                   QList<IosDeviceInfo>* devices, QString* error )
+{
+    QProcess process;
+    process.start( executable, arguments );
+    if ( !process.waitForStarted( 3000 ) ) {
+        if ( error ) {
+            *error = process.errorString();
+        }
+        return false;
+    }
+
+    if ( !waitForFinishedOrKill( process, 5000 ) ) {
+        if ( error ) {
+            *error = QObject::tr( "Timed out waiting for iOS device list output" );
+        }
+        return false;
+    }
+
+    const auto stdOut = process.readAllStandardOutput();
+    if ( process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 ) {
+        if ( error ) {
+            const auto stdErr = QString::fromUtf8( process.readAllStandardError() ).trimmed();
+            *error = stdErr.isEmpty() ? process.errorString() : stdErr;
+        }
+        return false;
+    }
+
+    *devices = parsePymobiledeviceSimpleDeviceList( stdOut );
+    return true;
+}
+
+QStringList pymobiledeviceListArguments()
+{
+    return { QStringLiteral( "usbmux" ), QStringLiteral( "list" ), QStringLiteral( "--simple" ) };
+}
+
+QStringList pymobiledeviceStreamingArguments( const QString& deviceUdid )
+{
+    if ( deviceUdid.isEmpty() ) {
+        return { QStringLiteral( "syslog" ), QStringLiteral( "live" ) };
+    }
+
+    return { QStringLiteral( "syslog" ), QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+             deviceUdid };
+}
+
+} // namespace
+
+IosLogProcessTransport::IosLogProcessTransport( QString executable, QString deviceUdid,
+                                                QString extraArgs, QObject* parent )
+    : ProcessLiveSourceTransport( parent )
+    , executable_( std::move( executable ) )
+    , deviceUdid_( std::move( deviceUdid ) )
+    , extraArgs_( std::move( extraArgs ) )
+{
+}
+
+QList<IosDeviceInfo> IosLogProcessTransport::listDevices( const QString& executable,
+                                                          QString* error )
+{
+#ifndef Q_OS_MAC
+    if ( error ) {
+        *error = QObject::tr( "iOS log streaming is supported only on macOS." );
+    }
+    return {};
+#else
+    QList<IosDeviceInfo> devices;
+    const auto pymobiledeviceExecutable = normalizedIosSyslogExecutable( executable );
+    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceListArguments(),
+                                        &devices, error ) ) {
+        return {};
+    }
+
+    if ( devices.isEmpty() && error ) {
+        *error = QObject::tr( "No iOS devices reported by pymobiledevice3." );
+    }
+    return devices;
+#endif
+}
+
+QString IosLogProcessTransport::detectIosSyslogExecutable()
+{
+    return findExecutableAtKnownLocation( QStringLiteral( "pymobiledevice3" ) );
+}
+
+bool IosLogProcessTransport::clearRemote( QString* error )
+{
+    if ( error ) {
+        *error = tr( "iOS live logs cannot be cleared remotely." );
+    }
+    return false;
+}
+
+ProcessLiveSourceTransport::Command IosLogProcessTransport::streamingCommand() const
+{
+    return Command{ normalizedExecutable(), streamArguments() };
+}
+
+ProcessLiveSourceTransport::Command IosLogProcessTransport::clearCommand() const
+{
+    return Command{ normalizedExecutable(), {} };
+}
+
+QString IosLogProcessTransport::normalizedExecutable() const
+{
+    return normalizedIosSyslogExecutable( executable_ );
+}
+
+QStringList IosLogProcessTransport::streamArguments() const
+{
+    QStringList arguments = pymobiledeviceStreamingArguments( deviceUdid_ );
+    const auto trimmedExtraArgs = extraArgs_.trimmed();
+    if ( !trimmedExtraArgs.isEmpty() ) {
+        arguments.append( splitCommandArguments( trimmedExtraArgs ) );
+    }
+    return arguments;
+}

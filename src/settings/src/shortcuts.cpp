@@ -30,9 +30,23 @@ QStringList getKeyBindings( QKeySequence::StandardKey standardKey )
     auto bindings = QKeySequence::keyBindings( standardKey );
     QStringList stringBindings;
     std::transform( bindings.cbegin(), bindings.cend(), std::back_inserter( stringBindings ),
-                    []( const auto& keySequence ) { return keySequence.toString(); } );
+                    []( const auto& keySequence ) {
+                        return keySequence.toString( QKeySequence::PortableText );
+                    } );
 
     return stringBindings;
+}
+
+QStringList uniqueKeyBindings( const QStringList& bindings )
+{
+    QStringList uniqueBindings;
+    for ( const auto& binding : bindings ) {
+        const auto normalized = QKeySequence( binding ).toString( QKeySequence::PortableText );
+        if ( !normalized.isEmpty() && !uniqueBindings.contains( normalized ) ) {
+            uniqueBindings.push_back( normalized );
+        }
+    }
+    return uniqueBindings;
 }
 
 QStringList ShortcutAction::defaultShortcutKeys( const std::string& action )
@@ -234,7 +248,10 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowOpenFromClipboard,
             {
                 QApplication::tr( "Paste text from clipboard" ),
-                getKeyBindings( QKeySequence::Paste ),
+                // Do not bind this to QKeySequence::Paste by default. It is an
+                // application command, not text editing, and stealing Cmd/Ctrl+V
+                // breaks paste in child dialogs and platform-native panels.
+                QStringList{},
             },
         },
         {
@@ -524,14 +541,14 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewQfForward,
             {
                 QApplication::tr( "Main view: find next" ),
-                getKeyBindings( QKeySequence::FindNext ) << "Ctrl+G",
+                uniqueKeyBindings( getKeyBindings( QKeySequence::FindNext ) << "Ctrl+G" ),
             },
         },
         {
             LogViewQfBackward,
             { QApplication::tr( "Main view: find previous" ),
-              getKeyBindings( QKeySequence::FindPrevious ) << "Shift+N"
-                                                           << "Ctrl+Shift+G" },
+              uniqueKeyBindings( getKeyBindings( QKeySequence::FindPrevious ) << "Shift+N"
+                                                                               << "Ctrl+Shift+G" ) },
         },
         {
             LogViewQfSelectedForward,

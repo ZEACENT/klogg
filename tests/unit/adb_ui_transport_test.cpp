@@ -26,17 +26,23 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
 #include <QGuiApplication>
+#include <QJsonDocument>
 #include <QLineEdit>
 #include <QPushButton>
+
+#include <map>
 
 #include "adbprocesstransport.h"
 #include "adblogcatdialog.h"
 #include "configuration.h"
+#include "ioslogprocesstransport.h"
 #include "livesourcetransport.h"
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
+#include "shortcuts.h"
 #include "test_utils.h"
 
 namespace {
@@ -70,6 +76,65 @@ class ScopedAdbConfigurationGuard {
     QString extraArgs_;
 };
 
+class ScopedOptionsDialogConfigurationGuard {
+  public:
+    ScopedOptionsDialogConfigurationGuard()
+        : config_( Configuration::getSynced() )
+        , mainFont_( config_.mainFont() )
+        , lineSpacingPercent_( config_.lineSpacingPercent() )
+        , versionCheckingEnabled_( config_.versionCheckingEnabled() )
+        , pollIntervalMs_( config_.pollIntervalMs() )
+        , adbExecutable_( config_.adbExecutable() )
+        , adbExtraArgs_( config_.adbLogcatExtraArgs() )
+        , iosLogExecutable_( config_.iosLogExecutable() )
+        , iosLogExtraArgs_( config_.iosLogExtraArgs() )
+        , useSearchResultsCache_( config_.useSearchResultsCache() )
+        , shortcuts_( config_.shortcuts() )
+        , savedSearches_( SavedSearches::getSynced() )
+        , searchHistorySize_( savedSearches_.historySize() )
+        , recentFiles_( RecentFiles::getSynced() )
+        , recentFilesMaxItems_( recentFiles_.filesHistoryMaxItems() )
+    {
+    }
+
+    ~ScopedOptionsDialogConfigurationGuard()
+    {
+        config_.setMainFont( mainFont_ );
+        config_.setLineSpacingPercent( lineSpacingPercent_ );
+        config_.setVersionCheckingEnabled( versionCheckingEnabled_ );
+        config_.setPollIntervalMs( pollIntervalMs_ );
+        config_.setAdbExecutable( adbExecutable_ );
+        config_.setAdbLogcatExtraArgs( adbExtraArgs_ );
+        config_.setIosLogExecutable( iosLogExecutable_ );
+        config_.setIosLogExtraArgs( iosLogExtraArgs_ );
+        config_.setUseSearchResultsCache( useSearchResultsCache_ );
+        config_.setShortcuts( shortcuts_ );
+        config_.save();
+
+        savedSearches_.setHistorySize( searchHistorySize_ );
+        savedSearches_.save();
+        recentFiles_.setFilesHistoryMaxItems( recentFilesMaxItems_ );
+        recentFiles_.save();
+    }
+
+  private:
+    Configuration& config_;
+    QFont mainFont_;
+    int lineSpacingPercent_;
+    bool versionCheckingEnabled_;
+    int pollIntervalMs_;
+    QString adbExecutable_;
+    QString adbExtraArgs_;
+    QString iosLogExecutable_;
+    QString iosLogExtraArgs_;
+    bool useSearchResultsCache_;
+    std::map<std::string, QStringList> shortcuts_;
+    SavedSearches& savedSearches_;
+    int searchHistorySize_;
+    RecentFiles& recentFiles_;
+    int recentFilesMaxItems_;
+};
+
 class TestAdbProcessTransport : public AdbProcessTransport {
   public:
     using AdbProcessTransport::AdbProcessTransport;
@@ -83,6 +148,17 @@ class TestAdbProcessTransport : public AdbProcessTransport {
     Command clearCommandForTest() const
     {
         return clearCommand();
+    }
+};
+
+class TestIosLogProcessTransport : public IosLogProcessTransport {
+  public:
+    using IosLogProcessTransport::IosLogProcessTransport;
+    using Command = ProcessLiveSourceTransport::Command;
+
+    Command streamingCommandForTest() const
+    {
+        return streamingCommand();
     }
 };
 } // namespace
@@ -138,6 +214,36 @@ TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
                              QStringLiteral( "C:\\temp\\log.txt" ),
                              QStringLiteral( "--pattern" ), QStringLiteral( "regex\\d+" ),
                              QStringLiteral( "--title" ), QStringLiteral( "hello world" ) } );
+}
+
+TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
+{
+    TestIosLogProcessTransport transport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "--no-color --match \"process name\"" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.program == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "syslog" ), QStringLiteral( "live" ),
+                             QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ),
+                             QStringLiteral( "--no-color" ),
+                             QStringLiteral( "--match" ),
+                             QStringLiteral( "process name" ) } );
+}
+
+TEST_CASE( "IosLogProcessTransport reports unsupported device listing off macOS" )
+{
+#ifndef Q_OS_MAC
+    QString error;
+    const auto devices = IosLogProcessTransport::listDevices( QString{}, &error );
+    REQUIRE( devices.isEmpty() );
+    REQUIRE_FALSE( error.isEmpty() );
+#else
+    SUCCEED( "iOS device listing is macOS-only and covered by command construction here." );
+#endif
 }
 
 TEST_CASE( "AdbProcessTransport reports startup failures through the transport interface" )
@@ -215,6 +321,119 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
     REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/updated/adb" ) );
     REQUIRE( restoredConfig.adbLogcatExtraArgs()
              == QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
+}
+
+TEST_CASE( "OptionsDialog default shortcut table keeps Apply and OK enabled" )
+{
+    ScopedOptionsDialogConfigurationGuard configGuard;
+    auto& config = Configuration::getSynced();
+    config.setShortcuts( {} );
+    config.save();
+
+    OptionsDialog dialog;
+    auto* buttonBox = dialog.findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
+    REQUIRE( buttonBox != nullptr );
+
+    auto* okButton = buttonBox->button( QDialogButtonBox::Ok );
+    auto* applyButton = buttonBox->button( QDialogButtonBox::Apply );
+    REQUIRE( okButton != nullptr );
+    REQUIRE( applyButton != nullptr );
+    CHECK( okButton->isEnabled() );
+    CHECK( applyButton->isEnabled() );
+}
+
+TEST_CASE( "OptionsDialog persists changed font size from preferences" )
+{
+    ScopedOptionsDialogConfigurationGuard configGuard;
+    auto& config = Configuration::getSynced();
+    const auto originalFont = config.mainFont();
+    const auto baseSize = originalFont.pointSize() > 0 ? originalFont.pointSize() : 10;
+    config.setMainFont( QFont{ originalFont.family(), baseSize } );
+    config.save();
+
+    OptionsDialog dialog;
+    auto* fontSizeBox = dialog.findChild<QComboBox*>( QStringLiteral( "fontSizeBox" ) );
+    REQUIRE( fontSizeBox != nullptr );
+
+    const auto requestedSize = baseSize == 13 ? 14 : 13;
+    auto sizeIndex = fontSizeBox->findText( QString::number( requestedSize ) );
+    if ( sizeIndex == -1 ) {
+        fontSizeBox->addItem( QString::number( requestedSize ) );
+        sizeIndex = fontSizeBox->findText( QString::number( requestedSize ) );
+    }
+    REQUIRE( sizeIndex != -1 );
+    fontSizeBox->setCurrentIndex( sizeIndex );
+
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
+
+    const auto restoredFont = Configuration::getSynced().mainFont();
+    CHECK( restoredFont.pointSize() == requestedSize );
+}
+
+TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
+{
+    ScopedOptionsDialogConfigurationGuard configGuard;
+
+    auto& config = Configuration::getSynced();
+    config.setVersionCheckingEnabled( false );
+    config.setLineSpacingPercent( Configuration::MaxLineSpacingPercent );
+    config.setPollIntervalMs( 12345 );
+    config.setAdbExecutable( QStringLiteral( "/custom/adb" ) );
+    config.setIosLogExecutable( QStringLiteral( "/custom/pymobiledevice3" ) );
+    config.setUseSearchResultsCache( false );
+    config.setShortcuts( { { ShortcutAction::MainWindowOpenFile,
+                             QStringList{ QStringLiteral( "Ctrl+Shift+P" ) } } } );
+    config.save();
+
+    auto& savedSearches = SavedSearches::getSynced();
+    savedSearches.setHistorySize( 7 );
+    savedSearches.save();
+    auto& recentFiles = RecentFiles::getSynced();
+    recentFiles.setFilesHistoryMaxItems( 9 );
+    recentFiles.save();
+
+    OptionsDialog dialog;
+    const QStringList resetButtons{
+        QStringLiteral( "resetGeneralDefaultsButton" ),
+        QStringLiteral( "resetViewDefaultsButton" ),
+        QStringLiteral( "resetFileDefaultsButton" ),
+        QStringLiteral( "restoreShortcutsDefaults" ),
+        QStringLiteral( "resetAdvancedDefaultsButton" ),
+    };
+
+    for ( const auto& objectName : resetButtons ) {
+        auto* button = dialog.findChild<QPushButton*>( objectName );
+        REQUIRE( button != nullptr );
+        button->click();
+        QCoreApplication::processEvents();
+    }
+
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
+
+    const Configuration defaults;
+    const SavedSearches defaultSavedSearches;
+    const RecentFiles defaultRecentFiles;
+    const auto& restoredConfig = Configuration::getSynced();
+
+    CHECK( restoredConfig.versionCheckingEnabled() == defaults.versionCheckingEnabled() );
+    CHECK( restoredConfig.lineSpacingPercent() == defaults.lineSpacingPercent() );
+    CHECK( restoredConfig.pollIntervalMs() == defaults.pollIntervalMs() );
+    CHECK( restoredConfig.adbExecutable() == defaults.adbExecutable() );
+    CHECK( restoredConfig.iosLogExecutable() == defaults.iosLogExecutable() );
+    CHECK( restoredConfig.useSearchResultsCache() == defaults.useSearchResultsCache() );
+    CHECK( SavedSearches::getSynced().historySize() == defaultSavedSearches.historySize() );
+    CHECK( RecentFiles::getSynced().filesHistoryMaxItems()
+           == defaultRecentFiles.filesHistoryMaxItems() );
+
+    const auto restoredOpenFileShortcuts
+        = ShortcutAction::shortcutKeys( ShortcutAction::MainWindowOpenFile,
+                                        restoredConfig.shortcuts() );
+    const auto defaultOpenFileShortcuts
+        = ShortcutAction::shortcutKeys( ShortcutAction::MainWindowOpenFile, {} );
+    CHECK_FALSE( restoredOpenFileShortcuts.contains( QKeySequence( QStringLiteral( "Ctrl+Shift+P" ) ) ) );
+    for ( const auto& defaultShortcut : defaultOpenFileShortcuts ) {
+        CHECK( restoredOpenFileShortcuts.contains( defaultShortcut ) );
+    }
 }
 
 TEST_CASE( "OptionsDialog adb detect button fills the executable field with the resolved adb path" )
@@ -400,6 +619,29 @@ TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edit
     auto& restoredConfig = Configuration::getSynced();
     REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/saved/adb" ) );
     REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
+}
+
+TEST_CASE( "iOS log stream session data serializes its source type" )
+{
+    const AdbLogcatSessionData iosSessionData{
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "iPhone Test" ),
+        QStringLiteral( "--network" ),
+        QStringLiteral( "ios-capture" ),
+        QStringLiteral( "/tmp/ios.log" ),
+        LiveLogSourceType::IosLogStream,
+    };
+
+    const auto json = QString::fromUtf8(
+        QJsonDocument( iosSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
+    const auto restored = AdbLogcatSessionData::fromJson( json );
+
+    REQUIRE( restored.sourceType == LiveLogSourceType::IosLogStream );
+    REQUIRE( restored.documentId() == QStringLiteral( "ios-log://ios-capture" ) );
+    REQUIRE( restored.persistedSourceType() == QStringLiteral( "ios_log_stream" ) );
+    REQUIRE( restored.deviceSerial == QStringLiteral( "00008030-001C195E36D8802E" ) );
+    REQUIRE( restored.extraArgs == QStringLiteral( "--network" ) );
 }
 
 // ----------------------------------------------------------------------------

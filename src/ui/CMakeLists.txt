@@ -18,6 +18,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/savefavoritedialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filterdiffdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/infoline.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogdialog.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogprocesstransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logmainview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livesourcetransport.h
@@ -77,6 +79,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/savefavoritedialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filterdiffdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/infoline.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogdialog.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogprocesstransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/pathline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logmainview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp

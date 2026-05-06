@@ -37,15 +37,20 @@
  */
 
 #include <QColorDialog>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QKeySequenceEdit>
 #include <QMessageBox>
 #include <QToolButton>
 #include <QtGui>
 
+#include <algorithm>
+
 #include "adbprocesstransport.h"
 #include "encodings.h"
 #include "fontutils.h"
 #include "highlighteredit.h"
+#include "ioslogprocesstransport.h"
 #include "log.h"
 #include "logger.h"
 #include "mainwindow.h"
@@ -74,6 +79,8 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     setupStyles();
     setupEncodings();
     setupLanguageList();
+    setupIosLogSettings();
+    setupPanelResetButtons();
 
     // Validators
     QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax );
@@ -115,13 +122,9 @@ OptionsDialog::OptionsDialog( QWidget* parent )
         adbExecutableLineEdit->setText( resolved );
     } );
 
-    connect( restoreShortcutsDefaults, &QPushButton::clicked, this, [ this ]() {
-        auto ret = QMessageBox::question(
-            this, "Restore Default Shortcuts", "Do you want to restore default shortcuts?",
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
-        if ( ret == QMessageBox::Yes )
-            buildShortcutsTable( true );
-    } );
+    restoreShortcutsDefaults->setText( tr( "Reset to defaults" ) );
+    connect( restoreShortcutsDefaults, &QPushButton::clicked, this,
+             &OptionsDialog::resetShortcutsDefaults );
 
     updateDialogFromConfig();
 
@@ -229,6 +232,102 @@ void OptionsDialog::setupLanguageList()
                                        attributes.value( "ietfCode" ).toString() );
         }
     }
+}
+
+void OptionsDialog::setupIosLogSettings()
+{
+    iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), file_watch_tab );
+    iosLogGroupBox_->setObjectName( QStringLiteral( "iosLogGroupBox" ) );
+
+    auto* layout = new QVBoxLayout( iosLogGroupBox_ );
+
+    auto* executableRow = new QHBoxLayout();
+    auto* executableLabel = new QLabel( tr( "pymobiledevice3 executable" ), iosLogGroupBox_ );
+    iosLogExecutableLineEdit_ = new QLineEdit( iosLogGroupBox_ );
+    iosLogExecutableLineEdit_->setObjectName( QStringLiteral( "iosLogExecutableLineEdit" ) );
+    iosLogExecutableLineEdit_->setPlaceholderText( QStringLiteral( "pymobiledevice3" ) );
+    auto* detectButton = new QPushButton( tr( "Detect" ), iosLogGroupBox_ );
+    detectButton->setObjectName( QStringLiteral( "iosLogDetectButton" ) );
+    detectButton->setToolTip(
+        tr( "Probe well-known Homebrew install locations and fill the path automatically." ) );
+    executableRow->addWidget( executableLabel );
+    executableRow->addWidget( iosLogExecutableLineEdit_ );
+    executableRow->addWidget( detectButton );
+
+    auto* argsRow = new QHBoxLayout();
+    auto* argsLabel = new QLabel( tr( "Extra iOS log args" ), iosLogGroupBox_ );
+    iosLogArgsLineEdit_ = new QLineEdit( iosLogGroupBox_ );
+    iosLogArgsLineEdit_->setObjectName( QStringLiteral( "iosLogArgsLineEdit" ) );
+    argsRow->addWidget( argsLabel );
+    argsRow->addWidget( iosLogArgsLineEdit_ );
+
+    auto* helpLabel = new QLabel( iosLogGroupBox_ );
+    helpLabel->setWordWrap( true );
+    helpLabel->setText( tr( "Extra arguments are appended after "
+                            "'pymobiledevice3 syslog live --udid <udid>'. This feature is "
+                            "available only on macOS." ) );
+
+    layout->addLayout( executableRow );
+    layout->addLayout( argsRow );
+    layout->addWidget( helpLabel );
+
+    const auto insertIndex = std::max( 0, verticalLayout_9->count() - 1 );
+    verticalLayout_9->insertWidget( insertIndex, iosLogGroupBox_ );
+
+    connect( detectButton, &QPushButton::clicked, this, [ this ] {
+        const auto resolved = IosLogProcessTransport::detectIosSyslogExecutable();
+        if ( resolved.isEmpty() ) {
+            QMessageBox::information(
+                this, tr( "Detect iOS log executable" ),
+                tr( "No pymobiledevice3 found at well-known install locations. Set the path "
+                    "manually or install pymobiledevice3." ) );
+            return;
+        }
+
+        const auto current = iosLogExecutableLineEdit_->text().trimmed();
+        if ( !current.isEmpty() && current != resolved ) {
+            const auto answer = QMessageBox::question(
+                this, tr( "Detect iOS log executable" ),
+                tr( "Replace the configured path\n\n    %1\n\nwith the auto-detected path?\n\n    %2" )
+                    .arg( current, resolved ),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
+            if ( answer != QMessageBox::Yes ) {
+                return;
+            }
+        }
+        iosLogExecutableLineEdit_->setText( resolved );
+    } );
+
+#ifndef Q_OS_MAC
+    iosLogGroupBox_->setVisible( false );
+#endif
+}
+
+void OptionsDialog::setupPanelResetButtons()
+{
+    auto addResetButton = [ this ]( QWidget* tab, const QString& objectName, auto slot ) {
+        auto* button = new QPushButton( tr( "Reset to defaults" ), tab );
+        button->setObjectName( objectName );
+
+        auto* row = new QHBoxLayout();
+        row->addStretch();
+        row->addWidget( button );
+
+        if ( auto* layout = qobject_cast<QVBoxLayout*>( tab->layout() ) ) {
+            layout->addLayout( row );
+        }
+
+        connect( button, &QPushButton::clicked, this, slot );
+    };
+
+    addResetButton( general_tab, QStringLiteral( "resetGeneralDefaultsButton" ),
+                    &OptionsDialog::resetGeneralDefaults );
+    addResetButton( viewTab, QStringLiteral( "resetViewDefaultsButton" ),
+                    &OptionsDialog::resetViewDefaults );
+    addResetButton( file_watch_tab, QStringLiteral( "resetFileDefaultsButton" ),
+                    &OptionsDialog::resetFileDefaults );
+    addResetButton( advanced_tab, QStringLiteral( "resetAdvancedDefaultsButton" ),
+                    &OptionsDialog::resetAdvancedDefaults );
 }
 
 void OptionsDialog::setupPolling()
@@ -348,20 +447,26 @@ RegexpEngine OptionsDialog::getRegexpEngineFromIndex( int index ) const
 // Updates the dialog box using values in global Config()
 void OptionsDialog::updateDialogFromConfig()
 {
-    const auto& config = Configuration::get();
+    updateDialogFromConfiguration( Configuration::get() );
+}
 
+void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
+{
     // Main font
-    QFontInfo fontInfo = QFontInfo( config.mainFont() );
+    const auto configuredFont = config.mainFont();
+    const auto configuredFamily = configuredFont.family();
+    const auto configuredPointSize = configuredFont.pointSize();
 
-    int familyIndex = fontFamilyBox->findText( fontInfo.family() );
-    if ( familyIndex != -1 )
+    int familyIndex = fontFamilyBox->findText( configuredFamily );
+    if ( familyIndex == -1 && !configuredFamily.isEmpty() ) {
+        fontFamilyBox->addItem( configuredFamily );
+        familyIndex = fontFamilyBox->findText( configuredFamily );
+    }
+    if ( familyIndex != -1 ) {
         fontFamilyBox->setCurrentIndex( familyIndex );
+    }
 
-    updateFontSize( fontInfo.family() );
-
-    int sizeIndex = fontSizeBox->findText( QString::number( fontInfo.pointSize() ) );
-    if ( sizeIndex != -1 )
-        fontSizeBox->setCurrentIndex( sizeIndex );
+    updateFontSizePreservingSelection( fontFamilyBox->currentText(), configuredPointSize );
 
     lineSpacingSpinBox->setValue( config.lineSpacingPercent() );
     fontSmoothCheckBox->setChecked( config.forceFontAntialiasing() );
@@ -454,6 +559,12 @@ void OptionsDialog::updateDialogFromConfig()
     verifySslCheckBox->setChecked( config.verifySslPeers() );
     adbExecutableLineEdit->setText( config.adbExecutable() );
     adbLogcatArgsLineEdit->setText( config.adbLogcatExtraArgs() );
+    if ( iosLogExecutableLineEdit_ ) {
+        iosLogExecutableLineEdit_->setText( config.iosLogExecutable() );
+    }
+    if ( iosLogArgsLineEdit_ ) {
+        iosLogArgsLineEdit_->setText( config.iosLogExtraArgs() );
+    }
 
     const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
     encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
@@ -475,17 +586,36 @@ void OptionsDialog::updateDialogFromConfig()
 
 void OptionsDialog::updateFontSize( const QString& fontFamily )
 {
-    QString oldFontSize = fontSizeBox->currentText();
+    bool ok = false;
+    const auto oldFontSize = fontSizeBox->currentText().toInt( &ok );
+    updateFontSizePreservingSelection( fontFamily, ok ? oldFontSize : -1 );
+}
+
+void OptionsDialog::updateFontSizePreservingSelection( const QString& fontFamily,
+                                                       int preferredPointSize )
+{
     const auto sizes = FontUtils::availableFontSizes( fontFamily );
 
     fontSizeBox->clear();
     for ( int size : sizes ) {
         fontSizeBox->addItem( QString::number( size ) );
     }
+
+    if ( preferredPointSize > 0
+         && fontSizeBox->findText( QString::number( preferredPointSize ) ) == -1 ) {
+        auto insertIndex = 0;
+        while ( insertIndex < fontSizeBox->count()
+                && fontSizeBox->itemText( insertIndex ).toInt() < preferredPointSize ) {
+            ++insertIndex;
+        }
+        fontSizeBox->insertItem( insertIndex, QString::number( preferredPointSize ) );
+    }
+
     // Now restore the size we had before
-    int i = fontSizeBox->findText( oldFontSize );
-    if ( i != -1 )
+    int i = fontSizeBox->findText( QString::number( preferredPointSize ) );
+    if ( i != -1 ) {
         fontSizeBox->setCurrentIndex( i );
+    }
 }
 
 void OptionsDialog::changeMainColor()
@@ -504,6 +634,125 @@ void OptionsDialog::changeQfColor()
         qfSearchColor_ = newColor;
         HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
     }
+}
+
+void OptionsDialog::resetGeneralDefaults()
+{
+    const Configuration defaults;
+    const SavedSearches defaultSavedSearches;
+
+    mainSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.mainRegexpType() ) );
+    mainSearchColor_ = defaults.mainSearchBackColor();
+    HighlighterEdit::updateIcon( mainSearchColorButton, mainSearchColor_ );
+    quickFindSearchBox->setCurrentIndex( getRegexpTypeIndex( defaults.quickfindRegexpType() ) );
+    qfSearchColor_ = defaults.qfBackColor();
+    HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
+
+    highlightMainSearchCheckBox->setChecked( defaults.mainSearchHighlight() );
+    variateHighlightCheckBox->setChecked( defaults.variateMainSearchHighlight() );
+    incrementalCheckBox->setChecked( defaults.isQuickfindIncremental() );
+    caseSensitiveCheckBox->setChecked( !defaults.isSearchIgnoreCaseDefault() );
+    logicalCombiningCheckBox->setChecked( defaults.isSearchLogicalCombiningDefault() );
+    autoRefreshCheckBox->setChecked( defaults.isSearchAutoRefreshDefault() );
+    autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
+    searchHistorySpinBox->setValue( defaultSavedSearches.historySize() );
+
+    loadLastSessionCheckBox->setChecked( defaults.loadLastSession() );
+    followFileOnLoadCheckBox->setChecked( defaults.followFileOnLoad() );
+    minimizeToTrayCheckBox->setChecked( defaults.minimizeToTray() );
+    multipleWindowsCheckBox->setChecked( defaults.allowMultipleWindows() );
+    confirmTabCloseCheckBox->setChecked( defaults.confirmTabClose() );
+
+    checkForNewVersionCheckBox->setChecked( defaults.versionCheckingEnabled() );
+}
+
+void OptionsDialog::resetViewDefaults()
+{
+    const Configuration defaults;
+
+    const auto defaultFont = defaults.mainFont();
+    auto familyIndex = fontFamilyBox->findText( defaultFont.family() );
+    if ( familyIndex == -1 ) {
+        fontFamilyBox->addItem( defaultFont.family() );
+        familyIndex = fontFamilyBox->findText( defaultFont.family() );
+    }
+    if ( familyIndex != -1 ) {
+        fontFamilyBox->setCurrentIndex( familyIndex );
+    }
+    updateFontSizePreservingSelection( fontFamilyBox->currentText(), defaultFont.pointSize() );
+    lineSpacingSpinBox->setValue( defaults.lineSpacingPercent() );
+    fontSmoothCheckBox->setChecked( defaults.forceFontAntialiasing() );
+    boldFontCheckBox->setChecked( defaults.useBoldFont() );
+    wrapTextCheckBox->setChecked( defaults.useTextWrap() );
+
+    auto langIdx = languageComboBox->findData( defaults.language() );
+    languageComboBox->setCurrentIndex( langIdx == -1 ? 0 : langIdx );
+
+    const auto styleIndex = styleComboBox->findData( defaults.style() );
+    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
+    const auto themeModeIndex
+        = themeModeComboBox->findData( static_cast<int>( defaults.themeMode() ) );
+    themeModeComboBox->setCurrentIndex( themeModeIndex == -1 ? 0 : themeModeIndex );
+
+    enableQtHiDpiCheckBox->setChecked( defaults.enableQtHighDpi() );
+    scaleRoundingComboBox->setCurrentIndex( defaults.scaleFactorRounding() - 1 );
+    hideAnsiColorsCheckBox->setChecked( defaults.hideAnsiColorSequences() );
+}
+
+void OptionsDialog::resetFileDefaults()
+{
+    const Configuration defaults;
+    const RecentFiles defaultRecentFiles;
+
+    nativeFileWatchCheckBox->setChecked( defaults.nativeFileWatchEnabled() );
+    fastModificationDetectionCheckBox->setChecked( defaults.fastModificationDetection() );
+    pollingCheckBox->setChecked( defaults.pollingEnabled() );
+    pollIntervalLineEdit->setText( QString::number( defaults.pollIntervalMs() ) );
+    allowFollowOnScrollCheckBox->setChecked( defaults.allowFollowOnScroll() );
+    setupPolling();
+
+    const auto encodingIndex = encodingComboBox->findData( defaults.defaultEncodingMib() );
+    encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
+    filesHistoryMaxItemsSpinBox->setValue( defaultRecentFiles.filesHistoryMaxItems() );
+
+    extractArchivesCheckBox->setChecked( defaults.extractArchives() );
+    extractArchivesAlwaysCheckBox->setChecked( defaults.extractArchivesAlways() );
+    setupArchives();
+
+    verifySslCheckBox->setChecked( defaults.verifySslPeers() );
+    adbExecutableLineEdit->setText( defaults.adbExecutable() );
+    adbLogcatArgsLineEdit->setText( defaults.adbLogcatExtraArgs() );
+    if ( iosLogExecutableLineEdit_ ) {
+        iosLogExecutableLineEdit_->setText( defaults.iosLogExecutable() );
+    }
+    if ( iosLogArgsLineEdit_ ) {
+        iosLogArgsLineEdit_->setText( defaults.iosLogExtraArgs() );
+    }
+}
+
+void OptionsDialog::resetShortcutsDefaults()
+{
+    buildShortcutsTable( true );
+}
+
+void OptionsDialog::resetAdvancedDefaults()
+{
+    const Configuration defaults;
+
+    regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( defaults.regexpEngine() ) );
+    parallelSearchCheckBox->setChecked( defaults.useParallelSearch() );
+    searchResultsCacheCheckBox->setChecked( defaults.useSearchResultsCache() );
+    searchCacheSpinBox->setValue( static_cast<int>( defaults.searchResultsCacheLines() ) );
+    indexReadBufferSpinBox->setValue( defaults.indexReadBufferSizeMb() );
+    searchReadBufferSpinBox->setValue( defaults.searchReadBufferSizeLines() );
+    keepFileClosedCheckBox->setChecked( defaults.keepFileClosed() );
+    compressedIndexCheckBox->setChecked( defaults.useCompressedIndex() );
+    optimizeForNotLatinEncodingsCheckBox->setChecked( defaults.optimizeForNotLatinEncodings() );
+    setupSearchResultsCache();
+
+    loggingCheckBox->setChecked( defaults.enableLogging() );
+    verbositySpinBox->setValue( defaults.loggingLevel() );
+    setupLogging();
 }
 
 void OptionsDialog::checkShortcutsOnDuplicate() const
@@ -560,8 +809,7 @@ void OptionsDialog::checkShortcutsOnDuplicate() const
 
 int OptionsDialog::updateTranslate()
 {
-    auto mw = dynamic_cast<MainWindow*>( parent() );
-    return mw->installLanguage( languageComboBox->currentData().toString() );
+    return MainWindow::installLanguage( languageComboBox->currentData().toString() );
 }
 
 void OptionsDialog::updateConfigFromDialog()
@@ -569,7 +817,12 @@ void OptionsDialog::updateConfigFromDialog()
     bool restartAppMessage = false;
     auto& config = Configuration::get();
 
-    QFont font = QFont( fontFamilyBox->currentText(), ( fontSizeBox->currentText() ).toInt() );
+    bool fontSizeOk = false;
+    auto fontPointSize = fontSizeBox->currentText().toInt( &fontSizeOk );
+    if ( !fontSizeOk || fontPointSize <= 0 ) {
+        fontPointSize = Configuration{}.mainFont().pointSize();
+    }
+    QFont font = QFont( fontFamilyBox->currentText(), fontPointSize );
     config.setMainFont( font );
     config.setLineSpacingPercent( lineSpacingSpinBox->value() );
     config.setForceFontAntialiasing( fontSmoothCheckBox->isChecked() );
@@ -636,6 +889,12 @@ void OptionsDialog::updateConfigFromDialog()
     config.setVerifySslPeers( verifySslCheckBox->isChecked() );
     config.setAdbExecutable( adbExecutableLineEdit->text().trimmed() );
     config.setAdbLogcatExtraArgs( adbLogcatArgsLineEdit->text().trimmed() );
+    if ( iosLogExecutableLineEdit_ ) {
+        config.setIosLogExecutable( iosLogExecutableLineEdit_->text().trimmed() );
+    }
+    if ( iosLogArgsLineEdit_ ) {
+        config.setIosLogExtraArgs( iosLogArgsLineEdit_->text().trimmed() );
+    }
 
     const auto selectedStyle = styleComboBox->currentData().toString();
     restartAppMessage = config.style() != selectedStyle;
@@ -715,8 +974,8 @@ void OptionsDialog::onButtonBoxClicked( QAbstractButton* button )
 
 KeySequencePresenter::KeySequencePresenter( const QString& keySequence )
 {
-    keySequenceLabel_
-        = new QLabel( QKeySequence( keySequence ).toString( QKeySequence::NativeText ) );
+    keySequenceLabel_ = new QLabel();
+    setKeySequence( keySequence );
 
     auto editButton = new QPushButton();
     editButton->setText( "..." );
@@ -735,7 +994,13 @@ KeySequencePresenter::KeySequencePresenter( const QString& keySequence )
 
 QString KeySequencePresenter::keySequence() const
 {
-    return keySequenceLabel_->text();
+    return keySequence_;
+}
+
+void KeySequencePresenter::setKeySequence( const QString& keySequence )
+{
+    keySequence_ = QKeySequence( keySequence ).toString( QKeySequence::PortableText );
+    keySequenceLabel_->setText( QKeySequence( keySequence_ ).toString( QKeySequence::NativeText ) );
 }
 
 void KeySequencePresenter::showEditor()
@@ -743,7 +1008,7 @@ void KeySequencePresenter::showEditor()
     QDialog keyEditDialog;
 
     auto label = new QLabel( "Press new key combination" );
-    auto editor = new QKeySequenceEdit( QKeySequence( keySequenceLabel_->text() ) );
+    auto editor = new QKeySequenceEdit( QKeySequence( keySequence_ ) );
     auto clearButton = new QToolButton();
     clearButton->setText( "Clear" );
     auto dialogButtons = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel );
@@ -762,7 +1027,7 @@ void KeySequencePresenter::showEditor()
     connect( dialogButtons, &QDialogButtonBox::rejected, &keyEditDialog, &QDialog::reject );
 
     if ( keyEditDialog.exec() == QDialog::Accepted ) {
-        keySequenceLabel_->setText( editor->keySequence().toString() );
+        setKeySequence( editor->keySequence().toString( QKeySequence::PortableText ) );
         Q_EMIT edited(); // NOTE: it's important to emit this signal only after changing
                          // \keySequenceLabel_'s text
     }

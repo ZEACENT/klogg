@@ -22,6 +22,8 @@
 #include <QKeySequence>
 #include <QString>
 
+#include <algorithm>
+
 #include "shortcuts.h"
 
 TEST_CASE( "Shortcut bindings: disconnect and reconnect source have defaults" )
@@ -134,6 +136,22 @@ TEST_CASE( "Shortcut bindings: crawler visibility and filter options use Ctrl+Sh
     }
 }
 
+TEST_CASE( "Shortcut bindings: open from clipboard does not steal text paste" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+    const auto it = shortcuts.find( ShortcutAction::MainWindowOpenFromClipboard );
+    REQUIRE( it != shortcuts.end() );
+
+    const auto pasteKeys = QKeySequence::keyBindings( QKeySequence::Paste );
+    for ( const auto& configuredKey : it->second.keySequence ) {
+        const auto configuredSequence = QKeySequence( configuredKey );
+        for ( const auto& pasteKey : pasteKeys ) {
+            CHECK( configuredSequence.matches( pasteKey ) != QKeySequence::ExactMatch );
+            CHECK( pasteKey.matches( configuredSequence ) != QKeySequence::ExactMatch );
+        }
+    }
+}
+
 TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shortcuts" )
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();
@@ -166,6 +184,34 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
                 }
                 CHECK( it->second.size() <= 1 );
             }
+        }
+    }
+}
+
+TEST_CASE( "Shortcut bindings: editable defaults have no duplicate displayed keys" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+
+    std::map<QString, std::vector<std::string>> keyToActions;
+    for ( const auto& [ action, shortcut ] : shortcuts ) {
+        const auto visibleShortcutCount = std::min( 2, shortcut.keySequence.size() );
+        for ( auto shortcutIndex = 0; shortcutIndex < visibleShortcutCount; ++shortcutIndex ) {
+            const auto key = QKeySequence( shortcut.keySequence.at( shortcutIndex ) )
+                                 .toString( QKeySequence::NativeText );
+            if ( !key.isEmpty() ) {
+                keyToActions[ key ].push_back( action );
+            }
+        }
+    }
+
+    for ( const auto& [ key, actions ] : keyToActions ) {
+        DYNAMIC_SECTION( "Displayed key " << key.toStdString() << " is unique" )
+        {
+            INFO( "Actions using displayed key:" );
+            for ( const auto& action : actions ) {
+                INFO( "  " << action );
+            }
+            CHECK( actions.size() <= 1 );
         }
     }
 }

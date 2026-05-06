@@ -117,3 +117,30 @@ TEST_CASE( "Configuration stores and restores adb defaults" )
              == QStringLiteral( "/opt/android/platform-tools/adb" ) );
     REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
 }
+
+TEST_CASE( "Configuration stores and restores iOS log defaults" )
+{
+    const auto dirPath = makeTestDir( "configuration_ios_log" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-ios-log.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setIosLogExecutable( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+        config.setIosLogExtraArgs( QStringLiteral( "--no-color --match SpringBoard" ) );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredConfig.iosLogExecutable()
+             == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+    REQUIRE( restoredConfig.iosLogExtraArgs()
+             == QStringLiteral( "--no-color --match SpringBoard" ) );
+}

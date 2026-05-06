@@ -108,6 +108,7 @@ class MainWindow : public QMainWindow {
   private Q_SLOTS:
     void open();
     void openAdbLogcat();
+    void openIosLogStream();
     void openFileFromRecent( QAction* action );
     void openFileFromFavorites( QAction* action );
     void switchToOpenedFile( QAction* action );
@@ -265,6 +266,7 @@ class MainWindow : public QMainWindow {
     QAction* newWindowAction;
     QAction* openAction;
     QAction* openAdbLogcatAction;
+    QAction* openIosLogStreamAction;
     QAction* closeAction;
     QAction* closeAllAction;
     QAction* exitAction;
