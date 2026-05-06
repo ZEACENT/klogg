@@ -31,10 +31,13 @@
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QTemporaryDir>
+#include <QUuid>
 
 #include <map>
 
 #include "adbprocesstransport.h"
+#include "adblogcatsource.h"
 #include "adblogcatdialog.h"
 #include "configuration.h"
 #include "ioslogprocesstransport.h"
@@ -42,6 +45,7 @@
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
+#include "streaminglogdata.h"
 #include "shortcuts.h"
 #include "test_utils.h"
 
@@ -161,6 +165,22 @@ class TestIosLogProcessTransport : public IosLogProcessTransport {
         return streamingCommand();
     }
 };
+
+QString makeCaptureId()
+{
+    return QUuid::createUuid().toString( QUuid::WithoutBraces );
+}
+
+bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData, unsigned long long lineCount )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( logData->getNbLine().get() < lineCount && deadline.elapsed() < 5000 ) {
+        QCoreApplication::processEvents();
+        QTest::qWait( 50 );
+    }
+    return logData->getNbLine().get() >= lineCount;
+}
 } // namespace
 
 TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
@@ -642,6 +662,58 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
     REQUIRE( restored.persistedSourceType() == QStringLiteral( "ios_log_stream" ) );
     REQUIRE( restored.deviceSerial == QStringLiteral( "00008030-001C195E36D8802E" ) );
     REQUIRE( restored.extraArgs == QStringLiteral( "--network" ) );
+}
+
+TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote clear" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based iOS stream restart test on Windows." );
+    return;
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "pymobiledevice3" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\n"
+                  "i=1\n"
+                  "while :; do\n"
+                  "  echo ios-live-line-$i\n"
+                  "  i=$((i + 1))\n"
+                  "  sleep 0.05\n"
+                  "done\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    const AdbLogcatSessionData sessionData{
+        scriptPath,
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "iPhone Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::IosLogStream,
+    };
+
+    AdbLogcatSource source( sessionData, logData );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForLineCount( logData, 1 ) );
+
+    REQUIRE( source.clearAndRestart() );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( source.lastError().isEmpty() );
+    REQUIRE( waitForLineCount( logData, 1 ) );
+
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
 }
 
 // ----------------------------------------------------------------------------

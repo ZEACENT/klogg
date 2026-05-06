@@ -1252,18 +1252,32 @@ void MainWindow::clearLog()
     }
 
     if ( session_.getDocumentKind( crawler ) == DocumentKind::AdbLogcat ) {
+        auto* adbSource = session_.getAdbLogcatSource( crawler );
+        if ( !adbSource ) {
+            return;
+        }
+
         const auto displayName = session_.getDisplayName( crawler );
+        const auto isIosLogStream
+            = adbSource->sessionData().sourceType == LiveLogSourceType::IosLogStream;
         const auto userAction = QMessageBox::question(
-            this, tr( "klogg - clear logcat buffer" ),
-            tr( "Clear device log buffer for %1? Local cached log will also be removed." )
-                .arg( displayName ),
+            this,
+            isIosLogStream ? tr( "klogg - clear iOS log stream" )
+                           : tr( "klogg - clear logcat buffer" ),
+            isIosLogStream
+                ? tr( "Clear local iOS log stream capture for %1? The live stream will be "
+                      "restarted." )
+                      .arg( displayName )
+                : tr( "Clear device log buffer for %1? Local cached log will also be removed." )
+                      .arg( displayName ),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
 
         if ( userAction == QMessageBox::Yes ) {
-            if ( auto* adbSource = session_.getAdbLogcatSource( crawler );
-                 adbSource != nullptr && !adbSource->clearAndRestart() ) {
+            if ( !adbSource->clearAndRestart() ) {
                 QMessageBox::critical(
-                    this, tr( "klogg - clear logcat buffer" ),
+                    this,
+                    isIosLogStream ? tr( "klogg - clear iOS log stream" )
+                                   : tr( "klogg - clear logcat buffer" ),
                     adbSource->lastError().isEmpty() ? tr( "Failed to clear logcat buffer" )
                                                      : adbSource->lastError() );
             }

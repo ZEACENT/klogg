@@ -171,11 +171,13 @@ bool AdbLogcatSource::clearAndRestart()
     const auto wasConnected = state_ == State::Connected;
     disconnectSource();
 
-    QString error;
-    if ( !transport_ || !transport_->clearRemote( &error ) ) {
-        lastError_ = error.isEmpty() ? tr( "Failed to clear logcat buffer" ) : error;
-        setState( State::Error );
-        return false;
+    if ( sessionData_.sourceType != LiveLogSourceType::IosLogStream ) {
+        QString error;
+        if ( !transport_ || !transport_->clearRemote( &error ) ) {
+            lastError_ = error.isEmpty() ? tr( "Failed to clear logcat buffer" ) : error;
+            setState( State::Error );
+            return false;
+        }
     }
 
     if ( logData_ ) {
