@@ -60,6 +60,16 @@ bool isHeadlessDialogTestEnvironment()
                   == 0;
 }
 
+bool skipHeadlessOptionsDialogTest()
+{
+    if ( isHeadlessDialogTestEnvironment() ) {
+        WARN( "OptionsDialog UI coverage is skipped on headless/offscreen platforms" );
+        return true;
+    }
+
+    return false;
+}
+
 class ScopedAdbConfigurationGuard {
   public:
     ScopedAdbConfigurationGuard()
@@ -402,8 +412,7 @@ TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transp
 
 TEST_CASE( "OptionsDialog loads and persists adb settings" )
 {
-    if ( isHeadlessDialogTestEnvironment() ) {
-        WARN( "OptionsDialog UI coverage is skipped on headless/offscreen platforms" );
+    if ( skipHeadlessOptionsDialogTest() ) {
         return;
     }
 
@@ -439,6 +448,10 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
 
 TEST_CASE( "OptionsDialog default shortcut table keeps Apply and OK enabled" )
 {
+    if ( skipHeadlessOptionsDialogTest() ) {
+        return;
+    }
+
     ScopedOptionsDialogConfigurationGuard configGuard;
     auto& config = Configuration::getSynced();
     config.setShortcuts( {} );
@@ -458,6 +471,10 @@ TEST_CASE( "OptionsDialog default shortcut table keeps Apply and OK enabled" )
 
 TEST_CASE( "OptionsDialog persists changed font size from preferences" )
 {
+    if ( skipHeadlessOptionsDialogTest() ) {
+        return;
+    }
+
     ScopedOptionsDialogConfigurationGuard configGuard;
     auto& config = Configuration::getSynced();
     const auto originalFont = config.mainFont();
@@ -486,6 +503,10 @@ TEST_CASE( "OptionsDialog persists changed font size from preferences" )
 
 TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
 {
+    if ( skipHeadlessOptionsDialogTest() ) {
+        return;
+    }
+
     ScopedOptionsDialogConfigurationGuard configGuard;
 
     auto& config = Configuration::getSynced();
@@ -557,8 +578,7 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
 
 TEST_CASE( "OptionsDialog adb detect button fills the executable field with the resolved adb path" )
 {
-    if ( isHeadlessDialogTestEnvironment() ) {
-        WARN( "OptionsDialog UI coverage is skipped on headless/offscreen platforms" );
+    if ( skipHeadlessOptionsDialogTest() ) {
         return;
     }
 
