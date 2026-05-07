@@ -130,6 +130,8 @@ TEST_CASE( "Configuration stores and restores iOS log defaults" )
         Configuration config;
         config.setIosLogExecutable( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
         config.setIosLogExtraArgs( QStringLiteral( "--no-color --match SpringBoard" ) );
+        config.setIosLogAnsiOutputEnabled( true );
+        config.setAdbLogcatAnsiOutputEnabled( true );
         config.saveToStorage( settings );
         settings.sync();
         REQUIRE( settings.status() == QSettings::NoError );
@@ -143,4 +145,6 @@ TEST_CASE( "Configuration stores and restores iOS log defaults" )
              == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
     REQUIRE( restoredConfig.iosLogExtraArgs()
              == QStringLiteral( "--no-color --match SpringBoard" ) );
+    REQUIRE( restoredConfig.iosLogAnsiOutputEnabled() );
+    REQUIRE( restoredConfig.adbLogcatAnsiOutputEnabled() );
 }

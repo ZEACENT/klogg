@@ -50,6 +50,7 @@
 
 #include "ui_optionsdialog.h"
 
+class QCheckBox;
 class QGroupBox;
 class QLineEdit;
 
@@ -136,8 +137,10 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     QColor mainSearchColor_;
     QColor qfSearchColor_;
     QGroupBox* iosLogGroupBox_ = nullptr;
+    QCheckBox* adbAnsiOutputCheckBox_ = nullptr;
     QLineEdit* iosLogExecutableLineEdit_ = nullptr;
     QLineEdit* iosLogArgsLineEdit_ = nullptr;
+    QCheckBox* iosLogAnsiOutputCheckBox_ = nullptr;
 };
 
 #endif

@@ -36,12 +36,14 @@ std::unique_ptr<LiveSourceTransport> makeTransport( const AdbLogcatSessionData& 
     if ( sessionData.sourceType == LiveLogSourceType::IosLogStream ) {
         return std::make_unique<IosLogProcessTransport>( sessionData.adbExecutable,
                                                          sessionData.deviceSerial,
-                                                         sessionData.extraArgs );
+                                                         sessionData.extraArgs,
+                                                         sessionData.ansiOutputEnabled );
     }
 
     return std::make_unique<AdbProcessTransport>( sessionData.adbExecutable,
                                                   sessionData.deviceSerial,
-                                                  sessionData.extraArgs );
+                                                  sessionData.extraArgs,
+                                                  sessionData.ansiOutputEnabled );
 }
 } // namespace
 
@@ -77,6 +79,7 @@ QJsonObject AdbLogcatSessionData::toJson() const
         { QStringLiteral( "extraArgs" ), extraArgs },
         { QStringLiteral( "captureId" ), captureId },
         { QStringLiteral( "boundOutputFile" ), boundOutputFile },
+        { QStringLiteral( "ansiOutputEnabled" ), ansiOutputEnabled },
     };
 }
 
@@ -91,6 +94,7 @@ AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
         jsonObject.value( QStringLiteral( "captureId" ) ).toString(),
         jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString(),
         sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() ),
+        jsonObject.value( QStringLiteral( "ansiOutputEnabled" ) ).toBool( false ),
     };
 }
 

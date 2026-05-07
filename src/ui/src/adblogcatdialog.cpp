@@ -1,5 +1,6 @@
 #include "adblogcatdialog.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -38,10 +39,13 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
     extraArgsEdit_ = new QLineEdit( this );
     extraArgsEdit_->setObjectName( QStringLiteral( "extraArgsEdit" ) );
     extraArgsEdit_->setPlaceholderText( tr( "Optional logcat args, appended after 'adb -s <serial> logcat'" ) );
+    ansiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), this );
+    ansiOutputCheckBox_->setObjectName( QStringLiteral( "ansiOutputCheckBox" ) );
 
     formLayout->addRow( tr( "ADB executable" ), adbRowLayout );
     formLayout->addRow( tr( "Device" ), deviceCombo_ );
     formLayout->addRow( tr( "Extra logcat args" ), extraArgsEdit_ );
+    formLayout->addRow( QString{}, ansiOutputCheckBox_ );
 
     statusLabel_ = new QLabel( this );
     statusLabel_->setObjectName( QStringLiteral( "adbStatusLabel" ) );
@@ -76,6 +80,8 @@ AdbLogcatSessionData AdbLogcatDialog::sessionData() const
         extraArgsEdit_->text().trimmed(),
         QUuid::createUuid().toString( QUuid::WithoutBraces ),
         {},
+        LiveLogSourceType::AdbLogcat,
+        ansiOutputCheckBox_->isChecked(),
     };
 }
 
@@ -113,6 +119,7 @@ void AdbLogcatDialog::loadSettings()
     const auto& config = Configuration::get();
     adbExecutableEdit_->setText( config.adbExecutable() );
     extraArgsEdit_->setText( config.adbLogcatExtraArgs() );
+    ansiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
 }
 
 void AdbLogcatDialog::saveSettings() const
@@ -120,5 +127,6 @@ void AdbLogcatDialog::saveSettings() const
     auto& config = Configuration::get();
     config.setAdbExecutable( adbExecutableEdit_->text().trimmed() );
     config.setAdbLogcatExtraArgs( extraArgsEdit_->text().trimmed() );
+    config.setAdbLogcatAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.save();
 }

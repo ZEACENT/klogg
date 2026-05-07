@@ -1,5 +1,6 @@
 #include "ioslogdialog.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -39,10 +40,13 @@ IosLogDialog::IosLogDialog( QWidget* parent )
     extraArgsEdit_->setObjectName( QStringLiteral( "extraArgsEdit" ) );
     extraArgsEdit_->setPlaceholderText(
         tr( "Optional args, appended after 'pymobiledevice3 syslog live --udid <udid>'" ) );
+    ansiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), this );
+    ansiOutputCheckBox_->setObjectName( QStringLiteral( "ansiOutputCheckBox" ) );
 
     formLayout->addRow( tr( "pymobiledevice3 executable" ), executableRowLayout );
     formLayout->addRow( tr( "Device" ), deviceCombo_ );
     formLayout->addRow( tr( "Extra iOS log args" ), extraArgsEdit_ );
+    formLayout->addRow( QString{}, ansiOutputCheckBox_ );
 
     statusLabel_ = new QLabel( this );
     statusLabel_->setObjectName( QStringLiteral( "iosLogStatusLabel" ) );
@@ -78,6 +82,7 @@ AdbLogcatSessionData IosLogDialog::sessionData() const
         QUuid::createUuid().toString( QUuid::WithoutBraces ),
         {},
         LiveLogSourceType::IosLogStream,
+        ansiOutputCheckBox_->isChecked(),
     };
 }
 
@@ -115,6 +120,7 @@ void IosLogDialog::loadSettings()
     const auto& config = Configuration::get();
     executableEdit_->setText( config.iosLogExecutable() );
     extraArgsEdit_->setText( config.iosLogExtraArgs() );
+    ansiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
 }
 
 void IosLogDialog::saveSettings() const
@@ -122,5 +128,6 @@ void IosLogDialog::saveSettings() const
     auto& config = Configuration::get();
     config.setIosLogExecutable( executableEdit_->text().trimmed() );
     config.setIosLogExtraArgs( extraArgsEdit_->text().trimmed() );
+    config.setIosLogAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.save();
 }

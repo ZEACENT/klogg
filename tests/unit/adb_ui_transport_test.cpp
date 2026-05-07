@@ -19,6 +19,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
@@ -64,6 +65,7 @@ class ScopedAdbConfigurationGuard {
         : config_( Configuration::getSynced() )
         , executable_( config_.adbExecutable() )
         , extraArgs_( config_.adbLogcatExtraArgs() )
+        , ansiOutput_( config_.adbLogcatAnsiOutputEnabled() )
     {
     }
 
@@ -71,6 +73,7 @@ class ScopedAdbConfigurationGuard {
     {
         config_.setAdbExecutable( executable_ );
         config_.setAdbLogcatExtraArgs( extraArgs_ );
+        config_.setAdbLogcatAnsiOutputEnabled( ansiOutput_ );
         config_.save();
     }
 
@@ -78,6 +81,7 @@ class ScopedAdbConfigurationGuard {
     Configuration& config_;
     QString executable_;
     QString extraArgs_;
+    bool ansiOutput_;
 };
 
 class ScopedOptionsDialogConfigurationGuard {
@@ -90,8 +94,10 @@ class ScopedOptionsDialogConfigurationGuard {
         , pollIntervalMs_( config_.pollIntervalMs() )
         , adbExecutable_( config_.adbExecutable() )
         , adbExtraArgs_( config_.adbLogcatExtraArgs() )
+        , adbAnsiOutput_( config_.adbLogcatAnsiOutputEnabled() )
         , iosLogExecutable_( config_.iosLogExecutable() )
         , iosLogExtraArgs_( config_.iosLogExtraArgs() )
+        , iosLogAnsiOutput_( config_.iosLogAnsiOutputEnabled() )
         , useSearchResultsCache_( config_.useSearchResultsCache() )
         , shortcuts_( config_.shortcuts() )
         , savedSearches_( SavedSearches::getSynced() )
@@ -109,8 +115,10 @@ class ScopedOptionsDialogConfigurationGuard {
         config_.setPollIntervalMs( pollIntervalMs_ );
         config_.setAdbExecutable( adbExecutable_ );
         config_.setAdbLogcatExtraArgs( adbExtraArgs_ );
+        config_.setAdbLogcatAnsiOutputEnabled( adbAnsiOutput_ );
         config_.setIosLogExecutable( iosLogExecutable_ );
         config_.setIosLogExtraArgs( iosLogExtraArgs_ );
+        config_.setIosLogAnsiOutputEnabled( iosLogAnsiOutput_ );
         config_.setUseSearchResultsCache( useSearchResultsCache_ );
         config_.setShortcuts( shortcuts_ );
         config_.save();
@@ -129,8 +137,10 @@ class ScopedOptionsDialogConfigurationGuard {
     int pollIntervalMs_;
     QString adbExecutable_;
     QString adbExtraArgs_;
+    bool adbAnsiOutput_;
     QString iosLogExecutable_;
     QString iosLogExtraArgs_;
+    bool iosLogAnsiOutput_;
     bool useSearchResultsCache_;
     std::map<std::string, QStringList> shortcuts_;
     SavedSearches& savedSearches_;
@@ -236,22 +246,82 @@ TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
                              QStringLiteral( "--title" ), QStringLiteral( "hello world" ) } );
 }
 
+TEST_CASE( "AdbProcessTransport preserves empty quoted extra args" )
+{
+    TestAdbProcessTransport transport( QString{}, QStringLiteral( "serial-123" ),
+                                       QStringLiteral( "--empty '' --quoted \"\"" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "--empty" ),
+                             QString{}, QStringLiteral( "--quoted" ), QString{} } );
+}
+
+TEST_CASE( "AdbProcessTransport adds logcat color modifier when ANSI output is enabled" )
+{
+    TestAdbProcessTransport transport( QString{}, QStringLiteral( "serial-123" ),
+                                       QStringLiteral( "-v threadtime *:I" ), true );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "color" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "*:I" ) } );
+}
+
 TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
 {
     TestIosLogProcessTransport transport(
         QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
         QStringLiteral( "00008030-001C195E36D8802E" ),
-        QStringLiteral( "--no-color --match \"process name\"" ) );
+        QStringLiteral( "--match \"process name\"" ) );
 
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.program == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
     REQUIRE( streaming.arguments
-             == QStringList{ QStringLiteral( "syslog" ), QStringLiteral( "live" ),
+             == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ),
                              QStringLiteral( "--udid" ),
                              QStringLiteral( "00008030-001C195E36D8802E" ),
-                             QStringLiteral( "--no-color" ),
                              QStringLiteral( "--match" ),
                              QStringLiteral( "process name" ) } );
+}
+
+TEST_CASE( "IosLogProcessTransport preserves empty quoted extra args" )
+{
+    TestIosLogProcessTransport transport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "--tunnel '' --match \"\"" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ),
+                             QStringLiteral( "--tunnel" ), QString{}, QStringLiteral( "--match" ),
+                             QString{} } );
+}
+
+TEST_CASE( "IosLogProcessTransport controls pymobiledevice3 ANSI color output" )
+{
+    TestIosLogProcessTransport colorTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, true );
+    TestIosLogProcessTransport plainTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, false );
+
+    REQUIRE( colorTransport.streamingCommandForTest().arguments
+             == QStringList{ QStringLiteral( "--color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
+    REQUIRE( plainTransport.streamingCommandForTest().arguments
+             == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
 }
 
 TEST_CASE( "IosLogProcessTransport reports unsupported device listing off macOS" )
@@ -399,7 +469,9 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
     config.setLineSpacingPercent( Configuration::MaxLineSpacingPercent );
     config.setPollIntervalMs( 12345 );
     config.setAdbExecutable( QStringLiteral( "/custom/adb" ) );
+    config.setAdbLogcatAnsiOutputEnabled( true );
     config.setIosLogExecutable( QStringLiteral( "/custom/pymobiledevice3" ) );
+    config.setIosLogAnsiOutputEnabled( true );
     config.setUseSearchResultsCache( false );
     config.setShortcuts( { { ShortcutAction::MainWindowOpenFile,
                              QStringList{ QStringLiteral( "Ctrl+Shift+P" ) } } } );
@@ -439,7 +511,10 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
     CHECK( restoredConfig.lineSpacingPercent() == defaults.lineSpacingPercent() );
     CHECK( restoredConfig.pollIntervalMs() == defaults.pollIntervalMs() );
     CHECK( restoredConfig.adbExecutable() == defaults.adbExecutable() );
+    CHECK( restoredConfig.adbLogcatAnsiOutputEnabled()
+           == defaults.adbLogcatAnsiOutputEnabled() );
     CHECK( restoredConfig.iosLogExecutable() == defaults.iosLogExecutable() );
+    CHECK( restoredConfig.iosLogAnsiOutputEnabled() == defaults.iosLogAnsiOutputEnabled() );
     CHECK( restoredConfig.useSearchResultsCache() == defaults.useSearchResultsCache() );
     CHECK( SavedSearches::getSynced().historySize() == defaultSavedSearches.historySize() );
     CHECK( RecentFiles::getSynced().filesHistoryMaxItems()
@@ -603,23 +678,29 @@ TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edit
     auto& config = Configuration::getSynced();
     config.setAdbExecutable( QStringLiteral( "/configured/adb" ) );
     config.setAdbLogcatExtraArgs( QStringLiteral( "-v color" ) );
+    config.setAdbLogcatAnsiOutputEnabled( true );
     config.save();
 
     AdbLogcatDialog dialog;
     auto* adbExecutableEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableEdit" ) );
     auto* extraArgsEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "extraArgsEdit" ) );
+    auto* ansiOutputCheckBox
+        = dialog.findChild<QCheckBox*>( QStringLiteral( "ansiOutputCheckBox" ) );
     auto* deviceCombo = dialog.findChild<QComboBox*>( QStringLiteral( "deviceCombo" ) );
     auto* buttonBox = dialog.findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
 
     REQUIRE( adbExecutableEdit != nullptr );
     REQUIRE( extraArgsEdit != nullptr );
     REQUIRE( deviceCombo != nullptr );
+    REQUIRE( ansiOutputCheckBox != nullptr );
     REQUIRE( buttonBox != nullptr );
     REQUIRE( adbExecutableEdit->text() == QStringLiteral( "/configured/adb" ) );
     REQUIRE( extraArgsEdit->text() == QStringLiteral( "-v color" ) );
+    REQUIRE( ansiOutputCheckBox->isChecked() );
 
     adbExecutableEdit->setText( QStringLiteral( "/saved/adb" ) );
     extraArgsEdit->setText( QStringLiteral( "-v threadtime *:I" ) );
+    ansiOutputCheckBox->setChecked( false );
     deviceCombo->addItem( QStringLiteral( "Pixel 8 (ABC123)" ), QStringLiteral( "ABC123" ) );
     deviceCombo->setCurrentIndex( 0 );
     QCoreApplication::processEvents();
@@ -629,6 +710,7 @@ TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edit
     REQUIRE( sessionData.deviceSerial == QStringLiteral( "ABC123" ) );
     REQUIRE( sessionData.deviceDescription == QStringLiteral( "Pixel 8 (ABC123)" ) );
     REQUIRE( sessionData.extraArgs == QStringLiteral( "-v threadtime *:I" ) );
+    REQUIRE_FALSE( sessionData.ansiOutputEnabled );
     REQUIRE_FALSE( sessionData.captureId.isEmpty() );
 
     auto* okButton = buttonBox->button( QDialogButtonBox::Ok );
@@ -639,6 +721,7 @@ TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edit
     auto& restoredConfig = Configuration::getSynced();
     REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/saved/adb" ) );
     REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
+    REQUIRE_FALSE( restoredConfig.adbLogcatAnsiOutputEnabled() );
 }
 
 TEST_CASE( "iOS log stream session data serializes its source type" )
@@ -651,6 +734,7 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
         QStringLiteral( "ios-capture" ),
         QStringLiteral( "/tmp/ios.log" ),
         LiveLogSourceType::IosLogStream,
+        true,
     };
 
     const auto json = QString::fromUtf8(
@@ -662,6 +746,7 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
     REQUIRE( restored.persistedSourceType() == QStringLiteral( "ios_log_stream" ) );
     REQUIRE( restored.deviceSerial == QStringLiteral( "00008030-001C195E36D8802E" ) );
     REQUIRE( restored.extraArgs == QStringLiteral( "--network" ) );
+    REQUIRE( restored.ansiOutputEnabled );
 }
 
 TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote clear" )

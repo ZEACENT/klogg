@@ -426,6 +426,15 @@ class Configuration final : public Persistable<Configuration> {
         adbLogcatExtraArgs_ = std::move( adbLogcatExtraArgs );
     }
 
+    bool adbLogcatAnsiOutputEnabled() const
+    {
+        return adbLogcatAnsiOutputEnabled_;
+    }
+    void setAdbLogcatAnsiOutputEnabled( bool enabled )
+    {
+        adbLogcatAnsiOutputEnabled_ = enabled;
+    }
+
     QString iosLogExecutable() const
     {
         return iosLogExecutable_;
@@ -442,6 +451,15 @@ class Configuration final : public Persistable<Configuration> {
     void setIosLogExtraArgs( QString iosLogExtraArgs )
     {
         iosLogExtraArgs_ = std::move( iosLogExtraArgs );
+    }
+
+    bool iosLogAnsiOutputEnabled() const
+    {
+        return iosLogAnsiOutputEnabled_;
+    }
+    void setIosLogAnsiOutputEnabled( bool enabled )
+    {
+        iosLogAnsiOutputEnabled_ = enabled;
     }
 
     bool forceFontAntialiasing() const
@@ -665,8 +683,10 @@ class Configuration final : public Persistable<Configuration> {
     bool verifySslPeers_ = true;
     QString adbExecutable_;
     QString adbLogcatExtraArgs_;
+    bool adbLogcatAnsiOutputEnabled_ = false;
     QString iosLogExecutable_;
     QString iosLogExtraArgs_;
+    bool iosLogAnsiOutputEnabled_ = false;
 
     bool forceFontAntialiasing_ = false;
     bool enableQtHighDpi_ = true;

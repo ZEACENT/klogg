@@ -37,6 +37,7 @@
  */
 
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
@@ -236,6 +237,12 @@ void OptionsDialog::setupLanguageList()
 
 void OptionsDialog::setupIosLogSettings()
 {
+    adbAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), adbGroupBox );
+    adbAnsiOutputCheckBox_->setObjectName( QStringLiteral( "adbAnsiOutputCheckBox" ) );
+    if ( auto* adbLayout = qobject_cast<QVBoxLayout*>( adbGroupBox->layout() ) ) {
+        adbLayout->insertWidget( std::max( 0, adbLayout->count() - 1 ), adbAnsiOutputCheckBox_ );
+    }
+
     iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), file_watch_tab );
     iosLogGroupBox_->setObjectName( QStringLiteral( "iosLogGroupBox" ) );
 
@@ -261,6 +268,9 @@ void OptionsDialog::setupIosLogSettings()
     argsRow->addWidget( argsLabel );
     argsRow->addWidget( iosLogArgsLineEdit_ );
 
+    iosLogAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), iosLogGroupBox_ );
+    iosLogAnsiOutputCheckBox_->setObjectName( QStringLiteral( "iosLogAnsiOutputCheckBox" ) );
+
     auto* helpLabel = new QLabel( iosLogGroupBox_ );
     helpLabel->setWordWrap( true );
     helpLabel->setText( tr( "Extra arguments are appended after "
@@ -269,6 +279,7 @@ void OptionsDialog::setupIosLogSettings()
 
     layout->addLayout( executableRow );
     layout->addLayout( argsRow );
+    layout->addWidget( iosLogAnsiOutputCheckBox_ );
     layout->addWidget( helpLabel );
 
     const auto insertIndex = std::max( 0, verticalLayout_9->count() - 1 );
@@ -559,11 +570,17 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     verifySslCheckBox->setChecked( config.verifySslPeers() );
     adbExecutableLineEdit->setText( config.adbExecutable() );
     adbLogcatArgsLineEdit->setText( config.adbLogcatExtraArgs() );
+    if ( adbAnsiOutputCheckBox_ ) {
+        adbAnsiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
+    }
     if ( iosLogExecutableLineEdit_ ) {
         iosLogExecutableLineEdit_->setText( config.iosLogExecutable() );
     }
     if ( iosLogArgsLineEdit_ ) {
         iosLogArgsLineEdit_->setText( config.iosLogExtraArgs() );
+    }
+    if ( iosLogAnsiOutputCheckBox_ ) {
+        iosLogAnsiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
     }
 
     const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
@@ -722,11 +739,17 @@ void OptionsDialog::resetFileDefaults()
     verifySslCheckBox->setChecked( defaults.verifySslPeers() );
     adbExecutableLineEdit->setText( defaults.adbExecutable() );
     adbLogcatArgsLineEdit->setText( defaults.adbLogcatExtraArgs() );
+    if ( adbAnsiOutputCheckBox_ ) {
+        adbAnsiOutputCheckBox_->setChecked( defaults.adbLogcatAnsiOutputEnabled() );
+    }
     if ( iosLogExecutableLineEdit_ ) {
         iosLogExecutableLineEdit_->setText( defaults.iosLogExecutable() );
     }
     if ( iosLogArgsLineEdit_ ) {
         iosLogArgsLineEdit_->setText( defaults.iosLogExtraArgs() );
+    }
+    if ( iosLogAnsiOutputCheckBox_ ) {
+        iosLogAnsiOutputCheckBox_->setChecked( defaults.iosLogAnsiOutputEnabled() );
     }
 }
 
@@ -889,11 +912,17 @@ void OptionsDialog::updateConfigFromDialog()
     config.setVerifySslPeers( verifySslCheckBox->isChecked() );
     config.setAdbExecutable( adbExecutableLineEdit->text().trimmed() );
     config.setAdbLogcatExtraArgs( adbLogcatArgsLineEdit->text().trimmed() );
+    if ( adbAnsiOutputCheckBox_ ) {
+        config.setAdbLogcatAnsiOutputEnabled( adbAnsiOutputCheckBox_->isChecked() );
+    }
     if ( iosLogExecutableLineEdit_ ) {
         config.setIosLogExecutable( iosLogExecutableLineEdit_->text().trimmed() );
     }
     if ( iosLogArgsLineEdit_ ) {
         config.setIosLogExtraArgs( iosLogArgsLineEdit_->text().trimmed() );
+    }
+    if ( iosLogAnsiOutputCheckBox_ ) {
+        config.setIosLogAnsiOutputEnabled( iosLogAnsiOutputCheckBox_->isChecked() );
     }
 
     const auto selectedStyle = styleComboBox->currentData().toString();

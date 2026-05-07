@@ -106,6 +106,7 @@ QStringList splitCommandArguments( const QString& arguments )
     QStringList tokens;
     QString currentToken;
     QChar quoteChar;
+    bool tokenStarted = false;
 
     for ( int i = 0; i < arguments.size(); ++i ) {
         const auto ch = arguments.at( i );
@@ -114,12 +115,14 @@ QStringList splitCommandArguments( const QString& arguments )
             if ( nextIndex < arguments.size() ) {
                 const auto nextChar = arguments.at( nextIndex );
                 if ( canEscapeArgumentCharacter( nextChar, quoteChar ) ) {
+                    tokenStarted = true;
                     currentToken.append( nextChar );
                     ++i;
                     continue;
                 }
             }
 
+            tokenStarted = true;
             currentToken.append( ch );
             continue;
         }
@@ -129,28 +132,32 @@ QStringList splitCommandArguments( const QString& arguments )
                 quoteChar = QChar{};
             }
             else {
+                tokenStarted = true;
                 currentToken.append( ch );
             }
             continue;
         }
 
         if ( ch == QLatin1Char( '"' ) || ch == QLatin1Char( '\'' ) ) {
+            tokenStarted = true;
             quoteChar = ch;
             continue;
         }
 
         if ( ch.isSpace() ) {
-            if ( !currentToken.isEmpty() ) {
+            if ( tokenStarted ) {
                 tokens.push_back( currentToken );
                 currentToken.clear();
+                tokenStarted = false;
             }
             continue;
         }
 
+        tokenStarted = true;
         currentToken.append( ch );
     }
 
-    if ( !currentToken.isEmpty() ) {
+    if ( tokenStarted ) {
         tokens.push_back( currentToken );
     }
 
@@ -159,11 +166,13 @@ QStringList splitCommandArguments( const QString& arguments )
 } // namespace
 
 AdbProcessTransport::AdbProcessTransport( QString adbExecutable, QString deviceSerial,
-                                          QString extraArgs, QObject* parent )
+                                          QString extraArgs, bool ansiOutputEnabled,
+                                          QObject* parent )
     : ProcessLiveSourceTransport( parent )
     , adbExecutable_( std::move( adbExecutable ) )
     , deviceSerial_( std::move( deviceSerial ) )
     , extraArgs_( std::move( extraArgs ) )
+    , ansiOutputEnabled_( ansiOutputEnabled )
 {
 }
 
@@ -268,6 +277,9 @@ QString AdbProcessTransport::detectAdbExecutable()
 QStringList AdbProcessTransport::logcatArguments() const
 {
     QStringList arguments{ QStringLiteral( "-s" ), deviceSerial_, QStringLiteral( "logcat" ) };
+    if ( ansiOutputEnabled_ ) {
+        arguments.append( { QStringLiteral( "-v" ), QStringLiteral( "color" ) } );
+    }
     const auto trimmedExtraArgs = extraArgs_.trimmed();
     if ( !trimmedExtraArgs.isEmpty() ) {
         arguments.append( splitCommandArguments( trimmedExtraArgs ) );

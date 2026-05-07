@@ -16,7 +16,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
 
   public:
     IosLogProcessTransport( QString executable, QString deviceUdid, QString extraArgs,
-                            QObject* parent = nullptr );
+                            bool ansiOutputEnabled = false, QObject* parent = nullptr );
 
     static QList<IosDeviceInfo> listDevices( const QString& executable, QString* error );
     static QString detectIosSyslogExecutable();
@@ -35,6 +35,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     QString executable_;
     QString deviceUdid_;
     QString extraArgs_;
+    bool ansiOutputEnabled_;
 };
 
 #endif

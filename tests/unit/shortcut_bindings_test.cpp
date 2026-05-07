@@ -194,7 +194,7 @@ TEST_CASE( "Shortcut bindings: editable defaults have no duplicate displayed key
 
     std::map<QString, std::vector<std::string>> keyToActions;
     for ( const auto& [ action, shortcut ] : shortcuts ) {
-        const auto visibleShortcutCount = std::min( 2, shortcut.keySequence.size() );
+        const auto visibleShortcutCount = std::min<qsizetype>( 2, shortcut.keySequence.size() );
         for ( auto shortcutIndex = 0; shortcutIndex < visibleShortcutCount; ++shortcutIndex ) {
             const auto key = QKeySequence( shortcut.keySequence.at( shortcutIndex ) )
                                  .toString( QKeySequence::NativeText );

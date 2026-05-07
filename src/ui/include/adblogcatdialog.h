@@ -7,6 +7,7 @@
 
 class QComboBox;
 class QDialogButtonBox;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -32,6 +33,7 @@ class AdbLogcatDialog : public QDialog {
     QPushButton* refreshButton_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QLineEdit* extraArgsEdit_ = nullptr;
+    QCheckBox* ansiOutputCheckBox_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QDialogButtonBox* buttonBox_ = nullptr;
 };

@@ -16,7 +16,7 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
 
   public:
     AdbProcessTransport( QString adbExecutable, QString deviceSerial, QString extraArgs,
-                         QObject* parent = nullptr );
+                         bool ansiOutputEnabled = false, QObject* parent = nullptr );
 
     static QList<AdbDeviceInfo> listDevices( const QString& adbExecutable, QString* error );
 
@@ -39,6 +39,7 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
     QString adbExecutable_;
     QString deviceSerial_;
     QString extraArgs_;
+    bool ansiOutputEnabled_;
 };
 
 #endif

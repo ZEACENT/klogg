@@ -23,6 +23,7 @@ struct AdbLogcatSessionData {
     QString captureId;
     QString boundOutputFile;
     LiveLogSourceType sourceType = LiveLogSourceType::AdbLogcat;
+    bool ansiOutputEnabled = false;
 
     QString displayName() const;
     QString documentId() const;
