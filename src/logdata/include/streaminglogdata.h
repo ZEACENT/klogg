@@ -32,12 +32,14 @@ class StreamingLogData : public SearchableLogData {
     void reload( QTextCodec* forcedEncoding = nullptr ) override;
     QTextCodec* getDetectedEncoding() const override;
     void setPrefilter( const QString& prefilterPattern ) override;
+    void setAnsiProcessingMode( AnsiProcessingMode mode ) override;
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
     bool isLiveSource() const override;
 
   protected:
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
+    klogg::vector<AnsiColorSpan> doGetLineAnsiColors( LineNumber line ) const override;
     klogg::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
     klogg::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
     LineNumber doGetLineNumber( LineNumber index ) const override;
@@ -59,6 +61,7 @@ class StreamingLogData : public SearchableLogData {
     CaptureStore captureStore_;
     TextCodecHolder codec_;
     QRegularExpression prefilterPattern_;
+    AnsiProcessingMode ansiProcessingMode_ = AnsiProcessingMode::Plain;
     bool loadingFinishedQueued_ = false;
     QTimer outputFlushTimer_;
 };

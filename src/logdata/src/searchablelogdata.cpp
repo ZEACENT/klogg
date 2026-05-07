@@ -46,6 +46,7 @@ klogg::vector<QString> SearchableLogData::RawLines::decodeLines() const
             auto decodedLine = textDecoder.decoder->toUnicode(
                 buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) );
 
+            decodedLine = processAnsiSequences( std::move( decodedLine ), ansiProcessingMode ).text;
             if ( !prefilterPattern.pattern().isEmpty() ) {
                 decodedLine.remove( prefilterPattern );
             }
@@ -68,6 +69,41 @@ klogg::vector<QString> SearchableLogData::RawLines::decodeLines() const
     return decodedLines;
 }
 
+klogg::vector<klogg::vector<AnsiColorSpan>> SearchableLogData::RawLines::decodeLineAnsiColors() const
+{
+    klogg::vector<klogg::vector<AnsiColorSpan>> colors;
+    if ( this->endOfLines.empty() || ansiProcessingMode != AnsiProcessingMode::Render ) {
+        colors.resize( this->endOfLines.size() );
+        return colors;
+    }
+
+    colors.reserve( this->endOfLines.size() );
+
+    try {
+        qint64 lineStart = 0;
+        const auto lineFeedWidth = textDecoder.encodingParams.lineFeedWidth;
+        for ( const auto& lineEnd : this->endOfLines ) {
+            const auto length = lineEnd - lineStart - lineFeedWidth;
+
+            if ( length < 0 || lineStart + length > klogg::ssize( buffer ) ) {
+                break;
+            }
+
+            auto decodedLine = textDecoder.decoder->toUnicode(
+                buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) );
+            colors.push_back(
+                processAnsiSequences( std::move( decodedLine ), ansiProcessingMode ).colorSpans );
+
+            lineStart = lineEnd;
+        }
+    } catch ( const std::bad_alloc& ) {
+        LOG_ERROR << "not enough memory";
+    }
+
+    colors.resize( this->endOfLines.size() );
+    return colors;
+}
+
 klogg::vector<std::string_view> SearchableLogData::RawLines::buildUtf8View() const
 {
     klogg::vector<std::string_view> lines;
@@ -80,7 +116,8 @@ klogg::vector<std::string_view> SearchableLogData::RawLines::buildUtf8View() con
 
         std::string_view wholeString;
 
-        if ( prefilterPattern.pattern().isEmpty() && textDecoder.encodingParams.isUtf8Compatible ) {
+        if ( ansiProcessingMode == AnsiProcessingMode::Plain && prefilterPattern.pattern().isEmpty()
+             && textDecoder.encodingParams.isUtf8Compatible ) {
             wholeString = std::string_view( buffer.data(), buffer.size() );
         }
         else {
@@ -91,6 +128,10 @@ klogg::vector<std::string_view> SearchableLogData::RawLines::buildUtf8View() con
             }
             else {
                 utf16Data = textDecoder.decoder->toUnicode( buffer.data(), klogg::isize( buffer ) );
+            }
+
+            if ( ansiProcessingMode != AnsiProcessingMode::Plain ) {
+                utf16Data = processAnsiSequences( std::move( utf16Data ), ansiProcessingMode ).text;
             }
 
             if ( !prefilterPattern.pattern().isEmpty() ) {

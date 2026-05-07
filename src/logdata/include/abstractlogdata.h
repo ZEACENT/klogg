@@ -44,6 +44,7 @@
 #include <QStringList>
 #include <QTextCodec>
 
+#include "ansicolorprocessor.h"
 #include "linetypes.h"
 
 // Base class representing a set of data.
@@ -56,6 +57,8 @@ class AbstractLogData : public QObject {
     QString getLineString( LineNumber line ) const;
     // Returns the line passed as a QString, with tabs expanded
     QString getExpandedLineString( LineNumber line ) const;
+    // Returns ANSI color spans for the line after ANSI sequences are stripped.
+    klogg::vector<AnsiColorSpan> getLineAnsiColors( LineNumber line ) const;
     // Returns a set of lines as a QStringList
     klogg::vector<QString> getLines( LineNumber first_line, LinesCount number ) const;
     // Returns a set of lines with tabs expanded
@@ -96,6 +99,7 @@ class AbstractLogData : public QObject {
     virtual QString doGetLineString( LineNumber line ) const = 0;
     // Internal function called to get a given line
     virtual QString doGetExpandedLineString( LineNumber line ) const = 0;
+    virtual klogg::vector<AnsiColorSpan> doGetLineAnsiColors( LineNumber line ) const;
     // Internal function called to get a set of lines
     virtual klogg::vector<QString> doGetLines( LineNumber first_line, LinesCount number ) const = 0;
     // Internal function called to get a set of expanded lines

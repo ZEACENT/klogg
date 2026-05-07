@@ -780,6 +780,25 @@ QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
     return sourceLogData_->getExpandedLineString( line );
 }
 
+klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber index ) const
+{
+    if ( !sourceLogData_ ) {
+        return {};
+    }
+
+    if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
+        if ( !contextLinesListValid_ ) {
+            rebuildContextLinesList();
+        }
+        if ( index.get() < static_cast<LineNumber::UnderlyingType>( contextLinesList_.size() ) ) {
+            return sourceLogData_->getLineAnsiColors( contextLinesList_[ index.get() ] );
+        }
+        return {};
+    }
+
+    return sourceLogData_->getLineAnsiColors( findLogDataLine( index ) );
+}
+
 // Implementation of the virtual function.
 klogg::vector<QString> LogFilteredData::doGetLines( LineNumber first_line, LinesCount number ) const
 {

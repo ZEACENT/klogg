@@ -127,6 +127,12 @@ void LogData::setPrefilter( const QString& prefilterPattern )
     prefilterPattern_ = prefilterPattern;
 }
 
+void LogData::setAnsiProcessingMode( AnsiProcessingMode mode )
+{
+    IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+    ansiProcessingMode_ = mode;
+}
+
 void LogData::attachFile( const QString& fileName )
 {
     LOG_DEBUG << "LogData::attachFile " << fileName.toStdString();
@@ -364,6 +370,13 @@ QString LogData::doGetExpandedLineString( LineNumber line ) const
     return untabify( doGetLineString( line ) );
 }
 
+klogg::vector<AnsiColorSpan> LogData::doGetLineAnsiColors( LineNumber line ) const
+{
+    const auto rawLines = getLinesRaw( line, 1_lcount );
+    const auto colors = rawLines.decodeLineAnsiColors();
+    return colors.empty() ? klogg::vector<AnsiColorSpan>{} : colors.front();
+}
+
 // Note this function is also called from the LogFilteredDataWorker thread, so
 // data must be protected because they are changed in the main thread (by
 // indexingFinished).
@@ -407,6 +420,7 @@ LogData::RawLines LogData::getLinesRaw( LineNumber firstLine, LinesCount number 
                   ? QRegularExpression( prefilterPattern_,
                                         QRegularExpression::CaseInsensitiveOption )
                   : QRegularExpression{};
+        rawLines.ansiProcessingMode = ansiProcessingMode_;
 
         ScopedFileHolder<FileHolder> fileHolder( attached_file_.get() );
 

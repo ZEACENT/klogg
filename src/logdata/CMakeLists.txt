@@ -1,6 +1,7 @@
 add_library(
   klogg_logdata STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogdata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/ansicolorprocessor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/capturestore.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/concatenatedlogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
@@ -19,6 +20,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filedigest.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/readablesize.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogdata.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/ansicolorprocessor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/capturestore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/concatenatedlogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressedlinestorage.cpp

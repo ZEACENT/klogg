@@ -1,6 +1,7 @@
 # Add test cpp file
 add_executable(klogg_tests
     adb_ui_transport_test.cpp
+    ansicolorprocessor_test.cpp
     capturestore_test.cpp
     cli_test.cpp
     colorlabelsmanager_test.cpp

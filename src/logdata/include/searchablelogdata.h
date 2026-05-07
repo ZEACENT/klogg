@@ -10,6 +10,7 @@
 #include <QTextCodec>
 
 #include "abstractlogdata.h"
+#include "ansicolorprocessor.h"
 #include "encodingdetector.h"
 #include "loadingstatus.h"
 
@@ -31,9 +32,11 @@ class SearchableLogData : public AbstractLogData {
         TextDecoder textDecoder;
 
         QRegularExpression prefilterPattern;
+        AnsiProcessingMode ansiProcessingMode = AnsiProcessingMode::Plain;
 
       public:
         klogg::vector<QString> decodeLines() const;
+        klogg::vector<klogg::vector<AnsiColorSpan>> decodeLineAnsiColors() const;
         klogg::vector<std::string_view> buildUtf8View() const;
 
       private:
@@ -49,6 +52,7 @@ class SearchableLogData : public AbstractLogData {
     virtual void reload( QTextCodec* forcedEncoding = nullptr ) = 0;
     virtual QTextCodec* getDetectedEncoding() const = 0;
     virtual void setPrefilter( const QString& prefilterPattern ) = 0;
+    virtual void setAnsiProcessingMode( AnsiProcessingMode mode ) = 0;
     virtual RawLines getLinesRaw( LineNumber first, LinesCount number ) const = 0;
 
     virtual bool isLiveSource() const

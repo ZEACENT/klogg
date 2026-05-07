@@ -139,6 +139,17 @@ QString ConcatenatedLogData::doGetExpandedLineString( LineNumber line ) const
     return source ? source->getExpandedLineString( localLine ) : QString{};
 }
 
+klogg::vector<AnsiColorSpan> ConcatenatedLogData::doGetLineAnsiColors( LineNumber line ) const
+{
+    if ( sources_.empty() || line.get() >= totalLines_.get() ) {
+        return {};
+    }
+
+    const auto [ srcIdx, localLine ] = mapToSource( line );
+    const auto source = sourceAt( srcIdx );
+    return source ? source->getLineAnsiColors( localLine ) : klogg::vector<AnsiColorSpan>{};
+}
+
 klogg::vector<QString> ConcatenatedLogData::doGetLines( LineNumber first, LinesCount number ) const
 {
     klogg::vector<QString> result;

@@ -605,6 +605,14 @@ class Configuration final : public Persistable<Configuration> {
     {
         hideAnsiColorSequences_ = hide;
     }
+    bool renderAnsiColorSequences() const
+    {
+        return renderAnsiColorSequences_;
+    }
+    void setRenderAnsiColorSequences( bool render )
+    {
+        renderAnsiColorSequences_ = render;
+    }
 
     int defaultEncodingMib() const
     {
@@ -707,6 +715,7 @@ class Configuration final : public Persistable<Configuration> {
     bool optimizeForNotLatinEncodings_ = false;
 
     bool hideAnsiColorSequences_ = false;
+    bool renderAnsiColorSequences_ = false;
 
     int defaultEncodingMib_ = 106; // UTF-8
 

@@ -504,6 +504,19 @@
             </property>
            </widget>
           </item>
+          <item>
+           <widget class="QCheckBox" name="renderAnsiColorsCheckBox">
+            <property name="enabled">
+             <bool>true</bool>
+            </property>
+            <property name="text">
+             <string>Render ANSI Colors (search performance will be reduced)</string>
+            </property>
+            <property name="checked">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
          </layout>
         </widget>
        </item>

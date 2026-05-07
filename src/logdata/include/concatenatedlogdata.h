@@ -74,6 +74,7 @@ class ConcatenatedLogData : public AbstractLogData {
   protected:
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
+    klogg::vector<AnsiColorSpan> doGetLineAnsiColors( LineNumber line ) const override;
     klogg::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
     klogg::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
     LineNumber doGetLineNumber( LineNumber index ) const override;

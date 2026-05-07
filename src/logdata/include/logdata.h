@@ -104,6 +104,7 @@ class LogData : public SearchableLogData {
     QTextCodec* getDetectedEncoding() const override;
 
     void setPrefilter( const QString& prefilterPattern ) override;
+    void setAnsiProcessingMode( AnsiProcessingMode mode ) override;
 
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
 
@@ -119,6 +120,7 @@ class LogData : public SearchableLogData {
     // Implementation of virtual functions
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
+    klogg::vector<AnsiColorSpan> doGetLineAnsiColors( LineNumber line ) const override;
     klogg::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
     klogg::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
     LineNumber doGetLineNumber( LineNumber index ) const override;
@@ -156,6 +158,7 @@ class LogData : public SearchableLogData {
     MonitoredFileStatus fileChangedOnDisk_;
 
     QString prefilterPattern_;
+    AnsiProcessingMode ansiProcessingMode_ = AnsiProcessingMode::Plain;
 
     QMetaObject::Connection fileWatcherConnection_;
     QMetaObject::Connection workerIndexingProgressConnection_;

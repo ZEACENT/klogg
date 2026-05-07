@@ -2910,6 +2910,19 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             foreColor = palette.brush( QPalette::Disabled, QPalette::Text ).color();
         }
         else if ( !isOutsideSearchRange ) {
+            const auto ansiColorSpans = logData_->getLineAnsiColors( lineNumber );
+            for ( const auto& span : ansiColorSpans ) {
+                const auto toColor = []( quint32 rgb ) {
+                    return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
+                                   static_cast<int>( ( rgb >> 8 ) & 0xff ),
+                                   static_cast<int>( rgb & 0xff ) );
+                };
+                highlighterMatches.addMatch( HighlightedMatch{
+                    span.startColumn, span.length,
+                    span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
+                    span.background.has_value() ? toColor( *span.background ) : backColor } );
+            }
+
             const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
 
             // LineMatch whole-line coloring only applies when not selected

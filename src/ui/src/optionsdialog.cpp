@@ -97,6 +97,16 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 
     connect( extractArchivesCheckBox, &QCheckBox::toggled,
              [ this ]( auto ) { this->setupArchives(); } );
+    connect( hideAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
+        if ( checked ) {
+            renderAnsiColorsCheckBox->setChecked( false );
+        }
+    } );
+    connect( renderAnsiColorsCheckBox, &QCheckBox::toggled, this, [ this ]( bool checked ) {
+        if ( checked ) {
+            hideAnsiColorsCheckBox->setChecked( false );
+        }
+    } );
 
     connect( mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
     connect( quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
@@ -508,6 +518,8 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     }
 
     hideAnsiColorsCheckBox->setChecked( config.hideAnsiColorSequences() );
+    renderAnsiColorsCheckBox->setChecked( !config.hideAnsiColorSequences()
+                                          && config.renderAnsiColorSequences() );
 
     // Regexp types
     mainSearchBox->setCurrentIndex( getRegexpTypeIndex( config.mainRegexpType() ) );
@@ -714,6 +726,8 @@ void OptionsDialog::resetViewDefaults()
     enableQtHiDpiCheckBox->setChecked( defaults.enableQtHighDpi() );
     scaleRoundingComboBox->setCurrentIndex( defaults.scaleFactorRounding() - 1 );
     hideAnsiColorsCheckBox->setChecked( defaults.hideAnsiColorSequences() );
+    renderAnsiColorsCheckBox->setChecked( !defaults.hideAnsiColorSequences()
+                                          && defaults.renderAnsiColorSequences() );
 }
 
 void OptionsDialog::resetFileDefaults()
@@ -941,6 +955,8 @@ void OptionsDialog::updateConfigFromDialog()
     }
     
     config.setHideAnsiColorSequences( hideAnsiColorsCheckBox->isChecked() );
+    config.setRenderAnsiColorSequences( !hideAnsiColorsCheckBox->isChecked()
+                                        && renderAnsiColorsCheckBox->isChecked() );
 
     config.setDefaultEncodingMib( encodingComboBox->currentData().toInt() );
 

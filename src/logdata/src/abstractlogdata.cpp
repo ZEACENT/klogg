@@ -56,6 +56,16 @@ QString AbstractLogData::getExpandedLineString( LineNumber line ) const
     return doGetExpandedLineString( line );
 }
 
+klogg::vector<AnsiColorSpan> AbstractLogData::getLineAnsiColors( LineNumber line ) const
+{
+    return doGetLineAnsiColors( line );
+}
+
+klogg::vector<AnsiColorSpan> AbstractLogData::doGetLineAnsiColors( LineNumber ) const
+{
+    return {};
+}
+
 // Simple wrapper in order to use a clean Template Method
 klogg::vector<QString> AbstractLogData::getLines( LineNumber first_line, LinesCount number ) const
 {

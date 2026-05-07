@@ -23,6 +23,8 @@
 #include <QTemporaryDir>
 #include <QUuid>
 
+#include <string_view>
+
 #include "capturestore.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
@@ -122,6 +124,41 @@ TEST_CASE( "StreamingLogData getLinesRaw returns correct RawLines for search wor
     REQUIRE( decoded[ 1 ] == QStringLiteral( "second" ) );
     REQUIRE( decoded[ 2 ] == QStringLiteral( "third" ) );
     REQUIRE( decoded[ 3 ] == QStringLiteral( "fourth" ) );
+}
+
+TEST_CASE( "StreamingLogData strips ANSI before display and search views" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "plain \x1b[31mred\x1b[0m text\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine().get() == 1 );
+
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Plain );
+    REQUIRE( logData.getLineString( 0_lnum ) == QStringLiteral( "plain \x1b[31mred\x1b[0m text" ) );
+
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Strip );
+    REQUIRE( logData.getLineString( 0_lnum ) == QStringLiteral( "plain red text" ) );
+    const auto strippedRawLines = logData.getLinesRaw( 0_lnum, 1_lcount );
+    REQUIRE( strippedRawLines.decodeLines()[ 0 ] == QStringLiteral( "plain red text" ) );
+    REQUIRE( strippedRawLines.buildUtf8View()[ 0 ] == std::string_view{ "plain red text" } );
+
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Render );
+    REQUIRE( logData.getLineString( 0_lnum ) == QStringLiteral( "plain red text" ) );
+    const auto colors = logData.getLineAnsiColors( 0_lnum );
+    REQUIRE( colors.size() == 1 );
+    REQUIRE( colors[ 0 ].startColumn == 6_lcol );
+    REQUIRE( colors[ 0 ].length == 3_length );
+    REQUIRE( colors[ 0 ].foreground == 0xde382b );
+    REQUIRE( logData.getLinesRaw( 0_lnum, 1_lcount ).buildUtf8View()[ 0 ]
+             == std::string_view{ "plain red text" } );
 }
 
 TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )

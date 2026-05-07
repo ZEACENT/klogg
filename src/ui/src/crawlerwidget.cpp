@@ -83,8 +83,6 @@
 #include "savedsearches.h"
 #include "shortcuts.h"
 
-static constexpr char AnsiColorSequenceRegex[] = "\\x1B\\[([0-9]{1,4}((;|:)[0-9]{1,3})*)?[mK]";
-
 // Throttle intervals (ms) for coalescing search updates during live streaming.
 static constexpr int kSearchThrottleActiveMs = 250;
 static constexpr int kSearchThrottleInactiveMs = 1000;
@@ -811,12 +809,16 @@ void CrawlerWidget::applyConfiguration()
 
     font.setBold( config.useBoldFont() );
 
-    if ( config.hideAnsiColorSequences() ) {
-        logData_->setPrefilter( AnsiColorSequenceRegex );
+    if ( config.renderAnsiColorSequences() ) {
+        logData_->setAnsiProcessingMode( AnsiProcessingMode::Render );
+    }
+    else if ( config.hideAnsiColorSequences() ) {
+        logData_->setAnsiProcessingMode( AnsiProcessingMode::Strip );
     }
     else {
-        logData_->setPrefilter( {} );
+        logData_->setAnsiProcessingMode( AnsiProcessingMode::Plain );
     }
+    logData_->setPrefilter( {} );
 
     logMainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
 

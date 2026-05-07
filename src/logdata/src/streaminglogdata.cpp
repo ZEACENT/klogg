@@ -148,9 +148,16 @@ void StreamingLogData::setPrefilter( const QString& prefilterPattern )
     prefilterPattern_.setPattern( prefilterPattern );
 }
 
+void StreamingLogData::setAnsiProcessingMode( AnsiProcessingMode mode )
+{
+    ansiProcessingMode_ = mode;
+}
+
 SearchableLogData::RawLines StreamingLogData::getLinesRaw( LineNumber first, LinesCount number ) const
 {
-    return captureStore_.buildRawLines( first, number, codec_.codec(), prefilterPattern_ );
+    auto rawLines = captureStore_.buildRawLines( first, number, codec_.codec(), prefilterPattern_ );
+    rawLines.ansiProcessingMode = ansiProcessingMode_;
+    return rawLines;
 }
 
 bool StreamingLogData::isLiveSource() const
@@ -160,12 +167,21 @@ bool StreamingLogData::isLiveSource() const
 
 QString StreamingLogData::doGetLineString( LineNumber line ) const
 {
-    return captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ );
+    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
+                                 ansiProcessingMode_ )
+        .text;
 }
 
 QString StreamingLogData::doGetExpandedLineString( LineNumber line ) const
 {
     return doGetLineString( line );
+}
+
+klogg::vector<AnsiColorSpan> StreamingLogData::doGetLineAnsiColors( LineNumber line ) const
+{
+    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
+                                 ansiProcessingMode_ )
+        .colorSpans;
 }
 
 klogg::vector<QString> StreamingLogData::doGetLines( LineNumber first, LinesCount number ) const
