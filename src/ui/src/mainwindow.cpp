@@ -1266,7 +1266,7 @@ void MainWindow::clearLog()
                            : tr( "klogg - clear logcat buffer" ),
             isIosLogStream
                 ? tr( "Clear local iOS log stream capture for %1? The live stream will be "
-                      "restarted." )
+                      "restarted if the source was connected." )
                       .arg( displayName )
                 : tr( "Clear device log buffer for %1? Local cached log will also be removed." )
                       .arg( displayName ),
@@ -1278,8 +1278,10 @@ void MainWindow::clearLog()
                     this,
                     isIosLogStream ? tr( "klogg - clear iOS log stream" )
                                    : tr( "klogg - clear logcat buffer" ),
-                    adbSource->lastError().isEmpty() ? tr( "Failed to clear logcat buffer" )
-                                                     : adbSource->lastError() );
+                    adbSource->lastError().isEmpty()
+                        ? ( isIosLogStream ? tr( "Failed to clear iOS log stream" )
+                                           : tr( "Failed to clear logcat buffer" ) )
+                        : adbSource->lastError() );
             }
         }
         return;

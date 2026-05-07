@@ -31,7 +31,6 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     QString normalizedExecutable() const;
     QStringList streamArguments() const;
 
-  private:
     QString executable_;
     QString deviceUdid_;
     QString extraArgs_;

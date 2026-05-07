@@ -397,13 +397,19 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
     for ( const auto& file : session_files ) {
         LOG_DEBUG << "Create view for " << file.fileName;
         ViewInterface* view = nullptr;
-        if ( file.sourceType == QStringLiteral( "adb_logcat" )
-             || file.sourceType == QStringLiteral( "ios_log_stream" ) ) {
-            view = appSession_->openAdbAlways( AdbLogcatSessionData::fromJson( file.sourceSpec ),
-                                               view_factory, false, file.viewContext );
+        if ( AdbLogcatSessionData::isPersistedSourceType( file.sourceType ) ) {
+            const auto sessionData = AdbLogcatSessionData::fromJson( file.sourceSpec );
+            if ( sessionData.isValid() ) {
+                view = appSession_->openAdbAlways( sessionData, view_factory, false,
+                                                   file.viewContext );
+            }
         }
         else {
             view = appSession_->openAlways( file.fileName, view_factory, file.viewContext );
+        }
+
+        if ( !view ) {
+            continue;
         }
 
         const auto info = appSession_->openedDocumentInfo( view );

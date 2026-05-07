@@ -89,17 +89,6 @@ QStringList splitCommandArguments( const QString& arguments )
     return tokens;
 }
 
-bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
-{
-    if ( process.waitForFinished( timeoutMs ) ) {
-        return true;
-    }
-
-    process.kill();
-    process.waitForFinished( 1500 );
-    return false;
-}
-
 QString findExecutableAtKnownLocation( const QString& executable )
 {
 #ifdef Q_OS_MAC
@@ -139,6 +128,18 @@ QString normalizedIosSyslogExecutable( const QString& executable )
     }
 
     return QStringLiteral( "pymobiledevice3" );
+}
+
+#ifdef Q_OS_MAC
+bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
+{
+    if ( process.waitForFinished( timeoutMs ) ) {
+        return true;
+    }
+
+    process.kill();
+    process.waitForFinished( 1500 );
+    return false;
 }
 
 QString firstStringValue( const QJsonObject& object, std::initializer_list<const char*> keys )
@@ -243,10 +244,16 @@ bool runPymobiledeviceListCommand( const QString& executable, const QStringList&
     return true;
 }
 
-QStringList pymobiledeviceListArguments()
+QStringList pymobiledeviceSimpleListArguments()
 {
     return { QStringLiteral( "usbmux" ), QStringLiteral( "list" ), QStringLiteral( "--simple" ) };
 }
+
+QStringList pymobiledeviceLegacyListArguments()
+{
+    return { QStringLiteral( "usbmux" ), QStringLiteral( "list" ) };
+}
+#endif
 
 QStringList pymobiledeviceStreamingArguments( const QString& deviceUdid )
 {
@@ -279,6 +286,7 @@ QList<IosDeviceInfo> IosLogProcessTransport::listDevices( const QString& executa
                                                           QString* error )
 {
 #ifndef Q_OS_MAC
+    Q_UNUSED( executable );
     if ( error ) {
         *error = QObject::tr( "iOS log streaming is supported only on macOS." );
     }
@@ -286,9 +294,21 @@ QList<IosDeviceInfo> IosLogProcessTransport::listDevices( const QString& executa
 #else
     QList<IosDeviceInfo> devices;
     const auto pymobiledeviceExecutable = normalizedIosSyslogExecutable( executable );
-    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceListArguments(),
+    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceSimpleListArguments(),
                                         &devices, error ) ) {
-        return {};
+        QString legacyError;
+        if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable,
+                                            pymobiledeviceLegacyListArguments(), &devices,
+                                            &legacyError ) ) {
+            if ( error && !legacyError.isEmpty() ) {
+                *error = legacyError;
+            }
+            return {};
+        }
+
+        if ( error ) {
+            error->clear();
+        }
     }
 
     if ( devices.isEmpty() && error ) {
@@ -318,7 +338,12 @@ ProcessLiveSourceTransport::Command IosLogProcessTransport::streamingCommand() c
 
 ProcessLiveSourceTransport::Command IosLogProcessTransport::clearCommand() const
 {
-    return Command{ normalizedExecutable(), {} };
+#ifdef Q_OS_WIN
+    return Command{ QStringLiteral( "cmd" ),
+                    { QStringLiteral( "/c" ), QStringLiteral( "exit" ), QStringLiteral( "0" ) } };
+#else
+    return Command{ QStringLiteral( "true" ), {} };
+#endif
 }
 
 QString IosLogProcessTransport::normalizedExecutable() const

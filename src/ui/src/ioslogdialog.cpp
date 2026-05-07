@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QUuid>
 
@@ -69,7 +70,7 @@ IosLogDialog::IosLogDialog( QWidget* parent )
     connect( buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject );
 
     loadSettings();
-    refreshDevices();
+    QTimer::singleShot( 0, this, &IosLogDialog::refreshDevices );
 }
 
 AdbLogcatSessionData IosLogDialog::sessionData() const

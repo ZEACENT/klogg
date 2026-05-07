@@ -29,8 +29,11 @@ struct AdbLogcatSessionData {
     QString documentId() const;
     QString associatedPath() const;
     QString persistedSourceType() const;
+    bool isValid() const;
 
     QJsonObject toJson() const;
+    static QString persistedSourceType( LiveLogSourceType sourceType );
+    static bool isPersistedSourceType( const QString& sourceType );
     static AdbLogcatSessionData fromJson( const QString& json );
 };
 

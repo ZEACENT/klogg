@@ -10,21 +10,10 @@
 #include "streaminglogdata.h"
 
 namespace {
-QString sourceTypeToString( LiveLogSourceType sourceType )
-{
-    switch ( sourceType ) {
-    case LiveLogSourceType::IosLogStream:
-        return QStringLiteral( "ios_log_stream" );
-    case LiveLogSourceType::AdbLogcat:
-        return QStringLiteral( "adb_logcat" );
-    }
-
-    return QStringLiteral( "adb_logcat" );
-}
-
 LiveLogSourceType sourceTypeFromString( const QString& sourceType )
 {
-    if ( sourceType == QStringLiteral( "ios_log_stream" ) ) {
+    if ( sourceType == AdbLogcatSessionData::persistedSourceType(
+                           LiveLogSourceType::IosLogStream ) ) {
         return LiveLogSourceType::IosLogStream;
     }
 
@@ -66,13 +55,36 @@ QString AdbLogcatSessionData::associatedPath() const
 
 QString AdbLogcatSessionData::persistedSourceType() const
 {
-    return sourceTypeToString( sourceType );
+    return persistedSourceType( sourceType );
+}
+
+bool AdbLogcatSessionData::isValid() const
+{
+    return !captureId.isEmpty();
+}
+
+QString AdbLogcatSessionData::persistedSourceType( LiveLogSourceType sourceType )
+{
+    switch ( sourceType ) {
+    case LiveLogSourceType::IosLogStream:
+        return QStringLiteral( "ios_log_stream" );
+    case LiveLogSourceType::AdbLogcat:
+        return QStringLiteral( "adb_logcat" );
+    }
+
+    return QStringLiteral( "adb_logcat" );
+}
+
+bool AdbLogcatSessionData::isPersistedSourceType( const QString& sourceType )
+{
+    return sourceType == persistedSourceType( LiveLogSourceType::AdbLogcat )
+           || sourceType == persistedSourceType( LiveLogSourceType::IosLogStream );
 }
 
 QJsonObject AdbLogcatSessionData::toJson() const
 {
     return QJsonObject{
-        { QStringLiteral( "sourceType" ), sourceTypeToString( sourceType ) },
+        { QStringLiteral( "sourceType" ), persistedSourceType() },
         { QStringLiteral( "adbExecutable" ), adbExecutable },
         { QStringLiteral( "deviceSerial" ), deviceSerial },
         { QStringLiteral( "deviceDescription" ), deviceDescription },

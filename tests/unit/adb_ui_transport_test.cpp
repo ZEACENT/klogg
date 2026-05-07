@@ -32,6 +32,7 @@
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QUuid>
 
@@ -88,65 +89,38 @@ class ScopedOptionsDialogConfigurationGuard {
   public:
     ScopedOptionsDialogConfigurationGuard()
         : config_( Configuration::getSynced() )
-        , mainFont_( config_.mainFont() )
-        , lineSpacingPercent_( config_.lineSpacingPercent() )
-        , versionCheckingEnabled_( config_.versionCheckingEnabled() )
-        , pollIntervalMs_( config_.pollIntervalMs() )
-        , adbExecutable_( config_.adbExecutable() )
-        , adbExtraArgs_( config_.adbLogcatExtraArgs() )
-        , adbAnsiOutput_( config_.adbLogcatAnsiOutputEnabled() )
-        , iosLogExecutable_( config_.iosLogExecutable() )
-        , iosLogExtraArgs_( config_.iosLogExtraArgs() )
-        , iosLogAnsiOutput_( config_.iosLogAnsiOutputEnabled() )
-        , useSearchResultsCache_( config_.useSearchResultsCache() )
-        , shortcuts_( config_.shortcuts() )
         , savedSearches_( SavedSearches::getSynced() )
-        , searchHistorySize_( savedSearches_.historySize() )
         , recentFiles_( RecentFiles::getSynced() )
-        , recentFilesMaxItems_( recentFiles_.filesHistoryMaxItems() )
     {
+        REQUIRE( snapshotDir_.isValid() );
+        snapshotPath_ = snapshotDir_.filePath( QStringLiteral( "settings.ini" ) );
+
+        QSettings snapshot( snapshotPath_, QSettings::IniFormat );
+        config_.saveToStorage( snapshot );
+        savedSearches_.saveToStorage( snapshot );
+        recentFiles_.saveToStorage( snapshot );
+        snapshot.sync();
     }
 
     ~ScopedOptionsDialogConfigurationGuard()
     {
-        config_.setMainFont( mainFont_ );
-        config_.setLineSpacingPercent( lineSpacingPercent_ );
-        config_.setVersionCheckingEnabled( versionCheckingEnabled_ );
-        config_.setPollIntervalMs( pollIntervalMs_ );
-        config_.setAdbExecutable( adbExecutable_ );
-        config_.setAdbLogcatExtraArgs( adbExtraArgs_ );
-        config_.setAdbLogcatAnsiOutputEnabled( adbAnsiOutput_ );
-        config_.setIosLogExecutable( iosLogExecutable_ );
-        config_.setIosLogExtraArgs( iosLogExtraArgs_ );
-        config_.setIosLogAnsiOutputEnabled( iosLogAnsiOutput_ );
-        config_.setUseSearchResultsCache( useSearchResultsCache_ );
-        config_.setShortcuts( shortcuts_ );
+        QSettings snapshot( snapshotPath_, QSettings::IniFormat );
+        config_.retrieveFromStorage( snapshot );
         config_.save();
 
-        savedSearches_.setHistorySize( searchHistorySize_ );
+        savedSearches_.retrieveFromStorage( snapshot );
         savedSearches_.save();
-        recentFiles_.setFilesHistoryMaxItems( recentFilesMaxItems_ );
+
+        recentFiles_.retrieveFromStorage( snapshot );
         recentFiles_.save();
     }
 
   private:
     Configuration& config_;
-    QFont mainFont_;
-    int lineSpacingPercent_;
-    bool versionCheckingEnabled_;
-    int pollIntervalMs_;
-    QString adbExecutable_;
-    QString adbExtraArgs_;
-    bool adbAnsiOutput_;
-    QString iosLogExecutable_;
-    QString iosLogExtraArgs_;
-    bool iosLogAnsiOutput_;
-    bool useSearchResultsCache_;
-    std::map<std::string, QStringList> shortcuts_;
     SavedSearches& savedSearches_;
-    int searchHistorySize_;
     RecentFiles& recentFiles_;
-    int recentFilesMaxItems_;
+    QTemporaryDir snapshotDir_;
+    QString snapshotPath_;
 };
 
 class TestAdbProcessTransport : public AdbProcessTransport {
@@ -173,6 +147,11 @@ class TestIosLogProcessTransport : public IosLogProcessTransport {
     Command streamingCommandForTest() const
     {
         return streamingCommand();
+    }
+
+    Command clearCommandForTest() const
+    {
+        return clearCommand();
     }
 };
 
@@ -322,6 +301,51 @@ TEST_CASE( "IosLogProcessTransport controls pymobiledevice3 ANSI color output" )
              == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
                              QStringLiteral( "live" ), QStringLiteral( "--udid" ),
                              QStringLiteral( "00008030-001C195E36D8802E" ) } );
+}
+
+TEST_CASE( "IosLogProcessTransport clear command is an inert no-op" )
+{
+    TestIosLogProcessTransport transport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{} );
+
+    const auto clear = transport.clearCommandForTest();
+#ifdef Q_OS_WIN
+    REQUIRE( clear.program == QStringLiteral( "cmd" ) );
+    REQUIRE( clear.arguments == QStringList{ QStringLiteral( "/c" ), QStringLiteral( "exit" ),
+                                             QStringLiteral( "0" ) } );
+#else
+    REQUIRE( clear.program == QStringLiteral( "true" ) );
+    REQUIRE( clear.arguments.isEmpty() );
+#endif
+}
+
+TEST_CASE( "IosLogProcessTransport falls back to legacy pymobiledevice3 device listing" )
+{
+#ifdef Q_OS_MAC
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "pymobiledevice3" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\n"
+                  "case \"$*\" in\n"
+                  "  *--simple*) echo 'No such option: --simple' >&2; exit 2 ;;\n"
+                  "esac\n"
+                  "printf '[{\"Identifier\":\"00008030\",\"DeviceName\":\"Test iPhone\"}]\\n'\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    QString error;
+    const auto devices = IosLogProcessTransport::listDevices( scriptPath, &error );
+    REQUIRE( error.isEmpty() );
+    REQUIRE( devices.size() == 1 );
+    CHECK( devices.front().udid == QStringLiteral( "00008030" ) );
+    CHECK( devices.front().description == QStringLiteral( "Test iPhone" ) );
+#else
+    SUCCEED( "pymobiledevice3 device listing is macOS-only." );
+#endif
 }
 
 TEST_CASE( "IosLogProcessTransport reports unsupported device listing off macOS" )
