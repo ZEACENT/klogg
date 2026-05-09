@@ -3,8 +3,27 @@
 
 #include <QString>
 #include <QStringList>
+#include <QStandardPaths>
 
 namespace ui::internal {
+
+inline QString expandTildePath( const QString& path )
+{
+    if ( !path.startsWith( QLatin1Char( '~' ) ) ) {
+        return path;
+    }
+
+    const auto homeDir = QStandardPaths::writableLocation( QStandardPaths::HomeLocation );
+    if ( homeDir.isEmpty() ) {
+        return path;
+    }
+
+    if ( path.length() == 1 || path[ 1 ] == QLatin1Char( '/' ) ) {
+        return homeDir + path.mid( 1 );
+    }
+
+    return path;
+}
 
 inline bool canEscapeArgumentCharacter( const QChar nextChar, const QChar quoteChar )
 {

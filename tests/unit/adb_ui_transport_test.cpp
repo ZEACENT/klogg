@@ -41,6 +41,7 @@
 #include "adbprocesstransport.h"
 #include "adblogcatsource.h"
 #include "adblogcatdialog.h"
+#include "commandargumenttokenizer.h"
 #include "configuration.h"
 #include "ioslogprocesstransport.h"
 #include "livesourcetransport.h"
@@ -969,4 +970,48 @@ TEST_CASE( "ProcessLiveSourceTransport delivers every line of a slow streaming p
     QCoreApplication::processEvents();
     QTest::qWait( 1500 );
     QCoreApplication::processEvents();
+}
+
+TEST_CASE( "expandTildePath expands bare tilde to home directory" )
+{
+    const auto homeDir = QStandardPaths::writableLocation( QStandardPaths::HomeLocation );
+    REQUIRE( ui::internal::expandTildePath( QStringLiteral( "~" ) ) == homeDir );
+}
+
+TEST_CASE( "expandTildePath expands tilde-slash paths" )
+{
+    const auto homeDir = QStandardPaths::writableLocation( QStandardPaths::HomeLocation );
+    REQUIRE( ui::internal::expandTildePath( QStringLiteral( "~/bin/tool" ) )
+             == homeDir + QStringLiteral( "/bin/tool" ) );
+}
+
+TEST_CASE( "expandTildePath does not expand tilde-user syntax" )
+{
+    const auto input = QStringLiteral( "~otheruser/bin" );
+    REQUIRE( ui::internal::expandTildePath( input ) == input );
+}
+
+TEST_CASE( "expandTildePath leaves non-tilde paths unchanged" )
+{
+    REQUIRE( ui::internal::expandTildePath( QStringLiteral( "/opt/homebrew/bin/tool" ) )
+             == QStringLiteral( "/opt/homebrew/bin/tool" ) );
+    REQUIRE( ui::internal::expandTildePath( QString{} ) == QString{} );
+}
+
+TEST_CASE( "IosLogProcessTransport expands tilde in user-configured executable" )
+{
+    TestIosLogProcessTransport transport( QStringLiteral( "~/Library/Python/3.9/bin/pymobiledevice3" ),
+                                          QStringLiteral( "DEVICE_UDID" ), {} );
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE_FALSE( streaming.program.startsWith( QLatin1Char( '~' ) ) );
+    REQUIRE( streaming.program.contains( QStringLiteral( "Library/Python/3.9/bin/pymobiledevice3" ) ) );
+}
+
+TEST_CASE( "AdbProcessTransport expands tilde in user-configured executable" )
+{
+    TestAdbProcessTransport transport( QStringLiteral( "~/android/sdk/platform-tools/adb" ),
+                                       QStringLiteral( "emulator-5554" ), {} );
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE_FALSE( streaming.program.startsWith( QLatin1Char( '~' ) ) );
+    REQUIRE( streaming.program.contains( QStringLiteral( "android/sdk/platform-tools/adb" ) ) );
 }

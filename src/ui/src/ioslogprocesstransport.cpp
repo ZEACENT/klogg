@@ -15,15 +15,34 @@
 namespace {
 
 using ui::internal::splitCommandArguments;
+using ui::internal::expandTildePath;
 
-QString findExecutableAtKnownLocation( const QString& executable )
+QStringList knownExecutableCandidatePaths( const QString& executable )
 {
-#ifdef Q_OS_MAC
-    const QStringList candidates{
+    QStringList candidates{
         QDir::cleanPath( QStringLiteral( "/opt/homebrew/bin/" ) + executable ),
         QDir::cleanPath( QStringLiteral( "/usr/local/bin/" ) + executable ),
     };
 
+#ifdef Q_OS_MAC
+    const auto homeDir = QStandardPaths::writableLocation( QStandardPaths::HomeLocation );
+    if ( !homeDir.isEmpty() ) {
+        const auto pythonRoot = QDir( homeDir + QStringLiteral( "/Library/Python" ) );
+        const auto versionDirs = pythonRoot.entryList( QDir::Dirs | QDir::NoDotAndDotDot );
+        for ( const auto& version : versionDirs ) {
+            candidates.append(
+                QDir::cleanPath( pythonRoot.absoluteFilePath( version + QStringLiteral( "/bin/" ) + executable ) ) );
+        }
+    }
+#endif
+
+    return candidates;
+}
+
+QString findExecutableAtKnownLocation( const QString& executable )
+{
+#ifdef Q_OS_MAC
+    const auto candidates = knownExecutableCandidatePaths( executable );
     for ( const auto& candidate : candidates ) {
         const QFileInfo info( candidate );
         if ( info.exists() && info.isFile() && info.isExecutable() ) {
@@ -44,9 +63,9 @@ QString findExecutableAtKnownLocation( const QString& executable )
 
 QString normalizedIosSyslogExecutable( const QString& executable )
 {
-    const auto trimmed = executable.trimmed();
-    if ( !trimmed.isEmpty() ) {
-        return trimmed;
+    const auto expanded = expandTildePath( executable.trimmed() );
+    if ( !expanded.isEmpty() ) {
+        return expanded;
     }
 
     const auto detected = findExecutableAtKnownLocation( QStringLiteral( "pymobiledevice3" ) );

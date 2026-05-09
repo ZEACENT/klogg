@@ -8,6 +8,8 @@
 #include <QProcessEnvironment>
 
 namespace {
+
+using ui::internal::expandTildePath;
 // See AdbProcessTransport::detectAdbExecutable for rationale and probe order.
 QString findAdbAtKnownLocation()
 {
@@ -60,9 +62,9 @@ QString findAdbAtKnownLocation()
 
 QString normalizedExecutable( const QString& adbExecutable )
 {
-    const auto trimmed = adbExecutable.trimmed();
-    if ( !trimmed.isEmpty() ) {
-        return trimmed;
+    const auto expanded = expandTildePath( adbExecutable.trimmed() );
+    if ( !expanded.isEmpty() ) {
+        return expanded;
     }
 
     const auto resolved = findAdbAtKnownLocation();
