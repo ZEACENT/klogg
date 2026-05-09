@@ -73,6 +73,134 @@ PATTERNS: list[dict] = [
     },
 ]
 
+# Multi-line patterns: checked separately via whole-file analysis.
+# Each entry has a name, a description, and a check function that
+# receives the file text and path, returning a list of
+# (line_number, message) tuples.
+
+def _check_unguarded_platform_helper(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag namespace-scope function definitions that appear *before* an
+    #ifdef Q_OS_* but whose *only* call sites are inside that #ifdef.
+
+    This catches the pattern that broke Linux CI in PR #14: a helper
+    function defined outside any platform guard but only called inside
+    #ifdef Q_OS_MAC, which triggers -Werror=unused-function on other
+    platforms.
+
+    The check is heuristic-based (regex, not a real preprocessor) and
+    focuses on anonymous-namespace and static free functions.
+    """
+    if ALLOW_MARKER in text:
+        return []
+
+    findings: list[tuple[int, str]] = []
+
+    # Collect top-level function definitions (anonymous-namespace or static).
+    # Matches lines like:  QStringList functionName( ... )  or  static void foo()
+    func_def_re = re.compile(
+        r"^(?:static\s+)?[\w:<>]+\s+\*?\s*(\w+)\s*\([^)]*\)\s*$"
+    )
+    # Collect #ifdef Q_OS_* guards.
+    ifdef_re = re.compile(r"^\s*#\s*if(?:def|n?def)?\s+(Q_OS_\w+)")
+    endif_re = re.compile(r"^\s*#\s*endif")
+
+    lines = text.splitlines()
+    # Build a map: function_name -> definition_line_number
+    func_defs: dict[str, int] = {}
+    for i, line in enumerate(lines, start=1):
+        m = func_def_re.match(line)
+        if m:
+            func_defs[m.group(1)] = i
+
+    if not func_defs:
+        return findings
+
+    # For each function, check whether all call sites are inside the same
+    # #ifdef Q_OS_* block, and the definition is NOT.
+    for func_name, def_line in func_defs.items():
+        call_re = re.compile(rf"\b{re.escape(func_name)}\s*\(")
+        # Find all call-site lines.
+        call_lines = [
+            (i, line)
+            for i, line in enumerate(lines, start=1)
+            if i != def_line and call_re.search(line) and not line.strip().startswith("#")
+        ]
+        if not call_lines:
+            # Unused function — that's a different problem (-Wunused),
+            # not a platform-guard mismatch. Skip.
+            continue
+
+        # Determine the #ifdef context of the definition line.
+        def_guard = _guard_at_line(lines, def_line)
+        # Determine the #ifdef context of each call site.
+        call_guards = {_guard_at_line(lines, cl[0]) for cl in call_lines}
+
+        # If *all* call sites share a guard that the definition does NOT have,
+        # the definition is unguarded and will cause -Werror=unused-function
+        # on other platforms.  If any call site is outside any guard (None),
+        # the function IS used on all platforms and this is not a problem.
+        if None in call_guards:
+            continue
+        common_guards = call_guards - {None}
+        if common_guards and def_guard not in common_guards:
+            for guard in common_guards:
+                findings.append(
+                    (
+                        def_line,
+                        f"Function '{func_name}' is defined outside #ifdef {guard} "
+                        f"but all call sites are inside it. This will cause "
+                        f"-Werror=unused-function on other platforms. "
+                        f"Move the definition inside the same #ifdef {guard} guard.",
+                    )
+                )
+                break  # one report per function is enough
+
+    return findings
+
+
+_GUARD_RE = re.compile(r"^\s*#\s*if(?:def|n?def)?\s+(Q_OS_\w+)")
+_ELSE_RE = re.compile(r"^\s*#\s*else")
+_ENDIF_RE = re.compile(r"^\s*#\s*endif")
+
+
+def _guard_at_line(lines: list[str], target: int) -> str | None:
+    """Return the innermost active #ifdef Q_OS_* guard at the given
+    1-based line number, or None if the line is not inside any such guard.
+
+    Returns None for lines inside #else branches (they run on the
+    complementary platform set, so a function used there IS used on
+    other platforms).
+    """
+    # Each entry is (guard_name, in_else: bool)
+    guard_stack: list[tuple[str, bool]] = []
+    for i, line in enumerate(lines, start=1):
+        if i > target:
+            break
+        m = _GUARD_RE.match(line)
+        if m:
+            guard_stack.append((m.group(1), False))
+        elif _ELSE_RE.match(line):
+            if guard_stack:
+                name, _ = guard_stack[-1]
+                guard_stack[-1] = (name, True)
+        elif _ENDIF_RE.match(line):
+            if guard_stack:
+                guard_stack.pop()
+    if guard_stack:
+        name, in_else = guard_stack[-1]
+        # If we're in the #else branch, the code runs on all platforms
+        # EXCEPT the guarded one — treat as unguarded (None).
+        return None if in_else else name
+    return None
+
+
+MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "unguarded-platform-helper",
+        "check": _check_unguarded_platform_helper,
+    },
+]
+
 
 def iter_target_files(paths: Iterable[Path]) -> Iterable[Path]:
     for root in paths:
@@ -102,6 +230,8 @@ def lint_file(path: Path) -> int:
     except OSError:
         return 0
     issues = 0
+
+    # Single-line patterns.
     for line_num, raw in enumerate(text.splitlines(), start=1):
         if ALLOW_MARKER in raw:
             continue
@@ -113,6 +243,17 @@ def lint_file(path: Path) -> int:
                 print(f"  fix: {pat['fix']}")
                 print()
                 issues += 1
+
+    # Multi-line checks.
+    for check in MULTI_LINE_CHECKS:
+        findings = check["check"](text, path)
+        for line_num, message in findings:
+            print(f"[platform-fragile] {check['name']}")
+            print(f"  at {path}:{line_num}")
+            print(f"  {message}")
+            print()
+            issues += len(findings)
+
     return issues
 
 
