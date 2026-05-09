@@ -198,7 +198,7 @@ ProcessedAnsiLine processAnsiSequences( QString line, AnsiProcessingMode mode )
     processed.text.reserve( line.size() );
 
     AttrState state;
-    int colorSpanStart = 0;
+    qsizetype colorSpanStart = 0;
 
     for ( int i = 0; i < line.size(); ) {
         const auto ch = line[ i ];
@@ -220,7 +220,8 @@ ProcessedAnsiLine processAnsiSequences( QString line, AnsiProcessingMode mode )
         }
 
         if ( mode == AnsiProcessingMode::Render ) {
-            appendColorSpan( processed.colorSpans, state, colorSpanStart, processed.text.size() );
+            appendColorSpan( processed.colorSpans, state, static_cast<int>( colorSpanStart ),
+                             static_cast<int>( processed.text.size() ) );
 
             if ( line[ end ] == QLatin1Char( 'm' ) ) {
                 applySgr( QStringView{ line }.mid( i + 2, end - i - 2 ), state );
@@ -232,7 +233,8 @@ ProcessedAnsiLine processAnsiSequences( QString line, AnsiProcessingMode mode )
     }
 
     if ( mode == AnsiProcessingMode::Render ) {
-        appendColorSpan( processed.colorSpans, state, colorSpanStart, processed.text.size() );
+        appendColorSpan( processed.colorSpans, state, static_cast<int>( colorSpanStart ),
+                         static_cast<int>( processed.text.size() ) );
     }
 
     return processed;

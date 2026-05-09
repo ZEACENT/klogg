@@ -4,6 +4,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatsource.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/commandargumenttokenizer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersdialog.h
