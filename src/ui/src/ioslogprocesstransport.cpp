@@ -17,6 +17,7 @@ namespace {
 using ui::internal::splitCommandArguments;
 using ui::internal::expandTildePath;
 
+#ifdef Q_OS_MAC
 QStringList knownExecutableCandidatePaths( const QString& executable )
 {
     QStringList candidates{
@@ -24,7 +25,6 @@ QStringList knownExecutableCandidatePaths( const QString& executable )
         QDir::cleanPath( QStringLiteral( "/usr/local/bin/" ) + executable ),
     };
 
-#ifdef Q_OS_MAC
     const auto homeDir = QStandardPaths::writableLocation( QStandardPaths::HomeLocation );
     if ( !homeDir.isEmpty() ) {
         const auto pythonRoot = QDir( homeDir + QStringLiteral( "/Library/Python" ) );
@@ -34,10 +34,10 @@ QStringList knownExecutableCandidatePaths( const QString& executable )
                 QDir::cleanPath( pythonRoot.absoluteFilePath( version + QStringLiteral( "/bin/" ) + executable ) ) );
         }
     }
-#endif
 
     return candidates;
 }
+#endif
 
 QString findExecutableAtKnownLocation( const QString& executable )
 {
