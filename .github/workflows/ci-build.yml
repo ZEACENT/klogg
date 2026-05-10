@@ -141,6 +141,40 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - name: Prefetch linuxdeployqt artifact
+        shell: sh
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          LINUXDEPLOYQT="$PREFETCH_ROOT/linuxdeployqt-continuous-x86_64.AppImage"
+          LINUXDEPLOYQT_URL="https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage"
+
+          mkdir -p "$PREFETCH_ROOT"
+
+          attempt=1
+          max_attempts=3
+          while [ $attempt -le $max_attempts ]; do
+            rm -f "$LINUXDEPLOYQT"
+
+            if curl --fail --retry 3 --retry-delay 10 --progress-bar --location \
+              --output "$LINUXDEPLOYQT" "$LINUXDEPLOYQT_URL"; then
+              if file "$LINUXDEPLOYQT" | grep -q "ELF"; then
+                chmod +x "$LINUXDEPLOYQT"
+                exit 0
+              fi
+              echo "Downloaded file is not a valid ELF/AppImage binary, retrying..."
+              rm -f "$LINUXDEPLOYQT"
+            fi
+
+            if [ $attempt -eq $max_attempts ]; then
+              echo "::error::Failed to download linuxdeployqt after $max_attempts attempts"
+              exit 1
+            fi
+
+            echo "linuxdeployqt prefetch attempt $attempt failed, retrying after backoff..."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 10))
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: cpm-cache
@@ -158,6 +192,12 @@ jobs:
         with:
           name: openssl-archive
           path: prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linuxdeployqt
+          path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
           if-no-files-found: error
 
   Linux:
@@ -218,6 +258,11 @@ jobs:
         with:
           name: cpm-cache
           path: ${{ github.workspace }}/cpm_cache
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linuxdeployqt
+          path: ${{ github.workspace }}/tools
 
       #- uses: satackey/action-docker-layer-caching@v0.0.11
       #  # Ignore the failure of a step and avoid terminating the job.

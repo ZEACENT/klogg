@@ -94,9 +94,7 @@ Binaries for all platforms are available from [GitHub Releases](https://github.c
 
 ### Continuous builds
 
-| Windows | Linux | Mac |
-| ------------- |------------- | ------------- |
-| [continuous-win](https://github.com/ZEACENT/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/ZEACENT/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/ZEACENT/klogg/releases/tag/continuous-osx) |
+Automated pre-release builds for all platforms are available from the [continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous).
 
 ## Building
 
