@@ -19,10 +19,10 @@ RUN apt-get update -y && \
                     fuse file -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN wget https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh && \
-    chmod 755 cmake-3.20.2-linux-x86_64.sh && \
-    ./cmake-3.20.2-linux-x86_64.sh --prefix=/opt/ --exclude-subdir --skip-license && \
-    rm cmake-3.20.2-linux-x86_64.sh
+COPY cmake-3.20.2-linux-x86_64.sh /tmp/cmake-installer.sh
+RUN chmod 755 /tmp/cmake-installer.sh && \
+    /tmp/cmake-installer.sh --prefix=/opt/ --exclude-subdir --skip-license && \
+    rm /tmp/cmake-installer.sh
 
 ENV PATH=/opt/bin:$PATH
 ENV CC=/usr/bin/gcc-13

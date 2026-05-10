@@ -6,20 +6,13 @@ runs:
     - name: Install Ninja
       uses: seanmiddleditch/gha-setup-ninja@master
 
-    - name: Cache Qt
-      id: cache-qt
-      uses: actions/cache@v4
-      with:
-        path: ../Qt
-        key: ${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ matrix.config.qt_version }}-QtCache
-
     - name: Install Qt
       if: ${{ matrix.config.qt_arch }}
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@v4
       with:
         version: ${{ matrix.config.qt_version }}
         arch: ${{ matrix.config.qt_arch }}
-        cached: ${{ steps.cache-qt.outputs.cache-hit }}
+        cache: true
         modules: ${{ matrix.config.qt_modules }}
         archives: ${{ matrix.config.qt_archives || 'qtbase icu' }}
 
