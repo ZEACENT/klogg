@@ -331,7 +331,7 @@ TEST_CASE( "IosLogProcessTransport clear command is an inert no-op" )
 #endif
 }
 
-TEST_CASE( "IosLogProcessTransport falls back to legacy pymobiledevice3 device listing" )
+TEST_CASE( "IosLogProcessTransport lists devices using full JSON output" )
 {
 #ifdef Q_OS_MAC
     QTemporaryDir tempDir;
@@ -341,10 +341,8 @@ TEST_CASE( "IosLogProcessTransport falls back to legacy pymobiledevice3 device l
     QFile script( scriptPath );
     REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
     script.write( "#!/bin/sh\n"
-                  "case \"$*\" in\n"
-                  "  *--simple*) echo 'No such option: --simple' >&2; exit 2 ;;\n"
-                  "esac\n"
-                  "printf '[{\"Identifier\":\"00008030\",\"DeviceName\":\"Test iPhone\"}]\\n'\n" );
+                  "printf '[{\"Identifier\":\"00008030\",\"DeviceName\":\"Test iPhone\","
+                  "\"ProductType\":\"iPhone14,2\",\"ProductVersion\":\"17.0\"}]\\n'\n" );
     script.close();
     REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
 
@@ -354,6 +352,36 @@ TEST_CASE( "IosLogProcessTransport falls back to legacy pymobiledevice3 device l
     REQUIRE( devices.size() == 1 );
     CHECK( devices.front().udid == QStringLiteral( "00008030" ) );
     CHECK( devices.front().description == QStringLiteral( "Test iPhone" ) );
+    CHECK( devices.front().productType == QStringLiteral( "iPhone14,2" ) );
+    CHECK( devices.front().productVersion == QStringLiteral( "17.0" ) );
+#else
+    SUCCEED( "pymobiledevice3 device listing is macOS-only." );
+#endif
+}
+
+TEST_CASE( "IosLogProcessTransport falls back to --simple when full listing fails" )
+{
+#ifdef Q_OS_MAC
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "pymobiledevice3" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    // Legacy (full) listing fails; --simple returns UDID-only JSON
+    script.write( "#!/bin/sh\n"
+                  "case \"$*\" in\n"
+                  "  *--simple*) printf '[\"00008030\"]\\n' ;;\n"
+                  "  *) echo 'Full listing not supported' >&2; exit 2 ;;\n"
+                  "esac\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    QString error;
+    const auto devices = IosLogProcessTransport::listDevices( scriptPath, &error );
+    REQUIRE( error.isEmpty() );
+    REQUIRE( devices.size() == 1 );
+    CHECK( devices.front().udid == QStringLiteral( "00008030" ) );
 #else
     SUCCEED( "pymobiledevice3 device listing is macOS-only." );
 #endif

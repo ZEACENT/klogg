@@ -190,10 +190,21 @@ void SearchData::clear()
 LogFilteredDataWorker::LogFilteredDataWorker( const SearchableLogData& sourceLogData )
     : sourceLogData_( sourceLogData )
 {
+    dispatchThread_ = std::thread( [ this ] { dispatchLoop(); } );
 }
 
 LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
 {
+    // Shut down the dispatch thread first.
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        dispatchShutdown_ = true;
+    }
+    requestCv_.notify_one();
+    if ( dispatchThread_.joinable() ) {
+        dispatchThread_.join();
+    }
+
     // Signal any running task to stop, then wait for the thread to fully exit
     // before any other members are destroyed.  std::thread::join() guarantees
     // the OS thread has completely exited -- no race with internal Qt thread-pool
@@ -228,29 +239,12 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
 void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, LineNumber startLine,
                                     LineNumber endLine )
 {
-    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
-    // ScopedLock blocks until the previous task releases operationsMutex_, so by
-    // the time we get here the previous task function has returned.  join() then
-    // waits for the OS thread to fully exit before we start a new one.
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequested_.clear();
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
-
-    LOG_INFO << "Search requested";
+    LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
     compiledExpression_ = std::make_shared<RegularExpression>( regExp );
-    QSemaphore operationStarted;
-    auto compiled = compiledExpression_;
-    opThread_ = std::thread( [ this, &operationStarted, regExp, startLine, endLine, generation,
-                               compiled ] {
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<FullSearchOperation>(
-            sourceLogData_, interruptRequested_, regExp, startLine, endLine, compiled );
-        connectSignalsAndRun( operationRequested.get(), generation );
-    } );
-    operationStarted.acquire();
+
+    enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
+                                   generation, compiledExpression_ } );
 }
 
 void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp,
@@ -258,32 +252,90 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
                                           LineNumber position )
 {
     // Signal any running search to stop at the next chunk boundary so that
-    // operationsMutex_ is released quickly.  Without this, the main thread
-    // blocks here until the entire previous search finishes -- the root cause
-    // of UI freezes during live-source streaming (ADB logcat, etc.).
+    // operationsMutex_ is released quickly.
     interruptRequested_.set();
 
-    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
-    interruptRequested_.clear();
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
+    LOG_INFO << "Search update requested from " << position.get()
+             << " (async dispatch, gen " << generation << ")";
 
-    LOG_INFO << "Search update requested from " << position.get();
+    enqueueRequest( SearchRequest{ SearchRequest::Type::Update, regExp, startLine, endLine, position,
+                                   generation, compiledExpression_ } );
+}
 
-    QSemaphore operationStarted;
-    auto compiled = compiledExpression_; // reuse compiled expression from previous search/update
-    opThread_ = std::thread( [ this, &operationStarted, regExp, startLine, endLine, position,
-                               generation, compiled ] {
-        operationStarted.release();
-        ScopedLock operationLock( operationsMutex_ );
-        auto operationRequested = std::make_unique<UpdateSearchOperation>(
-            sourceLogData_, interruptRequested_, regExp, startLine, endLine, position, compiled );
-        connectSignalsAndRun( operationRequested.get(), generation );
-    } );
+void LogFilteredDataWorker::enqueueRequest( SearchRequest request )
+{
+    interruptRequested_.set();
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        pendingRequest_.emplace( std::move( request ) );
+    }
+    requestCv_.notify_one();
+}
 
-    operationStarted.acquire();
+void LogFilteredDataWorker::dispatchLoop()
+{
+    while ( true ) {
+        SearchRequest request;
+        {
+            std::unique_lock<std::mutex> lock( requestMutex_ );
+            requestCv_.wait( lock, [ this ] { return pendingRequest_.has_value() || dispatchShutdown_; } );
+            if ( dispatchShutdown_ && !pendingRequest_.has_value() ) {
+                return;
+            }
+            if ( !pendingRequest_.has_value() ) {
+                continue;
+            }
+            request = std::move( *pendingRequest_ );
+            pendingRequest_.reset();
+        }
+
+        // Acquire the operations mutex — this may block if a previous
+        // search is still running, but that's OK because we're on the
+        // dispatch thread, not the UI thread.
+        ScopedLock locker( operationsMutex_ );
+
+        // Check if this request has been superseded by a newer one.
+        if ( request.generation != operationGeneration_.load() ) {
+            continue;
+        }
+
+        if ( opThread_.joinable() ) {
+            opThread_.join();
+        }
+        interruptRequested_.clear();
+
+        QSemaphore operationStarted;
+        if ( request.type == SearchRequest::Type::Full ) {
+            opThread_ = std::thread(
+                [ this, &operationStarted, request ] {
+                    operationStarted.release();
+                    ScopedLock operationLock( operationsMutex_ );
+                    if ( request.generation != operationGeneration_.load() ) {
+                        return;
+                    }
+                    auto operationRequested = std::make_unique<FullSearchOperation>(
+                        sourceLogData_, interruptRequested_, request.regExp, request.startLine,
+                        request.endLine, request.compiled );
+                    connectSignalsAndRun( operationRequested.get(), request.generation );
+                } );
+        }
+        else {
+            opThread_ = std::thread(
+                [ this, &operationStarted, request ] {
+                    operationStarted.release();
+                    ScopedLock operationLock( operationsMutex_ );
+                    if ( request.generation != operationGeneration_.load() ) {
+                        return;
+                    }
+                    auto operationRequested = std::make_unique<UpdateSearchOperation>(
+                        sourceLogData_, interruptRequested_, request.regExp, request.startLine,
+                        request.endLine, request.position, request.compiled );
+                    connectSignalsAndRun( operationRequested.get(), request.generation );
+                } );
+        }
+        operationStarted.acquire();
+    }
 }
 
 void LogFilteredDataWorker::interrupt()

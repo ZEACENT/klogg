@@ -906,7 +906,14 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
             }
         }
         else {
-            logFilteredData_->updateSearch( searchStartLine_, searchEndLine_ );
+            // For static files, also defer through the throttle timer to
+            // prevent the main thread from blocking on operationsMutex_ while
+            // a previous search is still running.
+            pendingSearchEndLine_ = searchEndLine_;
+            searchUpdatePending_ = true;
+            if ( !searchUpdateThrottleTimer_.isActive() ) {
+                searchUpdateThrottleTimer_.start( kSearchThrottleActiveMs );
+            }
         }
     }
 

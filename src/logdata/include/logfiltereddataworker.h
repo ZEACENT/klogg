@@ -42,7 +42,10 @@
 #include <QObject>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <thread>
 
 #ifndef Q_MOC_RUN
@@ -206,10 +209,13 @@ public:
     LogFilteredDataWorker( LogFilteredDataWorker&& ) = delete;
     LogFilteredDataWorker& operator=( LogFilteredDataWorker&& ) = delete;
 
-    // Start the search with the passed regexp
+    // Start the search with the passed regexp (non-blocking).
+    // The actual search is started on an internal dispatch thread,
+    // so the caller (typically the main/UI thread) is never blocked
+    // waiting for a previous search to release the operations mutex.
     void search( const RegularExpressionPattern& regExp, LineNumber startLine, LineNumber endLine );
     // Continue the previous search starting at the passed position
-    // in the source file (line number)
+    // in the source file (line number).  Also non-blocking.
     void updateSearch( const RegularExpressionPattern& regExp, LineNumber startLine,
                        LineNumber endLine, LineNumber position );
 
@@ -264,6 +270,30 @@ private:
                                             LineNumber initialLine,
                                             OperationGeneration generation );
     void emitSearchFinishedOnOwnerThread( OperationGeneration generation );
+
+    // Async dispatch ----------------------------------------------------------
+    // search() / updateSearch() enqueue a SearchRequest and return immediately.
+    // A dedicated dispatch thread waits for the operations mutex, joins the
+    // previous search thread, and starts the new one — so the caller (UI
+    // thread) never blocks on the mutex.
+    struct SearchRequest {
+        enum class Type { Full, Update } type;
+        RegularExpressionPattern regExp;
+        LineNumber startLine;
+        LineNumber endLine;
+        LineNumber position; // only for Update
+        OperationGeneration generation;
+        std::shared_ptr<RegularExpression> compiled;
+    };
+
+    void dispatchLoop();
+    void enqueueRequest( SearchRequest request );
+
+    std::thread dispatchThread_;
+    std::mutex requestMutex_;
+    std::condition_variable requestCv_;
+    std::optional<SearchRequest> pendingRequest_;
+    bool dispatchShutdown_ = false;
 
 private:
     // sourceLogData_, interruptRequested_, operationsMutex_, and searchData_ must all

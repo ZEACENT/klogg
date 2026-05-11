@@ -1,12 +1,9 @@
 #include "ioslogprocesstransport.h"
 #include "commandargumenttokenizer.h"
+#include "iosdeviceparser.h"
 
 #include <QDir>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
 #include <QProcess>
 #include <QStandardPaths>
 
@@ -86,76 +83,6 @@ bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
     process.kill();
     process.waitForFinished( 1500 );
     return false;
-}
-
-QString firstStringValue( const QJsonObject& object, std::initializer_list<const char*> keys )
-{
-    for ( const auto* key : keys ) {
-        const auto value = object.value( QLatin1String( key ) );
-        if ( value.isString() ) {
-            const auto text = value.toString().trimmed();
-            if ( !text.isEmpty() ) {
-                return text;
-            }
-        }
-    }
-
-    return {};
-}
-
-QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
-{
-    const auto document = QJsonDocument::fromJson( output );
-    if ( !document.isArray() ) {
-        return {};
-    }
-
-    QList<IosDeviceInfo> devices;
-    for ( const auto& value : document.array() ) {
-        QString udid;
-        QString name;
-
-        if ( value.isString() ) {
-            udid = value.toString().trimmed();
-        }
-        else if ( value.isObject() ) {
-            const auto object = value.toObject();
-            udid = firstStringValue( object, { "Identifier", "UDID", "UniqueDeviceID",
-                                               "SerialNumber", "serial", "udid" } );
-            name = firstStringValue( object, { "DeviceName", "Name", "ProductName", "name" } );
-        }
-
-        if ( udid.isEmpty() ) {
-            continue;
-        }
-
-        const auto displayName = name.isEmpty() ? udid : QStringLiteral( "%1 (%2)" ).arg( name, udid );
-        devices.push_back( IosDeviceInfo{ udid, displayName, name.isEmpty() ? udid : name } );
-    }
-
-    return devices;
-}
-
-QList<IosDeviceInfo> parsePymobiledeviceSimpleDeviceList( const QByteArray& output )
-{
-    const auto parsed = parsePymobiledeviceDeviceList( output );
-    if ( !parsed.isEmpty() ) {
-        return parsed;
-    }
-
-    QList<IosDeviceInfo> devices;
-    const auto lines = QString::fromUtf8( output ).split( '\n' );
-    for ( auto line : lines ) {
-        const auto udid = line.trimmed();
-        if ( udid.isEmpty() || udid.startsWith( QLatin1Char( '[' ) )
-             || udid.startsWith( QLatin1Char( ']' ) ) ) {
-            continue;
-        }
-
-        devices.push_back( IosDeviceInfo{ udid, udid, udid } );
-    }
-
-    return devices;
 }
 
 bool runPymobiledeviceListCommand( const QString& executable, const QStringList& arguments,
@@ -240,14 +167,17 @@ QList<IosDeviceInfo> IosLogProcessTransport::listDevices( const QString& executa
 #else
     QList<IosDeviceInfo> devices;
     const auto pymobiledeviceExecutable = normalizedIosSyslogExecutable( executable );
-    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceSimpleListArguments(),
+    // Try the full JSON output first — it includes DeviceName, ProductType,
+    // ProductVersion, etc.  Fall back to --simple (UDID-only) only if the
+    // full listing is not supported by the installed pymobiledevice3 version.
+    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceLegacyListArguments(),
                                         &devices, error ) ) {
-        QString legacyError;
+        QString simpleError;
         if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable,
-                                            pymobiledeviceLegacyListArguments(), &devices,
-                                            &legacyError ) ) {
-            if ( error && !legacyError.isEmpty() ) {
-                *error = legacyError;
+                                            pymobiledeviceSimpleListArguments(), &devices,
+                                            &simpleError ) ) {
+            if ( error && !simpleError.isEmpty() ) {
+                *error = simpleError;
             }
             return {};
         }

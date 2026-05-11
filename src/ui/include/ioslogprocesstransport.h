@@ -3,13 +3,8 @@
 
 #include <QList>
 
+#include "iosdeviceparser.h"
 #include "livesourcetransport.h"
-
-struct IosDeviceInfo {
-    QString udid;
-    QString displayName;
-    QString description;
-};
 
 class IosLogProcessTransport : public ProcessLiveSourceTransport {
     Q_OBJECT
