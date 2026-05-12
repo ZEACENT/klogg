@@ -71,7 +71,7 @@ TEST_CASE( "parsePymobiledeviceDeviceList excludes BuildVersion ConnectionType D
         "\"ProductVersion\":\"17.0\","
         "\"BuildVersion\":\"21A329\","
         "\"ConnectionType\":\"USB\","
-        "\"DeviceClass\":\"iPhone\""
+        "\"DeviceClass\":\"Smartphone\""
         "}]";
 
     const auto devices = parsePymobiledeviceDeviceList( json );
@@ -80,7 +80,22 @@ TEST_CASE( "parsePymobiledeviceDeviceList excludes BuildVersion ConnectionType D
     const auto& name = devices[ 0 ].displayName;
     CHECK_FALSE( name.contains( QStringLiteral( "21A329" ) ) );
     CHECK_FALSE( name.contains( QStringLiteral( "USB" ) ) );
-    CHECK_FALSE( name.contains( QStringLiteral( "DeviceClass" ) ) );
+    CHECK_FALSE( name.contains( QStringLiteral( "Smartphone" ) ) );
+}
+
+TEST_CASE( "parsePymobiledeviceDeviceList does not promote DeviceClass into displayName" )
+{
+    const QByteArray json = "[{"
+        "\"Identifier\":\"00008030\","
+        "\"DeviceName\":\"My Tablet\","
+        "\"DeviceClass\":\"AppleTV\","
+        "\"ProductVersion\":\"17.0\""
+        "}]";
+
+    const auto devices = parsePymobiledeviceDeviceList( json );
+    REQUIRE( devices.size() == 1 );
+    CHECK_FALSE( devices[ 0 ].displayName.contains( QStringLiteral( "AppleTV" ) ) );
+    CHECK( devices[ 0 ].productType.isEmpty() );
 }
 
 TEST_CASE( "parsePymobiledeviceDeviceList strips ANSI sequences from JSON values" )
@@ -176,10 +191,9 @@ TEST_CASE( "parsePymobiledeviceDeviceList parses real pymobiledevice3 output" )
     CHECK( device.displayName.contains( QStringLiteral( "iPhone18,3" ) ) );
     CHECK( device.displayName.contains( QStringLiteral( "26.4.2" ) ) );
 
-    // Should NOT contain BuildVersion, ConnectionType, DeviceClass
+    // Should NOT contain BuildVersion or ConnectionType values
     CHECK_FALSE( device.displayName.contains( QStringLiteral( "23E261" ) ) );
     CHECK_FALSE( device.displayName.contains( QStringLiteral( "USB" ) ) );
-    CHECK_FALSE( device.displayName.contains( QStringLiteral( "DeviceClass" ) ) );
 }
 
 TEST_CASE( "parsePymobiledeviceDeviceList parses --simple output as UDID-only" )

@@ -111,7 +111,7 @@ QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
             name = stripAnsiSequences(
                 firstStringValue( object, { "DeviceName", "Name", "ProductName", "name" } ) );
             productType = stripAnsiSequences(
-                firstStringValue( object, { "ProductType", "DeviceClass" } ) );
+                firstStringValue( object, { "ProductType" } ) );
             productVersion = stripAnsiSequences(
                 firstStringValue( object, { "ProductVersion" } ) );
         }
