@@ -33,6 +33,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     QString extraArgs_;
     bool ansiOutputEnabled_;
     bool ptyPrefixStripped_ = false;
+    QByteArray pendingPrefixProbe_;
 };
 
 #endif

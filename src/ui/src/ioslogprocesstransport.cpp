@@ -210,6 +210,7 @@ bool IosLogProcessTransport::clearRemote( QString* error )
 bool IosLogProcessTransport::connectTransport()
 {
     ptyPrefixStripped_ = false;
+    pendingPrefixProbe_.clear();
     return ProcessLiveSourceTransport::connectTransport();
 }
 
@@ -269,10 +270,30 @@ void IosLogProcessTransport::filterReceivedBytes( QByteArray& data )
     // macOS script(1) emits a visual ^D\b\b prefix at the start of its output:
     //   0x5e ('^') 0x44 ('D') 0x08 (BS) 0x08 (BS)
     // Strip this garbage so it doesn't appear as a spurious first line.
+    // The prefix may arrive split across chunks, so buffer until we can
+    // decide definitively.
     static const QByteArray scriptPtyPrefix = QByteArrayLiteral( "^D" ) + QByteArray( 2, '\b' );
+
+    if ( !pendingPrefixProbe_.isEmpty() ) {
+        pendingPrefixProbe_.append( data );
+        data = pendingPrefixProbe_;
+        pendingPrefixProbe_.clear();
+    }
+
     if ( data.startsWith( scriptPtyPrefix ) ) {
         data.remove( 0, scriptPtyPrefix.size() );
+        ptyPrefixStripped_ = true;
+        return;
     }
+
+    // data might be a partial prefix (e.g. just "^D" without the two BS yet).
+    if ( scriptPtyPrefix.startsWith( data ) ) {
+        pendingPrefixProbe_ = data;
+        data.clear();
+        return;
+    }
+
+    // Not a prefix match at all — first chunk is real log data; done probing.
     ptyPrefixStripped_ = true;
 #else
     Q_UNUSED( data );
