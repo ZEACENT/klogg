@@ -280,7 +280,8 @@ void LogFilteredDataWorker::dispatchLoop()
         {
             std::unique_lock<std::mutex> lock( requestMutex_ );
             requestCv_.wait( lock, [ this ] { return pendingRequest_.has_value() || dispatchShutdown_; } );
-            if ( dispatchShutdown_ && !pendingRequest_.has_value() ) {
+            if ( dispatchShutdown_ ) {
+                pendingRequest_.reset();
                 return;
             }
             if ( !pendingRequest_.has_value() ) {
@@ -290,12 +291,10 @@ void LogFilteredDataWorker::dispatchLoop()
             pendingRequest_.reset();
         }
 
-        // Acquire the operations mutex — this may block if a previous
-        // search is still running, but that's OK because we're on the
-        // dispatch thread, not the UI thread.
-        ScopedLock locker( operationsMutex_ );
-
-        // Check if this request has been superseded by a newer one.
+        // Check if this request has been superseded by a newer one before
+        // doing any work. Serialization with the previous operation is
+        // provided by joining opThread_ below; the worker itself acquires
+        // operationsMutex_ for the duration of its run.
         if ( request.generation != operationGeneration_.load() ) {
             continue;
         }
@@ -353,6 +352,18 @@ void LogFilteredDataWorker::interrupt()
 
 void LogFilteredDataWorker::waitForDone()
 {
+    // Cancel any queued request and shut down the dispatch thread so that
+    // no new opThread_ can be spawned after this point.
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        dispatchShutdown_ = true;
+        pendingRequest_.reset();
+    }
+    requestCv_.notify_one();
+    if ( dispatchThread_.joinable() ) {
+        dispatchThread_.join();
+    }
+
     if ( opThread_.joinable() ) {
         opThread_.join();
     }
