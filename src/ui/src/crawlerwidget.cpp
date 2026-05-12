@@ -932,7 +932,6 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
         changeDataStatus( DataStatus::NEW_DATA );
     }
     else {
-        firstLoadDone_ = true;
         for ( const auto& m : savedMarkedLines_ ) {
             logFilteredData_->addMark( m );
         }
@@ -941,6 +940,11 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 
     loadingInProgress_ = false;
     Q_EMIT loadingFinished( status );
+
+    // Set firstLoadDone_ AFTER emitting loadingFinished so that
+    // MainWindow::handleLoadingFinished can distinguish the initial load
+    // from incremental updates via isFirstLoadDone().
+    firstLoadDone_ = true;
 }
 
 void CrawlerWidget::fireThrottledSearchUpdate()
@@ -963,6 +967,10 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
         logFilteredData_->clearMarks();
         searchUpdateThrottleTimer_.stop();
         searchUpdatePending_ = false;
+        if ( searchPendingLines_ != 0 ) {
+            searchPendingLines_ = 0;
+            Q_EMIT searchPendingLinesChanged();
+        }
         if ( !searchInfoLine_->text().isEmpty() ) {
             // Invalidate the search
             constexpr auto DropCache = true;
