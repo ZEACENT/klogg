@@ -380,6 +380,12 @@ TEST_CASE( "IosLogProcessTransport strips script PTY header from received data" 
 TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-emulating process" )
 {
 #ifdef Q_OS_MAC
+    // Skip on headless/offscreen CI where /usr/bin/script may not behave.
+    if ( isHeadlessDialogTestEnvironment() ) {
+        WARN( "PTY integration test skipped on headless/offscreen platforms" );
+        return;
+    }
+
     // Create a mock pymobiledevice3 that only emits ANSI codes when stdout is a TTY.
     QTemporaryDir tempDir;
     REQUIRE( tempDir.isValid() );
@@ -393,7 +399,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
                   "else\n"
                   "  echo 'NO_ANSI 12:00:00 App Hello'\n"
                   "fi\n"
-                  "sleep 60\n" );
+                  "sleep 5\n" );
     script.close();
     REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
 
@@ -428,7 +434,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
 
         colorTransport.disconnectTransport();
         QCoreApplication::processEvents();
-        QTest::qWait( 200 );
+        QTest::qWait( 500 );
         QCoreApplication::processEvents();
     }
 
@@ -462,7 +468,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
 
         plainTransport.disconnectTransport();
         QCoreApplication::processEvents();
-        QTest::qWait( 200 );
+        QTest::qWait( 500 );
         QCoreApplication::processEvents();
     }
 #else
