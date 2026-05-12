@@ -280,6 +280,10 @@ void CrawlerWidget::reload()
 {
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
+    if ( searchPendingLines_ != 0 ) {
+        searchPendingLines_ = 0;
+        Q_EMIT searchPendingLinesChanged();
+    }
     searchState_.resetState();
     constexpr auto DropCache = true;
     logFilteredData_->clearSearch( DropCache );
@@ -448,6 +452,10 @@ void CrawlerWidget::stopSearch()
 {
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
+    if ( searchPendingLines_ != 0 ) {
+        searchPendingLines_ = 0;
+        Q_EMIT searchPendingLinesChanged();
+    }
     logFilteredData_->interruptSearch();
     searchState_.stopSearch();
     printSearchInfoMessage();

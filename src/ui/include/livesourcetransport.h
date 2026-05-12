@@ -52,6 +52,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
   protected:
     virtual Command streamingCommand() const = 0;
     virtual Command clearCommand() const = 0;
+    virtual void filterReceivedBytes( QByteArray& data );
     bool runBlockingCommand( const Command& command, QByteArray* stdErr ) const;
 
   private:

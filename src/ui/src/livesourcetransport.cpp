@@ -33,9 +33,12 @@ void ProcessLiveSourceTransport::createProcess()
     process_->setProcessChannelMode( QProcess::SeparateChannels );
 
     connect( process_.get(), &QProcess::readyReadStandardOutput, this, [ this ] {
-        const auto data = process_->readAllStandardOutput();
+        auto data = process_->readAllStandardOutput();
         if ( !data.isEmpty() ) {
-            Q_EMIT bytesReceived( data );
+            filterReceivedBytes( data );
+            if ( !data.isEmpty() ) {
+                Q_EMIT bytesReceived( data );
+            }
         }
     } );
 
@@ -245,4 +248,9 @@ void ProcessLiveSourceTransport::setState( State state )
 
     state_ = state;
     Q_EMIT stateChanged( state_ );
+}
+
+void ProcessLiveSourceTransport::filterReceivedBytes( QByteArray& data )
+{
+    Q_UNUSED( data );
 }

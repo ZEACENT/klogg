@@ -164,6 +164,11 @@ class TestIosLogProcessTransport : public IosLogProcessTransport {
     {
         return clearCommand();
     }
+
+    void filterReceivedBytesForTest( QByteArray& data )
+    {
+        filterReceivedBytes( data );
+    }
 };
 
 QString makeCaptureId()
@@ -295,8 +300,13 @@ TEST_CASE( "IosLogProcessTransport preserves empty quoted extra args" )
                              QString{} } );
 }
 
-TEST_CASE( "IosLogProcessTransport controls pymobiledevice3 ANSI color output" )
+TEST_CASE( "IosLogProcessTransport wraps with PTY when ANSI output is enabled" )
 {
+    // pymobiledevice3 checks isatty() in addition to the --color flag; when
+    // QProcess pipes stdout, isatty() is false so ANSI codes are never emitted.
+    // The fix: when ansiOutputEnabled is true, wrap the command with
+    // /usr/bin/script -q /dev/null so that pymobiledevice3 sees a TTY and
+    // actually produces ANSI escape codes.
     TestIosLogProcessTransport colorTransport(
         QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
         QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, true );
@@ -304,14 +314,160 @@ TEST_CASE( "IosLogProcessTransport controls pymobiledevice3 ANSI color output" )
         QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
         QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, false );
 
-    REQUIRE( colorTransport.streamingCommandForTest().arguments
+    const auto colorCmd = colorTransport.streamingCommandForTest();
+#ifdef Q_OS_MAC
+    // On macOS, the command is wrapped with script to allocate a PTY.
+    REQUIRE( colorCmd.program == QStringLiteral( "/usr/bin/script" ) );
+    REQUIRE( colorCmd.arguments
+             == QStringList{ QStringLiteral( "-q" ), QStringLiteral( "/dev/null" ),
+                             QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                             QStringLiteral( "--color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
+#else
+    // On non-macOS, script is not available; fall back to bare --color.
+    REQUIRE( colorCmd.program == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+    REQUIRE( colorCmd.arguments
              == QStringList{ QStringLiteral( "--color" ), QStringLiteral( "syslog" ),
                              QStringLiteral( "live" ), QStringLiteral( "--udid" ),
                              QStringLiteral( "00008030-001C195E36D8802E" ) } );
-    REQUIRE( plainTransport.streamingCommandForTest().arguments
+#endif
+
+    // Without ANSI, no PTY wrapper is needed.
+    const auto plainCmd = plainTransport.streamingCommandForTest();
+    REQUIRE( plainCmd.program == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+    REQUIRE( plainCmd.arguments
              == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
                              QStringLiteral( "live" ), QStringLiteral( "--udid" ),
                              QStringLiteral( "00008030-001C195E36D8802E" ) } );
+}
+
+TEST_CASE( "IosLogProcessTransport strips script PTY header from received data" )
+{
+    // macOS script(1) emits a ^D\b\b prefix at the start of its output
+    // (the literal bytes 0x5e 0x44 0x08 0x08).  The transport must strip
+    // this garbage so it doesn't appear as a spurious first line in the log.
+    TestIosLogProcessTransport colorTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, true );
+    TestIosLogProcessTransport plainTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, false );
+
+    // Simulate script's initial output: ^D\b\b followed by actual log data.
+    QByteArray ptyOutput = QByteArrayLiteral( "^D" ) + QByteArray( 2, '\b' )
+                           + QByteArrayLiteral( "Default 12:34:56 App Message\n" );
+    colorTransport.filterReceivedBytesForTest( ptyOutput );
+#ifdef Q_OS_MAC
+    // The ^D\b\b prefix must be stripped; the log line must remain.
+    REQUIRE( ptyOutput == QByteArrayLiteral( "Default 12:34:56 App Message\n" ) );
+#else
+    // On non-macOS, no PTY wrapping so no filtering.
+    REQUIRE( ptyOutput.startsWith( QByteArrayLiteral( "^D" ) ) );
+#endif
+
+    // Second chunk: no more ^D\b\b to strip.
+    QByteArray secondChunk = QByteArrayLiteral( "Warning 12:34:57 App Another\n" );
+    colorTransport.filterReceivedBytesForTest( secondChunk );
+    REQUIRE( secondChunk == QByteArrayLiteral( "Warning 12:34:57 App Another\n" ) );
+
+    // Plain transport never filters.
+    QByteArray plainData = QByteArrayLiteral( "some data\n" );
+    plainTransport.filterReceivedBytesForTest( plainData );
+    REQUIRE( plainData == QByteArrayLiteral( "some data\n" ) );
+}
+
+TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-emulating process" )
+{
+#ifdef Q_OS_MAC
+    // Create a mock pymobiledevice3 that only emits ANSI codes when stdout is a TTY.
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "pymobiledevice3" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\n"
+                  "if [ -t 1 ]; then\n"
+                  "  printf '\\033[31mDefault\\033[0m 12:00:00 App Hello\\n'\n"
+                  "else\n"
+                  "  echo 'NO_ANSI 12:00:00 App Hello'\n"
+                  "fi\n"
+                  "sleep 60\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    // With ANSI enabled (script wrapper), the process should emit ANSI codes.
+    {
+        TestIosLogProcessTransport colorTransport( scriptPath,
+                                                   QStringLiteral( "DEVICE_UDID" ), QString{}, true );
+        SafeQSignalSpy bytesSpy( &colorTransport, SIGNAL( bytesReceived( QByteArray ) ) );
+
+        REQUIRE( colorTransport.connectTransport() );
+
+        QByteArray accumulated;
+        QElapsedTimer deadline;
+        deadline.start();
+        while ( deadline.elapsed() < 3000 ) {
+            QCoreApplication::processEvents();
+            QTest::qWait( 50 );
+            if ( bytesSpy.count() > 0 ) {
+                for ( int i = 0; i < bytesSpy.count(); ++i ) {
+                    accumulated += bytesSpy.at( i ).at( 0 ).toByteArray();
+                }
+                break;
+            }
+        }
+
+        INFO( "Accumulated bytes: " << accumulated.toStdString() );
+        // Must contain the ANSI escape code (0x1b) — proving the PTY wrapper
+        // forced the process to see a TTY.
+        REQUIRE( accumulated.contains( '\x1b' ) );
+        // Must NOT contain the no-TTY fallback text.
+        REQUIRE_FALSE( accumulated.contains( QByteArrayLiteral( "NO_ANSI" ) ) );
+
+        colorTransport.disconnectTransport();
+        QCoreApplication::processEvents();
+        QTest::qWait( 200 );
+        QCoreApplication::processEvents();
+    }
+
+    // Without ANSI (no script wrapper), the process should NOT emit ANSI codes.
+    {
+        TestIosLogProcessTransport plainTransport( scriptPath,
+                                                   QStringLiteral( "DEVICE_UDID" ), QString{}, false );
+        SafeQSignalSpy bytesSpy( &plainTransport, SIGNAL( bytesReceived( QByteArray ) ) );
+
+        REQUIRE( plainTransport.connectTransport() );
+
+        QByteArray accumulated;
+        QElapsedTimer deadline;
+        deadline.start();
+        while ( deadline.elapsed() < 3000 ) {
+            QCoreApplication::processEvents();
+            QTest::qWait( 50 );
+            if ( bytesSpy.count() > 0 ) {
+                for ( int i = 0; i < bytesSpy.count(); ++i ) {
+                    accumulated += bytesSpy.at( i ).at( 0 ).toByteArray();
+                }
+                break;
+            }
+        }
+
+        INFO( "Accumulated bytes: " << accumulated.toStdString() );
+        // Must NOT contain ANSI escape codes — plain pipe, no TTY.
+        REQUIRE_FALSE( accumulated.contains( '\x1b' ) );
+        // Must contain the no-TTY fallback text.
+        REQUIRE( accumulated.contains( QByteArrayLiteral( "NO_ANSI" ) ) );
+
+        plainTransport.disconnectTransport();
+        QCoreApplication::processEvents();
+        QTest::qWait( 200 );
+        QCoreApplication::processEvents();
+    }
+#else
+    SUCCEED( "PTY wrapper test is macOS-only." );
+#endif
 }
 
 TEST_CASE( "IosLogProcessTransport clear command is an inert no-op" )

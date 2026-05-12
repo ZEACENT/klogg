@@ -17,10 +17,12 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     static QString detectIosSyslogExecutable();
 
     bool clearRemote( QString* error ) override;
+    bool connectTransport() override;
 
   protected:
     Command streamingCommand() const override;
     Command clearCommand() const override;
+    void filterReceivedBytes( QByteArray& data ) override;
 
   private:
     QString normalizedExecutable() const;
@@ -30,6 +32,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     QString deviceUdid_;
     QString extraArgs_;
     bool ansiOutputEnabled_;
+    bool ptyPrefixStripped_ = false;
 };
 
 #endif

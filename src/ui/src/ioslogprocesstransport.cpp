@@ -207,9 +207,30 @@ bool IosLogProcessTransport::clearRemote( QString* error )
     return false;
 }
 
+bool IosLogProcessTransport::connectTransport()
+{
+    ptyPrefixStripped_ = false;
+    return ProcessLiveSourceTransport::connectTransport();
+}
+
 ProcessLiveSourceTransport::Command IosLogProcessTransport::streamingCommand() const
 {
-    return Command{ normalizedExecutable(), streamArguments() };
+    const auto innerCommand = Command{ normalizedExecutable(), streamArguments() };
+
+#ifdef Q_OS_MAC
+    // pymobiledevice3 checks isatty() in addition to the --color flag; when
+    // QProcess pipes stdout, isatty() is false so ANSI escape codes are never
+    // emitted.  Wrap with /usr/bin/script to allocate a PTY so that
+    // pymobiledevice3 sees a terminal and actually produces colored output.
+    if ( ansiOutputEnabled_ ) {
+        auto args = QStringList{ QStringLiteral( "-q" ), QStringLiteral( "/dev/null" ),
+                                 innerCommand.program }
+                    + innerCommand.arguments;
+        return Command{ QStringLiteral( "/usr/bin/script" ), std::move( args ) };
+    }
+#endif
+
+    return innerCommand;
 }
 
 ProcessLiveSourceTransport::Command IosLogProcessTransport::clearCommand() const
@@ -237,4 +258,23 @@ QStringList IosLogProcessTransport::streamArguments() const
         arguments.append( splitCommandArguments( trimmedExtraArgs ) );
     }
     return arguments;
+}
+
+void IosLogProcessTransport::filterReceivedBytes( QByteArray& data )
+{
+#ifdef Q_OS_MAC
+    if ( !ansiOutputEnabled_ || ptyPrefixStripped_ || data.isEmpty() ) {
+        return;
+    }
+    // macOS script(1) emits a visual ^D\b\b prefix at the start of its output:
+    //   0x5e ('^') 0x44 ('D') 0x08 (BS) 0x08 (BS)
+    // Strip this garbage so it doesn't appear as a spurious first line.
+    static const QByteArray scriptPtyPrefix = QByteArrayLiteral( "^D" ) + QByteArray( 2, '\b' );
+    if ( data.startsWith( scriptPtyPrefix ) ) {
+        data.remove( 0, scriptPtyPrefix.size() );
+    }
+    ptyPrefixStripped_ = true;
+#else
+    Q_UNUSED( data );
+#endif
 }
