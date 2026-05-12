@@ -212,6 +212,11 @@ bool CrawlerWidget::isFollowEnabled() const
     return logMainView_->isFollowEnabled();
 }
 
+bool CrawlerWidget::isFirstLoadDone() const
+{
+    return firstLoadDone_;
+}
+
 bool CrawlerWidget::isTextWrapEnabled() const
 {
     return logMainView_->isTextWrapEnabled();

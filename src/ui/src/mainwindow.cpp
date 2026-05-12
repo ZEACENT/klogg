@@ -1730,7 +1730,16 @@ void MainWindow::handleLoadingFinished( LoadingStatus status )
         stopAction->setEnabled( false );
         reloadAction->setEnabled( true );
 
-        lineNumberHandler( 0_lnum, LinesCount( 0 ), LineColumn( 0 ), LineLength( 0 ) );
+        // Only reset the line number for the initial file load.
+        // For incremental updates (follow mode / live sources), preserve the
+        // current line number so the display doesn't flip back to Ln:1/y.
+        if ( auto* crawler = currentCrawlerWidget();
+             crawler == nullptr || !crawler->isFirstLoadDone() ) {
+            lineNumberHandler( 0_lnum, LinesCount( 0 ), LineColumn( 0 ), LineLength( 0 ) );
+        }
+        else {
+            refreshLineNumberField();
+        }
 
         // Now everything is ready, we can finally show the file!
         currentCrawlerWidget()->show();

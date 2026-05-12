@@ -88,7 +88,11 @@ QString stripAnsiSequences( const QString& text )
 
 QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
 {
-    const auto document = QJsonDocument::fromJson( output );
+    // Strip ANSI escape sequences from the raw output before JSON parsing,
+    // in case pymobiledevice3 emits colored output that corrupts the JSON
+    // structure (e.g. \x1b[32m[{...}]\x1b[0m).
+    const auto cleanedOutput = stripAnsiSequences( QString::fromUtf8( output ) ).toUtf8();
+    const auto document = QJsonDocument::fromJson( cleanedOutput );
     if ( !document.isArray() ) {
         return {};
     }

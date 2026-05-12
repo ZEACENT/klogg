@@ -111,6 +111,9 @@ class CrawlerWidget : public QSplitter,
     // Returns whether follow is enabled in this crawler
     bool isFollowEnabled() const;
 
+    // Returns whether the initial file load has completed
+    bool isFirstLoadDone() const;
+
     bool isTextWrapEnabled() const;
 
     qint64 searchPendingLines() const { return searchPendingLines_; }
