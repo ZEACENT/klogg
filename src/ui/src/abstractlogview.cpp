@@ -1176,9 +1176,14 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // This prevents infinite loops and works correctly in test environments
     if ( pendingScrollBarUpdate_ ) {
         pendingScrollBarUpdate_ = false;
-        LOG_DEBUG << "[TextWrap:Paint] Scheduling deferred scrollbar update after paintEvent()";
         // Defer the call using Qt::QueuedConnection to execute after paintEvent() completes.
-        QMetaObject::invokeMethod( this, [ this ] { updateScrollBars(); }, Qt::QueuedConnection );
+        QMetaObject::invokeMethod(
+            this,
+            [ this ] {
+                updateScrollBars();
+                forceRefresh();
+            },
+            Qt::QueuedConnection );
     }
 
     // Height including the potentially invisible last line
@@ -2417,8 +2422,6 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
     // leftMarginPx_ is set in drawTextArea() at line 2541, but this function may be called
     // earlier (e.g., from updateScrollBars() during initialization)
     if ( leftMarginPx_ == 0 ) {
-        LOG_DEBUG << "[TextWrap:Calc] getNbBottomWrappedVisibleLines: leftMarginPx_ not initialized (0),"
-                  << " returning visibleLines to avoid incorrect column calculation";
         return visibleLines;
     }
     
@@ -2522,8 +2525,6 @@ void AbstractLogView::updateScrollBars()
                 if ( scrollBarWasVisible != verticalScrollBar()->isVisible() ) {
                     scrollBarVisibilityChanged = true;
                 }
-                LOG_DEBUG << "[TextWrap:ScrollBar] updateScrollBars: leftMarginPx_ not initialized,"
-                          << " using fallback calculation (scrollMax=" << scrollMax << ")";
             }
             else {
                 // Estimate scrollMax using current scrollbar visibility
@@ -2576,10 +2577,6 @@ void AbstractLogView::updateScrollBars()
                     // Update previous visibility for next iteration
                     previousVisibility = currentVisibility;
                     
-                    if ( iteration == maxIterations - 1 ) {
-                        LOG_DEBUG << "[TextWrap:ScrollBar] updateScrollBars: reached max iterations ("
-                                  << maxIterations << "), visibility may not be stable";
-                    }
                 }
             }
         }
@@ -2603,15 +2600,6 @@ void AbstractLogView::updateScrollBars()
         }
     }
     
-    LOG_DEBUG << "[TextWrap:ScrollBar] updateScrollBars:"
-              << " totalLines=" << totalLines.get()
-              << " visibleLines=" << visibleLines.get()
-              << " useTextWrap=" << useTextWrap_
-              << " scrollMax=" << scrollMax
-              << " scrollBarWasVisible=" << scrollBarWasVisible
-              << " scrollBarNowVisible=" << verticalScrollBar()->isVisible()
-              << " scrollBarVisibilityChanged=" << scrollBarVisibilityChanged;
-
     // Calculate visibleColumns after setRange() to ensure correct scrollbar width
     // setRange() may show/hide the scrollbar based on range (0,0) vs (0,>0)
     // which affects the available width for columns calculation
@@ -2647,13 +2635,29 @@ void AbstractLogView::updateScrollBars()
         // This prevents using incorrect column count (calculated with leftMarginPx_ = 0)
         // The horizontal scrollbar will be correctly calculated after the first paint event
         horizontalScrollBar()->setRange( 0, 0 );
-        LOG_DEBUG << "[TextWrap:ScrollBar] updateScrollBars: leftMarginPx_ not initialized,"
-                  << " skipping horizontal scrollbar calculation";
     }
 }
 
 void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 {
+    const auto dpr = viewport()->devicePixelRatioF();
+
+    if ( !useTextWrap_ && paintDevice == &textAreaCache_.pixmap_ ) {
+        const int requiredPixW = static_cast<int>( std::ceil( viewport()->width() * dpr ) );
+        const int requiredPixH = static_cast<int>(
+            std::ceil( static_cast<int>( getNbVisibleLines().get() ) * charHeight_ * dpr ) );
+
+        const bool needsRecreate = textAreaCache_.pixmap_.isNull()
+            || ( textAreaCache_.pixmap_.devicePixelRatioF() != dpr )
+            || ( textAreaCache_.pixmap_.width() < requiredPixW )
+            || ( textAreaCache_.pixmap_.height() < requiredPixH );
+
+        if ( needsRecreate ) {
+            textAreaCache_.pixmap_ = QPixmap{ requiredPixW, requiredPixH };
+            textAreaCache_.pixmap_.setDevicePixelRatio( dpr );
+        }
+    }
+
     // When text wrapping is enabled, create pixmap with sufficient height for wrapped content.
     // We can't pre-calculate this in updateDisplaySize because wrapped line count is variable.
     // Allocate height for all remaining lines to ensure complete rendering.
@@ -2675,13 +2679,12 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                           viewport()->height() + maxWrappedLineHeight );
         const int estimatedHeight = std::clamp( dynamicMax, MinWrapCacheHeightPx,
                                                 AbsoluteMaxWrapCacheHeightPx );
-        const auto dpr = viewport()->devicePixelRatio();
         // Add charWidth_ padding to prevent last-character clipping from font rounding
         const int requiredPixW = static_cast<int>( std::ceil( ( viewport()->width() + charWidth_ ) * dpr ) );
         const int requiredPixH = static_cast<int>( std::ceil( estimatedHeight * dpr ) );
 
         const bool needsRecreate = textAreaCache_.pixmap_.isNull()
-            || ( textAreaCache_.pixmap_.devicePixelRatio() != dpr )
+            || ( textAreaCache_.pixmap_.devicePixelRatioF() != dpr )
             || ( textAreaCache_.pixmap_.width() < requiredPixW )
             || ( textAreaCache_.pixmap_.height() < requiredPixH );
 
@@ -2800,6 +2803,18 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     // was set, causing incorrect column count for text rendering
     LineLength nbVisibleCols = getNbVisibleCols();
 
+    const int narrowColumnWidth = std::max(
+        1,
+        std::min( { charWidth_, pixmapFontMetrics_.averageCharWidth(),
+                    textWidth( pixmapFontMetrics_, QStringLiteral( "i" ) ),
+                    textWidth( pixmapFontMetrics_, QStringLiteral( "." ) ),
+                    textWidth( pixmapFontMetrics_, QStringLiteral( "x" ) ) } ) );
+    const LineLength renderColumnOverscan
+        = useTextWrap_
+              ? 0_length
+              : LineLength{ static_cast<LineLength::UnderlyingType>(
+                  ( viewport()->width() / narrowColumnWidth ) + 2 ) };
+
     // If leftMarginPx_ was uninitialized (0) and is now set, we need to recalculate
     // scrollbar ranges. This happens during initialization when updateScrollBars() was
     // called before drawTextArea() set leftMarginPx_. The fallback calculation used
@@ -2812,9 +2827,6 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     // Instead, set a flag to defer the update until after paintEvent() completes.
     // This prevents reentrancy issues and works correctly in test environments.
     if ( leftMarginWasUninitialized ) {
-        LOG_DEBUG << "[TextWrap:Draw] leftMarginPx_ initialized, marking scrollbar update pending"
-                  << " (was 0, now " << leftMarginPx_ << ", useTextWrap=" << useTextWrap_ << ")";
-        
         // Set flag to update scrollbars after paintEvent() completes
         // This will be handled in paintEvent() after drawing is complete
         pendingScrollBarUpdate_ = true;
@@ -3007,8 +3019,10 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         LineDrawer lineDrawer( backColor );
         const auto firstVisibleColumn = std::clamp( useTextWrap_ ? 0_lcol : firstCol_, 0_lcol,
                                                     LineColumn{ klogg::isize( expandedLine ) } );
-        const auto lastVisibleColumn
-            = useTextWrap_ ? LineColumn{ klogg::isize( expandedLine ) } : firstCol_ + nbVisibleCols;
+        const auto lastVisibleColumn = useTextWrap_
+            ? LineColumn{ klogg::isize( expandedLine ) }
+            : std::min( LineColumn{ klogg::isize( expandedLine ) },
+                        firstCol_ + nbVisibleCols + renderColumnOverscan );
         allHighlights.clamp( firstVisibleColumn, lastVisibleColumn );
 
         if ( !allHighlights.empty() && !expandedLine.isEmpty() ) {
@@ -3053,7 +3067,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                      backColor );
             }
             else {
-                lineDrawer.addChunk( firstCol_, firstCol_ + nbVisibleCols, foreColor, backColor );
+                lineDrawer.addChunk( firstCol_, lastVisibleColumn, foreColor, backColor );
             }
         }
         lineDrawer.draw( painter.get(), xPos, yPos, viewport()->width(), wrappedLineView,
@@ -3128,8 +3142,6 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         const bool continueForLastLine = useTextWrap_ && isLastLineInFile;
         const bool continueForBottomAlign = useTextWrap_ && lastLineAligned_ && ( yPos < paintDeviceHeight );
         if ( yPos > viewport()->height() && !continueForLastLine && !continueForBottomAlign ) {
-            LOG_DEBUG << "[TextWrap:Draw] Breaking at line " << lineNumber.get()
-                      << " yPos=" << yPos << " viewportHeight=" << viewport()->height();
             break;
         }
     } // For each line

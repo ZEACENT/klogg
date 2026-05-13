@@ -29,6 +29,7 @@
 #include <qtestmouse.h>
 
 #include <QElapsedTimer>
+#include <QCoreApplication>
 #include <QUuid>
 
 #include "savedsearches.h"
@@ -63,6 +64,21 @@ bool generateDataFiles( QTemporaryFile& file )
 #else
             file.write( "\n", 1 );
 #endif
+        }
+        file.flush();
+    }
+
+    return true;
+}
+
+bool generateLongLineDataFile( QTemporaryFile& file )
+{
+    if ( file.open() ) {
+        for ( int i = 0; i < SL_NB_LINES; i++ ) {
+            const auto line = QStringLiteral( "LOGDATA long line %1 %2\n" )
+                                  .arg( i, 6, 10, QChar( '0' ) )
+                                  .arg( QString( 600, QLatin1Char( 'x' ) ) );
+            file.write( line.toUtf8() );
         }
         file.flush();
     }
@@ -108,6 +124,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return view->charHeight_;
     }
 
+    static int charWidth( const AbstractLogView* view )
+    {
+        return view->charWidth_;
+    }
+
     static int leftMargin( const AbstractLogView* view )
     {
         return view->leftMarginPx_;
@@ -131,6 +152,26 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static bool shouldBottomAlignFrame( const AbstractLogView* view )
     {
         return view->shouldBottomAlignFrame();
+    }
+
+    static bool textAreaCacheInvalid( const AbstractLogView* view )
+    {
+        return view->textAreaCache_.invalid_;
+    }
+
+    static QSize textAreaCachePixmapSize( const AbstractLogView* view )
+    {
+        return view->textAreaCache_.pixmap_.size();
+    }
+
+    static qreal textAreaCachePixmapDevicePixelRatio( const AbstractLogView* view )
+    {
+        return view->textAreaCache_.pixmap_.devicePixelRatioF();
+    }
+
+    static LineLength visibleColumns( const AbstractLogView* view )
+    {
+        return view->getNbVisibleCols();
     }
 };
 
@@ -224,6 +265,57 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     void render()
     {
         crawler->grab();
+    }
+
+    int mainHorizontalScrollMaximum() const
+    {
+        return crawler->logMainView_->horizontalScrollBar()->maximum();
+    }
+
+    bool mainTextAreaCacheInvalid() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCacheInvalid(
+            crawler->logMainView_ );
+    }
+
+    QSize mainTextAreaCachePixmapSize() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCachePixmapSize(
+            crawler->logMainView_ );
+    }
+
+    qreal mainTextAreaCachePixmapDevicePixelRatio() const
+    {
+        return AbstractLogView::access_by<
+            AbstractLogViewPrivate>::textAreaCachePixmapDevicePixelRatio( crawler->logMainView_ );
+    }
+
+    LineLength mainVisibleColumns() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::visibleColumns(
+            crawler->logMainView_ );
+    }
+
+    int mainCharWidth() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::charWidth( crawler->logMainView_ );
+    }
+
+    int mainLeftMargin() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::leftMargin( crawler->logMainView_ );
+    }
+
+    QImage grabMainViewport()
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::viewport( crawler->logMainView_ )
+            ->grab()
+            .toImage();
+    }
+
+    QColor mainBaseColor() const
+    {
+        return crawler->logMainView_->palette().color( QPalette::Base );
     }
 
     QImage grabFilteredViewport()
@@ -910,4 +1002,72 @@ SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
         }
     }
 
+}
+
+SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 260, 120 );
+
+    crawlerVisitor.render();
+
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+
+    REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() > 0 );
+    REQUIRE( crawlerVisitor.mainTextAreaCacheInvalid() );
+
+    crawlerVisitor.render();
+
+    const auto image = crawlerVisitor.grabMainViewport();
+    const auto baseColor = crawlerVisitor.mainBaseColor();
+    const auto sampleTop = std::max( 0, crawlerVisitor.mainCharHeight() / 4 );
+    const auto sampleBottom = std::min( image.height(), crawlerVisitor.mainCharHeight() );
+    const auto sampleLeft = image.width() * 2 / 3;
+    int textPixelsInLeftBand = 0;
+    int textPixelsInRightBand = 0;
+    int rightmostTextPixel = -1;
+
+    for ( int y = sampleTop; y < sampleBottom; ++y ) {
+        for ( int x = crawlerVisitor.mainLeftMargin(); x < image.width() / 3; ++x ) {
+            if ( image.pixelColor( x, y ) != baseColor ) {
+                ++textPixelsInLeftBand;
+            }
+        }
+        for ( int x = sampleLeft; x < image.width() - 2; ++x ) {
+            if ( image.pixelColor( x, y ) != baseColor ) {
+                ++textPixelsInRightBand;
+                rightmostTextPixel = std::max( rightmostTextPixel, x );
+            }
+        }
+    }
+
+    INFO( "image=" << image.width() << "x" << image.height()
+                   << " charWidth=" << crawlerVisitor.mainCharWidth()
+                   << " charHeight=" << crawlerVisitor.mainCharHeight()
+                   << " leftMargin=" << crawlerVisitor.mainLeftMargin()
+                   << " hMax=" << crawlerVisitor.mainHorizontalScrollMaximum()
+                   << " visibleCols=" << crawlerVisitor.mainVisibleColumns().get()
+                   << " pixmap=" << crawlerVisitor.mainTextAreaCachePixmapSize().width() << "x"
+                   << crawlerVisitor.mainTextAreaCachePixmapSize().height()
+                   << " pixmapDpr=" << crawlerVisitor.mainTextAreaCachePixmapDevicePixelRatio()
+                   << " cacheInvalid=" << crawlerVisitor.mainTextAreaCacheInvalid()
+                   << " leftPixels=" << textPixelsInLeftBand
+                   << " rightPixels=" << textPixelsInRightBand
+                   << " rightmostTextPixel=" << rightmostTextPixel );
+    REQUIRE( textPixelsInLeftBand > 0 );
+    REQUIRE( textPixelsInRightBand > 0 );
+    REQUIRE( rightmostTextPixel >= image.width() - 8 );
 }

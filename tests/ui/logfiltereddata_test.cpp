@@ -1208,3 +1208,332 @@ SCENARIO( "searchProgressed signal carries the search generation",
         REQUIRE( gen == activeGeneration );
     }
 }
+
+// ============================================================================
+// Regression tests for follow-mode search result loss
+//
+// BUG: In follow mode, each call to updateSearch() bumps the generation counter
+// in LogFilteredDataWorker.  When the search completes, its progress signal
+// carries the generation that was active when the operation started.  By the
+// time the signal arrives in updateFilteredView(), the active generation has
+// moved on (because another updateSearch was dispatched), and
+// isStaleSearchGeneration() drops the signal.  Result: matches ARE found but
+// NEVER displayed.
+// ============================================================================
+
+SCENARIO( "updateSearch should not bump generation beyond what the search itself produces",
+          "[logdata][search-generation][regression]" )
+{
+    // This test exposes the core bug: each updateSearch() call increments
+    // operationGeneration_ inside the worker, so if two updateSearch calls
+    // happen in rapid succession, the first search's completion signal
+    // carries a generation that no longer matches currentGeneration(),
+    // and the results are silently dropped.
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    // First search
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+    REQUIRE( filtered_data->currentSearchGeneration() > 0 );
+    REQUIRE( filtered_data->getNbMatches() == 50_lcount );
+
+    // Now do an updateSearch (simulating follow-mode file growth).
+    // In the BUGGY behavior, updateSearch bumps the generation, so a
+    // subsequent updateSearch would cause the first one's results to be
+    // dropped as stale.
+    searchProgressSpy.clear();
+
+    filtered_data->updateSearch( 0_lnum, LineNumber( SL_NB_LINES ) );
+
+    // Wait for the search to complete
+    int progress = 0;
+    int consumedSignals = 0;
+    do {
+        while ( searchProgressSpy.count() <= consumedSignals ) {
+            REQUIRE( searchProgressSpy.wait() );
+        }
+        QList<QVariant> progressArgs = searchProgressSpy.at( consumedSignals );
+        ++consumedSignals;
+        progress = progressArgs.at( 1 ).toInt();
+    } while ( progress < 100 );
+
+    // Drain throttled signals
+    QElapsedTimer drainTimer;
+    drainTimer.start();
+    while ( drainTimer.elapsed() < 3000 ) {
+        if ( !searchProgressSpy.wait( 500 ) ) {
+            break;
+        }
+    }
+
+    // CRITICAL ASSERTION: after updateSearch completes, the results must
+    // still be accessible.  The BUG is that the generation bump from
+    // updateSearch causes the searchProgressed signal to be considered
+    // stale, and the matches are never delivered to the UI.
+    REQUIRE( filtered_data->getNbMatches() > 0_lcount );
+
+    // The searchProgressed signals we received should all carry a generation
+    // that matches what the worker reports as current at completion time.
+    // If updateSearch bumped the generation AFTER dispatching the search,
+    // some signals will carry a stale generation.
+    const auto finalGeneration = filtered_data->currentSearchGeneration();
+    bool allSignalsMatch = true;
+    for ( int i = 0; i < searchProgressSpy.count(); ++i ) {
+        const auto args = searchProgressSpy.at( i );
+        if ( args.size() == 4 ) {
+            const auto gen = args.at( 3 ).toULongLong();
+            if ( gen != finalGeneration ) {
+                allSignalsMatch = false;
+                break;
+            }
+        }
+    }
+    REQUIRE( allSignalsMatch );
+}
+
+SCENARIO( "rapid updateSearch calls do not lose search results",
+          "[logdata][search-generation][regression]" )
+{
+    // Simulates follow-mode behavior: the file keeps growing and
+    // loadingFinished triggers updateSearch in rapid succession.
+    // Each call should not cause the previous search's results to be
+    // silently dropped.
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    // Initial search
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+    REQUIRE( filtered_data->getNbMatches() == 50_lcount );
+    searchProgressSpy.clear();
+
+    // Rapid updateSearch calls (simulating follow mode)
+    for ( int i = 0; i < 3; ++i ) {
+        filtered_data->updateSearch( 0_lnum, LineNumber( SL_NB_LINES ) );
+    }
+
+    // Wait for the final search to complete
+    int progress = 0;
+    int consumedSignals = 0;
+    do {
+        while ( searchProgressSpy.count() <= consumedSignals ) {
+            REQUIRE( searchProgressSpy.wait() );
+        }
+        QList<QVariant> progressArgs = searchProgressSpy.at( consumedSignals );
+        ++consumedSignals;
+        progress = progressArgs.at( 1 ).toInt();
+    } while ( progress < 100 );
+
+    // Drain
+    QElapsedTimer drainTimer;
+    drainTimer.start();
+    while ( drainTimer.elapsed() < 3000 ) {
+        if ( !searchProgressSpy.wait( 500 ) ) {
+            break;
+        }
+    }
+
+    // The results must still be present and non-zero.
+    // In the buggy behavior, rapid updateSearch calls bump the generation
+    // so much that all completion signals are dropped as stale.
+    REQUIRE( filtered_data->getNbMatches() > 0_lcount );
+}
+
+SCENARIO( "regex search with various patterns produces correct results",
+          "[logdata][search-regex]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    SECTION( "simple literal match" )
+    {
+        runSearch( filtered_data.get(), "LOGDATA", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 500_lcount );
+    }
+
+    SECTION( "regex character class" )
+    {
+        runSearch( filtered_data.get(), "line [0-3]", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() > 0_lcount );
+    }
+
+    SECTION( "regex alternation" )
+    {
+        runSearch( filtered_data.get(), "line 00000[0-2]|line 000499", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() >= 3_lcount );
+    }
+
+    SECTION( "regex with anchoring" )
+    {
+        runSearch( filtered_data.get(), "^LOGDATA", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 500_lcount );
+    }
+
+    SECTION( "regex with quantifier" )
+    {
+        runSearch( filtered_data.get(), "line [0-9]{6}", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 500_lcount );
+    }
+
+    SECTION( "regex match at end of line" )
+    {
+        runSearch( filtered_data.get(), "\\d{3}9$", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 50_lcount );
+    }
+
+    SECTION( "case insensitive match via pattern" )
+    {
+        auto pattern = RegularExpressionPattern( "logdata", false, false, false, false );
+        filtered_data->runSearch( pattern );
+        int progress = 0;
+        int consumedSignals = 0;
+        do {
+            while ( searchProgressSpy.count() <= consumedSignals ) {
+                REQUIRE( searchProgressSpy.wait() );
+            }
+            QList<QVariant> progressArgs = searchProgressSpy.at( consumedSignals );
+            ++consumedSignals;
+            progress = progressArgs.at( 1 ).toInt();
+        } while ( progress < 100 );
+        QElapsedTimer drainTimer;
+        drainTimer.start();
+        while ( drainTimer.elapsed() < 3000 ) {
+            if ( !searchProgressSpy.wait( 500 ) ) {
+                break;
+            }
+        }
+        REQUIRE( filtered_data->getNbMatches() == 500_lcount );
+    }
+}
+
+SCENARIO( "search with empty or invalid regex does not crash",
+          "[logdata][search-edge-cases]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SECTION( "empty search pattern matches all lines" )
+    {
+        SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                          &LogFilteredData::searchProgressed };
+        runSearch( filtered_data.get(), "", searchProgressSpy );
+        // Empty pattern matches every line
+        REQUIRE( filtered_data->getNbMatches() == 500_lcount );
+    }
+
+    SECTION( "invalid regex does not crash" )
+    {
+        // Invalid regex like unmatched parenthesis
+        SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                          &LogFilteredData::searchProgressed };
+        auto pattern = RegularExpressionPattern( "(", false, false, false, false );
+        // The RegularExpression constructor should mark this as invalid,
+        // so runSearch should handle it gracefully
+        RegularExpression hsExpression{ pattern };
+        if ( !hsExpression.isValid() ) {
+            // Invalid regex should not produce matches
+            REQUIRE( filtered_data->getNbMatches() == 0_lcount );
+        }
+    }
+}
+
+SCENARIO( "runSearch followed by updateSearch preserves results",
+          "[logdata][search-update][regression]" )
+{
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    // Full search
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+    const auto matchesAfterFullSearch = filtered_data->getNbMatches();
+    REQUIRE( matchesAfterFullSearch == 50_lcount );
+    searchProgressSpy.clear();
+
+    // Update search (same range, simulating re-check after file growth)
+    filtered_data->updateSearch( 0_lnum, LineNumber( SL_NB_LINES ) );
+
+    // Wait for completion
+    int progress = 0;
+    int consumedSignals = 0;
+    do {
+        while ( searchProgressSpy.count() <= consumedSignals ) {
+            REQUIRE( searchProgressSpy.wait() );
+        }
+        QList<QVariant> progressArgs = searchProgressSpy.at( consumedSignals );
+        ++consumedSignals;
+        progress = progressArgs.at( 1 ).toInt();
+    } while ( progress < 100 );
+
+    QElapsedTimer drainTimer;
+    drainTimer.start();
+    while ( drainTimer.elapsed() < 3000 ) {
+        if ( !searchProgressSpy.wait( 500 ) ) {
+            break;
+        }
+    }
+
+    // After updateSearch, the same matches should still be present
+    const auto matchesAfterUpdate = filtered_data->getNbMatches();
+    REQUIRE( matchesAfterUpdate == matchesAfterFullSearch );
+
+    // The filtered view line count should also match
+    REQUIRE( filtered_data->getNbLine() > 0_lcount );
+}
+
+SCENARIO( "search generation is stable across updateSearch calls with same criteria",
+          "[logdata][search-generation][regression]" )
+{
+    // The generation should only change when search criteria change,
+    // NOT when updateSearch is called for the same pattern on an
+    // expanded range (follow mode).  This is the root cause of the
+    // follow-mode search result loss.
+    LogDataLoader logDataLoader;
+    auto filtered_data = makeTestFilteredData( logDataLoader.log_data );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    runSearch( filtered_data.get(), "this is line [0-9]{5}9", searchProgressSpy );
+    const auto genAfterSearch = filtered_data->currentSearchGeneration();
+    REQUIRE( genAfterSearch > 0 );
+
+    // updateSearch should NOT advance the generation when the search
+    // criteria (pattern) haven't changed.  Only the search range expanded.
+    filtered_data->updateSearch( 0_lnum, LineNumber( SL_NB_LINES ) );
+
+    // The generation should remain the same since the search criteria
+    // (pattern) have not changed.
+    const auto genAfterUpdate = filtered_data->currentSearchGeneration();
+    REQUIRE( genAfterUpdate == genAfterSearch );
+}

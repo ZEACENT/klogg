@@ -255,7 +255,15 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
     // operationsMutex_ is released quickly.
     interruptRequested_.set();
 
-    const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
+    // updateSearch extends an existing search (same pattern, expanded range).
+    // It must NOT advance the generation counter.  In follow mode, repeated
+    // file reloads trigger updateSearch calls; if each one bumped the
+    // generation, completion signals from the in-flight search would carry
+    // a now-stale generation and be dropped by isStaleSearchGeneration(),
+    // causing matches to silently disappear from the filtered view.
+    // Only runSearch() (new criteria) and bumpGeneration() (explicit
+    // abandon-all-in-flight path in replaceCurrentSearch) advance the counter.
+    const auto generation = operationGeneration_.load();
     LOG_INFO << "Search update requested from " << position.get()
              << " (async dispatch, gen " << generation << ")";
 
@@ -352,18 +360,10 @@ void LogFilteredDataWorker::interrupt()
 
 void LogFilteredDataWorker::waitForDone()
 {
-    // Cancel any queued request and shut down the dispatch thread so that
-    // no new opThread_ can be spawned after this point.
-    {
-        std::lock_guard<std::mutex> lock( requestMutex_ );
-        dispatchShutdown_ = true;
-        pendingRequest_.reset();
-    }
-    requestCv_.notify_one();
-    if ( dispatchThread_.joinable() ) {
-        dispatchThread_.join();
-    }
-
+    // Wait for the current operation thread to fully exit.  Unlike the
+    // destructor, this does NOT shut down the dispatch thread — subsequent
+    // updateSearch calls must still be processable after a search completes.
+    // The dispatch thread is only shut down in the destructor.
     if ( opThread_.joinable() ) {
         opThread_.join();
     }
