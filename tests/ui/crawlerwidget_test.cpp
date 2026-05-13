@@ -159,6 +159,21 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return view->textAreaCache_.invalid_;
     }
 
+    static int getSelectedTextCallCount( const AbstractLogView* view )
+    {
+        return view->getSelectedTextCallCount_;
+    }
+
+    static void resetGetSelectedTextCallCount( AbstractLogView* view )
+    {
+        view->getSelectedTextCallCount_ = 0;
+    }
+
+    static bool selectionChanged( const AbstractLogView* view )
+    {
+        return view->selectionChanged_;
+    }
+
     static QSize textAreaCachePixmapSize( const AbstractLogView* view )
     {
         return view->textAreaCache_.pixmap_.size();
@@ -376,6 +391,34 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     int mainCharHeight() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::charHeight( crawler->logMainView_ );
+    }
+
+    int mainGetSelectedTextCallCount() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::getSelectedTextCallCount(
+            crawler->logMainView_ );
+    }
+
+    void mainResetGetSelectedTextCallCount()
+    {
+        AbstractLogView::access_by<AbstractLogViewPrivate>::resetGetSelectedTextCallCount(
+            crawler->logMainView_ );
+    }
+
+    bool mainSelectionChanged() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::selectionChanged(
+            crawler->logMainView_ );
+    }
+
+    QWidget* mainViewport() const
+    {
+        return crawler->logMainView_->viewport();
+    }
+
+    AbstractLogView* mainView() const
+    {
+        return crawler->logMainView_;
     }
 
     void selectMainViewLine( LineNumber::UnderlyingType lineIndex )
@@ -1070,4 +1113,165 @@ SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization"
     REQUIRE( textPixelsInLeftBand > 0 );
     REQUIRE( textPixelsInRightBand > 0 );
     REQUIRE( rightmostTextPixel >= image.width() - 8 );
+}
+
+SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_selection_perf_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    GIVEN( "a loaded log file" )
+    {
+        WHEN( "dragging to create a portion selection on one line" )
+        {
+            const auto charHeight = crawlerVisitor.mainCharHeight();
+            const auto charWidth = crawlerVisitor.mainCharWidth();
+            const auto leftMargin = crawlerVisitor.mainLeftMargin();
+
+            // Click on line 5 and drag horizontally
+            const int lineY = charHeight * 5 + charHeight / 2;
+            const int startX = leftMargin + charWidth * 5;
+            const int endX = leftMargin + charWidth * 20;
+
+            crawlerVisitor.mainResetGetSelectedTextCallCount();
+
+            auto* viewport = crawlerVisitor.mainViewport();
+
+            QTest::mousePress( viewport, Qt::LeftButton, {}, QPoint( startX, lineY ) );
+            QTest::mouseMove( viewport, QPoint( endX, lineY ) );
+            QTest::mouseRelease( viewport, Qt::LeftButton, {}, QPoint( endX, lineY ) );
+
+            QTest::qWait( 50 );
+
+            THEN( "getSelectedText() should not be called during drag" )
+            {
+                INFO( "getSelectedTextCallCount=" << crawlerVisitor.mainGetSelectedTextCallCount() );
+                // Current code calls getSelectedText() on every portion selection mouse move.
+                // After fix, it should be 0 during drag (or only called on release).
+                REQUIRE( crawlerVisitor.mainGetSelectedTextCallCount() == 0 );
+            }
+        }
+
+        WHEN( "dragging to create a range selection across lines" )
+        {
+            const auto charHeight = crawlerVisitor.mainCharHeight();
+            const auto leftMargin = crawlerVisitor.mainLeftMargin();
+
+            // Click on line 5 and drag to line 15
+            const int startY = charHeight * 5 + charHeight / 2;
+            const int endY = charHeight * 15 + charHeight / 2;
+            const int xPos = leftMargin + 20;
+
+            crawlerVisitor.mainResetGetSelectedTextCallCount();
+
+            auto* viewport = crawlerVisitor.mainViewport();
+
+            QTest::mousePress( viewport, Qt::LeftButton, {}, QPoint( xPos, startY ) );
+            QTest::mouseMove( viewport, QPoint( xPos, endY ) );
+            QTest::mouseRelease( viewport, Qt::LeftButton, {}, QPoint( xPos, endY ) );
+
+            QTest::qWait( 50 );
+
+            THEN( "getSelectedText() should not be called during drag" )
+            {
+                INFO( "getSelectedTextCallCount=" << crawlerVisitor.mainGetSelectedTextCallCount() );
+                // Current code calls getSelectedText() on every range selection mouse move.
+                // After fix, it should be 0 during drag (or only called on release).
+                REQUIRE( crawlerVisitor.mainGetSelectedTextCallCount() == 0 );
+            }
+        }
+
+        WHEN( "clicking to select a single line" )
+        {
+            const auto charHeight = crawlerVisitor.mainCharHeight();
+            const auto leftMargin = crawlerVisitor.mainLeftMargin();
+
+            const int lineY = charHeight * 10 + charHeight / 2;
+            const int xPos = leftMargin + 20;
+
+            crawlerVisitor.mainResetGetSelectedTextCallCount();
+
+            auto* viewport = crawlerVisitor.mainViewport();
+
+            QTest::mouseClick( viewport, Qt::LeftButton, {}, QPoint( xPos, lineY ) );
+            QTest::qWait( 50 );
+
+            THEN( "getSelectedText() should not be called for single line click" )
+            {
+                INFO( "getSelectedTextCallCount=" << crawlerVisitor.mainGetSelectedTextCallCount() );
+                // Single line selection uses 0_length, no getSelectedText() needed.
+                REQUIRE( crawlerVisitor.mainGetSelectedTextCallCount() == 0 );
+            }
+        }
+    }
+}
+
+SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_selection_cache_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    // Process deferred updates from initial paint (scrollbar init + forceRefresh cycle)
+    for ( int i = 0; i < 5; ++i ) {
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+        QTest::qWait( 20 );
+    }
+
+    GIVEN( "a rendered log file with valid text cache" )
+    {
+        // Verify cache is valid before the test action
+        if ( crawlerVisitor.mainTextAreaCacheInvalid() ) {
+            // Force a final paint to stabilize the cache
+            crawlerVisitor.render();
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+            QTest::qWait( 20 );
+        }
+        REQUIRE_FALSE( crawlerVisitor.mainTextAreaCacheInvalid() );
+
+        WHEN( "clicking to select a different line" )
+        {
+            const auto charHeight = crawlerVisitor.mainCharHeight();
+            const auto leftMargin = crawlerVisitor.mainLeftMargin();
+
+            const int lineY = charHeight * 5 + charHeight / 2;
+            const int xPos = leftMargin + 20;
+
+            auto* viewport = crawlerVisitor.mainViewport();
+
+            QTest::mouseClick( viewport, Qt::LeftButton, {}, QPoint( xPos, lineY ) );
+
+            THEN( "selection change sets selectionChanged flag, not cache invalidation" )
+            {
+                INFO( "selectionChanged=" << crawlerVisitor.mainSelectionChanged()
+                      << " cacheInvalid=" << crawlerVisitor.mainTextAreaCacheInvalid() );
+                // mousePressEvent sets selectionChanged_ instead of textAreaCache_.invalid_.
+                // The cache should not be invalidated by a selection-only change.
+                REQUIRE_FALSE( crawlerVisitor.mainTextAreaCacheInvalid() );
+            }
+        }
+    }
 }

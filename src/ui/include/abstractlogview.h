@@ -410,6 +410,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Set to true when leftMarginPx_ is initialized during drawTextArea()
     mutable bool pendingScrollBarUpdate_ = false;
 
+    // Flag indicating selection changed without content/viewport change.
+    // When true, paintEvent triggers a redraw but does not mark the text cache
+    // as independently invalid, separating selection updates from content updates.
+    bool selectionChanged_ = false;
+
     // Popup menu
     QMenu* popupMenu_;
     QAction* copyAction_;
@@ -465,6 +470,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     TextAreaCache textAreaCache_ = { {}, true, 0_lnum, 0_lnum, 0_lcol, 0 };
     PullToFollowCache pullToFollowCache_ = { {}, 0_length };
     QFontMetrics pixmapFontMetrics_;
+
+    // Test instrumentation: counts calls to getSelectedText() for perf verification
+    mutable int getSelectedTextCallCount_ = 0;
 
     LinesCount getNbVisibleLines() const;
     LinesCount getNbBottomWrappedVisibleLines() const;

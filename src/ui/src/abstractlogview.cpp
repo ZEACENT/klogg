@@ -494,8 +494,8 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
     auto line = convertCoordToLine( mouseEvent->pos().y() );
 
     if ( mouseEvent->button() == Qt::LeftButton ) {
-        // Invalidate our cache
-        textAreaCache_.invalid_ = true;
+        // Mark selection as changed for overlay redraw
+        selectionChanged_ = true;
 
         if ( line.has_value() && mouseEvent->modifiers() & Qt::ShiftModifier ) {
             selection_.selectRangeFromPrevious( *line );
@@ -535,7 +535,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
              && !selection_.isPortionSelected( *line, filePos.column(), filePos.column() ) ) {
             selection_.selectLine( *line );
             Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
-            textAreaCache_.invalid_ = true;
+            selectionChanged_ = true;
         }
 
         if ( selection_.isSingleLine() ) {
@@ -690,8 +690,8 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 {
     // Selection implementation
     if ( selectionStarted_ ) {
-        // Invalidate our cache
-        textAreaCache_.invalid_ = true;
+        // Mark selection as changed for overlay redraw (don't invalidate text cache)
+        selectionChanged_ = true;
 
         const auto thisEndPos = convertCoordToFilePos( mouseEvent->pos() );
 
@@ -705,8 +705,8 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 
                     Q_EMIT newSelection(
                         lineNumber, selection_.getSelectedLinesCount(),
-                        0_lcol, // portion selection always starts from the first column
-                        LineLength{ getSelectedText().size() } );
+                        0_lcol,
+                        0_length ); // nSymbols deferred to mouse release
 
                     update();
                 }
@@ -716,9 +716,8 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
                 // This is a 'portion' selection
                 selection_.selectPortion( lineNumber, selectionStartPos_.column(),
                                           thisEndPos.column() );
-                auto selectionStr = getSelectedText();
                 Q_EMIT newSelection( lineNumber, 1_lcount, selectionStartPos_.column(),
-                                     LineLength( selectionStr.size() ) );
+                                     selection_.getPortionForLine( lineNumber ).size() );
                 update();
             }
             // On the same line, and moving vertically then
@@ -765,6 +764,18 @@ void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
         selectionStarted_ = false;
         if ( autoScrollTimer_.isActive() )
             autoScrollTimer_.stop();
+
+        // Emit final selection with correct nSymbols (deferred from drag)
+        if ( !selection_.isEmpty() && !selection_.isSingleLine() ) {
+            const auto nSymbols = selection_.isPortion()
+                ? selection_.getPortionForLine( selectionCurrentEndPos_.line() ).size()
+                : LineLength{ getSelectedText().size() };
+            Q_EMIT newSelection(
+                selectionCurrentEndPos_.line(), selection_.getSelectedLinesCount(),
+                selection_.isPortion() ? selection_.getPortionForLine( selectionCurrentEndPos_.line() ).startColumn() : 0_lcol,
+                nSymbols );
+        }
+
         updateGlobalSelection();
     }
 }
@@ -772,8 +783,7 @@ void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
 void AbstractLogView::mouseDoubleClickEvent( QMouseEvent* mouseEvent )
 {
     if ( mouseEvent->button() == Qt::LeftButton ) {
-        // Invalidate our cache
-        textAreaCache_.invalid_ = true;
+        selectionChanged_ = true;
 
         const auto pos = convertCoordToFilePos( mouseEvent->pos() );
         selectWordAtPosition( pos );
@@ -1148,7 +1158,8 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // Can we use our cache?
     auto deltaY = textAreaCache_.first_line_.get() - firstLine_.get();
 
-    if ( textAreaCache_.invalid_ || ( textAreaCache_.first_column_ != firstCol_ ) ) {
+    if ( textAreaCache_.invalid_ || ( textAreaCache_.first_column_ != firstCol_ )
+         || selectionChanged_ ) {
         // Force a full redraw
         deltaY = std::numeric_limits<decltype( deltaY )>::max();
     }
@@ -1158,6 +1169,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
         drawTextArea( &textAreaCache_.pixmap_ );
 
         textAreaCache_.invalid_ = false;
+        selectionChanged_ = false;
         textAreaCache_.first_line_ = firstLine_;
         textAreaCache_.first_column_ = firstCol_;
 
@@ -1879,6 +1891,7 @@ LineNumber AbstractLogView::getTopLine() const
 
 QString AbstractLogView::getSelectedText() const
 {
+    ++getSelectedTextCallCount_;
     return selection_.getSelectedText( logData_ );
 }
 
@@ -2153,8 +2166,9 @@ void AbstractLogView::moveSelection( LinesCount delta, bool isDeltaNegative )
     displayLine( newLine );
     selectionStartPos_ = FilePosition{ newLine, 0_lcol };
     selectionCurrentEndPos_ = selectionStartPos_;
+    selectionChanged_ = true;
     Q_EMIT newSelection( newLine, selection_.getSelectedLinesCount(), 0_lcol,
-                         LineLength{ getSelectedText().size() } );
+                         logData_->getLineLength( newLine ) );
 }
 
 // Make the start of the lines visible
@@ -2263,8 +2277,9 @@ void AbstractLogView::selectAndDisplayRange( FilePosition pos )
     selection_.selectRange( selectionStartPos_.line(), pos.line() );
     selectionCurrentEndPos_ = pos;
     displayLine( pos.line() );
+    selectionChanged_ = true;
     Q_EMIT newSelection( pos.line(), selection_.getSelectedLinesCount(), 0_lcol,
-                         LineLength{ getSelectedText().size() } );
+                         0_length );
 }
 
 // Create the pop-up menu
