@@ -1241,7 +1241,9 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     else if ( shouldBottomAlignFrame() && !followElasticHook_.isHooked() ) {
         const int hiddenHeightPx
             = std::max( 0, effectiveHeight - viewport()->height() );
-        drawingTopOffset_ = -alignHiddenHeightToLineGrid( hiddenHeightPx );
+        // Use exact pixel offset instead of line-grid snapping so the last line
+        // is never cut off and no gap appears between content bottom and viewport bottom.
+        drawingTopOffset_ = -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
 
         const int heightForPullToFollow = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 )
@@ -2458,11 +2460,18 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
     LinesCount wrappedLinesCount{ 0 };
     LinesCount unwrappedLinesCount{ 0 };
     LineNumber unwrappedLineNumber{ totalLines.get() - 1 };
-    
+
+    // Pixel-accurate wrapping width for the text content area
+    static constexpr int ContentMarginWidth = 1;
+    const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
+    auto twFn = [this]( QStringView s ) -> int {
+        return textWidth( pixmapFontMetrics_, s );
+    };
+
     // Count from bottom: how many unwrapped lines fit when viewport is filled with wrapped lines
     while ( wrappedLinesCount < visibleLines ) {
         QString expandedLine = logData_->getExpandedLineString( unwrappedLineNumber );
-        WrappedString wrapped{ expandedLine, visibleColumns };
+        WrappedString wrapped{ expandedLine, availableWidth, twFn };
         const auto thisLineWrappedCount = LinesCount(
             type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped.wrappedLinesCount() ) );
         
@@ -3019,9 +3028,17 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                                       palette.color( QPalette::Highlight ) } );
         }
 
-        const auto wrappedLineLength
-            = useTextWrap_ ? nbVisibleCols : LineLength{ klogg::isize( expandedLine ) + 1 };
-        const WrappedString wrappedLineView{ expandedLine, wrappedLineLength };
+        const WrappedString wrappedLineView = [&, this] {
+            if ( useTextWrap_ ) {
+                const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
+                auto twFn = [this]( QStringView s ) -> int {
+                    return textWidth( pixmapFontMetrics_, s );
+                };
+                return WrappedString{ expandedLine, availableWidth, twFn };
+            }
+            return WrappedString{ expandedLine,
+                                  LineLength{ klogg::isize( expandedLine ) + 1 } };
+        }();
         const auto finalLineHeight
             = fontHeight * static_cast<int>( wrappedLineView.wrappedLinesCount() );
         // LOG_INFO << "Draw line " << lineNumber << ": " << expandedLine;
