@@ -1224,10 +1224,10 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
         = std::min( drawingTopPosition + effectiveHeight, viewport()->height() );
 
     if ( shouldBottomAlignFrame() ) {
-        const int hiddenHeightPx
-            = std::max( 0, effectiveHeight - viewport()->height() );
-        // Use exact pixel offset instead of line-grid snapping so the last line
-        // is never cut off and no gap appears between content bottom and viewport bottom.
+        int hiddenHeightPx = std::max( 0, effectiveHeight - viewport()->height() );
+        if ( !useTextWrap_ ) {
+            hiddenHeightPx = alignHiddenHeightToLineGrid( hiddenHeightPx );
+        }
         drawingTopOffset_ = -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
 

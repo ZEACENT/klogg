@@ -7,6 +7,7 @@
 #include <QObject>
 
 #include "livesourcetransport.h"
+#include "streaminglogdata.h"
 
 class StreamingLogData;
 
@@ -53,6 +54,7 @@ class AdbLogcatSource : public QObject {
     bool reconnectSource();
     bool clearAndRestart();
     bool bindOutputFile( const QString& outputPath );
+    bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     void deleteCaptureFiles();
 
     const AdbLogcatSessionData& sessionData() const;

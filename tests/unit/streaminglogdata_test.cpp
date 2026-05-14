@@ -189,6 +189,64 @@ TEST_CASE( "StreamingLogData saves display text when ANSI rendering is enabled" 
     REQUIRE( outputFile.readAll() == QByteArrayLiteral( "I/App first\nE/App second\n" ) );
 }
 
+TEST_CASE( "StreamingLogData can strip ANSI while saving current and future live log lines" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[32mI/App\x1b[0m first\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Render );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "strip.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+
+    loadingSpy.clear();
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[31mE/App\x1b[0m second\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    logData.bindOutputFile( QString{} );
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    REQUIRE( outputFile.readAll() == QByteArrayLiteral( "I/App first\nE/App second\n" ) );
+}
+
+TEST_CASE( "StreamingLogData can preserve ANSI while saving current and future live log lines" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[32mI/App\x1b[0m first\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Render );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "preserve.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+
+    loadingSpy.clear();
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[31mE/App\x1b[0m second\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    logData.bindOutputFile( QString{} );
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    REQUIRE( outputFile.readAll()
+             == QByteArrayLiteral( "\x1b[32mI/App\x1b[0m first\n"
+                                   "\x1b[31mE/App\x1b[0m second\n" ) );
+}
+
 TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )
 {
     QTemporaryDir tempDir;

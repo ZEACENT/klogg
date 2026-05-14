@@ -10,6 +10,11 @@
 #include "capturestore.h"
 #include "searchablelogdata.h"
 
+enum class LiveLogSaveAnsiMode {
+    Strip,
+    Preserve,
+};
+
 class StreamingLogData : public SearchableLogData {
     Q_OBJECT
 
@@ -21,6 +26,7 @@ class StreamingLogData : public SearchableLogData {
     void finishInput();
     void clearCapture();
     bool bindOutputFile( const QString& outputPath );
+    bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     QString boundOutputFile() const;
     QString captureId() const;
     QString capturePath() const;
@@ -70,6 +76,7 @@ class StreamingLogData : public SearchableLogData {
     QTimer outputFlushTimer_;
     QString boundOutputFile_;
     QFile boundOutputHandle_;
+    LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
 };
 
 #endif

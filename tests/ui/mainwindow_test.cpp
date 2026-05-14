@@ -25,6 +25,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QKeySequence>
+#include <QMenu>
 #include <QSignalSpy>
 #include <QTabBar>
 #include <QTemporaryDir>
@@ -130,6 +131,17 @@ SCENARIO( "Main window tests", "[ui]" )
 
         auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
         REQUIRE( tabArea != nullptr );
+
+        auto* saveLiveLogMenu = mainWindow->findChild<QMenu*>(
+            QStringLiteral( "saveCurrentLiveLogMenu" ) );
+        REQUIRE( saveLiveLogMenu != nullptr );
+        REQUIRE_FALSE( saveLiveLogMenu->isEnabled() );
+        REQUIRE( mainWindow->findChild<QAction*>(
+                     QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) )
+                 != nullptr );
+        REQUIRE( mainWindow->findChild<QAction*>(
+                     QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) )
+                 != nullptr );
 
         const auto tempDirPath = makeTestDir( "mainwindow" );
         REQUIRE( QDir{ tempDirPath }.exists() );

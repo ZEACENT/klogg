@@ -66,6 +66,7 @@ class QActionGroup;
 class Session;
 class RecentFiles;
 class HighlightersMenu;
+enum class LiveLogSaveAnsiMode;
 
 // Main window of the application, creates menus, toolbar and
 // the CrawlerWidget
@@ -118,7 +119,6 @@ class MainWindow : public QMainWindow {
     void copy();
     void find();
     void clearLog();
-    void saveCurrentLiveLog();
     void disconnectCurrentSource();
     void reconnectCurrentSource();
     void copyFullPath();
@@ -231,6 +231,7 @@ class MainWindow : public QMainWindow {
     void persistSessionState();
     void registerAdbLogcatSource( CrawlerWidget* crawler );
     void updateLiveTabAppearance( CrawlerWidget* crawler );
+    void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
 
     WindowSession session_;
     QString loadingFileName;
@@ -239,6 +240,7 @@ class MainWindow : public QMainWindow {
     QActionGroup* recentFilesGroup;
 
     QMenu* fileMenu;
+    QMenu* saveCurrentLiveLogMenu;
     QMenu* recentFilesMenu;
     QMenu* editMenu;
     QMenu* viewMenu;
@@ -275,7 +277,8 @@ class MainWindow : public QMainWindow {
     QAction* goToLineAction;
     QAction* findAction;
     QAction* clearLogAction;
-    QAction* saveCurrentLiveLogAction;
+    QAction* saveCurrentLiveLogStripAnsiAction;
+    QAction* saveCurrentLiveLogPreserveAnsiAction;
     QAction* disconnectSourceAction;
     QAction* reconnectSourceAction;
     QAction* copyPathToClipboardAction;

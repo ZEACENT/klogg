@@ -209,11 +209,16 @@ bool AdbLogcatSource::clearAndRestart()
 
 bool AdbLogcatSource::bindOutputFile( const QString& outputPath )
 {
+    return bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip );
+}
+
+bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
+{
     if ( !logData_ ) {
         return false;
     }
 
-    if ( !logData_->bindOutputFile( outputPath ) ) {
+    if ( !logData_->bindOutputFile( outputPath, ansiMode ) ) {
         return false;
     }
 

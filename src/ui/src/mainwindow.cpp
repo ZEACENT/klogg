@@ -126,6 +126,57 @@ void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
 
 static constexpr auto ClipboardMaxTry = 5;
 
+class ScopedMainWindowShortcutSuspender {
+  public:
+    explicit ScopedMainWindowShortcutSuspender( QWidget* window )
+    {
+        if ( !window ) {
+            return;
+        }
+
+        for ( auto* action : window->findChildren<QAction*>() ) {
+            const auto shortcuts = action->shortcuts();
+            if ( shortcuts.isEmpty() ) {
+                continue;
+            }
+            actionShortcuts_.push_back( { action, shortcuts } );
+            action->setShortcuts( {} );
+        }
+
+        for ( auto* shortcut : window->findChildren<QShortcut*>() ) {
+            if ( !shortcut->isEnabled() ) {
+                continue;
+            }
+            disabledShortcuts_.push_back( shortcut );
+            shortcut->setEnabled( false );
+        }
+    }
+
+    ~ScopedMainWindowShortcutSuspender()
+    {
+        for ( const auto& actionShortcut : actionShortcuts_ ) {
+            if ( actionShortcut.action ) {
+                actionShortcut.action->setShortcuts( actionShortcut.shortcuts );
+            }
+        }
+
+        for ( auto* shortcut : disabledShortcuts_ ) {
+            if ( shortcut ) {
+                shortcut->setEnabled( true );
+            }
+        }
+    }
+
+  private:
+    struct ActionShortcuts {
+        QAction* action;
+        QList<QKeySequence> shortcuts;
+    };
+
+    std::vector<ActionShortcuts> actionShortcuts_;
+    std::vector<QShortcut*> disabledShortcuts_;
+};
+
 } // namespace
 
 QTranslator MainWindow::mTranslator;
@@ -378,8 +429,13 @@ void MainWindow::reTranslateUI()
 
     clearLogAction->setText( transAction( action::clearLogText ) );
     clearLogAction->setStatusTip( transAction( action::clearLogStatusTip ) );
-    saveCurrentLiveLogAction->setText( tr( "Save Live Log As..." ) );
-    saveCurrentLiveLogAction->setStatusTip( tr( "Persist the current live capture to a file" ) );
+    saveCurrentLiveLogMenu->setTitle( tr( "Save Live Log As" ) );
+    saveCurrentLiveLogStripAnsiAction->setText( tr( "Without ANSI Sequences..." ) );
+    saveCurrentLiveLogStripAnsiAction->setStatusTip(
+        tr( "Persist the current live capture to a file after removing ANSI sequences" ) );
+    saveCurrentLiveLogPreserveAnsiAction->setText( tr( "With ANSI Sequences..." ) );
+    saveCurrentLiveLogPreserveAnsiAction->setStatusTip(
+        tr( "Persist the current live capture to a file without modifying ANSI sequences" ) );
     disconnectSourceAction->setText( tr( "Disconnect Source" ) );
     disconnectSourceAction->setStatusTip( tr( "Stop streaming from the current live source" ) );
     reconnectSourceAction->setText( tr( "Reconnect Source" ) );
@@ -580,11 +636,26 @@ void MainWindow::createActions()
     clearLogAction->setStatusTip( tr( action::clearLogStatusTip ) );
     connect( clearLogAction, &QAction::triggered, this, [ this ]( auto ) { this->clearLog(); } );
 
-    saveCurrentLiveLogAction = new QAction( tr( "Save Live Log As..." ), this );
-    saveCurrentLiveLogAction->setStatusTip(
-        tr( "Persist the current live capture to a file" ) );
-    connect( saveCurrentLiveLogAction, &QAction::triggered, this,
-             [ this ]( auto ) { this->saveCurrentLiveLog(); } );
+    saveCurrentLiveLogMenu = new QMenu( tr( "Save Live Log As" ), this );
+    saveCurrentLiveLogMenu->setObjectName( QStringLiteral( "saveCurrentLiveLogMenu" ) );
+    saveCurrentLiveLogStripAnsiAction = new QAction( tr( "Without ANSI Sequences..." ), this );
+    saveCurrentLiveLogStripAnsiAction->setObjectName(
+        QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) );
+    saveCurrentLiveLogStripAnsiAction->setStatusTip(
+        tr( "Persist the current live capture to a file after removing ANSI sequences" ) );
+    connect( saveCurrentLiveLogStripAnsiAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->saveCurrentLiveLog( LiveLogSaveAnsiMode::Strip ); } );
+
+    saveCurrentLiveLogPreserveAnsiAction = new QAction( tr( "With ANSI Sequences..." ), this );
+    saveCurrentLiveLogPreserveAnsiAction->setObjectName(
+        QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) );
+    saveCurrentLiveLogPreserveAnsiAction->setStatusTip(
+        tr( "Persist the current live capture to a file without modifying ANSI sequences" ) );
+    connect( saveCurrentLiveLogPreserveAnsiAction, &QAction::triggered, this,
+             [ this ]( auto ) { this->saveCurrentLiveLog( LiveLogSaveAnsiMode::Preserve ); } );
+    saveCurrentLiveLogMenu->addAction( saveCurrentLiveLogStripAnsiAction );
+    saveCurrentLiveLogMenu->addAction( saveCurrentLiveLogPreserveAnsiAction );
+    saveCurrentLiveLogMenu->setEnabled( false );
 
     disconnectSourceAction = new QAction( tr( "Disconnect Source" ), this );
     disconnectSourceAction->setStatusTip(
@@ -867,7 +938,7 @@ void MainWindow::createMenus()
 
     fileMenu->addAction( optionsAction );
     fileMenu->addSeparator();
-
+    fileMenu->addMenu( saveCurrentLiveLogMenu );
     fileMenu->addSeparator();
     fileMenu->addAction( exitAction );
 
@@ -883,7 +954,7 @@ void MainWindow::createMenus()
     editMenu->addAction( openContainingFolderAction );
     editMenu->addSeparator();
     editMenu->addAction( openInEditorAction );
-    editMenu->addAction( saveCurrentLiveLogAction );
+    editMenu->addMenu( saveCurrentLiveLogMenu );
     editMenu->addAction( clearLogAction );
     editMenu->addAction( disconnectSourceAction );
     editMenu->addAction( reconnectSourceAction );
@@ -1299,7 +1370,7 @@ void MainWindow::clearLog()
     }
 }
 
-void MainWindow::saveCurrentLiveLog()
+void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 {
     auto* crawler = currentCrawlerWidget();
     if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
@@ -1317,14 +1388,18 @@ void MainWindow::saveCurrentLiveLog()
             = QDir::home().filePath( session_.getDisplayName( crawler ) + QStringLiteral( ".log" ) );
     }
 
-    const auto outputPath
-        = QFileDialog::getSaveFileName( this, tr( "Save live log" ), suggestedPath,
-                                        tr( "Log files (*.log *.txt);;All files (*)" ) );
+    QString outputPath;
+    {
+        ScopedMainWindowShortcutSuspender shortcutSuspender( this );
+        outputPath = QFileDialog::getSaveFileName(
+            this, tr( "Save live log" ), suggestedPath,
+            tr( "Log files (*.log *.txt);;All files (*)" ) );
+    }
     if ( outputPath.isEmpty() ) {
         return;
     }
 
-    if ( !adbSource->bindOutputFile( outputPath ) ) {
+    if ( !adbSource->bindOutputFile( outputPath, ansiMode ) ) {
         QMessageBox::critical( this, tr( "Save live log" ),
                                tr( "Failed to bind live capture to %1" ).arg( outputPath ) );
         return;
@@ -1872,7 +1947,7 @@ void MainWindow::currentTabChanged( int index )
         followAction->setEnabled( Configuration::get().anyFileWatchEnabled() );
         addToFavoritesAction->setEnabled( false );
         addToFavoritesMenuAction->setEnabled( false );
-        saveCurrentLiveLogAction->setEnabled( false );
+        saveCurrentLiveLogMenu->setEnabled( false );
         disconnectSourceAction->setEnabled( false );
         reconnectSourceAction->setEnabled( false );
         openContainingFolderAction->setEnabled( false );
@@ -2437,7 +2512,7 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
     openInEditorAction->setEnabled( hasFilesystemPath );
     addToFavoritesAction->setEnabled( isFileDocument );
     addToFavoritesMenuAction->setEnabled( isFileDocument );
-    saveCurrentLiveLogAction->setEnabled( isLiveDocument );
+    saveCurrentLiveLogMenu->setEnabled( isLiveDocument );
 
     auto* adbSource = isLiveDocument ? session_.getAdbLogcatSource( crawler ) : nullptr;
     const auto sourceState

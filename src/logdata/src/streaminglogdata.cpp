@@ -24,6 +24,9 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
         if ( boundOutputHandle_.isOpen() ) {
             boundOutputHandle_.flush();
         }
+        if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
+            captureStore_.flush();
+        }
     } );
 
 }
@@ -44,7 +47,8 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto previousLineCount = captureStore_.lineCount();
     captureStore_.appendUtf8( data );
     const auto currentLineCount = captureStore_.lineCount();
-    if ( currentLineCount != previousLineCount ) {
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
+         && currentLineCount != previousLineCount ) {
         writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
                                    currentLineCount - previousLineCount );
     }
@@ -60,9 +64,12 @@ void StreamingLogData::finishInput()
     const auto previousLineCount = captureStore_.lineCount();
     captureStore_.finishInput();
     const auto currentLineCount = captureStore_.lineCount();
-    if ( currentLineCount != previousLineCount ) {
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
+         && currentLineCount != previousLineCount ) {
         writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
                                    currentLineCount - previousLineCount );
+    }
+    if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
@@ -76,7 +83,7 @@ void StreamingLogData::clearCapture()
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
-    if ( !boundOutputFile_.isEmpty() ) {
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundOutputFile_.isEmpty() ) {
         openDisplayOutputFile( boundOutputFile_ );
     }
 
@@ -93,8 +100,31 @@ void StreamingLogData::clearCapture()
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
 {
+    return bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip );
+}
+
+bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
+{
     stopOutputFlushTimer();
-    const auto result = openDisplayOutputFile( outputPath );
+    outputSaveAnsiMode_ = ansiMode;
+
+    if ( outputPath.isEmpty() ) {
+        closeDisplayOutputFile();
+        captureStore_.bindOutputFile( QString{} );
+        return true;
+    }
+
+    bool result = false;
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
+        closeDisplayOutputFile();
+        result = captureStore_.bindOutputFile( outputPath );
+        boundOutputFile_ = result ? outputPath : QString{};
+    }
+    else {
+        captureStore_.bindOutputFile( QString{} );
+        result = openDisplayOutputFile( outputPath );
+    }
+
     if ( !outputPath.isEmpty() && result ) {
         startOutputFlushTimer();
     }
@@ -119,6 +149,7 @@ QString StreamingLogData::capturePath() const
 void StreamingLogData::deleteCaptureFiles()
 {
     closeDisplayOutputFile();
+    captureStore_.bindOutputFile( QString{} );
     captureStore_.deleteCaptureFiles();
 }
 
@@ -315,13 +346,9 @@ bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount c
 
     qint64 unflushedBytes = 0;
     LinesCount::UnderlyingType unflushedLines = 0;
-    const auto displayMode = ansiProcessingMode_ == AnsiProcessingMode::Plain
-        ? AnsiProcessingMode::Plain
-        : AnsiProcessingMode::Strip;
-
     const auto lines = getLines( first, count );
     for ( const auto& line : lines ) {
-        const auto outputLine = processAnsiSequences( line, displayMode ).text.toUtf8();
+        const auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
         if ( boundOutputHandle_.write( outputLine ) != outputLine.size()
              || boundOutputHandle_.write( "\n", 1 ) != 1 ) {
             closeDisplayOutputFile();
