@@ -158,6 +158,44 @@ def _check_unguarded_platform_helper(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+def _check_unwaited_text_pixel_probe(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag main-view text pixel probes that grab a viewport immediately.
+
+    PR #17 exposed this on Windows x86 / Qt5: the test rendered, grabbed the
+    viewport, and asserted text pixels before the asynchronous paint pipeline had
+    produced a text frame. macOS and Linux hid the race locally. Keep this check
+    narrow to the textPixelsInLeftBand/rightBand regression-test pattern.
+    """
+    if path.name != "crawlerwidget_test.cpp" or ALLOW_MARKER in text:
+        return []
+
+    lines = text.splitlines()
+    findings: list[tuple[int, str]] = []
+    for i, line in enumerate(lines, start=1):
+        if "grabMainViewport(" not in line or "=" not in line:
+            continue
+
+        window_start = max( 0, i - 20 )
+        context_before = "\n".join(lines[window_start : i - 1])
+        context_after = "\n".join(lines[i - 1 : min(len(lines), i + 25)])
+        if (
+            "textPixelsInLeftBand" in context_after
+            and "textPixelsInRightBand" in context_after
+            and "waitUiState" not in context_before
+        ):
+            findings.append(
+                (
+                    i,
+                    "Main-view text pixel probes must wait for a rendered text frame "
+                    "before asserting pixel counts. Wrap render/grab/sampling in "
+                    "waitUiState() so slower Qt/Windows runners do not grab a blank "
+                    "intermediate frame.",
+                )
+            )
+
+    return findings
+
+
 _GUARD_RE = re.compile(r"^\s*#\s*if(?:def|n?def)?\s+(Q_OS_\w+)")
 _ELSE_RE = re.compile(r"^\s*#\s*else")
 _ENDIF_RE = re.compile(r"^\s*#\s*endif")
@@ -198,6 +236,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "unguarded-platform-helper",
         "check": _check_unguarded_platform_helper,
+    },
+    {
+        "name": "unwaited-text-pixel-probe",
+        "check": _check_unwaited_text_pixel_probe,
     },
 ]
 
@@ -252,7 +294,7 @@ def lint_file(path: Path) -> int:
             print(f"  at {path}:{line_num}")
             print(f"  {message}")
             print()
-            issues += len(findings)
+            issues += 1
 
     return issues
 

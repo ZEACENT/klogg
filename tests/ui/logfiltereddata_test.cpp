@@ -1447,17 +1447,24 @@ SCENARIO( "search with empty or invalid regex does not crash",
 
     SECTION( "invalid regex does not crash" )
     {
-        // Invalid regex like unmatched parenthesis
         SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
                                           &LogFilteredData::searchProgressed };
         auto pattern = RegularExpressionPattern( "(", false, false, false, false );
-        // The RegularExpression constructor should mark this as invalid,
-        // so runSearch should handle it gracefully
         RegularExpression hsExpression{ pattern };
-        if ( !hsExpression.isValid() ) {
-            // Invalid regex should not produce matches
-            REQUIRE( filtered_data->getNbMatches() == 0_lcount );
-        }
+        REQUIRE_FALSE( hsExpression.isValid() );
+
+        filtered_data->runSearch( pattern );
+        int progress = 0;
+        int consumedSignals = 0;
+        do {
+            while ( searchProgressSpy.count() <= consumedSignals ) {
+                REQUIRE( searchProgressSpy.wait() );
+            }
+            const auto progressArgs = searchProgressSpy.at( consumedSignals );
+            ++consumedSignals;
+            progress = progressArgs.at( 1 ).toInt();
+        } while ( progress < 100 );
+        REQUIRE( filtered_data->getNbMatches() == 0_lcount );
     }
 }
 

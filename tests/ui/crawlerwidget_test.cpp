@@ -1078,30 +1078,36 @@ SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization"
     REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() > 0 );
     REQUIRE( crawlerVisitor.mainTextAreaCacheInvalid() );
 
-    crawlerVisitor.render();
-
-    const auto image = crawlerVisitor.grabMainViewport();
+    QImage image;
     const auto baseColor = crawlerVisitor.mainBaseColor();
-    const auto sampleTop = std::max( 0, crawlerVisitor.mainCharHeight() / 4 );
-    const auto sampleBottom = std::min( image.height(), crawlerVisitor.mainCharHeight() );
-    const auto sampleLeft = image.width() * 2 / 3;
     int textPixelsInLeftBand = 0;
     int textPixelsInRightBand = 0;
     int rightmostTextPixel = -1;
 
-    for ( int y = sampleTop; y < sampleBottom; ++y ) {
-        for ( int x = crawlerVisitor.mainLeftMargin(); x < image.width() / 3; ++x ) {
-            if ( image.pixelColor( x, y ) != baseColor ) {
-                ++textPixelsInLeftBand;
+    REQUIRE( waitUiState( [ & ] {
+        crawlerVisitor.render();
+        image = crawlerVisitor.grabMainViewport();
+        const auto sampleLeft = image.width() * 2 / 3;
+        textPixelsInLeftBand = 0;
+        textPixelsInRightBand = 0;
+        rightmostTextPixel = -1;
+
+        for ( int y = 0; y < image.height(); ++y ) {
+            for ( int x = crawlerVisitor.mainLeftMargin(); x < image.width() / 3; ++x ) {
+                if ( image.pixelColor( x, y ) != baseColor ) {
+                    ++textPixelsInLeftBand;
+                }
+            }
+            for ( int x = sampleLeft; x < image.width() - 2; ++x ) {
+                if ( image.pixelColor( x, y ) != baseColor ) {
+                    ++textPixelsInRightBand;
+                    rightmostTextPixel = std::max( rightmostTextPixel, x );
+                }
             }
         }
-        for ( int x = sampleLeft; x < image.width() - 2; ++x ) {
-            if ( image.pixelColor( x, y ) != baseColor ) {
-                ++textPixelsInRightBand;
-                rightmostTextPixel = std::max( rightmostTextPixel, x );
-            }
-        }
-    }
+
+        return textPixelsInLeftBand > 0 && textPixelsInRightBand > 0;
+    } ) );
 
     INFO( "image=" << image.width() << "x" << image.height()
                    << " charWidth=" << crawlerVisitor.mainCharWidth()

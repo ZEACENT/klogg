@@ -237,11 +237,12 @@ public:
     using OperationGeneration = quint64;
 
     // Generation of the search currently active (most recently started via
-    // search() / updateSearch()).  Stale signals from superseded searches
-    // carry an older generation and are filtered out by the worker before
-    // re-emission; downstream consumers can additionally compare against
-    // this value to drop signals that were already in their event queue
-    // when the search was replaced.
+    // search()).  updateSearch() keeps the same generation because it extends
+    // the same logical search criteria.  Stale signals from superseded logical
+    // searches carry an older generation and are filtered out by the worker
+    // before re-emission; downstream consumers can additionally compare against
+    // this value to drop signals that were already in their event queue when
+    // the search was replaced.
     OperationGeneration currentGeneration() const { return operationGeneration_.load(); }
 
     // Advance the generation counter without launching a worker thread.
@@ -250,7 +251,11 @@ public:
     // from a previous real search would still match the active generation
     // and corrupt the freshly-displayed cached state.  Returns the new
     // generation value.
-    OperationGeneration bumpGeneration() { return operationGeneration_.fetch_add( 1 ) + 1; }
+    OperationGeneration bumpGeneration()
+    {
+        operationId_.fetch_add( 1 );
+        return operationGeneration_.fetch_add( 1 ) + 1;
+    }
 
 Q_SIGNALS:
     // Sent during the indexing process to signal progress
@@ -265,11 +270,14 @@ Q_SIGNALS:
     void searchFinished();
 
 private:
-    void connectSignalsAndRun( SearchOperation* operationRequested, OperationGeneration generation );
+    using OperationId = quint64;
+
+    void connectSignalsAndRun( SearchOperation* operationRequested, OperationGeneration generation,
+                               OperationId operationId );
     void emitSearchProgressedOnOwnerThread( LinesCount nbMatches, int percent,
                                             LineNumber initialLine,
-                                            OperationGeneration generation );
-    void emitSearchFinishedOnOwnerThread( OperationGeneration generation );
+                                            OperationGeneration generation, OperationId operationId );
+    void emitSearchFinishedOnOwnerThread( OperationGeneration generation, OperationId operationId );
 
     // Async dispatch ----------------------------------------------------------
     // search() / updateSearch() enqueue a SearchRequest and return immediately.
@@ -283,11 +291,13 @@ private:
         LineNumber endLine;
         LineNumber position; // only for Update
         OperationGeneration generation;
+        OperationId operationId;
         std::shared_ptr<RegularExpression> compiled;
     };
 
     void dispatchLoop();
     void enqueueRequest( SearchRequest request );
+    void joinOperationThread();
 
     std::thread dispatchThread_;
     std::mutex requestMutex_;
@@ -308,6 +318,7 @@ private:
     SearchData searchData_;
 
     std::atomic<OperationGeneration> operationGeneration_{ 0 };
+    std::atomic<OperationId> operationId_{ 0 };
 
     // Cached compiled regular expression to avoid recompilation on incremental
     // search updates.  The Vectorscan database compilation is expensive; caching
@@ -316,6 +327,7 @@ private:
 
     // Declared last so it is destroyed first.  The destructor body joins this thread
     // before other members are destroyed, guaranteeing the task has fully exited.
+    std::mutex opThreadMutex_;
     std::thread opThread_;
 };
 

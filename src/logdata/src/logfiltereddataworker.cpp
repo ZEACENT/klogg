@@ -210,13 +210,12 @@ LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
     // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequested_.set();
-    if ( opThread_.joinable() ) {
-        opThread_.join();
-    }
+    joinOperationThread();
 }
 
 void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequested,
-                                                  OperationGeneration generation )
+                                                  OperationGeneration generation,
+                                                  OperationId operationId )
 {
     // SearchOperation is a short-lived QObject created on the std::thread. Using
     // a queued signal-to-signal hop into this worker can leave queued metacalls
@@ -225,12 +224,16 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
     // back onto the owner's thread to avoid cross-thread QObject signal/disconnect
     // races during teardown.
     connect( operationRequested, &SearchOperation::searchProgressed, this,
-             [ this, generation ]( LinesCount nbMatches, int percent, LineNumber initialLine ) {
-                 emitSearchProgressedOnOwnerThread( nbMatches, percent, initialLine, generation );
+             [ this, generation, operationId ]( LinesCount nbMatches, int percent,
+                                                LineNumber initialLine ) {
+                 emitSearchProgressedOnOwnerThread( nbMatches, percent, initialLine, generation,
+                                                    operationId );
              },
              Qt::DirectConnection );
     connect( operationRequested, &SearchOperation::searchFinished, this,
-             [ this, generation ] { emitSearchFinishedOnOwnerThread( generation ); },
+             [ this, generation, operationId ] {
+                 emitSearchFinishedOnOwnerThread( generation, operationId );
+             },
              Qt::DirectConnection );
 
     operationRequested->run( searchData_ );
@@ -240,11 +243,12 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
                                     LineNumber endLine )
 {
     const auto generation = operationGeneration_.fetch_add( 1 ) + 1;
+    const auto operationId = operationId_.fetch_add( 1 ) + 1;
     LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
     compiledExpression_ = std::make_shared<RegularExpression>( regExp );
 
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
-                                   generation, compiledExpression_ } );
+                                   generation, operationId, compiledExpression_ } );
 }
 
 void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp,
@@ -264,11 +268,12 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
     // Only runSearch() (new criteria) and bumpGeneration() (explicit
     // abandon-all-in-flight path in replaceCurrentSearch) advance the counter.
     const auto generation = operationGeneration_.load();
+    const auto operationId = operationId_.fetch_add( 1 ) + 1;
     LOG_INFO << "Search update requested from " << position.get()
              << " (async dispatch, gen " << generation << ")";
 
     enqueueRequest( SearchRequest{ SearchRequest::Type::Update, regExp, startLine, endLine, position,
-                                   generation, compiledExpression_ } );
+                                   generation, operationId, compiledExpression_ } );
 }
 
 void LogFilteredDataWorker::enqueueRequest( SearchRequest request )
@@ -303,42 +308,47 @@ void LogFilteredDataWorker::dispatchLoop()
         // doing any work. Serialization with the previous operation is
         // provided by joining opThread_ below; the worker itself acquires
         // operationsMutex_ for the duration of its run.
-        if ( request.generation != operationGeneration_.load() ) {
+        if ( request.generation != operationGeneration_.load()
+             || request.operationId != operationId_.load() ) {
             continue;
         }
 
-        if ( opThread_.joinable() ) {
-            opThread_.join();
-        }
+        joinOperationThread();
         interruptRequested_.clear();
 
         QSemaphore operationStarted;
         if ( request.type == SearchRequest::Type::Full ) {
+            std::lock_guard<std::mutex> opLock( opThreadMutex_ );
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
                     ScopedLock operationLock( operationsMutex_ );
-                    if ( request.generation != operationGeneration_.load() ) {
+                    if ( request.generation != operationGeneration_.load()
+                         || request.operationId != operationId_.load() ) {
                         return;
                     }
                     auto operationRequested = std::make_unique<FullSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
                         request.endLine, request.compiled );
-                    connectSignalsAndRun( operationRequested.get(), request.generation );
+                    connectSignalsAndRun( operationRequested.get(), request.generation,
+                                          request.operationId );
                 } );
         }
         else {
+            std::lock_guard<std::mutex> opLock( opThreadMutex_ );
             opThread_ = std::thread(
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
                     ScopedLock operationLock( operationsMutex_ );
-                    if ( request.generation != operationGeneration_.load() ) {
+                    if ( request.generation != operationGeneration_.load()
+                         || request.operationId != operationId_.load() ) {
                         return;
                     }
                     auto operationRequested = std::make_unique<UpdateSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
                         request.endLine, request.position, request.compiled );
-                    connectSignalsAndRun( operationRequested.get(), request.generation );
+                    connectSignalsAndRun( operationRequested.get(), request.generation,
+                                          request.operationId );
                 } );
         }
         operationStarted.acquire();
@@ -364,6 +374,12 @@ void LogFilteredDataWorker::waitForDone()
     // destructor, this does NOT shut down the dispatch thread — subsequent
     // updateSearch calls must still be processable after a search completes.
     // The dispatch thread is only shut down in the destructor.
+    joinOperationThread();
+}
+
+void LogFilteredDataWorker::joinOperationThread()
+{
+    std::lock_guard<std::mutex> lock( opThreadMutex_ );
     if ( opThread_.joinable() ) {
         opThread_.join();
     }
@@ -371,11 +387,12 @@ void LogFilteredDataWorker::waitForDone()
 
 void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatches, int percent,
                                                                LineNumber initialLine,
-                                                               OperationGeneration generation )
+                                                               OperationGeneration generation,
+                                                               OperationId operationId )
 {
     dispatchToObject(
-        [ this, nbMatches, percent, initialLine, generation ] {
-            if ( generation != operationGeneration_.load() ) {
+        [ this, nbMatches, percent, initialLine, generation, operationId ] {
+            if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
                 return;
             }
 
@@ -391,11 +408,12 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
         this );
 }
 
-void LogFilteredDataWorker::emitSearchFinishedOnOwnerThread( OperationGeneration generation )
+void LogFilteredDataWorker::emitSearchFinishedOnOwnerThread( OperationGeneration generation,
+                                                             OperationId operationId )
 {
     dispatchToObject(
-        [ this, generation ] {
-            if ( generation != operationGeneration_.load() ) {
+        [ this, generation, operationId ] {
+            if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
                 return;
             }
             Q_EMIT searchFinished();
