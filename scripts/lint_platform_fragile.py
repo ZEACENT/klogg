@@ -71,6 +71,16 @@ PATTERNS: list[dict] = [
             "or compare QFileInfo(path).fileName() instead."
         ),
     },
+    {
+        "name": "whoami fake process-failure test",
+        "regex": re.compile(r'QStringLiteral\s*\(\s*"whoami\.exe"\s*\)'),
+        "fix": (
+            "Do not use whoami.exe to simulate a failed Windows process. It can "
+            "outlive short startup grace windows on slower CI runners and make "
+            "connectTransport() report success. Create a temporary script that "
+            "exits with a non-zero status instead."
+        ),
+    },
 ]
 
 # Multi-line patterns: checked separately via whole-file analysis.

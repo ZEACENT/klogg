@@ -150,6 +150,27 @@ class TestAdbProcessTransport : public AdbProcessTransport {
     }
 };
 
+class ImmediateFailureAdbProcessTransport : public AdbProcessTransport {
+  public:
+    ImmediateFailureAdbProcessTransport()
+        : AdbProcessTransport( QString{}, QStringLiteral( "serial-123" ), {} )
+    {
+    }
+
+  protected:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return Command{ QStringLiteral( "cmd" ),
+                        { QStringLiteral( "/c" ), QStringLiteral( "exit" ),
+                          QStringLiteral( "/b" ), QStringLiteral( "7" ) } };
+#else
+        return Command{ QStringLiteral( "/bin/sh" ),
+                        { QStringLiteral( "-c" ), QStringLiteral( "exit 7" ) } };
+#endif
+    }
+};
+
 class TestIosLogProcessTransport : public IosLogProcessTransport {
   public:
     using IosLogProcessTransport::IosLogProcessTransport;
@@ -614,11 +635,7 @@ TEST_CASE( "AdbProcessTransport listDevices returns an error when adb cannot sta
 
 TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transport errors" )
 {
-#ifdef Q_OS_WIN
-    TestAdbProcessTransport transport( QStringLiteral( "whoami.exe" ), QStringLiteral( "serial-123" ), {} );
-#else
-    TestAdbProcessTransport transport( QStringLiteral( "false" ), QStringLiteral( "serial-123" ), {} );
-#endif
+    ImmediateFailureAdbProcessTransport transport;
     SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
     SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
 
