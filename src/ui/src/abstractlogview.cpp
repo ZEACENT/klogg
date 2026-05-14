@@ -1201,11 +1201,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // Height including the potentially invisible last line
     const auto wholeHeight = static_cast<int>( getNbVisibleLines().get() ) * charHeight_;
     // Height in pixels of the "pull to follow" bottom bar.
-    const auto pullToFollowHeight
-        = mapPullToFollowLength( followElasticHook_.size() )
-          + ( followElasticHook_.isHooked()
-                  ? ( wholeHeight - viewport()->height() ) + PullToFollowHookedHeight
-                  : 0 );
+    const auto pullToFollowHeight = mapPullToFollowLength( followElasticHook_.size() );
 
     if ( pullToFollowHeight && ( pullToFollowCache_.nb_columns_ != getNbVisibleCols() ) ) {
         LOG_DEBUG << "Drawing pull to follow bar";
@@ -1227,18 +1223,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     int drawingPullToFollowTopPosition
         = std::min( drawingTopPosition + effectiveHeight, viewport()->height() );
 
-    // This is to cover the special case where there is less than a screenful
-    // worth of data, we want to see the document from the top, rather than
-    // pushing the first couple of lines above the viewport.
-    if ( followElasticHook_.isHooked()
-         && ( logData_->getNbLine() + LinesCount( 1 ) < getNbVisibleLines() ) ) {
-        drawingTopOffset_ = 0;
-        drawingTopPosition = ( wholeHeight - viewport()->height() ) + PullToFollowHookedHeight;
-        drawingPullToFollowTopPosition
-            = std::min( drawingTopPosition + viewport()->height() - PullToFollowHookedHeight,
-                        viewport()->height() );
-    }
-    else if ( shouldBottomAlignFrame() && !followElasticHook_.isHooked() ) {
+    if ( shouldBottomAlignFrame() ) {
         const int hiddenHeightPx
             = std::max( 0, effectiveHeight - viewport()->height() );
         // Use exact pixel offset instead of line-grid snapping so the last line

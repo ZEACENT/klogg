@@ -1,8 +1,15 @@
 #include "streaminglogdata.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QMetaObject>
 
 #include "logfiltereddata.h"
+
+namespace {
+constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
+constexpr LinesCount::UnderlyingType OutputFlushLinesThreshold = 1000;
+}
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     : SearchableLogData()
@@ -14,40 +21,34 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
 
     outputFlushTimer_.setInterval( 1000 );
     connect( &outputFlushTimer_, &QTimer::timeout, this, [this] {
-        captureStore_.flush();
+        if ( boundOutputHandle_.isOpen() ) {
+            boundOutputHandle_.flush();
+        }
     } );
 
-    captureStore_.setOutputFlushedCallback( [this] {
-        // Restart timer so the 1-second countdown begins after each threshold flush.
-        // Use QMetaObject::invokeMethod to ensure QTimer is accessed from its owning thread.
-        QMetaObject::invokeMethod( &outputFlushTimer_, [this] {
-            if ( outputFlushTimer_.isActive() ) {
-                outputFlushTimer_.start();
-            }
-        }, Qt::QueuedConnection );
-    } );
 }
 
 StreamingLogData::~StreamingLogData()
 {
-    // Clear callback before members are destroyed to prevent use-after-free.
-    // captureStore_ is declared before outputFlushTimer_, so the timer is
-    // destroyed first; without this, CaptureStore's destructor could fire
-    // the callback against a dead timer.
-    captureStore_.setOutputFlushedCallback( nullptr );
+    closeDisplayOutputFile();
 }
 
 void StreamingLogData::appendUtf8( const QByteArray& data )
 {
     // Restart the flush timer if new data arrives while an output file is bound
     // but the timer is stopped (e.g. after finishInput from a reconnect cycle).
-    if ( !outputFlushTimer_.isActive() && !captureStore_.boundOutputFile().isEmpty() ) {
+    if ( !outputFlushTimer_.isActive() && !boundOutputFile_.isEmpty() ) {
         startOutputFlushTimer();
     }
 
     const auto previousLineCount = captureStore_.lineCount();
     captureStore_.appendUtf8( data );
-    if ( captureStore_.lineCount() != previousLineCount ) {
+    const auto currentLineCount = captureStore_.lineCount();
+    if ( currentLineCount != previousLineCount ) {
+        writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
+                                   currentLineCount - previousLineCount );
+    }
+    if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
@@ -58,9 +59,15 @@ void StreamingLogData::finishInput()
     stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
     captureStore_.finishInput();
-    if ( captureStore_.lineCount() != previousLineCount ) {
+    const auto currentLineCount = captureStore_.lineCount();
+    if ( currentLineCount != previousLineCount ) {
+        writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
+                                   currentLineCount - previousLineCount );
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
+    }
+    if ( boundOutputHandle_.isOpen() ) {
+        boundOutputHandle_.flush();
     }
 }
 
@@ -69,11 +76,14 @@ void StreamingLogData::clearCapture()
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
+    if ( !boundOutputFile_.isEmpty() ) {
+        openDisplayOutputFile( boundOutputFile_ );
+    }
 
     // clear() internally rebinds the output file if one was bound.
     // Only restart the timer if it was running before the clear,
     // so a clearCapture after finishInput does not revive the timer.
-    if ( timerWasActive && !captureStore_.boundOutputFile().isEmpty() ) {
+    if ( timerWasActive && !boundOutputFile_.isEmpty() ) {
         startOutputFlushTimer();
     }
 
@@ -84,7 +94,7 @@ void StreamingLogData::clearCapture()
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
 {
     stopOutputFlushTimer();
-    const auto result = captureStore_.bindOutputFile( outputPath );
+    const auto result = openDisplayOutputFile( outputPath );
     if ( !outputPath.isEmpty() && result ) {
         startOutputFlushTimer();
     }
@@ -93,7 +103,7 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath )
 
 QString StreamingLogData::boundOutputFile() const
 {
-    return captureStore_.boundOutputFile();
+    return boundOutputFile_;
 }
 
 QString StreamingLogData::captureId() const
@@ -108,6 +118,7 @@ QString StreamingLogData::capturePath() const
 
 void StreamingLogData::deleteCaptureFiles()
 {
+    closeDisplayOutputFile();
     captureStore_.deleteCaptureFiles();
 }
 
@@ -259,6 +270,78 @@ void StreamingLogData::startOutputFlushTimer()
 void StreamingLogData::stopOutputFlushTimer()
 {
     outputFlushTimer_.stop();
+}
+
+bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
+{
+    const auto outputPathCopy = outputPath;
+    closeDisplayOutputFile();
+    boundOutputFile_ = outputPathCopy;
+
+    if ( boundOutputFile_.isEmpty() ) {
+        return true;
+    }
+
+    QDir().mkpath( QFileInfo( boundOutputFile_ ).absolutePath() );
+    boundOutputHandle_.setFileName( boundOutputFile_ );
+    if ( !boundOutputHandle_.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+        boundOutputFile_.clear();
+        return false;
+    }
+
+    if ( !writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount() ) ) {
+        closeDisplayOutputFile();
+        return false;
+    }
+
+    boundOutputHandle_.flush();
+    return true;
+}
+
+void StreamingLogData::closeDisplayOutputFile()
+{
+    if ( boundOutputHandle_.isOpen() ) {
+        boundOutputHandle_.flush();
+        boundOutputHandle_.close();
+    }
+    boundOutputFile_.clear();
+}
+
+bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount count )
+{
+    if ( !boundOutputHandle_.isOpen() || count <= 0_lcount ) {
+        return true;
+    }
+
+    qint64 unflushedBytes = 0;
+    LinesCount::UnderlyingType unflushedLines = 0;
+    const auto displayMode = ansiProcessingMode_ == AnsiProcessingMode::Plain
+        ? AnsiProcessingMode::Plain
+        : AnsiProcessingMode::Strip;
+
+    const auto lines = getLines( first, count );
+    for ( const auto& line : lines ) {
+        const auto outputLine = processAnsiSequences( line, displayMode ).text.toUtf8();
+        if ( boundOutputHandle_.write( outputLine ) != outputLine.size()
+             || boundOutputHandle_.write( "\n", 1 ) != 1 ) {
+            closeDisplayOutputFile();
+            return false;
+        }
+
+        unflushedBytes += outputLine.size() + 1;
+        ++unflushedLines;
+        if ( unflushedBytes >= OutputFlushBytesThreshold
+             || unflushedLines >= OutputFlushLinesThreshold ) {
+            if ( !boundOutputHandle_.flush() ) {
+                closeDisplayOutputFile();
+                return false;
+            }
+            unflushedBytes = 0;
+            unflushedLines = 0;
+        }
+    }
+
+    return true;
 }
 
 klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount number ) const

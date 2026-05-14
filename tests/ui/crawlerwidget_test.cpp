@@ -636,6 +636,19 @@ SCENARIO( "Crawler widget search", "[ui]" )
                         REQUIRE( offsetBefore >= 0 );
                     }
                 }
+
+                AND_WHEN( "follow mode is enabled at the filtered bottom" )
+                {
+                    const auto offsetBeforeFollow = crawlerVisitor.filteredDrawingTopOffset();
+                    crawlerVisitor.enableFollowMode( true );
+                    crawlerVisitor.render();
+
+                    THEN( "follow mode does not reserve a bottom bar or move the text area" )
+                    {
+                        REQUIRE( crawlerVisitor.isFollowModeEnabled() );
+                        REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == offsetBeforeFollow );
+                    }
+                }
             }
         }
 

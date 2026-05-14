@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include <QFile>
 #include <QRegularExpression>
 #include <QTimer>
 
@@ -55,6 +56,9 @@ class StreamingLogData : public SearchableLogData {
     void scheduleLoadingFinished();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
+    bool openDisplayOutputFile( const QString& outputPath );
+    void closeDisplayOutputFile();
+    bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
 
   private:
@@ -64,6 +68,8 @@ class StreamingLogData : public SearchableLogData {
     AnsiProcessingMode ansiProcessingMode_ = AnsiProcessingMode::Plain;
     bool loadingFinishedQueued_ = false;
     QTimer outputFlushTimer_;
+    QString boundOutputFile_;
+    QFile boundOutputHandle_;
 };
 
 #endif

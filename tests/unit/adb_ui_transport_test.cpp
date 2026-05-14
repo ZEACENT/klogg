@@ -305,6 +305,38 @@ TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
                              QStringLiteral( "process name" ) } );
 }
 
+TEST_CASE( "IosLogProcessTransport passes color flags as pymobiledevice3 top-level options" )
+{
+    TestIosLogProcessTransport colorTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, true );
+    TestIosLogProcessTransport plainTransport(
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, false );
+
+    const auto colorCmd = colorTransport.streamingCommandForTest();
+    const auto plainCmd = plainTransport.streamingCommandForTest();
+
+#ifdef Q_OS_MAC
+    REQUIRE( colorCmd.arguments
+             == QStringList{ QStringLiteral( "-q" ), QStringLiteral( "/dev/null" ),
+                             QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                             QStringLiteral( "--color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
+#else
+    REQUIRE( colorCmd.arguments
+             == QStringList{ QStringLiteral( "--color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
+#endif
+
+    REQUIRE( plainCmd.arguments
+             == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
+                             QStringLiteral( "00008030-001C195E36D8802E" ) } );
+}
+
 TEST_CASE( "IosLogProcessTransport preserves empty quoted extra args" )
 {
     TestIosLogProcessTransport transport(

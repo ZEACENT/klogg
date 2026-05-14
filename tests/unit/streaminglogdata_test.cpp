@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QUuid>
 
@@ -159,6 +160,33 @@ TEST_CASE( "StreamingLogData strips ANSI before display and search views" )
     REQUIRE( colors[ 0 ].foreground == 0xde382b );
     REQUIRE( logData.getLinesRaw( 0_lnum, 1_lcount ).buildUtf8View()[ 0 ]
              == std::string_view{ "plain red text" } );
+}
+
+TEST_CASE( "StreamingLogData saves display text when ANSI rendering is enabled" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[32mI/App\x1b[0m first\n" ) );
+    logData.appendUtf8( QByteArrayLiteral( "\x1b[31mE/App\x1b[0m second\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    logData.finishInput();
+
+    logData.setAnsiProcessingMode( AnsiProcessingMode::Render );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath ) );
+    logData.bindOutputFile( QString{} );
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    REQUIRE( outputFile.readAll() == QByteArrayLiteral( "I/App first\nE/App second\n" ) );
 }
 
 TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )

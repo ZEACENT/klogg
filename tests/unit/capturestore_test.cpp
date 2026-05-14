@@ -413,7 +413,7 @@ TEST_CASE( "CaptureStore batched output defers flush below threshold" )
     CaptureStore store( makeCaptureId(), rootPath );
     REQUIRE( store.bindOutputFile( outputPath ) );
 
-    // Append a small amount of data (well below 64KB and 100 lines)
+    // Append a small amount of data (well below 1MB and 1000 lines)
     for ( int i = 0; i < 10; ++i ) {
         store.appendUtf8( QStringLiteral( "short-line-%1\n" ).arg( i ).toUtf8() );
     }
@@ -442,16 +442,16 @@ TEST_CASE( "CaptureStore batched output auto-flushes after byte threshold" )
     CaptureStore store( makeCaptureId(), rootPath );
     REQUIRE( store.bindOutputFile( outputPath ) );
 
-    // Append more than 64KB of data to trigger auto-flush
+    // Append more than 1MB of data to trigger auto-flush
     const QByteArray bigLine = QByteArray( 1024, 'X' ) + "\n";
-    for ( int i = 0; i < 70; ++i ) {
+    for ( int i = 0; i < 1040; ++i ) {
         store.appendUtf8( bigLine );
     }
 
-    // Data should have been auto-flushed (70KB > 64KB threshold)
+    // Data should have been auto-flushed (1040KB > 1MB threshold)
     QFile output( outputPath );
     REQUIRE( output.open( QIODevice::ReadOnly ) );
-    REQUIRE( output.size() > 64 * 1024 );
+    REQUIRE( output.size() > 1024 * 1024 );
 }
 
 TEST_CASE( "CaptureStore batched output auto-flushes after line threshold" )
@@ -462,12 +462,12 @@ TEST_CASE( "CaptureStore batched output auto-flushes after line threshold" )
     CaptureStore store( makeCaptureId(), rootPath );
     REQUIRE( store.bindOutputFile( outputPath ) );
 
-    // Append more than 100 lines (each small enough to stay under 64KB total)
-    for ( int i = 0; i < 110; ++i ) {
+    // Append more than 1000 lines (each small enough to stay under 1MB total)
+    for ( int i = 0; i < 1010; ++i ) {
         store.appendUtf8( QStringLiteral( "ln-%1\n" ).arg( i ).toUtf8() );
     }
 
-    // Data should have been auto-flushed (110 lines > 100 line threshold)
+    // Data should have been auto-flushed (1010 lines > 1000 line threshold)
     const auto content = readUtf8File( outputPath );
     REQUIRE( content.contains( QStringLiteral( "ln-0" ) ) );
 }

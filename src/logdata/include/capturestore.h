@@ -92,8 +92,8 @@ class CaptureStore {
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();
 
-    static constexpr qint64 OutputFlushBytesThreshold = 64 * 1024;
-    static constexpr int OutputFlushLinesThreshold = 100;
+    static constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
+    static constexpr int OutputFlushLinesThreshold = 1000;
 
   private:
     QString captureId_;
