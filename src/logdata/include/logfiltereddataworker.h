@@ -226,6 +226,12 @@ public:
     // Must be called before any reader detach to prevent use-after-close.
     void waitForDone();
 
+    // Cancels queued work, stops the dispatch thread, and blocks until any
+    // running operation has completed.  Use during owner teardown before
+    // detaching the reader; waitForDone() intentionally keeps dispatch alive
+    // for normal progress-completion waits.
+    void shutdownAndWait();
+
     // get the current indexing data
     SearchResults getSearchResults() const;
 

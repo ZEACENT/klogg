@@ -158,13 +158,13 @@ def _check_unguarded_platform_helper(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
-def _check_unwaited_text_pixel_probe(text: str, path: Path) -> list[tuple[int, str]]:
-    """Flag main-view text pixel probes that grab a viewport immediately.
+def _check_main_view_text_pixel_probe(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag main-view text pixel probes that assert on viewport grabs.
 
-    PR #17 exposed this on Windows x86 / Qt5: the test rendered, grabbed the
-    viewport, and asserted text pixels before the asynchronous paint pipeline had
-    produced a text frame. macOS and Linux hid the race locally. Keep this check
-    narrow to the textPixelsInLeftBand/rightBand regression-test pattern.
+    PR #17 exposed this on Windows x86 / Qt5: even when the test waited and
+    repeatedly grabbed the offscreen viewport, that runner could still return a
+    blank frame. Keep this check narrow to main-view text pixel counters; use
+    deterministic cache/layout assertions instead.
     """
     if path.name != "crawlerwidget_test.cpp" or ALLOW_MARKER in text:
         return []
@@ -175,21 +175,14 @@ def _check_unwaited_text_pixel_probe(text: str, path: Path) -> list[tuple[int, s
         if "grabMainViewport(" not in line or "=" not in line:
             continue
 
-        window_start = max( 0, i - 20 )
-        context_before = "\n".join(lines[window_start : i - 1])
         context_after = "\n".join(lines[i - 1 : min(len(lines), i + 25)])
-        if (
-            "textPixelsInLeftBand" in context_after
-            and "textPixelsInRightBand" in context_after
-            and "waitUiState" not in context_before
-        ):
+        if "textPixelsInLeftBand" in context_after and "textPixelsInRightBand" in context_after:
             findings.append(
                 (
                     i,
-                    "Main-view text pixel probes must wait for a rendered text frame "
-                    "before asserting pixel counts. Wrap render/grab/sampling in "
-                    "waitUiState() so slower Qt/Windows runners do not grab a blank "
-                    "intermediate frame.",
+                    "Main-view text pixel probes based on viewport grabs are flaky "
+                    "on Windows Qt5 offscreen runners. Assert deterministic cache "
+                    "or layout state instead of sampled text pixels.",
                 )
             )
 
@@ -238,8 +231,8 @@ MULTI_LINE_CHECKS: list[dict] = [
         "check": _check_unguarded_platform_helper,
     },
     {
-        "name": "unwaited-text-pixel-probe",
-        "check": _check_unwaited_text_pixel_probe,
+        "name": "main-view-text-pixel-probe",
+        "check": _check_main_view_text_pixel_probe,
     },
 ]
 

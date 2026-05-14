@@ -195,22 +195,12 @@ LogFilteredDataWorker::LogFilteredDataWorker( const SearchableLogData& sourceLog
 
 LogFilteredDataWorker::~LogFilteredDataWorker() noexcept
 {
-    // Shut down the dispatch thread first.
-    {
-        std::lock_guard<std::mutex> lock( requestMutex_ );
-        dispatchShutdown_ = true;
-    }
-    requestCv_.notify_one();
-    if ( dispatchThread_.joinable() ) {
-        dispatchThread_.join();
-    }
-
     // Signal any running task to stop, then wait for the thread to fully exit
     // before any other members are destroyed.  std::thread::join() guarantees
     // the OS thread has completely exited -- no race with internal Qt thread-pool
     // cleanup (QMutex::lock / QThread::isRunning crashes seen in Qt 5.15/6.9).
     interruptRequested_.set();
-    joinOperationThread();
+    shutdownAndWait();
 }
 
 void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequested,
@@ -374,6 +364,21 @@ void LogFilteredDataWorker::waitForDone()
     // destructor, this does NOT shut down the dispatch thread — subsequent
     // updateSearch calls must still be processable after a search completes.
     // The dispatch thread is only shut down in the destructor.
+    joinOperationThread();
+}
+
+void LogFilteredDataWorker::shutdownAndWait()
+{
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        dispatchShutdown_ = true;
+        pendingRequest_.reset();
+    }
+    requestCv_.notify_one();
+    if ( dispatchThread_.joinable() ) {
+        dispatchThread_.join();
+    }
+
     joinOperationThread();
 }
 

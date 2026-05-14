@@ -108,11 +108,11 @@ LogFilteredData::~LogFilteredData()
     }
 
     interruptSearch();
-    // Wait for any in-flight search operations to fully stop before
-    // detaching the file reader.  Without this, the worker thread can
-    // still be mid-read when the file handle is closed, causing
-    // STATUS_HEAP_CORRUPTION (0xC0000374) on Windows.
-    workerThread_.waitForDone();
+    // Cancel queued work and wait for any in-flight search operations to fully
+    // stop before detaching the file reader.  Without this, a queued search can
+    // start after the file handle is closed, causing STATUS_HEAP_CORRUPTION
+    // (0xC0000374) on Windows.
+    workerThread_.shutdownAndWait();
 
     workerThread_.blockSignals( true );
     disconnect( &workerThread_, nullptr, this, nullptr );
