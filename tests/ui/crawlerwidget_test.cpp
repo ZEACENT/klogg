@@ -262,7 +262,7 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->show();
         const auto windowExposed = QTest::qWaitForWindowExposed( crawler.get() );
         (void) windowExposed;
-        crawler->searchLineEdit_->setFocus();
+        crawler->searchLineEdit_->lineEdit()->setFocus();
         QTest::qWait( 20 );
     }
 
@@ -278,7 +278,7 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 
     void pressSearchPatternKey( Qt::Key key )
     {
-        QTest::keyClick( crawler->searchLineEdit_, key );
+        QTest::keyClick( crawler->searchLineEdit_->lineEdit(), key );
         QTest::qWait( 20 );
     }
 
