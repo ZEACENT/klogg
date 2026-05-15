@@ -19,7 +19,9 @@
 
 #include <catch2/catch.hpp>
 
+#include <QShortcut>
 #include <QSignalSpy>
+#include <QLineEdit>
 #include <QScrollBar>
 #include <QTemporaryFile>
 #include <QTest>
@@ -188,6 +190,12 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     {
         return view->getNbVisibleCols();
     }
+
+    static QShortcut* shortcutFor( const AbstractLogView* view, const QString& key )
+    {
+        const auto shortcut = view->shortcuts_.find( key );
+        return shortcut != view->shortcuts_.end() ? shortcut->second : nullptr;
+    }
 };
 
 template <>
@@ -244,6 +252,36 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::keyClicks( crawler->searchLineEdit_, pattern );
     }
 
+    void replaceSearchPattern( const QString& pattern )
+    {
+        crawler->searchLineEdit_->lineEdit()->setText( pattern );
+    }
+
+    void focusSearchPattern()
+    {
+        crawler->show();
+        const auto windowExposed = QTest::qWaitForWindowExposed( crawler.get() );
+        (void) windowExposed;
+        crawler->searchLineEdit_->setFocus();
+        QTest::qWait( 20 );
+    }
+
+    void setSearchPatternCursorPosition( int position )
+    {
+        crawler->searchLineEdit_->lineEdit()->setCursorPosition( position );
+    }
+
+    int searchPatternCursorPosition() const
+    {
+        return crawler->searchLineEdit_->lineEdit()->cursorPosition();
+    }
+
+    void pressSearchPatternKey( Qt::Key key )
+    {
+        QTest::keyClick( crawler->searchLineEdit_, key );
+        QTest::qWait( 20 );
+    }
+
     void enableCaseSensitiveSearch()
     {
         if ( !crawler->matchCaseButton_->isChecked() ) {
@@ -285,6 +323,72 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     int mainHorizontalScrollMaximum() const
     {
         return crawler->logMainView_->horizontalScrollBar()->maximum();
+    }
+
+    int mainHorizontalScrollValue() const
+    {
+        return crawler->logMainView_->horizontalScrollBar()->value();
+    }
+
+    int filteredHorizontalScrollMaximum() const
+    {
+        return crawler->filteredView_->horizontalScrollBar()->maximum();
+    }
+
+    int filteredHorizontalScrollValue() const
+    {
+        return crawler->filteredView_->horizontalScrollBar()->value();
+    }
+
+    void setMainHorizontalScrollValue( int value )
+    {
+        crawler->logMainView_->horizontalScrollBar()->setValue( value );
+        QTest::qWait( 20 );
+    }
+
+    void setFilteredHorizontalScrollValue( int value )
+    {
+        crawler->filteredView_->horizontalScrollBar()->setValue( value );
+        QTest::qWait( 20 );
+    }
+
+    void focusMainView()
+    {
+        crawler->show();
+        const auto windowExposed = QTest::qWaitForWindowExposed( crawler.get() );
+        (void) windowExposed;
+        crawler->logMainView_->viewport()->setFocus();
+        QTest::qWait( 20 );
+    }
+
+    void focusFilteredView()
+    {
+        crawler->show();
+        const auto windowExposed = QTest::qWaitForWindowExposed( crawler.get() );
+        (void) windowExposed;
+        crawler->filteredView_->viewport()->setFocus();
+        QTest::qWait( 20 );
+    }
+
+    void pressMainViewKey( Qt::Key key )
+    {
+        QTest::keyClick( crawler->logMainView_->viewport(), key );
+        QTest::qWait( 20 );
+    }
+
+    void pressFilteredViewKey( Qt::Key key )
+    {
+        QTest::keyClick( crawler->filteredView_->viewport(), key );
+        QTest::qWait( 20 );
+    }
+
+    void activateMainViewShortcut( Qt::Key key )
+    {
+        auto* shortcut = AbstractLogView::access_by<AbstractLogViewPrivate>::shortcutFor(
+            crawler->logMainView_, QKeySequence( key ).toString() );
+        REQUIRE( shortcut != nullptr );
+        Q_EMIT shortcut->activated();
+        QTest::qWait( 20 );
     }
 
     bool mainTextAreaCacheInvalid() const
@@ -683,6 +787,136 @@ SCENARIO( "Crawler widget search", "[ui]" )
             THEN( "single line match" )
             {
                 REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == 1 );
+            }
+        }
+
+        WHEN( "Home and End are pressed in the filter input" )
+        {
+            const auto pattern = QStringLiteral( "this is line" );
+            const auto middlePosition = static_cast<int>( pattern.size() / 2 );
+            const auto endPosition = static_cast<int>( pattern.size() );
+            crawlerVisitor.replaceSearchPattern( pattern );
+            crawlerVisitor.focusSearchPattern();
+
+            crawlerVisitor.setSearchPatternCursorPosition( middlePosition );
+            crawlerVisitor.pressSearchPatternKey( Qt::Key_Home );
+
+            THEN( "Home moves the text cursor to the beginning of the input" )
+            {
+                REQUIRE( crawlerVisitor.searchPatternCursorPosition() == 0 );
+            }
+
+            AND_WHEN( "End is pressed" )
+            {
+                crawlerVisitor.setSearchPatternCursorPosition( middlePosition );
+                crawlerVisitor.pressSearchPatternKey( Qt::Key_End );
+
+                THEN( "End moves the text cursor to the end of the input" )
+                {
+                    REQUIRE( crawlerVisitor.searchPatternCursorPosition() == endPosition );
+                }
+            }
+        }
+
+        WHEN( "log view Home and End shortcuts are activated while the filter input has focus" )
+        {
+            crawlerVisitor.setTextWrap( false );
+            crawlerVisitor.resizeViews( 200, 120 );
+            crawlerVisitor.render();
+
+            REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() > 0 );
+
+            const auto middleScroll = crawlerVisitor.mainHorizontalScrollMaximum() / 2;
+            crawlerVisitor.replaceSearchPattern( QStringLiteral( "this is line" ) );
+            crawlerVisitor.focusSearchPattern();
+            crawlerVisitor.setMainHorizontalScrollValue( middleScroll );
+            const auto scrollBeforeShortcut = crawlerVisitor.mainHorizontalScrollValue();
+
+            crawlerVisitor.activateMainViewShortcut( Qt::Key_Home );
+
+            THEN( "the main view does not handle Home" )
+            {
+                REQUIRE( crawlerVisitor.mainHorizontalScrollValue() == scrollBeforeShortcut );
+            }
+
+            AND_WHEN( "End is activated" )
+            {
+                crawlerVisitor.activateMainViewShortcut( Qt::Key_End );
+
+                THEN( "the main view does not handle End" )
+                {
+                    REQUIRE( crawlerVisitor.mainHorizontalScrollValue() == scrollBeforeShortcut );
+                }
+            }
+        }
+
+        WHEN( "Home and End are pressed while the main log view has focus" )
+        {
+            crawlerVisitor.setTextWrap( false );
+            crawlerVisitor.resizeViews( 200, 120 );
+            crawlerVisitor.render();
+            crawlerVisitor.focusMainView();
+            crawlerVisitor.resizeViews( 200, 120 );
+            crawlerVisitor.render();
+
+            REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() > 0 );
+
+            const auto middleScroll = crawlerVisitor.mainHorizontalScrollMaximum() / 2;
+            crawlerVisitor.setMainHorizontalScrollValue( middleScroll );
+
+            crawlerVisitor.pressMainViewKey( Qt::Key_Home );
+
+            THEN( "Home jumps the main view to the left of the log line" )
+            {
+                REQUIRE( crawlerVisitor.mainHorizontalScrollValue() == 0 );
+            }
+
+            AND_WHEN( "End is activated" )
+            {
+                crawlerVisitor.setMainHorizontalScrollValue( middleScroll );
+                crawlerVisitor.pressMainViewKey( Qt::Key_End );
+
+                THEN( "End jumps the main view to the right of the log line" )
+                {
+                    REQUIRE( crawlerVisitor.mainHorizontalScrollValue() > middleScroll );
+                }
+            }
+        }
+
+        WHEN( "Home and End are pressed while the filtered log view has focus" )
+        {
+            crawlerVisitor.setSearchPattern( "10" );
+            crawlerVisitor.runSearch();
+            waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } );
+
+            crawlerVisitor.setTextWrap( false );
+            crawlerVisitor.resizeViews( 200, 120 );
+            crawlerVisitor.render();
+            crawlerVisitor.focusFilteredView();
+            crawlerVisitor.resizeViews( 200, 120 );
+            crawlerVisitor.render();
+
+            REQUIRE( crawlerVisitor.filteredHorizontalScrollMaximum() > 0 );
+
+            const auto middleScroll = crawlerVisitor.filteredHorizontalScrollMaximum() / 2;
+            crawlerVisitor.setFilteredHorizontalScrollValue( middleScroll );
+
+            crawlerVisitor.pressFilteredViewKey( Qt::Key_Home );
+
+            THEN( "Home jumps the filtered view to the left of the log line" )
+            {
+                REQUIRE( crawlerVisitor.filteredHorizontalScrollValue() == 0 );
+            }
+
+            AND_WHEN( "End is pressed" )
+            {
+                crawlerVisitor.setFilteredHorizontalScrollValue( middleScroll );
+                crawlerVisitor.pressFilteredViewKey( Qt::Key_End );
+
+                THEN( "End jumps the filtered view to the right of the log line" )
+                {
+                    REQUIRE( crawlerVisitor.filteredHorizontalScrollValue() > middleScroll );
+                }
             }
         }
 

@@ -845,8 +845,18 @@ void AbstractLogView::registerShortcut( const std::string& action, std::function
     const auto& config = Configuration::get();
     const auto& configuredShortcuts = config.shortcuts();
 
-    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this, Qt::WidgetShortcut,
-                                      action, func );
+    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
+                                      Qt::WidgetWithChildrenShortcut, action,
+                                      [ this, func = std::move( func ) ] {
+                                          const auto* focusWidget = QApplication::focusWidget();
+                                          if ( focusWidget == nullptr
+                                               || ( focusWidget != this && focusWidget != viewport()
+                                                    && !isAncestorOf( focusWidget ) ) ) {
+                                              return;
+                                          }
+
+                                          func();
+                                      } );
 }
 
 void AbstractLogView::registerShortcuts()

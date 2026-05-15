@@ -53,9 +53,11 @@
 #include <QAction>
 #include <QApplication>
 #include <QCompleter>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QInputDialog>
 #include <QJsonDocument>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLineEdit>
 #include <QListView>
@@ -308,7 +310,45 @@ void CrawlerWidget::setEncoding( std::optional<int> mib )
 
 void CrawlerWidget::focusSearchEdit()
 {
-    searchLineEdit_->setFocus( Qt::ShortcutFocusReason );
+    searchLineEdit_->lineEdit()->setFocus( Qt::ShortcutFocusReason );
+}
+
+bool CrawlerWidget::eventFilter( QObject* watched, QEvent* event )
+{
+    const auto* searchEdit = searchLineEdit_ != nullptr ? searchLineEdit_->lineEdit() : nullptr;
+    const auto isSearchInput = watched == searchLineEdit_ || watched == searchEdit;
+    if ( !isSearchInput ) {
+        return QSplitter::eventFilter( watched, event );
+    }
+
+    if ( event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress ) {
+        return QSplitter::eventFilter( watched, event );
+    }
+
+    auto* keyEvent = static_cast<QKeyEvent*>( event );
+    const auto key = keyEvent->key();
+    if ( key != Qt::Key_Home && key != Qt::Key_End ) {
+        return QSplitter::eventFilter( watched, event );
+    }
+
+    const auto modifiers = keyEvent->modifiers() & ~Qt::KeypadModifier;
+    if ( modifiers != Qt::NoModifier ) {
+        return QSplitter::eventFilter( watched, event );
+    }
+
+    if ( event->type() == QEvent::ShortcutOverride ) {
+        event->accept();
+        return false;
+    }
+
+    if ( key == Qt::Key_Home ) {
+        searchLineEdit_->lineEdit()->setCursorPosition( 0 );
+    }
+    else {
+        searchLineEdit_->lineEdit()->end( false );
+    }
+    event->accept();
+    return true;
 }
 
 void CrawlerWidget::jumpToTop()
@@ -1327,6 +1367,8 @@ void CrawlerWidget::setup()
     searchLineEdit_->setSizeAdjustPolicy( QComboBox::AdjustToMinimumContentsLengthWithIcon );
     searchLineEdit_->lineEdit()->setMaxLength( std::numeric_limits<int>::max() / 1024 );
     searchLineEdit_->setContentsMargins( 2, 2, 2, 2 );
+    searchLineEdit_->installEventFilter( this );
+    searchLineEdit_->lineEdit()->installEventFilter( this );
 
     QAction* clearSearchHistoryAction = new QAction( tr( "Clear search history" ), this );
     QAction* editSearchHistoryAction = new QAction( tr( "Edit search history" ), this );
