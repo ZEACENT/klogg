@@ -136,6 +136,7 @@ private:
     LineLength maxLength_{ 0 };
     LinesCount nbLinesProcessed_{ 0 };
     LinesCount nbMatches_{ 0 };
+    bool lastProcessedLineMatched_ = false;
 };
 
 class SearchOperation : public QObject {

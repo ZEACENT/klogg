@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 #include <QDir>
 #include <QFileInfo>
@@ -120,19 +121,26 @@ bool CaptureStore::loadFromDisk()
     return true;
 }
 
-void CaptureStore::appendUtf8( const QByteArray& data )
+CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    AppendResult appendResult;
+    appendResult.firstLine = LineNumber( static_cast<LineNumber::UnderlyingType>( totalLines_ ) );
     if ( data.isEmpty() ) {
-        return;
+        return appendResult;
     }
+    appendResult.rawUtf8Lines.reserve( partialLine_.size() + data.size() );
+    appendResult.endOfLines.reserve( static_cast<size_t>( qMax<qsizetype>( 1, data.size() / 32 ) ) );
 
     const auto originalLineCount = totalLines_;
 
-    const auto processBuffer = [ this ]( const QByteArray& buffer ) -> qsizetype {
+    const auto processBuffer = [ &appendResult ]( const QByteArray& buffer ) -> qsizetype {
         qsizetype lineStart = 0;
         const auto* const bufferData = buffer.constData();
         const auto bufferSize = buffer.size();
+        klogg::vector<qint64> lineEnds;
+        lineEnds.reserve( static_cast<size_t>( qMax<qsizetype>( 1, bufferSize / 32 ) ) );
+        bool needsNormalization = false;
 
         while ( lineStart < bufferSize ) {
             const auto remaining = bufferSize - lineStart;
@@ -144,13 +152,36 @@ void CaptureStore::appendUtf8( const QByteArray& data )
 
             auto lineLength = static_cast<qsizetype>( newline - ( bufferData + lineStart ) );
             if ( lineLength > 0 && bufferData[ lineStart + lineLength - 1 ] == '\r' ) {
+                needsNormalization = true;
+            }
+            lineEnds.push_back( static_cast<qint64>( newline - bufferData ) + 1 );
+            lineStart = static_cast<qsizetype>( newline - bufferData ) + 1;
+        }
+
+        if ( lineEnds.empty() ) {
+            return lineStart;
+        }
+
+        if ( !needsNormalization ) {
+            const auto outputStart = appendResult.rawUtf8Lines.size();
+            appendResult.rawUtf8Lines.append( bufferData, lineStart );
+            for ( const auto lineEnd : lineEnds ) {
+                appendResult.endOfLines.push_back( outputStart + lineEnd );
+            }
+            return lineStart;
+        }
+
+        qsizetype normalizedLineStart = 0;
+        for ( const auto lineEnd : lineEnds ) {
+            auto lineLength = static_cast<qsizetype>( lineEnd ) - normalizedLineStart - 1;
+            if ( lineLength > 0 && bufferData[ normalizedLineStart + lineLength - 1 ] == '\r' ) {
                 --lineLength;
             }
 
-            const auto lineBytes = QByteArray::fromRawData(
-                bufferData + lineStart, type_safe::narrow_cast<int>( lineLength ) );
-            commitLine( lineBytes, true );
-            lineStart = static_cast<qsizetype>( newline - bufferData ) + 1;
+            appendResult.rawUtf8Lines.append( bufferData + normalizedLineStart, lineLength );
+            appendResult.rawUtf8Lines.append( '\n' );
+            appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
+            normalizedLineStart = static_cast<qsizetype>( lineEnd );
         }
 
         return lineStart;
@@ -161,10 +192,13 @@ void CaptureStore::appendUtf8( const QByteArray& data )
         if ( consumed < data.size() ) {
             partialLine_ = data.mid( consumed );
         }
+        appendResult.lineCount
+            = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
+        commitLines( appendResult );
         if ( totalLines_ != originalLineCount ) {
             lastModified_ = QDateTime::currentDateTime();
         }
-        return;
+        return appendResult;
     }
 
     partialLine_.append( data );
@@ -175,14 +209,20 @@ void CaptureStore::appendUtf8( const QByteArray& data )
     else if ( consumed > 0 ) {
         partialLine_ = partialLine_.mid( consumed );
     }
+    appendResult.lineCount
+        = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
+    commitLines( appendResult );
     if ( totalLines_ != originalLineCount ) {
         lastModified_ = QDateTime::currentDateTime();
     }
+    return appendResult;
 }
 
-void CaptureStore::finishInput()
+CaptureStore::AppendResult CaptureStore::finishInput()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    AppendResult appendResult;
+    appendResult.firstLine = LineNumber( static_cast<LineNumber::UnderlyingType>( totalLines_ ) );
     if ( !partialLine_.isEmpty() ) {
         auto lineBytes = partialLine_;
         partialLine_.clear();
@@ -191,6 +231,10 @@ void CaptureStore::finishInput()
         }
 
         commitLine( lineBytes, false );
+        appendResult.rawUtf8Lines.append( lineBytes );
+        appendResult.rawUtf8Lines.append( '\n' );
+        appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
+        appendResult.lineCount = 1_lcount;
         lastModified_ = QDateTime::currentDateTime();
     }
 
@@ -199,6 +243,7 @@ void CaptureStore::finishInput()
         boundOutputHandle_->flush();
         resetOutputFlushCounters();
     }
+    return appendResult;
 }
 
 void CaptureStore::flush()
@@ -540,6 +585,100 @@ void CaptureStore::commitLine( const QByteArray& lineBytes, bool terminated )
     }
 }
 
+void CaptureStore::commitLines( const AppendResult& appendResult )
+{
+    if ( appendResult.endOfLines.empty() ) {
+        return;
+    }
+
+    if ( boundOutputHandle_ ) {
+        if ( appendResult.endOfLines.size()
+             > static_cast<size_t>( std::numeric_limits<int>::max() ) ) {
+            throw std::runtime_error( "Too many output lines while committing capture batch" );
+        }
+        appendOutputBytes( appendResult.rawUtf8Lines,
+                           static_cast<int>( appendResult.endOfLines.size() ) );
+    }
+
+    size_t lineIndex = 0;
+    qint64 rawLineStart = 0;
+    const auto lineCount = appendResult.endOfLines.size();
+
+    while ( lineIndex < lineCount ) {
+        auto& segment = ensureActiveSegment();
+        if ( !segment.memoryData ) {
+            segment.memoryData = std::make_shared<QByteArray>();
+            reserveSegmentMemory( *segment.memoryData, limits_.segmentTargetBytes,
+                                  limits_.memoryBudgetBytes );
+        }
+
+        const auto segmentRawStart = rawLineStart;
+        const auto firstLineInSegment = lineIndex;
+        auto segmentBytes = qint64{ 0 };
+        auto segmentMaxLineLength = 0;
+
+        while ( lineIndex < lineCount ) {
+            const auto lineEnd = appendResult.endOfLines[ lineIndex ];
+            const auto lineBytes = lineEnd - rawLineStart;
+            if ( lineIndex > firstLineInSegment
+                 && segment.byteSize + segmentBytes + lineBytes > limits_.segmentTargetBytes ) {
+                break;
+            }
+
+            if ( lineBytes <= 0 || lineBytes - 1 > std::numeric_limits<int>::max() ) {
+                throw std::runtime_error( "Invalid append line length while committing capture batch" );
+            }
+            segmentMaxLineLength = qMax( segmentMaxLineLength,
+                                         type_safe::narrow_cast<int>( lineBytes - 1 ) );
+            segmentBytes += lineBytes;
+            rawLineStart = lineEnd;
+            ++lineIndex;
+
+            if ( segment.byteSize + segmentBytes >= limits_.segmentTargetBytes ) {
+                break;
+            }
+        }
+
+        const auto segmentOffset = segment.memoryData->size();
+        if ( segmentBytes < 0 || segmentBytes > std::numeric_limits<int>::max() ) {
+            throw std::runtime_error( "Invalid segment byte count while committing capture batch" );
+        }
+        segment.memoryData->append( appendResult.rawUtf8Lines.constData() + segmentRawStart,
+                                    type_safe::narrow_cast<int>( segmentBytes ) );
+
+        qint64 localRawStart = segmentRawStart;
+        auto localOffset = segmentOffset;
+        for ( auto metadataIndex = firstLineInSegment; metadataIndex < lineIndex;
+              ++metadataIndex ) {
+            const auto lineEnd = appendResult.endOfLines[ metadataIndex ];
+            const auto lineBytes = lineEnd - localRawStart;
+            if ( lineBytes <= 0 || lineBytes - 1 > std::numeric_limits<int>::max() ) {
+                throw std::runtime_error( "Invalid metadata line length while committing capture batch" );
+            }
+            segment.lineOffsets.push_back( localOffset );
+            segment.lineLengths.push_back( type_safe::narrow_cast<int>( lineBytes - 1 ) );
+            localOffset += lineBytes;
+            localRawStart = lineEnd;
+        }
+
+        const auto committedLines
+            = static_cast<qint64>( lineIndex - firstLineInSegment );
+        segment.byteSize = segment.memoryData->size();
+        segment.spilled = false;
+        segment.cumulativeEndLine += committedLines;
+
+        fileSize_ += segmentBytes;
+        memoryBytes_ += segmentBytes;
+        totalLines_ += committedLines;
+        maxLineLength_ = qMax( maxLineLength_, segmentMaxLineLength );
+
+        rotateSegmentIfNeeded();
+        if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
+            enforceMemoryBudget();
+        }
+    }
+}
+
 void CaptureStore::ensureCaptureDir()
 {
     QDir().mkpath( capturePath_ );
@@ -755,7 +894,7 @@ bool CaptureStore::writeCaptureToDevice( QIODevice* device ) const
     return true;
 }
 
-void CaptureStore::appendOutputBytes( const QByteArray& bytes )
+void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
 {
     if ( !boundOutputHandle_ ) {
         return;
@@ -769,7 +908,7 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes )
     }
 
     unflushedOutputBytes_ += bytes.size();
-    unflushedOutputLines_++;
+    unflushedOutputLines_ += lineCount;
     flushOutputIfNeeded();
 }
 

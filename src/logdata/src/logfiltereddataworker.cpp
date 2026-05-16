@@ -152,9 +152,12 @@ void SearchData::addAll( LineLength length, const SearchResultArray& matches,
     UniqueLock lock( dataMutex_ );
 
     maxLength_ = qMax( maxLength_, length );
-    nbLinesProcessed_ = qMax( nbLinesProcessed_, processedLines );
+    if ( processedLines >= nbLinesProcessed_ ) {
+        nbLinesProcessed_ = processedLines;
+        const auto lastProcessedLine = processedLines.get() > 0 ? processedLines.get() - 1 : 0;
+        lastProcessedLineMatched_ = processedLines.get() > 0 && matches.contains( lastProcessedLine );
+    }
     nbMatches_ += matchedLines;
-
     newMatches_ |= matches;
 }
 
@@ -173,7 +176,15 @@ LineNumber SearchData::getLastProcessedLine() const
 void SearchData::deleteMatch( LineNumber line )
 {
     UniqueLock lock( dataMutex_ );
-    matches_.remove( line.get() );
+    if ( nbLinesProcessed_.get() > 0
+         && line.get() == nbLinesProcessed_.get() - 1
+         && lastProcessedLineMatched_ ) {
+        lastProcessedLineMatched_ = false;
+        newMatches_.remove( line.get() );
+        if ( nbMatches_ > 0_lcount ) {
+            nbMatches_ -= 1_lcount;
+        }
+    }
 }
 
 void SearchData::clear()
@@ -185,6 +196,7 @@ void SearchData::clear()
     nbMatches_ = LinesCount( 0 );
     matches_ = {};
     newMatches_ = {};
+    lastProcessedLineMatched_ = false;
 }
 
 LogFilteredDataWorker::LogFilteredDataWorker( const SearchableLogData& sourceLogData )
@@ -639,7 +651,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                 reportedMatches = nbMatches;
             }
 
-            chunkStart = chunkStart + nbLinesInChunk;
+            chunkStart = chunkStart + linesInChunk;
         }
 
         const auto t2 = high_resolution_clock::now();
@@ -852,7 +864,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         / 1000.f
                 << " ms";*/
 
-        chunkStart = chunkStart + nbLinesInChunk;
+        chunkStart = chunkStart + linesInChunk;
         fileReadingDuration += chunkReadTime;
 
         bool pushed = false;

@@ -9,6 +9,7 @@
 namespace {
 constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
 constexpr LinesCount::UnderlyingType OutputFlushLinesThreshold = 1000;
+constexpr qint64 CachedRawBatchBytesLimit = 64 * 1024 * 1024;
 }
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
@@ -45,7 +46,8 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     }
 
     const auto previousLineCount = captureStore_.lineCount();
-    captureStore_.appendUtf8( data );
+    const auto appendResult = captureStore_.appendUtf8( data );
+    rememberAppendedRawLines( appendResult );
     const auto currentLineCount = captureStore_.lineCount();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
          && currentLineCount != previousLineCount ) {
@@ -62,7 +64,8 @@ void StreamingLogData::finishInput()
 {
     stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
-    captureStore_.finishInput();
+    const auto appendResult = captureStore_.finishInput();
+    rememberAppendedRawLines( appendResult );
     const auto currentLineCount = captureStore_.lineCount();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
          && currentLineCount != previousLineCount ) {
@@ -83,6 +86,11 @@ void StreamingLogData::clearCapture()
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
+    {
+        std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+        cachedRawBatches_.clear();
+        cachedRawBytes_ = 0;
+    }
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundOutputFile_.isEmpty() ) {
         openDisplayOutputFile( boundOutputFile_ );
     }
@@ -197,6 +205,15 @@ void StreamingLogData::setAnsiProcessingMode( AnsiProcessingMode mode )
 
 SearchableLogData::RawLines StreamingLogData::getLinesRaw( LineNumber first, LinesCount number ) const
 {
+    const auto encodingParams = EncodingParameters( codec_.codec() );
+    if ( encodingParams.isUtf8Compatible ) {
+        if ( auto cachedRawLines = tryBuildCachedRawLines( first, number ) ) {
+            cachedRawLines->prefilterPattern = prefilterPattern_;
+            cachedRawLines->ansiProcessingMode = ansiProcessingMode_;
+            return *std::move( cachedRawLines );
+        }
+    }
+
     auto rawLines = captureStore_.buildRawLines( first, number, codec_.codec(), prefilterPattern_ );
     rawLines.ansiProcessingMode = ansiProcessingMode_;
     return rawLines;
@@ -380,4 +397,79 @@ klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount 
         lines.push_back( doGetLineString( LineNumber( line ) ) );
     }
     return lines;
+}
+
+void StreamingLogData::rememberAppendedRawLines( const CaptureStore::AppendResult& appendResult )
+{
+    if ( appendResult.lineCount <= 0_lcount || appendResult.rawUtf8Lines.isEmpty() ) {
+        return;
+    }
+
+    CachedRawBatch batch;
+    batch.firstLine = appendResult.firstLine;
+    batch.lineCount = appendResult.lineCount;
+    batch.rawUtf8Lines = appendResult.rawUtf8Lines;
+    batch.endOfLines = appendResult.endOfLines;
+
+    std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+    cachedRawBytes_ += batch.rawUtf8Lines.size();
+    cachedRawBatches_.push_back( std::move( batch ) );
+
+    while ( cachedRawBytes_ > CachedRawBatchBytesLimit && !cachedRawBatches_.empty() ) {
+        cachedRawBytes_ -= cachedRawBatches_.front().rawUtf8Lines.size();
+        cachedRawBatches_.pop_front();
+    }
+}
+
+std::optional<SearchableLogData::RawLines>
+StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) const
+{
+    if ( number <= 0_lcount ) {
+        return RawLines{};
+    }
+
+    RawLines rawLines;
+    rawLines.startLine = first;
+    auto* utf8Codec = QTextCodec::codecForName( "UTF-8" );
+    rawLines.textDecoder.decoder.reset( utf8Codec->makeDecoder() );
+    rawLines.textDecoder.encodingParams = EncodingParameters( utf8Codec );
+    rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
+    rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
+
+    auto nextLine = first;
+    const auto requestedEnd = first + number;
+
+    std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+    for ( const auto& batch : cachedRawBatches_ ) {
+        const auto batchEnd = batch.firstLine + batch.lineCount;
+        if ( batchEnd <= nextLine ) {
+            continue;
+        }
+        if ( batch.firstLine > nextLine ) {
+            break;
+        }
+
+        const auto localStart = static_cast<size_t>( nextLine.get() - batch.firstLine.get() );
+        const auto localEnd = static_cast<size_t>(
+            qMin( batchEnd.get(), requestedEnd.get() ) - batch.firstLine.get() );
+        if ( localStart >= localEnd || localEnd > batch.endOfLines.size() ) {
+            break;
+        }
+
+        const auto byteStart = localStart == 0 ? 0 : batch.endOfLines[ localStart - 1 ];
+        const auto byteEnd = batch.endOfLines[ localEnd - 1 ];
+        const auto existingBytes = klogg::ssize( rawLines.buffer );
+        rawLines.buffer.insert( rawLines.buffer.end(), batch.rawUtf8Lines.constData() + byteStart,
+                                batch.rawUtf8Lines.constData() + byteEnd );
+        for ( auto i = localStart; i < localEnd; ++i ) {
+            rawLines.endOfLines.push_back( existingBytes + batch.endOfLines[ i ] - byteStart );
+        }
+
+        nextLine = LineNumber( batch.firstLine.get() + static_cast<LineNumber::UnderlyingType>( localEnd ) );
+        if ( nextLine >= requestedEnd ) {
+            return rawLines;
+        }
+    }
+
+    return std::nullopt;
 }

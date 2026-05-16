@@ -41,6 +41,13 @@ class CaptureStore {
         QDateTime lastModified;
     };
 
+    struct AppendResult {
+        LineNumber firstLine = 0_lnum;
+        LinesCount lineCount = 0_lcount;
+        QByteArray rawUtf8Lines;
+        klogg::vector<qint64> endOfLines;
+    };
+
     explicit CaptureStore( QString captureId, QString rootPath = {} );
     CaptureStore( QString captureId, QString rootPath, Limits limits );
     ~CaptureStore();
@@ -53,8 +60,8 @@ class CaptureStore {
     CaptureStore& operator=( const CaptureStore& ) = delete;
 
     bool loadFromDisk();
-    void appendUtf8( const QByteArray& data );
-    void finishInput();
+    AppendResult appendUtf8( const QByteArray& data );
+    AppendResult finishInput();
     void flush();
     void clear();
     bool bindOutputFile( const QString& outputPath );
@@ -77,6 +84,7 @@ class CaptureStore {
 
   private:
     void commitLine( const QByteArray& lineBytes, bool terminated );
+    void commitLines( const AppendResult& appendResult );
     void ensureCaptureDir();
     Segment& ensureActiveSegment();
     void rotateSegmentIfNeeded();
@@ -88,7 +96,7 @@ class CaptureStore {
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
     bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
     bool writeCaptureToDevice( QIODevice* device ) const;
-    void appendOutputBytes( const QByteArray& bytes );
+    void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();
 

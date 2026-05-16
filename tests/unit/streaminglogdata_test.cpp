@@ -20,9 +20,11 @@
 #include <catch2/catch.hpp>
 
 #include <QDir>
+#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QUuid>
 
 #include <string_view>
@@ -51,6 +53,20 @@ bool waitForSearchComplete( LogFilteredData& filteredData, int timeoutMs = 10000
                 return true;
             }
         }
+    }
+    return false;
+}
+
+bool waitForMatchCount( LogFilteredData& filteredData, LinesCount expected, int timeoutMs = 10000 )
+{
+    QElapsedTimer timer;
+    timer.start();
+    while ( timer.elapsed() < timeoutMs ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+        if ( filteredData.getNbMatches() == expected ) {
+            return true;
+        }
+        QThread::msleep( 10 );
     }
     return false;
 }
@@ -339,4 +355,65 @@ TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
              == countersAfterInitialSearch.matcherCreations + 1 );
 
     config.setUseParallelSearch( previousParallelSearch );
+}
+
+TEST_CASE( "Streaming live search covers append batches with partial line boundaries" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    auto& config = Configuration::getSynced();
+    const auto previousParallelSearch = config.useParallelSearch();
+    const auto previousBufferLines = config.searchReadBufferSizeLines();
+    config.setUseParallelSearch( false );
+    config.setSearchReadBufferSizeLines( 10000 );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    auto filteredData = logData.getNewFilteredData();
+
+    logData.appendUtf8( makeStreamingSearchLines( 0, 10000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+    filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
+                             LineNumber( logData.getNbLine().get() ) );
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+
+    logData.appendUtf8( QByteArrayLiteral( "ERROR partial" ) );
+    REQUIRE( logData.getNbLine().get() == 10000 );
+
+    loadingSpy.clear();
+    logData.appendUtf8( QByteArrayLiteral( "-line component=streaming-search\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+    filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+
+    for ( int batch = 0; batch < 4; ++batch ) {
+        logData.appendUtf8( makeStreamingSearchLines( 10001 + batch * 5000, 5000 ) );
+        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+    }
+    filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+
+    auto reachedExpectedMatches = waitForMatchCount( *filteredData, 3001_lcount, 1000 );
+    if ( !reachedExpectedMatches ) {
+        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+        reachedExpectedMatches = waitForMatchCount( *filteredData, 3001_lcount );
+    }
+    const auto countersBeforeAssert = filteredData->searchPerformanceCounters();
+    INFO( "matches after wait=" << filteredData->getNbMatches().get()
+                                << " operations=" << countersBeforeAssert.operationStarts
+                                << " updates=" << countersBeforeAssert.updateRequests
+                                << " coalesced=" << countersBeforeAssert.coalescedLiveUpdates );
+    REQUIRE( reachedExpectedMatches );
+    REQUIRE( logData.getNbLine().get() == 30001 );
+    INFO( "matches=" << filteredData->getNbMatches().get() );
+    REQUIRE( filteredData->getNbMatches() == 3001_lcount );
+    REQUIRE( logData.getLineString( 10000_lnum )
+             == QStringLiteral( "ERROR partial-line component=streaming-search" ) );
+
+    const auto counters = filteredData->searchPerformanceCounters();
+    REQUIRE( counters.coalescedLiveUpdates > 0 );
+
+    config.setUseParallelSearch( previousParallelSearch );
+    config.setSearchReadBufferSizeLines( previousBufferLines );
 }

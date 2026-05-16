@@ -454,6 +454,35 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     REQUIRE( elapsedMs < 500 );
 }
 
+TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata overhead" )
+{
+    const auto rootPath = makeTestDir( "capturestore_large_append_metadata_budget" );
+    CaptureStore store( makeCaptureId(), rootPath );
+
+    constexpr int lineCount = 1000000;
+    QByteArray data;
+    data.reserve( lineCount * 16 );
+    for ( int i = 0; i < lineCount; ++i ) {
+        data.append( "m-" );
+        data.append( QByteArray::number( i ) );
+        data.append( '\n' );
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    store.appendUtf8( data );
+    const auto elapsedMs = timer.elapsed();
+
+    REQUIRE( store.lineCount().get() == lineCount );
+    REQUIRE( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), QRegularExpression{} )
+             == QStringLiteral( "m-0" ) );
+    REQUIRE( store.lineAt( LineNumber( lineCount - 1 ), QTextCodec::codecForName( "UTF-8" ),
+                           QRegularExpression{} )
+             == QStringLiteral( "m-999999" ) );
+    REQUIRE( store.stats().memoryBytes == data.size() );
+    REQUIRE( elapsedMs < 50 );
+}
+
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )
 {
     const auto rootPath = makeTestDir( "capturestore_batched_flush" );

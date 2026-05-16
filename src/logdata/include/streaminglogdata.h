@@ -2,6 +2,9 @@
 #define STREAMINGLOGDATA_H
 
 #include <memory>
+#include <mutex>
+#include <deque>
+#include <optional>
 
 #include <QFile>
 #include <QRegularExpression>
@@ -59,6 +62,13 @@ class StreamingLogData : public SearchableLogData {
     void doDetachReader() const override;
 
   private:
+    struct CachedRawBatch {
+        LineNumber firstLine = 0_lnum;
+        LinesCount lineCount = 0_lcount;
+        QByteArray rawUtf8Lines;
+        klogg::vector<qint64> endOfLines;
+    };
+
     void scheduleLoadingFinished();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
@@ -66,6 +76,8 @@ class StreamingLogData : public SearchableLogData {
     void closeDisplayOutputFile();
     bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
+    void rememberAppendedRawLines( const CaptureStore::AppendResult& appendResult );
+    std::optional<RawLines> tryBuildCachedRawLines( LineNumber first, LinesCount number ) const;
 
   private:
     CaptureStore captureStore_;
@@ -77,6 +89,9 @@ class StreamingLogData : public SearchableLogData {
     QString boundOutputFile_;
     QFile boundOutputHandle_;
     LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
+    mutable std::mutex cachedRawBatchesMutex_;
+    std::deque<CachedRawBatch> cachedRawBatches_;
+    qint64 cachedRawBytes_ = 0;
 };
 
 #endif
