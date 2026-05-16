@@ -419,11 +419,11 @@ TEST_CASE( "CaptureStore buildRawLines converts non UTF-8 input before search vi
                                                QRegularExpression{} );
     const auto decoded = rawLines.decodeLines();
     REQUIRE( decoded.size() == 1 );
-    REQUIRE( decoded[ 0 ] == QStringLiteral( "café" ) );
+    REQUIRE( decoded[ 0 ] == QString::fromLatin1( "caf\xe9" ) );
 
     const auto utf8View = rawLines.buildUtf8View();
     REQUIRE( utf8View.size() == 1 );
-    REQUIRE( utf8View[ 0 ] == std::string_view{ u8"café" } );
+    REQUIRE( utf8View[ 0 ] == std::string_view{ "caf\xc3\xa9" } );
 }
 
 TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget" )
