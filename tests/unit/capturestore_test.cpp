@@ -22,6 +22,7 @@
 #include <atomic>
 #include <thread>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -423,6 +424,34 @@ TEST_CASE( "CaptureStore buildRawLines converts non UTF-8 input before search vi
     const auto utf8View = rawLines.buildUtf8View();
     REQUIRE( utf8View.size() == 1 );
     REQUIRE( utf8View[ 0 ] == std::string_view{ u8"café" } );
+}
+
+TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget" )
+{
+    const auto rootPath = makeTestDir( "capturestore_large_append_budget" );
+    CaptureStore store( makeCaptureId(), rootPath );
+
+    constexpr int lineCount = 1000000;
+    QByteArray data;
+    data.reserve( lineCount * 32 );
+    for ( int i = 0; i < lineCount; ++i ) {
+        data.append( "line-" );
+        data.append( QByteArray::number( i ) );
+        data.append( "\r\n" );
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    store.appendUtf8( data );
+    const auto elapsedMs = timer.elapsed();
+
+    REQUIRE( store.lineCount().get() == lineCount );
+    REQUIRE( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), QRegularExpression{} )
+             == QStringLiteral( "line-0" ) );
+    REQUIRE( store.lineAt( LineNumber( lineCount - 1 ), QTextCodec::codecForName( "UTF-8" ),
+                           QRegularExpression{} )
+             == QStringLiteral( "line-999999" ) );
+    REQUIRE( elapsedMs < 500 );
 }
 
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )
