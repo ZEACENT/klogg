@@ -405,6 +405,26 @@ TEST_CASE( "CaptureStore buildRawLines snapshot spans in-memory and spilled segm
              == QStringLiteral( "juliet" ) );
 }
 
+TEST_CASE( "CaptureStore buildRawLines converts non UTF-8 input before search views" )
+{
+    const auto* latin1Codec = QTextCodec::codecForName( "ISO-8859-1" );
+    REQUIRE( latin1Codec != nullptr );
+
+    const auto rootPath = makeTestDir( "capturestore_non_utf8_rawlines" );
+    CaptureStore store( makeCaptureId(), rootPath );
+    store.appendUtf8( QByteArray::fromHex( "636166e90a" ) ); // cafe acute in ISO-8859-1
+
+    const auto rawLines = store.buildRawLines( 0_lnum, 1_lcount, const_cast<QTextCodec*>( latin1Codec ),
+                                               QRegularExpression{} );
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 1 );
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "café" ) );
+
+    const auto utf8View = rawLines.buildUtf8View();
+    REQUIRE( utf8View.size() == 1 );
+    REQUIRE( utf8View[ 0 ] == std::string_view{ u8"café" } );
+}
+
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )
 {
     const auto rootPath = makeTestDir( "capturestore_batched_flush" );

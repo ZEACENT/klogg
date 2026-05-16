@@ -109,8 +109,20 @@ The generated summaries now include fairness-oriented counters for every case:
 - searched line count
 - match count
 - hit rate
+- byte throughput (`throughput_mib_per_s`)
+- line throughput (`throughput_lines_per_s`)
 
 Those counters make it easier to verify that each regex tier is being compared on the same corpus and to spot cases where a pattern is unrealistically sparse or dense.
+
+Streaming cases also include stage and coalescing counters:
+
+- append/update phase time (`streaming_append_update_ms`)
+- final catch-up phase time (`streaming_catchup_ms`)
+- search operation starts (`operation_starts`)
+- matcher creations (`matcher_creations`)
+- requested updates and coalesced live updates (`update_requests`, `coalesced_live_updates`)
+
+These fields separate live ingestion/indexing/scheduling overhead from final search catch-up and make it possible to verify that many append-triggered `updateSearch()` calls collapse into a small number of live search operations.
 
 ## Benchmark notes
 

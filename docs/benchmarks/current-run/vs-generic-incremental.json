@@ -1,0 +1,745 @@
+{
+    "benchmark": "regex_search_benchmark",
+    "cases": [
+        {
+            "actual_bytes": 52436809,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.008727505918628196,
+            "index_ms": 47,
+            "match_count": 1987,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "ERROR",
+            "profile_description": "Single-token severity match",
+            "profile_id": "simple",
+            "profile_label": "Simple",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 33.01301,
+                "mean": 18.4972942,
+                "median": 17.144781,
+                "min": 11.334451,
+                "stddev": 7.6601986174933465
+            },
+            "search_ms_iterations": [
+                33.01301,
+                17.900178999999998,
+                17.144781,
+                11.334451,
+                13.09405
+            ],
+            "searched_line_count": 22768,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 2008743.0789545958,
+                "mean": 1407428.4989210214,
+                "median": 1327984.3002952326,
+                "min": 689667.4977531584,
+                "stddev": 449719.5341433515
+            },
+            "throughput_lines_per_s_iterations": [
+                689667.4977531584,
+                1271942.5878366914,
+                1327984.3002952326,
+                2008743.0789545958,
+                1738805.0297654276
+            ],
+            "throughput_mib_per_s": {
+                "max": 441.20035436740693,
+                "mean": 309.12761267304796,
+                "median": 291.678487917694,
+                "min": 151.4785776201567,
+                "stddev": 98.77640396563463
+            },
+            "throughput_mib_per_s_iterations": [
+                151.4785776201567,
+                279.3694855096147,
+                291.678487917694,
+                441.20035436740693,
+                381.9111579503675
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        },
+        {
+            "actual_bytes": 52436809,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.00300433520299028,
+            "index_ms": 47,
+            "match_count": 684,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false",
+            "profile_description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "profile_id": "normal",
+            "profile_label": "Normal",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 8.890744999999999,
+                "mean": 8.5147526,
+                "median": 8.391518,
+                "min": 8.181460999999999,
+                "stddev": 0.3067859959832585
+            },
+            "search_ms_iterations": [
+                8.890744999999999,
+                8.239025,
+                8.181460999999999,
+                8.391518,
+                8.871013999999999
+            ],
+            "searched_line_count": 22768,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 2782877.0435989364,
+                "mean": 2677390.627507961,
+                "median": 2713215.8925238554,
+                "min": 2560865.2593230377,
+                "stddev": 95577.8107655511
+            },
+            "throughput_lines_per_s_iterations": [
+                2560865.2593230377,
+                2763433.7800892703,
+                2782877.0435989364,
+                2713215.8925238554,
+                2566561.162004704
+            ],
+            "throughput_mib_per_s": {
+                "max": 611.2311478059981,
+                "mean": 588.0621100888864,
+                "median": 595.9307717340307,
+                "min": 562.4684767991895,
+                "stddev": 20.99271152255466
+            },
+            "throughput_mib_per_s_iterations": [
+                562.4684767991895,
+                606.9606291715354,
+                611.2311478059981,
+                595.9307717340307,
+                563.7195249336784
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        },
+        {
+            "actual_bytes": 52436809,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.004001387967725358,
+            "index_ms": 47,
+            "match_count": 911,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)",
+            "profile_description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "profile_id": "complex",
+            "profile_label": "Complex",
+            "requested_bytes": 52428800,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 12.075002999999999,
+                "mean": 9.1023778,
+                "median": 8.330316,
+                "min": 8.197353,
+                "stddev": 1.4940855019974455
+            },
+            "search_ms_iterations": [
+                8.642488,
+                8.266729,
+                8.330316,
+                12.075002999999999,
+                8.197353
+            ],
+            "searched_line_count": 22768,
+            "size_id": "50MB",
+            "size_label": "50MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 2777481.9505759967,
+                "mean": 2556955.820823195,
+                "median": 2733149.61881398,
+                "min": 1885548.1857851297,
+                "stddev": 339222.7842555741
+            },
+            "throughput_lines_per_s_iterations": [
+                2634426.5679049827,
+                2754172.7810358847,
+                2733149.61881398,
+                1885548.1857851297,
+                2777481.9505759967
+            ],
+            "throughput_mib_per_s": {
+                "max": 610.0461695086218,
+                "mean": 561.6098076793905,
+                "median": 600.3090156195767,
+                "min": 414.14182652873956,
+                "stddev": 74.50689647226937
+            },
+            "throughput_mib_per_s_iterations": [
+                578.625483513545,
+                604.9265432264696,
+                600.3090156195767,
+                414.14182652873956,
+                610.0461695086218
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.008727601754305054,
+            "index_ms": 274,
+            "match_count": 19870,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "ERROR",
+            "profile_description": "Single-token severity match",
+            "profile_id": "simple",
+            "profile_label": "Simple",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 174.468853,
+                "mean": 165.5635122,
+                "median": 165.49822899999998,
+                "min": 154.110894,
+                "stddev": 7.394686944067324
+            },
+            "search_ms_iterations": [
+                172.325176,
+                154.110894,
+                161.414409,
+                165.49822899999998,
+                174.468853
+            ],
+            "searched_line_count": 227669,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 1477306.3350083479,
+                "mean": 1377902.56380262,
+                "median": 1375658.2253215532,
+                "min": 1304926.32974437,
+                "stddev": 62436.5959545256
+            },
+            "throughput_lines_per_s_iterations": [
+                1321159.2483735515,
+                1477306.3350083479,
+                1410462.680565277,
+                1375658.2253215532,
+                1304926.32974437
+            ],
+            "throughput_mib_per_s": {
+                "max": 324.49003283776955,
+                "mean": 302.656014923968,
+                "median": 302.16304643790494,
+                "min": 286.6268001126712,
+                "stddev": 13.714185468139954
+            },
+            "throughput_mib_per_s_iterations": [
+                290.19235735304295,
+                324.49003283776955,
+                309.80783787845127,
+                302.16304643790494,
+                286.6268001126712
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.0029999758420686216,
+            "index_ms": 274,
+            "match_count": 6830,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false",
+            "profile_description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "profile_id": "normal",
+            "profile_label": "Normal",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 85.06575099999999,
+                "mean": 84.44920979999999,
+                "median": 84.528381,
+                "min": 83.53135999999999,
+                "stddev": 0.5064565085609627
+            },
+            "search_ms_iterations": [
+                85.06575099999999,
+                84.528381,
+                84.680651,
+                83.53135999999999,
+                84.439906
+            ],
+            "searched_line_count": 227669,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 2725551.218129335,
+                "mean": 2696025.568995788,
+                "median": 2693403.059500217,
+                "min": 2676388.5267996984,
+                "stddev": 16248.270365045855
+            },
+            "throughput_lines_per_s_iterations": [
+                2676388.5267996984,
+                2693403.059500217,
+                2688559.8694795105,
+                2725551.218129335,
+                2696225.171070181
+            ],
+            "throughput_mib_per_s": {
+                "max": 598.666764849968,
+                "mean": 592.1814620865118,
+                "median": 591.6054284148424,
+                "min": 587.8681898043552,
+                "stddev": 3.568929245998843
+            },
+            "throughput_mib_per_s_iterations": [
+                587.8681898043552,
+                591.6054284148424,
+                590.5416227222677,
+                598.666764849968,
+                592.2253046411257
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        },
+        {
+            "actual_bytes": 524366109,
+            "coalesced_live_updates": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "coalesced_live_updates_iterations": [
+            ],
+            "generation_ms": 0,
+            "hit_rate": 0.003999674966014183,
+            "index_ms": 274,
+            "match_count": 9106,
+            "matcher_creations": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "matcher_creations_iterations": [
+            ],
+            "operation_starts": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "operation_starts_iterations": [
+            ],
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)",
+            "profile_description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "profile_id": "complex",
+            "profile_label": "Complex",
+            "requested_bytes": 524288000,
+            "reused_input": true,
+            "search_mode": "incremental",
+            "search_ms": {
+                "max": 95.36541799999999,
+                "mean": 88.6319322,
+                "median": 87.044546,
+                "min": 86.054822,
+                "stddev": 3.456972257754253
+            },
+            "search_ms_iterations": [
+                87.044546,
+                88.335443,
+                95.36541799999999,
+                86.359432,
+                86.054822
+            ],
+            "searched_line_count": 227669,
+            "size_id": "500MB",
+            "size_label": "500MB",
+            "skip_reason": "",
+            "status": "ok",
+            "streaming_append_update_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_append_update_ms_iterations": [
+            ],
+            "streaming_catchup_ms": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "streaming_catchup_ms_iterations": [
+            ],
+            "throughput_lines_per_s": {
+                "max": 2645627.4582730527,
+                "mean": 2572425.051459536,
+                "median": 2615545.837874782,
+                "min": 2387332.900905441,
+                "stddev": 95478.32528736658
+            },
+            "throughput_lines_per_s_iterations": [
+                2615545.837874782,
+                2577323.351398147,
+                2387332.900905441,
+                2636295.7088462557,
+                2645627.4582730527
+            ],
+            "throughput_mib_per_s": {
+                "max": 581.111527425134,
+                "mean": 565.0326338146306,
+                "median": 574.5041056876559,
+                "min": 524.3771809894234,
+                "stddev": 20.971794524672998
+            },
+            "throughput_mib_per_s_iterations": [
+                574.5041056876559,
+                566.1085443893458,
+                524.3771809894234,
+                579.0618105815937,
+                581.111527425134
+            ],
+            "update_requests": {
+                "max": 0,
+                "mean": 0,
+                "median": 0,
+                "min": 0,
+                "stddev": 0
+            },
+            "update_requests_iterations": [
+            ]
+        }
+    ],
+    "engine": "vectorscan",
+    "generated_at_utc": "2026-05-15T19:34:58Z",
+    "host": {
+        "cpu_architecture": "x86_64",
+        "kernel_type": "darwin",
+        "kernel_version": "25.4.0",
+        "product_name": "macOS Tahoe (26.4.1)",
+        "qt_version": "6.10.1"
+    },
+    "iterations": 5,
+    "keep_files": true,
+    "label": "vs-generic-current-incremental",
+    "profiles": [
+        {
+            "description": "Single-token severity match",
+            "id": "simple",
+            "label": "Simple",
+            "pattern": "ERROR"
+        },
+        {
+            "description": "Structured warning or error match with field alternation and bounded numeric suffixes",
+            "id": "normal",
+            "label": "Normal",
+            "pattern": "level=(ERROR|WARN).*component=(auth|scheduler|replication|storage|parser|crawler).*msg=\\\"(timeout|failed|exception).*\\\".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false"
+        },
+        {
+            "description": "Structured log-line match with nested alternation, optional groups, and bounded repetitions",
+            "id": "complex",
+            "label": "Complex",
+            "pattern": "level=(INFO|WARN) component=(auth|scheduler|replication|storage|parser|crawler).*req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?.*msg=\\\"(peer (reset|disconnect(ed)?) during remote link handover|(timeout|failed|exception) while processing customer ledger batch)\\\".*path=/api/v1/(node|task)/[0-9]{1,4}.*tenant=prod region=us-east-1 shard=[0-9]{1,2} (window=batch-e2e|retry=false)"
+        }
+    ],
+    "scan_mode": "per-line",
+    "search_mode": "incremental",
+    "seed": 20260301,
+    "sizes": [
+        {
+            "id": "50MB",
+            "label": "50MB",
+            "requested_bytes": 52428800
+        },
+        {
+            "id": "500MB",
+            "label": "500MB",
+            "requested_bytes": 524288000
+        }
+    ],
+    "tmpfs_dir": "/tmp/klogg-bench",
+    "version": "v1",
+    "warmup": 0
+}

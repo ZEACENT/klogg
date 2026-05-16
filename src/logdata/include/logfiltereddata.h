@@ -155,6 +155,10 @@ class LogFilteredData : public AbstractLogData {
     // the signal-supplied generation against this value to drop stale signals
     // that were queued before the search was replaced.
     SearchGeneration currentSearchGeneration() const { return workerThread_.currentGeneration(); }
+    SearchPerformanceCounters searchPerformanceCounters() const
+    {
+        return workerThread_.performanceCounters();
+    }
 
     // Advance the generation counter without launching a search.  Called by
     // CrawlerWidget::replaceCurrentSearch (and any other "abandon all

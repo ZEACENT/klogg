@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QTemporaryDir>
 #include <QUuid>
@@ -27,6 +28,8 @@
 #include <string_view>
 
 #include "capturestore.h"
+#include "configuration.h"
+#include "logfiltereddata.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
 
@@ -34,6 +37,35 @@ namespace {
 QString makeCaptureId()
 {
     return QUuid::createUuid().toString( QUuid::WithoutBraces );
+}
+
+bool waitForSearchComplete( LogFilteredData& filteredData, int timeoutMs = 10000 )
+{
+    SafeQSignalSpy searchProgressSpy{ &filteredData, &LogFilteredData::searchProgressed };
+    QElapsedTimer timer;
+    timer.start();
+    while ( timer.elapsed() < timeoutMs ) {
+        if ( searchProgressSpy.safeWait( 100 ) ) {
+            const auto args = searchProgressSpy.at( searchProgressSpy.count() - 1 );
+            if ( args.size() >= 2 && args.at( 1 ).toInt() >= 100 ) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+QByteArray makeStreamingSearchLines( int firstLine, int count )
+{
+    QByteArray data;
+    data.reserve( count * 48 );
+    for ( int i = 0; i < count; ++i ) {
+        const auto line = firstLine + i;
+        data.append( line % 10 == 0 ? "ERROR " : "INFO " );
+        data.append( QByteArray::number( line ) );
+        data.append( " component=streaming-search\n" );
+    }
+    return data;
 }
 } // namespace
 
@@ -266,4 +298,45 @@ TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )
     REQUIRE( logData.getFileSize() > 0 );
     REQUIRE( logData.getLastModifiedDate().isValid() );
     REQUIRE( logData.getNbLine().get() == 2 );
+}
+
+TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    auto& config = Configuration::getSynced();
+    const auto previousParallelSearch = config.useParallelSearch();
+    config.setUseParallelSearch( false );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.appendUtf8( makeStreamingSearchLines( 0, 10000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    auto filteredData = logData.getNewFilteredData();
+    filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
+                             LineNumber( logData.getNbLine().get() ) );
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 1000_lcount );
+
+    const auto countersAfterInitialSearch = filteredData->searchPerformanceCounters();
+
+    for ( int batch = 0; batch < 4; ++batch ) {
+        logData.appendUtf8( makeStreamingSearchLines( 10000 + batch * 5000, 5000 ) );
+        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+    }
+
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 3000_lcount );
+
+    const auto countersAfterRapidUpdates = filteredData->searchPerformanceCounters();
+    REQUIRE( countersAfterRapidUpdates.operationStarts
+             == countersAfterInitialSearch.operationStarts + 1 );
+    REQUIRE( countersAfterRapidUpdates.matcherCreations
+             == countersAfterInitialSearch.matcherCreations + 1 );
+
+    config.setUseParallelSearch( previousParallelSearch );
 }

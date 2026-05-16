@@ -245,6 +245,27 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
                                           LineNumber startLine, LineNumber endLine,
                                           LineNumber position )
 {
+    updateRequests_.fetch_add( 1 );
+
+    if ( sourceLogData_.isLiveSource() ) {
+        liveTargetEndLine_.store( endLine.get() );
+        bool expectedRunning = false;
+        if ( !liveUpdateRunning_.compare_exchange_strong( expectedRunning, true ) ) {
+            coalescedLiveUpdates_.fetch_add( 1 );
+            return;
+        }
+
+        const auto generation = operationGeneration_.load();
+        const auto operationId = operationId_.fetch_add( 1 ) + 1;
+        LOG_INFO << "Live search update requested from " << position.get()
+                 << " to " << endLine.get() << " (async dispatch, gen " << generation << ")";
+
+        enqueueRequest( SearchRequest{ SearchRequest::Type::LiveUpdate, regExp, startLine, endLine,
+                                       position, generation, operationId, compiledExpression_ },
+                        false );
+        return;
+    }
+
     // Signal any running search to stop at the next chunk boundary so that
     // operationsMutex_ is released quickly.
     interruptRequested_.set();
@@ -266,9 +287,11 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
                                    generation, operationId, compiledExpression_ } );
 }
 
-void LogFilteredDataWorker::enqueueRequest( SearchRequest request )
+void LogFilteredDataWorker::enqueueRequest( SearchRequest request, bool interruptRunningSearch )
 {
-    interruptRequested_.set();
+    if ( interruptRunningSearch ) {
+        interruptRequested_.set();
+    }
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
         pendingRequest_.emplace( std::move( request ) );
@@ -317,9 +340,29 @@ void LogFilteredDataWorker::dispatchLoop()
                          || request.operationId != operationId_.load() ) {
                         return;
                     }
+                    operationStarts_.fetch_add( 1 );
                     auto operationRequested = std::make_unique<FullSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
-                        request.endLine, request.compiled );
+                        request.endLine, request.compiled, &matcherCreations_ );
+                    connectSignalsAndRun( operationRequested.get(), request.generation,
+                                          request.operationId );
+                } );
+        }
+        else if ( request.type == SearchRequest::Type::Update ) {
+            std::lock_guard<std::mutex> opLock( opThreadMutex_ );
+            opThread_ = std::thread(
+                [ this, &operationStarted, request ] {
+                    operationStarted.release();
+                    ScopedLock operationLock( operationsMutex_ );
+                    if ( request.generation != operationGeneration_.load()
+                         || request.operationId != operationId_.load() ) {
+                        return;
+                    }
+                    operationStarts_.fetch_add( 1 );
+                    auto operationRequested = std::make_unique<UpdateSearchOperation>(
+                        sourceLogData_, interruptRequested_, request.regExp, request.startLine,
+                        request.endLine, request.position, request.compiled, nullptr,
+                        &matcherCreations_ );
                     connectSignalsAndRun( operationRequested.get(), request.generation,
                                           request.operationId );
                 } );
@@ -332,17 +375,44 @@ void LogFilteredDataWorker::dispatchLoop()
                     ScopedLock operationLock( operationsMutex_ );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
+                        liveUpdateRunning_.store( false );
                         return;
                     }
+                    operationStarts_.fetch_add( 1 );
                     auto operationRequested = std::make_unique<UpdateSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
-                        request.endLine, request.position, request.compiled );
+                        request.endLine, request.position, request.compiled, &liveTargetEndLine_,
+                        &matcherCreations_ );
                     connectSignalsAndRun( operationRequested.get(), request.generation,
                                           request.operationId );
+                    finishLiveUpdateAndRestartIfNeeded( request );
                 } );
         }
         operationStarted.acquire();
     }
+}
+
+void LogFilteredDataWorker::finishLiveUpdateAndRestartIfNeeded( const SearchRequest& request )
+{
+    liveUpdateRunning_.store( false );
+
+    const auto processedLine = searchData_.getLastProcessedLine();
+    const auto targetEndLine = LineNumber( liveTargetEndLine_.load() );
+    if ( targetEndLine <= processedLine || request.generation != operationGeneration_.load()
+         || request.operationId != operationId_.load() ) {
+        return;
+    }
+
+    bool expectedRunning = false;
+    if ( !liveUpdateRunning_.compare_exchange_strong( expectedRunning, true ) ) {
+        return;
+    }
+
+    const auto operationId = operationId_.fetch_add( 1 ) + 1;
+    enqueueRequest( SearchRequest{ SearchRequest::Type::LiveUpdate, request.regExp,
+                                   request.startLine, targetEndLine, processedLine,
+                                   request.generation, operationId, request.compiled },
+                    false );
 }
 
 void LogFilteredDataWorker::interrupt()
@@ -440,7 +510,9 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
                                   AtomicFlag& interruptRequested,
                                   const RegularExpressionPattern& regExp, LineNumber startLine,
                                   LineNumber endLine,
-                                  std::shared_ptr<RegularExpression> compiledRegExp )
+                                  std::shared_ptr<RegularExpression> compiledRegExp,
+                                  std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine,
+                                  std::atomic<quint64>* matcherCreations )
 
     : interruptRequested_( interruptRequested )
     , regexp_( regExp )
@@ -448,14 +520,21 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
     , startLine_( startLine )
     , endLine_( endLine )
     , compiledRegExp_( std::move( compiledRegExp ) )
+    , liveTargetEndLine_( liveTargetEndLine )
+    , matcherCreations_( matcherCreations )
 {
 }
 
 void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 {
-    const auto nbSourceLines = sourceLogData_.getNbLine();
+    const auto requestedEndLine = [ this ] {
+        if ( liveTargetEndLine_ ) {
+            return LineNumber( liveTargetEndLine_->load() );
+        }
+        return endLine_;
+    };
 
-    LOG_INFO << "Searching from line " << initialLine << " to " << nbSourceLines;
+    LOG_INFO << "Searching from line " << initialLine << " to " << requestedEndLine();
 
     using namespace std::chrono;
     high_resolution_clock::time_point t1 = high_resolution_clock::now();
@@ -481,7 +560,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
             initialLine = startLine_;
         }
 
-        const auto endLine = qMin( LineNumber( nbSourceLines.get() ), endLine_ );
+        auto endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
         const auto nbLinesInChunk = LinesCount(
             static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() ) );
 
@@ -489,7 +568,6 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         std::chrono::microseconds matchCombiningDuration{ 0 };
         std::chrono::microseconds matchDuration{ 0 };
 
-        const auto totalLines = endLine - initialLine;
         LinesCount totalProcessedLines = 0_lcount;
         LineLength maxLength = 0_length;
         LinesCount nbMatches = searchData.getNbMatches();
@@ -503,10 +581,18 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
             ownedExpression = std::make_shared<RegularExpression>( regexp_ );
         }
         const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
+        if ( matcherCreations_ ) {
+            matcherCreations_->fetch_add( 1 );
+        }
         auto matcher = regularExpression.createMatcher();
 
         auto chunkStart = initialLine;
-        while ( chunkStart < endLine && !interruptRequested_ ) {
+        while ( !interruptRequested_ ) {
+            endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+            if ( chunkStart >= endLine ) {
+                break;
+            }
+
             const auto lineSourceStartTime = high_resolution_clock::now();
             LOG_DEBUG << "Reading chunk starting at " << chunkStart;
 
@@ -544,7 +630,9 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
             matchCombiningDuration += duration_cast<microseconds>( matchProcessorEndTime
                                                                    - matchProcessorStartTime );
 
-            const int percentage = calculateProgress( totalProcessedLines.get(), totalLines.get() );
+            const auto currentTotalLines = endLine - initialLine;
+            const int percentage
+                = calculateProgress( totalProcessedLines.get(), currentTotalLines.get() );
             if ( percentage > reportedPercentage || nbMatches > reportedMatches ) {
                 Q_EMIT searchProgressed( nbMatches, std::min( 99, percentage ), initialLine );
                 reportedPercentage = percentage;
@@ -586,7 +674,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         initialLine = startLine_;
     }
 
-    const auto endLine = qMin( LineNumber( nbSourceLines.get() ), endLine_ );
+    auto endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
     const auto nbLinesInChunk = LinesCount(
         static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() ) );
 
@@ -621,6 +709,9 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     }
     const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
     for ( auto index = 0u; index < matchingThreadsCount; ++index ) {
+        if ( matcherCreations_ ) {
+            matcherCreations_->fetch_add( 1 );
+        }
         matcherData.push_back( { regularExpression.createMatcher(), microseconds{ 0 } } );
     }
 
@@ -660,7 +751,6 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
             } ) );
     }
 
-    const auto totalLines = endLine - initialLine;
     LinesCount totalProcessedLines = 0_lcount;
     LineLength maxLength = 0_length;
     LinesCount nbMatches = searchData.getNbMatches();
@@ -708,8 +798,9 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                 const auto matchProcessorEndTime = high_resolution_clock::now();
                 matchCombiningDuration += duration_cast<microseconds>( matchProcessorEndTime
                                                                        - matchProcessorStartTime );
+                const auto currentTotalLines = endLine - initialLine;
                 const int percentage
-                    = calculateProgress( totalProcessedLines.get(), totalLines.get() );
+                    = calculateProgress( totalProcessedLines.get(), currentTotalLines.get() );
 
                 if ( percentage > reportedPercentage || nbMatches > reportedMatches ) {
 
@@ -733,7 +824,12 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     tbb::flow::make_edge( matchProcessor, blockPrefetcher.decrementer() );
 
     auto chunkStart = initialLine;
-    while ( chunkStart < endLine && !interruptRequested_ ) {
+    while ( !interruptRequested_ ) {
+        endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+        if ( chunkStart >= endLine ) {
+            break;
+        }
+
         const auto lineSourceStartTime = high_resolution_clock::now();
         LOG_DEBUG << "Reading chunk starting at " << chunkStart;
 

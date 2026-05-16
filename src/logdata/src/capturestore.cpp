@@ -333,14 +333,18 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
     // mutex released -- main thread can now append data freely
 
     const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
+    const auto sourceEncodingParams = EncodingParameters( effectiveCodec );
 
     SearchableLogData::RawLines rawLines;
     rawLines.startLine = first;
-    rawLines.textDecoder.decoder.reset( effectiveCodec->makeDecoder() );
-    rawLines.textDecoder.encodingParams = EncodingParameters( effectiveCodec );
+    auto* utf8Codec = QTextCodec::codecForName( "UTF-8" );
+    rawLines.textDecoder.decoder.reset( utf8Codec->makeDecoder() );
+    rawLines.textDecoder.encodingParams = sourceEncodingParams;
     rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
     rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
     rawLines.prefilterPattern = prefilterPattern;
+    const auto canUseRawUtf8
+        = sourceEncodingParams.isUtf8Compatible && prefilterPattern.pattern().isEmpty();
 
     // Cache file handle for spilled segments to avoid repeated open/close
     // when consecutive lines come from the same segment file.
@@ -365,9 +369,14 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                 utf8Line = cachedFile->read( ref.length );
             }
         }
-        const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
-        const auto lineUtf8 = lineStr.toUtf8();
-        rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
+        if ( canUseRawUtf8 ) {
+            rawLines.buffer.insert( rawLines.buffer.end(), utf8Line.begin(), utf8Line.end() );
+        }
+        else {
+            const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
+            const auto lineUtf8 = lineStr.toUtf8();
+            rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
+        }
         rawLines.buffer.push_back( '\n' );
         rawLines.endOfLines.push_back( klogg::ssize( rawLines.buffer ) );
     }

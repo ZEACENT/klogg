@@ -138,8 +138,22 @@ struct CaseResult {
     double hitRate = 0.0;
     QVector<double> searchMsIterations;
     QVector<double> throughputMiBsIterations;
+    QVector<double> throughputLinesIterations;
+    QVector<double> streamingAppendUpdateMsIterations;
+    QVector<double> streamingCatchupMsIterations;
+    QVector<double> operationStartsIterations;
+    QVector<double> matcherCreationsIterations;
+    QVector<double> updateRequestsIterations;
+    QVector<double> coalescedLiveUpdatesIterations;
     Stats searchMs;
     Stats throughputMiBs;
+    Stats throughputLines;
+    Stats streamingAppendUpdateMs;
+    Stats streamingCatchupMs;
+    Stats operationStarts;
+    Stats matcherCreations;
+    Stats updateRequests;
+    Stats coalescedLiveUpdates;
 };
 
 class ConfigGuard {
@@ -795,6 +809,8 @@ CaseResult benchmarkCase( const FilePrepResult& filePrepResult, const IndexedLog
 
         result.searchMsIterations.push_back( searchMs );
         result.throughputMiBsIterations.push_back( mib / ( searchMs / 1000.0 ) );
+        result.throughputLinesIterations.push_back(
+            static_cast<double>( result.searchedLineCount ) / ( searchMs / 1000.0 ) );
         result.matchCount = matchCount;
     }
 
@@ -805,6 +821,7 @@ CaseResult benchmarkCase( const FilePrepResult& filePrepResult, const IndexedLog
 
     result.searchMs = computeStats( result.searchMsIterations );
     result.throughputMiBs = computeStats( result.throughputMiBsIterations );
+    result.throughputLines = computeStats( result.throughputLinesIterations );
     return result;
 }
 
@@ -869,6 +886,8 @@ CaseResult benchmarkCaseIncremental( const FilePrepResult& filePrepResult,
         result.matchCount = matchesAfter - matchesBefore;
         result.searchMsIterations.push_back( searchMs );
         result.throughputMiBsIterations.push_back( incrementalMib / ( searchMs / 1000.0 ) );
+        result.throughputLinesIterations.push_back(
+            static_cast<double>( result.searchedLineCount ) / ( searchMs / 1000.0 ) );
     }
 
     if ( result.searchedLineCount > 0 ) {
@@ -878,6 +897,7 @@ CaseResult benchmarkCaseIncremental( const FilePrepResult& filePrepResult,
 
     result.searchMs = computeStats( result.searchMsIterations );
     result.throughputMiBs = computeStats( result.throughputMiBsIterations );
+    result.throughputLines = computeStats( result.throughputLinesIterations );
     return result;
 }
 
@@ -971,10 +991,13 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             // Process Qt events (signals, search progress)
             QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
         }
+        const auto appendUpdateMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
 
         // Final catch-up: wait for search to cover all ingested lines.
         streamingLogData->finishInput();
         const auto finalEnd = LineNumber( streamingLogData->getNbLine().get() );
+        QElapsedTimer catchupTimer;
+        catchupTimer.start();
 
         for ( int catchup = 0; catchup < 100; ++catchup ) {
             searchDone.store( false );
@@ -990,11 +1013,22 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
         }
 
         const auto totalMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
+        const auto catchupMs = static_cast<double>( catchupTimer.nsecsElapsed() ) / 1'000'000.0;
+        const auto counters = filteredData->searchPerformanceCounters();
         result.matchCount = filteredData->getNbMatches().get();
         result.searchedLineCount = static_cast<quint64>( linesWritten );
         result.actualBytes = streamBytes;
         result.searchMsIterations.push_back( totalMs );
         result.throughputMiBsIterations.push_back( streamMib / ( totalMs / 1000.0 ) );
+        result.throughputLinesIterations.push_back(
+            static_cast<double>( result.searchedLineCount ) / ( totalMs / 1000.0 ) );
+        result.streamingAppendUpdateMsIterations.push_back( appendUpdateMs );
+        result.streamingCatchupMsIterations.push_back( catchupMs );
+        result.operationStartsIterations.push_back( static_cast<double>( counters.operationStarts ) );
+        result.matcherCreationsIterations.push_back( static_cast<double>( counters.matcherCreations ) );
+        result.updateRequestsIterations.push_back( static_cast<double>( counters.updateRequests ) );
+        result.coalescedLiveUpdatesIterations.push_back(
+            static_cast<double>( counters.coalescedLiveUpdates ) );
 
         // Cleanup capture files
         streamingLogData->deleteCaptureFiles();
@@ -1007,6 +1041,13 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
 
     result.searchMs = computeStats( result.searchMsIterations );
     result.throughputMiBs = computeStats( result.throughputMiBsIterations );
+    result.throughputLines = computeStats( result.throughputLinesIterations );
+    result.streamingAppendUpdateMs = computeStats( result.streamingAppendUpdateMsIterations );
+    result.streamingCatchupMs = computeStats( result.streamingCatchupMsIterations );
+    result.operationStarts = computeStats( result.operationStartsIterations );
+    result.matcherCreations = computeStats( result.matcherCreationsIterations );
+    result.updateRequests = computeStats( result.updateRequestsIterations );
+    result.coalescedLiveUpdates = computeStats( result.coalescedLiveUpdatesIterations );
     return result;
 }
 
@@ -1034,8 +1075,31 @@ QJsonObject caseResultToJson( const CaseResult& result )
         { QLatin1String( "search_ms_iterations" ), doublesToJson( result.searchMsIterations ) },
         { QLatin1String( "throughput_mib_per_s_iterations" ),
           doublesToJson( result.throughputMiBsIterations ) },
+        { QLatin1String( "throughput_lines_per_s_iterations" ),
+          doublesToJson( result.throughputLinesIterations ) },
+        { QLatin1String( "streaming_append_update_ms_iterations" ),
+          doublesToJson( result.streamingAppendUpdateMsIterations ) },
+        { QLatin1String( "streaming_catchup_ms_iterations" ),
+          doublesToJson( result.streamingCatchupMsIterations ) },
+        { QLatin1String( "operation_starts_iterations" ),
+          doublesToJson( result.operationStartsIterations ) },
+        { QLatin1String( "matcher_creations_iterations" ),
+          doublesToJson( result.matcherCreationsIterations ) },
+        { QLatin1String( "update_requests_iterations" ),
+          doublesToJson( result.updateRequestsIterations ) },
+        { QLatin1String( "coalesced_live_updates_iterations" ),
+          doublesToJson( result.coalescedLiveUpdatesIterations ) },
         { QLatin1String( "search_ms" ), statsToJson( result.searchMs ) },
         { QLatin1String( "throughput_mib_per_s" ), statsToJson( result.throughputMiBs ) },
+        { QLatin1String( "throughput_lines_per_s" ), statsToJson( result.throughputLines ) },
+        { QLatin1String( "streaming_append_update_ms" ),
+          statsToJson( result.streamingAppendUpdateMs ) },
+        { QLatin1String( "streaming_catchup_ms" ), statsToJson( result.streamingCatchupMs ) },
+        { QLatin1String( "operation_starts" ), statsToJson( result.operationStarts ) },
+        { QLatin1String( "matcher_creations" ), statsToJson( result.matcherCreations ) },
+        { QLatin1String( "update_requests" ), statsToJson( result.updateRequests ) },
+        { QLatin1String( "coalesced_live_updates" ),
+          statsToJson( result.coalescedLiveUpdates ) },
     };
 }
 
@@ -1131,15 +1195,15 @@ void printSummary( QTextStream& out, const BenchmarkOptions& options, const QVec
         out << "| " << profile.id << " | `" << profile.pattern << "` |" << QLatin1Char( '\n' );
     }
     out << QLatin1Char( '\n' );
-    out << "| Size | Profile | Searched lines | Matches | Hit rate | Median search (ms) | Mean search (ms) | Median throughput (MiB/s) | Status |"
+    out << "| Size | Profile | Searched lines | Matches | Hit rate | Median search (ms) | Mean search (ms) | Median throughput (MiB/s) | Median lines/s | Status |"
         << QLatin1Char( '\n' );
-    out << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    out << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
         << QLatin1Char( '\n' );
 
     for ( const auto& result : results ) {
         if ( result.status != QLatin1String( "ok" ) ) {
             out << "| " << result.sizeLabel << " | " << result.profileId
-                << " | - | - | - | - | - | - | " << result.status;
+                << " | - | - | - | - | - | - | - | " << result.status;
             if ( !result.skipReason.isEmpty() ) {
                 out << " (" << result.skipReason << ")";
             }
@@ -1151,7 +1215,8 @@ void printSummary( QTextStream& out, const BenchmarkOptions& options, const QVec
             << result.searchedLineCount << " | " << result.matchCount << " | "
             << formatHitRate( result.hitRate ) << " | " << formatDuration( result.searchMs.median )
             << " | " << formatDuration( result.searchMs.mean ) << " | "
-            << formatThroughput( result.throughputMiBs.median ) << " | ok |"
+            << formatThroughput( result.throughputMiBs.median ) << " | "
+            << static_cast<quint64>( result.throughputLines.median ) << " | ok |"
             << QLatin1Char( '\n' );
     }
 }
