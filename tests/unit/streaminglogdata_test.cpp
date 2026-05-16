@@ -47,6 +47,15 @@ bool waitForSearchComplete( LogFilteredData& filteredData, int timeoutMs = 10000
     QElapsedTimer timer;
     timer.start();
     while ( timer.elapsed() < timeoutMs ) {
+        // Process any queued signals that may have arrived before the spy
+        // was created, then check if we already received completion.
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+        for ( int i = searchProgressSpy.count() - 1; i >= 0; --i ) {
+            const auto args = searchProgressSpy.at( i );
+            if ( args.size() >= 2 && args.at( 1 ).toInt() >= 100 ) {
+                return true;
+            }
+        }
         if ( searchProgressSpy.safeWait( 100 ) ) {
             const auto args = searchProgressSpy.at( searchProgressSpy.count() - 1 );
             if ( args.size() >= 2 && args.at( 1 ).toInt() >= 100 ) {
@@ -83,6 +92,28 @@ QByteArray makeStreamingSearchLines( int firstLine, int count )
     }
     return data;
 }
+
+struct SearchConfigGuard {
+    Configuration& cfg;
+    bool prevParallel;
+    int prevBufferLines;
+
+    explicit SearchConfigGuard( Configuration& c )
+        : cfg( c )
+        , prevParallel( c.useParallelSearch() )
+        , prevBufferLines( c.searchReadBufferSizeLines() )
+    {
+    }
+
+    ~SearchConfigGuard()
+    {
+        cfg.setUseParallelSearch( prevParallel );
+        cfg.setSearchReadBufferSizeLines( prevBufferLines );
+    }
+
+    SearchConfigGuard( const SearchConfigGuard& ) = delete;
+    SearchConfigGuard& operator=( const SearchConfigGuard& ) = delete;
+};
 } // namespace
 
 TEST_CASE( "StreamingLogData emits its ready signal asynchronously after listeners attach" )
@@ -322,7 +353,7 @@ TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
     REQUIRE( tempDir.isValid() );
 
     auto& config = Configuration::getSynced();
-    const auto previousParallelSearch = config.useParallelSearch();
+    SearchConfigGuard configGuard( config );
     config.setUseParallelSearch( false );
 
     StreamingLogData logData( makeCaptureId(), tempDir.path() );
@@ -354,8 +385,6 @@ TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
     const auto countersAfterRapidUpdates = filteredData->searchPerformanceCounters();
     REQUIRE( countersAfterRapidUpdates.operationStarts
              > countersAfterInitialSearch.operationStarts );
-
-    config.setUseParallelSearch( previousParallelSearch );
 }
 
 TEST_CASE( "Streaming live search covers append batches with partial line boundaries" )
@@ -364,8 +393,7 @@ TEST_CASE( "Streaming live search covers append batches with partial line bounda
     REQUIRE( tempDir.isValid() );
 
     auto& config = Configuration::getSynced();
-    const auto previousParallelSearch = config.useParallelSearch();
-    const auto previousBufferLines = config.searchReadBufferSizeLines();
+    SearchConfigGuard configGuard( config );
     config.setUseParallelSearch( false );
     config.setSearchReadBufferSizeLines( 10000 );
 
@@ -414,9 +442,6 @@ TEST_CASE( "Streaming live search covers append batches with partial line bounda
 
     const auto counters = filteredData->searchPerformanceCounters();
     REQUIRE( counters.coalescedLiveUpdates > 0 );
-
-    config.setUseParallelSearch( previousParallelSearch );
-    config.setSearchReadBufferSizeLines( previousBufferLines );
 }
 
 TEST_CASE( "Streaming live search uses pooled single-threaded path for small incremental ranges" )
@@ -425,8 +450,7 @@ TEST_CASE( "Streaming live search uses pooled single-threaded path for small inc
     REQUIRE( tempDir.isValid() );
 
     auto& config = Configuration::getSynced();
-    const auto previousParallelSearch = config.useParallelSearch();
-    const auto previousBufferLines = config.searchReadBufferSizeLines();
+    SearchConfigGuard configGuard( config );
     config.setUseParallelSearch( true );
     config.setSearchReadBufferSizeLines( 10000 );
 
@@ -473,7 +497,4 @@ TEST_CASE( "Streaming live search uses pooled single-threaded path for small inc
     // total matcherCreations for incremental updates should be far less than
     // incrementalOps * 8.
     REQUIRE( incrementalMatchers < incrementalOps * 8 );
-
-    config.setUseParallelSearch( previousParallelSearch );
-    config.setSearchReadBufferSizeLines( previousBufferLines );
 }

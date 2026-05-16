@@ -297,3 +297,36 @@ TEST_CASE( "MatcherCache pooled matchers produce identical results to fresh matc
                  == pooled->hasMatch( std::string_view{ line } ) );
     }
 }
+
+TEST_CASE( "MatcherCache evicts stale matchers when prior expression expires",
+           "[matchercache]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    auto expr1 = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+    REQUIRE( expr1->isValid() );
+
+    MatcherCache cache;
+
+    // Acquire and release a matcher for expr1 — it goes into the pool.
+    auto m1 = cache.acquire( expr1 );
+    REQUIRE( m1->hasMatch( std::string_view{ "ERROR: crash" } ) );
+    cache.release( std::move( m1 ) );
+
+    // Let expr1 go out of scope so the weak_ptr in the cache expires.
+    expr1.reset();
+
+    // Now acquire for a different expression.  The pool must be cleared
+    // because the cached weak_ptr has expired — returning the stale
+    // matcher would produce wrong results.
+    auto expr2 = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "WARN" ), true, false, false, true ) );
+    REQUIRE( expr2->isValid() );
+
+    auto m2 = cache.acquire( expr2 );
+    REQUIRE( m2 != nullptr );
+    REQUIRE( m2->hasMatch( std::string_view{ "WARN: low mem" } ) );
+    REQUIRE_FALSE( m2->hasMatch( std::string_view{ "ERROR: crash" } ) );
+}

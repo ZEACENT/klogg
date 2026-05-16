@@ -164,7 +164,7 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
 
         if ( !needsNormalization ) {
             const auto outputStart = appendResult.rawUtf8Lines.size();
-            appendResult.rawUtf8Lines.append( bufferData, lineStart );
+            appendResult.rawUtf8Lines.append( bufferData, type_safe::narrow_cast<int>( lineStart ) );
             for ( const auto lineEnd : lineEnds ) {
                 appendResult.endOfLines.push_back( outputStart + lineEnd );
             }
@@ -178,7 +178,8 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
                 --lineLength;
             }
 
-            appendResult.rawUtf8Lines.append( bufferData + normalizedLineStart, lineLength );
+            appendResult.rawUtf8Lines.append( bufferData + normalizedLineStart,
+                                               type_safe::narrow_cast<int>( lineLength ) );
             appendResult.rawUtf8Lines.append( '\n' );
             appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
             normalizedLineStart = static_cast<qsizetype>( lineEnd );
@@ -190,7 +191,7 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
     if ( partialLine_.isEmpty() ) {
         const auto consumed = processBuffer( data );
         if ( consumed < data.size() ) {
-            partialLine_ = data.mid( consumed );
+            partialLine_ = data.mid( type_safe::narrow_cast<int>( consumed ) );
         }
         appendResult.lineCount
             = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
@@ -207,7 +208,7 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
         partialLine_.clear();
     }
     else if ( consumed > 0 ) {
-        partialLine_ = partialLine_.mid( consumed );
+        partialLine_ = partialLine_.mid( type_safe::narrow_cast<int>( consumed ) );
     }
     appendResult.lineCount
         = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
@@ -726,7 +727,7 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
                                     type_safe::narrow_cast<int>( segmentBytes ) );
 
         qint64 localRawStart = segmentRawStart;
-        auto localOffset = segmentOffset;
+        qint64 localOffset = segmentOffset;
         for ( auto metadataIndex = firstLineInSegment; metadataIndex < lineIndex;
               ++metadataIndex ) {
             const auto lineEnd = appendResult.endOfLines[ metadataIndex ];

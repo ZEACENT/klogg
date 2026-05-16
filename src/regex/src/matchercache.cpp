@@ -30,8 +30,10 @@ std::unique_ptr<PatternMatcher> MatcherCache::acquire(
 
     const auto cached = cachedExpression_.lock();
 
-    // If the expression changed, evict all pooled matchers.
-    if ( cached && cached != expression ) {
+    // If the expression changed or the prior one expired, evict all
+    // pooled matchers to avoid returning stale matchers compiled for
+    // a different pattern.
+    if ( !cached || cached != expression ) {
         pool_.clear();
     }
 
