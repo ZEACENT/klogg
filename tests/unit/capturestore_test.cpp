@@ -68,7 +68,7 @@ TEST_CASE( "CaptureStore default spill limits prefer memory over temp files" )
     CaptureStore::Limits limits;
 
     REQUIRE( limits.segmentTargetBytes == 1024 * 1024 );
-    REQUIRE( limits.memoryBudgetBytes == 32 * 1024 * 1024 );
+    REQUIRE( limits.memoryBudgetBytes == 256 * 1024 * 1024 );
 }
 
 TEST_CASE( "CaptureStore spills old segments only after memory budget is exceeded" )
@@ -566,6 +566,191 @@ TEST_CASE( "CaptureStore finishInput flushes pending output data" )
 
     const auto content = readUtf8File( outputPath );
     REQUIRE( content.contains( QStringLiteral( "pending-data" ) ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines bulk-read spans multiple segments" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir( "capturestore_bulk_multi_segment" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // Each line is short enough that several lines fit per segment,
+    // but with segmentTargetBytes=16, many segments will be created.
+    const QStringList expectedLines = {
+        QStringLiteral( "aa" ), QStringLiteral( "bb" ), QStringLiteral( "cc" ),
+        QStringLiteral( "dd" ), QStringLiteral( "ee" ), QStringLiteral( "ff" ),
+        QStringLiteral( "gg" ), QStringLiteral( "hh" ), QStringLiteral( "ii" ),
+    };
+
+    for ( const auto& line : expectedLines ) {
+        store.appendUtf8( ( line + QLatin1Char( '\n' ) ).toUtf8() );
+    }
+
+    REQUIRE( store.lineCount().get() == 9 );
+
+    // Request all lines — this forces the bulk read to traverse multiple segments.
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 9 ), codec, QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 9 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 9 );
+    for ( size_t i = 0; i < decoded.size(); ++i ) {
+        INFO( "Multi-segment line " << i );
+        REQUIRE( decoded[ i ] == expectedLines[ static_cast<int>( i ) ] );
+    }
+
+    // Also verify buildUtf8View produces the same content.
+    const auto views = rawLines.buildUtf8View();
+    REQUIRE( views.size() == 9 );
+    for ( size_t i = 0; i < views.size(); ++i ) {
+        INFO( "Multi-segment utf8 view " << i );
+        REQUIRE( views[ i ] == expectedLines[ static_cast<int>( i ) ].toStdString() );
+    }
+}
+
+TEST_CASE( "CaptureStore buildRawLines handles unterminated last line" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 64;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir( "capturestore_unterminated" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // Append data where the last line has no trailing newline.
+    store.appendUtf8( QByteArrayLiteral( "alpha\nbeta\nno-newline" ) );
+    // finishInput commits the trailing partial line.
+    store.finishInput();
+
+    REQUIRE( store.lineCount().get() == 3 );
+
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 3 ), codec, QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 3 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 3 );
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "alpha" ) );
+    REQUIRE( decoded[ 1 ] == QStringLiteral( "beta" ) );
+    REQUIRE( decoded[ 2 ] == QStringLiteral( "no-newline" ) );
+
+    // Verify the unterminated line gets a synthetic \n appended in the buffer.
+    REQUIRE( rawLines.buffer.back() == '\n' );
+}
+
+TEST_CASE( "CaptureStore buildRawLines CRLF normalization in slow path" )
+{
+    const auto* latin1Codec = QTextCodec::codecForName( "ISO-8859-1" );
+    REQUIRE( latin1Codec != nullptr );
+
+    const auto rootPath = makeTestDir( "capturestore_crlf_slow_path" );
+    CaptureStore store( makeCaptureId(), rootPath );
+
+    // CRLF line endings with a non-UTF8 codec forces the slow path.
+    store.appendUtf8( QByteArrayLiteral( "line1\r\nline2\r\nline3\r\n" ) );
+    REQUIRE( store.lineCount().get() == 3 );
+
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 3 ), const_cast<QTextCodec*>( latin1Codec ), QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 3 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 3 );
+    // \r should be stripped in the slow path.
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "line1" ) );
+    REQUIRE( decoded[ 1 ] == QStringLiteral( "line2" ) );
+    REQUIRE( decoded[ 2 ] == QStringLiteral( "line3" ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines applies prefilter pattern in slow path" )
+{
+    const auto* latin1Codec = QTextCodec::codecForName( "ISO-8859-1" );
+    REQUIRE( latin1Codec != nullptr );
+
+    const auto rootPath = makeTestDir( "capturestore_prefilter" );
+    CaptureStore store( makeCaptureId(), rootPath );
+
+    store.appendUtf8( QByteArrayLiteral( "[INFO] message-one\n[WARN] message-two\n" ) );
+    REQUIRE( store.lineCount().get() == 2 );
+
+    // A prefilter pattern forces the slow path even with UTF-8 data,
+    // but we also use a non-UTF8 codec here to ensure the slow path.
+    QRegularExpression prefilter( QStringLiteral( "\\[\\w+\\]\\s*" ) );
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 2 ), const_cast<QTextCodec*>( latin1Codec ), prefilter );
+    REQUIRE( rawLines.endOfLines.size() == 2 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 2 );
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "message-one" ) );
+    REQUIRE( decoded[ 1 ] == QStringLiteral( "message-two" ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines reads from spilled disk segments" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 16;
+
+    const auto rootPath = makeTestDir( "capturestore_disk_read" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    const QStringList expectedLines = {
+        QStringLiteral( "aaa" ), QStringLiteral( "bbb" ),
+        QStringLiteral( "ccc" ), QStringLiteral( "ddd" ),
+        QStringLiteral( "eee" ), QStringLiteral( "fff" ),
+    };
+
+    for ( const auto& line : expectedLines ) {
+        store.appendUtf8( ( line + QLatin1Char( '\n' ) ).toUtf8() );
+    }
+
+    REQUIRE( store.lineCount().get() == 6 );
+    REQUIRE_FALSE( segmentFiles( store.capturePath() ).empty() );
+
+    // Read all lines — at least some must come from disk (spilled segments).
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 6 ), codec, QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 6 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 6 );
+    for ( size_t i = 0; i < decoded.size(); ++i ) {
+        INFO( "Disk-read line " << i );
+        REQUIRE( decoded[ i ] == expectedLines[ static_cast<int>( i ) ] );
+    }
+
+    // Read a subset from the middle — spanning a spilled segment boundary.
+    const auto midLines = store.buildRawLines( LineNumber( 2 ), LinesCount( 3 ), codec, QRegularExpression{} );
+    REQUIRE( midLines.endOfLines.size() == 3 );
+    const auto midDecoded = midLines.decodeLines();
+    REQUIRE( midDecoded[ 0 ] == QStringLiteral( "ccc" ) );
+    REQUIRE( midDecoded[ 1 ] == QStringLiteral( "ddd" ) );
+    REQUIRE( midDecoded[ 2 ] == QStringLiteral( "eee" ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines CRLF fast path strips carriage returns" )
+{
+    const auto rootPath = makeTestDir( "capturestore_crlf_fast_path" );
+    CaptureStore store( makeCaptureId(), rootPath );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    // CRLF line endings stored in capture — the fast path scans for \n.
+    // The \r before each \n should still be present in raw buffer,
+    // but decodeLines should strip them.
+    store.appendUtf8( QByteArrayLiteral( "row1\r\nrow2\r\nrow3\r\n" ) );
+    REQUIRE( store.lineCount().get() == 3 );
+
+    const auto rawLines = store.buildRawLines( 0_lnum, LinesCount( 3 ), codec, QRegularExpression{} );
+    REQUIRE( rawLines.endOfLines.size() == 3 );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == 3 );
+    REQUIRE( decoded[ 0 ] == QStringLiteral( "row1" ) );
+    REQUIRE( decoded[ 1 ] == QStringLiteral( "row2" ) );
+    REQUIRE( decoded[ 2 ] == QStringLiteral( "row3" ) );
 }
 
 TEST_CASE( "CaptureStore clear flushes and resets output" )

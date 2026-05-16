@@ -9,7 +9,7 @@
 namespace {
 constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
 constexpr LinesCount::UnderlyingType OutputFlushLinesThreshold = 1000;
-constexpr qint64 CachedRawBatchBytesLimit = 64 * 1024 * 1024;
+constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
 }
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )

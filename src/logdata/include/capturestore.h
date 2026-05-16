@@ -19,7 +19,7 @@ class CaptureStore {
   public:
     struct Limits {
         qint64 segmentTargetBytes = 1024 * 1024;
-        qint64 memoryBudgetBytes = 32 * 1024 * 1024;
+        qint64 memoryBudgetBytes = 256 * 1024 * 1024;
     };
 
     struct Segment {

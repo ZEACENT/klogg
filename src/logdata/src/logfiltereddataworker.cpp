@@ -600,9 +600,14 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
         auto chunkStart = initialLine;
         while ( !interruptRequested_ ) {
-            endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+            // Only re-check the dynamic end line when we've caught up to the
+            // current target.  This avoids a virtual call + mutex lock per chunk
+            // for StreamingLogData when the search is still far behind.
             if ( chunkStart >= endLine ) {
-                break;
+                endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+                if ( chunkStart >= endLine ) {
+                    break;
+                }
             }
 
             const auto lineSourceStartTime = high_resolution_clock::now();
@@ -837,9 +842,11 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
     auto chunkStart = initialLine;
     while ( !interruptRequested_ ) {
-        endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
         if ( chunkStart >= endLine ) {
-            break;
+            endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+            if ( chunkStart >= endLine ) {
+                break;
+            }
         }
 
         const auto lineSourceStartTime = high_resolution_clock::now();

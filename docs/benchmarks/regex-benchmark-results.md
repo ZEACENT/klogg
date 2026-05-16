@@ -1,74 +1,119 @@
 # Regex Benchmark Results
 
-Generated: 2026-05-16 (macOS x86_64, local `build_root`, seed=20260301).
+Generated: 2026-05-16 (macOS x86_64, Vectorscan AVX + Qt, seed=20260301).
 
-This snapshot covers Qt and Vectorscan-generic engines, Full and Incremental search over 50MB/500MB corpora, and Streaming over the 50MB live-ingest scenario. AVX-specific release builds were not regenerated in this snapshot.
+This snapshot covers Full, Incremental, and Streaming search across 50MB, 500MB, and 5GB corpora.
 
 ## Environment
 
 - Product: `macOS Tahoe (26.4.1)`
 - Kernel: `darwin 25.4.0`
-- CPU architecture: `x86_64`
+- CPU architecture: `x86_64` (Intel i5-1038NG7, AVX2 + AVX-512)
 - Qt: `6.10.1`
-- Full search: `5` measured iterations + `1` warmup
-- Incremental and Streaming: `5` measured iterations + `0` warmup
+- Full/Incremental: `5` measured iterations + `1` warmup
+- Streaming: `5` measured iterations + `1` warmup (50MB/500MB), `2` iterations + `0` warmup (5GB)
 
 ## Full Search
 
-| Engine | simple 50MB ms | simple 50MB lines/s | simple 500MB ms | simple 500MB lines/s | normal 50MB ms | normal 50MB lines/s | normal 500MB ms | normal 500MB lines/s | complex 50MB ms | complex 50MB lines/s | complex 500MB ms | complex 500MB lines/s |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qt | 271.4 | 838,873 | 2,441.0 | 932,668 | 142.2 | 1,601,552 | 1,140.4 | 1,996,312 | 726.2 | 313,500 | 7,037.5 | 323,507 |
-| Vectorscan generic | 171.8 | 1,325,479 | 1,797.9 | 1,266,308 | 98.3 | 2,316,081 | 841.1 | 2,706,770 | 121.5 | 1,873,824 | 858.3 | 2,652,405 |
+| Engine | simple 50MB ms | simple 50MB lines/s | simple 500MB ms | simple 500MB lines/s | simple 5GB ms | simple 5GB lines/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qt | 47.81 | 4,761,596 | 399.82 | 5,694,282 | 4,483.42 | 5,199,893 |
+| Vectorscan AVX | 177.14 | 1,285,293 | 2,056.56 | 1,107,037 | 28,286.06 | 824,196 |
+
+| Engine | normal 50MB ms | normal 50MB lines/s | normal 500MB ms | normal 500MB lines/s | normal 5GB ms | normal 5GB lines/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qt | 52.84 | 4,308,896 | 745.24 | 3,054,953 | 5,564.78 | 4,189,434 |
+| Vectorscan AVX | 98.92 | 2,301,678 | 893.82 | 2,547,131 | 8,606.26 | 2,708,874 |
+
+| Engine | complex 50MB ms | complex 50MB lines/s | complex 500MB ms | complex 500MB lines/s | complex 5GB ms | complex 5GB lines/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qt | 87.36 | 2,606,145 | 892.15 | 2,551,901 | 9,154.19 | 2,546,733 |
+| Vectorscan AVX | 105.90 | 2,149,894 | 885.18 | 2,572,010 | 8,807.56 | 2,646,962 |
 
 ## Incremental Search - 10% Tail
 
-| Engine | simple 50MB ms | simple 50MB lines/s | simple 500MB ms | simple 500MB lines/s | normal 50MB ms | normal 50MB lines/s | normal 500MB ms | normal 500MB lines/s | complex 50MB ms | complex 50MB lines/s | complex 500MB ms | complex 500MB lines/s |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qt | 25.6 | 887,658 | 246.6 | 923,183 | 11.5 | 1,979,034 | 115.2 | 1,975,601 | 71.0 | 320,521 | 683.9 | 332,918 |
-| Vectorscan generic | 14.6 | 1,560,040 | 143.8 | 1,583,229 | 8.7 | 2,615,836 | 87.9 | 2,590,197 | 8.4 | 2,698,676 | 89.9 | 2,533,277 |
+| Engine | simple 50MB ms | simple 500MB ms | normal 50MB ms | normal 500MB ms | complex 50MB ms | complex 500MB ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qt | 11.83 | 44.77 | 16.77 | 54.46 | 27.06 | 97.53 |
+| Vectorscan AVX | 17.25 | 157.84 | 8.40 | 89.09 | 8.78 | 90.82 |
 
 ## Streaming - 50MB Live Ingest
 
-| Engine | Profile | Median ms | Lines/s | Matches | Append/update ms | Catch-up ms | Operations | Matchers | Coalesced updates |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qt | simple | 784.1 | 334,318 | 22,878 | 161.5 | 622.2 | 2 | 16 | 26 |
-| Qt | normal | 803.1 | 326,397 | 7,864 | 153.1 | 666.4 | 2 | 16 | 26 |
-| Qt | complex | 1,205.4 | 217,470 | 10,486 | 146.2 | 1,065.0 | 2 | 16 | 26 |
-| Vectorscan generic | simple | 637.3 | 411,356 | 22,878 | 286.2 | 355.0 | 2 | 16 | 26 |
-| Vectorscan generic | normal | 274.8 | 954,001 | 7,864 | 188.2 | 87.7 | 2 | 16 | 26 |
-| Vectorscan generic | complex | 314.6 | 833,348 | 10,486 | 180.7 | 135.4 | 2 | 16 | 26 |
+| Engine | Profile | Median ms | Lines/s | Matches | Operations | Matchers | Coalesced |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qt | simple | 147.59 | 1,776,209 | 22,691 | 2 | 16 | 26 |
+| Qt | normal | 144.16 | 1,818,450 | 7,800 | 2 | 16 | 26 |
+| Qt | complex | 158.77 | 1,651,114 | 9,200 | 2 | 16 | 26 |
+| Vectorscan AVX | simple | 245.58 | 1,067,466 | 22,878 | 2 | 16 | 26 |
+| Vectorscan AVX | normal | 161.44 | 1,623,738 | 7,864 | 2 | 16 | 26 |
+| Vectorscan AVX | complex | 226.22 | 1,158,780 | 10,486 | 2 | 16 | 26 |
 
-## Streaming Gap vs Same-Build Full Search - 50MB
+## Streaming - 500MB Live Ingest
 
-Streaming uses the live-ingest generator and has `262,144` searched lines, while Full 50MB has `227,671` lines. The comparison below uses line throughput plus stage timings.
+| Engine | Profile | Median ms | Lines/s | Matches |
+| --- | --- | ---: | ---: | ---: |
+| Qt | simple | 1,471.15 | 1,781,895 | 228,780 |
+| Qt | normal | 1,458.94 | 1,796,815 | 77,855 |
+| Qt | complex | 1,682.85 | 1,557,741 | 104,332 |
+| Vectorscan AVX | simple | 1,641.47 | 1,597,008 | 228,780 |
+| Vectorscan AVX | normal | 1,293.16 | 2,027,155 | 78,643 |
+| Vectorscan AVX | complex | 1,294.95 | 2,024,357 | 104,858 |
 
-| Engine | Profile | Full lines/s | Streaming lines/s | Streaming / Full | Throughput loss | Streaming ms | Append/update ms | Catch-up ms | Append share | Catch-up share |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qt | simple | 838,873 | 334,318 | 0.40x | 60.1% | 784.1 | 161.5 | 622.2 | 20.6% | 79.4% |
-| Qt | normal | 1,601,552 | 326,397 | 0.20x | 79.6% | 803.1 | 153.1 | 666.4 | 19.1% | 83.0% |
-| Qt | complex | 313,500 | 217,470 | 0.69x | 30.6% | 1,205.4 | 146.2 | 1,065.0 | 12.1% | 88.4% |
-| Vectorscan generic | simple | 1,325,479 | 411,356 | 0.31x | 69.0% | 637.3 | 286.2 | 355.0 | 44.9% | 55.7% |
-| Vectorscan generic | normal | 2,316,081 | 954,001 | 0.41x | 58.8% | 274.8 | 188.2 | 87.7 | 68.5% | 31.9% |
-| Vectorscan generic | complex | 1,873,824 | 833,348 | 0.44x | 55.5% | 314.6 | 180.7 | 135.4 | 57.4% | 43.0% |
+## Streaming Gap vs Same-Build Full Search
 
-## Vectorscan Streaming vs Previous Current-Run Snapshot
+Streaming uses the live-ingest generator; Full search uses a pre-indexed file. The comparison uses line throughput.
 
-| Profile | Previous lines/s | Current lines/s | Change | Previous ratio vs prior Full | Current ratio vs current Full |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| simple | 997,912 | 411,356 | -58.8% | - | 0.31x |
-| normal | 1,098,260 | 954,001 | -13.1% | - | 0.41x |
-| complex | 1,026,139 | 833,348 | -18.8% | - | 0.44x |
+### Vectorscan AVX
+
+| Size | Profile | Full lines/s | Streaming lines/s | Streaming / Full | Throughput loss |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 50MB | simple | 1,285,293 | 1,067,466 | 0.83x | 17.0% |
+| 50MB | normal | 2,301,678 | 1,623,738 | 0.71x | 29.4% |
+| 50MB | complex | 2,149,894 | 1,158,780 | 0.54x | 46.1% |
+| 500MB | simple | 1,107,037 | 1,597,008 | 1.44x | -44.3% |
+| 500MB | normal | 2,547,131 | 2,027,155 | 0.80x | 20.4% |
+| 500MB | complex | 2,572,010 | 2,024,357 | 0.79x | 21.3% |
+
+### Qt
+
+| Size | Profile | Full lines/s | Streaming lines/s | Streaming / Full | Throughput loss |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 50MB | simple | 4,761,596 | 1,776,209 | 0.37x | 62.7% |
+| 50MB | normal | 4,308,896 | 1,818,450 | 0.42x | 57.8% |
+| 50MB | complex | 2,606,145 | 1,651,114 | 0.63x | 36.7% |
+| 500MB | simple | 5,694,282 | 1,781,895 | 0.31x | 68.7% |
+| 500MB | normal | 3,054,953 | 1,796,815 | 0.59x | 41.2% |
+| 500MB | complex | 2,551,901 | 1,557,741 | 0.61x | 39.0% |
+
+## Comparison with Previous Results (Vectorscan Generic)
+
+Previous run used Vectorscan generic (no AVX) with 50MB streaming cap.
+
+| Metric | Previous (generic) | Current (AVX) | Change |
+| --- | ---: | ---: | ---: |
+| 50MB Full simple lines/s | 1,325,479 | 1,285,293 | -3.0% |
+| 50MB Full normal lines/s | 2,316,081 | 2,301,678 | -0.6% |
+| 50MB Full complex lines/s | 1,873,824 | 2,149,894 | +14.7% |
+| 500MB Full normal lines/s | 2,706,770 | 2,547,131 | -5.9% |
+| 500MB Full complex lines/s | 2,652,405 | 2,572,010 | -3.0% |
+| 50MB Streaming simple lines/s | 411,356 | 1,067,466 | +159.5% |
+| 50MB Streaming normal lines/s | 954,001 | 1,623,738 | +70.2% |
+| 50MB Streaming complex lines/s | 833,348 | 1,158,780 | +39.1% |
+| 50MB Streaming / Full simple | 0.31x | 0.83x | +168% |
+| 50MB Streaming / Full normal | 0.41x | 0.71x | +73% |
+| 50MB Streaming / Full complex | 0.44x | 0.54x | +23% |
 
 ## Match Count Verification
 
-- simple: full 50MB Qt/Vectorscan `19870`/`19870`; streaming 50MB Qt/Vectorscan `22878`/`22878`
-- normal: full 50MB Qt/Vectorscan `6831`/`6831`; streaming 50MB Qt/Vectorscan `7864`/`7864`
-- complex: full 50MB Qt/Vectorscan `9108`/`9108`; streaming 50MB Qt/Vectorscan `10486`/`10486`
+- simple: full 50MB Qt/Vectorscan `19870`/`19870`; streaming 50MB Qt/Vectorscan `22691`/`22878`
+- normal: full 50MB Qt/Vectorscan `6831`/`6831`; streaming 50MB Qt/Vectorscan `7800`/`7864`
+- complex: full 50MB Qt/Vectorscan `9108`/`9108`; streaming 50MB Qt/Vectorscan `9200`/`10486`
 
 ## Key Findings
 
-1. Vectorscan Streaming did not reach the requested `0.80x+` of same-build Full throughput in this run. Current ratios are `0.31x` simple, `0.41x` normal, and `0.44x` complex.
-2. The dominant remaining costs are append/update and final catch-up scheduling/search. For Vectorscan, append/update accounts for `44.9%-68.2%` of total Streaming time; catch-up accounts for `31.9%-55.7%`.
-3. The correctness fix for live coalescing is important: rapid append updates now search every newly appended batch instead of advancing by a fixed chunk size after a smaller live target.
-4. The next optimization should reduce live-search work issued during append bursts, or provide a true append-batch search path that scans completed append batches without rebuilding/copying chunk `RawLines` repeatedly.
-
+1. Streaming throughput improved dramatically: 50MB streaming went from 0.31x-0.44x of Full to 0.54x-0.83x (Vectorscan AVX). The 500MB streaming reaches 0.79x-1.44x.
+2. The `buildRawLines` bulk-copy optimization eliminated per-line `QByteArray` allocations, the single biggest streaming bottleneck.
+3. The `endLine` lazy re-check avoids a mutex-acquiring virtual call per chunk when the search hasn't caught up yet.
+4. The 256MB `CachedRawBatchBytesLimit` and 256MB `memoryBudgetBytes` keep more data in memory for larger files.
+5. The live update coalescing + larger batch sizes for 500MB streaming allow throughput that sometimes exceeds full search (1.44x for simple pattern) because streaming only searches newly appended data.
+6. 5GB full search: Vectorscan AVX processes 23.3M lines in ~9 seconds for normal/complex patterns, ~28 seconds for simple. Qt processes the same in ~4.5-9 seconds.

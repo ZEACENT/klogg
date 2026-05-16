@@ -360,76 +360,97 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                                                          QTextCodec* codec,
                                                          const QRegularExpression& prefilterPattern ) const
 {
-    // Snapshot-based two-phase read: take lightweight references under the lock,
-    // then build the output buffer without holding the mutex.  This prevents the
-    // search worker thread from blocking appendUtf8() on the main thread.
+    // Segment-based batch read: identify contiguous byte ranges per segment
+    // under the lock, then bulk-copy directly into the output buffer.
+    // This avoids per-line QByteArray allocations that dominate the old path.
 
-    struct LineRef {
+    struct SegmentRead {
         std::shared_ptr<QByteArray> memoryData;
         QString filePath;
-        qint64 offset;
-        int length;
+        qint64 byteStart;
+        qint64 byteLength;
+        qint64 lineCount;
     };
 
-    LinesCount::UnderlyingType requestedLines = 0;
-    std::vector<LineRef> lineRefs;
+    LinesCount::UnderlyingType totalRequestedLines = 0;
+    std::vector<SegmentRead> segmentReads;
 
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
         const auto totalLines = lineCount();
         const auto availableLines = qMax<LineNumber::UnderlyingType>(
             0, totalLines.get() - qMin( first.get(), totalLines.get() ) );
-        requestedLines
+        totalRequestedLines
             = qMin( number.get(), static_cast<LinesCount::UnderlyingType>( availableLines ) );
-        lineRefs.reserve( requestedLines );
 
-        // Cache the current segment to avoid repeated binary searches.
-        // Consecutive lines almost always fall within the same segment.
-        auto cachedSegIt = segments_.cend();
-        qint64 cachedPrevEnd = 0;
+        if ( totalRequestedLines == 0 ) {
+            SearchableLogData::RawLines rawLines;
+            rawLines.startLine = first;
+            return rawLines;
+        }
 
-        for ( LinesCount::UnderlyingType lineOffset = 0; lineOffset < requestedLines;
-              ++lineOffset ) {
-            const auto lineNum = first + LinesCount( lineOffset );
-            if ( lineNum < 0_lnum || lineNum >= totalLines ) {
+        segmentReads.reserve( 4 );
+
+        auto segIt = std::lower_bound(
+            segments_.cbegin(), segments_.cend(), first.get(),
+            []( const Segment& segment, qint64 value ) {
+                return segment.cumulativeEndLine <= value;
+            } );
+
+        if ( segIt == segments_.cend() ) {
+            SearchableLogData::RawLines rawLines;
+            rawLines.startLine = first;
+            return rawLines;
+        }
+
+        LinesCount::UnderlyingType linesRemaining = totalRequestedLines;
+        auto currentLine = first;
+
+        while ( linesRemaining > 0 && segIt != segments_.cend() ) {
+            const auto segIdx
+                = static_cast<size_t>( std::distance( segments_.cbegin(), segIt ) );
+            const qint64 prevEndLine
+                = segIdx == 0 ? 0LL : segments_[ segIdx - 1 ].cumulativeEndLine;
+
+            const auto localStart = static_cast<int>( currentLine.get<qint64>() - prevEndLine );
+            const auto linesInThisSegment
+                = qMin( linesRemaining,
+                        static_cast<LinesCount::UnderlyingType>(
+                            klogg::ssize( segIt->lineOffsets ) - localStart ) );
+
+            if ( linesInThisSegment <= 0 || localStart < 0
+                 || localStart >= klogg::ssize( segIt->lineOffsets ) ) {
                 break;
             }
 
-            // Advance the cached segment iterator if the line is beyond it.
-            if ( cachedSegIt == segments_.cend()
-                 || lineNum.get<qint64>() >= cachedSegIt->cumulativeEndLine ) {
-                cachedSegIt = std::lower_bound(
-                    segments_.cbegin(), segments_.cend(), lineNum.get(),
-                    []( const Segment& segment, qint64 value ) {
-                        return segment.cumulativeEndLine <= value;
-                    } );
-                if ( cachedSegIt == segments_.cend() ) {
-                    break;
-                }
-                const auto segIdx
-                    = static_cast<size_t>( std::distance( segments_.cbegin(), cachedSegIt ) );
-                cachedPrevEnd = segIdx == 0 ? 0LL : segments_[ segIdx - 1 ].cumulativeEndLine;
+            SegmentRead read;
+            read.memoryData = segIt->memoryData;
+            read.filePath = segIt->filePath;
+            read.lineCount = static_cast<qint64>( linesInThisSegment );
+
+            read.byteStart = segIt->lineOffsets[ static_cast<size_t>( localStart ) ];
+            const auto lastLocalLine = localStart + static_cast<int>( linesInThisSegment ) - 1;
+
+            if ( lastLocalLine + 1 < klogg::ssize( segIt->lineOffsets ) ) {
+                read.byteLength = segIt->lineOffsets[ static_cast<size_t>( lastLocalLine + 1 ) ]
+                                - read.byteStart;
+            } else {
+                read.byteLength = segIt->byteSize - read.byteStart;
             }
 
-            const auto localLine
-                = static_cast<int>( lineNum.get<qint64>() - cachedPrevEnd );
+            segmentReads.push_back( std::move( read ) );
 
-            if ( localLine < 0 || localLine >= klogg::isize( cachedSegIt->lineOffsets ) ) {
-                break;
-            }
-
-            LineRef ref;
-            ref.memoryData = cachedSegIt->memoryData; // shared_ptr copy keeps data alive
-            ref.filePath = cachedSegIt->filePath;
-            ref.offset = cachedSegIt->lineOffsets[ static_cast<size_t>( localLine ) ];
-            ref.length = cachedSegIt->lineLengths[ static_cast<size_t>( localLine ) ];
-            lineRefs.push_back( std::move( ref ) );
+            linesRemaining -= linesInThisSegment;
+            currentLine = currentLine + LinesCount( linesInThisSegment );
+            ++segIt;
         }
     }
-    // mutex released -- main thread can now append data freely
+    // mutex released
 
     const auto effectiveCodec = codec ? codec : QTextCodec::codecForName( "UTF-8" );
     const auto sourceEncodingParams = EncodingParameters( effectiveCodec );
+    const auto canUseRawUtf8
+        = sourceEncodingParams.isUtf8Compatible && prefilterPattern.pattern().isEmpty();
 
     SearchableLogData::RawLines rawLines;
     rawLines.startLine = first;
@@ -439,42 +460,100 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
     rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
     rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
     rawLines.prefilterPattern = prefilterPattern;
-    const auto canUseRawUtf8
-        = sourceEncodingParams.isUtf8Compatible && prefilterPattern.pattern().isEmpty();
 
-    // Cache file handle for spilled segments to avoid repeated open/close
-    // when consecutive lines come from the same segment file.
-    QString cachedFilePath;
-    std::unique_ptr<QFile> cachedFile;
-
-    for ( const auto& ref : lineRefs ) {
-        QByteArray utf8Line;
-        if ( ref.memoryData ) {
-            utf8Line = ref.memoryData->mid( type_safe::narrow_cast<int>( ref.offset ), ref.length );
+    if ( canUseRawUtf8 ) {
+        // Fast path: bulk copy from segments, derive endOfLines from \n scanning.
+        // Segment data stores each line as content+\n, so scanning for \n gives
+        // exact line boundaries without per-line allocation.
+        qint64 totalBytes = 0;
+        for ( const auto& read : segmentReads ) {
+            totalBytes += read.byteLength;
         }
-        else {
-            if ( cachedFilePath != ref.filePath || !cachedFile ) {
-                cachedFile = std::make_unique<QFile>( ref.filePath );
-                if ( !cachedFile->open( QIODevice::ReadOnly ) ) {
-                    cachedFile.reset();
+        rawLines.buffer.reserve( static_cast<size_t>( totalBytes ) );
+        rawLines.endOfLines.reserve( static_cast<size_t>( totalRequestedLines ) );
+
+        for ( const auto& read : segmentReads ) {
+            const auto outputStart = klogg::ssize( rawLines.buffer );
+
+            if ( read.memoryData ) {
+                const auto* src = read.memoryData->constData() + read.byteStart;
+                rawLines.buffer.insert( rawLines.buffer.end(), src, src + read.byteLength );
+            } else {
+                QFile file( read.filePath );
+                if ( file.open( QIODevice::ReadOnly ) ) {
+                    file.seek( read.byteStart );
+                    const auto data = file.read( read.byteLength );
+                    if ( data.size() > 0 ) {
+                        rawLines.buffer.insert( rawLines.buffer.end(), data.constBegin(),
+                                                data.constEnd() );
+                    }
                 }
-                cachedFilePath = ref.filePath;
             }
-            if ( cachedFile && cachedFile->isOpen() ) {
-                cachedFile->seek( ref.offset );
-                utf8Line = cachedFile->read( ref.length );
+
+            // Scan for \n to compute endOfLines
+            const auto* scanStart = rawLines.buffer.data() + outputStart;
+            const auto scanLength = klogg::ssize( rawLines.buffer ) - outputStart;
+            qint64 linesFound = 0;
+            for ( qint64 pos = 0; pos < scanLength && linesFound < read.lineCount; ++pos ) {
+                if ( scanStart[ pos ] == '\n' ) {
+                    rawLines.endOfLines.push_back( outputStart + pos + 1 );
+                    ++linesFound;
+                }
+            }
+
+            // Handle unterminated last line
+            if ( linesFound < read.lineCount ) {
+                rawLines.buffer.push_back( '\n' );
+                rawLines.endOfLines.push_back( klogg::ssize( rawLines.buffer ) );
             }
         }
-        if ( canUseRawUtf8 ) {
-            rawLines.buffer.insert( rawLines.buffer.end(), utf8Line.begin(), utf8Line.end() );
+    } else {
+        // Slow path: bulk read per segment, per-line codec conversion or prefilter
+        for ( const auto& read : segmentReads ) {
+            QByteArray segmentData;
+            if ( read.memoryData ) {
+                segmentData = read.memoryData->mid( type_safe::narrow_cast<int>( read.byteStart ),
+                                                    type_safe::narrow_cast<int>( read.byteLength ) );
+            } else {
+                QFile file( read.filePath );
+                if ( file.open( QIODevice::ReadOnly ) ) {
+                    file.seek( read.byteStart );
+                    segmentData = file.read( read.byteLength );
+                }
+            }
+
+            qint64 lineStart = 0;
+            for ( qint64 lineIdx = 0; lineIdx < read.lineCount; ++lineIdx ) {
+                const auto remaining = segmentData.size() - static_cast<int>( lineStart );
+                if ( remaining <= 0 ) {
+                    break;
+                }
+                const auto* nl = static_cast<const char*>(
+                    std::memchr( segmentData.constData() + static_cast<int>( lineStart ), '\n',
+                                 static_cast<size_t>( remaining ) ) );
+                qint64 lineEnd;
+                if ( nl ) {
+                    lineEnd = nl - segmentData.constData();
+                } else {
+                    lineEnd = segmentData.size();
+                }
+
+                auto lineLength = lineEnd - lineStart;
+                if ( lineLength > 0 && segmentData[ static_cast<int>( lineStart + lineLength - 1 ) ] == '\r' ) {
+                    --lineLength;
+                }
+
+                const auto utf8Line = segmentData.mid( static_cast<int>( lineStart ),
+                                                       static_cast<int>( lineLength ) );
+                const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
+                const auto lineUtf8 = lineStr.toUtf8();
+                rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
+                rawLines.buffer.push_back( '\n' );
+                rawLines.endOfLines.push_back( klogg::ssize( rawLines.buffer ) );
+
+                lineStart = lineEnd + 1;
+            }
         }
-        else {
-            const auto lineStr = decodeUtf8Line( utf8Line, effectiveCodec, prefilterPattern );
-            const auto lineUtf8 = lineStr.toUtf8();
-            rawLines.buffer.insert( rawLines.buffer.end(), lineUtf8.begin(), lineUtf8.end() );
-        }
-        rawLines.buffer.push_back( '\n' );
-        rawLines.endOfLines.push_back( klogg::ssize( rawLines.buffer ) );
     }
 
     return rawLines;

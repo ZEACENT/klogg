@@ -917,8 +917,8 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
     result.profileDescription = profile.description;
     result.pattern = profile.pattern;
 
-    // Use a smaller target for streaming to keep wall-clock time reasonable
-    const auto streamBytes = qMin( size.requestedBytes, static_cast<quint64>( 50 ) * 1024 * 1024 );
+    // Test at the actual requested size so 500MB and 5GB streaming are measured.
+    const auto streamBytes = size.requestedBytes;
     const auto targetLines = static_cast<quint64>( streamBytes / 200 ); // ~200 bytes/line average
 
     err << "Running streaming " << options.label << " size=" << size.label
@@ -955,21 +955,18 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
                               }
                           } );
 
-        // Feed all data in large batches (10,000 lines -- matching the search
-        // chunk size) with a few updateSearch triggers.  This models the real
-        // application where scheduleLoadingFinished() coalesces many small
-        // appendUtf8 calls into fewer search triggers.
-        //
-        // We measure:
-        //   totalMs     = wall-clock from first append to search completion
-        //   searchCount = number of updateSearch calls (thread create/join cycles)
-        constexpr quint64 batchSize = 10000;
+        // Feed all data in large batches with search triggers every few batches.
+        // Scale batch size with file size so that 5GB doesn't take thousands of
+        // small updateSearch calls.  Each updateSearch creates a thread, so fewer
+        // triggers means less overhead.
+        const quint64 batchSize = qMax<quint64>( 10000, targetLines / 200 );
+        const quint64 searchTriggerInterval = qMax<quint64>( 1, batchSize / 10000 );
         quint64 linesWritten = 0;
 
         QElapsedTimer timer;
         timer.start();
 
-        for ( quint64 i = 0; i < targetLines; i += batchSize ) {
+        for ( quint64 i = 0, batchIndex = 0; i < targetLines; i += batchSize, ++batchIndex ) {
             QByteArray batch;
             const auto end = qMin( i + batchSize, targetLines );
             for ( quint64 j = i; j < end; ++j ) {
@@ -978,17 +975,18 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             streamingLogData->appendUtf8( batch );
             linesWritten = end;
 
-            // Trigger search (one per batch -- models coalesced loadingFinished)
-            if ( i == 0 ) {
-                filteredData->runSearch( pattern, 0_lnum,
-                                         LineNumber( streamingLogData->getNbLine().get() ) );
-            }
-            else {
-                filteredData->updateSearch( 0_lnum,
+            // Trigger search at intervals to let the live-update coalescing work
+            if ( batchIndex % searchTriggerInterval == 0 ) {
+                if ( i == 0 ) {
+                    filteredData->runSearch( pattern, 0_lnum,
                                              LineNumber( streamingLogData->getNbLine().get() ) );
+                }
+                else {
+                    filteredData->updateSearch( 0_lnum,
+                                                 LineNumber( streamingLogData->getNbLine().get() ) );
+                }
             }
 
-            // Process Qt events (signals, search progress)
             QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
         }
         const auto appendUpdateMs = static_cast<double>( timer.nsecsElapsed() ) / 1'000'000.0;
