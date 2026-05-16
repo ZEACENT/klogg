@@ -27,17 +27,17 @@ Three regex complexity buckets are benchmarked:
 
 ### Corpus sizes
 
-Three corpus buckets are generated:
+Two corpus buckets are generated:
 
 - `50MB`
 - `500MB`
-- `5GB`
 
 These labels map to binary-sized buckets in the benchmark tool:
 
 - `50MB = 50 * 1024 * 1024`
 - `500MB = 500 * 1024 * 1024`
-- `5GB = 5 * 1024 * 1024 * 1024`
+
+The corpus is **generated at benchmark time** by `regex_search_benchmark` using a deterministic pseudo-random generator keyed by `--seed`. No static corpus files are tracked in the repository. The generator produces realistic structured log lines with varying severity levels, component names, and request IDs.
 
 ### Engine variants
 
@@ -87,7 +87,7 @@ If the target filesystem does not have enough space for a requested bucket, the 
   --engine qt \
   --label qt \
   --tmpfs-dir /dev/shm/klogg-bench \
-  --sizes 50MB,500MB,5GB \
+  --sizes 50MB,500MB \
   --profiles simple,normal,complex \
   --iterations 5 \
   --warmup 1 \
@@ -123,6 +123,114 @@ Streaming cases also include stage and coalescing counters:
 - requested updates and coalesced live updates (`update_requests`, `coalesced_live_updates`)
 
 These fields separate live ingestion/indexing/scheduling overhead from final search catch-up and make it possible to verify that many append-triggered `updateSearch()` calls collapse into a small number of live search operations.
+
+## Standard benchmark execution procedure
+
+Follow these steps to produce reproducible, commit-worthy benchmark results.
+
+### 1. Prerequisites
+
+- macOS: `brew install cmake ninja qt@6 boost ragel`
+- Linux: `sudo apt-get install build-essential cmake qtbase5-dev libboost-all-dev ragel`
+- A memory-backed filesystem:
+  - macOS: create a RAM disk (`diskutil erasevolume HFS+ RAMDisk $(hdiutil attach -nomount ram://2097152)`)
+  - Linux: use `/dev/shm/klogg-bench`
+
+### 2. Build three engine variants
+
+```bash
+ROOT_DIR="$(pwd)"
+
+# Qt engine
+cmake -S "$ROOT_DIR" -B "$ROOT_DIR/build-bench-qt" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKLOGG_BUILD_BENCHMARKS=ON \
+  -DKLOGG_USE_VECTORSCAN=OFF \
+  -DKLOGG_USE_SENTRY=OFF \
+  -DQt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6
+cmake --build "$ROOT_DIR/build-bench-qt" --config Release --target regex_search_benchmark
+
+# Vectorscan generic (no SIMD)
+cmake -S "$ROOT_DIR" -B "$ROOT_DIR/build-bench-vs-generic" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKLOGG_BUILD_BENCHMARKS=ON \
+  -DKLOGG_USE_VECTORSCAN=ON \
+  -DKLOGG_GENERIC_CPU=ON \
+  -DKLOGG_USE_SENTRY=OFF \
+  -DQt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6
+cmake --build "$ROOT_DIR/build-bench-vs-generic" --config Release --target regex_search_benchmark
+
+# Vectorscan AVX (host SIMD)
+cmake -S "$ROOT_DIR" -B "$ROOT_DIR/build-bench-vs-avx" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKLOGG_BUILD_BENCHMARKS=ON \
+  -DKLOGG_USE_VECTORSCAN=ON \
+  -DKLOGG_GENERIC_CPU=OFF \
+  -DKLOGG_USE_SENTRY=OFF \
+  -DQt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6
+cmake --build "$ROOT_DIR/build-bench-vs-avx" --config Release --target regex_search_benchmark
+```
+
+### 3. Run the full matrix
+
+```bash
+./scripts/run_regex_benchmarks.sh --tmpfs-dir /Volumes/RAMDisk/klogg-bench
+```
+
+Or run each engine individually with `--search-mode all`:
+
+```bash
+./build-bench-qt/output/regex_search_benchmark \
+  --engine qt --label qt \
+  --tmpfs-dir /Volumes/RAMDisk/klogg-bench \
+  --sizes 50MB,500MB \
+  --profiles simple,normal,complex \
+  --search-mode all \
+  --iterations 5 --warmup 1 --seed 20260301 \
+  --output docs/benchmarks/current-run/qt.json
+
+./build-bench-vs-generic/output/regex_search_benchmark \
+  --engine vectorscan --label vectorscan-generic \
+  --tmpfs-dir /Volumes/RAMDisk/klogg-bench \
+  --sizes 50MB,500MB \
+  --profiles simple,normal,complex \
+  --search-mode all \
+  --iterations 5 --warmup 1 --seed 20260301 \
+  --output docs/benchmarks/current-run/vs-generic.json
+
+./build-bench-vs-avx/output/regex_search_benchmark \
+  --engine vectorscan --label vectorscan-avx \
+  --tmpfs-dir /Volumes/RAMDisk/klogg-bench \
+  --sizes 50MB,500MB \
+  --profiles simple,normal,complex \
+  --search-mode all \
+  --iterations 5 --warmup 1 --seed 20260301 \
+  --output docs/benchmarks/current-run/vs-avx.json
+```
+
+### 4. Commit results
+
+```bash
+# Copy raw results and regenerate the combined report
+cp /tmp/klogg-bench-results/*.json docs/benchmarks/current-run/
+
+# The combined JSON and Markdown are written by the runner script.
+# If running manually, combine the three JSON files into
+# docs/benchmarks/regex-benchmark-results.json and
+# docs/benchmarks/regex-benchmark-results.md.
+
+git add docs/benchmarks/
+git commit -m "Update benchmark results YYYY-MM-DD"
+```
+
+### Reproducibility checklist
+
+- Use the same `--seed 20260301` across runs.
+- Use the same `--iterations 5 --warmup 1`.
+- Run on a memory-backed filesystem (`/dev/shm` or RAM disk).
+- Close other CPU-intensive processes before measuring.
+- Record the host, OS, CPU, and Qt version in the commit message.
+- Do not mix results from different hosts in a single commit.
 
 ## Benchmark notes
 

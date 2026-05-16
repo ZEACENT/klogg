@@ -235,7 +235,6 @@ QVector<SizeSpec> availableSizes()
     return {
         { QLatin1String( "50MB" ), QLatin1String( "50MB" ), 50ull * 1024ull * 1024ull },
         { QLatin1String( "500MB" ), QLatin1String( "500MB" ), 500ull * 1024ull * 1024ull },
-        { QLatin1String( "5GB" ), QLatin1String( "5GB" ), 5ull * 1024ull * 1024ull * 1024ull },
     };
 }
 
@@ -316,7 +315,7 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
         QStringList{ QLatin1String( "sizes" ) },
         QLatin1String( "Comma-separated size buckets to run." ),
         QLatin1String( "sizes" ),
-        QLatin1String( "50MB,500MB,5GB" ) );
+        QLatin1String( "50MB,500MB" ) );
     const QCommandLineOption profilesOption(
         QStringList{ QLatin1String( "profiles" ) },
         QLatin1String( "Comma-separated profile ids to run." ),

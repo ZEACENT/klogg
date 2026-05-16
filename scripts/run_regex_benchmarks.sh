@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_TYPE="Release"
-SIZES="50MB,500MB,5GB"
+SIZES="50MB,500MB"
 PROFILES="simple,normal,complex"
 ITERATIONS="5"
 WARMUP="1"
@@ -204,7 +204,7 @@ markdown_output = Path(sys.argv[5])
 
 runs = [json.loads(path.read_text()) for path in raw_paths]
 engine_order = ["qt", "vectorscan-generic", "vectorscan-avx"]
-size_order = ["50MB", "500MB", "5GB"]
+size_order = ["50MB", "500MB"]
 profile_order = ["simple", "normal", "complex"]
 
 case_index = {}
@@ -250,8 +250,8 @@ for profile in profile_order:
     summary["summary"]["profiles"][profile] = {}
     markdown.append(f"### {profile}")
     markdown.append("")
-    markdown.append("| Engine | 50MB (ms) | 500MB (ms) | 5GB (ms) |")
-    markdown.append("| --- | ---: | ---: | ---: |")
+    markdown.append("| Engine | 50MB (ms) | 500MB (ms) |")
+    markdown.append("| --- | ---: | ---: |")
     for engine in engine_order:
         row = [engine]
         for size in size_order:
@@ -273,8 +273,8 @@ markdown.append("")
 for profile in profile_order:
     markdown.append(f"### {profile}")
     markdown.append("")
-    markdown.append("| Engine | 50MB (MiB/s) | 500MB (MiB/s) | 5GB (MiB/s) |")
-    markdown.append("| --- | ---: | ---: | ---: |")
+    markdown.append("| Engine | 50MB (MiB/s) | 500MB (MiB/s) |")
+    markdown.append("| --- | ---: | ---: |")
     for engine in engine_order:
         row = [engine]
         for size in size_order:
