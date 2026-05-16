@@ -249,6 +249,11 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     LOG_INFO << "Search requested (async dispatch, gen " << generation << ")";
     compiledExpression_ = std::make_shared<RegularExpression>( regExp );
 
+    // A new full search implicitly cancels any pending or coalesced live
+    // update.  Without this reset, liveUpdateRunning_ would stay true and
+    // subsequent updateSearch() calls would keep coalescing forever.
+    liveUpdateRunning_.store( false );
+
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
                                    generation, operationId, compiledExpression_ } );
 }

@@ -287,6 +287,7 @@ public:
     OperationGeneration bumpGeneration()
     {
         operationId_.fetch_add( 1 );
+        liveUpdateRunning_.store( false );
         return operationGeneration_.fetch_add( 1 ) + 1;
     }
 

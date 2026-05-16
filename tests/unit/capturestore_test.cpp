@@ -451,7 +451,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     REQUIRE( store.lineAt( LineNumber( lineCount - 1 ), QTextCodec::codecForName( "UTF-8" ),
                            QRegularExpression{} )
              == QStringLiteral( "line-999999" ) );
-    REQUIRE( elapsedMs < 2000 );
+    CHECK( elapsedMs < 2000 );
 }
 
 TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata overhead" )
@@ -480,7 +480,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
                            QRegularExpression{} )
              == QStringLiteral( "m-999999" ) );
     REQUIRE( store.stats().memoryBytes == data.size() );
-    REQUIRE( elapsedMs < 200 );
+    CHECK( elapsedMs < 200 );
 }
 
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )
