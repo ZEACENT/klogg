@@ -554,6 +554,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     high_resolution_clock::time_point t1 = high_resolution_clock::now();
 
     const auto& config = Configuration::get();
+    const auto configuredChunkSize = config.searchReadBufferSizeLines();
     const auto matchingThreadsCount = static_cast<uint32_t>( [ &config ]() {
         if ( !config.useParallelSearch() ) {
             return 1;
@@ -563,20 +564,31 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                                                       : configuredThreadPoolSize );
     }() );
 
-    LOG_INFO << "Using " << matchingThreadsCount << " matching threads";
+    const auto searchRange = static_cast<LinesCount::UnderlyingType>(
+        qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() ).get()
+        - initialLine.get() );
 
-    // Avoid the TBB flow-graph path for the single-threaded case. It adds
-    // unnecessary teardown complexity and has been a source of intermittent
-    // crashes in tests during node destruction, while a straightforward loop is
-    // simpler and deterministic.
-    if ( matchingThreadsCount == 1 ) {
+    // For small incremental searches, the TBB flow-graph path is wasteful:
+    // graph setup, per-thread matcher creation, and per-chunk mutex combining
+    // dominate the actual matching work.  Use the single-threaded path instead
+    // — it reuses matchers from the pool (MatcherCache), reads the entire
+    // range in one chunk, and combines results once.
+    const auto singleThreadedThreshold
+        = static_cast<LinesCount::UnderlyingType>( configuredChunkSize );
+    const bool useSingleThreaded
+        = matchingThreadsCount == 1 || searchRange <= singleThreadedThreshold;
+
+    LOG_INFO << "Using " << ( useSingleThreaded ? 1u : matchingThreadsCount ) << " matching threads"
+             << " (range=" << searchRange << " chunk=" << configuredChunkSize << ")";
+
+    if ( useSingleThreaded ) {
         if ( initialLine < startLine_ ) {
             initialLine = startLine_;
         }
 
         auto endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
         const auto nbLinesInChunk = LinesCount(
-            static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() ) );
+            static_cast<LinesCount::UnderlyingType>( configuredChunkSize ) );
 
         std::chrono::microseconds fileReadingDuration{ 0 };
         std::chrono::microseconds matchCombiningDuration{ 0 };
@@ -713,7 +725,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
     auto endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
     const auto nbLinesInChunk = LinesCount(
-        static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() ) );
+        static_cast<LinesCount::UnderlyingType>( configuredChunkSize ) );
 
     std::chrono::microseconds fileReadingDuration{ 0 };
 
