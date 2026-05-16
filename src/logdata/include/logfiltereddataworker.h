@@ -56,6 +56,7 @@
 
 #include "atomicflag.h"
 #include "linetypes.h"
+#include "matchercache.h"
 #include "regularexpression.h"
 #include "synchronization.h"
 
@@ -147,7 +148,8 @@ public:
                      LineNumber endLine,
                      std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                      std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
-                     std::atomic<quint64>* matcherCreations = nullptr );
+                     std::atomic<quint64>* matcherCreations = nullptr,
+                     MatcherCache* matcherCache = nullptr );
 
     // Run the search operation, returns true if it has been done
     // and false if it has been cancelled (results not copied)
@@ -172,6 +174,7 @@ protected:
     std::shared_ptr<RegularExpression> compiledRegExp_;
     std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine_;
     std::atomic<quint64>* matcherCreations_;
+    MatcherCache* matcherCache_;
 };
 
 class FullSearchOperation : public SearchOperation {
@@ -181,9 +184,10 @@ public:
                          const RegularExpressionPattern& regExp, LineNumber startLine,
                          LineNumber endLine,
                          std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
-                         std::atomic<quint64>* matcherCreations = nullptr )
+                         std::atomic<quint64>* matcherCreations = nullptr,
+                         MatcherCache* matcherCache = nullptr )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
-                           std::move( compiledRegExp ), nullptr, matcherCreations )
+                           std::move( compiledRegExp ), nullptr, matcherCreations, matcherCache )
     {
     }
 
@@ -198,9 +202,10 @@ public:
                            LineNumber endLine, LineNumber position,
                            std::shared_ptr<RegularExpression> compiledRegExp = nullptr,
                            std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine = nullptr,
-                           std::atomic<quint64>* matcherCreations = nullptr )
+                           std::atomic<quint64>* matcherCreations = nullptr,
+                           MatcherCache* matcherCache = nullptr )
         : SearchOperation( sourceLogData, interruptRequested, regExp, startLine, endLine,
-                           std::move( compiledRegExp ), liveTargetEndLine, matcherCreations )
+                           std::move( compiledRegExp ), liveTargetEndLine, matcherCreations, matcherCache )
         , initialPosition_( position )
     {
     }
@@ -355,6 +360,8 @@ private:
     std::atomic<quint64> matcherCreations_{ 0 };
     std::atomic<quint64> updateRequests_{ 0 };
     std::atomic<quint64> coalescedLiveUpdates_{ 0 };
+
+    MatcherCache matcherCache_;
 
     // Cached compiled regular expression to avoid recompilation on incremental
     // search updates.  The Vectorscan database compilation is expensive; caching

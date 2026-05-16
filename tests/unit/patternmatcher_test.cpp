@@ -25,6 +25,7 @@
 
 #include "configuration.h"
 #include "containers.h"
+#include "matchercache.h"
 #include "regularexpression.h"
 #include "test_utils.h"
 
@@ -164,4 +165,135 @@ TEST_CASE( "Block scan falls back when Vectorscan is unavailable", "[patternmatc
     // Per-line hasMatch still works correctly as the fallback.
     REQUIRE( matcher->hasMatch( std::string_view{ "ERROR: something" } ) );
     REQUIRE_FALSE( matcher->hasMatch( std::string_view{ "INFO: ok" } ) );
+}
+
+// --- MatcherCache tests ---
+
+TEST_CASE( "MatcherCache returns reusable matchers for the same expression",
+           "[matchercache]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    auto expression = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+    REQUIRE( expression->isValid() );
+
+    MatcherCache cache;
+
+    // First access: no cached matchers, should create new ones.
+    auto m1 = cache.acquire( expression );
+    REQUIRE( m1 != nullptr );
+    REQUIRE( m1->hasMatch( std::string_view{ "ERROR: crash" } ) );
+    REQUIRE_FALSE( m1->hasMatch( std::string_view{ "INFO: ok" } ) );
+
+    // Return the matcher to the pool.
+    cache.release( std::move( m1 ) );
+
+    // Second access: should reuse the returned matcher (no new creation).
+    auto m2 = cache.acquire( expression );
+    REQUIRE( m2 != nullptr );
+    REQUIRE( m2->hasMatch( std::string_view{ "ERROR: crash" } ) );
+    REQUIRE_FALSE( m2->hasMatch( std::string_view{ "INFO: ok" } ) );
+}
+
+TEST_CASE( "MatcherCache evicts matchers when expression changes",
+           "[matchercache]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    auto expr1 = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+    auto expr2 = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "WARN" ), true, false, false, true ) );
+    REQUIRE( expr1->isValid() );
+    REQUIRE( expr2->isValid() );
+
+    MatcherCache cache;
+
+    auto m1 = cache.acquire( expr1 );
+    REQUIRE( m1->hasMatch( std::string_view{ "ERROR: crash" } ) );
+    cache.release( std::move( m1 ) );
+
+    // Acquire for a different expression — old matchers should be evicted.
+    auto m2 = cache.acquire( expr2 );
+    REQUIRE( m2->hasMatch( std::string_view{ "WARN: low mem" } ) );
+    REQUIRE_FALSE( m2->hasMatch( std::string_view{ "ERROR: crash" } ) );
+}
+
+TEST_CASE( "MatcherCache supports multiple matchers per expression",
+           "[matchercache]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    auto expression = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+    REQUIRE( expression->isValid() );
+
+    MatcherCache cache;
+
+    // Acquire multiple matchers (simulating TBB parallel threads).
+    auto m1 = cache.acquire( expression );
+    auto m2 = cache.acquire( expression );
+    auto m3 = cache.acquire( expression );
+    REQUIRE( m1 != nullptr );
+    REQUIRE( m2 != nullptr );
+    REQUIRE( m3 != nullptr );
+
+    // All should produce correct results.
+    const std::string_view line{ "ERROR: disk full" };
+    REQUIRE( m1->hasMatch( line ) );
+    REQUIRE( m2->hasMatch( line ) );
+    REQUIRE( m3->hasMatch( line ) );
+
+    // Return them.
+    cache.release( std::move( m1 ) );
+    cache.release( std::move( m2 ) );
+    cache.release( std::move( m3 ) );
+
+    // Acquire again — should reuse from pool without creating new ones.
+    auto m4 = cache.acquire( expression );
+    auto m5 = cache.acquire( expression );
+    REQUIRE( m4 != nullptr );
+    REQUIRE( m5 != nullptr );
+    REQUIRE( m4->hasMatch( line ) );
+    REQUIRE( m5->hasMatch( line ) );
+}
+
+TEST_CASE( "MatcherCache pooled matchers produce identical results to fresh matchers",
+           "[matchercache]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    RegularExpression expression(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+    REQUIRE( expression.isValid() );
+
+    MatcherCache cache;
+    auto expr = std::make_shared<RegularExpression>(
+        RegularExpressionPattern( QStringLiteral( "ERROR" ), true, false, false, true ) );
+
+    // Create a fresh matcher for reference.
+    const auto fresh = expression.createMatcher();
+
+    // Get a matcher from the cache (first call creates, then release and re-acquire).
+    auto pooled = cache.acquire( expr );
+    cache.release( std::move( pooled ) );
+    pooled = cache.acquire( expr );
+
+    const std::vector<std::string> testLines = {
+        "ERROR: disk full",
+        "WARN: low memory",
+        "INFO: system started",
+        "ERROR: timeout",
+        "DEBUG: checkpoint",
+    };
+
+    for ( const auto& line : testLines ) {
+        REQUIRE( fresh->hasMatch( std::string_view{ line } )
+                 == pooled->hasMatch( std::string_view{ line } ) );
+    }
 }

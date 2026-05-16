@@ -355,7 +355,7 @@ void LogFilteredDataWorker::dispatchLoop()
                     operationStarts_.fetch_add( 1 );
                     auto operationRequested = std::make_unique<FullSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
-                        request.endLine, request.compiled, &matcherCreations_ );
+                        request.endLine, request.compiled, &matcherCreations_, &matcherCache_ );
                     connectSignalsAndRun( operationRequested.get(), request.generation,
                                           request.operationId );
                 } );
@@ -374,7 +374,7 @@ void LogFilteredDataWorker::dispatchLoop()
                     auto operationRequested = std::make_unique<UpdateSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
                         request.endLine, request.position, request.compiled, nullptr,
-                        &matcherCreations_ );
+                        &matcherCreations_, &matcherCache_ );
                     connectSignalsAndRun( operationRequested.get(), request.generation,
                                           request.operationId );
                 } );
@@ -394,7 +394,7 @@ void LogFilteredDataWorker::dispatchLoop()
                     auto operationRequested = std::make_unique<UpdateSearchOperation>(
                         sourceLogData_, interruptRequested_, request.regExp, request.startLine,
                         request.endLine, request.position, request.compiled, &liveTargetEndLine_,
-                        &matcherCreations_ );
+                        &matcherCreations_, &matcherCache_ );
                     connectSignalsAndRun( operationRequested.get(), request.generation,
                                           request.operationId );
                     finishLiveUpdateAndRestartIfNeeded( request );
@@ -524,7 +524,8 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
                                   LineNumber endLine,
                                   std::shared_ptr<RegularExpression> compiledRegExp,
                                   std::atomic<LineNumber::UnderlyingType>* liveTargetEndLine,
-                                  std::atomic<quint64>* matcherCreations )
+                                  std::atomic<quint64>* matcherCreations,
+                                  MatcherCache* matcherCache )
 
     : interruptRequested_( interruptRequested )
     , regexp_( regExp )
@@ -534,6 +535,7 @@ SearchOperation::SearchOperation( const SearchableLogData& sourceLogData,
     , compiledRegExp_( std::move( compiledRegExp ) )
     , liveTargetEndLine_( liveTargetEndLine )
     , matcherCreations_( matcherCreations )
+    , matcherCache_( matcherCache )
 {
 }
 
@@ -593,10 +595,22 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
             ownedExpression = std::make_shared<RegularExpression>( regexp_ );
         }
         const auto& regularExpression = compiledRegExp_ ? *compiledRegExp_ : *ownedExpression;
-        if ( matcherCreations_ ) {
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+        const auto matcherT0 = std::chrono::steady_clock::now();
+#endif
+        auto matcher = matcherCache_
+                           ? matcherCache_->acquire( compiledRegExp_ ? compiledRegExp_ : ownedExpression )
+                           : regularExpression.createMatcher();
+        if ( matcherCreations_ && !matcherCache_ ) {
             matcherCreations_->fetch_add( 1 );
         }
-        auto matcher = regularExpression.createMatcher();
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+        const auto matcherT1 = std::chrono::steady_clock::now();
+        const auto matcherAcquireUs
+            = std::chrono::duration_cast<std::chrono::microseconds>( matcherT1 - matcherT0 ).count();
+        LOG_INFO << "PERF [search] matcher_acquire_us=" << matcherAcquireUs
+                 << " pooled=" << ( matcherCache_ ? "yes" : "no" );
+#endif
 
         auto chunkStart = initialLine;
         while ( !interruptRequested_ ) {
@@ -682,6 +696,12 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
         Q_EMIT searchProgressed( nbMatches, 100, initialLine );
         Q_EMIT searchFinished();
+
+        // Return the single-threaded matcher to the pool for reuse.
+        if ( matcherCache_ ) {
+            matcherCache_->release( std::move( matcher ) );
+        }
+
         return;
     }
 

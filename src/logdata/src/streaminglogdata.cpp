@@ -39,6 +39,10 @@ StreamingLogData::~StreamingLogData()
 
 void StreamingLogData::appendUtf8( const QByteArray& data )
 {
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+    const auto t0 = std::chrono::steady_clock::now();
+#endif
+
     // Restart the flush timer if new data arrives while an output file is bound
     // but the timer is stopped (e.g. after finishInput from a reconnect cycle).
     if ( !outputFlushTimer_.isActive() && !boundOutputFile_.isEmpty() ) {
@@ -46,8 +50,23 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     }
 
     const auto previousLineCount = captureStore_.lineCount();
+
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+    const auto t1 = std::chrono::steady_clock::now();
+#endif
+
     const auto appendResult = captureStore_.appendUtf8( data );
+
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+    const auto t2 = std::chrono::steady_clock::now();
+#endif
+
     rememberAppendedRawLines( appendResult );
+
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+    const auto t3 = std::chrono::steady_clock::now();
+#endif
+
     const auto currentLineCount = captureStore_.lineCount();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
          && currentLineCount != previousLineCount ) {
@@ -58,6 +77,18 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
+
+#ifdef KLOGG_PERF_MEASURE_STREAMING
+    const auto t4 = std::chrono::steady_clock::now();
+    const auto captureUs = std::chrono::duration_cast<std::chrono::microseconds>( t2 - t1 ).count();
+    const auto cacheUs = std::chrono::duration_cast<std::chrono::microseconds>( t3 - t2 ).count();
+    const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>( t4 - t0 ).count();
+    LOG_INFO << "PERF [streaming] appendUtf8 size=" << data.size()
+             << " lines=" << ( currentLineCount.get() - previousLineCount.get() )
+             << " capture_us=" << captureUs
+             << " cache_us=" << cacheUs
+             << " total_us=" << totalUs;
+#endif
 }
 
 void StreamingLogData::finishInput()
