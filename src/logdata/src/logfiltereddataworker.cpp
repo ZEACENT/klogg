@@ -61,6 +61,9 @@
 #include "synchronization.h"
 
 namespace {
+constexpr auto LiveUpdateMaxCoalesceDelay = std::chrono::milliseconds( 25 );
+constexpr LinesCount::UnderlyingType LiveUpdateSingleThreadChunkMultiplier = 4;
+
 struct PartialSearchResults {
     PartialSearchResults() = default;
 
@@ -253,6 +256,10 @@ void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, Line
     // update.  Without this reset, liveUpdateRunning_ would stay true and
     // subsequent updateSearch() calls would keep coalescing forever.
     liveUpdateRunning_.store( false );
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        deferredLiveRequest_.reset();
+    }
 
     enqueueRequest( SearchRequest{ SearchRequest::Type::Full, regExp, startLine, endLine, {},
                                    generation, operationId, compiledExpression_ } );
@@ -277,9 +284,17 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
         LOG_INFO << "Live search update requested from " << position.get()
                  << " to " << endLine.get() << " (async dispatch, gen " << generation << ")";
 
-        enqueueRequest( SearchRequest{ SearchRequest::Type::LiveUpdate, regExp, startLine, endLine,
-                                       position, generation, operationId, compiledExpression_ },
-                        false );
+        auto request = SearchRequest{ SearchRequest::Type::LiveUpdate, regExp, startLine, endLine,
+                                      position, generation, operationId, compiledExpression_ };
+        const auto processedLine = searchData_.getLastProcessedLine();
+        const auto pendingLines = endLine > processedLine ? ( endLine - processedLine ).get() : 0;
+        if ( pendingLines < liveUpdateCoalesceThreshold() ) {
+            liveUpdateRunning_.store( false );
+            enqueueOrDeferLiveRequest( std::move( request ) );
+        }
+        else {
+            enqueueRequest( std::move( request ), false );
+        }
         return;
     }
 
@@ -316,15 +331,62 @@ void LogFilteredDataWorker::enqueueRequest( SearchRequest request, bool interrup
     requestCv_.notify_one();
 }
 
+void LogFilteredDataWorker::enqueueOrDeferLiveRequest( SearchRequest request )
+{
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        auto coalesceRequest = [ &request, this ]( SearchRequest& existing ) {
+            existing.endLine = qMax( existing.endLine, request.endLine );
+            existing.position = qMin( existing.position, request.position );
+            existing.operationId = request.operationId;
+            existing.compiled = request.compiled;
+            coalescedLiveUpdates_.fetch_add( 1 );
+        };
+
+        if ( pendingRequest_ && pendingRequest_->type == SearchRequest::Type::LiveUpdate ) {
+            coalesceRequest( *pendingRequest_ );
+            return;
+        }
+
+        if ( deferredLiveRequest_ ) {
+            coalesceRequest( *deferredLiveRequest_ );
+        }
+        else {
+            deferredLiveRequest_.emplace( std::move( request ) );
+        }
+        deferredLiveDeadline_ = std::chrono::steady_clock::now() + LiveUpdateMaxCoalesceDelay;
+    }
+    requestCv_.notify_one();
+}
+
 void LogFilteredDataWorker::dispatchLoop()
 {
     while ( true ) {
         SearchRequest request;
         {
             std::unique_lock<std::mutex> lock( requestMutex_ );
-            requestCv_.wait( lock, [ this ] { return pendingRequest_.has_value() || dispatchShutdown_; } );
+            requestCv_.wait( lock, [ this ] {
+                return pendingRequest_.has_value() || deferredLiveRequest_.has_value()
+                    || dispatchShutdown_;
+            } );
             if ( dispatchShutdown_ ) {
                 pendingRequest_.reset();
+                deferredLiveRequest_.reset();
+                return;
+            }
+            while ( !pendingRequest_.has_value() && deferredLiveRequest_.has_value()
+                    && !dispatchShutdown_ ) {
+                const auto now = std::chrono::steady_clock::now();
+                if ( now < deferredLiveDeadline_ ) {
+                    requestCv_.wait_until( lock, deferredLiveDeadline_ );
+                    continue;
+                }
+                pendingRequest_ = std::move( deferredLiveRequest_ );
+                deferredLiveRequest_.reset();
+            }
+            if ( dispatchShutdown_ ) {
+                pendingRequest_.reset();
+                deferredLiveRequest_.reset();
                 return;
             }
             if ( !pendingRequest_.has_value() ) {
@@ -390,6 +452,7 @@ void LogFilteredDataWorker::dispatchLoop()
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
                     ScopedLock operationLock( operationsMutex_ );
+                    liveUpdateRunning_.store( true );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
                         liveUpdateRunning_.store( false );
@@ -407,6 +470,32 @@ void LogFilteredDataWorker::dispatchLoop()
         }
         operationStarted.acquire();
     }
+}
+
+LinesCount::UnderlyingType LogFilteredDataWorker::liveUpdateCoalesceThreshold() const
+{
+    const auto& config = Configuration::get();
+    const auto matchingThreadsCount = static_cast<LinesCount::UnderlyingType>( [ &config ]() {
+        if ( !config.useParallelSearch() ) {
+            return 1;
+        }
+        const auto configuredThreadPoolSize = config.searchThreadPoolSize();
+        return qMax( 1, configuredThreadPoolSize == 0 ? tbb::info::default_concurrency()
+                                                      : configuredThreadPoolSize );
+    }() );
+
+    return static_cast<LinesCount::UnderlyingType>( config.searchReadBufferSizeLines() )
+         * matchingThreadsCount;
+}
+
+void LogFilteredDataWorker::promoteDeferredLiveRequest()
+{
+    std::lock_guard<std::mutex> lock( requestMutex_ );
+    if ( deferredLiveRequest_ && !pendingRequest_ ) {
+        pendingRequest_ = std::move( deferredLiveRequest_ );
+        deferredLiveRequest_.reset();
+    }
+    requestCv_.notify_one();
 }
 
 void LogFilteredDataWorker::finishLiveUpdateAndRestartIfNeeded( const SearchRequest& request )
@@ -451,6 +540,7 @@ void LogFilteredDataWorker::waitForDone()
     // destructor, this does NOT shut down the dispatch thread — subsequent
     // updateSearch calls must still be processable after a search completes.
     // The dispatch thread is only shut down in the destructor.
+    promoteDeferredLiveRequest();
     joinOperationThread();
 }
 
@@ -460,6 +550,7 @@ void LogFilteredDataWorker::shutdownAndWait()
         std::lock_guard<std::mutex> lock( requestMutex_ );
         dispatchShutdown_ = true;
         pendingRequest_.reset();
+        deferredLiveRequest_.reset();
     }
     requestCv_.notify_one();
     if ( dispatchThread_.joinable() ) {
@@ -573,13 +664,17 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() ).get()
         - initialLine.get() );
 
-    // For small incremental searches, the TBB flow-graph path is wasteful:
+    // For incremental searches, especially live-source updates, the TBB
+    // flow-graph path is wasteful until the pending range is large enough:
     // graph setup, per-thread matcher creation, and per-chunk mutex combining
-    // dominate the actual matching work.  Use the single-threaded path instead
-    // — it reuses matchers from the pool (MatcherCache), reads the entire
-    // range in one chunk, and combines results once.
-    const auto singleThreadedThreshold
-        = static_cast<LinesCount::UnderlyingType>( configuredChunkSize );
+    // dominate the actual matching work.  Live updates arrive as many medium
+    // ranges, so keep them on the pooled single-threaded path for several
+    // chunks before paying the parallel setup cost.
+    const auto singleThreadedThreshold = static_cast<LinesCount::UnderlyingType>(
+        static_cast<LinesCount::UnderlyingType>( configuredChunkSize )
+        * static_cast<LinesCount::UnderlyingType>(
+            liveTargetEndLine_ ? matchingThreadsCount * LiveUpdateSingleThreadChunkMultiplier
+                               : 1u ) );
     const bool useSingleThreaded
         = matchingThreadsCount == 1 || searchRange <= singleThreadedThreshold;
 

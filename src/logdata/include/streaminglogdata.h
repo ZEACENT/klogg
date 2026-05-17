@@ -1,10 +1,11 @@
 #ifndef STREAMINGLOGDATA_H
 #define STREAMINGLOGDATA_H
 
+#include <deque>
 #include <memory>
 #include <mutex>
-#include <deque>
 #include <optional>
+#include <unordered_map>
 
 #include <QFile>
 #include <QRegularExpression>
@@ -69,7 +70,9 @@ class StreamingLogData : public SearchableLogData {
         klogg::vector<qint64> endOfLines;
     };
 
-    void scheduleLoadingFinished();
+    void scheduleLoadingFinished( int delayMs = 0 );
+    ProcessedAnsiLine processedAnsiLine( LineNumber line ) const;
+    void clearAnsiDisplayCache();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
     bool openDisplayOutputFile( const QString& outputPath );
@@ -85,6 +88,7 @@ class StreamingLogData : public SearchableLogData {
     QRegularExpression prefilterPattern_;
     AnsiProcessingMode ansiProcessingMode_ = AnsiProcessingMode::Plain;
     bool loadingFinishedQueued_ = false;
+    QTimer loadingFinishedTimer_;
     QTimer outputFlushTimer_;
     QString boundOutputFile_;
     QFile boundOutputHandle_;
@@ -92,6 +96,9 @@ class StreamingLogData : public SearchableLogData {
     mutable std::mutex cachedRawBatchesMutex_;
     std::deque<CachedRawBatch> cachedRawBatches_;
     qint64 cachedRawBytes_ = 0;
+    mutable std::mutex ansiDisplayCacheMutex_;
+    mutable std::deque<LineNumber::UnderlyingType> ansiDisplayCacheOrder_;
+    mutable std::unordered_map<LineNumber::UnderlyingType, ProcessedAnsiLine> ansiDisplayCache_;
 };
 
 #endif

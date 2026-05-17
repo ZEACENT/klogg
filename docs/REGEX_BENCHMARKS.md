@@ -89,6 +89,8 @@ If the target filesystem does not have enough space for a requested bucket, the 
   --tmpfs-dir /dev/shm/klogg-bench \
   --sizes 50MB,500MB \
   --profiles simple,normal,complex \
+  --search-mode all \
+  --streaming-render-ansi \
   --iterations 5 \
   --warmup 1 \
   --output docs/benchmarks/qt.json
@@ -111,6 +113,10 @@ The generated summaries now include fairness-oriented counters for every case:
 - hit rate
 - byte throughput (`throughput_mib_per_s`)
 - line throughput (`throughput_lines_per_s`)
+- streaming append/update time (`streaming_append_update_ms`)
+- streaming visible-window ANSI display read time (`streaming_display_ms`, when `--streaming-render-ansi` is enabled)
+- streaming final catch-up time (`streaming_catchup_ms`)
+- live search operation/matcher/coalescing counters
 
 Those counters make it easier to verify that each regex tier is being compared on the same corpus and to spot cases where a pattern is unrealistically sparse or dense.
 
@@ -186,6 +192,7 @@ Or run each engine individually with `--search-mode all`:
   --sizes 50MB,500MB \
   --profiles simple,normal,complex \
   --search-mode all \
+  --streaming-render-ansi \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/qt.json
 
@@ -195,6 +202,7 @@ Or run each engine individually with `--search-mode all`:
   --sizes 50MB,500MB \
   --profiles simple,normal,complex \
   --search-mode all \
+  --streaming-render-ansi \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/vs-generic.json
 
@@ -204,6 +212,7 @@ Or run each engine individually with `--search-mode all`:
   --sizes 50MB,500MB \
   --profiles simple,normal,complex \
   --search-mode all \
+  --streaming-render-ansi \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/vs-avx.json
 ```

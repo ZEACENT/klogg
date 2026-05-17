@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -95,6 +96,8 @@ struct BenchmarkOptions {
     int warmup = 1;
     quint32 seed = 20260301u;
     bool keepFiles = false;
+    bool streamingRenderAnsi = false;
+    int streamingVisibleLines = 120;
 };
 
 struct FilePrepResult {
@@ -141,6 +144,7 @@ struct CaseResult {
     QVector<double> throughputLinesIterations;
     QVector<double> streamingAppendUpdateMsIterations;
     QVector<double> streamingCatchupMsIterations;
+    QVector<double> streamingDisplayMsIterations;
     QVector<double> operationStartsIterations;
     QVector<double> matcherCreationsIterations;
     QVector<double> updateRequestsIterations;
@@ -150,6 +154,7 @@ struct CaseResult {
     Stats throughputLines;
     Stats streamingAppendUpdateMs;
     Stats streamingCatchupMs;
+    Stats streamingDisplayMs;
     Stats operationStarts;
     Stats matcherCreations;
     Stats updateRequests;
@@ -354,6 +359,14 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     const QCommandLineOption keepFilesOption(
         QStringList{ QLatin1String( "keep-files" ) },
         QLatin1String( "Keep generated log files after the benchmark finishes." ) );
+    const QCommandLineOption streamingRenderAnsiOption(
+        QStringList{ QLatin1String( "streaming-render-ansi" ) },
+        QLatin1String( "Decorate streaming input with ANSI SGR sequences and measure visible-line render reads." ) );
+    const QCommandLineOption streamingVisibleLinesOption(
+        QStringList{ QLatin1String( "streaming-visible-lines" ) },
+        QLatin1String( "Visible line window used by the ANSI streaming render micro-benchmark." ),
+        QLatin1String( "count" ),
+        QLatin1String( "120" ) );
 
     parser.addOption( engineOption );
     parser.addOption( labelOption );
@@ -367,6 +380,8 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     parser.addOption( outputOption );
     parser.addOption( seedOption );
     parser.addOption( keepFilesOption );
+    parser.addOption( streamingRenderAnsiOption );
+    parser.addOption( streamingVisibleLinesOption );
 
     parser.process( app );
 
@@ -387,6 +402,8 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     options.warmup = parser.value( warmupOption ).toInt();
     options.seed = parser.value( seedOption ).toUInt();
     options.keepFiles = parser.isSet( keepFilesOption );
+    options.streamingRenderAnsi = parser.isSet( streamingRenderAnsiOption );
+    options.streamingVisibleLines = parser.value( streamingVisibleLinesOption ).toInt();
     options.sizes = selectByIds( availableSizes(), parser.value( sizesOption ), "size bucket" );
     options.profiles = selectByIds( availableProfiles(), parser.value( profilesOption ), "profile" );
 
@@ -395,6 +412,9 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     }
     if ( options.warmup < 0 ) {
         throw std::runtime_error( "warmup must be zero or greater" );
+    }
+    if ( options.streamingVisibleLines < 0 ) {
+        throw std::runtime_error( "streaming-visible-lines must be zero or greater" );
     }
 
     return options;
@@ -625,6 +645,21 @@ int formatLogLine( quint64 lineNumber, quint32 seed, char* buffer, std::size_t b
         static_cast<unsigned>( lineNumber % 8192u ),
         shard,
         static_cast<unsigned>( 512u + ( lineNumber % 4096u ) ) );
+}
+
+QByteArray addAnsiDecorations( QByteArray line, quint64 lineNumber )
+{
+    static constexpr const char* colors[] = {
+        "\x1b[32m", "\x1b[36m", "\x1b[33m", "\x1b[31m", "\x1b[38;5;208m",
+    };
+    const auto* color = colors[ lineNumber % std::size( colors ) ];
+
+    if ( line.endsWith( '\n' ) ) {
+        line.chop( 1 );
+        return QByteArray( color ) + line + QByteArrayLiteral( "\x1b[0m\n" );
+    }
+
+    return QByteArray( color ) + line + QByteArrayLiteral( "\x1b[0m" );
 }
 
 FilePrepResult ensureLogFile( const BenchmarkOptions& options, const SizeSpec& size, QTextStream& err )
@@ -929,6 +964,9 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
     for ( int iteration = 0; iteration < options.iterations; ++iteration ) {
         auto captureId = QString( "bench-stream-%1" ).arg( iteration );
         auto streamingLogData = std::make_unique<StreamingLogData>( captureId );
+        if ( options.streamingRenderAnsi ) {
+            streamingLogData->setAnsiProcessingMode( AnsiProcessingMode::Render );
+        }
         auto filteredData = streamingLogData->getNewFilteredData();
 
         // Pre-generate all lines to remove generation overhead from measurement
@@ -938,7 +976,11 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
         for ( quint64 i = 0; i < targetLines; ++i ) {
             const auto length
                 = formatLogLine( i, options.seed, lineBuffer.data(), lineBuffer.size() );
-            allLines.emplace_back( lineBuffer.data(), length );
+            QByteArray line{ lineBuffer.data(), length };
+            if ( options.streamingRenderAnsi ) {
+                line = addAnsiDecorations( std::move( line ), i );
+            }
+            allLines.push_back( std::move( line ) );
         }
 
         // Start search with auto-refresh
@@ -961,6 +1003,7 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
         const quint64 batchSize = qMax<quint64>( 10000, targetLines / 200 );
         const quint64 searchTriggerInterval = qMax<quint64>( 1, batchSize / 10000 );
         quint64 linesWritten = 0;
+        qint64 displayAccessNs = 0;
 
         QElapsedTimer timer;
         timer.start();
@@ -973,6 +1016,29 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             }
             streamingLogData->appendUtf8( batch );
             linesWritten = end;
+
+            if ( options.streamingRenderAnsi && options.streamingVisibleLines > 0 ) {
+                QElapsedTimer displayTimer;
+                displayTimer.start();
+                const auto visibleCount = LinesCount( qMin<quint64>(
+                    static_cast<quint64>( options.streamingVisibleLines ),
+                    static_cast<quint64>( streamingLogData->getNbLine().get() ) ) );
+                const auto firstVisible = LineNumber( streamingLogData->getNbLine().get()
+                                                      - visibleCount.get() );
+                const auto visibleLines
+                    = static_cast<const AbstractLogData*>( streamingLogData.get() )
+                          ->getLines( firstVisible, visibleCount );
+                quint64 colorSpanCount = 0;
+                for ( auto line = firstVisible.get();
+                      line < firstVisible.get() + visibleCount.get(); ++line ) {
+                    colorSpanCount += streamingLogData->getLineAnsiColors( LineNumber( line ) ).size();
+                }
+                if ( visibleLines.size() != static_cast<size_t>( visibleCount.get() ) ) {
+                    throw std::runtime_error( "Streaming ANSI display window read failed" );
+                }
+                displayAccessNs += displayTimer.nsecsElapsed();
+                Q_UNUSED( colorSpanCount );
+            }
 
             // Trigger search at intervals to let the live-update coalescing work
             if ( batchIndex % searchTriggerInterval == 0 ) {
@@ -1021,6 +1087,8 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
             static_cast<double>( result.searchedLineCount ) / ( totalMs / 1000.0 ) );
         result.streamingAppendUpdateMsIterations.push_back( appendUpdateMs );
         result.streamingCatchupMsIterations.push_back( catchupMs );
+        result.streamingDisplayMsIterations.push_back(
+            static_cast<double>( displayAccessNs ) / 1'000'000.0 );
         result.operationStartsIterations.push_back( static_cast<double>( counters.operationStarts ) );
         result.matcherCreationsIterations.push_back( static_cast<double>( counters.matcherCreations ) );
         result.updateRequestsIterations.push_back( static_cast<double>( counters.updateRequests ) );
@@ -1041,6 +1109,7 @@ CaseResult benchmarkCaseStreaming( const BenchmarkOptions& options, const SizeSp
     result.throughputLines = computeStats( result.throughputLinesIterations );
     result.streamingAppendUpdateMs = computeStats( result.streamingAppendUpdateMsIterations );
     result.streamingCatchupMs = computeStats( result.streamingCatchupMsIterations );
+    result.streamingDisplayMs = computeStats( result.streamingDisplayMsIterations );
     result.operationStarts = computeStats( result.operationStartsIterations );
     result.matcherCreations = computeStats( result.matcherCreationsIterations );
     result.updateRequests = computeStats( result.updateRequestsIterations );
@@ -1078,6 +1147,8 @@ QJsonObject caseResultToJson( const CaseResult& result )
           doublesToJson( result.streamingAppendUpdateMsIterations ) },
         { QLatin1String( "streaming_catchup_ms_iterations" ),
           doublesToJson( result.streamingCatchupMsIterations ) },
+        { QLatin1String( "streaming_display_ms_iterations" ),
+          doublesToJson( result.streamingDisplayMsIterations ) },
         { QLatin1String( "operation_starts_iterations" ),
           doublesToJson( result.operationStartsIterations ) },
         { QLatin1String( "matcher_creations_iterations" ),
@@ -1092,6 +1163,7 @@ QJsonObject caseResultToJson( const CaseResult& result )
         { QLatin1String( "streaming_append_update_ms" ),
           statsToJson( result.streamingAppendUpdateMs ) },
         { QLatin1String( "streaming_catchup_ms" ), statsToJson( result.streamingCatchupMs ) },
+        { QLatin1String( "streaming_display_ms" ), statsToJson( result.streamingDisplayMs ) },
         { QLatin1String( "operation_starts" ), statsToJson( result.operationStarts ) },
         { QLatin1String( "matcher_creations" ), statsToJson( result.matcherCreations ) },
         { QLatin1String( "update_requests" ), statsToJson( result.updateRequests ) },
@@ -1140,6 +1212,8 @@ QJsonObject buildJsonReport( const BenchmarkOptions& options, const QVector<Case
         { QLatin1String( "warmup" ), options.warmup },
         { QLatin1String( "seed" ), static_cast<int>( options.seed ) },
         { QLatin1String( "keep_files" ), options.keepFiles },
+        { QLatin1String( "streaming_render_ansi" ), options.streamingRenderAnsi },
+        { QLatin1String( "streaming_visible_lines" ), options.streamingVisibleLines },
         { QLatin1String( "host" ),
           QJsonObject{
               { QLatin1String( "product_name" ), QSysInfo::prettyProductName() },
@@ -1192,15 +1266,16 @@ void printSummary( QTextStream& out, const BenchmarkOptions& options, const QVec
         out << "| " << profile.id << " | `" << profile.pattern << "` |" << QLatin1Char( '\n' );
     }
     out << QLatin1Char( '\n' );
-    out << "| Size | Profile | Searched lines | Matches | Hit rate | Median search (ms) | Mean search (ms) | Median throughput (MiB/s) | Median lines/s | Status |"
+    out << "| Size | Profile | Mode | Searched lines | Matches | Hit rate | Median search (ms) | Append/update ms | Display ms | Catchup ms | Median throughput (MiB/s) | Median lines/s | Status |"
         << QLatin1Char( '\n' );
-    out << "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    out << "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
         << QLatin1Char( '\n' );
 
     for ( const auto& result : results ) {
         if ( result.status != QLatin1String( "ok" ) ) {
-            out << "| " << result.sizeLabel << " | " << result.profileId
-                << " | - | - | - | - | - | - | - | " << result.status;
+            out << "| " << result.sizeLabel << " | " << result.profileId << " | "
+                << result.searchMode << " | - | - | - | - | - | - | - | - | - | "
+                << result.status;
             if ( !result.skipReason.isEmpty() ) {
                 out << " (" << result.skipReason << ")";
             }
@@ -1209,9 +1284,12 @@ void printSummary( QTextStream& out, const BenchmarkOptions& options, const QVec
         }
 
         out << "| " << result.sizeLabel << " | " << result.profileId << " | "
+            << result.searchMode << " | "
             << result.searchedLineCount << " | " << result.matchCount << " | "
             << formatHitRate( result.hitRate ) << " | " << formatDuration( result.searchMs.median )
-            << " | " << formatDuration( result.searchMs.mean ) << " | "
+            << " | " << formatDuration( result.streamingAppendUpdateMs.median ) << " | "
+            << formatDuration( result.streamingDisplayMs.median ) << " | "
+            << formatDuration( result.streamingCatchupMs.median ) << " | "
             << formatThroughput( result.throughputMiBs.median ) << " | "
             << static_cast<quint64>( result.throughputLines.median ) << " | ok |"
             << QLatin1Char( '\n' );

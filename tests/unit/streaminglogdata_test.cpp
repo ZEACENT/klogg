@@ -97,11 +97,13 @@ struct SearchConfigGuard {
     Configuration& cfg;
     bool prevParallel;
     int prevBufferLines;
+    int prevThreadPoolSize;
 
     explicit SearchConfigGuard( Configuration& c )
         : cfg( c )
         , prevParallel( c.useParallelSearch() )
         , prevBufferLines( c.searchReadBufferSizeLines() )
+        , prevThreadPoolSize( c.searchThreadPoolSize() )
     {
     }
 
@@ -109,6 +111,7 @@ struct SearchConfigGuard {
     {
         cfg.setUseParallelSearch( prevParallel );
         cfg.setSearchReadBufferSizeLines( prevBufferLines );
+        cfg.setSearchThreadPoolSize( prevThreadPoolSize );
     }
 
     SearchConfigGuard( const SearchConfigGuard& ) = delete;
@@ -156,6 +159,30 @@ TEST_CASE( "StreamingLogData refreshes listeners after append and clear operatio
     logData.clearCapture();
     REQUIRE( loadingSpy.safeWait() );
     REQUIRE( logData.getNbLine().get() == 0 );
+}
+
+TEST_CASE( "StreamingLogData coalesces rapid live append refresh signals" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    for ( int batch = 0; batch < 30; ++batch ) {
+        logData.appendUtf8( makeStreamingSearchLines( batch * 10, 10 ) );
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
+    }
+
+    REQUIRE( loadingSpy.safeWait( 1000 ) );
+    QCoreApplication::processEvents( QEventLoop::AllEvents, 100 );
+
+    INFO( "loadingFinished signals=" << loadingSpy.count() );
+    REQUIRE( logData.getNbLine().get() == 300 );
+    REQUIRE( loadingSpy.count() <= 3 );
 }
 
 TEST_CASE( "StreamingLogData exposes a trailing partial line when input finishes" )
@@ -497,4 +524,97 @@ TEST_CASE( "Streaming live search uses pooled single-threaded path for small inc
     // total matcherCreations for incremental updates should be far less than
     // incrementalOps * 8.
     REQUIRE( incrementalMatchers < incrementalOps * 8 );
+}
+
+TEST_CASE( "Streaming live search uses pooled path for medium live update ranges" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    auto& config = Configuration::getSynced();
+    SearchConfigGuard configGuard( config );
+    config.setUseParallelSearch( true );
+    config.setSearchThreadPoolSize( 4 );
+    config.setSearchReadBufferSizeLines( 10000 );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.appendUtf8( makeStreamingSearchLines( 0, 10000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    auto filteredData = logData.getNewFilteredData();
+    filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
+                             LineNumber( logData.getNbLine().get() ) );
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 1000_lcount );
+
+    const auto countersAfterInitial = filteredData->searchPerformanceCounters();
+
+    logData.appendUtf8( makeStreamingSearchLines( 10000, 20000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+    filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 3000_lcount );
+
+    const auto countersAfterIncrement = filteredData->searchPerformanceCounters();
+    const auto incrementalOps
+        = countersAfterIncrement.operationStarts - countersAfterInitial.operationStarts;
+    const auto incrementalMatchers
+        = countersAfterIncrement.matcherCreations - countersAfterInitial.matcherCreations;
+
+    INFO( "incremental operations=" << incrementalOps
+          << " incremental matcherCreations=" << incrementalMatchers );
+
+    REQUIRE( incrementalOps >= 1 );
+    REQUIRE( incrementalMatchers < incrementalOps * 4 );
+}
+
+TEST_CASE( "Streaming live search coalesces medium updates before starting operations" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    auto& config = Configuration::getSynced();
+    SearchConfigGuard configGuard( config );
+    config.setUseParallelSearch( true );
+    config.setSearchThreadPoolSize( 4 );
+    config.setSearchReadBufferSizeLines( 10000 );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.appendUtf8( makeStreamingSearchLines( 0, 10000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    auto filteredData = logData.getNewFilteredData();
+    filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
+                             LineNumber( logData.getNbLine().get() ) );
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 1000_lcount );
+
+    const auto countersAfterInitial = filteredData->searchPerformanceCounters();
+
+    for ( int batch = 0; batch < 4; ++batch ) {
+        logData.appendUtf8( makeStreamingSearchLines( 10000 + batch * 10000, 10000 ) );
+        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+    }
+
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 5000_lcount );
+
+    const auto countersAfterUpdates = filteredData->searchPerformanceCounters();
+    const auto incrementalOps
+        = countersAfterUpdates.operationStarts - countersAfterInitial.operationStarts;
+    const auto coalescedUpdates
+        = countersAfterUpdates.coalescedLiveUpdates - countersAfterInitial.coalescedLiveUpdates;
+
+    INFO( "incremental operations=" << incrementalOps
+          << " coalescedLiveUpdates=" << coalescedUpdates );
+
+    REQUIRE( incrementalOps < 4 );
+    REQUIRE( coalescedUpdates > 0 );
 }

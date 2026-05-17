@@ -95,6 +95,117 @@ Klogg is a high-performance, cross-platform log file viewer built on Qt5/Qt6. It
    - FileWatcher: File change monitoring
    - CrashHandler: Crash reporting
 
+### Detailed Runtime Architecture
+
+```mermaid
+flowchart TB
+    User[User actions<br/>open file, search, live source] --> MW[MainWindow<br/>src/ui]
+    MW --> Tabs[TabbedCrawlerWidget]
+    Tabs --> CW[CrawlerWidget<br/>per tab/session]
+
+    subgraph UI[UI and view layer]
+        CW --> MainView[LogMainView<br/>full log]
+        CW --> FilterView[FilteredView<br/>search results]
+        CW --> QuickFind[QuickFindMux<br/>pattern and mode selection]
+        CW --> Overview[OverviewWidget<br/>marks and matches]
+        CW --> LiveThrottle[Live search throttle<br/>250ms active / 1000ms inactive]
+        CW --> UiRefresh[Live UI refresh throttle<br/>~30 FPS loadingFinished]
+        MainView --> AbstractView[AbstractLogView<br/>scrolling, rendering, selection]
+        FilterView --> AbstractView
+    end
+
+    subgraph Sources[Input sources]
+        FilePath[Local file path]
+        AdbDialog[ADB/iOS dialogs]
+        LiveTransport[ProcessLiveSourceTransport<br/>QProcess stdout]
+        AdbSource[AdbLogcatSource<br/>owns live transport]
+        FileWatcher[FileWatcher<br/>external file changes]
+    end
+
+    FilePath --> LogData[LogData<br/>indexed file data]
+    FileWatcher --> LogData
+    AdbDialog --> AdbSource
+    AdbSource --> LiveTransport
+    LiveTransport -->|bytesReceived| AdbSource
+    AdbSource --> StreamingLogData[StreamingLogData<br/>live append data]
+
+    subgraph Data[Log data and indexing layer]
+        LogData --> FileHolder[FileHolder<br/>portable file IO]
+        LogData --> LogDataWorker[LogDataWorker<br/>background indexing]
+        LogDataWorker --> LineIndex[LinePositionArray<br/>line offsets]
+        LogDataWorker --> Encoding[EncodingDetector<br/>uchardet/simdutf]
+        StreamingLogData --> CaptureStore[CaptureStore<br/>memory segments + temp spill]
+        CaptureStore --> LiveSegments[Live segment metadata<br/>line offsets, lengths, partial line]
+        StreamingLogData --> RawCache[Recent raw append cache<br/>fast live search reads]
+        StreamingLogData --> AnsiCache[Recent ANSI display cache<br/>text + color spans]
+        StreamingLogData -->|fileChanged / loadingFinished| CW
+        LogData --> Searchable[SearchableLogData]
+        StreamingLogData --> Searchable
+    end
+
+    Searchable --> FilteredData[LogFilteredData<br/>filtered AbstractLogData]
+    QuickFind --> FilteredData
+    LiveThrottle -->|coalesced updateSearch| FilteredData
+
+    subgraph Search[Search and filtering layer]
+        FilteredData -->|runSearch / updateSearch| SearchWorker[LogFilteredDataWorker<br/>threaded search]
+        SearchWorker --> Dispatch[Dispatch thread<br/>pending request selection]
+        Dispatch --> Operation[Operation thread<br/>SearchOperation / UpdateSearchOperation]
+        SearchWorker --> Coalescing[Live target coalescing<br/>generation + operation id]
+        SearchWorker --> MatcherCache[MatcherCache<br/>compiled matcher reuse]
+        MatcherCache --> Regex[RegularExpression]
+        Regex --> QtRegex[QRegularExpression<br/>fallback engine]
+        Regex --> VectorScan[HsRegularExpression<br/>Vectorscan engine]
+        Operation --> BoolEval[BooleanEvaluator<br/>AND/OR/NOT filters]
+        Operation --> RawCache
+        Operation --> CaptureStore
+        Operation --> Matches[Roaring bitmaps<br/>match/mark line sets]
+        SearchWorker --> Perf[SearchPerformanceCounters]
+    end
+
+    FilteredData --> FilterView
+    SearchWorker -->|searchProgressed queued signal| FilteredData
+    FilteredData -->|searchProgressed queued signal| CW
+    UiRefresh --> MainView
+    AnsiCache --> MainView
+    CW --> Overview
+    Searchable --> MainView
+
+    subgraph CrossCutting[Settings, diagnostics, and platform services]
+        Config[Configuration<br/>QSettings-backed perf/UI options]
+        Persistent[PersistentInfo<br/>recent files and session state]
+        Logger[logging module]
+        Crash[CrashHandler<br/>IssueReporter, memory info]
+        Version[VersionChecker]
+    end
+
+    Config --> CW
+    Config --> LogData
+    Config --> SearchWorker
+    Persistent --> MW
+    Logger --> MW
+    Logger --> LogDataWorker
+    Logger --> SearchWorker
+    Crash --> MW
+    Version --> MW
+
+    subgraph Verification[Verification surface<br/>not product runtime]
+        Tests[tests/unit + tests/ui<br/>Catch2 and QtTest]
+        Bench[regex_search_benchmark<br/>full, incremental, streaming]
+        Docs[docs/benchmarks<br/>JSON and Markdown reports]
+    end
+
+    Bench -.-> LogData
+    Bench -.-> StreamingLogData
+    Bench -.-> FilteredData
+    Tests -.-> UI
+    Tests -.-> Data
+    Tests -.-> Search
+    Bench -.-> Docs
+```
+
+The hot runtime path starts with `SearchableLogData` implementations (`LogData` for files and `StreamingLogData` for live sources), flows through `LogFilteredDataWorker`, and returns match bitmaps to both the filtered view and overview. Live streaming adds two scheduling gates: `StreamingLogData` appends into `CaptureStore` and coalesces UI refresh notifications to frame-level cadence, while `CrawlerWidget` coalesces auto-refresh search requests through a throttle timer. `LogFilteredDataWorker` then coalesces live target end lines before dispatching update operations. ANSI render mode has a separate recent-line display cache in `StreamingLogData` so the main view can reuse stripped text and color spans across repeated paints. UI components own interaction state; data and search components own indexing, matching, and thread-side counters.
+
 ---
 
 ## Module Organization
@@ -356,6 +467,15 @@ paintEvent() → drawTextArea() → QPainter → viewport()
    - Reduces ~90% of calculations
 
 3. **Bottom Alignment Detection**
+
+4. **Live Refresh Throttling**
+   - `StreamingLogData` coalesces live append `loadingFinished` notifications to about 30 FPS.
+   - Prevents high-rate iOS/ADB stream chunks from driving one `CrawlerWidget::loadingFinishedHandler()` call and one main-view/overview refresh per process read.
+
+5. **ANSI Display Cache**
+   - `StreamingLogData` caches recent ANSI-rendered display lines as stripped text plus color spans.
+   - Avoids parsing the same visible live lines twice during `AbstractLogView::drawTextArea()` (`getLines()` for text and `getLineAnsiColors()` for colors).
+   - The cache is cleared when ANSI mode, prefilter, or capture contents are reset.
    - Uses scrollbar max comparison
    - Avoids expensive wrapped line calculations
 
@@ -477,6 +597,7 @@ Supports:
 - Cache hit: Near-instant results
 - Vectorscan: 2-4x faster than Qt Regex
 - Benchmark methodology and generated snapshots: [Regex Search Benchmarks](./REGEX_BENCHMARKS.md)
+- ANSI live-stream benchmark coverage: `regex_search_benchmark --streaming-render-ansi` records append/update, visible display read, and catch-up phases separately.
 
 ### Rendering Performance
 

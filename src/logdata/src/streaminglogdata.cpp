@@ -10,6 +10,8 @@ namespace {
 constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
 constexpr LinesCount::UnderlyingType OutputFlushLinesThreshold = 1000;
 constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
+constexpr int LiveAppendRefreshIntervalMs = 33;
+constexpr size_t AnsiDisplayCacheLineLimit = 4096;
 }
 
 StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
@@ -18,6 +20,11 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     , codec_( QTextCodec::codecForName( "UTF-8" ) )
 {
     captureStore_.loadFromDisk();
+    loadingFinishedTimer_.setSingleShot( true );
+    connect( &loadingFinishedTimer_, &QTimer::timeout, this, [ this ] {
+        loadingFinishedQueued_ = false;
+        Q_EMIT loadingFinished( LoadingStatus::Successful );
+    } );
     scheduleLoadingFinished();
 
     outputFlushTimer_.setInterval( 1000 );
@@ -75,7 +82,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     }
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
-        scheduleLoadingFinished();
+        scheduleLoadingFinished( LiveAppendRefreshIntervalMs );
     }
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING
@@ -117,6 +124,7 @@ void StreamingLogData::clearCapture()
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
+    clearAnsiDisplayCache();
     {
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
         cachedRawBatches_.clear();
@@ -227,11 +235,16 @@ QTextCodec* StreamingLogData::getDetectedEncoding() const
 void StreamingLogData::setPrefilter( const QString& prefilterPattern )
 {
     prefilterPattern_.setPattern( prefilterPattern );
+    clearAnsiDisplayCache();
 }
 
 void StreamingLogData::setAnsiProcessingMode( AnsiProcessingMode mode )
 {
+    if ( ansiProcessingMode_ == mode ) {
+        return;
+    }
     ansiProcessingMode_ = mode;
+    clearAnsiDisplayCache();
 }
 
 SearchableLogData::RawLines StreamingLogData::getLinesRaw( LineNumber first, LinesCount number ) const
@@ -257,9 +270,7 @@ bool StreamingLogData::isLiveSource() const
 
 QString StreamingLogData::doGetLineString( LineNumber line ) const
 {
-    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
-                                 ansiProcessingMode_ )
-        .text;
+    return processedAnsiLine( line ).text;
 }
 
 QString StreamingLogData::doGetExpandedLineString( LineNumber line ) const
@@ -269,9 +280,7 @@ QString StreamingLogData::doGetExpandedLineString( LineNumber line ) const
 
 klogg::vector<AnsiColorSpan> StreamingLogData::doGetLineAnsiColors( LineNumber line ) const
 {
-    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
-                                 ansiProcessingMode_ )
-        .colorSpans;
+    return processedAnsiLine( line ).colorSpans;
 }
 
 klogg::vector<QString> StreamingLogData::doGetLines( LineNumber first, LinesCount number ) const
@@ -323,20 +332,56 @@ void StreamingLogData::doDetachReader() const
 {
 }
 
-void StreamingLogData::scheduleLoadingFinished()
+void StreamingLogData::scheduleLoadingFinished( int delayMs )
 {
     if ( loadingFinishedQueued_ ) {
+        if ( delayMs > 0 && loadingFinishedTimer_.isActive()
+             && loadingFinishedTimer_.remainingTime() > delayMs ) {
+            loadingFinishedTimer_.start( delayMs );
+        }
         return;
     }
 
     loadingFinishedQueued_ = true;
-    QMetaObject::invokeMethod(
-        this,
-        [ this ] {
-            loadingFinishedQueued_ = false;
-            Q_EMIT loadingFinished( LoadingStatus::Successful );
-        },
-        Qt::QueuedConnection );
+    loadingFinishedTimer_.start( delayMs );
+}
+
+ProcessedAnsiLine StreamingLogData::processedAnsiLine( LineNumber line ) const
+{
+    if ( ansiProcessingMode_ == AnsiProcessingMode::Render ) {
+        const auto key = line.get();
+        {
+            std::lock_guard<std::mutex> lock( ansiDisplayCacheMutex_ );
+            const auto cached = ansiDisplayCache_.find( key );
+            if ( cached != ansiDisplayCache_.end() ) {
+                return cached->second;
+            }
+        }
+
+        auto processed = processAnsiSequences(
+            captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ), ansiProcessingMode_ );
+
+        std::lock_guard<std::mutex> lock( ansiDisplayCacheMutex_ );
+        if ( ansiDisplayCache_.find( key ) == ansiDisplayCache_.end() ) {
+            ansiDisplayCacheOrder_.push_back( key );
+        }
+        ansiDisplayCache_[ key ] = processed;
+        while ( ansiDisplayCacheOrder_.size() > AnsiDisplayCacheLineLimit ) {
+            ansiDisplayCache_.erase( ansiDisplayCacheOrder_.front() );
+            ansiDisplayCacheOrder_.pop_front();
+        }
+        return processed;
+    }
+
+    return processAnsiSequences( captureStore_.lineAt( line, codec_.codec(), prefilterPattern_ ),
+                                 ansiProcessingMode_ );
+}
+
+void StreamingLogData::clearAnsiDisplayCache()
+{
+    std::lock_guard<std::mutex> lock( ansiDisplayCacheMutex_ );
+    ansiDisplayCache_.clear();
+    ansiDisplayCacheOrder_.clear();
 }
 
 void StreamingLogData::startOutputFlushTimer()

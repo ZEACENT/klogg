@@ -44,6 +44,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -331,13 +332,18 @@ private:
 
     void dispatchLoop();
     void enqueueRequest( SearchRequest request, bool interruptRunningSearch = true );
+    void enqueueOrDeferLiveRequest( SearchRequest request );
     void joinOperationThread();
     void finishLiveUpdateAndRestartIfNeeded( const SearchRequest& request );
+    LinesCount::UnderlyingType liveUpdateCoalesceThreshold() const;
+    void promoteDeferredLiveRequest();
 
     std::thread dispatchThread_;
     std::mutex requestMutex_;
     std::condition_variable requestCv_;
     std::optional<SearchRequest> pendingRequest_;
+    std::optional<SearchRequest> deferredLiveRequest_;
+    std::chrono::steady_clock::time_point deferredLiveDeadline_{};
     bool dispatchShutdown_ = false;
 
 private:
