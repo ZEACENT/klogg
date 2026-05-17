@@ -403,8 +403,7 @@ TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
         filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
     }
 
-    REQUIRE( waitForSearchComplete( *filteredData ) );
-    REQUIRE( filteredData->getNbMatches() == 3000_lcount );
+    REQUIRE( waitForMatchCount( *filteredData, 3000_lcount ) );
 
     // Coalescing is timing-dependent: the dispatch loop may merge some or all
     // of the four updateSearch calls into fewer operations.  Just verify that
@@ -412,6 +411,55 @@ TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
     const auto countersAfterRapidUpdates = filteredData->searchPerformanceCounters();
     REQUIRE( countersAfterRapidUpdates.operationStarts
              > countersAfterInitialSearch.operationStarts );
+}
+
+TEST_CASE( "Streaming live search dispatches while updates keep arriving" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    auto& config = Configuration::getSynced();
+    SearchConfigGuard configGuard( config );
+    config.setUseParallelSearch( false );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.appendUtf8( makeStreamingSearchLines( 0, 1000 ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    auto filteredData = logData.getNewFilteredData();
+    filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
+                             LineNumber( logData.getNbLine().get() ) );
+    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( filteredData->getNbMatches() == 100_lcount );
+
+    const auto countersAfterInitialSearch = filteredData->searchPerformanceCounters();
+
+    QElapsedTimer timer;
+    timer.start();
+    bool observedDispatchDuringSteadyUpdates = false;
+    int batch = 0;
+    while ( timer.elapsed() < 1000 ) {
+        logData.appendUtf8( makeStreamingSearchLines( 1000 + batch * 10, 10 ) );
+        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+        QThread::msleep( 5 );
+
+        const auto counters = filteredData->searchPerformanceCounters();
+        if ( counters.operationStarts > countersAfterInitialSearch.operationStarts ) {
+            observedDispatchDuringSteadyUpdates = true;
+            break;
+        }
+        ++batch;
+    }
+
+    const auto countersAfterSteadyUpdates = filteredData->searchPerformanceCounters();
+    INFO( "operationStartsBefore=" << countersAfterInitialSearch.operationStarts
+          << " operationStartsAfter=" << countersAfterSteadyUpdates.operationStarts
+          << " matches=" << filteredData->getNbMatches().get() );
+    REQUIRE( observedDispatchDuringSteadyUpdates );
 }
 
 TEST_CASE( "Streaming live search covers append batches with partial line boundaries" )

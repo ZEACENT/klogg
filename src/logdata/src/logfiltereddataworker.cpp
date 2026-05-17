@@ -353,8 +353,9 @@ void LogFilteredDataWorker::enqueueOrDeferLiveRequest( SearchRequest request )
         }
         else {
             deferredLiveRequest_.emplace( std::move( request ) );
+            deferredLiveDeadline_
+                = std::chrono::steady_clock::now() + LiveUpdateMaxCoalesceDelay;
         }
-        deferredLiveDeadline_ = std::chrono::steady_clock::now() + LiveUpdateMaxCoalesceDelay;
     }
     requestCv_.notify_one();
 }
@@ -394,6 +395,9 @@ void LogFilteredDataWorker::dispatchLoop()
             }
             request = std::move( *pendingRequest_ );
             pendingRequest_.reset();
+            if ( request.type == SearchRequest::Type::LiveUpdate ) {
+                liveUpdateRunning_.store( true );
+            }
         }
 
         // Check if this request has been superseded by a newer one before
@@ -452,7 +456,6 @@ void LogFilteredDataWorker::dispatchLoop()
                 [ this, &operationStarted, request ] {
                     operationStarted.release();
                     ScopedLock operationLock( operationsMutex_ );
-                    liveUpdateRunning_.store( true );
                     if ( request.generation != operationGeneration_.load()
                          || request.operationId != operationId_.load() ) {
                         liveUpdateRunning_.store( false );

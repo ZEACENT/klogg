@@ -240,6 +240,130 @@ jobs:
           path: prefetch_artifacts/cmake-3.20.2-linux-x86_64.sh
           if-no-files-found: error
 
+  PrefetchWindowsTools:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch Windows MSYS2 tools"
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore MSYS2 tools cache
+        id: cache-msys2-tools
+        uses: actions/cache@v4
+        with:
+          path: prefetch_artifacts/msys2-tools.zip
+          key: msys2-tools-mingw64-ragel-pkgconf-v1
+
+      - name: Setup MSYS2 and install tools (attempt 1)
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' }}
+        id: msys2-attempt-1
+        continue-on-error: true
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-ragel
+            mingw-w64-x86_64-pkgconf
+
+      - name: Clean failed MSYS2 setup
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
+            (Join-Path $env:RUNNER_TEMP "setup-msys2"), `
+            (Join-Path $env:RUNNER_TEMP "msys64")
+
+      - name: Setup MSYS2 and install tools (attempt 2)
+        id: msys2-attempt-2
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' }}
+        continue-on-error: true
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-ragel
+            mingw-w64-x86_64-pkgconf
+
+      - name: Clean failed MSYS2 setup
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' && steps.msys2-attempt-2.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
+            (Join-Path $env:RUNNER_TEMP "setup-msys2"), `
+            (Join-Path $env:RUNNER_TEMP "msys64")
+
+      - name: Setup MSYS2 and install tools (attempt 3)
+        id: msys2-attempt-3
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' && steps.msys2-attempt-1.outcome == 'failure' && steps.msys2-attempt-2.outcome == 'failure' }}
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-ragel
+            mingw-w64-x86_64-pkgconf
+
+      - name: Package MSYS2 tools
+        if: ${{ steps.cache-msys2-tools.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: |
+          $msysBinCandidates = @(
+            (Join-Path $env:RUNNER_TEMP "setup-msys2\mingw64\bin"),
+            (Join-Path $env:RUNNER_TEMP "setup-msys2\msys64\mingw64\bin"),
+            (Join-Path $env:RUNNER_TEMP "msys64\mingw64\bin"),
+            "C:\msys64\mingw64\bin"
+          )
+
+          $msysBin = $msysBinCandidates |
+            Where-Object {
+              (Test-Path (Join-Path $_ "ragel.exe")) -and
+              (Test-Path (Join-Path $_ "pkg-config.exe"))
+            } |
+            Select-Object -First 1
+          if ( !$msysBin ) {
+            Write-Error "ragel/pkg-config binaries not found in MSYS2 mingw64 bin candidates: $($msysBinCandidates -join ', ')"
+            exit 1
+          }
+
+          $msysRoot = Split-Path (Split-Path $msysBin -Parent) -Parent
+          $artifactRoot = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools"
+          $artifactZip = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools.zip"
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          Copy-Item -Path $msysRoot -Destination (Join-Path $artifactRoot "msys64") -Recurse -Force
+
+          Push-Location $artifactRoot
+          Compress-Archive -Path "msys64" -DestinationPath $artifactZip -Force
+          Pop-Location
+
+      - name: Verify MSYS2 tools archive
+        shell: pwsh
+        run: |
+          $artifactZip = Join-Path $env:GITHUB_WORKSPACE "prefetch_artifacts\msys2-tools.zip"
+          if ( !(Test-Path $artifactZip) ) {
+            Write-Error "MSYS2 tools archive missing at $artifactZip"
+            exit 1
+          }
+
+          $verifyRoot = Join-Path $env:RUNNER_TEMP "verify-msys2-tools"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $verifyRoot
+          New-Item -ItemType Directory -Force -Path $verifyRoot | Out-Null
+          Expand-Archive -Path $artifactZip -DestinationPath $verifyRoot -Force
+
+          $msysBin = Join-Path $verifyRoot "msys64\mingw64\bin"
+          if ( !(Test-Path (Join-Path $msysBin "ragel.exe")) -or
+               !(Test-Path (Join-Path $msysBin "pkg-config.exe")) ) {
+            Write-Error "MSYS2 archive does not contain ragel.exe and pkg-config.exe under msys64\mingw64\bin"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msys2-tools
+          path: prefetch_artifacts/msys2-tools.zip
+          if-no-files-found: error
+
   Linux:
     needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
@@ -438,7 +562,7 @@ jobs:
           if-no-files-found: warn
 
   Windows:
-    needs: [SaveVersion]
+    needs: [SaveVersion, PrefetchWindowsTools]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -489,14 +613,23 @@ jobs:
           }
           7z x openssl.zip 
 
-      - name: Setup MSYS2 and install tools
-        uses: msys2/setup-msys2@v2
+      - uses: actions/download-artifact@v4
         with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-ragel
-            mingw-w64-x86_64-pkgconf
+          name: msys2-tools
+          path: ${{ github.workspace }}
+
+      - name: Unpack prefetched MSYS2 tools
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:GITHUB_WORKSPACE "msys2-tools.zip"
+          if ( !(Test-Path $archive) ) {
+            Write-Error "Prefetched MSYS2 tools artifact is required but msys2-tools.zip is missing"
+            exit 1
+          }
+
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE "msys2-tools"
+          New-Item -ItemType Directory -Force -Path $toolsRoot | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $toolsRoot -Force
 
       - name: Set openssl paths
         shell: sh
@@ -536,6 +669,7 @@ jobs:
         shell: pwsh
         run: |
           $msysBinCandidates = @(
+            (Join-Path $env:GITHUB_WORKSPACE "msys2-tools\msys64\mingw64\bin"),
             (Join-Path $env:RUNNER_TEMP "setup-msys2\mingw64\bin"),
             (Join-Path $env:RUNNER_TEMP "setup-msys2\msys64\mingw64\bin"),
             (Join-Path $env:RUNNER_TEMP "msys64\mingw64\bin"),
