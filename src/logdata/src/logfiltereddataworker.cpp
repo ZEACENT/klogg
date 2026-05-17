@@ -326,6 +326,9 @@ void LogFilteredDataWorker::enqueueRequest( SearchRequest request, bool interrup
     }
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
+        if ( request.type == SearchRequest::Type::LiveUpdate ) {
+            deferredLiveRequest_.reset();
+        }
         pendingRequest_.emplace( std::move( request ) );
     }
     requestCv_.notify_one();

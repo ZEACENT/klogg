@@ -25,7 +25,7 @@ on:
 
 jobs:
   SaveVersion:
-    needs: [PrefetchDeps]
+    needs: [PrefetchDeps, PrefetchWindowsTools]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
     outputs:
@@ -562,7 +562,7 @@ jobs:
           if-no-files-found: warn
 
   Windows:
-    needs: [SaveVersion, PrefetchWindowsTools]
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:

@@ -13,6 +13,7 @@ add_executable(klogg_tests
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     searchgeneration_test.cpp
+    logfiltereddataworker_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
     streaminglogdata_test.cpp
