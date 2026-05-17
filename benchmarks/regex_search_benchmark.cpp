@@ -403,7 +403,12 @@ BenchmarkOptions parseOptions( QCoreApplication& app )
     options.seed = parser.value( seedOption ).toUInt();
     options.keepFiles = parser.isSet( keepFilesOption );
     options.streamingRenderAnsi = parser.isSet( streamingRenderAnsiOption );
-    options.streamingVisibleLines = parser.value( streamingVisibleLinesOption ).toInt();
+    bool streamingVisibleLinesOk = false;
+    options.streamingVisibleLines
+        = parser.value( streamingVisibleLinesOption ).toInt( &streamingVisibleLinesOk );
+    if ( !streamingVisibleLinesOk ) {
+        throw std::runtime_error( "streaming-visible-lines must be an integer" );
+    }
     options.sizes = selectByIds( availableSizes(), parser.value( sizesOption ), "size bucket" );
     options.profiles = selectByIds( availableProfiles(), parser.value( profilesOption ), "profile" );
 

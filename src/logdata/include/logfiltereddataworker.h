@@ -289,6 +289,11 @@ public:
     {
         operationId_.fetch_add( 1 );
         liveUpdateRunning_.store( false );
+        {
+            std::lock_guard<std::mutex> lock( requestMutex_ );
+            pendingRequest_.reset();
+            deferredLiveRequest_.reset();
+        }
         return operationGeneration_.fetch_add( 1 ) + 1;
     }
 

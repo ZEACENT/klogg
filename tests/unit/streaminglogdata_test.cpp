@@ -506,7 +506,7 @@ TEST_CASE( "Streaming live search uses pooled single-threaded path for small inc
         REQUIRE( loadingSpy.safeWait() );
         filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
     }
-    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( waitForMatchCount( *filteredData, 1200_lcount ) );
     REQUIRE( filteredData->getNbMatches() == 1200_lcount );
 
     const auto countersAfterIncrements = filteredData->searchPerformanceCounters();
@@ -556,7 +556,7 @@ TEST_CASE( "Streaming live search uses pooled path for medium live update ranges
     REQUIRE( loadingSpy.safeWait() );
     filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
 
-    REQUIRE( waitForSearchComplete( *filteredData ) );
+    REQUIRE( waitForMatchCount( *filteredData, 3000_lcount ) );
     REQUIRE( filteredData->getNbMatches() == 3000_lcount );
 
     const auto countersAfterIncrement = filteredData->searchPerformanceCounters();

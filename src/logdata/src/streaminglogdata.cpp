@@ -223,6 +223,7 @@ void StreamingLogData::reload( QTextCodec* forcedEncoding )
 {
     if ( forcedEncoding ) {
         codec_.setCodec( forcedEncoding );
+        clearAnsiDisplayCache();
     }
     scheduleLoadingFinished();
 }
@@ -317,6 +318,7 @@ LineLength StreamingLogData::doGetLineLength( LineNumber line ) const
 void StreamingLogData::doSetDisplayEncoding( const char* encoding )
 {
     codec_.setCodec( QTextCodec::codecForName( encoding ) );
+    clearAnsiDisplayCache();
 }
 
 QTextCodec* StreamingLogData::doGetDisplayEncoding() const

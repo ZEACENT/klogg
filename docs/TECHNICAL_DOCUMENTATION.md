@@ -597,7 +597,7 @@ Supports:
 - Cache hit: Near-instant results
 - Vectorscan: 2-4x faster than Qt Regex
 - Benchmark methodology and generated snapshots: [Regex Search Benchmarks](./REGEX_BENCHMARKS.md)
-- ANSI live-stream benchmark coverage: `regex_search_benchmark --streaming-render-ansi` records append/update, visible display read, and catch-up phases separately.
+- ANSI live-stream benchmark coverage: `regex_search_benchmark --search-mode streaming --streaming-render-ansi` records append/update, visible display read, and catch-up phases separately; use `--search-mode all` when comparing full and streaming modes in one run.
 
 ### Rendering Performance
 

@@ -91,6 +91,7 @@ If the target filesystem does not have enough space for a requested bucket, the 
   --profiles simple,normal,complex \
   --search-mode all \
   --streaming-render-ansi \
+  --streaming-visible-lines 120 \
   --iterations 5 \
   --warmup 1 \
   --output docs/benchmarks/qt.json
@@ -193,6 +194,7 @@ Or run each engine individually with `--search-mode all`:
   --profiles simple,normal,complex \
   --search-mode all \
   --streaming-render-ansi \
+  --streaming-visible-lines 120 \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/qt.json
 
@@ -203,6 +205,7 @@ Or run each engine individually with `--search-mode all`:
   --profiles simple,normal,complex \
   --search-mode all \
   --streaming-render-ansi \
+  --streaming-visible-lines 120 \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/vs-generic.json
 
@@ -213,6 +216,7 @@ Or run each engine individually with `--search-mode all`:
   --profiles simple,normal,complex \
   --search-mode all \
   --streaming-render-ansi \
+  --streaming-visible-lines 120 \
   --iterations 5 --warmup 1 --seed 20260301 \
   --output docs/benchmarks/current-run/vs-avx.json
 ```
