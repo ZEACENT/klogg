@@ -2,8 +2,14 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 1db128ba..969206a0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -137,7 +137,7 @@ include (${CMAKE_MODULE_PATH}/archdetect.cmake)
+@@ -137,7 +137,13 @@ include (${CMAKE_MODULE_PATH}/archdetect.cmake)
  
++if (KLOGG_GENERIC_CPU AND (ARCH_IA32 OR ARCH_X86_64))
++    set(GNUCC_ARCH x86-64)
++    set(TUNE_FLAG generic)
++    set(GNUCC_TUNE "")
++endif ()
++
  include (${CMAKE_MODULE_PATH}/sanitize.cmake)
  
 -if (NOT FAT_RUNTIME)

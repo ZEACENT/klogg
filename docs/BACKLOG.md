@@ -5,6 +5,8 @@
 | TASK-001 | [Search generation ID refactoring](#task-001-search-generation-id-refactoring) | Low | Done | [PR #11](https://github.com/ZEACENT/klogg/pull/11) |
 | TASK-002 | [Chart Panel — regex match → time series](#task-002-chart-panel) | Medium | Planned | [SPEC](SPEC_CHART_AND_FILTERS_PANEL.md) |
 | TASK-003 | [Filters Panel — persistent dock with groups & pinning](#task-003-filters-panel) | Medium | Planned | [SPEC](SPEC_CHART_AND_FILTERS_PANEL.md) |
+| TASK-004 | [macOS code signing and notarization hardening](#task-004-macos-code-signing-and-notarization-hardening) | Medium | Planned | CI Release |
+| TASK-005 | [Continuous and Release tag Changes automation](#task-005-continuous-and-release-tag-changes-automation) | Medium | Planned | Releases |
 
 ### TASK-001: Search generation ID refactoring
 
@@ -81,3 +83,48 @@ phased iterations, testing strategy, and effort estimate (~1.5 weeks
 to feature-complete).
 
 **Recommended order:** ship before TASK-002.
+
+### TASK-004: macOS Code Signing And Notarization Hardening
+
+**Scenario:**
+Release macOS artifacts should be signed and notarized consistently so users can
+open downloaded DMGs without Gatekeeper warnings or manual override steps.
+
+**Problem:**
+The packaging action contains signing and notarization hooks, but the backlog
+needs a dedicated plan to verify identity setup, entitlement requirements,
+secret handling, and artifact validation for both Intel and Apple Silicon
+packages.
+
+**Proposed plan:**
+1. Document required Apple Developer certificates, installer identities, App
+   Store Connect issuer/key material, and GitHub secret names.
+2. Add CI preflight checks that fail early when signing secrets are missing on a
+   release run.
+3. Sign the `.app` bundle before DMG creation, sign the DMG, submit for
+   notarization, staple the result, and verify with `codesign`, `spctl`, and
+   `stapler`.
+4. Keep unsigned local/PR builds possible while making release signing behavior
+   explicit in logs and artifact metadata.
+
+### TASK-005: Continuous And Release Tag Changes Automation
+
+**Scenario:**
+The `continuous` prerelease and versioned release tags should publish useful
+Changes text so users can understand what changed without digging through CI
+runs or commit history.
+
+**Problem:**
+Release assets are uploaded automatically, but the release notes need a clear
+plan covering the moving `continuous` tag and immutable version tags.
+
+**Proposed plan:**
+1. Generate Continuous Changes from commits merged since the previous
+   successful Continuous build, grouped by change type using
+   `scripts/gen_changelog.py`.
+2. Generate Release Changes from the previous version tag to the new version
+   tag, including highlights, fixed issues, and artifact notes.
+3. Update the release workflow to write the generated text into the GitHub
+   Release body after assets are uploaded.
+4. Add a dry-run mode that prints the planned release notes in CI logs for PR
+   validation before changing any GitHub Release.

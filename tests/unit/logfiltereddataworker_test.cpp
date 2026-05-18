@@ -55,6 +55,7 @@
 #if defined( __clang__ )
 #pragma clang diagnostic pop
 #endif
+#include "logfiltereddata.h"
 
 namespace {
 class TestSearchableLogData : public SearchableLogData {

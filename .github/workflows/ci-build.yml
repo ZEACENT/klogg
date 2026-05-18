@@ -379,28 +379,28 @@ jobs:
             arch: x64
             label: ubuntu-22.04-deb
             package_tag: vs-gen
-            check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
             cpack_gen: DEB
             artifacts_id: jammy
             package_suffix: deb
             check_container: ubuntu:22.04
             container_root: docker/ubuntu22.04
             container: variar/klogg_ubuntu22.04
-            cmake_opts: ""
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON
+            check_command: apt-get update && DEBIAN_FRONTEND=noninteractive apt install -y /usr/local/klogg*.deb && QT_QPA_PLATFORM=offscreen klogg -v
 
           - os: ubuntu_noble
             os_version: 24.04
             arch: x64
             label: ubuntu-24.04-deb
             package_tag: vs-gen
-            check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
+            check_command: apt-get update && DEBIAN_FRONTEND=noninteractive apt install -y /usr/local/klogg*.deb && QT_QPA_PLATFORM=offscreen klogg -v
             cpack_gen: DEB
             artifacts_id: noble
             package_suffix: deb
             check_container: ubuntu:24.04
             container_root: docker/ubuntu24.04
             container: variar/klogg_ubuntu24.04
-            cmake_opts: -DENABLE_CPPCHECK=ON
+            cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
 
           - os: ubuntu_appimage
             os_version: 20.04
@@ -411,7 +411,7 @@ jobs:
             package_suffix: AppImage
             container_root: docker/ubuntu20.04
             container: variar/klogg_ubuntu20.04
-            cmake_opts: ""
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON
 
 
     runs-on: ubuntu-22.04

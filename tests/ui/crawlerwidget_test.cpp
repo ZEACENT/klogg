@@ -22,7 +22,9 @@
 #include <QShortcut>
 #include <QSignalSpy>
 #include <QLineEdit>
+#include <QProxyStyle>
 #include <QScrollBar>
+#include <QStyle>
 #include <QTemporaryFile>
 #include <QTest>
 #include <QTimer>
@@ -50,6 +52,20 @@
 static const qint64 SL_NB_LINES = 100LL;
 
 namespace {
+class TransientScrollBarStyle : public QProxyStyle {
+  public:
+    int styleHint( StyleHint hint, const QStyleOption* option = nullptr,
+                   const QWidget* widget = nullptr,
+                   QStyleHintReturn* returnData = nullptr ) const override
+    {
+        if ( hint == QStyle::SH_ScrollBar_Transient ) {
+            return 1;
+        }
+
+        return QProxyStyle::styleHint( hint, option, widget, returnData );
+    }
+};
+
 bool generateDataFiles( QTemporaryFile& file )
 {
     char newLine[ 90 ];
@@ -189,6 +205,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static LineLength visibleColumns( const AbstractLogView* view )
     {
         return view->getNbVisibleCols();
+    }
+
+    static int textViewportHeight( const AbstractLogView* view )
+    {
+        return view->textViewportHeight();
     }
 
     static QShortcut* shortcutFor( const AbstractLogView* view, const QString& key )
@@ -500,6 +521,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     int mainCharHeight() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::charHeight( crawler->logMainView_ );
+    }
+
+    int mainTextViewportHeight() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textViewportHeight(
+            crawler->logMainView_ );
     }
 
     int mainGetSelectedTextCallCount() const
@@ -1376,6 +1403,36 @@ SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization"
              >= crawlerVisitor.mainViewportSize().width() );
     REQUIRE( crawlerVisitor.mainTextAreaCachePixmapSize().height()
              >= crawlerVisitor.mainViewportSize().height() );
+}
+
+SCENARIO( "Log view reserves space for transient horizontal scrollbars",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.mainView()->setStyle( new TransientScrollBarStyle );
+    crawlerVisitor.resizeViews( 260, 120 );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() > 0 );
+
+    const auto scrollbarHeight = crawlerVisitor.mainView()->horizontalScrollBar()->sizeHint().height();
+    REQUIRE( scrollbarHeight > 0 );
+    REQUIRE( crawlerVisitor.mainTextViewportHeight()
+             == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
 }
 
 SCENARIO( "Selection drag performance", "[ui][selection][regression]" )

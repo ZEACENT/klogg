@@ -76,6 +76,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QStringView>
+#include <QStyle>
 #include <QtCore>
 
 #include <tbb/flow_graph.h>
@@ -1223,6 +1224,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     QPainter devicePainter( viewport() );
 
     // Calculate effective height for text wrapping and pull-to-follow bar positioning
+    const int availableTextHeight = textViewportHeight();
     const int effectiveHeight
         = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 ) ? textAreaCache_.actual_height_
                                                                  : wholeHeight;
@@ -1231,10 +1233,10 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     int drawingTopPosition = drawingTopOffset_;
     // Keep pull-to-follow within viewport to avoid blank/gray regions.
     int drawingPullToFollowTopPosition
-        = std::min( drawingTopPosition + effectiveHeight, viewport()->height() );
+        = std::min( drawingTopPosition + effectiveHeight, availableTextHeight );
 
     if ( shouldBottomAlignFrame() ) {
-        int hiddenHeightPx = std::max( 0, effectiveHeight - viewport()->height() );
+        int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
         if ( !useTextWrap_ ) {
             hiddenHeightPx = alignHiddenHeightToLineGrid( hiddenHeightPx );
         }
@@ -1245,7 +1247,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
             ? textAreaCache_.actual_height_
             : effectiveHeight;
         const int maxPullToFollowTop
-            = std::max( 0, viewport()->height() - pullToFollowHeight );
+            = std::max( 0, availableTextHeight - pullToFollowHeight );
         drawingPullToFollowTopPosition
             = std::min( drawingTopPosition + heightForPullToFollow, maxPullToFollowTop );
     }
@@ -1253,7 +1255,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
         drawingTopOffset_ = -pullToFollowHeight;
         drawingTopPosition = drawingTopOffset_;
         const int maxPullToFollowTop
-            = std::max( 0, viewport()->height() - pullToFollowHeight );
+            = std::max( 0, availableTextHeight - pullToFollowHeight );
         drawingPullToFollowTopPosition
             = std::min( drawingTopPosition + effectiveHeight, maxPullToFollowTop );
     }
@@ -1997,7 +1999,28 @@ void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine 
 LinesCount AbstractLogView::getNbVisibleLines() const
 {
     return LinesCount(
-        static_cast<LinesCount::UnderlyingType>( viewport()->height() / charHeight_ + 1 ) );
+        static_cast<LinesCount::UnderlyingType>( textViewportHeight() / charHeight_ + 1 ) );
+}
+
+int AbstractLogView::textViewportHeight() const
+{
+    return std::max( 0, viewport()->height() - horizontalScrollBarOverlayHeight() );
+}
+
+int AbstractLogView::horizontalScrollBarOverlayHeight() const
+{
+    if ( horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff
+         || horizontalScrollBar()->maximum() <= 0 ) {
+        return 0;
+    }
+
+    const auto transientScrollBar
+        = style()->styleHint( QStyle::SH_ScrollBar_Transient, nullptr, horizontalScrollBar() ) != 0;
+    if ( !transientScrollBar ) {
+        return 0;
+    }
+
+    return horizontalScrollBar()->sizeHint().height();
 }
 
 // Returns the number of columns visible in the viewport

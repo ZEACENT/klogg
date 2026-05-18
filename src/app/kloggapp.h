@@ -69,8 +69,6 @@ class KloggApp : public QApplication {
     {
         QFontDatabase::addApplicationFont( ":/fonts/DejaVuSansMono.ttf" );
 
-        QNetworkProxyFactory::setUseSystemConfiguration( true );
-
         qRegisterMetaType<LoadingStatus>( "LoadingStatus" );
         qRegisterMetaType<LinesCount>( "LinesCount" );
         qRegisterMetaType<LineNumber>( "LineNumber" );
@@ -215,7 +213,10 @@ class KloggApp : public QApplication {
     void startBackgroundTasks()
     {
         LOG_DEBUG << "startBackgroundTasks";
-        versionChecker_.startCheck();
+        QTimer::singleShot( 0, this, [ this ] {
+            QNetworkProxyFactory::setUseSystemConfiguration( true );
+            versionChecker_.startCheck();
+        } );
     }
 
 #ifdef Q_OS_MAC

@@ -477,6 +477,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     LinesCount getNbVisibleLines() const;
     LinesCount getNbBottomWrappedVisibleLines() const;
     LineLength getNbVisibleCols() const;
+    int textViewportHeight() const;
+    int horizontalScrollBarOverlayHeight() const;
 
     FilePosition convertCoordToFilePos( const QPoint& pos ) const;
     OptionalLineNumber convertCoordToLine( int yPos ) const;

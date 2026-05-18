@@ -19,4 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run lint
-        run: python3 scripts/lint_platform_fragile.py
+        run: |
+          python3 scripts/lint_platform_fragile.py
+          python3 scripts/lint_linux_package_runtime.py
