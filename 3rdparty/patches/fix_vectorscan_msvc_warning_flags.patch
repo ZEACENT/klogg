@@ -6,7 +6,6 @@ index 1db128ba..969206a0 100644
  
 +if (KLOGG_GENERIC_CPU AND (ARCH_IA32 OR ARCH_X86_64))
 +    set(GNUCC_ARCH x86-64)
-+    set(TUNE_FLAG generic)
 +    set(GNUCC_TUNE "")
 +endif ()
 +

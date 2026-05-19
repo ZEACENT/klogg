@@ -1421,7 +1421,8 @@ SCENARIO( "Log view reserves space for transient horizontal scrollbars",
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
 
     crawlerVisitor.setTextWrap( false );
-    crawlerVisitor.mainView()->setStyle( new TransientScrollBarStyle );
+    static TransientScrollBarStyle transientStyle;
+    crawlerVisitor.mainView()->setStyle( &transientStyle );
     crawlerVisitor.resizeViews( 260, 120 );
     crawlerVisitor.render();
     QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );

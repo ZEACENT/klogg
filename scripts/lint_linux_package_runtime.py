@@ -57,7 +57,8 @@ def main() -> int:
 
         if package_suffix == "deb":
             check_command = entry.get("check_command", "")
-            if "apt install" not in check_command or "--dry-run" in check_command:
+            has_real_install = ("apt install" in check_command) or ("apt-get install" in check_command)
+            if not has_real_install or "--dry-run" in check_command:
                 failures.append(f"{os_name}: deb package check must perform a real install")
             if "klogg -v" not in check_command:
                 failures.append(f"{os_name}: deb package check must execute klogg -v")

@@ -44,17 +44,7 @@
 #include "regularexpression.h"
 #include "searchablelogdata.h"
 #include "synchronization.h"
-
-#if defined( __clang__ )
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wkeyword-macro"
-#endif
-#define private public
 #include "logfiltereddataworker.h"
-#undef private
-#if defined( __clang__ )
-#pragma clang diagnostic pop
-#endif
 #include "logfiltereddata.h"
 
 namespace {
@@ -89,30 +79,58 @@ class TestSearchableLogData : public SearchableLogData {
     void doDetachReader() const override {}
 };
 
-LogFilteredDataWorker::SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
-{
-    return LogFilteredDataWorker::SearchRequest{ LogFilteredDataWorker::SearchRequest::Type::LiveUpdate,
-                                                 RegularExpressionPattern{ QStringLiteral( "ERROR" ) },
-                                                 0_lnum,
-                                                 endLine,
-                                                 0_lnum,
-                                                 0,
-                                                 operationId,
-                                                 nullptr };
-}
 } // namespace
+
+struct LogFilteredDataWorkerPrivate {
+};
+
+template <>
+struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
+    static void enqueueOrDeferLiveRequest( LogFilteredDataWorker* worker, quint64 operationId,
+                                           LineNumber endLine )
+    {
+        worker->enqueueOrDeferLiveRequest( makeLiveRequest( operationId, endLine ) );
+    }
+
+    static void enqueueImmediateLiveRequest( LogFilteredDataWorker* worker, quint64 operationId,
+                                             LineNumber endLine )
+    {
+        worker->enqueueRequest( makeLiveRequest( operationId, endLine ), false );
+    }
+
+    static bool hasDeferredLiveRequest( LogFilteredDataWorker* worker )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        return worker->deferredLiveRequest_.has_value();
+    }
+
+  private:
+    static SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
+    {
+        return SearchRequest{ SearchRequest::Type::LiveUpdate,
+                              RegularExpressionPattern{ QStringLiteral( "ERROR" ) },
+                              0_lnum,
+                              endLine,
+                              0_lnum,
+                              0,
+                              operationId,
+                              nullptr };
+    }
+};
 
 TEST_CASE( "LogFilteredDataWorker clears deferred live update when immediate live dispatch supersedes it" )
 {
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
 
-    worker.enqueueOrDeferLiveRequest( makeLiveRequest( 1, 10_lnum ) );
-    REQUIRE( worker.deferredLiveRequest_.has_value() );
+    WorkerVisitor::enqueueOrDeferLiveRequest( &worker, 1, 10_lnum );
+    REQUIRE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
 
-    worker.enqueueRequest( makeLiveRequest( 2, 100_lnum ), false );
+    WorkerVisitor::enqueueImmediateLiveRequest( &worker, 2, 100_lnum );
 
-    CHECK_FALSE( worker.deferredLiveRequest_.has_value() );
+    CHECK_FALSE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
 
     worker.shutdownAndWait();
 }

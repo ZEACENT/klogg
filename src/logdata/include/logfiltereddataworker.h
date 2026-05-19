@@ -221,6 +221,9 @@ class LogFilteredDataWorker : public QObject {
     Q_OBJECT
 
 public:
+    template <class T>
+    struct access_by;
+
     explicit LogFilteredDataWorker( const SearchableLogData& sourceLogData );
     ~LogFilteredDataWorker() noexcept override;
 

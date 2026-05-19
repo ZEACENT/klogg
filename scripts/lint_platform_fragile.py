@@ -81,6 +81,17 @@ PATTERNS: list[dict] = [
             "exits with a non-zero status instead."
         ),
     },
+    {
+        "name": "private macro access override",
+        "regex": re.compile(r"^\s*#\s*define\s+private\s+public\b"),
+        "fix": (
+            "Do not rewrite C++ access specifiers with a macro in tests. MSVC "
+            "encodes access level in decorated symbols, so a test translation "
+            "unit that sees a private method as public can fail to link against "
+            "the implementation object. Add a narrow access_by<T> test adapter "
+            "to the class instead."
+        ),
+    },
 ]
 
 # Multi-line patterns: checked separately via whole-file analysis.
