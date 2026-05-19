@@ -2,7 +2,7 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 1db128ba..969206a0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -137,7 +137,13 @@ include (${CMAKE_MODULE_PATH}/archdetect.cmake)
+@@ -137,7 +137,12 @@ include (${CMAKE_MODULE_PATH}/archdetect.cmake)
  
 +if (KLOGG_GENERIC_CPU AND (ARCH_IA32 OR ARCH_X86_64))
 +    set(GNUCC_ARCH x86-64)
