@@ -78,6 +78,58 @@ struct TabGroupCleanupGuard {
     }
 };
 
+struct SessionInfoWindowSnapshot {
+    QString id;
+    QByteArray geometry;
+    int currentFileIndex = -1;
+    std::vector<SessionInfo::OpenFile> openFiles;
+};
+
+class SessionInfoRestoreGuard {
+  public:
+    explicit SessionInfoRestoreGuard( SessionInfo& sessionInfo )
+        : sessionInfo_{ sessionInfo }
+    {
+        for ( const auto& windowId : sessionInfo_.windows() ) {
+            snapshots_.push_back( { windowId, sessionInfo_.geometry( windowId ),
+                                    sessionInfo_.currentFileIndex( windowId ),
+                                    sessionInfo_.openFiles( windowId ) } );
+        }
+    }
+
+    ~SessionInfoRestoreGuard()
+    {
+        QStringList originalWindowIds;
+        for ( const auto& snapshot : snapshots_ ) {
+            originalWindowIds.push_back( snapshot.id );
+            sessionInfo_.add( snapshot.id );
+            sessionInfo_.setGeometry( snapshot.id, snapshot.geometry );
+            sessionInfo_.setCurrentFileIndex( snapshot.id, snapshot.currentFileIndex );
+            sessionInfo_.setOpenFiles( snapshot.id, snapshot.openFiles );
+        }
+
+        for ( const auto& windowId : sessionInfo_.windows() ) {
+            if ( !originalWindowIds.contains( windowId ) ) {
+                sessionInfo_.remove( windowId );
+            }
+        }
+
+        if ( snapshots_.empty() ) {
+            for ( const auto& windowId : sessionInfo_.windows() ) {
+                sessionInfo_.setGeometry( windowId, {} );
+                sessionInfo_.setCurrentFileIndex( windowId, -1 );
+                sessionInfo_.setOpenFiles( windowId, {} );
+            }
+        }
+
+        sessionInfo_.save();
+    }
+
+  private:
+    SessionInfo& sessionInfo_;
+    std::vector<SessionInfoWindowSnapshot> snapshots_;
+};
+
 QToolButton* findGroupChipButton( QTabBar* tabBar, int tabIndex )
 {
     if ( tabBar == nullptr || tabIndex < 0 || tabIndex >= tabBar->count() ) {
@@ -670,14 +722,15 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
 {
     auto appSession = std::make_shared<Session>();
     auto& sessionInfo = SessionInfo::getSynced();
-    auto windowIds = sessionInfo.windows();
+    SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
+    const auto windowIds = sessionInfo.windows();
     const auto windowId = QString( "restore-ios-session-%1" ).arg(
         QUuid::createUuid().toString( QUuid::WithoutBraces ) );
 
+    sessionInfo.add( windowId );
     for ( const auto& existingWindowId : windowIds ) {
         sessionInfo.remove( existingWindowId );
     }
-    sessionInfo.add( windowId );
 
     const AdbLogcatSessionData iosSessionData{
         QStringLiteral( "pymobiledevice3" ),

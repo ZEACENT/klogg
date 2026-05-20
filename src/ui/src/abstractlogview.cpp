@@ -2024,11 +2024,7 @@ int AbstractLogView::horizontalScrollBarOverlayHeight() const
         return scrollBarHeight;
     }
 
-    if ( horizontalScrollBar()->isVisible() ) {
-        return 0;
-    }
-
-    return scrollBarHeight;
+    return 0;
 }
 
 // Returns the number of columns visible in the viewport

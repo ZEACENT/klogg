@@ -66,6 +66,20 @@ class TransientScrollBarStyle : public QProxyStyle {
     }
 };
 
+class ClassicScrollBarStyle : public QProxyStyle {
+  public:
+    int styleHint( StyleHint hint, const QStyleOption* option = nullptr,
+                   const QWidget* widget = nullptr,
+                   QStyleHintReturn* returnData = nullptr ) const override
+    {
+        if ( hint == QStyle::SH_ScrollBar_Transient ) {
+            return 0;
+        }
+
+        return QProxyStyle::styleHint( hint, option, widget, returnData );
+    }
+};
+
 bool generateDataFiles( QTemporaryFile& file )
 {
     char newLine[ 90 ];
@@ -1469,6 +1483,38 @@ SCENARIO( "Log view keeps the bottom text gutter stable without horizontal overf
     REQUIRE( scrollbarHeight > 0 );
     REQUIRE( crawlerVisitor.mainTextViewportHeight()
              == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
+}
+
+SCENARIO( "Log view does not reserve hidden classic horizontal scrollbar gutter",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_short_lines_XXXXXX" };
+    REQUIRE( file.open() );
+    for ( int i = 0; i < SL_NB_LINES; ++i ) {
+        file.write( QStringLiteral( "short line %1\n" ).arg( i ).toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    static ClassicScrollBarStyle classicStyle;
+    crawlerVisitor.mainView()->setStyle( &classicStyle );
+    crawlerVisitor.resizeViews( 1600, 120 );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() == 0 );
+    REQUIRE_FALSE( crawlerVisitor.mainView()->horizontalScrollBar()->isVisible() );
+    REQUIRE( crawlerVisitor.mainTextViewportHeight() == crawlerVisitor.mainViewportSize().height() );
 }
 
 SCENARIO( "Selection drag performance", "[ui][selection][regression]" )

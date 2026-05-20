@@ -8,6 +8,7 @@
 #include <thread>
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 
 #include "log.h"
@@ -39,6 +40,26 @@ void reserveSegmentMemory( QByteArray& data, qint64 targetBytes, qint64 budgetBy
     const auto cappedTarget = std::min<qint64>( reserveTarget, std::numeric_limits<int>::max() );
     data.reserve( type_safe::narrow_cast<int>( cappedTarget ) );
 }
+
+QDateTime latestModificationTime( const QFileInfo& entry )
+{
+    auto latestModification = entry.lastModified().toUTC();
+    if ( !entry.isDir() ) {
+        return latestModification;
+    }
+
+    QDirIterator iterator( entry.absoluteFilePath(), QDir::AllEntries | QDir::NoDotAndDotDot,
+                           QDirIterator::Subdirectories );
+    while ( iterator.hasNext() ) {
+        iterator.next();
+        const auto modified = iterator.fileInfo().lastModified().toUTC();
+        if ( !latestModification.isValid() || modified > latestModification ) {
+            latestModification = modified;
+        }
+    }
+
+    return latestModification;
+}
 } // namespace
 
 QString CaptureStore::defaultRootPath()
@@ -47,16 +68,22 @@ QString CaptureStore::defaultRootPath()
 }
 
 void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
-                                          const QString& rootPath )
+                                          const QString& rootPath,
+                                          const QDateTime& preserveModifiedAfter )
 {
     QDir capturesRoot( rootPath.isEmpty() ? defaultRootPath() : rootPath );
     if ( !capturesRoot.exists() ) {
         return;
     }
 
+    const auto cutoff = preserveModifiedAfter.toUTC();
     const auto entries = capturesRoot.entryInfoList( QDir::Dirs | QDir::NoDotAndDotDot );
     for ( const auto& entry : entries ) {
         if ( retainCaptureIds.contains( entry.fileName() ) ) {
+            continue;
+        }
+
+        if ( cutoff.isValid() && latestModificationTime( entry ) > cutoff ) {
             continue;
         }
 
@@ -68,8 +95,9 @@ void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
 void CaptureStore::cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
                                                const QString& rootPath )
 {
-    std::thread( [ retainCaptureIds, rootPath ] {
-        CaptureStore::cleanupUnusedCaptures( retainCaptureIds, rootPath );
+    const auto cleanupScheduledAt = QDateTime::currentDateTimeUtc();
+    std::thread( [ retainCaptureIds, rootPath, cleanupScheduledAt ] {
+        CaptureStore::cleanupUnusedCaptures( retainCaptureIds, rootPath, cleanupScheduledAt );
     } ).detach();
 }
 

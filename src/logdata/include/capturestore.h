@@ -54,7 +54,8 @@ class CaptureStore {
 
     static QString defaultRootPath();
     static void cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
-                                       const QString& rootPath = {} );
+                                       const QString& rootPath = {},
+                                       const QDateTime& preserveModifiedAfter = {} );
     static void cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
                                             const QString& rootPath = {} );
 
