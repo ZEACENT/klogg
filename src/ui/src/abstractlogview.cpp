@@ -2009,18 +2009,26 @@ int AbstractLogView::textViewportHeight() const
 
 int AbstractLogView::horizontalScrollBarOverlayHeight() const
 {
-    if ( horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff
-         || horizontalScrollBar()->maximum() <= 0 ) {
+    if ( horizontalScrollBarPolicy() == Qt::ScrollBarAlwaysOff ) {
+        return 0;
+    }
+
+    const auto scrollBarHeight = horizontalScrollBar()->sizeHint().height();
+    if ( scrollBarHeight <= 0 ) {
         return 0;
     }
 
     const auto transientScrollBar
         = style()->styleHint( QStyle::SH_ScrollBar_Transient, nullptr, horizontalScrollBar() ) != 0;
-    if ( !transientScrollBar ) {
+    if ( transientScrollBar ) {
+        return scrollBarHeight;
+    }
+
+    if ( horizontalScrollBar()->isVisible() ) {
         return 0;
     }
 
-    return horizontalScrollBar()->sizeHint().height();
+    return scrollBarHeight;
 }
 
 // Returns the number of columns visible in the viewport

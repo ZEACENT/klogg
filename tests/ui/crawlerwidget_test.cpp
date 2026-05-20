@@ -1436,6 +1436,41 @@ SCENARIO( "Log view reserves space for transient horizontal scrollbars",
              == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
 }
 
+SCENARIO( "Log view keeps the bottom text gutter stable without horizontal overflow",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_short_lines_XXXXXX" };
+    REQUIRE( file.open() );
+    for ( int i = 0; i < SL_NB_LINES; ++i ) {
+        file.write( QStringLiteral( "short line %1\n" ).arg( i ).toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    static TransientScrollBarStyle transientStyle;
+    crawlerVisitor.mainView()->setStyle( &transientStyle );
+    crawlerVisitor.resizeViews( 1600, 120 );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() == 0 );
+
+    const auto scrollbarHeight = crawlerVisitor.mainView()->horizontalScrollBar()->sizeHint().height();
+    REQUIRE( scrollbarHeight > 0 );
+    REQUIRE( crawlerVisitor.mainTextViewportHeight()
+             == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
+}
+
 SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
 {
     QTemporaryFile file{ "crawler_selection_perf_XXXXXX" };

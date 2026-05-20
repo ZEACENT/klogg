@@ -665,6 +665,66 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     config.save();
 }
 
+SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
+          "[ui][session][ios]" )
+{
+    auto appSession = std::make_shared<Session>();
+    auto& sessionInfo = SessionInfo::getSynced();
+    auto windowIds = sessionInfo.windows();
+    const auto windowId = QString( "restore-ios-session-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+
+    for ( const auto& existingWindowId : windowIds ) {
+        sessionInfo.remove( existingWindowId );
+    }
+    sessionInfo.add( windowId );
+
+    const AdbLogcatSessionData iosSessionData{
+        QStringLiteral( "pymobiledevice3" ),
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "iPhone Test" ),
+        QString{},
+        QString( "ios_capture_%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) ),
+        QString{},
+        LiveLogSourceType::IosLogStream,
+    };
+    const auto sourceSpec = QString::fromUtf8(
+        QJsonDocument( iosSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
+
+    sessionInfo.setOpenFiles(
+        windowId, { SessionInfo::OpenFile( iosSessionData.documentId(), 0, {},
+                                           iosSessionData.persistedSourceType(),
+                                           iosSessionData.displayName(), sourceSpec ) } );
+    sessionInfo.setCurrentFileIndex( windowId, 0 );
+    sessionInfo.save();
+
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    runInUiThread( [&mainWindow] { mainWindow->reloadSession(); } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    REQUIRE( tabArea->tabText( 0 ) == QStringLiteral( "iPhone Test [disconnected]" ) );
+
+    mainWindow->close();
+    sessionInfo.remove( windowId );
+    sessionInfo.save();
+}
+
 SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][session][adb]" )
 {
     auto appSession = std::make_shared<Session>();

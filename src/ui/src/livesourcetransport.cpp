@@ -75,16 +75,13 @@ void ProcessLiveSourceTransport::createProcess()
                  }
 
                  if ( state_ == State::Connected || state_ == State::Connecting ) {
-                     if ( exitStatus != QProcess::NormalExit || exitCode != 0 || !lastError_.isEmpty() ) {
-                         if ( lastError_.isEmpty() ) {
-                             lastError_ = tr( "Live source exited unexpectedly (%1)" ).arg( exitCode );
-                         }
-                         setState( State::Error );
-                         Q_EMIT errorOccurred( lastError_ );
+                     if ( lastError_.isEmpty() ) {
+                         lastError_ = exitStatus == QProcess::NormalExit
+                                          ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
+                                          : tr( "Live source crashed" );
                      }
-                     else {
-                         setState( State::Disconnected );
-                     }
+                     setState( State::Error );
+                     Q_EMIT errorOccurred( lastError_ );
                  }
              } );
 }

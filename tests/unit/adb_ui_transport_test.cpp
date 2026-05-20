@@ -909,6 +909,30 @@ class LongRunningTestTransport : public ProcessLiveSourceTransport {
 #endif
     }
 };
+
+class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
+  public:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ),
+                 { QStringLiteral( "/c" ),
+                   QStringLiteral( "ping -n 2 127.0.0.1 > nul & exit /b 0" ) } };
+#else
+        return { QStringLiteral( "/bin/sh" ),
+                 { QStringLiteral( "-c" ), QStringLiteral( "sleep 0.5; exit 0" ) } };
+#endif
+    }
+
+    Command clearCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ), { QStringLiteral( "/c" ), QStringLiteral( "echo" ) } };
+#else
+        return { QStringLiteral( "true" ), {} };
+#endif
+    }
+};
 } // namespace
 
 TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intentional disconnect" )
@@ -938,6 +962,24 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     const auto lastState
         = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
     CHECK( lastState == LiveSourceTransport::State::Disconnected );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as error" )
+{
+    FiniteSuccessfulTestTransport transport;
+
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    REQUIRE( transport.connectTransport() );
+
+    REQUIRE( errorSpy.safeWait( 3000 ) );
+    REQUIRE_FALSE( transport.lastError().isEmpty() );
+
+    REQUIRE( stateSpy.count() >= 1 );
+    const auto lastState
+        = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
+    CHECK( lastState == LiveSourceTransport::State::Error );
 }
 
 TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )

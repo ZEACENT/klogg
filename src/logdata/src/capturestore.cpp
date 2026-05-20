@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 
 #include <QDir>
 #include <QFileInfo>
@@ -62,6 +63,14 @@ void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
         QDir orphanCaptureDir( entry.absoluteFilePath() );
         orphanCaptureDir.removeRecursively();
     }
+}
+
+void CaptureStore::cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
+                                               const QString& rootPath )
+{
+    std::thread( [ retainCaptureIds, rootPath ] {
+        CaptureStore::cleanupUnusedCaptures( retainCaptureIds, rootPath );
+    } ).detach();
 }
 
 CaptureStore::CaptureStore( QString captureId, QString rootPath )
