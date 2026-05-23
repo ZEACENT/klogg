@@ -22,3 +22,4 @@ jobs:
         run: |
           python3 scripts/lint_platform_fragile.py
           python3 scripts/lint_linux_package_runtime.py
+          python3 -m unittest discover -s tests/scripts -p 'test_*.py'

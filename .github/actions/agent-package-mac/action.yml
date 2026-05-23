@@ -5,6 +5,10 @@ inputs:
     required: false
   p12-password:
     required: false
+  codesign-identity:
+    required: false
+  installer-sign-identity:
+    required: false
   notarization-username:
     required: false
   notarization-team:
@@ -15,13 +19,41 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Mac prepare codesign
-      id: prepare-codesign
-      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-      uses: apple-actions/import-codesign-certs@v1
-      with: 
-        p12-file-base64: ${{ inputs.p12-file-base64 }}
-        p12-password: ${{ inputs.p12-password }}
+    # macOS signing/notarization is disabled until the CI account has a paid
+    # Apple Developer Program membership and Developer ID certificates.
+    #
+    # - name: Mac signing preflight
+    #   if: ${{ github.event_name != 'pull_request' }}
+    #   shell: sh
+    #   run: |
+    #     missing=0
+    #     require_input() {
+    #       name="$1"
+    #       value="$2"
+    #       if [ -z "${value}" ]; then
+    #         echo "::error::Missing macOS signing input: ${name}"
+    #         missing=1
+    #       fi
+    #     }
+    #
+    #     require_input "p12-file-base64 (GitHub secret CODESIGN_BASE64)" "${{ inputs.p12-file-base64 }}"
+    #     require_input "p12-password (GitHub secret CODESIGN_PASSWORD)" "${{ inputs.p12-password }}"
+    #     require_input "codesign-identity (GitHub secret APPLE_DEVELOPER_ID_APPLICATION)" "${{ inputs.codesign-identity }}"
+    #     require_input "notarization-username (GitHub secret NOTARIZATION_USERNAME)" "${{ inputs.notarization-username }}"
+    #     require_input "notarization-team (GitHub secret NOTARIZATION_TEAM)" "${{ inputs.notarization-team }}"
+    #     require_input "notarization-password (GitHub secret NOTARIZATION_PASSWORD)" "${{ inputs.notarization-password }}"
+    #
+    #     if [ "${missing}" -ne 0 ]; then
+    #       exit 1
+    #     fi
+    #
+    # - name: Mac prepare codesign
+    #   id: prepare-codesign
+    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
+    #   uses: apple-actions/import-codesign-certs@v1
+    #   with:
+    #     p12-file-base64: ${{ inputs.p12-file-base64 }}
+    #     p12-password: ${{ inputs.p12-password }}
      
     - name: Mac deploy Qt
       shell: sh
@@ -48,18 +80,19 @@ runs:
     - name: Set packaging env
       shell: sh
       run: |
-        echo "KLOGG_CODESIGN=Developer ID Application: Anton Filimonov (GAW773U324)" >> $GITHUB_ENV
-        echo "KLOGG_INSTALLERSIGN=Developer ID Installer: Anton Filimonov (GAW773U324)" >> $GITHUB_ENV
+        # echo "KLOGG_CODESIGN=${{ inputs.codesign-identity }}" >> $GITHUB_ENV
+        # echo "KLOGG_INSTALLERSIGN=${{ inputs.installer-sign-identity }}" >> $GITHUB_ENV
         echo "KLOGG_DMG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.dmg" >> $GITHUB_ENV
         echo "KLOGG_PKG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.pkg" >> $GITHUB_ENV
 
-    - name: Mac codesign binaries
-      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-      shell: sh
-      run: |
-        cd $KLOGG_BUILD_ROOT
-        codesign -v -f -o runtime --deep --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./output/klogg.app;
-    
+    # - name: Mac codesign binaries
+    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
+    #   shell: sh
+    #   run: |
+    #     cd $KLOGG_BUILD_ROOT
+    #     codesign -v -f -o runtime --deep --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./output/klogg.app;
+    #     codesign --verify --deep --strict --verbose=2 ./output/klogg.app
+
     - name: Mac pack dmg
       shell: sh
       run: |
@@ -116,27 +149,30 @@ runs:
         mv ./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg ./packages/${{ env.KLOGG_DMG }}
         echo "Renamed DMG to: ${{ env.KLOGG_DMG }}"
 
-    - name: Mac codesign dmg
-      if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-      shell: sh
-      run: |
-        cd $KLOGG_BUILD_ROOT
-        codesign -v -f -o runtime --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./packages/${{ env.KLOGG_DMG }}
-    
-    - name: Mac notarize DMG 
-      if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
-      shell: sh
-      run: |
-        xcrun notarytool submit --wait --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}" | tee dmg_notary.log
-        dmg_notary_id=$(awk '$1=="id:"{id=$2} END{print id}' dmg_notary.log)
-        xcrun notarytool log --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "$dmg_notary_id" "dmg_notary.log.json"
-        cat "dmg_notary.log.json"
-
-    - name: Mac staple DMG 
-      if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
-      shell: sh
-      run: |
-        xcrun stapler staple "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
+    # - name: Mac codesign dmg
+    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
+    #   shell: sh
+    #   run: |
+    #     cd $KLOGG_BUILD_ROOT
+    #     codesign -v -f -o runtime --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./packages/${{ env.KLOGG_DMG }}
+    #     codesign --verify --strict --verbose=2 ./packages/${{ env.KLOGG_DMG }}
+    #
+    # - name: Mac notarize DMG
+    #   if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
+    #   shell: sh
+    #   run: |
+    #     xcrun notarytool submit --wait --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}" | tee dmg_notary.log
+    #     dmg_notary_id=$(awk '$1=="id:"{id=$2} END{print id}' dmg_notary.log)
+    #     xcrun notarytool log --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "$dmg_notary_id" "dmg_notary.log.json"
+    #     cat "dmg_notary.log.json"
+    #
+    # - name: Mac staple DMG
+    #   if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
+    #   shell: sh
+    #   run: |
+    #     xcrun stapler staple "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
+    #     xcrun stapler validate "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
+    #     spctl --assess --type open --context context:primary-signature --verbose "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
 
     #- name: "Mac build pkg"
     #  if: ${{ github.event_name != 'pull_request' }}

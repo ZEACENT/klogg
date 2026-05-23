@@ -148,3 +148,33 @@ TEST_CASE( "Configuration stores and restores iOS log defaults" )
     REQUIRE( restoredConfig.iosLogAnsiOutputEnabled() );
     REQUIRE( restoredConfig.adbLogcatAnsiOutputEnabled() );
 }
+
+TEST_CASE( "Configuration defaults empty filters to show all lines in filtered view" )
+{
+    Configuration config;
+
+    REQUIRE( config.showAllInFilteredViewWhenSearchEmpty() );
+}
+
+TEST_CASE( "Configuration stores and restores empty-filter filtered-view behavior" )
+{
+    const auto dirPath = makeTestDir( "configuration_empty_filter" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-empty-filter.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setShowAllInFilteredViewWhenSearchEmpty( false );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE_FALSE( restoredConfig.showAllInFilteredViewWhenSearchEmpty() );
+}

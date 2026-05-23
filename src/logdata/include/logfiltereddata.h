@@ -90,6 +90,8 @@ class LogFilteredData : public AbstractLogData {
     void interruptSearch();
     // Clear the search and the list of results.
     void clearSearch( bool dropCache = false );
+    void setAllLinesVisible( bool visible );
+    bool allLinesVisible() const { return allLinesVisible_; }
 
     // Returns the line number in the original LogData where the element
     // 'index' was found.
@@ -222,6 +224,7 @@ class LogFilteredData : public AbstractLogData {
     SearchResultArray matching_lines_;
     SearchResultArray marks_;
     SearchResultArray marks_and_matches_;
+    bool allLinesVisible_ = false;
 
     const SearchableLogData* sourceLogData_;
 

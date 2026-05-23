@@ -186,6 +186,11 @@ void Configuration::retrieveFromStorage( QSettings& settings )
                                         .value( "regexpType.autoRunSearch",
                                                 DefaultConfiguration.autoRunSearchOnPatternChange_ )
                                         .toBool();
+    showAllInFilteredViewWhenSearchEmpty_
+        = settings
+              .value( "regexpType.showAllInFilteredViewWhenSearchEmpty",
+                      DefaultConfiguration.showAllInFilteredViewWhenSearchEmpty_ )
+              .toBool();
 
     // "Advanced" settings
     nativeFileWatchEnabled_
@@ -429,6 +434,8 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "regexpType.mainHighlight", enableMainSearchHighlight_ );
     settings.setValue( "regexpType.mainHighlightVariate", enableMainSearchHighlightVariance_ );
     settings.setValue( "regexpType.autoRunSearch", autoRunSearchOnPatternChange_ );
+    settings.setValue( "regexpType.showAllInFilteredViewWhenSearchEmpty",
+                       showAllInFilteredViewWhenSearchEmpty_ );
 
     settings.setValue( "regexpType.quickfind", static_cast<int>( quickfindRegexpType_ ) );
     settings.setValue( "regexpType.quickfindBackColor", qfBackColor_.name( QColor::HexArgb ) );

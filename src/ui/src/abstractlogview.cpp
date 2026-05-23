@@ -2018,13 +2018,7 @@ int AbstractLogView::horizontalScrollBarOverlayHeight() const
         return 0;
     }
 
-    const auto transientScrollBar
-        = style()->styleHint( QStyle::SH_ScrollBar_Transient, nullptr, horizontalScrollBar() ) != 0;
-    if ( transientScrollBar ) {
-        return scrollBarHeight;
-    }
-
-    return 0;
+    return scrollBarHeight;
 }
 
 // Returns the number of columns visible in the viewport

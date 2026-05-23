@@ -82,6 +82,27 @@ QIcon makeGroupColorIcon( const QColor& color )
     return QIcon( colorIcon );
 }
 
+QString liveStatusSuffix( const QString& title )
+{
+    static const QStringList suffixes{
+        QStringLiteral( " [disconnected]" ),
+        QStringLiteral( " [error]" ),
+    };
+
+    for ( const auto& suffix : suffixes ) {
+        if ( title.endsWith( suffix ) ) {
+            return suffix;
+        }
+    }
+
+    return {};
+}
+
+QString tabLabelWithLiveStatus( const QString& label, const QString& storedTitle )
+{
+    return label + liveStatusSuffix( storedTitle );
+}
+
 bool isGroupChipWidget( const QWidget* widget )
 {
     return widget != nullptr && widget->property( GroupChipPropertyKey ).toBool();
@@ -222,8 +243,7 @@ void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
                                          const QString& displayName, const QString& toolTip )
 {
     const auto tabLabel = displayName.isEmpty() ? QFileInfo( documentId ).fileName() : displayName;
-    const auto tabName
-        = displayName.isEmpty() ? TabNameMapping::getSynced().tabName( documentId ) : QString{};
+    const auto tabName = TabNameMapping::getSynced().tabName( documentId );
     const auto nativeToolTip
         = toolTip.isEmpty() ? QDir::toNativeSeparators( documentId ) : QDir::toNativeSeparators( toolTip );
 
@@ -271,8 +291,12 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     myTabBar_.setTabToolTip( index, QDir::toNativeSeparators( toolTip ) );
 
     const auto documentId = tabData.value( PathKey ).toString();
-    if ( TabNameMapping::getSynced().tabName( documentId ).isEmpty() ) {
+    const auto customName = TabNameMapping::getSynced().tabName( documentId );
+    if ( customName.isEmpty() ) {
         myTabBar_.setTabText( index, displayName );
+    }
+    else {
+        myTabBar_.setTabText( index, tabLabelWithLiveStatus( customName, displayName ) );
     }
 }
 
@@ -613,11 +637,14 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
         if ( isNameEntered ) {
             TabNameMapping::getSynced().setTabName( tabPath, newName ).save();
 
+            const auto storedTitle = myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString();
             if ( newName.isEmpty() ) {
-                myTabBar_.setTabText( tab, QFileInfo( tabPath ).fileName() );
+                myTabBar_.setTabText( tab,
+                                      storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName()
+                                                            : storedTitle );
             }
             else {
-                myTabBar_.setTabText( tab, std::move( newName ) );
+                myTabBar_.setTabText( tab, tabLabelWithLiveStatus( newName, storedTitle ) );
             }
         }
     } );
@@ -956,7 +983,7 @@ void TabbedCrawlerWidget::onGroupsChanged()
         const auto originalTabLabel
             = customName.isEmpty()
                   ? ( storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName() : storedTitle )
-                  : customName;
+                  : tabLabelWithLiveStatus( customName, storedTitle );
         const auto originalTooltip
             = storedToolTip.isEmpty() ? QDir::toNativeSeparators( tabPath ) : storedToolTip;
 

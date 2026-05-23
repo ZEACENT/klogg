@@ -22,7 +22,10 @@
 #include <QDir>
 #include <QWidget>
 
+#include <utility>
+
 #include "tabbedcrawlerwidget.h"
+#include "tabnamemapping.h"
 
 class DummyCrawlerWidget : public QWidget {
     Q_OBJECT
@@ -32,6 +35,23 @@ class DummyCrawlerWidget : public QWidget {
 
   Q_SIGNALS:
     void dataStatusChanged( DataStatus status );
+};
+
+class ScopedTabNameMapping {
+  public:
+    ScopedTabNameMapping( QString path, QString name )
+        : path_( std::move( path ) )
+    {
+        TabNameMapping::getSynced().setTabName( path_, std::move( name ) ).save();
+    }
+
+    ~ScopedTabNameMapping()
+    {
+        TabNameMapping::getSynced().setTabName( path_, QString{} ).save();
+    }
+
+  private:
+    QString path_;
 };
 
 TEST_CASE( "TabbedCrawlerWidget keeps live tab title and tooltip across group refreshes" )
@@ -101,6 +121,36 @@ TEST_CASE( "TabbedCrawlerWidget updateCrawler reflects disconnect and error stat
         tabWidget.onGroupsChanged();
         REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [error]" ) );
     }
+}
+
+TEST_CASE( "TabbedCrawlerWidget keeps live status visible on renamed tabs" )
+{
+    const auto documentId = QStringLiteral( "adb://capture-renamed-status" );
+    const ScopedTabNameMapping tabNameMapping{ documentId, QStringLiteral( "Lab Phone" ) };
+
+    TabbedCrawlerWidget tabWidget;
+    auto* crawler = new DummyCrawlerWidget();
+
+    const auto index = tabWidget.addCrawler( crawler, documentId, QStringLiteral( "Galaxy S24" ),
+                                             QStringLiteral( "/tmp/galaxy.log" ) );
+
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
+
+    tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [disconnected]" ),
+                             QStringLiteral( "/tmp/galaxy.log" ) );
+
+    REQUIRE( tabWidget.tabText( index ).toStdString()
+             == std::string( "Lab Phone [disconnected]" ) );
+
+    tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
+                             QStringLiteral( "/tmp/galaxy.log" ) );
+
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone [error]" ) );
+
+    tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24" ),
+                             QStringLiteral( "/tmp/galaxy.log" ) );
+
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
 }
 
 #include "tabbedcrawlerwidget_test.moc"

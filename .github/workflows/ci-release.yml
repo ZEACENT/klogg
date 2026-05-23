@@ -19,26 +19,6 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Generate Changelog
-      id: changelog
-      shell: bash
-      run: |
-        # Find the last tag
-        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-        if [ -z "$LAST_TAG" ]; then
-          echo "No previous tag found. Generating log from start."
-          CHANGELOG=$(git log --pretty=format:"* %s (%h)")
-        else
-          echo "Generating changelog since $LAST_TAG"
-          CHANGELOG=$(git log --pretty=format:"* %s (%h)" ${LAST_TAG}..HEAD)
-        fi
-        
-        # Escape newlines for GITHUB_ENV
-        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-        echo "CHANGELOG<<$EOF" >> $GITHUB_ENV
-        echo "$CHANGELOG" >> $GITHUB_ENV
-        echo "$EOF" >> $GITHUB_ENV
-
     - name: Download artifacts for last successful CI workflow
       if: ${{ !github.event.inputs.ci-run-id }}
       uses: dawidd6/action-download-artifact@v2
@@ -56,6 +36,18 @@ jobs:
 
     - name: Initialize version
       run: echo "KLOGG_VERSION=`cat klogg_version/klogg_version.txt`" >> $GITHUB_ENV
+
+    - name: Generate Changelog
+      id: changelog
+      shell: bash
+      run: |
+        CHANGELOG="$(python3 scripts/gen_changelog.py --mode release --current-tag "v${KLOGG_VERSION}" --to-ref HEAD --print-range)"
+
+        # Escape newlines for GITHUB_ENV
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        echo "CHANGELOG<<$EOF" >> $GITHUB_ENV
+        echo "$CHANGELOG" >> $GITHUB_ENV
+        echo "$EOF" >> $GITHUB_ENV
 
     - name: Display structure of downloaded files
       run: ls -R ./packages-*

@@ -587,6 +587,14 @@ class Configuration final : public Persistable<Configuration> {
     {
         autoRunSearchOnPatternChange_ = enable;
     }
+    bool showAllInFilteredViewWhenSearchEmpty() const
+    {
+        return showAllInFilteredViewWhenSearchEmpty_;
+    }
+    void setShowAllInFilteredViewWhenSearchEmpty( bool enable )
+    {
+        showAllInFilteredViewWhenSearchEmpty_ = enable;
+    }
 
     bool optimizeForNotLatinEncodings() const
     {
@@ -711,6 +719,7 @@ class Configuration final : public Persistable<Configuration> {
 
     bool allowFollowOnScroll_ = true;
     bool autoRunSearchOnPatternChange_ = false;
+    bool showAllInFilteredViewWhenSearchEmpty_ = true;
 
     bool optimizeForNotLatinEncodings_ = false;
 

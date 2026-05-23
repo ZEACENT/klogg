@@ -145,6 +145,7 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
     const auto& config = Configuration::get();
 
     clearSearch();
+    setAllLinesVisible( false );
     currentRegExp_ = regExp;
     currentSearchKey_ = makeCacheKey( regExp, startLine, endLine );
     LOG_INFO << "Search cache key: " << regExp.pattern << "_" << startLine.get() << "_"
@@ -182,6 +183,7 @@ void LogFilteredData::updateSearch( LineNumber startLine, LineNumber endLine )
 {
     LOG_DEBUG << "Entering updateSearch";
 
+    setAllLinesVisible( false );
     currentSearchKey_ = {};
 
     attachReaderIfNeeded();
@@ -200,6 +202,7 @@ void LogFilteredData::clearSearch( bool dropCache )
 {
     interruptSearch();
 
+    allLinesVisible_ = false;
     currentRegExp_ = {};
     matching_lines_ = {};
     marks_and_matches_ = marks_;
@@ -212,8 +215,22 @@ void LogFilteredData::clearSearch( bool dropCache )
     }
 }
 
+void LogFilteredData::setAllLinesVisible( bool visible )
+{
+    if ( allLinesVisible_ == visible ) {
+        return;
+    }
+
+    allLinesVisible_ = visible;
+    contextLinesListValid_ = false;
+}
+
 LineNumber LogFilteredData::getMatchingLineNumber( LineNumber matchNum ) const
 {
+    if ( allLinesVisible_ ) {
+        return matchNum;
+    }
+
     // If context lines are enabled, get the line number from context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -261,6 +278,10 @@ LinesCount LogFilteredData::getNbMarks() const
 
 LogFilteredData::LineType LogFilteredData::lineTypeByIndex( LineNumber index ) const
 {
+    if ( allLinesVisible_ ) {
+        return lineTypeByLine( index );
+    }
+
     // If context lines are enabled, get the line number from context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -291,6 +312,14 @@ LogFilteredData::LineType LogFilteredData::lineTypeByLine( LineNumber lineNumber
 
 void LogFilteredData::iterateOverLines( const std::function<void( LineNumber )>& callback ) const
 {
+    if ( allLinesVisible_ ) {
+        const auto totalLines = sourceLogData_ ? sourceLogData_->getNbLine() : 0_lcount;
+        for ( auto line = 0_lnum; line < LineNumber( totalLines.get() ); ++line ) {
+            callback( line );
+        }
+        return;
+    }
+
     using CallbackFn = std::function<void( LineNumber )>;
     const auto& currentResults = currentResultArray();
     currentResults.iterate(
@@ -677,6 +706,10 @@ void LogFilteredData::handleSearchProgressedThrottled()
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const
 {
+    if ( allLinesVisible_ ) {
+        return index;
+    }
+
     const auto& currentResults = currentResultArray();
 
     LineNumber::UnderlyingType line = {};
@@ -708,6 +741,10 @@ const SearchResultArray& LogFilteredData::currentResultArray() const
 
 LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
 {
+    if ( allLinesVisible_ ) {
+        return lineNum;
+    }
+
     // If context lines are enabled, search in context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -740,6 +777,10 @@ QString LogFilteredData::doGetLineString( LineNumber index ) const
         return QString();
     }
 
+    if ( allLinesVisible_ ) {
+        return sourceLogData_->getLineString( index );
+    }
+
     // If context lines are enabled, use the context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -764,6 +805,10 @@ QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
         return QString();
     }
 
+    if ( allLinesVisible_ ) {
+        return sourceLogData_->getExpandedLineString( index );
+    }
+
     // If context lines are enabled, use the context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -784,6 +829,10 @@ klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber in
 {
     if ( !sourceLogData_ ) {
         return {};
+    }
+
+    if ( allLinesVisible_ ) {
+        return sourceLogData_->getLineAnsiColors( index );
     }
 
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
@@ -831,6 +880,10 @@ LogFilteredData::doGetLines( LineNumber first_line, LinesCount number,
 
 LineNumber LogFilteredData::doGetLineNumber(LineNumber index) const
 {
+    if ( allLinesVisible_ ) {
+        return index;
+    }
+
     // If context lines are enabled, return the line number from context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -849,6 +902,10 @@ LineNumber LogFilteredData::doGetLineNumber(LineNumber index) const
 // Implementation of the virtual function.
 LinesCount LogFilteredData::doGetNbLine() const
 {
+    if ( allLinesVisible_ ) {
+        return sourceLogData_ ? sourceLogData_->getNbLine() : 0_lcount;
+    }
+
     // If context lines are enabled, return the size of context lines list
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -865,6 +922,10 @@ LinesCount LogFilteredData::doGetNbLine() const
 // Implementation of the virtual function.
 LineLength LogFilteredData::doGetMaxLength() const
 {
+    if ( allLinesVisible_ ) {
+        return sourceLogData_ ? sourceLogData_->getMaxLength() : 0_length;
+    }
+
     LineLength result = qMax( maxLength_, maxLengthMarks_ );
     if ( contextLinesBefore_ > 0 || contextLinesAfter_ > 0 ) {
         if ( !contextLinesListValid_ ) {
@@ -881,6 +942,10 @@ LineLength LogFilteredData::doGetLineLength( LineNumber lineNum ) const
     // Safety check: if sourceLogData_ is null (object being destroyed), return 0
     if ( !sourceLogData_ ) {
         return 0_length;
+    }
+
+    if ( allLinesVisible_ ) {
+        return sourceLogData_->getLineLength( lineNum );
     }
 
     // If context lines are enabled, use the context lines list

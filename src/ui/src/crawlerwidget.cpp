@@ -898,6 +898,21 @@ void CrawlerWidget::applyConfiguration()
     }
 
     reloadPredefinedFilters();
+    applyEmptyFilterBehavior();
+}
+
+void CrawlerWidget::applyEmptyFilterBehavior()
+{
+    if ( !logFilteredData_ || !filteredView_ || !searchLineEdit_ ) {
+        return;
+    }
+
+    const bool showAll = searchLineEdit_->currentText().isEmpty()
+        && Configuration::get().showAllInFilteredViewWhenSearchEmpty();
+    logFilteredData_->setAllLinesVisible( showAll );
+    if ( searchLineEdit_->currentText().isEmpty() ) {
+        filteredView_->updateData();
+    }
 }
 
 void CrawlerWidget::enteringQuickFind()
@@ -931,6 +946,7 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
     // FIXME, handle topLine
     // logMainView_->updateData( logData_, topLine );
     logMainView_->updateData();
+    applyEmptyFilterBehavior();
 
     // Shall we Forbid starting a search when loading in progress?
     // searchButton_->setEnabled( false );
@@ -1363,6 +1379,7 @@ void CrawlerWidget::setup()
     searchLineEdit_->setEditable( true );
     searchLineEdit_->setCompleter( searchLineCompleter_ );
     searchLineEdit_->addItems( savedSearches_->recentSearches() );
+    searchLineEdit_->lineEdit()->clear();
     searchLineEdit_->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Minimum );
     searchLineEdit_->setSizeAdjustPolicy( QComboBox::AdjustToMinimumContentsLengthWithIcon );
     searchLineEdit_->lineEdit()->setMaxLength( std::numeric_limits<int>::max() / 1024 );
@@ -1937,6 +1954,9 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 
     // Clear and recompute the content of the filtered window.
     logFilteredData_->clearSearch();
+    if ( searchText.isEmpty() && Configuration::get().showAllInFilteredViewWhenSearchEmpty() ) {
+        logFilteredData_->setAllLinesVisible( true );
+    }
     filteredView_->updateData();
 
     // Update the match overview

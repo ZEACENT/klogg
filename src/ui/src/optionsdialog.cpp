@@ -530,6 +530,8 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
     regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( config.regexpEngine() ) );
     autoRunSearchOnAddCheckBox->setChecked( config.autoRunSearchOnPatternChange() );
+    showAllFilteredWhenEmptyCheckBox->setChecked(
+        config.showAllInFilteredViewWhenSearchEmpty() );
 
     highlightMainSearchCheckBox->setChecked( config.mainSearchHighlight() );
     variateHighlightCheckBox->setChecked( config.variateMainSearchHighlight() );
@@ -684,6 +686,8 @@ void OptionsDialog::resetGeneralDefaults()
     logicalCombiningCheckBox->setChecked( defaults.isSearchLogicalCombiningDefault() );
     autoRefreshCheckBox->setChecked( defaults.isSearchAutoRefreshDefault() );
     autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
+    showAllFilteredWhenEmptyCheckBox->setChecked(
+        defaults.showAllInFilteredViewWhenSearchEmpty() );
     searchHistorySpinBox->setValue( defaultSavedSearches.historySize() );
 
     loadLastSessionCheckBox->setChecked( defaults.loadLastSession() );
@@ -880,6 +884,8 @@ void OptionsDialog::updateConfigFromDialog()
     config.setQuickfindIncremental( incrementalCheckBox->isChecked() );
     config.setRegexpEnging( getRegexpEngineFromIndex( regexpEngineComboBox->currentIndex() ) );
     config.setAutoRunSearchOnPatternChange( autoRunSearchOnAddCheckBox->isChecked() );
+    config.setShowAllInFilteredViewWhenSearchEmpty(
+        showAllFilteredWhenEmptyCheckBox->isChecked() );
 
     config.setNativeFileWatchEnabled( nativeFileWatchCheckBox->isChecked() );
     config.setPollingEnabled( pollingCheckBox->isChecked() );

@@ -543,6 +543,17 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             crawler->logMainView_ );
     }
 
+    int filteredTextViewportHeight() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textViewportHeight(
+            crawler->filteredView_ );
+    }
+
+    SearchPerformanceCounters searchPerformanceCounters() const
+    {
+        return crawler->logFilteredData_->searchPerformanceCounters();
+    }
+
     int mainGetSelectedTextCallCount() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::getSelectedTextCallCount(
@@ -1275,6 +1286,54 @@ SCENARIO( "Crawler widget search", "[ui]" )
     }
 }
 
+SCENARIO( "Filtered window can mirror the main window while the filter is empty",
+          "[ui][filter][regression]" )
+{
+    QTemporaryFile file{ "crawler_empty_filter_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    auto& config = Configuration::get();
+    const auto previousShowAll = config.showAllInFilteredViewWhenSearchEmpty();
+    config.setShowAllInFilteredViewWhenSearchEmpty( true );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    const auto counters = crawlerVisitor.searchPerformanceCounters();
+    REQUIRE( crawlerVisitor.getLogFilteredNbLines() == crawlerVisitor.getLogNbLines() );
+    REQUIRE( counters.operationStarts == 0 );
+
+    config.setShowAllInFilteredViewWhenSearchEmpty( previousShowAll );
+}
+
+SCENARIO( "Filtered window can stay empty while the filter is empty",
+          "[ui][filter][regression]" )
+{
+    QTemporaryFile file{ "crawler_empty_filter_disabled_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    auto& config = Configuration::get();
+    const auto previousShowAll = config.showAllInFilteredViewWhenSearchEmpty();
+    config.setShowAllInFilteredViewWhenSearchEmpty( false );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    REQUIRE( crawlerVisitor.getLogFilteredNbLines() == 0_lcount );
+
+    config.setShowAllInFilteredViewWhenSearchEmpty( previousShowAll );
+}
+
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
 {
     // Use production-like search buffer so each search chunk takes noticeable time.
@@ -1485,7 +1544,7 @@ SCENARIO( "Log view keeps the bottom text gutter stable without horizontal overf
              == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
 }
 
-SCENARIO( "Log view does not reserve hidden classic horizontal scrollbar gutter",
+SCENARIO( "Log views reserve a stable bottom gutter for classic horizontal scrollbars",
           "[ui][scrollbar][regression]" )
 {
     QTemporaryFile file{ "crawler_short_lines_XXXXXX" };
@@ -1514,7 +1573,13 @@ SCENARIO( "Log view does not reserve hidden classic horizontal scrollbar gutter"
 
     REQUIRE( crawlerVisitor.mainHorizontalScrollMaximum() == 0 );
     REQUIRE_FALSE( crawlerVisitor.mainView()->horizontalScrollBar()->isVisible() );
-    REQUIRE( crawlerVisitor.mainTextViewportHeight() == crawlerVisitor.mainViewportSize().height() );
+
+    const auto scrollbarHeight = crawlerVisitor.mainView()->horizontalScrollBar()->sizeHint().height();
+    REQUIRE( scrollbarHeight > 0 );
+    REQUIRE( crawlerVisitor.mainTextViewportHeight()
+             == crawlerVisitor.mainViewportSize().height() - scrollbarHeight );
+    REQUIRE( crawlerVisitor.filteredTextViewportHeight()
+             == crawlerVisitor.filteredViewportSize().height() - scrollbarHeight );
 }
 
 SCENARIO( "Selection drag performance", "[ui][selection][regression]" )

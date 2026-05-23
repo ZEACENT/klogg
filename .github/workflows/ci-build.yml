@@ -548,12 +548,16 @@ jobs:
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
       - uses: ./.github/actions/agent-package-mac
-        with:
-          p12-file-base64: ${{ secrets.CODESIGN_BASE64 }}
-          p12-password: ${{ secrets.CODESIGN_PASSWORD }}
-          notarization-username: ${{ secrets.NOTARIZATION_USERNAME }}
-          notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
-          notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
+        # macOS signing/notarization is disabled until the CI account has a paid
+        # Apple Developer Program membership and Developer ID certificates.
+        # with:
+        #   p12-file-base64: ${{ secrets.CODESIGN_BASE64 }}
+        #   p12-password: ${{ secrets.CODESIGN_PASSWORD }}
+        #   codesign-identity: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        #   installer-sign-identity: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+        #   notarization-username: ${{ secrets.NOTARIZATION_USERNAME }}
+        #   notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
+        #   notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -845,15 +849,7 @@ jobs:
         id: changelog
         shell: bash
         run: |
-          # Find the last tag
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            echo "No previous tag found. Generating log from start."
-            CHANGELOG=$(git log --pretty=format:"* %s (%h)")
-          else
-            echo "Generating changelog since $LAST_TAG"
-            CHANGELOG=$(git log --pretty=format:"* %s (%h)" ${LAST_TAG}..HEAD)
-          fi
+          CHANGELOG="$(python3 scripts/gen_changelog.py --mode prerelease --to-ref HEAD --print-range)"
           
           # Escape newlines for GITHUB_ENV
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)

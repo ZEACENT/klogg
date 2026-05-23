@@ -99,6 +99,13 @@
               </property>
              </widget>
             </item>
+            <item row="10" column="0" colspan="3">
+             <widget class="QCheckBox" name="showAllFilteredWhenEmptyCheckBox">
+              <property name="text">
+               <string>Show all lines in filtered window when filter is empty</string>
+              </property>
+             </widget>
+            </item>
             <item row="4" column="0">
              <widget class="QLabel" name="label_4">
               <property name="text">

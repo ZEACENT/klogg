@@ -362,6 +362,7 @@ class CrawlerWidget : public QSplitter,
     void updateEncoding();
     void changeTopViewSize( int32_t delta );
     void updatePredefinedFiltersWidget();
+    void applyEmptyFilterBehavior();
 
     // Reload predefined filters after changing settings
     void reloadPredefinedFilters() const;
