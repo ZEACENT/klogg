@@ -917,7 +917,7 @@ class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
 #ifdef Q_OS_WIN
         return { QStringLiteral( "cmd" ),
                  { QStringLiteral( "/c" ),
-                   QStringLiteral( "ping -n 2 127.0.0.1 > nul & exit /b 0" ) } };
+                   QStringLiteral( "ping -n 4 127.0.0.1 > nul & exit /b 0" ) } };
 #else
         return { QStringLiteral( "/bin/sh" ),
                  { QStringLiteral( "-c" ), QStringLiteral( "sleep 0.5; exit 0" ) } };

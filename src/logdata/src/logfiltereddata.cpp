@@ -227,7 +227,7 @@ void LogFilteredData::setAllLinesVisible( bool visible )
 
 LineNumber LogFilteredData::getMatchingLineNumber( LineNumber matchNum ) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return matchNum;
     }
 
@@ -278,7 +278,7 @@ LinesCount LogFilteredData::getNbMarks() const
 
 LogFilteredData::LineType LogFilteredData::lineTypeByIndex( LineNumber index ) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return lineTypeByLine( index );
     }
 
@@ -312,7 +312,7 @@ LogFilteredData::LineType LogFilteredData::lineTypeByLine( LineNumber lineNumber
 
 void LogFilteredData::iterateOverLines( const std::function<void( LineNumber )>& callback ) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         const auto totalLines = sourceLogData_ ? sourceLogData_->getNbLine() : 0_lcount;
         for ( auto line = 0_lnum; line < LineNumber( totalLines.get() ); ++line ) {
             callback( line );
@@ -706,7 +706,7 @@ void LogFilteredData::handleSearchProgressedThrottled()
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return index;
     }
 
@@ -741,7 +741,7 @@ const SearchResultArray& LogFilteredData::currentResultArray() const
 
 LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return lineNum;
     }
 
@@ -777,7 +777,7 @@ QString LogFilteredData::doGetLineString( LineNumber index ) const
         return QString();
     }
 
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_->getLineString( index );
     }
 
@@ -805,7 +805,7 @@ QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
         return QString();
     }
 
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_->getExpandedLineString( index );
     }
 
@@ -831,7 +831,7 @@ klogg::vector<AnsiColorSpan> LogFilteredData::doGetLineAnsiColors( LineNumber in
         return {};
     }
 
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_->getLineAnsiColors( index );
     }
 
@@ -880,7 +880,7 @@ LogFilteredData::doGetLines( LineNumber first_line, LinesCount number,
 
 LineNumber LogFilteredData::doGetLineNumber(LineNumber index) const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return index;
     }
 
@@ -902,7 +902,7 @@ LineNumber LogFilteredData::doGetLineNumber(LineNumber index) const
 // Implementation of the virtual function.
 LinesCount LogFilteredData::doGetNbLine() const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_ ? sourceLogData_->getNbLine() : 0_lcount;
     }
 
@@ -922,7 +922,7 @@ LinesCount LogFilteredData::doGetNbLine() const
 // Implementation of the virtual function.
 LineLength LogFilteredData::doGetMaxLength() const
 {
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_ ? sourceLogData_->getMaxLength() : 0_length;
     }
 
@@ -944,7 +944,7 @@ LineLength LogFilteredData::doGetLineLength( LineNumber lineNum ) const
         return 0_length;
     }
 
-    if ( allLinesVisible_ ) {
+    if ( allLinesVisible_ && visibility_.testFlag( VisibilityFlags::Matches ) ) {
         return sourceLogData_->getLineLength( lineNum );
     }
 

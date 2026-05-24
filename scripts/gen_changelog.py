@@ -44,7 +44,7 @@ def git(args: List[str]) -> str:
 
 
 def version_tags() -> List[str]:
-    output = git(["tag", "--list", "v[0-9]*", "--sort=-v:refname"])
+    output = git(["tag", "--list", "v[0-9]*", "--sort=-v:refname", "--merged", "HEAD"])
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 

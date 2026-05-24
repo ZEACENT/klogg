@@ -10,7 +10,11 @@
 #include "log.h"
 
 namespace {
+#ifdef Q_OS_WIN
+constexpr int StartupFailureGracePeriodMs = 1000;
+#else
 constexpr int StartupFailureGracePeriodMs = 250;
+#endif
 constexpr int StartupFailurePollIntervalMs = 10;
 }
 
