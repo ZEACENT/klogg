@@ -73,10 +73,12 @@ def normalize_group(group: str, message: str) -> str:
         return "docs"
     if group == "test":
         return "tests"
-    if group in {key for key, _ in GROUPS_MAPPING}:
+    if group in {key for key, _ in GROUPS_MAPPING} and group != "other":
         return group
     if "feature" in message.lower():
         return "feature"
+    if group == "other":
+        return group
     return "other"
 
 

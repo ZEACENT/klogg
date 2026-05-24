@@ -92,6 +92,32 @@ class GenChangelogTest(unittest.TestCase):
         self.assertNotIn("stable fix", result.stdout)
         self.assertNotIn("initial", result.stdout)
 
+    def test_non_conventional_feature_message_uses_feature_group(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = init_repo(Path(tmp_dir))
+            commit(repo, "Add search feature polish", "feature-polish.txt")
+
+            result = run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--mode",
+                    "prerelease",
+                    "--to-ref",
+                    "HEAD",
+                ],
+                repo,
+                stdout=subprocess.PIPE,
+            )
+
+        feature_header = "## New features:"
+        bug_fixes_header = "## Bug fixes:"
+        message = "Add search feature polish"
+        self.assertIn(feature_header, result.stdout)
+        self.assertIn(bug_fixes_header, result.stdout)
+        self.assertLess(result.stdout.index(feature_header), result.stdout.index(message))
+        self.assertLess(result.stdout.index(message), result.stdout.index(bug_fixes_header))
+
 
 if __name__ == "__main__":
     unittest.main()

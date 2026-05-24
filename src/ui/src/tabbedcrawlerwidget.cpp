@@ -22,6 +22,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QColorDialog>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QHash>
@@ -84,13 +85,16 @@ QIcon makeGroupColorIcon( const QColor& color )
 
 QString liveStatusSuffix( const QString& title )
 {
-    static const QStringList suffixes{
+    QStringList suffixes{
+        QCoreApplication::translate( "MainWindow", " [disconnected]" ),
+        QCoreApplication::translate( "MainWindow", " [error]" ),
         QStringLiteral( " [disconnected]" ),
         QStringLiteral( " [error]" ),
     };
+    suffixes.removeDuplicates();
 
     for ( const auto& suffix : suffixes ) {
-        if ( title.endsWith( suffix ) ) {
+        if ( !suffix.isEmpty() && title.endsWith( suffix ) ) {
             return suffix;
         }
     }
@@ -98,9 +102,19 @@ QString liveStatusSuffix( const QString& title )
     return {};
 }
 
+QString tabLabelWithoutLiveStatus( QString label )
+{
+    const auto suffix = liveStatusSuffix( label );
+    if ( !suffix.isEmpty() ) {
+        label.chop( suffix.size() );
+    }
+    return label;
+}
+
 QString tabLabelWithLiveStatus( const QString& label, const QString& storedTitle )
 {
-    return label + liveStatusSuffix( storedTitle );
+    const auto suffix = liveStatusSuffix( storedTitle );
+    return suffix.isEmpty() ? label : tabLabelWithoutLiveStatus( label ) + suffix;
 }
 
 bool isGroupChipWidget( const QWidget* widget )
@@ -627,17 +641,18 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
 
     connect( renameTab, &QAction::triggered, this, [ this, tab, tabPath ] {
         const auto currentName = TabNameMapping::getSynced().tabName( tabPath );
+        const auto storedTitle = myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString();
         const auto defaultName
             = currentName.isEmpty()
-                  ? myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString()
-                  : currentName;
+                  ? tabLabelWithoutLiveStatus( storedTitle )
+                  : tabLabelWithoutLiveStatus( currentName );
         bool isNameEntered = false;
         auto newName = QInputDialog::getText( this, "Rename tab", "Tab name", QLineEdit::Normal,
                                               defaultName, &isNameEntered );
         if ( isNameEntered ) {
+            newName = tabLabelWithoutLiveStatus( newName );
             TabNameMapping::getSynced().setTabName( tabPath, newName ).save();
 
-            const auto storedTitle = myTabBar_.tabData( tab ).toMap().value( TitleKey ).toString();
             if ( newName.isEmpty() ) {
                 myTabBar_.setTabText( tab,
                                       storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName()

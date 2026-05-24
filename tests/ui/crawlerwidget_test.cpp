@@ -144,6 +144,23 @@ struct ConfigurationRestoreGuard {
     }
 };
 
+class ScopedShowAllEmptyFilterSetting {
+  public:
+    explicit ScopedShowAllEmptyFilterSetting( bool value )
+        : previousShowAll_( Configuration::get().showAllInFilteredViewWhenSearchEmpty() )
+    {
+        Configuration::get().setShowAllInFilteredViewWhenSearchEmpty( value );
+    }
+
+    ~ScopedShowAllEmptyFilterSetting()
+    {
+        Configuration::get().setShowAllInFilteredViewWhenSearchEmpty( previousShowAll_ );
+    }
+
+  private:
+    bool previousShowAll_;
+};
+
 template <>
 struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static int drawingTopOffset( const AbstractLogView* view )
@@ -363,6 +380,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     int mainHorizontalScrollValue() const
     {
         return crawler->logMainView_->horizontalScrollBar()->value();
+    }
+
+    int mainVerticalScrollMaximum() const
+    {
+        return crawler->logMainView_->verticalScrollBar()->maximum();
+    }
+
+    int filteredVerticalScrollMaximum() const
+    {
+        return crawler->filteredView_->verticalScrollBar()->maximum();
     }
 
     int filteredHorizontalScrollMaximum() const
@@ -664,6 +691,22 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
                                                                                 value );
     }
 
+    void setMainLastLineAligned( bool value )
+    {
+        AbstractLogView::access_by<AbstractLogViewPrivate>::setLastLineAligned( crawler->logMainView_,
+                                                                                value );
+    }
+
+    LineNumber mainTopLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::topLine( crawler->logMainView_ );
+    }
+
+    LineNumber filteredTopLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::topLine( crawler->filteredView_ );
+    }
+
     bool filteredShouldBottomAlign() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::shouldBottomAlignFrame(
@@ -674,6 +717,13 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         crawler->filteredView_->verticalScrollBar()->setValue(
             crawler->filteredView_->verticalScrollBar()->maximum() );
+        QTest::qWait( 50 );
+    }
+
+    void scrollMainVerticallyToBottom()
+    {
+        crawler->logMainView_->verticalScrollBar()->setValue(
+            crawler->logMainView_->verticalScrollBar()->maximum() );
         QTest::qWait( 50 );
     }
 
@@ -722,9 +772,9 @@ SCENARIO( "Crawler widget search", "[ui]" )
 
     GIVEN( "loaded log data" )
     {
-        THEN( "Has no lines in log view" )
+        THEN( "Has all lines in filtered log view while the filter is empty" )
         {
-            REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == 0 );
+            REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES );
         }
 
         WHEN( "search for lines" )
@@ -1292,9 +1342,7 @@ SCENARIO( "Filtered window can mirror the main window while the filter is empty"
     QTemporaryFile file{ "crawler_empty_filter_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
 
-    auto& config = Configuration::get();
-    const auto previousShowAll = config.showAllInFilteredViewWhenSearchEmpty();
-    config.setShowAllInFilteredViewWhenSearchEmpty( true );
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
 
     Session session;
     CrawlerWidgetVisitor crawlerVisitor;
@@ -1308,7 +1356,6 @@ SCENARIO( "Filtered window can mirror the main window while the filter is empty"
     REQUIRE( crawlerVisitor.getLogFilteredNbLines() == crawlerVisitor.getLogNbLines() );
     REQUIRE( counters.operationStarts == 0 );
 
-    config.setShowAllInFilteredViewWhenSearchEmpty( previousShowAll );
 }
 
 SCENARIO( "Filtered window can stay empty while the filter is empty",
@@ -1317,9 +1364,7 @@ SCENARIO( "Filtered window can stay empty while the filter is empty",
     QTemporaryFile file{ "crawler_empty_filter_disabled_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
 
-    auto& config = Configuration::get();
-    const auto previousShowAll = config.showAllInFilteredViewWhenSearchEmpty();
-    config.setShowAllInFilteredViewWhenSearchEmpty( false );
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ false };
 
     Session session;
     CrawlerWidgetVisitor crawlerVisitor;
@@ -1331,7 +1376,6 @@ SCENARIO( "Filtered window can stay empty while the filter is empty",
 
     REQUIRE( crawlerVisitor.getLogFilteredNbLines() == 0_lcount );
 
-    config.setShowAllInFilteredViewWhenSearchEmpty( previousShowAll );
 }
 
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
@@ -1457,7 +1501,7 @@ SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization"
         const auto viewportSize = crawlerVisitor.mainViewportSize();
         return !crawlerVisitor.mainTextAreaCacheInvalid() && !pixmapSize.isEmpty()
             && pixmapSize.width() >= viewportSize.width()
-            && pixmapSize.height() >= viewportSize.height();
+            && pixmapSize.height() >= crawlerVisitor.mainTextViewportHeight();
     } ) );
 
     INFO( "viewport=" << crawlerVisitor.mainViewportSize().width() << "x"
@@ -1475,7 +1519,53 @@ SCENARIO( "Log view repaints after deferred horizontal scrollbar initialization"
     REQUIRE( crawlerVisitor.mainTextAreaCachePixmapSize().width()
              >= crawlerVisitor.mainViewportSize().width() );
     REQUIRE( crawlerVisitor.mainTextAreaCachePixmapSize().height()
-             >= crawlerVisitor.mainViewportSize().height() );
+             >= crawlerVisitor.mainTextViewportHeight() );
+}
+
+SCENARIO( "Log views keep the bottom line anchored when non-wrapped height changes",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    crawlerVisitor.scrollMainVerticallyToBottom();
+    crawlerVisitor.scrollFilteredVerticallyToBottom();
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+    REQUIRE( crawlerVisitor.mainTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.mainVerticalScrollMaximum() ) );
+    REQUIRE( crawlerVisitor.filteredTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.filteredVerticalScrollMaximum() ) );
+
+    crawlerVisitor.setMainLastLineAligned( false );
+    crawlerVisitor.setFilteredLastLineAligned( false );
+
+    crawlerVisitor.resizeViews( 320, 88 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.mainVerticalScrollMaximum() ) );
+    REQUIRE( crawlerVisitor.filteredTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.filteredVerticalScrollMaximum() ) );
 }
 
 SCENARIO( "Log view reserves space for transient horizontal scrollbars",

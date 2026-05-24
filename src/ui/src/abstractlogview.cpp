@@ -1118,7 +1118,7 @@ void AbstractLogView::scrollContentsBy( int dx, int /*dy*/ )
     // Determine if we're at the bottom by checking if scroll value >= maximum.
     // This avoids the expensive getNbBottomWrappedVisibleLines() call on every scroll.
     // The scroll range is already calculated correctly by updateScrollBars().
-    const bool atBottom = ( scrollMax > 0 ) ? ( scrollValue >= scrollMax ) : true;
+    const bool atBottom = scrollMax > 0 && scrollValue >= scrollMax;
 
     if ( atBottom ) {
         // We're at or past the bottom, lock the last line at the bottom
@@ -1281,7 +1281,7 @@ bool AbstractLogView::shouldBottomAlignFrame() const
 
     const auto scrollValue = verticalScrollBar()->value();
     const auto scrollMax = verticalScrollBar()->maximum();
-    return scrollValue >= scrollMax;
+    return scrollMax > 0 && scrollValue >= scrollMax;
 }
 
 int AbstractLogView::alignHiddenHeightToLineGrid( int hiddenHeightPx ) const
@@ -1837,8 +1837,10 @@ void AbstractLogView::updateDisplaySize()
               << " lastLineAligned_=" << lastLineAligned_
               << " followMode_=" << followMode_;
 
-    // Remember if we were bottom-aligned before size change
-    const bool wasBottomAligned = lastLineAligned_;
+    // Remember if the user was looking at EOF before the size change.  The
+    // scrollbar maximum changes with the viewport height, so this must be
+    // captured before updateScrollBars() recalculates the range.
+    const bool wasBottomAligned = shouldBottomAlignFrame();
 
     // Update the scroll bars first - this recalculates range based on new viewport size
     updateScrollBars();
