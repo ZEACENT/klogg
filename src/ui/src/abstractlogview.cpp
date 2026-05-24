@@ -1237,9 +1237,6 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
 
     if ( shouldBottomAlignFrame() ) {
         int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
-        if ( !useTextWrap_ ) {
-            hiddenHeightPx = alignHiddenHeightToLineGrid( hiddenHeightPx );
-        }
         drawingTopOffset_ = -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
 
@@ -1282,15 +1279,6 @@ bool AbstractLogView::shouldBottomAlignFrame() const
     const auto scrollValue = verticalScrollBar()->value();
     const auto scrollMax = verticalScrollBar()->maximum();
     return scrollMax > 0 && scrollValue >= scrollMax;
-}
-
-int AbstractLogView::alignHiddenHeightToLineGrid( int hiddenHeightPx ) const
-{
-    if ( hiddenHeightPx <= 0 || charHeight_ <= 0 ) {
-        return 0;
-    }
-
-    return ( hiddenHeightPx / charHeight_ ) * charHeight_;
 }
 
 // These two functions are virtual and this implementation is clearly

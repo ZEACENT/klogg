@@ -845,7 +845,10 @@ SCENARIO( "Crawler widget search", "[ui]" )
                     const auto viewportHeight = crawlerVisitor.filteredViewportSize().height();
                     REQUIRE( viewportHeight % charH != 0 );
                     REQUIRE( offset >= 0 );
-                    REQUIRE( offset % charH == 0 );
+                    // Bottom-aligned: pixmap is offset upward so the bottom line sits at the
+                    // viewport bottom. The offset is strictly less than one char height for a
+                    // partial-line viewport (no grid snapping).
+                    REQUIRE( offset < charH );
                     // The offset should be at most one viewport's worth of content
                     REQUIRE( offset < charH * 50 );
                 }
@@ -865,6 +868,11 @@ SCENARIO( "Crawler widget search", "[ui]" )
 
                 AND_WHEN( "follow mode is enabled at the filtered bottom" )
                 {
+                    // Force bottom-alignment: scroll to end and explicitly mark the view
+                    // as bottom-aligned so the offset comparison is reliable.
+                    crawlerVisitor.scrollFilteredVerticallyToBottom();
+                    crawlerVisitor.setFilteredLastLineAligned( true );
+                    crawlerVisitor.render();
                     const auto offsetBeforeFollow = crawlerVisitor.filteredDrawingTopOffset();
                     crawlerVisitor.enableFollowMode( true );
                     crawlerVisitor.render();
@@ -872,6 +880,7 @@ SCENARIO( "Crawler widget search", "[ui]" )
                     THEN( "follow mode does not reserve a bottom bar or move the text area" )
                     {
                         REQUIRE( crawlerVisitor.isFollowModeEnabled() );
+                        REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
                         REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == offsetBeforeFollow );
                     }
                 }

@@ -526,7 +526,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     void selectAndDisplayRange( FilePosition pos );
     bool shouldBottomAlignFrame() const;
-    int alignHiddenHeightToLineGrid( int hiddenHeightPx ) const;
 };
 
 #endif
