@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.12)
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR
+          "In-source builds are not supported. Configure with a separate build directory, "
+          "for example: cmake -S . -B build_root"
+  )
+endif()
+
 # Keep old dependency projects compatible with newer CMake policy handling.
 if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "Minimum policy version for dependencies" FORCE)

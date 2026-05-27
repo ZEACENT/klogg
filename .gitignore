@@ -4,6 +4,7 @@
 # exclude patterns (uncomment them if you want to use them):
 *.[oa]
 *~
+.DS_Store
 moc_*.cpp
 ui_*.h
 .*.sw?
@@ -31,13 +32,25 @@ release/
 object_script.glogg.Debug
 object_script.glogg.Release
 
-
-build_root/
-build_root_clang/
-build_root_gcc/
-build_root_qt5/
-build_root_qt6/
-test_data/
+# Local CMake builds and generated files
+/CMakeCache.txt
+/CMakeFiles/
+/CPM_modules/
+/Testing/
+/_deps/
+/build/
+/build-bench-*/
+/build_root/
+/build_root_ci/
+/build_root_clang/
+/build_root_gcc/
+/build_root_qt5/
+/build_root_qt6/
+/cpm-package-lock.cmake
+/cpm_cache/
+/generated/
+/test_tmp/
+/.klogg_sdk_version
 
 compile_commands.json
 

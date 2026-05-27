@@ -254,5 +254,3 @@ Section "Uninstall"
     SetShellVarContext all
     Delete "$SMPROGRAMS\klogg.lnk"
 SectionEnd
-
-;!uninstfinalize 'packaging\windows\codesign_client.exe --debug "%1"'
