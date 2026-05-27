@@ -228,6 +228,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return view->textAreaCache_.pixmap_.size();
     }
 
+    static int textAreaCacheActualHeight( const AbstractLogView* view )
+    {
+        return view->textAreaCache_.actual_height_;
+    }
+
     static qreal textAreaCachePixmapDevicePixelRatio( const AbstractLogView* view )
     {
         return view->textAreaCache_.pixmap_.devicePixelRatioF();
@@ -462,6 +467,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     QSize mainTextAreaCachePixmapSize() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCachePixmapSize(
+            crawler->logMainView_ );
+    }
+
+    int mainTextAreaCacheActualHeight() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCacheActualHeight(
             crawler->logMainView_ );
     }
 
@@ -1777,6 +1788,36 @@ SCENARIO( "Filtered view keeps sparse results top-aligned when follow mode is en
     REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
     REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
     REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+}
+
+SCENARIO( "Wrapped single-line content keeps EOF anchored when scrollbar range is empty",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_wrapped_single_line_XXXXXX" };
+    REQUIRE( file.open() );
+    file.write( QString( 5000, QLatin1Char( 'x' ) ).toUtf8() );
+    file.write( "\n" );
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 1; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( true );
+    crawlerVisitor.resizeViews( 220, 100 );
+    crawlerVisitor.enableFollowMode( true );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() == 0 );
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainTextAreaCacheActualHeight()
+             > crawlerVisitor.mainTextViewportHeight() );
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
 }
 
 SCENARIO( "Log view reserves space for transient horizontal scrollbars",

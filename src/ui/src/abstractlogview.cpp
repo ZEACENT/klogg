@@ -1236,7 +1236,11 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
 
     if ( shouldBottomAlignFrame() ) {
         int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
-        drawingTopOffset_ = verticalScrollBar()->maximum() == 0 ? 0 : -hiddenHeightPx;
+        const bool wrappedContentOverflows
+            = useTextWrap_ && textAreaCache_.actual_height_ > availableTextHeight;
+        const bool contentFitsEmptyScrollRange
+            = verticalScrollBar()->maximum() == 0 && !wrappedContentOverflows;
+        drawingTopOffset_ = contentFitsEmptyScrollRange ? 0 : -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
 
         const int heightForPullToFollow = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 )
