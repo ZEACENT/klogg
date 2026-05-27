@@ -285,6 +285,38 @@ def _check_close_without_loading_wait(text: str, path: Path) -> list[tuple[int, 
     ]
 
 
+def _check_hardcoded_text_viewport_row_assertion(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag text viewport height assertions that assume fixed font metrics.
+
+    PR #26 exposed this in the offscreen UI tests: a resize that produced a
+    text viewport taller than three rows locally produced only 59 pixels on
+    Windows Qt5 and older Linux containers, so
+    ``TextViewportHeight() > CharHeight() * 3`` failed in CI. Size the view
+    from runtime metrics instead of asserting that one fixed pixel resize has
+    a fixed row capacity.
+    """
+    if path.name != "crawlerwidget_test.cpp" or ALLOW_MARKER in text:
+        return []
+
+    row_assertion_re = re.compile(
+        r"TextViewportHeight\s*\(\s*\)\s*>\s*.*CharHeight\s*\(\s*\)\s*\*\s*\d+"
+    )
+
+    findings: list[tuple[int, str]] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        if row_assertion_re.search(line):
+            findings.append(
+                (
+                    i,
+                    "Text viewport row-count assertions based on a fixed resize "
+                    "are platform-fragile because Qt font/style metrics differ "
+                    "across CI runners. Resize until the runtime viewport metrics "
+                    "satisfy the row precondition, then assert the behavior under test.",
+                )
+            )
+    return findings
+
+
 _GUARD_RE = re.compile(r"^\s*#\s*if(?:def|n?def)?\s+(Q_OS_\w+)")
 _ELSE_RE = re.compile(r"^\s*#\s*else")
 _ENDIF_RE = re.compile(r"^\s*#\s*endif")
@@ -337,6 +369,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "close-without-loading-wait",
         "check": _check_close_without_loading_wait,
+    },
+    {
+        "name": "hardcoded-text-viewport-row-assertion",
+        "check": _check_hardcoded_text_viewport_row_assertion,
     },
 ]
 

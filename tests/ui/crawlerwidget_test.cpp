@@ -563,6 +563,23 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         }
     }
 
+    bool resizeViewsToFitFilteredTextRows( int width, int minimumRows )
+    {
+        for ( int height = 120; height <= 720; height += 40 ) {
+            crawler->logMainView_->setFixedSize( width, height );
+            crawler->filteredView_->setFixedSize( width, height );
+            QTest::qWait( 10 );
+            render();
+
+            const auto charHeight = filteredCharHeight();
+            if ( charHeight > 0 && filteredTextViewportHeight() > charHeight * minimumRows ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void enableFollowMode( bool enabled )
     {
         crawler->logMainView_->followSet( enabled );
@@ -1747,10 +1764,10 @@ SCENARIO( "Filtered view keeps sparse results top-aligned when follow mode is en
     crawlerVisitor.runSearch();
 
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+    REQUIRE( crawlerVisitor.resizeViewsToFitFilteredTextRows( 900, 3 ) );
     crawlerVisitor.render();
 
     REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
-    REQUIRE( crawlerVisitor.filteredTextViewportHeight() > crawlerVisitor.filteredCharHeight() * 3 );
     REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
 
     crawlerVisitor.enableFollowMode( true );
