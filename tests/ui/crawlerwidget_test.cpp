@@ -499,6 +499,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             .toImage();
     }
 
+    int mainDrawingTopOffset() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::drawingTopOffset(
+            crawler->logMainView_ );
+    }
+
     QColor mainBaseColor() const
     {
         return crawler->logMainView_->palette().color( QPalette::Base );
@@ -539,6 +545,22 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->logMainView_->resize( width, height );
         crawler->filteredView_->resize( width, height );
         QTest::qWait( 50 );
+    }
+
+    void resizeViewsToPartialTextLineHeight( int width )
+    {
+        for ( int height = 70; height < 140; ++height ) {
+            crawler->logMainView_->setFixedSize( width, height );
+            crawler->filteredView_->setFixedSize( width, height );
+            QTest::qWait( 10 );
+            render();
+
+            if ( mainCharHeight() > 0 && filteredCharHeight() > 0
+                 && mainTextViewportHeight() % mainCharHeight() != 0
+                 && filteredTextViewportHeight() % filteredCharHeight() != 0 ) {
+                return;
+            }
+        }
     }
 
     void enableFollowMode( bool enabled )
@@ -713,6 +735,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             crawler->filteredView_ );
     }
 
+    bool mainShouldBottomAlign() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::shouldBottomAlignFrame(
+            crawler->logMainView_ );
+    }
+
     void scrollFilteredVerticallyToBottom()
     {
         crawler->filteredView_->verticalScrollBar()->setValue(
@@ -845,9 +873,9 @@ SCENARIO( "Crawler widget search", "[ui]" )
                     const auto viewportHeight = crawlerVisitor.filteredViewportSize().height();
                     REQUIRE( viewportHeight % charH != 0 );
                     REQUIRE( offset >= 0 );
-                    // Bottom-aligned: pixmap is offset upward so the bottom line sits at the
-                    // viewport bottom. The offset is strictly less than one char height for a
-                    // partial-line viewport (no grid snapping).
+                    // Bottom-aligned: pixmap is padded from the top so the bottom line sits at
+                    // the viewport bottom. The offset is strictly less than one char height for
+                    // a partial-line viewport (no grid snapping).
                     REQUIRE( offset < charH );
                     // The offset should be at most one viewport's worth of content
                     REQUIRE( offset < charH * 50 );
@@ -1575,6 +1603,163 @@ SCENARIO( "Log views keep the bottom line anchored when non-wrapped height chang
     REQUIRE( crawlerVisitor.filteredTopLine().get()
              == static_cast<LineNumber::UnderlyingType>(
                  crawlerVisitor.filteredVerticalScrollMaximum() ) );
+}
+
+SCENARIO( "Log views remain at bottom when viewport height decreases",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 200 );
+    crawlerVisitor.render();
+
+    crawlerVisitor.scrollMainVerticallyToBottom();
+    crawlerVisitor.scrollFilteredVerticallyToBottom();
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+    REQUIRE( crawlerVisitor.mainTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.mainVerticalScrollMaximum() ) );
+    REQUIRE( crawlerVisitor.filteredTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.filteredVerticalScrollMaximum() ) );
+
+    // Simulate window height change without clearing lastLineAligned_
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    // Should still be at the bottom after resize
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.mainVerticalScrollMaximum() ) );
+    REQUIRE( crawlerVisitor.filteredTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.filteredVerticalScrollMaximum() ) );
+
+    // Resize again to a smaller height
+    crawlerVisitor.resizeViews( 320, 88 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.mainVerticalScrollMaximum() ) );
+    REQUIRE( crawlerVisitor.filteredTopLine().get()
+             == static_cast<LineNumber::UnderlyingType>(
+                 crawlerVisitor.filteredVerticalScrollMaximum() ) );
+}
+
+SCENARIO( "Log views do not clip text rows at top or bottom in bottom alignment",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViewsToPartialTextLineHeight( 320 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainTextViewportHeight() % crawlerVisitor.mainCharHeight() != 0 );
+    REQUIRE( crawlerVisitor.filteredTextViewportHeight() % crawlerVisitor.filteredCharHeight() != 0 );
+
+    crawlerVisitor.scrollMainVerticallyToBottom();
+    crawlerVisitor.scrollFilteredVerticallyToBottom();
+    crawlerVisitor.render();
+
+    const auto mainRowsAtBottom = crawlerVisitor.getLogNbLines() - LinesCount{
+        crawlerVisitor.mainTopLine().get() };
+    const auto filteredRowsAtBottom = crawlerVisitor.getLogFilteredNbLines() - LinesCount{
+        crawlerVisitor.filteredTopLine().get() };
+
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+    // Bottom alignment shifts content upward so the last line sits at the viewport
+    // bottom. The offset is negative (or zero when viewport height is an exact
+    // multiple of char height), matching text-wrap mode behavior.
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset() <= 0 );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset() <= 0 );
+    // The last visible line must end within one char height of the viewport bottom
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset()
+             + static_cast<int>( mainRowsAtBottom.get() ) * crawlerVisitor.mainCharHeight()
+             >= crawlerVisitor.mainTextViewportHeight() - crawlerVisitor.mainCharHeight() );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset()
+             + static_cast<int>( filteredRowsAtBottom.get() ) * crawlerVisitor.filteredCharHeight()
+             >= crawlerVisitor.filteredTextViewportHeight() - crawlerVisitor.filteredCharHeight() );
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset()
+             + static_cast<int>( mainRowsAtBottom.get() ) * crawlerVisitor.mainCharHeight()
+             <= crawlerVisitor.mainTextViewportHeight() );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset()
+             + static_cast<int>( filteredRowsAtBottom.get() ) * crawlerVisitor.filteredCharHeight()
+             <= crawlerVisitor.filteredTextViewportHeight() );
+
+    crawlerVisitor.enableFollowMode( true );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset() <= 0 );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset() <= 0 );
+}
+
+SCENARIO( "Filtered view keeps sparse results top-aligned when follow mode is enabled",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 900, 420 );
+    crawlerVisitor.setSearchPattern( "LOGDATA long line 000042" );
+    crawlerVisitor.runSearch();
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+    REQUIRE( crawlerVisitor.filteredTextViewportHeight() > crawlerVisitor.filteredCharHeight() * 3 );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+
+    crawlerVisitor.enableFollowMode( true );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.isFollowModeEnabled() );
+    REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+    REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
 }
 
 SCENARIO( "Log view reserves space for transient horizontal scrollbars",

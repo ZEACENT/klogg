@@ -1226,8 +1226,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // Calculate effective height for text wrapping and pull-to-follow bar positioning
     const int availableTextHeight = textViewportHeight();
     const int effectiveHeight
-        = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 ) ? textAreaCache_.actual_height_
-                                                                 : wholeHeight;
+        = textAreaCache_.actual_height_ > 0 ? textAreaCache_.actual_height_ : wholeHeight;
 
     drawingTopOffset_ = -pullToFollowHeight;
     int drawingTopPosition = drawingTopOffset_;
@@ -1237,7 +1236,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
 
     if ( shouldBottomAlignFrame() ) {
         int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
-        drawingTopOffset_ = -hiddenHeightPx;
+        drawingTopOffset_ = verticalScrollBar()->maximum() == 0 ? 0 : -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
 
         const int heightForPullToFollow = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 )
