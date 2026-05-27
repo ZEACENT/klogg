@@ -1,6 +1,6 @@
 ---
 title: "Combining search expressions"
-date: 2021-05-26T01:46+03:00
+date: 2021-05-26T01:46:00+03:00
 anchor: "boolean_combination"
 weight: 25
 ---
@@ -91,7 +91,6 @@ I tried [robin_hood unordered map](https://github.com/martinus/robin-hood-hashin
 and was quite impressed by it. That was the final step of performance tuning.
 
 So now _Klogg_ has quite fast boolean expression combination mode!
-
 
 
 

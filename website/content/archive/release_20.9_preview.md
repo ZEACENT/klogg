@@ -1,6 +1,6 @@
 ---
 title: "Version 20.9 preview"
-date: 2020-04-26T01:46+03:00
+date: 2020-04-26T01:46:00+03:00
 anchor: "v20_9_preview"
 weight: 40
 bookhidden: true
@@ -43,4 +43,3 @@ Bugixes and minor improvements
  - Made some shortcut behavior more user-friendly
 
 As usual 3rdparty libraries were updated, some bugs were fixed, and some more were introduced.
-

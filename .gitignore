@@ -72,4 +72,5 @@ cmake-build-relwithdebinfo/
 
 #website
 website/hugo
+website/.hugo_build.lock
 website/resources/

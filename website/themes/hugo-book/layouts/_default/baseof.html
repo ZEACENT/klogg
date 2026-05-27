@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="{{ .Site.Language.Lang }}" dir={{ .Site.Language.LanguageDirection }}>
+<html lang="{{ .Site.Language.Lang }}" dir={{ .Site.Language.Direction }}>
 
 <head>
   {{ partial "docs/html-head" . }}
   {{ partial "docs/inject/head" . }}
 </head>
 
-<body dir={{ .Site.Language.LanguageDirection }}>
+<body dir={{ .Site.Language.Direction }}>
   <input type="checkbox" class="hidden toggle" id="menu-control" />
   <input type="checkbox" class="hidden toggle" id="toc-control" />
   <main class="container flex">

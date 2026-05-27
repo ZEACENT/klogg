@@ -1,9 +1,9 @@
 baseURL = "https://klogg.filimonov.dev/"
-languageCode = "en-us"
+locale = "en-US"
 title = "KLOGG"
 
 theme = 'hugo-book'
-disableKinds = ['taxonomy', 'taxonomyTerm']
+disableKinds = ['taxonomy']
 
 [markup]
   [markup.goldmark]

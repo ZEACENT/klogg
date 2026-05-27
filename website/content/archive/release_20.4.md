@@ -1,6 +1,6 @@
 ---
 title: "Version 20.4 released"
-date: 2020-04-26T01:46+03:00
+date: 2020-04-26T01:46:00+03:00
 anchor: "v20_4"
 weight: 45
 bookhidden: true

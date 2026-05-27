@@ -1,6 +1,6 @@
 ---
 title: "Automatic crash reporting"
-date: 2020-09-30T01:46+03:00
+date: 2020-09-30T01:46:00+03:00
 anchor: "v20_9_crash_reporting"
 weight: 35
 ---
@@ -32,6 +32,5 @@ to Sentry servers. Unsent reports are deleted. Crash reports are anonymous and d
 any information to identify users or their computers (like hardware ids, hostames, usernames etc.). 
 
 Please check new [privacy policy](/docs/privacy_policy) for more details.
-
 
 

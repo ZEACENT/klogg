@@ -1,6 +1,6 @@
 ---
 title: "Allocation matters"
-date: 2021-05-16T01:46+03:00
+date: 2021-05-16T01:46:00+03:00
 anchor: "allocation"
 weight: 27
 ---
@@ -128,7 +128,6 @@ on MacOS the default system memory allocator is used.
 Tweaking encoding conversion algorithm is a big change, so several next CI releases might be less
 stable than usual. Please report any bugs and crashes either on [GitHub](https://github.com/ZEACENT/klogg/issues)
 or in [Discord](https://discord.gg/DruNyQftzB).
-
 
 
 
