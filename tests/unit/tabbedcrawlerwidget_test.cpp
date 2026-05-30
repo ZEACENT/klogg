@@ -21,11 +21,15 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QTabBar>
 #include <QTranslator>
+#include <QTest>
 #include <QWidget>
 
 #include <utility>
 
+#include "configuration.h"
+#include "styles.h"
 #include "tabbedcrawlerwidget.h"
 #include "tabnamemapping.h"
 
@@ -54,6 +58,23 @@ class ScopedTabNameMapping {
 
   private:
     QString path_;
+};
+
+class ScopedStyleSetting {
+  public:
+    explicit ScopedStyleSetting( QString style )
+        : previousStyle_( Configuration::getSynced().style() )
+    {
+        Configuration::getSynced().setStyle( std::move( style ) );
+    }
+
+    ~ScopedStyleSetting()
+    {
+        Configuration::getSynced().setStyle( previousStyle_ );
+    }
+
+  private:
+    QString previousStyle_;
 };
 
 class LiveStatusTranslator : public QTranslator {
@@ -214,6 +235,81 @@ TEST_CASE( "TabbedCrawlerWidget keeps localized live status visible on renamed t
     QCoreApplication::removeTranslator( &translator );
 
     REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone [erreur]" ) );
+}
+
+TEST_CASE( "TabbedCrawlerWidget close button style does not pin buttons during tab scroll" )
+{
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey };
+
+    TabbedCrawlerWidget tabWidget;
+    auto* tabBar = tabWidget.findChild<CrawlerTabBar*>();
+
+    REQUIRE( tabBar != nullptr );
+    REQUIRE( tabBar->styleSheet().contains( QStringLiteral( "QTabBar::close-button" ) ) );
+    REQUIRE_FALSE( tabBar->styleSheet().contains( QStringLiteral( "subcontrol-position" ) ) );
+    REQUIRE_FALSE( tabBar->styleSheet().contains( QStringLiteral( "subcontrol-origin" ) ) );
+}
+
+TEST_CASE( "TabbedCrawlerWidget keeps close buttons inside their tabs after horizontal scroll" )
+{
+    TabbedCrawlerWidget tabWidget;
+    tabWidget.setDocumentMode( true );
+    tabWidget.setMovable( true );
+    tabWidget.setTabsClosable( true );
+    tabWidget.resize( 620, 180 );
+
+    for ( int i = 0; i < 12; ++i ) {
+        auto* crawler = new DummyCrawlerWidget();
+        tabWidget.addCrawler( crawler, QStringLiteral( "file:///tmp/klogg-tab-scroll-%1.log" ).arg( i ),
+                              QStringLiteral( "Very Wide Tab Title %1" ).arg( i ),
+                              QStringLiteral( "/tmp/klogg-tab-scroll-%1.log" ).arg( i ) );
+    }
+
+    tabWidget.show();
+    QCoreApplication::processEvents();
+    QTest::qWait( 50 );
+
+    auto* tabBar = tabWidget.findChild<CrawlerTabBar*>();
+    REQUIRE( tabBar != nullptr );
+
+    tabWidget.setCurrentIndex( tabWidget.count() - 1 );
+    QCoreApplication::processEvents();
+    QTest::qWait( 50 );
+
+    bool forcedStaleCloseButtonGeometry = false;
+    for ( int i = 0; i < tabBar->count(); ++i ) {
+        const auto tabRect = tabBar->tabRect( i );
+        if ( !tabRect.intersects( tabBar->rect() ) ) {
+            continue;
+        }
+
+        auto* closeButton = tabBar->tabButton( i, QTabBar::RightSide );
+        if ( closeButton == nullptr ) {
+            closeButton = tabBar->tabButton( i, QTabBar::LeftSide );
+        }
+        INFO( "Tab " << i << " rect=" << tabRect.x() << "," << tabRect.y() << " "
+                      << tabRect.width() << "x" << tabRect.height() );
+        REQUIRE( closeButton != nullptr );
+
+        if ( !forcedStaleCloseButtonGeometry ) {
+            const auto staleX = tabBar->rect().right() - closeButton->width();
+            closeButton->move( staleX, closeButton->y() );
+            if ( !tabRect.contains( closeButton->geometry().center() ) ) {
+                tabBar->repaint();
+                QCoreApplication::processEvents();
+                forcedStaleCloseButtonGeometry = true;
+            }
+        }
+
+        INFO( "Close button " << i << " geometry=" << closeButton->geometry().x() << ","
+                               << closeButton->geometry().y() << " "
+                               << closeButton->geometry().width() << "x"
+                               << closeButton->geometry().height() );
+        REQUIRE( tabRect.contains( closeButton->geometry().center() ) );
+    }
+    REQUIRE( forcedStaleCloseButtonGeometry );
+    tabWidget.hide();
+    QCoreApplication::processEvents();
 }
 
 #include "tabbedcrawlerwidget_test.moc"

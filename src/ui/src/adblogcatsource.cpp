@@ -34,10 +34,29 @@ std::unique_ptr<LiveSourceTransport> makeTransport( const AdbLogcatSessionData& 
                                                   sessionData.extraArgs,
                                                   sessionData.ansiOutputEnabled );
 }
+
+QString iosDeviceNameOnly( const QString& deviceDescription, const QString& deviceSerial )
+{
+    const auto label = deviceDescription.trimmed();
+    if ( label.isEmpty() ) {
+        return deviceSerial;
+    }
+
+    const auto serialOffset = deviceSerial.isEmpty() ? -1 : label.indexOf( deviceSerial );
+    if ( serialOffset > 0 ) {
+        return label.left( serialOffset ).trimmed();
+    }
+
+    return label;
+}
 } // namespace
 
 QString AdbLogcatSessionData::displayName() const
 {
+    if ( sourceType == LiveLogSourceType::IosLogStream ) {
+        return iosDeviceNameOnly( deviceDescription, deviceSerial );
+    }
+
     return deviceDescription.isEmpty() ? deviceSerial : deviceDescription;
 }
 
@@ -185,14 +204,16 @@ bool AdbLogcatSource::reconnectSource()
 bool AdbLogcatSource::clearAndRestart()
 {
     const auto wasConnected = state_ == State::Connected;
+    const auto isIosLogStream = sessionData_.sourceType == LiveLogSourceType::IosLogStream;
     disconnectSource();
 
-    if ( sessionData_.sourceType != LiveLogSourceType::IosLogStream ) {
+    bool remoteClearFailed = false;
+    if ( !isIosLogStream && wasConnected ) {
         QString error;
         if ( !transport_ || !transport_->clearRemote( &error ) ) {
             lastError_ = error.isEmpty() ? tr( "Failed to clear logcat buffer" ) : error;
             setState( State::Error );
-            return false;
+            remoteClearFailed = true;
         }
     }
 
@@ -200,8 +221,13 @@ bool AdbLogcatSource::clearAndRestart()
         logData_->clearCapture();
     }
 
+    if ( remoteClearFailed ) {
+        return true;
+    }
+
     if ( wasConnected ) {
-        return connectSource();
+        const auto restarted = connectSource();
+        return restarted || isIosLogStream;
     }
     lastError_.clear();
     return true;

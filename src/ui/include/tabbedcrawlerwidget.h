@@ -59,6 +59,8 @@ class CrawlerTabBar : public QTabBar {
     void handleTabMoved( int from, int to );
 
   private:
+    void syncTabButtonGeometry();
+
     bool leftButtonPressed_ = false;
     bool tabMovedWhilePressed_ = false;
 };

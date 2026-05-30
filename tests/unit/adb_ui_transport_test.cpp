@@ -207,6 +207,17 @@ bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData, unsigne
     }
     return logData->getNbLine().get() >= lineCount;
 }
+
+bool waitForSourceState( const AdbLogcatSource& source, AdbLogcatSource::State state )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( source.state() != state && deadline.elapsed() < 5000 ) {
+        QCoreApplication::processEvents();
+        QTest::qWait( 50 );
+    }
+    return source.state() == state;
+}
 } // namespace
 
 TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
@@ -1102,6 +1113,21 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
     REQUIRE( restored.ansiOutputEnabled );
 }
 
+TEST_CASE( "iOS log stream display name defaults to device name only" )
+{
+    const AdbLogcatSessionData iosSessionData{
+        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+        QStringLiteral( "00008150-001431410C78401C" ),
+        QStringLiteral( "ZEACENT's iPhone 00008150-001431410C78401C iPhone18,3 26.5" ),
+        QString{},
+        QStringLiteral( "ios-capture" ),
+        QString{},
+        LiveLogSourceType::IosLogStream,
+    };
+
+    REQUIRE( iosSessionData.displayName() == QStringLiteral( "ZEACENT's iPhone" ) );
+}
+
 TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote clear" )
 {
 #ifdef Q_OS_WIN
@@ -1146,6 +1172,173 @@ TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote c
     REQUIRE( source.state() == AdbLogcatSource::State::Connected );
     REQUIRE( source.lastError().isEmpty() );
     REQUIRE( waitForLineCount( logData, 1 ) );
+
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
+}
+
+TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for remote clear" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based ADB disconnect clear test on Windows." );
+    return;
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\n"
+                  "case \"$*\" in\n"
+                  "  *'logcat -c'*) sleep 10; exit 1 ;;\n"
+                  "esac\n"
+                  "echo adb-live-line-before-unplug\n"
+                  "sleep 0.4\n"
+                  "echo 'device disconnected' >&2\n"
+                  "exit 17\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    const AdbLogcatSessionData sessionData{
+        scriptPath,
+        QStringLiteral( "emulator-5554" ),
+        QStringLiteral( "Pixel Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+
+    AdbLogcatSource source( sessionData, logData );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForLineCount( logData, 1 ) );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
+
+    QElapsedTimer clearTimer;
+    clearTimer.start();
+    REQUIRE( source.clearAndRestart() );
+    REQUIRE( clearTimer.elapsed() < 2000 );
+    REQUIRE( logData->getNbLine().get() == 0 );
+
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
+}
+
+TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear fails" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based ADB remote clear failure test on Windows." );
+    return;
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\n"
+                  "case \"$*\" in\n"
+                  "  *'logcat -c'*) echo 'device disconnected during clear' >&2; exit 17 ;;\n"
+                  "esac\n"
+                  "echo adb-live-line-before-clear\n"
+                  "while :; do sleep 1; done\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    const AdbLogcatSessionData sessionData{
+        scriptPath,
+        QStringLiteral( "emulator-5554" ),
+        QStringLiteral( "Pixel Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+
+    AdbLogcatSource source( sessionData, logData );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForLineCount( logData, 1 ) );
+
+    REQUIRE( source.clearAndRestart() );
+    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( source.state() == AdbLogcatSource::State::Error );
+    REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );
+
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
+}
+
+TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cannot reconnect" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based iOS stream restart failure test on Windows." );
+    return;
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto unavailableMarker = tempDir.filePath( QStringLiteral( "device-unavailable" ) );
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "pymobiledevice3" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( QStringLiteral( "#!/bin/sh\n"
+                                  "MARKER='%1'\n"
+                                  "if [ -f \"$MARKER\" ]; then\n"
+                                  "  echo 'No iOS device connected' >&2\n"
+                                  "  exit 17\n"
+                                  "fi\n"
+                                  "echo ios-live-line-before-unplug\n"
+                                  "while :; do sleep 1; done\n" )
+                      .arg( unavailableMarker )
+                      .toUtf8() );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    const AdbLogcatSessionData sessionData{
+        scriptPath,
+        QStringLiteral( "00008030-001C195E36D8802E" ),
+        QStringLiteral( "iPhone Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::IosLogStream,
+    };
+
+    AdbLogcatSource source( sessionData, logData );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForLineCount( logData, 1 ) );
+
+    QFile marker( unavailableMarker );
+    REQUIRE( marker.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    marker.write( "unavailable\n" );
+    marker.close();
+
+    REQUIRE( source.clearAndRestart() );
+    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( source.state() == AdbLogcatSource::State::Error );
+    REQUIRE_FALSE( source.lastError().isEmpty() );
 
     source.disconnectSource();
     QCoreApplication::processEvents();

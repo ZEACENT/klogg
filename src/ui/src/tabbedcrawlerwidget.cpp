@@ -31,6 +31,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPalette>
+#include <QPointer>
 #include <QSet>
 #include <QSizePolicy>
 #include <QToolButton>
@@ -172,7 +173,12 @@ TabbedCrawlerWidget::TabbedCrawlerWidget()
     connect( &groupManager, &TabGroupManager::groupsChanged, this,
              &TabbedCrawlerWidget::onGroupsChanged );
 
-    dispatchToMainThread( [ this ] { loadIcons(); } );
+    const QPointer<TabbedCrawlerWidget> guard( this );
+    dispatchToMainThread( [ guard ] {
+        if ( guard ) {
+            guard->loadIcons();
+        }
+    } );
 }
 
 void TabbedCrawlerWidget::loadIcons()
@@ -197,8 +203,6 @@ void TabbedCrawlerWidget::updateTabBarStyle()
     QString tabStyle = "QTabBar::tab { height: 24px; }";
     QString tabCloseButtonStyle = " QTabBar::close-button {\
               height: 12px; width: 12px;\
-              subcontrol-origin: padding;\
-              subcontrol-position: right;\
               %1}";
 
     QString backgroundImage;
@@ -247,7 +251,12 @@ void TabbedCrawlerWidget::changeEvent( QEvent* event )
 {
     if ( event->type() == QEvent::StyleChange || event->type() == QEvent::PaletteChange ) {
         updateTabBarStyle();
-        dispatchToMainThread( [ this ] { loadIcons(); } );
+        const QPointer<TabbedCrawlerWidget> guard( this );
+        dispatchToMainThread( [ guard ] {
+            if ( guard ) {
+                guard->loadIcons();
+            }
+        } );
     }
 
     QWidget::changeEvent( event );
@@ -528,6 +537,7 @@ void CrawlerTabBar::handleTabMoved( int from, int to )
 void CrawlerTabBar::paintEvent( QPaintEvent* event )
 {
     QTabBar::paintEvent( event );
+    syncTabButtonGeometry();
 
     QPainter painter( this );
     painter.setRenderHint( QPainter::Antialiasing, true );
@@ -556,6 +566,42 @@ void CrawlerTabBar::paintEvent( QPaintEvent* event )
         painter.setPen( Qt::NoPen );
         painter.setBrush( adjustedGroupFillColor( groupColor, i == currentIndex() ) );
         painter.drawRoundedRect( tabRectValue, 3, 3 );
+    }
+}
+
+void CrawlerTabBar::syncTabButtonGeometry()
+{
+    const auto alignButton = [ this ]( int tab, QTabBar::ButtonPosition position ) {
+        auto* button = tabButton( tab, position );
+        if ( button == nullptr || isGroupChipWidget( button ) ) {
+            return;
+        }
+
+        const auto tabRectValue = tabRect( tab );
+        const bool visible = tabRectValue.intersects( rect() );
+        button->setVisible( visible );
+        if ( !visible ) {
+            return;
+        }
+
+        const auto hint = button->sizeHint();
+        const auto width = qMax( button->width(), hint.width() );
+        const auto height = qMax( button->height(), hint.height() );
+        if ( button->size() != QSize( width, height ) ) {
+            button->resize( width, height );
+        }
+
+        const int margin = 6;
+        const int x = position == QTabBar::LeftSide
+                          ? tabRectValue.left() + margin
+                          : tabRectValue.right() - width - margin + 1;
+        const int y = tabRectValue.top() + ( tabRectValue.height() - height ) / 2;
+        button->move( x, y );
+    };
+
+    for ( int tab = 0; tab < count(); ++tab ) {
+        alignButton( tab, QTabBar::LeftSide );
+        alignButton( tab, QTabBar::RightSide );
     }
 }
 
