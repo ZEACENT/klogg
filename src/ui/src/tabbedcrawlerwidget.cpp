@@ -218,7 +218,16 @@ QIcon TabbedCrawlerWidget::generateColoredDotIcon( LiveTabStatus liveStatus, Dat
 CrawlerTabBar::CrawlerTabBar( QWidget* parent )
     : QTabBar( parent )
 {
+    syncGeometryTimer_.setSingleShot( true );
+    syncGeometryTimer_.setInterval( 0 );
+    connect( &syncGeometryTimer_, &QTimer::timeout, this, &CrawlerTabBar::syncTabButtonGeometry );
+
     connect( this, &QTabBar::tabMoved, this, &CrawlerTabBar::handleTabMoved );
+}
+
+CrawlerTabBar::~CrawlerTabBar()
+{
+    syncGeometryTimer_.stop();
 }
 
 TabbedCrawlerWidget::TabbedCrawlerWidget()
@@ -691,10 +700,16 @@ void CrawlerTabBar::handleTabMoved( int from, int to )
     tabMovedWhilePressed_ = true;
 }
 
+void CrawlerTabBar::resizeEvent( QResizeEvent* event )
+{
+    QTabBar::resizeEvent( event );
+    scheduleTabButtonGeometrySync();
+}
+
 void CrawlerTabBar::paintEvent( QPaintEvent* event )
 {
     QTabBar::paintEvent( event );
-    syncTabButtonGeometry();
+    scheduleTabButtonGeometrySync();
 
     QPainter painter( this );
     painter.setRenderHint( QPainter::Antialiasing, true );
@@ -724,6 +739,15 @@ void CrawlerTabBar::paintEvent( QPaintEvent* event )
         painter.setBrush( adjustedGroupFillColor( groupColor, i == currentIndex() ) );
         painter.drawRoundedRect( tabRectValue, 3, 3 );
     }
+}
+
+void CrawlerTabBar::scheduleTabButtonGeometrySync()
+{
+    // Defer geometry sync to the next event-loop iteration to avoid
+    // modifying child widgets during paintEvent — doing so would
+    // invalidate layout and trigger another paint, creating an
+    // infinite repaint loop.
+    syncGeometryTimer_.start();
 }
 
 void CrawlerTabBar::syncTabButtonGeometry()

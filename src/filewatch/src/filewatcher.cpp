@@ -34,6 +34,7 @@
 #endif
 #include <QDir>
 #include <QFileInfo>
+#include <QThreadPool>
 #include <QTimer>
 
 namespace {
@@ -353,7 +354,14 @@ FileWatcher& FileWatcher::getFileWatcher()
 void FileWatcher::addFile( const QString& fileName )
 {
     updateConfiguration();
-    efswWatcher_->addFile( fileName );
+    // Dispatch the efsw watch setup to a worker thread to keep the main
+    // thread responsive. On macOS, open() on TCC-protected directories
+    // (e.g. ~/Downloads, ~/Desktop, ~/Documents) blocks until the user
+    // responds to the system permission dialog.
+    auto* watcher = efswWatcher_.get();
+    QThreadPool::globalInstance()->start( [ watcher, fileName ]() {
+        watcher->addFile( fileName );
+    } );
 }
 
 void FileWatcher::removeFile( const QString& fileName )

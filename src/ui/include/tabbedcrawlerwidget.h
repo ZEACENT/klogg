@@ -52,6 +52,7 @@ class CrawlerTabBar : public QTabBar {
 
   public:
     explicit CrawlerTabBar( QWidget* parent = nullptr );
+    ~CrawlerTabBar() override;
 
   Q_SIGNALS:
     void showTabContextMenu( int tab, QPoint point );
@@ -62,15 +63,18 @@ class CrawlerTabBar : public QTabBar {
     void mousePressEvent( QMouseEvent* ) override;
     void mouseReleaseEvent( QMouseEvent* ) override;
     void paintEvent( QPaintEvent* event ) override;
+    void resizeEvent( QResizeEvent* event ) override;
 
   private Q_SLOTS:
     void handleTabMoved( int from, int to );
 
   private:
     void syncTabButtonGeometry();
+    void scheduleTabButtonGeometrySync();
 
     bool leftButtonPressed_ = false;
     bool tabMovedWhilePressed_ = false;
+    QTimer syncGeometryTimer_;
 };
 
 class TabbedCrawlerWidget : public QTabWidget {
