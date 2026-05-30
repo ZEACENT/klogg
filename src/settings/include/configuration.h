@@ -641,7 +641,7 @@ class Configuration final : public Persistable<Configuration> {
 
   private:
     // Configuration settings
-    mutable QFont mainFont_ = { "DejaVu Sans Mono", 10 };
+    mutable QFont mainFont_ = { "DejaVu Sans Mono", 12 };
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
     SearchRegexpType quickfindRegexpType_ = SearchRegexpType::ExtendedRegexp;
     bool quickfindIncremental_ = true;
