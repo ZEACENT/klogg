@@ -782,7 +782,7 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
 
     runInUiThread( [&mainWindow] { mainWindow->reloadSession(); } );
     REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
-    REQUIRE( tabArea->tabText( 0 ) == QStringLiteral( "iPhone Test [disconnected]" ) );
+    REQUIRE( tabArea->tabText( 0 ) == QStringLiteral( "iPhone Test" ) );
 
     mainWindow->close();
     sessionInfo.remove( windowId );

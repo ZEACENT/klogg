@@ -34,6 +34,14 @@
 class QMenu;
 class QPaintEvent;
 
+// Connection status of a live log stream tab, used to color the dot indicator.
+enum class LiveTabStatus {
+    None, // Normal file tab (no live source)
+    Connected, // Live stream connected
+    Disconnected, // Live stream disconnected
+    Error // Live stream error
+};
+
 // This class represents glogg's main widget, a tabbed
 // group of CrawlerWidgets.
 // This is a very slightly customised QTabWidget, with
@@ -97,6 +105,9 @@ class TabbedCrawlerWidget : public QTabWidget {
     void selectNextTab();
     void selectPreviousTab();
 
+    // Set the live connection status (icon color) for the tab number 'index'
+    void setLiveTabStatus( int index, LiveTabStatus status );
+
   Q_SIGNALS:
     void tabsReordered();
 
@@ -128,6 +139,7 @@ class TabbedCrawlerWidget : public QTabWidget {
     void updateTabBarStyle();
     void loadIcons();
     void updateIcon( int index );
+    static QIcon generateColoredDotIcon( LiveTabStatus liveStatus, DataStatus dataStatus );
 
   public Q_SLOTS:
     void onGroupsChanged();
@@ -143,6 +155,9 @@ class TabbedCrawlerWidget : public QTabWidget {
     QIcon olddata_icon_;
     QIcon newdata_icon_;
     QIcon newfiltered_icon_;
+
+    // Colored icons for live stream tabs: [liveStatus][dataStatus]
+    QIcon live_icons_[ 4 ][ 3 ];
 
     QString draggedTabPath_;
     bool tabDragInProgress_ = false;

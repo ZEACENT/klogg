@@ -2395,22 +2395,23 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
                              ? displayName
                              : session_.getAssociatedPath( crawler );
 
-    QString title = displayName;
     QString toolTip = baseTip;
     if ( source ) {
         const auto state = source->state();
+        LiveTabStatus liveStatus = LiveTabStatus::Connected;
         if ( state == AdbLogcatSource::State::Error ) {
-            title += tr( " [error]" );
+            liveStatus = LiveTabStatus::Error;
             if ( !source->lastError().isEmpty() ) {
                 toolTip = tr( "%1\nError: %2" ).arg( baseTip, source->lastError() );
             }
         }
         else if ( state == AdbLogcatSource::State::Disconnected ) {
-            title += tr( " [disconnected]" );
+            liveStatus = LiveTabStatus::Disconnected;
         }
+        mainTabWidget_.setLiveTabStatus( tabIndex, liveStatus );
     }
 
-    mainTabWidget_.updateCrawler( tabIndex, title, toolTip );
+    mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip );
 }
 
 void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )

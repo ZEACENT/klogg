@@ -125,7 +125,7 @@ TEST_CASE( "TabbedCrawlerWidget keeps live tab title and tooltip across group re
              == QDir::toNativeSeparators( QStringLiteral( "/tmp/pixel-saved.log" ) ) );
 }
 
-TEST_CASE( "TabbedCrawlerWidget updateCrawler reflects disconnect and error state in tab text" )
+TEST_CASE( "TabbedCrawlerWidget updateCrawler strips old-format live status suffixes from tab text" )
 {
     TabbedCrawlerWidget tabWidget;
     auto* crawler = new DummyCrawlerWidget();
@@ -134,41 +134,41 @@ TEST_CASE( "TabbedCrawlerWidget updateCrawler reflects disconnect and error stat
                                              QStringLiteral( "Galaxy S24" ),
                                              QStringLiteral( "/tmp/galaxy.log" ) );
 
-    SECTION( "tab text shows [disconnected] suffix" )
+    SECTION( "tab text strips [disconnected] suffix" )
     {
         tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [disconnected]" ),
                                  QStringLiteral( "/tmp/galaxy.log" ) );
-        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [disconnected]" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
     }
 
-    SECTION( "tab text shows [error] suffix" )
+    SECTION( "tab text strips [error] suffix" )
     {
         tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
                                  QStringLiteral( "/tmp/galaxy.log" ) );
-        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [error]" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
     }
 
-    SECTION( "tab text restores to normal on reconnect" )
+    SECTION( "clean tab text passes through unchanged" )
     {
         tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [disconnected]" ),
                                  QStringLiteral( "/tmp/galaxy.log" ) );
-        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [disconnected]" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
 
         tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24" ),
                                  QStringLiteral( "/tmp/galaxy.log" ) );
         REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
     }
 
-    SECTION( "tab text persists across group refreshes" )
+    SECTION( "stripped tab text persists across group refreshes" )
     {
         tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
                                  QStringLiteral( "/tmp/galaxy.log" ) );
         tabWidget.onGroupsChanged();
-        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24 [error]" ) );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Galaxy S24" ) );
     }
 }
 
-TEST_CASE( "TabbedCrawlerWidget keeps live status visible on renamed tabs" )
+TEST_CASE( "TabbedCrawlerWidget strips old live status from renamed tabs" )
 {
     const auto documentId = QStringLiteral( "adb://capture-renamed-status" );
     const ScopedTabNameMapping tabNameMapping{ documentId, QStringLiteral( "Lab Phone" ) };
@@ -185,12 +185,12 @@ TEST_CASE( "TabbedCrawlerWidget keeps live status visible on renamed tabs" )
                              QStringLiteral( "/tmp/galaxy.log" ) );
 
     REQUIRE( tabWidget.tabText( index ).toStdString()
-             == std::string( "Lab Phone [disconnected]" ) );
+             == std::string( "Lab Phone" ) );
 
     tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
                              QStringLiteral( "/tmp/galaxy.log" ) );
 
-    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone [error]" ) );
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
 
     tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24" ),
                              QStringLiteral( "/tmp/galaxy.log" ) );
@@ -198,7 +198,7 @@ TEST_CASE( "TabbedCrawlerWidget keeps live status visible on renamed tabs" )
     REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
 }
 
-TEST_CASE( "TabbedCrawlerWidget does not duplicate live status from renamed tabs" )
+TEST_CASE( "TabbedCrawlerWidget strips old status suffix from renamed tabs with legacy names" )
 {
     const auto documentId = QStringLiteral( "adb://capture-renamed-status-duplicate" );
     const ScopedTabNameMapping tabNameMapping{ documentId, QStringLiteral( "Lab Phone [error]" ) };
@@ -212,10 +212,12 @@ TEST_CASE( "TabbedCrawlerWidget does not duplicate live status from renamed tabs
     tabWidget.updateCrawler( index, QStringLiteral( "Galaxy S24 [error]" ),
                              QStringLiteral( "/tmp/galaxy.log" ) );
 
-    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone [error]" ) );
+    // Old-format "[error]" suffix is stripped from both the stored title and custom name
+    // on display. Live status is now conveyed via colored dot, not text.
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
 }
 
-TEST_CASE( "TabbedCrawlerWidget keeps localized live status visible on renamed tabs" )
+TEST_CASE( "TabbedCrawlerWidget strips localized live status suffix from renamed tabs" )
 {
     LiveStatusTranslator translator;
     QCoreApplication::installTranslator( &translator );
@@ -234,7 +236,8 @@ TEST_CASE( "TabbedCrawlerWidget keeps localized live status visible on renamed t
 
     QCoreApplication::removeTranslator( &translator );
 
-    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone [erreur]" ) );
+    // Localized "[erreur]" suffix is stripped; live status is now via colored dot.
+    REQUIRE( tabWidget.tabText( index ).toStdString() == std::string( "Lab Phone" ) );
 }
 
 TEST_CASE( "TabbedCrawlerWidget close button style does not pin buttons during tab scroll" )
