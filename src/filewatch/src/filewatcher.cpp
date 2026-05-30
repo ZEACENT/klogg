@@ -334,6 +334,8 @@ FileWatcher::FileWatcher()
     , throttler_{ new KDToolBox::KDSignalThrottler( this ) }
     , efswWatcher_{ new EfswFileWatcher( this ) }
 {
+    workerPool_.setMaxThreadCount( 1 );
+
     connect( checkTimer_, &QTimer::timeout, this, &FileWatcher::checkWatches );
 
     throttler_->setTimeout( 250 );
@@ -343,7 +345,10 @@ FileWatcher::FileWatcher()
              &FileWatcher::sendChangesNotifications );
 }
 
-FileWatcher::~FileWatcher() = default;
+FileWatcher::~FileWatcher()
+{
+    workerPool_.waitForDone( 5000 );
+}
 
 FileWatcher& FileWatcher::getFileWatcher()
 {
@@ -358,16 +363,23 @@ void FileWatcher::addFile( const QString& fileName )
     // thread responsive. On macOS, open() on TCC-protected directories
     // (e.g. ~/Downloads, ~/Desktop, ~/Documents) blocks until the user
     // responds to the system permission dialog.
+    // Uses a dedicated single-worker thread pool to avoid contention
+    // on the global QThreadPool.
     auto* watcher = efswWatcher_.get();
-    QThreadPool::globalInstance()->start( [ watcher, fileName ]() {
+    workerPool_.start( [ watcher, fileName ]() {
         watcher->addFile( fileName );
     } );
 }
 
 void FileWatcher::removeFile( const QString& fileName )
 {
-    efswWatcher_->removeFile( fileName );
     updateConfiguration();
+    // Dispatch to the same dedicated worker pool so that removeFile is
+    // serialized with any in-progress addFile on the same worker thread.
+    auto* watcher = efswWatcher_.get();
+    workerPool_.start( [ watcher, fileName ]() {
+        watcher->removeFile( fileName );
+    } );
 }
 
 void FileWatcher::fileChangedOnDisk( const QString& fileName )

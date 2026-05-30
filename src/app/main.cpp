@@ -113,6 +113,10 @@ void setApplicationAttributes( bool enableQtHdpi, int scaleFactorRounding )
     Q_UNUSED( scaleFactorRounding );
 #endif
 
+#ifdef Q_OS_MAC
+    QCoreApplication::setAttribute( Qt::AA_MacDontSwapCtrlAndMeta );
+#endif
+
     QCoreApplication::setAttribute( Qt::AA_DontShowIconsInMenus );
 }
 

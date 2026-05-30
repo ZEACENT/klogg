@@ -1274,7 +1274,7 @@ TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear 
     REQUIRE( source.state() == AdbLogcatSource::State::Connected );
     REQUIRE( waitForLineCount( logData, 1 ) );
 
-    REQUIRE( source.clearAndRestart() );
+    REQUIRE_FALSE( source.clearAndRestart() );
     REQUIRE( logData->getNbLine().get() == 0 );
     REQUIRE( source.state() == AdbLogcatSource::State::Error );
     REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );

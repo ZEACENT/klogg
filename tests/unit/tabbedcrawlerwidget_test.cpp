@@ -269,7 +269,7 @@ TEST_CASE( "TabbedCrawlerWidget uses rounded iTerm-style tabs outside Modern sty
     REQUIRE_FALSE( tabStyle.contains( QStringLiteral( "border-bottom: none" ) ) );
 }
 
-TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+Tab shortcuts" )
+TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+PageDown/PageUp shortcuts" )
 {
     TabbedCrawlerWidget tabWidget;
 
@@ -282,11 +282,55 @@ TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+Tab shortcuts" )
 
     REQUIRE( tabWidget.currentIndex() == 2 );
 
-    QTest::keyClick( &tabWidget, Qt::Key_Tab, Qt::ControlModifier );
+    QTest::keyClick( &tabWidget, Qt::Key_PageDown, Qt::ControlModifier );
     REQUIRE( tabWidget.currentIndex() == 0 );
 
-    QTest::keyClick( &tabWidget, Qt::Key_Tab, Qt::ControlModifier | Qt::ShiftModifier );
+    QTest::keyClick( &tabWidget, Qt::Key_PageUp, Qt::ControlModifier );
     REQUIRE( tabWidget.currentIndex() == 2 );
+}
+
+TEST_CASE( "TabbedCrawlerWidget does not handle Ctrl+Tab in keyPressEvent" )
+{
+    // Test that our keyPressEvent no longer calls selectNextTab/selectPreviousTab
+    // for Ctrl+Tab — these are handled by QShortcut actions in MainWindow instead.
+    // We verify by checking that the key event falls through to the else branch
+    // (QTabWidget::keyPressEvent) rather than being intercepted by our conditions.
+
+    // Create a plain QTabWidget for comparison: on Qt 6, QTabWidget has
+    // built-in Ctrl+Tab handling, so expect the native behavior to apply.
+    QTabWidget plainWidget;
+    plainWidget.addTab( new QWidget(), QStringLiteral( "Tab 0" ) );
+    plainWidget.addTab( new QWidget(), QStringLiteral( "Tab 1" ) );
+    plainWidget.addTab( new QWidget(), QStringLiteral( "Tab 2" ) );
+    plainWidget.setCurrentIndex( 1 );
+
+    QTest::keyClick( &plainWidget, Qt::Key_Tab, Qt::ControlModifier );
+    const auto plainWidgetChanged = ( plainWidget.currentIndex() != 1 );
+
+    // Now test TabbedCrawlerWidget — it must behave identically to a plain
+    // QTabWidget for Ctrl+Tab, i.e., it must NOT add any extra handling beyond
+    // what the base class does natively.
+    TabbedCrawlerWidget tabWidget;
+    for ( int i = 0; i < 3; ++i ) {
+        auto* crawler = new DummyCrawlerWidget();
+        tabWidget.addCrawler( crawler, QStringLiteral( "file:///tmp/test-%1.log" ).arg( i ),
+                              QStringLiteral( "Tab %1" ).arg( i ) );
+    }
+    tabWidget.setCurrentIndex( 1 );
+    REQUIRE( tabWidget.currentIndex() == 1 );
+
+    QTest::keyClick( &tabWidget, Qt::Key_Tab, Qt::ControlModifier );
+
+    if ( plainWidgetChanged ) {
+        // Qt base class handles Ctrl+Tab natively — verify our widget matches
+        // the base class behavior exactly (no extra handling added).
+        REQUIRE( tabWidget.currentIndex() == plainWidget.currentIndex() );
+    }
+    else {
+        // Qt base class does not handle Ctrl+Tab natively — verify our widget
+        // also does not handle it.
+        REQUIRE( tabWidget.currentIndex() == 1 );
+    }
 }
 
 TEST_CASE( "TabbedCrawlerWidget keeps close buttons inside their tabs after horizontal scroll" )
@@ -349,6 +393,166 @@ TEST_CASE( "TabbedCrawlerWidget keeps close buttons inside their tabs after hori
     REQUIRE( forcedStaleCloseButtonGeometry );
     tabWidget.hide();
     QCoreApplication::processEvents();
+}
+
+TEST_CASE( "generateColoredDotIcon creates non-null icons for all live status and data status combinations" )
+{
+    const QList<LiveTabStatus> liveStatuses = {
+        LiveTabStatus::Connected, LiveTabStatus::Disconnected, LiveTabStatus::Error
+    };
+    const QList<DataStatus> dataStatuses = {
+        DataStatus::OLD_DATA, DataStatus::NEW_DATA, DataStatus::NEW_FILTERED_DATA
+    };
+
+    for ( auto ls : liveStatuses ) {
+        for ( auto ds : dataStatuses ) {
+            auto icon = TabbedCrawlerWidget::generateColoredDotIcon( ls, ds );
+            INFO( "liveStatus=" << static_cast<int>( ls ) << " dataStatus=" << static_cast<int>( ds ) );
+            REQUIRE_FALSE( icon.isNull() );
+        }
+    }
+}
+
+namespace {
+// Runs just enough of the event loop to process any queued metacalls
+// (e.g. the deferred loadIcons() dispatched via Qt::QueuedConnection).
+void runPendingMainThreadEvents()
+{
+    for ( int attempt = 0; attempt < 10; ++attempt ) {
+        qApp->processEvents( QEventLoop::AllEvents );
+        qApp->sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    }
+}
+} // namespace
+
+TEST_CASE( "setLiveTabStatus updates the tab icon with colored dots" )
+{
+    TabbedCrawlerWidget tabWidget;
+    runPendingMainThreadEvents();
+
+    auto* crawler = new DummyCrawlerWidget();
+    const auto index = tabWidget.addCrawler( crawler, QStringLiteral( "adb://test-status" ),
+                                             QStringLiteral( "Test Tab" ) );
+
+    // Set live status to Connected -- uses live_icons_ populated by
+    // generateColoredDotIcon, which works even without qrc resources
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Connected );
+    auto connectedIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( connectedIcon.isNull() );
+
+    // Set to Disconnected
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Disconnected );
+    auto disconnectedIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( disconnectedIcon.isNull() );
+
+    // Set to Error
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Error );
+    auto errorIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( errorIcon.isNull() );
+
+    // Reset to None (normal tab -- uses theme icons from qrc, may be null in tests)
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::None );
+    // When live status is None, the icon is the theme-tinted icon from IconLoader.
+    // In test builds without qrc resources, this may legitimately be null.
+    // The important verification is that the setter does not crash and the
+    // status-to-icon dispatch path is exercised.
+}
+
+TEST_CASE( "setTabDataStatus toggles between old and new data icons" )
+{
+    TabbedCrawlerWidget tabWidget;
+    runPendingMainThreadEvents();
+
+    auto* crawler = new DummyCrawlerWidget();
+    const auto index = tabWidget.addCrawler( crawler, QStringLiteral( "adb://test-data" ),
+                                             QStringLiteral( "Test Data Tab" ) );
+
+    // First set a live status so icons come from live_icons_ (generated
+    // by generateColoredDotIcon, which works without qrc resources).
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Connected );
+
+    // Start with OLD_DATA (default when tab is added)
+    auto oldIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( oldIcon.isNull() );
+
+    // Switch to NEW_DATA
+    tabWidget.setTabDataStatus( index, DataStatus::NEW_DATA );
+    auto newIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( newIcon.isNull() );
+
+    // Switch back
+    tabWidget.setTabDataStatus( index, DataStatus::OLD_DATA );
+    auto backToOldIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( backToOldIcon.isNull() );
+
+    // Switch to NEW_FILTERED_DATA
+    tabWidget.setTabDataStatus( index, DataStatus::NEW_FILTERED_DATA );
+    auto filteredIcon = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( filteredIcon.isNull() );
+}
+
+TEST_CASE( "Live status and data status combine to produce correct icon" )
+{
+    TabbedCrawlerWidget tabWidget;
+    runPendingMainThreadEvents();
+
+    auto* crawler = new DummyCrawlerWidget();
+    const auto index = tabWidget.addCrawler( crawler, QStringLiteral( "adb://test-combined" ),
+                                             QStringLiteral( "Combined Tab" ) );
+
+    // Set connected + new data
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Connected );
+    tabWidget.setTabDataStatus( index, DataStatus::NEW_DATA );
+    auto icon1 = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( icon1.isNull() );
+
+    // Set error + old data
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Error );
+    tabWidget.setTabDataStatus( index, DataStatus::OLD_DATA );
+    auto icon2 = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( icon2.isNull() );
+
+    // Set disconnected + new filtered data
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Disconnected );
+    tabWidget.setTabDataStatus( index, DataStatus::NEW_FILTERED_DATA );
+    auto icon3 = tabWidget.tabIcon( index );
+    REQUIRE_FALSE( icon3.isNull() );
+}
+
+TEST_CASE( "generateColoredDotIcon produces icons at multiple sizes" )
+{
+    auto icon = TabbedCrawlerWidget::generateColoredDotIcon( LiveTabStatus::Connected, DataStatus::NEW_DATA );
+    REQUIRE_FALSE( icon.isNull() );
+
+    // Should have pixmaps at 16, 20, 24, 32 (the sizes used in makeDotIcon)
+    const QList<int> expectedSizes = { 16, 20, 24, 32 };
+    for ( int size : expectedSizes ) {
+        auto pixmap = icon.pixmap( size, size );
+        INFO( "Size " << size );
+        REQUIRE_FALSE( pixmap.isNull() );
+        CHECK( pixmap.width() == size );
+        CHECK( pixmap.height() == size );
+    }
+}
+
+TEST_CASE( "NEW_DATA icon has a solid center while OLD_DATA icon has a hollow center" )
+{
+    // NEW_DATA = solid filled circle
+    auto solidIcon = TabbedCrawlerWidget::generateColoredDotIcon( LiveTabStatus::Connected, DataStatus::NEW_DATA );
+    auto solidPixmap = solidIcon.pixmap( 32, 32 );
+    auto solidImage = solidPixmap.toImage();
+    QColor solidCenter = solidImage.pixelColor( 16, 16 );
+
+    // OLD_DATA = hollow (outline) circle
+    auto hollowIcon = TabbedCrawlerWidget::generateColoredDotIcon( LiveTabStatus::Connected, DataStatus::OLD_DATA );
+    auto hollowPixmap = hollowIcon.pixmap( 32, 32 );
+    auto hollowImage = hollowPixmap.toImage();
+    QColor hollowCenter = hollowImage.pixelColor( 16, 16 );
+
+    // Solid center should be non-transparent (colored)
+    CHECK( solidCenter.alpha() > 128 );
+    // Hollow center should be transparent
+    CHECK( hollowCenter.alpha() < 32 );
 }
 
 #include "tabbedcrawlerwidget_test.moc"

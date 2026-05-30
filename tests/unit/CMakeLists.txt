@@ -21,6 +21,7 @@ add_executable(klogg_tests
     tabgroupdropresolver_test.cpp
     tabgroupmanager_test.cpp
     tabbedcrawlerwidget_test.cpp
+    filewatcher_test.cpp
     tests_main.cpp
 )
 

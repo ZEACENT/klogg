@@ -40,6 +40,7 @@
 #define FILEWATCHER_H
 
 #include <QObject>
+#include <QThreadPool>
 
 #include <memory>
 
@@ -98,6 +99,12 @@ class FileWatcher : public QObject {
     std::vector<QString> changes_;
 
     std::unique_ptr<EfswFileWatcher, EfswFileWatcherDeleter> efswWatcher_;
+
+    // Dedicated single-worker thread pool for efsw operations.
+    // Using a dedicated pool with maxThreadCount(1) ensures efsw
+    // operations are naturally serialized on one worker thread,
+    // avoiding contention on the global QThreadPool.
+    QThreadPool workerPool_;
 };
 
 #endif

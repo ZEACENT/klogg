@@ -222,7 +222,7 @@ bool AdbLogcatSource::clearAndRestart()
     }
 
     if ( remoteClearFailed ) {
-        return true;
+        return false;
     }
 
     if ( wasConnected ) {

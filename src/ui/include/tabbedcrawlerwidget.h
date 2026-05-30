@@ -112,6 +112,11 @@ class TabbedCrawlerWidget : public QTabWidget {
     // Set the live connection status (icon color) for the tab number 'index'
     void setLiveTabStatus( int index, LiveTabStatus status );
 
+    // Set the data status (icon) for the tab number 'index'
+    void setTabDataStatus( int index, DataStatus status );
+
+    static QIcon generateColoredDotIcon( LiveTabStatus liveStatus, DataStatus dataStatus );
+
   Q_SIGNALS:
     void tabsReordered();
 
@@ -137,13 +142,9 @@ class TabbedCrawlerWidget : public QTabWidget {
     void clearGroupChip( int tabIndex );
     void populateGroupActions( QMenu* menu, const QString& groupId );
 
-    // Set the data status (icon) for the tab number 'index'
-    void setTabDataStatus( int index, DataStatus status );
-
     void updateTabBarStyle();
     void loadIcons();
     void updateIcon( int index );
-    static QIcon generateColoredDotIcon( LiveTabStatus liveStatus, DataStatus dataStatus );
 
   public Q_SLOTS:
     void onGroupsChanged();

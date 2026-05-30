@@ -907,16 +907,14 @@ void TabbedCrawlerWidget::keyPressEvent( QKeyEvent* event )
 
     LOG_DEBUG << "TabbedCrawlerWidget::keyPressEvent";
 
-    // Ctrl + tab
-    if ( ( mod == Qt::ControlModifier && key == Qt::Key_Tab )
-         || ( mod == Qt::ControlModifier && key == Qt::Key_PageDown )
+    // Ctrl + page down
+    if ( ( mod == Qt::ControlModifier && key == Qt::Key_PageDown )
          || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
               && key == Qt::Key_Right ) ) {
         selectNextTab();
     }
-    // Ctrl + shift + tab
-    else if ( ( mod == ( Qt::ControlModifier | Qt::ShiftModifier ) && key == Qt::Key_Tab )
-              || ( mod == Qt::ControlModifier && key == Qt::Key_PageUp )
+    // Ctrl + page up
+    else if ( ( mod == Qt::ControlModifier && key == Qt::Key_PageUp )
               || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
                    && key == Qt::Key_Left ) ) {
         selectPreviousTab();
