@@ -70,3 +70,35 @@ TEST_CASE( "FileWatcher removeFile works after addFile" )
 
     SUCCEED( "removeFile after addFile works" );
 }
+
+TEST_CASE( "FileWatcher::updateConfiguration returns immediately" )
+{
+    auto& watcher = FileWatcher::getFileWatcher();
+
+    QElapsedTimer timer;
+    timer.start();
+    watcher.updateConfiguration();
+    const auto elapsed = timer.elapsed();
+
+    // updateConfiguration should return in well under 100ms —
+    // it dispatches enableWatch to the worker thread asynchronously
+    // rather than calling into efsw synchronously on the calling thread.
+    CHECK( elapsed < 100 );
+}
+
+TEST_CASE( "FileWatcher::checkWatches returns immediately" )
+{
+    auto& watcher = FileWatcher::getFileWatcher();
+
+    QElapsedTimer timer;
+    timer.start();
+    // checkWatches is a private slot; invoke it via the meta-object
+    QMetaObject::invokeMethod( &watcher, "checkWatches", Qt::DirectConnection );
+    const auto elapsed = timer.elapsed();
+
+    // checkWatches should return in well under 100ms —
+    // it dispatches the efsw check to the worker thread asynchronously
+    // rather than calling efswWatcher_->checkWatches() synchronously
+    // on the calling thread.
+    CHECK( elapsed < 100 );
+}

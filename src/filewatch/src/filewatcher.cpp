@@ -93,8 +93,9 @@ class FunctionRunnable : public QRunnable {
 
 class EfswFileWatcher final : public efsw::FileWatchListener {
   public:
-    explicit EfswFileWatcher( FileWatcher* parent )
+    explicit EfswFileWatcher( FileWatcher* parent, QThreadPool* workerPool )
         : parent_{ parent }
+        , workerPool_{ workerPool }
     {
     }
 
@@ -267,9 +268,14 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
         LOG_DEBUG << "Notification from esfw for " << dir;
 
-        // post to other thread to avoid deadlock between internal esfw lock and our mutex_
-        dispatchToThread( [ = ]() { notifyOnFileAction( dir, filename, oldFilename ); },
-                          parent_->thread() );
+        // Dispatch to the dedicated worker thread instead of parent_->thread()
+        // to keep all efsw operations serialized on a single thread.
+        // This avoids deadlock between the internal efsw lock and our mutex_,
+        // and prevents the main thread from blocking on mutex_ when the
+        // worker holds it during a blocking addWatch() call (e.g. macOS TCC).
+        workerPool_->start( new FunctionRunnable( [ = ]() {
+            notifyOnFileAction( dir, filename, oldFilename );
+        } ) );
     }
 
     void notifyOnFileAction( const std::string& dir, const std::string& filename,
@@ -339,6 +345,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     efsw::FileWatcher watcher_;
     std::vector<WatchedDirecotry> watchedPaths_;
     FileWatcher* parent_;
+    QThreadPool* workerPool_;
 
     bool nativeWatchEnabled_ = true;
 
@@ -353,7 +360,7 @@ void EfswFileWatcherDeleter::operator()( EfswFileWatcher* watcher ) const
 FileWatcher::FileWatcher()
     : checkTimer_{ new QTimer( this ) }
     , throttler_{ new KDToolBox::KDSignalThrottler( this ) }
-    , efswWatcher_{ new EfswFileWatcher( this ) }
+    , efswWatcher_{ new EfswFileWatcher( this, &workerPool_ ) }
 {
     workerPool_.setMaxThreadCount( 1 );
 
@@ -436,10 +443,23 @@ void FileWatcher::updateConfiguration()
         checkTimer_->stop();
     }
 
-    efswWatcher_->enableWatch( config.nativeFileWatchEnabled() );
+    // Dispatch enableWatch to the dedicated worker thread so that all
+    // efsw operations (addFile, removeFile, enableWatch, checkWatches,
+    // notifyOnFileAction) are serialized on a single thread.  This
+    // prevents the main thread from blocking on mutex_ when the worker
+    // holds it during a blocking addWatch() call (e.g. macOS TCC prompt).
+    auto* watcher = efswWatcher_.get();
+    const auto nativeEnabled = config.nativeFileWatchEnabled();
+    workerPool_.start( new FunctionRunnable(
+        [ watcher, nativeEnabled ]() { watcher->enableWatch( nativeEnabled ); } ) );
 }
 
 void FileWatcher::checkWatches()
 {
-    efswWatcher_->checkWatches();
+    // Dispatch to the dedicated worker thread so that efsw check
+    // operations are serialized with addFile/removeFile/enableWatch
+    // and never block the main thread on mutex_.
+    auto* watcher = efswWatcher_.get();
+    workerPool_.start(
+        new FunctionRunnable( [ watcher ]() { watcher->checkWatches(); } ) );
 }
