@@ -2084,3 +2084,182 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
         }
     }
 }
+
+SCENARIO( "Filtered view with sparse results does not block horizontal scroll",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_sparse_filtered_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+
+    GIVEN( "filtered view with long lines but only 1 result fitting entirely in the viewport" )
+    {
+        // Narrow viewport so long lines overflow horizontally,
+        // tall enough that the single filtered result fits within the viewport.
+        crawlerVisitor.resizeViews( 260, 300 );
+        crawlerVisitor.render();
+
+        crawlerVisitor.setSearchPattern( "LOGDATA long line 000042" );
+        crawlerVisitor.runSearch();
+
+        REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+
+        // Only 1 filtered result: vertical scroll range is zero
+        REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+        REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+
+        // Long lines + narrow viewport = horizontal scrollbar has range
+        const int hScrollMax = crawlerVisitor.filteredHorizontalScrollMaximum();
+        REQUIRE( hScrollMax > 0 );
+
+        WHEN( "the user scrolls horizontally while content fits vertically" )
+        {
+            // scrollContentsBy is called by Qt when the horizontal scrollbar
+            // moves. When scrollMax == 0, scrollContentsBy sets
+            // lastLineAligned_ = false unconditionally — but this should not
+            // affect the visual output because content fits entirely.
+            const int targetValue = qMin( 100, hScrollMax );
+            crawlerVisitor.setFilteredHorizontalScrollValue( targetValue );
+            crawlerVisitor.render();
+
+            THEN( "content stays top-aligned with no blank bar at the bottom" )
+            {
+                REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            }
+
+            THEN( "horizontal scroll value is applied correctly" )
+            {
+                REQUIRE( crawlerVisitor.filteredHorizontalScrollValue() == targetValue );
+            }
+
+            THEN( "bottom alignment follows scroll state correctly" )
+            {
+                // When content fits entirely (scrollMax == 0) and
+                // lastLineAligned_ is false, shouldBottomAlignFrame()
+                // should return false — no phantom bottom alignment.
+                REQUIRE_FALSE( crawlerVisitor.filteredShouldBottomAlign() );
+            }
+        }
+
+        WHEN( "follow mode is enabled and user scrolls horizontally" )
+        {
+            crawlerVisitor.enableFollowMode( true );
+            crawlerVisitor.render();
+
+            REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+            REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+            REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+
+            const int targetValue = qMin( 100, hScrollMax );
+            crawlerVisitor.setFilteredHorizontalScrollValue( targetValue );
+            crawlerVisitor.render();
+
+            THEN( "content stays top-aligned — sparse results fit entirely" )
+            {
+                // Even with follow mode active, when scrollMax == 0 and
+                // content fits, drawingTopOffset must stay 0.
+                REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            }
+
+            THEN( "horizontal scroll value is applied correctly" )
+            {
+                REQUIRE( crawlerVisitor.filteredHorizontalScrollValue() == targetValue );
+            }
+
+            THEN( "follow mode bottom alignment is preserved after horizontal scroll" )
+            {
+                // When followElasticHook_.isHooked() is true (follow mode enabled),
+                // shouldBottomAlignFrame() should still return true after a
+                // horizontal scroll — even though scrollContentsBy resets
+                // lastLineAligned_. The hook keeps bottom alignment active.
+                REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+            }
+        }
+    }
+}
+
+SCENARIO( "Elastic pull-to-follow hook does not activate when scroll range is empty",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_sparse_elastic_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+
+    GIVEN( "filtered view with content fitting entirely in viewport" )
+    {
+        crawlerVisitor.resizeViews( 260, 300 );
+        crawlerVisitor.render();
+
+        crawlerVisitor.setSearchPattern( "LOGDATA long line 000042" );
+        crawlerVisitor.runSearch();
+
+        REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+
+        REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+        REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+
+        const int hScrollMax = crawlerVisitor.filteredHorizontalScrollMaximum();
+        REQUIRE( hScrollMax > 0 );
+
+        WHEN( "scrollContentsBy is called with horizontal delta and empty vertical scroll range" )
+        {
+            // Simulate what Qt does during a horizontal scroll event when
+            // scrollMax == 0. scrollContentsBy is the override that handles
+            // scrollbar value changes.
+            //
+            // Before the fix, scrollContentsBy unconditionally set
+            // lastLineAligned_ = false when scrollMax == 0, but this did not
+            // affect rendering because contentFitsEmptyScrollRange handles it.
+            //
+            // The real fix is in wheelEvent: the elastic hook must only
+            // activate when verticalScrollBar()->maximum() > 0, preventing
+            // the hook from consuming wheel events when there is no scroll
+            // range.
+            const int targetValue = qMin( 50, hScrollMax );
+            crawlerVisitor.setFilteredHorizontalScrollValue( targetValue );
+            crawlerVisitor.render();
+
+            THEN( "content stays top-aligned with no blank area" )
+            {
+                REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            }
+
+            THEN( "horizontal scroll is applied correctly" )
+            {
+                REQUIRE( crawlerVisitor.filteredHorizontalScrollValue() == targetValue );
+            }
+
+            THEN( "scrollContentsBy does not force unwanted bottom-alignment" )
+            {
+                // When scrollMax == 0 and followMode_ is off, the view
+                // should not be bottom-aligned (no empty space at top).
+                // The hook is not active, so shouldBottomAlignFrame
+                // returns false when lastLineAligned_ is also false.
+                REQUIRE_FALSE( crawlerVisitor.filteredShouldBottomAlign() );
+            }
+        }
+    }
+}

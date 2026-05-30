@@ -269,6 +269,36 @@ TEST_CASE( "TabbedCrawlerWidget uses rounded iTerm-style tabs outside Modern sty
     REQUIRE_FALSE( tabStyle.contains( QStringLiteral( "border-bottom: none" ) ) );
 }
 
+TEST_CASE( "TabbedCrawlerWidget uses compact tab height for macOS 26 pill-tab look" )
+{
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey };
+
+    TabbedCrawlerWidget tabWidget;
+    auto* tabBar = tabWidget.findChild<CrawlerTabBar*>();
+
+    REQUIRE( tabBar != nullptr );
+    const auto tabStyle = tabBar->styleSheet();
+    // Reduced height from 24px to 20px for iTerm2/macOS 26 compact look
+    REQUIRE( tabStyle.contains( QStringLiteral( "height: 20px" ) ) );
+    // Tab bar padding should be tighter
+    REQUIRE( tabStyle.contains( QStringLiteral( "padding: 2px" ) ) );
+    // Tab padding should be compact
+    REQUIRE( tabStyle.contains( QStringLiteral( "padding: 3px 12px" ) ) );
+    // Old 24px height must be gone
+    REQUIRE_FALSE( tabStyle.contains( QStringLiteral( "height: 24px" ) ) );
+}
+
+TEST_CASE( "TabbedCrawlerWidget tab bar expands tabs to fill bar width" )
+{
+    TabbedCrawlerWidget tabWidget;
+    auto* tabBar = tabWidget.findChild<CrawlerTabBar*>();
+
+    REQUIRE( tabBar != nullptr );
+    // Tabs should stretch to fill the tab bar, like iTerm2's "stretch to fill bar"
+    // and system-native macOS tab bars
+    REQUIRE( tabBar->expanding() );
+}
+
 TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+PageDown/PageUp shortcuts" )
 {
     TabbedCrawlerWidget tabWidget;

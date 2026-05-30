@@ -592,6 +592,7 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->clearRecentFileActions(); } );
 
     closeAction = new QAction( tr( action::closeText ), this );
+    closeAction->setObjectName( QStringLiteral( "closeAction" ) );
     closeAction->setStatusTip( tr( action::closeStatusTip ) );
     connect( closeAction, &QAction::triggered, this,
              [ this ]( auto ) { this->closeTab( ActionInitiator::User ); } );

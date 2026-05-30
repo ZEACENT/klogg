@@ -1032,7 +1032,8 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         jumpToBottom();
 
     const auto allowFollowOnScroll = Configuration::get().allowFollowOnScroll();
-    if ( verticalScrollBar()->value() == verticalScrollBar()->maximum() ) {
+    if ( verticalScrollBar()->maximum() > 0
+         && verticalScrollBar()->value() == verticalScrollBar()->maximum() ) {
         if ( allowFollowOnScroll || yDelta > 0 ) {
             // First see if we need to block the elastic (on Mac)
             if ( wheelEvent->phase() == Qt::ScrollBegin ) {

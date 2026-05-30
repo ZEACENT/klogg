@@ -322,15 +322,15 @@ QTabBar {
     background-color: __ALT_BASE__;
     border: 1px solid __BORDER__;
     border-radius: 14px;
-    padding: 3px;
+    padding: 2px;
 }
 QTabBar::tab {
     background-color: transparent;
-    padding: 5px 14px;
+    padding: 3px 12px;
     border: 1px solid transparent;
     border-radius: 12px;
     margin: 2px 3px;
-    min-height: 24px;
+    min-height: 20px;
 }
 QTabBar::tab:selected {
     background-color: __BUTTON_PRESSED__;

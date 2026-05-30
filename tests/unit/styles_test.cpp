@@ -63,3 +63,16 @@ TEST_CASE( "Modern style sheet gives tabs a rounded iTerm-style treatment" )
     REQUIRE( style.contains( QStringLiteral( "font-weight: 600" ) ) );
     REQUIRE_FALSE( style.contains( QStringLiteral( "border-bottom: none" ) ) );
 }
+
+TEST_CASE( "Modern style sheet uses compact tab height for macOS 26 pill-tab look" )
+{
+    const ScopedModernStyle styleGuard;
+
+    const auto style = qApp->styleSheet();
+    // Tabs should be shorter — macOS 26 / iTerm2 style is compact
+    REQUIRE( style.contains( QStringLiteral( "min-height: 20px" ) ) );
+    // Tab bar padding should be tighter (QTabBar container padding)
+    REQUIRE( style.contains( QStringLiteral( "padding: 2px" ) ) );
+    // Tab padding should be compact (horizontal + vertical)
+    REQUIRE( style.contains( QStringLiteral( "padding: 3px 12px" ) ) );
+}
