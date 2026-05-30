@@ -200,7 +200,42 @@ void TabbedCrawlerWidget::updateTabBarStyle()
         return;
     }
 
-    QString tabStyle = "QTabBar::tab { height: 24px; }";
+    const bool useDarkIcons = shouldUseDarkTabIcons( this, config );
+    const auto trackColor = useDarkIcons ? QColor( "#202327" ) : QColor( "#E9EDF2" );
+    const auto selectedColor = useDarkIcons ? QColor( "#4B5053" ) : QColor( "#FFFFFF" );
+    const auto hoverColor = useDarkIcons ? QColor( "#2C3136" ) : QColor( "#F5F7FA" );
+    const auto borderColor = useDarkIcons ? QColor( "#62696E" ) : QColor( "#BCC4CE" );
+    const auto mutedTextColor = useDarkIcons ? QColor( "#9EA3A8" ) : QColor( "#626B75" );
+    const auto textColor = useDarkIcons ? QColor( "#F0F1F2" ) : QColor( "#202326" );
+
+    QString tabStyle = QStringLiteral(
+                           "QTabBar {"
+                           "background-color: %1;"
+                           "border: 1px solid %2;"
+                           "border-radius: 15px;"
+                           "padding: 3px;"
+                           "}"
+                           "QTabBar::tab {"
+                           "background-color: transparent;"
+                           "color: %3;"
+                           "height: 24px;"
+                           "padding: 4px 13px;"
+                           "border: 1px solid transparent;"
+                           "border-radius: 13px;"
+                           "margin: 3px 2px;"
+                           "}"
+                           "QTabBar::tab:selected {"
+                           "background-color: %4;"
+                           "color: %5;"
+                           "border: 1px solid %2;"
+                           "font-weight: 600;"
+                           "}"
+                           "QTabBar::tab:hover:!selected {"
+                           "background-color: %6;"
+                           "color: %5;"
+                           "}" )
+                           .arg( trackColor.name(), borderColor.name(), mutedTextColor.name(),
+                                 selectedColor.name(), textColor.name(), hoverColor.name() );
     QString tabCloseButtonStyle = " QTabBar::close-button {\
               height: 12px; width: 12px;\
               %1}";
@@ -208,7 +243,6 @@ void TabbedCrawlerWidget::updateTabBarStyle()
     QString backgroundImage;
     QString backgroundHoverImage;
 
-    const bool useDarkIcons = shouldUseDarkTabIcons( this, config );
     if ( useDarkIcons ) {
         backgroundImage = ":/images/icons8-close-window_inverse.svg";
         backgroundHoverImage = ":/images/icons8-close-window-hover_inverse.svg";
@@ -321,6 +355,28 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     else {
         myTabBar_.setTabText( index, tabLabelWithLiveStatus( customName, displayName ) );
     }
+}
+
+void TabbedCrawlerWidget::selectNextTab()
+{
+    const auto tabCount = count();
+    if ( tabCount <= 1 ) {
+        return;
+    }
+
+    const auto activeIndex = currentIndex();
+    setCurrentIndex( activeIndex < 0 ? 0 : ( activeIndex + 1 ) % tabCount );
+}
+
+void TabbedCrawlerWidget::selectPreviousTab()
+{
+    const auto tabCount = count();
+    if ( tabCount <= 1 ) {
+        return;
+    }
+
+    const auto activeIndex = currentIndex();
+    setCurrentIndex( activeIndex <= 0 ? tabCount - 1 : activeIndex - 1 );
 }
 
 void TabbedCrawlerWidget::mouseReleaseEvent( QMouseEvent* event )
@@ -730,14 +786,14 @@ void TabbedCrawlerWidget::keyPressEvent( QKeyEvent* event )
          || ( mod == Qt::ControlModifier && key == Qt::Key_PageDown )
          || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
               && key == Qt::Key_Right ) ) {
-        setCurrentIndex( ( currentIndex() + 1 ) % count() );
+        selectNextTab();
     }
     // Ctrl + shift + tab
     else if ( ( mod == ( Qt::ControlModifier | Qt::ShiftModifier ) && key == Qt::Key_Tab )
               || ( mod == Qt::ControlModifier && key == Qt::Key_PageUp )
               || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
                    && key == Qt::Key_Left ) ) {
-        setCurrentIndex( ( currentIndex() - 1 >= 0 ) ? currentIndex() - 1 : count() - 1 );
+        selectPreviousTab();
     }
     // Ctrl + numbers
     else if ( mod == Qt::ControlModifier && ( key >= Qt::Key_1 && key <= Qt::Key_8 ) ) {

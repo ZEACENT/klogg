@@ -45,6 +45,25 @@ TEST_CASE( "Shortcut bindings: disconnect and reconnect source have defaults" )
     }
 }
 
+TEST_CASE( "Shortcut bindings: tab cycling follows VSCode defaults" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+
+    SECTION( "Next tab is bound to Ctrl+Tab" )
+    {
+        const auto it = shortcuts.find( ShortcutAction::MainWindowNextTab );
+        REQUIRE( it != shortcuts.end() );
+        REQUIRE( it->second.keySequence.contains( QStringLiteral( "Ctrl+Tab" ) ) );
+    }
+
+    SECTION( "Previous tab is bound to Ctrl+Shift+Tab" )
+    {
+        const auto it = shortcuts.find( ShortcutAction::MainWindowPreviousTab );
+        REQUIRE( it != shortcuts.end() );
+        REQUIRE( it->second.keySequence.contains( QStringLiteral( "Ctrl+Shift+Tab" ) ) );
+    }
+}
+
 TEST_CASE( "Shortcut bindings: color labels use plain digit keys 1-9" )
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();
@@ -171,7 +190,8 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
                                 "Ctrl+Shift+1", "Ctrl+Shift+2", "Ctrl+Shift+3",
                                 "Ctrl+Shift+4", "Ctrl+Shift+5", "Ctrl+Shift+6",
                                 "Ctrl+Shift+7", "Ctrl+Shift+8", "Ctrl+Shift+9",
-                                "Ctrl+Shift+D", "Ctrl+Shift+R" };
+                                "Ctrl+Shift+D", "Ctrl+Shift+R", "Ctrl+Tab",
+                                "Ctrl+Shift+Tab" };
 
     for ( const auto& key : keysToCheck ) {
         DYNAMIC_SECTION( "Key " << key.toStdString() << " has at most one binding" )

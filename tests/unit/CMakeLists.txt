@@ -16,6 +16,7 @@ add_executable(klogg_tests
     logfiltereddataworker_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
+    styles_test.cpp
     streaminglogdata_test.cpp
     tabgroupdropresolver_test.cpp
     tabgroupmanager_test.cpp

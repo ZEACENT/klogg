@@ -865,6 +865,12 @@ void MainWindow::updateShortcuts()
     ShortcutAction::registerShortcut( shortcuts, shortcuts_, this, Qt::WindowShortcut,
                                       ShortcutAction::MainWindowMin,
                                       [ this ] { this->showMinimized(); } );
+    ShortcutAction::registerShortcut( shortcuts, shortcuts_, this, Qt::WindowShortcut,
+                                      ShortcutAction::MainWindowNextTab,
+                                      [ this ] { mainTabWidget_.selectNextTab(); } );
+    ShortcutAction::registerShortcut( shortcuts, shortcuts_, this, Qt::WindowShortcut,
+                                      ShortcutAction::MainWindowPreviousTab,
+                                      [ this ] { mainTabWidget_.selectPreviousTab(); } );
 
     auto setShortcuts = [ &shortcuts ]( auto* action, const auto& actionName ) {
         action->setShortcuts( ShortcutAction::shortcutKeys( actionName, shortcuts ) );

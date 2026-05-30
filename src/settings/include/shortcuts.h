@@ -79,6 +79,8 @@ struct ShortcutAction {
     static constexpr auto MainWindowOpenFromUrl = "mainwindow.open_from_url";
     static constexpr auto MainWindowDisconnectSource = "mainwindow.disconnect_source";
     static constexpr auto MainWindowReconnectSource = "mainwindow.reconnect_source";
+    static constexpr auto MainWindowNextTab = "mainwindow.next_tab";
+    static constexpr auto MainWindowPreviousTab = "mainwindow.previous_tab";
 
     static constexpr auto LogViewMark = "logview.mark";
     static constexpr auto LogViewDeleteMark = "logview.delete_mark";

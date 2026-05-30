@@ -326,6 +326,20 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
         {
+            MainWindowNextTab,
+            {
+                QApplication::tr( "Switch to next tab" ),
+                QStringList{ "Ctrl+Tab" },
+            },
+        },
+        {
+            MainWindowPreviousTab,
+            {
+                QApplication::tr( "Switch to previous tab" ),
+                QStringList{ "Ctrl+Shift+Tab" },
+            },
+        },
+        {
             CrawlerChangeVisibilityForward,
             {
                 QApplication::tr( "Change filtered lines visibility forward" ),

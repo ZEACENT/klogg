@@ -94,6 +94,8 @@ class TabbedCrawlerWidget : public QTabWidget {
 
     void removeCrawler( int index );
     void updateCrawler( int index, const QString& displayName, const QString& toolTip );
+    void selectNextTab();
+    void selectPreviousTab();
 
   Q_SIGNALS:
     void tabsReordered();

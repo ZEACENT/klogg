@@ -250,6 +250,42 @@ TEST_CASE( "TabbedCrawlerWidget close button style does not pin buttons during t
     REQUIRE_FALSE( tabBar->styleSheet().contains( QStringLiteral( "subcontrol-origin" ) ) );
 }
 
+TEST_CASE( "TabbedCrawlerWidget uses rounded iTerm-style tabs outside Modern style" )
+{
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey };
+
+    TabbedCrawlerWidget tabWidget;
+    auto* tabBar = tabWidget.findChild<CrawlerTabBar*>();
+
+    REQUIRE( tabBar != nullptr );
+    const auto tabStyle = tabBar->styleSheet();
+    REQUIRE( tabStyle.contains( QStringLiteral( "QTabBar {" ) ) );
+    REQUIRE( tabStyle.contains( QStringLiteral( "QTabBar::tab:selected" ) ) );
+    REQUIRE( tabStyle.contains( QStringLiteral( "border-radius: 13px" ) ) );
+    REQUIRE( tabStyle.contains( QStringLiteral( "font-weight: 600" ) ) );
+    REQUIRE_FALSE( tabStyle.contains( QStringLiteral( "border-bottom: none" ) ) );
+}
+
+TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+Tab shortcuts" )
+{
+    TabbedCrawlerWidget tabWidget;
+
+    for ( int i = 0; i < 3; ++i ) {
+        auto* crawler = new DummyCrawlerWidget();
+        tabWidget.addCrawler( crawler, QStringLiteral( "file:///tmp/klogg-cycle-%1.log" ).arg( i ),
+                              QStringLiteral( "Tab %1" ).arg( i ),
+                              QStringLiteral( "/tmp/klogg-cycle-%1.log" ).arg( i ) );
+    }
+
+    REQUIRE( tabWidget.currentIndex() == 2 );
+
+    QTest::keyClick( &tabWidget, Qt::Key_Tab, Qt::ControlModifier );
+    REQUIRE( tabWidget.currentIndex() == 0 );
+
+    QTest::keyClick( &tabWidget, Qt::Key_Tab, Qt::ControlModifier | Qt::ShiftModifier );
+    REQUIRE( tabWidget.currentIndex() == 2 );
+}
+
 TEST_CASE( "TabbedCrawlerWidget keeps close buttons inside their tabs after horizontal scroll" )
 {
     TabbedCrawlerWidget tabWidget;
