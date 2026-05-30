@@ -27,6 +27,7 @@
 #include <KDSignalThrottler.h>
 #include <efsw/efsw.hpp>
 
+#include <functional>
 #include <vector>
 
 #if QT_VERSION_MAJOR < 6
@@ -67,6 +68,26 @@ bool isOnlyForPolling( const WatchedDirecotry& wd )
 {
     return wd.watchId < 0;
 }
+
+// Qt5/Qt6 compatibility: QThreadPool::start() only accepts QRunnable* in Qt5.
+// Qt6 added a start(std::function<void()>) overload. This adapter allows
+// lambda-based dispatch to work on both versions while preserving the
+// dedicated worker pool.
+class FunctionRunnable : public QRunnable {
+  public:
+    explicit FunctionRunnable( std::function<void()> fn )
+        : fn_( std::move( fn ) )
+    {
+        setAutoDelete( true );
+    }
+    void run() override
+    {
+        fn_();
+    }
+
+  private:
+    std::function<void()> fn_;
+};
 
 } // namespace
 
@@ -347,7 +368,9 @@ FileWatcher::FileWatcher()
 
 FileWatcher::~FileWatcher()
 {
-    workerPool_.waitForDone( 5000 );
+    if ( !workerPool_.waitForDone( 5000 ) ) {
+        LOG_WARNING << "FileWatcher worker pool did not finish within 5s timeout";
+    }
 }
 
 FileWatcher& FileWatcher::getFileWatcher()
@@ -366,9 +389,9 @@ void FileWatcher::addFile( const QString& fileName )
     // Uses a dedicated single-worker thread pool to avoid contention
     // on the global QThreadPool.
     auto* watcher = efswWatcher_.get();
-    workerPool_.start( [ watcher, fileName ]() {
+    workerPool_.start( new FunctionRunnable( [ watcher, fileName ]() {
         watcher->addFile( fileName );
-    } );
+    } ) );
 }
 
 void FileWatcher::removeFile( const QString& fileName )
@@ -377,9 +400,9 @@ void FileWatcher::removeFile( const QString& fileName )
     // Dispatch to the same dedicated worker pool so that removeFile is
     // serialized with any in-progress addFile on the same worker thread.
     auto* watcher = efswWatcher_.get();
-    workerPool_.start( [ watcher, fileName ]() {
+    workerPool_.start( new FunctionRunnable( [ watcher, fileName ]() {
         watcher->removeFile( fileName );
-    } );
+    } ) );
 }
 
 void FileWatcher::fileChangedOnDisk( const QString& fileName )
