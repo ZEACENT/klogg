@@ -1901,26 +1901,6 @@
         <translation>Report an issue on GitHub</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindowtext.cpp" line="83"/>
-        <source>Join Discord community...</source>
-        <translation>Join Discord community...</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindowtext.cpp" line="85"/>
-        <source>Join Klogg development community at Discord</source>
-        <translation>Join Klogg development community at Discord</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindowtext.cpp" line="86"/>
-        <source>Join Telegram community...</source>
-        <translation>Join Telegram community...</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindowtext.cpp" line="88"/>
-        <source>Join Klogg development community at Telegram</source>
-        <translation>Join Klogg development community at Telegram</translation>
-    </message>
-    <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="89"/>
         <source>Generate crash dump</source>
         <translation>Generate crash dump</translation>

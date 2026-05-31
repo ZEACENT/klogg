@@ -304,8 +304,6 @@ class MainWindow : public QMainWindow {
     QAction* importFilterFavoritesAction;
     QAction* exportFilterFavoritesAction;
     QAction* reportIssueAction;
-    QAction* joinDiscordAction;
-    QAction* joinTelegramAction;
     QAction* generateDumpAction;
     QAction* mergeTabsAction;
     QActionGroup* encodingGroup;

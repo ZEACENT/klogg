@@ -81,12 +81,6 @@ const char* action::aboutQtText = QT_TR_NOOP( "About &Qt" );
 const char* action::aboutQtStatusTip = QT_TR_NOOP( "Show the Qt library's About box" );
 const char* action::reportIssueText = QT_TR_NOOP( "Report issue..." );
 const char* action::reportIssueStatusTip = QT_TR_NOOP( "Report an issue on GitHub" );
-const char* action::joinDiscordText = QT_TR_NOOP( "Join Discord Community..." );
-const char* action::joinDiscordStatusTip
-    = QT_TR_NOOP( "Join Klogg Development Community at Discord" );
-const char* action::joinTelegramText = QT_TR_NOOP( "Join Telegram Community..." );
-const char* action::joinTelegramStatusTip
-    = QT_TR_NOOP( "Join Klogg Development Community at Telegram" );
 const char* action::generateDumpText = QT_TR_NOOP( "Generate crash dump" );
 const char* action::generateDumpStatusTip = QT_TR_NOOP( "Generate diagnostic crash dump" );
 const char* action::showScratchPadText = QT_TR_NOOP( "Scratchpad" );
