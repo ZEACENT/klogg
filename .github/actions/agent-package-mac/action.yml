@@ -67,7 +67,8 @@ runs:
       run: |
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $Qt5_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
+        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $KLOGG_QT_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
 
     - name: Mac deploy Qt fixing
       if: "startsWith(matrix.config.qt_version, '6')"
@@ -75,7 +76,8 @@ runs:
       run: |
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $Qt6_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
+        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $KLOGG_QT_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
     
     - name: Set packaging env
       shell: sh
@@ -97,12 +99,23 @@ runs:
       shell: sh
       run: |
         cd $KLOGG_BUILD_ROOT
-        # Clean up any leftover mounted volumes from previous runs
-        if [ -d "/Volumes/klogg" ]; then
-            hdiutil detach "/Volumes/klogg" -force 2>/dev/null || true
-        fi
+
+        # Aggressive cleanup: orphan diskimages-helper processes can hold
+        # locks on disk image resources across runs, causing "hdiutil: create
+        # failed - Resource busy".  Kill them before we start.
+        killall diskimages-helper 2>/dev/null || true
+
+        # Detach any leftover mounted klogg volumes from previous runs
+        for vol in /Volumes/klogg /Volumes/klogg-*; do
+          if [ -d "${vol}" ]; then
+            hdiutil detach "${vol}" -force 2>/dev/null || true
+          fi
+        done
         rm -f ./packages/*.dmg 2>/dev/null || true
         mkdir -p ./packages
+
+        # Let the system release disk image resources after cleanup
+        sleep 2
 
         # Build DMG directly with hdiutil instead of CPack DragNDrop.
         #
@@ -126,12 +139,25 @@ runs:
         mkdir -p "${BACKGROUND_DIR}"
         cp "${KLOGG_WORKSPACE}/packaging/osx/dmg_background.tif" "${BACKGROUND_DIR}/background.tif"
 
-        hdiutil create \
-            -volname "klogg" \
-            -srcfolder "${DMG_STAGING}" \
-            -ov \
-            -format UDZO \
-            "./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
+        # Retry hdiutil create up to 3 times: "Resource busy" is a transient
+        # macOS runner issue caused by lingering diskimages-helper processes.
+        for attempt in 1 2 3; do
+          if hdiutil create \
+              -volname "klogg" \
+              -srcfolder "${DMG_STAGING}" \
+              -ov \
+              -format UDZO \
+              "./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"; then
+            break
+          fi
+          if [ $attempt -eq 3 ]; then
+            echo "hdiutil create failed after 3 attempts"
+            exit 1
+          fi
+          echo "hdiutil create attempt ${attempt} failed, retrying after cleanup..."
+          killall diskimages-helper 2>/dev/null || true
+          sleep 5
+        done
 
         rm -rf "${DMG_STAGING}"
 
