@@ -207,6 +207,9 @@ if(KLOGG_PERF_MEASURE_STREAMING)
   target_compile_definitions(project_options INTERFACE KLOGG_PERF_MEASURE_STREAMING)
 endif()
 
+# Expose build type for issue reporting and diagnostics
+target_compile_definitions(project_options INTERFACE "KLOGG_BUILD_TYPE=$<CONFIG>")
+
 # sanitizer options if supported by compiler
 include(Sanitizers)
 enable_sanitizers(project_options)

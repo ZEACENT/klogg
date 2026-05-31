@@ -20,7 +20,6 @@
 #include <QDesktopServices>
 #include <QMessageBox>
 #include <QUrl>
-#include <QUrlQuery>
 #include <qglobal.h>
 #include <qthreadpool.h>
 #include <string>
@@ -30,33 +29,90 @@
 
 #include "issuereporter.h"
 
-static constexpr auto DetailsFooter
-    = "-------------------------\n"
-      "Useful extra information\n"
-      "-------------------------\n"
-      "> Klogg version %1 (built on %2 from commit %3) [built for %4]\n"
-      "> running on %5 (%6/%7) [%8], concurrency %9\n";
+#ifndef KLOGG_BUILD_TYPE
+#define KLOGG_BUILD_TYPE Unknown
+#endif
 
-static constexpr auto LibraryVersionsFooter = "> Qt %1, tbb %2";
+#define KLOGG_STR_IMPL(x) #x
+#define KLOGG_STR(x) KLOGG_STR_IMPL(x)
 
-static constexpr auto DetailsHeader = "Details for the issue\n"
-                                      "--------------------\n\n";
+// Auto-filled environment section appended to every issue
+static constexpr auto EnvironmentFooter
+    = "\n---\n"
+      "### :computer: Environment\n"
+      "- **Klogg:** %1 (built %2, commit `%3`)\n"
+      "- **Build type:** %4\n"
+      "- **OS:** %5 (%6 %7)\n"
+      "- **Architecture:** %8\n"
+      "- **Concurrency:** %9\n"
+      "- **Qt:** %10, **TBB:** %11\n";
 
-static constexpr auto CrashTemplate = "#### What did you do?\n\n\n"
+// Bug report template (Help > Report Issue)
+static constexpr auto BugTemplate
+    = "### :bug: What is the problem?\n"
+      "<!-- A clear description of what the issue is -->\n"
+      "\n"
+      "\n"
+      "### :bulb: What did you expect to see?\n"
+      "<!-- What should have happened instead? -->\n"
+      "\n"
+      "\n"
+      "### :footprints: Steps to reproduce\n"
+      "<!-- Detailed steps so someone else can reproduce the issue -->\n"
+      "1. \n"
+      "2. \n"
+      "3. \n"
+      "\n"
+      "### :game_die: How often does this happen?\n"
+      "- [ ] Always\n"
+      "- [ ] Sometimes (roughly ___% of the time)\n"
+      "- [ ] Happened only once / hard to reproduce\n"
+      "\n"
+      "### :alembic: Version information\n"
+      "<!-- If you know which version introduced the issue or which one was fine -->\n"
+      "- **First bad version** (if known): \n"
+      "- **Last known good version** (if known): \n";
 
-                                      "-------------------------\n"
-                                      "Crash id:\n"
-                                      "%1\n";
+// Crash report template (used by crash handler)
+static constexpr auto CrashTemplate
+    = "### :boom: Klogg crashed\n"
+      "**Crash ID:** `%1`\n"
+      "\n"
+      "### :footprints: What were you doing when it crashed?\n"
+      "<!-- Describe what you were doing right before the crash -->\n"
+      "\n"
+      "\n"
+      "### :game_die: Can you reproduce it?\n"
+      "- [ ] Yes, always\n"
+      "- [ ] Yes, sometimes\n"
+      "- [ ] No, happened only once\n"
+      "\n"
+      "### :alembic: Version information\n"
+      "- **First bad version** (if known): \n"
+      "- **Last known good version** (if known): \n";
 
-static constexpr auto ExceptionTemplate = "#### What did you do?\n\n\n"
-
-                                          "-------------------------\n"
-                                          "Exception:\n"
-                                          "%1\n";
-
-static constexpr auto BugTemplate = "#### What did you do?\n\n\n"
-                                    "#### What did you expect to see?\n\n\n"
-                                    "#### What did you see instead?\n\n\n";
+// Exception report template (used for unexpected runtime errors)
+static constexpr auto ExceptionTemplate
+    = "### :warning: An unexpected error occurred\n"
+      "**Error:** `%1`\n"
+      "\n"
+      "### :footprints: What were you doing?\n"
+      "<!-- Describe what you were doing when the error appeared -->\n"
+      "\n"
+      "\n"
+      "### :footprints: Steps to reproduce\n"
+      "<!-- How can someone else trigger this error? -->\n"
+      "1. \n"
+      "2. \n"
+      "\n"
+      "### :game_die: How often does this happen?\n"
+      "- [ ] Always\n"
+      "- [ ] Sometimes\n"
+      "- [ ] Once\n"
+      "\n"
+      "### :alembic: Version information\n"
+      "- **First bad version** (if known): \n"
+      "- **Last known good version** (if known): \n";
 
 static constexpr auto ExceptionAskUserAction
     = "Ooops! Something unexpected happend. Create issue on Github?";
@@ -77,41 +133,42 @@ void IssueReporter::askUserAndReportIssue( IssueTemplate issueTemplate, const QS
 
 void IssueReporter::reportIssue( IssueTemplate issueTemplate, const QString& information )
 {
+    QString body;
 
-    QString body = DetailsHeader;
     switch ( issueTemplate ) {
     case IssueTemplate::Bug:
-        body.append( BugTemplate );
+        body = QString( BugTemplate );
         break;
     case IssueTemplate::Crash:
-        body.append( QString( CrashTemplate ).arg( information ) );
+        body = QString( CrashTemplate ).arg( information );
         break;
     case IssueTemplate::Exception:
-        body.append( QString( ExceptionTemplate ).arg( information ) );
+        body = QString( ExceptionTemplate ).arg( information );
         break;
     }
 
+    // Gather system information
     const auto version = kloggVersion();
     const auto buildDate = kloggBuildDate();
     const auto commit = kloggCommit();
-
+    const auto buildType = QString::fromLatin1( KLOGG_STR( KLOGG_BUILD_TYPE ) );
     const auto os = QSysInfo::prettyProductName();
     const auto kernelType = QSysInfo::kernelType();
     const auto kernelVersion = QSysInfo::kernelVersion();
     const auto arch = QSysInfo::currentCpuArchitecture();
-    const auto builtAbi = QSysInfo::buildAbi();
-    
     const auto concurrency = QThreadPool::globalInstance()->maxThreadCount();
 
-    body.append( QString( DetailsFooter )
-                     .arg( version, buildDate, commit, builtAbi, os, kernelType, kernelVersion,
-                           arch, std::to_string(concurrency).c_str() ) );
-    body.append( QString( LibraryVersionsFooter ).arg( qVersion(), TBB_runtime_version() ) );
+    body.append( QString( EnvironmentFooter )
+                     .arg( version, buildDate, commit, buildType, os, kernelType, kernelVersion,
+                           arch, QString::number( concurrency ), qVersion(),
+                           TBB_runtime_version() ) );
 
-    QUrlQuery query;
-    query.addQueryItem( "body", body );
+    // Construct URL with single-pass percent encoding.
+    // QUrl::fromEncoded treats the input as already-encoded and won't re-encode,
+    // avoiding the double-encoding that QUrlQuery + setQuery can produce.
+    const QByteArray encodedBody = QUrl::toPercentEncoding( body );
+    const QByteArray urlBytes
+        = QByteArrayLiteral( "https://github.com/ZEACENT/klogg/issues/new?body=" ) + encodedBody;
 
-    QUrl url( "https://github.com/ZEACENT/klogg/issues/new" );
-    url.setQuery( query );
-    QDesktopServices::openUrl( url );
+    QDesktopServices::openUrl( QUrl::fromEncoded( urlBytes ) );
 }
