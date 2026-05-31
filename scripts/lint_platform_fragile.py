@@ -285,6 +285,73 @@ def _check_close_without_loading_wait(text: str, path: Path) -> list[tuple[int, 
     ]
 
 
+def _check_qt5_arg_limit(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag QString::arg() calls with 10+ arguments, exceeding Qt5's 9-value limit.
+
+    Qt6 supports higher-arity QString::arg overloads, so multi-argument calls
+    compile fine on macOS (Qt6 via Homebrew) but fail on Linux CI jobs that
+    still use Qt5 (e.g. ubuntu-20.04 AppImage).
+
+    PR #28 exposed this in issuereporter.cpp.
+    """
+    if ALLOW_MARKER in text:
+        return []
+
+    findings: list[tuple[int, str]] = []
+
+    # Walk through text finding .arg( calls, then count top-level arguments
+    # (commas not nested inside parens/brackets/braces) until the matching ).
+    import re as _re
+
+    arg_call_re = _re.compile(r"\.arg\s*\(")
+    for m in arg_call_re.finditer(text):
+        start = m.end()  # position right after .arg(
+        # Find matching closing paren, tracking nesting of () [] {}
+        depth = 1
+        pos = start
+        while pos < len(text) and depth > 0:
+            ch = text[pos]
+            if ch == "(" or ch == "[" or ch == "{":
+                depth += 1
+            elif ch == ")" or ch == "]" or ch == "}":
+                depth -= 1
+            pos += 1
+        if depth != 0:
+            continue  # malformed — skip
+
+        arg_text = text[start : pos - 1]  # text between ( and matching )
+
+        # Count top-level commas.
+        comma_count = 0
+        nest = 0
+        for ch in arg_text:
+            if ch == "(" or ch == "[" or ch == "{":
+                nest += 1
+            elif ch == ")" or ch == "]" or ch == "}":
+                nest -= 1
+            elif ch == "," and nest == 0:
+                comma_count += 1
+
+        # comma_count of N means N+1 arguments.  Qt5 limit is 9 args → 8 commas.
+        if comma_count < 9:
+            continue
+
+        # Find the source line number for this call.
+        line_num = text[: m.start()].count("\n") + 1
+
+        findings.append(
+            (
+                line_num,
+                f"QString::arg() call with {comma_count + 1} arguments exceeds "
+                f"Qt5's 9-value limit. Split into multiple .arg() calls or "
+                f"use separate template strings to stay within the limit. "
+                f"(PR #28: issuereporter.cpp AppImage build failure.)",
+            )
+        )
+
+    return findings
+
+
 def _check_hardcoded_text_viewport_row_assertion(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag text viewport height assertions that assume fixed font metrics.
 
@@ -373,6 +440,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "hardcoded-text-viewport-row-assertion",
         "check": _check_hardcoded_text_viewport_row_assertion,
+    },
+    {
+        "name": "qt5-string-arg-limit",
+        "check": _check_qt5_arg_limit,
     },
 ]
 

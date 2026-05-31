@@ -44,8 +44,10 @@ static constexpr auto EnvironmentFooter
       "- **Build type:** %4\n"
       "- **OS:** %5 (%6 %7)\n"
       "- **Architecture:** %8\n"
-      "- **Concurrency:** %9\n"
-      "- **Qt:** %10, **TBB:** %11\n";
+      "- **Concurrency:** %9\n";
+
+// Qt/TBB versions appended separately to stay within Qt5's 9-arg limit for QString::arg
+static constexpr auto QtTbbFooter = "- **Qt:** %1, **TBB:** %2\n";
 
 // Bug report template (Help > Report Issue)
 static constexpr auto BugTemplate
@@ -160,8 +162,8 @@ void IssueReporter::reportIssue( IssueTemplate issueTemplate, const QString& inf
 
     body.append( QString( EnvironmentFooter )
                      .arg( version, buildDate, commit, buildType, os, kernelType, kernelVersion,
-                           arch, QString::number( concurrency ), qVersion(),
-                           TBB_runtime_version() ) );
+                           arch, QString::number( concurrency ) ) );
+    body.append( QString( QtTbbFooter ).arg( qVersion(), TBB_runtime_version() ) );
 
     // Construct URL with single-pass percent encoding.
     // QUrl::fromEncoded treats the input as already-encoded and won't re-encode,
