@@ -93,7 +93,9 @@ TEST_CASE( "FileWatcher::checkWatches returns immediately" )
     QElapsedTimer timer;
     timer.start();
     // checkWatches is a private slot; invoke it via the meta-object
-    QMetaObject::invokeMethod( &watcher, "checkWatches", Qt::DirectConnection );
+    const bool invoked
+        = QMetaObject::invokeMethod( &watcher, "checkWatches", Qt::DirectConnection );
+    REQUIRE( invoked );
     const auto elapsed = timer.elapsed();
 
     // checkWatches should return in well under 100ms —
