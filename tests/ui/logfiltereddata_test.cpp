@@ -974,10 +974,12 @@ SCENARIO( "max length includes context line lengths", "[logdata][context]" )
     {
         filtered_data->setContextLines( 0, 0 );
 
-        THEN( "maxLength is the match line length" )
+        THEN( "maxLength covers the source data max length" )
         {
-            // "MATCH_ln_3" has 10 chars, expanded with tab = 10
-            REQUIRE( filtered_data->getMaxLength() == LineLength( 10 ) );
+            // The file has a 200-char non-matching line, so sourceMax = 200.
+            // getMaxLength() must be >= sourceMax to ensure the horizontal
+            // scrollbar range covers every line in the file.
+            REQUIRE( filtered_data->getMaxLength() >= LineLength( 200 ) );
         }
     }
 
@@ -1002,11 +1004,12 @@ SCENARIO( "max length includes context line lengths", "[logdata][context]" )
     {
         filtered_data->setContextLines( 0, 1 );
 
-        THEN( "maxLength includes context after line" )
+        THEN( "maxLength covers the source data max length" )
         {
-            // Match at line 3, context after = line 4 (short)
-            // Max should still be 10
-            REQUIRE( filtered_data->getMaxLength() == LineLength( 10 ) );
+            // Match at line 3, context after = line 4 (short).
+            // Source max is 200 (line 2), so getMaxLength() must be >= 200
+            // to keep the horizontal scrollbar range sufficient.
+            REQUIRE( filtered_data->getMaxLength() >= LineLength( 200 ) );
         }
     }
 }
@@ -1543,4 +1546,91 @@ SCENARIO( "search generation is stable across updateSearch calls with same crite
     // (pattern) have not changed.
     const auto genAfterUpdate = filtered_data->currentSearchGeneration();
     REQUIRE( genAfterUpdate == genAfterSearch );
+}
+
+// ============================================================================
+// getMaxLength must not under-report — the horizontal scrollbar range in the
+// filtered view is derived from getMaxLength().  When the filtered view shows
+// matching lines that are shorter than non-matching, non-visible lines in the
+// source file, the horizontal scrollbar range is too small.  If any other
+// mechanism (marks, context lines, all-lines-visible fallback) later makes a
+// longer line visible, the stale scrollbar range can clip the content.
+//
+// The fix: LogFilteredData::doGetMaxLength() must fall back to the source
+// data's max length so the horizontal scrollbar always covers every line
+// that could become visible in the filtered subset.
+// ============================================================================
+SCENARIO( "getMaxLength covers source data max length for horizontal scrollbar", "[logdata][maxlength]" )
+{
+    // Create a file with both short matching lines and a long non-matching line.
+    // The long non-matching line drives sourceMax higher than the filtered max.
+    QTemporaryFile file{
+        makeTempFileTemplate( QLatin1String( "maxlen_hscroll_test_XXXXXX" ) ) };
+
+    REQUIRE( file.open() );
+
+    // Line 0: short matching line (10 chars)
+    file.write( "MATCH_0000\n" );
+    // Line 1: very long NON-matching line (500 chars)
+    QByteArray longLine( 500, 'Z' );
+    file.write( "SKIP__" );
+    file.write( longLine );
+    file.write( "\n" );
+    // Line 2: short matching line (10 chars)
+    file.write( "MATCH_0002\n" );
+    file.flush();
+
+    LogData logData;
+    SafeQSignalSpy loadSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    logData.attachFile( file.fileName() );
+    REQUIRE( loadSpy.safeWait( 10000 ) );
+    REQUIRE( logData.getNbLine() == 3_lcount );
+
+    const auto sourceMax = logData.getMaxLength();
+    // The long non-matching line determines the source max (500+ chars)
+    REQUIRE( sourceMax.get() >= 500 );
+
+    auto filtered_data = makeTestFilteredData( logData );
+
+    auto& config = Configuration::getSynced();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+    configureProductLikeRegexpEngine( config );
+
+    SafeQSignalSpy searchProgressSpy{ filtered_data.get(),
+                                      &LogFilteredData::searchProgressed };
+
+    GIVEN( "a search that matches only short lines" )
+    {
+        runSearch( filtered_data.get(), "MATCH", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 2_lcount );
+
+        THEN( "getMaxLength is at least the source data's max length" )
+        {
+            const auto filteredMax = filtered_data->getMaxLength();
+
+            INFO( "filteredMax: " << filteredMax.get()
+                  << ", sourceMax: " << sourceMax.get() );
+            // This must hold so the horizontal scrollbar can reach the end
+            // of every line that is (or could become) visible.
+            REQUIRE( filteredMax >= sourceMax );
+        }
+    }
+
+    GIVEN( "a search with context lines enabled" )
+    {
+        filtered_data->setContextLines( 1, 1 );
+
+        runSearch( filtered_data.get(), "MATCH_0000", searchProgressSpy );
+        REQUIRE( filtered_data->getNbMatches() == 1_lcount );
+
+        THEN( "getMaxLength with context is at least the source data's max length" )
+        {
+            const auto filteredMax = filtered_data->getMaxLength();
+
+            INFO( "filteredMax: " << filteredMax.get()
+                  << ", sourceMax: " << sourceMax.get() );
+            REQUIRE( filteredMax >= sourceMax );
+        }
+    }
 }

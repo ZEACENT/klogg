@@ -933,6 +933,16 @@ LineLength LogFilteredData::doGetMaxLength() const
         }
         result = qMax( result, maxLengthContext_ );
     }
+
+    // Fall back to the source data's max length so the horizontal scrollbar
+    // range always covers every line in the file.  Without this the filtered
+    // view scrollbar range can be too small when matching lines are shorter
+    // than other lines that may become visible (e.g. through marks or
+    // context lines), causing log content to extend beyond the window even
+    // when scrolled to the far right.
+    if ( sourceLogData_ ) {
+        result = qMax( result, sourceLogData_->getMaxLength() );
+    }
     return result;
 }
 
