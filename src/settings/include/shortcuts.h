@@ -161,4 +161,10 @@ private:
     static QStringList defaultShortcutKeys( const std::string& action );
 };
 
+// Returns the platform-appropriate modifier string for application command
+// shortcuts: "Meta" on macOS (maps to Cmd/⌘), "Ctrl" on Windows/Linux.
+// Use this when building QKeySequence::PortableText shortcut strings for
+// actions that should use the platform's primary modifier key.
+QString commandShortcutModifier();
+
 #endif

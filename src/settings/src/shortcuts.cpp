@@ -25,6 +25,15 @@
 
 #include "shortcuts.h"
 
+QString commandShortcutModifier()
+{
+#ifdef Q_OS_MACOS
+    return QStringLiteral( "Meta" );
+#else
+    return QStringLiteral( "Ctrl" );
+#endif
+}
+
 QStringList getKeyBindings( QKeySequence::StandardKey standardKey )
 {
     auto bindings = QKeySequence::keyBindings( standardKey );
@@ -143,7 +152,7 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowSelectAll,
             {
                 QApplication::tr( "Select all" ),
-                QStringList{ "Ctrl+A" },
+                getKeyBindings( QKeySequence::SelectAll ),
             },
         },
         {
@@ -157,7 +166,7 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowQuit,
             {
                 QApplication::tr( "Exit application" ),
-                QStringList{ "Ctrl+Q" },
+                QStringList{ commandShortcutModifier() + "+Q" },
             },
         },
         {
@@ -213,7 +222,8 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowFocusSearchInput,
             {
                 QApplication::tr( "Set focus to search input" ),
-                QStringList{ { "Ctrl+S", "Ctrl+Shift+F" } },
+                QStringList{ { commandShortcutModifier() + "+S",
+                               commandShortcutModifier() + "+Shift+F" } },
             },
         },
         {
@@ -265,14 +275,14 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowDisconnectSource,
             {
                 QApplication::tr( "Disconnect live source" ),
-                QStringList{ "Ctrl+Shift+D" },
+                QStringList{ commandShortcutModifier() + "+Shift+D" },
             },
         },
         {
             MainWindowReconnectSource,
             {
                 QApplication::tr( "Reconnect live source" ),
-                QStringList{ "Ctrl+Shift+R" },
+                QStringList{ commandShortcutModifier() + "+Shift+R" },
             },
         },
         {
@@ -322,7 +332,7 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             MainWindowSelectOpenFile,
             {
                 QApplication::tr( "Switch to file" ),
-                QStringList{ "Ctrl+Shift+O" },
+                QStringList{ commandShortcutModifier() + "+Shift+O" },
             },
         },
         {
@@ -357,21 +367,21 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             CrawlerChangeVisibilityToMarksAndMatches,
             {
                 QApplication::tr( "Change filtered lines visibility to marks and matches" ),
-                QStringList{ "Ctrl+Shift+1" },
+                QStringList{ commandShortcutModifier() + "+Shift+1" },
             },
         },
         {
             CrawlerChangeVisibilityToMarks,
             {
                 QApplication::tr( "Change filtered lines visibility to marks" ),
-                QStringList{ "Ctrl+Shift+2" },
+                QStringList{ commandShortcutModifier() + "+Shift+2" },
             },
         },
         {
             CrawlerChangeVisibilityToMatches,
             {
                 QApplication::tr( "Change filtered lines visibility to matches" ),
-                QStringList{ "Ctrl+Shift+3" },
+                QStringList{ commandShortcutModifier() + "+Shift+3" },
             },
         },
         {
@@ -392,42 +402,42 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             CrawlerEnableCaseMatching,
             {
                 QApplication::tr( "Enable case matching" ),
-                QStringList{ "Ctrl+Shift+4" },
+                QStringList{ commandShortcutModifier() + "+Shift+4" },
             },
         },
         {
             CrawlerEnableRegex,
             {
                 QApplication::tr( "Enable regex" ),
-                QStringList{ "Ctrl+Shift+5" },
+                QStringList{ commandShortcutModifier() + "+Shift+5" },
             },
         },
         {
             CrawlerEnableInverseMatching,
             {
                 QApplication::tr( "Enable inverse matching" ),
-                QStringList{ "Ctrl+Shift+6" },
+                QStringList{ commandShortcutModifier() + "+Shift+6" },
             },
         },
         {
             CrawlerEnableRegexCombining,
             {
                 QApplication::tr( "Enable regex combining" ),
-                QStringList{ "Ctrl+Shift+7" },
+                QStringList{ commandShortcutModifier() + "+Shift+7" },
             },
         },
         {
             CrawlerEnableAutoRefresh,
             {
                 QApplication::tr( "Enable auto refresh" ),
-                QStringList{ "Ctrl+Shift+8" },
+                QStringList{ commandShortcutModifier() + "+Shift+8" },
             },
         },
         {
             CrawlerKeepResults,
             {
                 QApplication::tr( "Keep search results" ),
-                QStringList{ "Ctrl+Shift+9" },
+                QStringList{ commandShortcutModifier() + "+Shift+9" },
             },
         },
         // remove by commit 0b75b9d6
@@ -482,14 +492,14 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewScrollUp,
             {
                 QApplication::tr( "Scroll up" ),
-                QStringList{ "Ctrl+Up" },
+                QStringList{ "Alt+Up" },
             },
         },
         {
             LogViewScrollDown,
             {
                 QApplication::tr( "Scroll down" ),
-                QStringList{ "Ctrl+Down" },
+                QStringList{ "Alt+Down" },
             },
         },
         {
@@ -534,35 +544,35 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewJumpToBottom,
             {
                 QApplication::tr( "Jump to the bottom of the text" ),
-                QStringList{ { "Ctrl+End", "Shift+G" } },
+                QStringList{ { commandShortcutModifier() + "+End", "Shift+G" } },
             },
         },
         {
             LogViewJumpToTop,
             {
                 QApplication::tr( "Jump to the top of the text" ),
-                QStringList{ "Ctrl+Home" },
+                QStringList{ commandShortcutModifier() + "+Home" },
             },
         },
         {
             LogViewJumpToLine,
             {
                 QApplication::tr( "Jump to line" ),
-                QStringList{ "Ctrl+L" },
+                QStringList{ commandShortcutModifier() + "+L" },
             },
         },
         {
             LogViewQfForward,
             {
                 QApplication::tr( "Main view: find next" ),
-                uniqueKeyBindings( getKeyBindings( QKeySequence::FindNext ) << "Ctrl+G" ),
+                uniqueKeyBindings( getKeyBindings( QKeySequence::FindNext ) << commandShortcutModifier() + "+G" ),
             },
         },
         {
             LogViewQfBackward,
             { QApplication::tr( "Main view: find previous" ),
               uniqueKeyBindings( getKeyBindings( QKeySequence::FindPrevious ) << "Shift+N"
-                                                                               << "Ctrl+Shift+G" ) },
+                                                                               << commandShortcutModifier() + "+Shift+G" ) },
         },
         {
             LogViewQfSelectedForward,
@@ -652,28 +662,28 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewAddNextColorLabel,
             {
                 QApplication::tr( "Highlight text with next color" ),
-                QStringList{ "Ctrl+D" },
+                QStringList{ commandShortcutModifier() + "+D" },
             },
         },
         {
             LogViewClearColorLabels,
             {
                 QApplication::tr( "Clear all color labels" ),
-                QStringList{ "Ctrl+Shift+0" },
+                QStringList{ commandShortcutModifier() + "+Shift+0" },
             },
         },
         {
             LogViewSendSelectionToScratchpad,
             {
                 QApplication::tr( "Send selection to scratchpad" ),
-                QStringList{ "Ctrl+Z" },
+                QStringList{ commandShortcutModifier() + "+E" },
             },
         },
         {
             LogViewReplaceScratchpadWithSelection,
             {
                 QApplication::tr( "Replace scratchpad with selection" ),
-                QStringList{ "Ctrl+Shift+Z" },
+                QStringList{ commandShortcutModifier() + "+Shift+E" },
             },
         },
         {

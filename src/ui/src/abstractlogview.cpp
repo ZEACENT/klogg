@@ -1019,7 +1019,12 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         return;
     }
 
-    if ( wheelEvent->modifiers().testFlag( Qt::ControlModifier ) ) {
+#ifdef Q_OS_MACOS
+    constexpr auto FontSizeMod = Qt::MetaModifier;
+#else
+    constexpr auto FontSizeMod = Qt::ControlModifier;
+#endif
+    if ( wheelEvent->modifiers().testFlag( FontSizeMod ) ) {
         Q_EMIT changeFontSize( yDelta > 0 );
         return;
     }

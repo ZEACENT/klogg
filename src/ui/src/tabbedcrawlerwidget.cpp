@@ -907,30 +907,46 @@ void TabbedCrawlerWidget::keyPressEvent( QKeyEvent* event )
 
     LOG_DEBUG << "TabbedCrawlerWidget::keyPressEvent";
 
-    // Ctrl + page down
+#ifdef Q_OS_MACOS
+    constexpr auto PrimaryMod = Qt::MetaModifier;
+#else
+    constexpr auto PrimaryMod = Qt::ControlModifier;
+#endif
+
+    // Ctrl + page down (tab cycling keeps Ctrl on all platforms —
+    // Cmd+Tab is reserved for the system app switcher on macOS)
     if ( ( mod == Qt::ControlModifier && key == Qt::Key_PageDown )
          || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
               && key == Qt::Key_Right ) ) {
         selectNextTab();
+        event->accept();
     }
     // Ctrl + page up
     else if ( ( mod == Qt::ControlModifier && key == Qt::Key_PageUp )
               || ( mod == ( Qt::ControlModifier | Qt::AltModifier | Qt::KeypadModifier )
                    && key == Qt::Key_Left ) ) {
         selectPreviousTab();
+        event->accept();
     }
-    // Ctrl + numbers
-    else if ( mod == Qt::ControlModifier && ( key >= Qt::Key_1 && key <= Qt::Key_8 ) ) {
+    // Primary modifier + numbers: jump to tab N (Cmd+1..9 on macOS, Ctrl+1..9 elsewhere)
+    else if ( ( mod == PrimaryMod || mod == Qt::ControlModifier )
+              && ( key >= Qt::Key_1 && key <= Qt::Key_8 ) ) {
         int newIndex = key - Qt::Key_0;
         if ( newIndex <= count() )
             setCurrentIndex( newIndex - 1 );
+        event->accept();
     }
-    // Ctrl + 9
-    else if ( mod == Qt::ControlModifier && key == Qt::Key_9 ) {
+    // Primary modifier + 9: jump to last tab
+    else if ( ( mod == PrimaryMod || mod == Qt::ControlModifier )
+              && key == Qt::Key_9 ) {
         setCurrentIndex( count() - 1 );
+        event->accept();
     }
     else if ( mod == Qt::ControlModifier && ( key == Qt::Key_Q || key == Qt::Key_W ) ) {
+        // Ctrl+Q/W closes tab on all platforms (physical Ctrl only —
+        // Cmd+Q is reserved for Quit, Cmd+W is handled by CloseFile shortcut)
         Q_EMIT tabCloseRequested( currentIndex() );
+        event->accept();
     }
     else {
         QTabWidget::keyPressEvent( event );
