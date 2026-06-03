@@ -641,7 +641,7 @@ class Configuration final : public Persistable<Configuration> {
 
   private:
     // Configuration settings
-    mutable QFont mainFont_ = { "DejaVu Sans Mono", 12 };
+    mutable QFont mainFont_ = { "DejaVu Sans Mono", 13 };
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
     SearchRegexpType quickfindRegexpType_ = SearchRegexpType::ExtendedRegexp;
     bool quickfindIncremental_ = true;
@@ -699,10 +699,10 @@ class Configuration final : public Persistable<Configuration> {
     bool verifySslPeers_ = true;
     QString adbExecutable_;
     QString adbLogcatExtraArgs_;
-    bool adbLogcatAnsiOutputEnabled_ = false;
+    bool adbLogcatAnsiOutputEnabled_ = true;
     QString iosLogExecutable_;
     QString iosLogExtraArgs_;
-    bool iosLogAnsiOutputEnabled_ = false;
+    bool iosLogAnsiOutputEnabled_ = true;
 
     bool forceFontAntialiasing_ = false;
     bool enableQtHighDpi_ = true;
@@ -724,7 +724,7 @@ class Configuration final : public Persistable<Configuration> {
     bool optimizeForNotLatinEncodings_ = false;
 
     bool hideAnsiColorSequences_ = false;
-    bool renderAnsiColorSequences_ = false;
+    bool renderAnsiColorSequences_ = true;
 
     int defaultEncodingMib_ = 106; // UTF-8
 
