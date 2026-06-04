@@ -47,7 +47,9 @@ TabbedScratchPad::TabbedScratchPad( QWidget* parent )
 
     connect( addTabButton.get(), &QToolButton::clicked, [ this ]( auto ) { addTab(); } );
 
-    tabWidget_->addTab( new QLabel( "You can add tabs by pressing <b>\"+\"</b> or Ctrl+N" ),
+    const auto newTabShortcut = QKeySequence( QKeySequence::New ).toString( QKeySequence::NativeText );
+    tabWidget_->addTab( new QLabel( QStringLiteral( "You can add tabs by pressing <b>\"+\"</b> or %1" )
+                                        .arg( newTabShortcut ) ),
                         QString() );
     tabWidget_->setTabEnabled( 0, false );
 

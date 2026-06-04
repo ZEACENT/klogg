@@ -26,6 +26,7 @@
 #include <QJsonDocument>
 
 #include <QMenu>
+#include <QMenuBar>
 #include <QSignalSpy>
 #include <QTabBar>
 #include <QTemporaryDir>
@@ -217,11 +218,19 @@ SCENARIO( "Main window tests", "[ui]" )
             QStringLiteral( "closeAction" ) );
         REQUIRE( closeAction != nullptr );
 
+        // Find exitAction: it's the last action in the File menu (first menu in menu bar)
+        auto* fileMenu = mainWindow->menuBar()->actions().constFirst()->menu();
+        REQUIRE( fileMenu != nullptr );
+        const auto fileActions = fileMenu->actions();
+        REQUIRE_FALSE( fileActions.isEmpty() );
+        auto* exitAction = fileActions.constLast();
+        REQUIRE( exitAction != nullptr );
+
         WHEN( "Exit hotkey pressed" )
         {
-            runInUiThread( [&mainWindow] {
+            runInUiThread( [ exitAction ] {
                 LOG_INFO << "ExitFromMainMenu";
-                QTest::keyPress( mainWindow.get(), Qt::Key_Q, Qt::ControlModifier );
+                exitAction->trigger();
             } );
 
             THEN( "Exit signalled" )

@@ -65,19 +65,25 @@ runs:
       if: "startsWith(matrix.config.qt_version, '5')"
       shell: sh
       run: |
+        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
+        test -n "${KLOGG_QT_DIR}" || { echo "::error::KLOGG_QT_DIR is not set"; exit 1; }
+        test -d "${KLOGG_QT_DIR}" || { echo "::error::KLOGG_QT_DIR does not exist: ${KLOGG_QT_DIR}"; exit 1; }
+        test -f "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" || { echo "::error::macdeployqtfix.py not found at ${KLOGG_BUILD_ROOT}/macdeployqtfix.py"; exit 1; }
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
-        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $KLOGG_QT_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_BUILD_ROOT}/output/klogg.app/Contents/MacOS/klogg" "${KLOGG_QT_DIR}" || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
 
     - name: Mac deploy Qt fixing
       if: "startsWith(matrix.config.qt_version, '6')"
       shell: sh
       run: |
+        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
+        test -n "${KLOGG_QT_DIR}" || { echo "::error::KLOGG_QT_DIR is not set"; exit 1; }
+        test -d "${KLOGG_QT_DIR}" || { echo "::error::KLOGG_QT_DIR does not exist: ${KLOGG_QT_DIR}"; exit 1; }
+        test -f "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" || { echo "::error::macdeployqtfix.py not found at ${KLOGG_BUILD_ROOT}/macdeployqtfix.py"; exit 1; }
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        # KLOGG_QT_DIR is set by prepare-workspace-env from QT_ROOT_DIR (install-qt-action)
-        python3 $KLOGG_BUILD_ROOT/macdeployqtfix.py $KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg $KLOGG_QT_DIR || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_BUILD_ROOT}/output/klogg.app/Contents/MacOS/klogg" "${KLOGG_QT_DIR}" || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
     
     - name: Set packaging env
       shell: sh
