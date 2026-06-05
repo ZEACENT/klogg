@@ -330,3 +330,233 @@ TEST_CASE( "MatcherCache evicts stale matchers when prior expression expires",
     REQUIRE( m2->hasMatch( std::string_view{ "WARN: low mem" } ) );
     REQUIRE_FALSE( m2->hasMatch( std::string_view{ "ERROR: crash" } ) );
 }
+
+// --- Lookahead / Lookbehind assertion tests ---
+
+// Helper struct to hold a regex test case.
+struct AssertionTestCase {
+    std::string description;
+    QString pattern;
+    std::string testLine;
+    bool shouldMatch;
+};
+
+// Test lookahead and lookbehind with the given regex engine.
+static void runAssertionTests( RegexpEngine engine )
+{
+    ScopedRegexpEngine scoped( engine );
+
+    const std::string logLine1
+        = "2026-06-06 00:10:09.238613 familycircled{Network}[3078] <DEBUG>: endpoint "
+          "<private> has associations";
+
+    // Patterns where lookbehind/lookahead are expected to work correctly.
+    const std::vector<AssertionTestCase> cases = {
+        // --- Positive lookbehind ---
+        {
+            "positive lookbehind: 'associations' immediately after 'has ' → match",
+            QStringLiteral( "(?<=has )associations" ),
+            logLine1,
+            true,
+        },
+        {
+            "positive lookbehind: 'associations' NOT immediately after 'familycircled' → no match",
+            QStringLiteral( "(?<=familycircled)associations" ),
+            logLine1,
+            false,
+        },
+        // --- Negative lookbehind ---
+        {
+            "negative lookbehind: 'associations' NOT preceded by 'missed' → match",
+            QStringLiteral( "(?<!missed )associations" ),
+            logLine1,
+            true,
+        },
+        {
+            "negative lookbehind: 'associations' IS preceded by 'has ' → no match",
+            QStringLiteral( "(?<!has )associations" ),
+            logLine1,
+            false,
+        },
+        // --- Positive lookahead ---
+        {
+            "positive lookahead: 'has' followed by ' associations' → match",
+            QStringLiteral( "has(?= associations)" ),
+            logLine1,
+            true,
+        },
+        {
+            "positive lookahead: 'has' NOT followed by ' nothing' → no match",
+            QStringLiteral( "has(?= nothing)" ),
+            logLine1,
+            false,
+        },
+        // --- Negative lookahead ---
+        {
+            "negative lookahead: 'has' NOT followed by ' nothing' → match",
+            QStringLiteral( "has(?! nothing)" ),
+            logLine1,
+            true,
+        },
+        {
+            "negative lookahead: 'has' IS followed by ' associations' → no match",
+            QStringLiteral( "has(?! associations)" ),
+            logLine1,
+            false,
+        },
+        // --- Lookbehind on shorter simple string ---
+        {
+            "simple lookbehind on 'foo bar' → match",
+            QStringLiteral( "(?<=foo )bar" ),
+            "foo bar",
+            true,
+        },
+        {
+            "simple lookahead on 'foo bar' → match",
+            QStringLiteral( "foo(?= bar)" ),
+            "foo bar",
+            true,
+        },
+        // --- Pattern with only lookbehind and no trailing literal ---
+        {
+            "lookbehind with dot-star: 'endpoint' somewhere after 'familycircled' → match",
+            QStringLiteral( "(?<=familycircled).*endpoint" ),
+            logLine1,
+            true,
+        },
+    };
+
+    for ( const auto& tc : cases ) {
+        INFO( "Engine: " << static_cast<int>( engine ) << " — " << tc.description );
+        INFO( "Pattern: " << tc.pattern.toStdString() );
+        INFO( "Test line: " << tc.testLine );
+
+        RegularExpression expr(
+            RegularExpressionPattern( tc.pattern, true, false, false, false ) );
+        REQUIRE( expr.isValid() );
+
+        const auto matcher = expr.createMatcher();
+        if ( tc.shouldMatch ) {
+            REQUIRE( matcher->hasMatch( std::string_view{ tc.testLine } ) );
+        }
+        else {
+            REQUIRE_FALSE( matcher->hasMatch( std::string_view{ tc.testLine } ) );
+        }
+    }
+}
+
+TEST_CASE( "Lookahead and lookbehind assertions with Vectorscan engine",
+           "[patternmatcher][lookaround]" )
+{
+    // Only meaningful when Vectorscan is available; otherwise the ScopedRegexpEngine
+    // silently stays on Qt and we still test the QRegularExpression path.
+    runAssertionTests( RegexpEngine::Vectorscan );
+}
+
+TEST_CASE( "Lookahead and lookbehind assertions with Qt engine",
+           "[patternmatcher][lookaround]" )
+{
+    runAssertionTests( RegexpEngine::QRegularExpression );
+}
+
+// Verify the exact user-reported scenario with explicit annotation.
+TEST_CASE( "User-reported lookbehind scenario", "[patternmatcher][lookaround]" )
+{
+    // Configure the product-like engine (Vectorscan when available).
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+
+    const std::string logLine
+        = "2026-06-06 00:10:09.238613 familycircled{Network}[3078] <DEBUG>: endpoint "
+          "<private> has associations";
+
+    SECTION( "Pattern that should match: (?<=has )associations" )
+    {
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "(?<=has )associations" ), true, false, false, false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ logLine } ) );
+    }
+
+    SECTION( "Pattern that should NOT match: (?<=familycircled)associations" )
+    {
+        // (?<=familycircled)associations means: match "associations" only when
+        // IMMEDIATELY preceded by "familycircled".  In the log line above,
+        // "associations" is preceded by "has ", NOT by "familycircled".
+        // Therefore this correctly does NOT match.
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "(?<=familycircled)associations" ), true, false, false, false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE_FALSE( matcher->hasMatch( std::string_view{ logLine } ) );
+    }
+
+    SECTION( "Pattern familycircled.*associations matches (no lookbehind)" )
+    {
+        // If the user wants to find lines containing "familycircled" followed
+        // (anywhere) by "associations", a simple .* pattern works:
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "familycircled.*associations" ), true, false, false, false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ logLine } ) );
+    }
+
+    SECTION( "Variable-length lookbehind: (?<=familycircled.*)associations — KNOWN LIMITATION" )
+    {
+        // Variable-length lookbehind: asserts that "familycircled" appears
+        // somewhere before "associations" in the same line. The match itself
+        // is only "associations" — "familycircled" and the characters in
+        // between are NOT part of the match.
+        //
+        // BUG: QRegularExpression rejects .* (or any variable-length quantifier)
+        // inside a lookbehind assertion.  The pattern is marked invalid and
+        // the expression will never match.
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "(?<=familycircled.*)associations" ), true, false, false, false ) );
+        // QRegularExpression considers this pattern INVALID.
+        REQUIRE_FALSE( expr.isValid() );
+    }
+
+    SECTION( "\\K reset: familycircled.*\\Kassociations — match only 'associations'" )
+    {
+        // \K resets the match start after "familycircled.*" has been consumed.
+        // The match text is only "associations".
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "familycircled.*\\Kassociations" ), true, false, false, false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ logLine } ) );
+
+        // Also verify with QRegularExpression directly to check match position.
+        QRegularExpression re( QStringLiteral( "familycircled.*\\Kassociations" ),
+                               QRegularExpression::UseUnicodePropertiesOption );
+        REQUIRE( re.isValid() );
+        auto match = re.match( QString::fromStdString( logLine ) );
+        REQUIRE( match.hasMatch() );
+        REQUIRE( match.captured() == QStringLiteral( "associations" ) );
+    }
+
+    SECTION( "Lookahead anchor: ^(?=.*familycircled).*?\\Kassociations" )
+    {
+        // Anchored at start, lookahead asserts "familycircled" exists,
+        // then consume to "associations" and \K reset.
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "^(?=.*familycircled).*?\\Kassociations" ), true, false, false,
+            false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ logLine } ) );
+    }
+
+    SECTION( "Boolean filter: \"familycircled\" & \"associations\"" )
+    {
+        // klogg's boolean filter syntax keeps the two patterns independent.
+        RegularExpression expr( RegularExpressionPattern(
+            QStringLiteral( "\"familycircled\" & \"associations\"" ), true, false, true, false ) );
+        REQUIRE( expr.isValid() );
+        const auto matcher = expr.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ logLine } ) );
+    }
+}

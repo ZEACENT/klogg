@@ -402,7 +402,13 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         }
     }
 
-    if ( !isHsValid() ) {
+    // When Vectorscan compilation fails entirely, or when it succeeds only in
+    // prefilter mode, we must validate patterns against QRegularExpression.
+    // The prefilter matcher (HsPrefilterMatcher) uses QRegularExpression to
+    // confirm Vectorscan's approximate matches — if QRegularExpression rejects
+    // the pattern, every confirmation fails silently and the expression never
+    // matches, even though isHsValid() reports true.
+    if ( !isHsValid() || isPrefilter_ ) {
         for ( const auto& pattern : patterns_ ) {
             const auto regex = static_cast<QRegularExpression>( pattern );
             if ( !regex.isValid() ) {
