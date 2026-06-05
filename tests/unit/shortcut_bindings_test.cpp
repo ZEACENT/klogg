@@ -215,6 +215,19 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
     }
 }
 
+TEST_CASE( "commandShortcutModifier: returns platform-appropriate modifier for command shortcuts" )
+{
+    // On macOS Qt maps "Meta" in QKeySequence strings to ⌘ Command so
+    // that application shortcuts follow the macOS HIG convention of using
+    // Command as the primary modifier. "Ctrl" maps to physical Control.
+    // On other platforms "Ctrl" is the expected primary modifier.
+#ifdef Q_OS_MACOS
+    REQUIRE( commandShortcutModifier() == QStringLiteral( "Meta" ) );
+#else
+    REQUIRE( commandShortcutModifier() == QStringLiteral( "Ctrl" ) );
+#endif
+}
+
 TEST_CASE( "Shortcut bindings: editable defaults have no duplicate displayed keys" )
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();
