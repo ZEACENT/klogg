@@ -1900,6 +1900,10 @@ void CrawlerWidget::registerShortcuts()
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
+        ShortcutAction::LogViewRemoveColorLabel, [ this ]() { removeColorLabelFromSelection(); } );
+
+    ShortcutAction::registerShortcut(
+        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
         ShortcutAction::LogViewClearColorLabels, [ this ]() { clearColorLabels(); } );
 
     logMainView_->registerShortcuts();

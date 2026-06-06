@@ -666,6 +666,13 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
         {
+            LogViewRemoveColorLabel,
+            {
+                QApplication::tr( "Remove color label from selection" ),
+                QStringList{ QKeySequence( Qt::Key_0 ).toString() },
+            },
+        },
+        {
             LogViewClearColorLabels,
             {
                 QApplication::tr( "Clear all color labels" ),

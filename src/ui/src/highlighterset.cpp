@@ -611,7 +611,7 @@ void HighlighterSetCollection::retrieveFromStorage( QSettings& settings )
             quickHighlighterDefaults_.ignoreCase
                 = settings.value( "ignore_case", false ).toBool();
             quickHighlighterDefaults_.wholeWord
-                = settings.value( "whole_word", true ).toBool();
+                = settings.value( "whole_word", false ).toBool();
             settings.endGroup();
         }
         else {

@@ -85,6 +85,13 @@ TEST_CASE( "Shortcut bindings: color labels use plain digit keys 1-9" )
             REQUIRE( it->second.keySequence.contains( expectedKey ) );
         }
     }
+
+    SECTION( "Remove color label (None) is bound to plain digit key 0" )
+    {
+        auto it = shortcuts.find( ShortcutAction::LogViewRemoveColorLabel );
+        REQUIRE( it != shortcuts.end() );
+        REQUIRE( it->second.keySequence.contains( QKeySequence( Qt::Key_0 ).toString() ) );
+    }
 }
 
 TEST_CASE( "Shortcut bindings: crawler visibility and filter options use Ctrl+Shift+digit" )
@@ -186,7 +193,7 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
     }
 
     // Check that the swapped keys don't have conflicts
-    QStringList keysToCheck = { "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    QStringList keysToCheck = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
                                 commandShortcutModifier() + "+Shift+1",
                                 commandShortcutModifier() + "+Shift+2",
                                 commandShortcutModifier() + "+Shift+3",

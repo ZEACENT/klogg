@@ -118,6 +118,7 @@ struct ShortcutAction {
     static constexpr auto LogViewAddColorLabel8 = "logview.add_color_label_8";
     static constexpr auto LogViewAddColorLabel9 = "logview.add_color_label_9";
 
+    static constexpr auto LogViewRemoveColorLabel = "logview.remove_color_label";
     static constexpr auto LogViewClearColorLabels = "logview.clear_color_labels";
     static constexpr auto LogViewAddNextColorLabel = "logview.add_next_color_label";
 

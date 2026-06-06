@@ -116,7 +116,7 @@ SCENARIO( "quick color label defaults persist in highlighter settings", "[colorl
         {
             const auto defaults = loadedCollection.quickHighlighterDefaults();
             CHECK_FALSE( defaults.ignoreCase );
-            CHECK( defaults.wholeWord );
+            CHECK_FALSE( defaults.wholeWord );
         }
     }
 }

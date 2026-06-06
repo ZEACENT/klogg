@@ -175,12 +175,12 @@ struct QuickHighlighter {
 struct QuickLabelEntry {
     QString text;
     bool ignoreCase = false;
-    bool wholeWord = true;
+    bool wholeWord = false;
 };
 
 struct QuickHighlighterDefaults {
     bool ignoreCase = false;
-    bool wholeWord = true;
+    bool wholeWord = false;
 };
 
 class HighlighterSetCollection final : public Persistable<HighlighterSetCollection> {
