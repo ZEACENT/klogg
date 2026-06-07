@@ -225,7 +225,7 @@ void VersionChecker::forceCheck()
 
     if ( !appConfig.versionCheckingEnabled() ) {
         LOG_DEBUG << "Version checking is disabled";
-        Q_EMIT checkCompleted( false );
+        Q_EMIT checkCompleted( false, true );
         return;
     }
 
@@ -268,12 +268,12 @@ void VersionChecker::processResponse( QByteArray data, bool hadError, bool wasMa
         const bool foundNewer = checkVersionData( data );
 
         if ( !foundNewer && wasManual ) {
-            Q_EMIT checkCompleted( false );
+            Q_EMIT checkCompleted( false, false );
         }
     }
     else {
         if ( wasManual ) {
-            Q_EMIT checkCompleted( false );
+            Q_EMIT checkCompleted( false, true );
         }
     }
 

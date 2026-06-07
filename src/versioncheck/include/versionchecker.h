@@ -114,8 +114,10 @@ class VersionChecker : public QObject {
     void newVersionFound( const QString& version, const QString& url,
                           const QString& downloadUrl, const QStringList& changes );
 
-    // Check completed without finding a new version
-    void checkCompleted( bool newVersionFound );
+    // Check completed without finding a new version.
+    // hadError is true when the network request failed or version checking
+    // is disabled, so callers can distinguish "no update" from "check failed".
+    void checkCompleted( bool newVersionFound, bool hadError = false );
 
   private:
     // Called on the main thread after the background network request completes

@@ -108,11 +108,19 @@ class KloggApp : public QApplication {
 
             // Manual check completed without finding a new version
             connect( &versionChecker_, &VersionChecker::checkCompleted,
-                     []( bool newVersionFound ) {
+                     []( bool newVersionFound, bool hadError ) {
                          Q_UNUSED( newVersionFound );
                          QMessageBox msgBox;
-                         msgBox.setText(
-                             QStringLiteral( "You are using the latest version of klogg." ) );
+                         if ( hadError ) {
+                             msgBox.setIcon( QMessageBox::Warning );
+                             msgBox.setText( tr(
+                                 "Unable to check for updates.\n"
+                                 "Please verify your internet connection." ) );
+                         }
+                         else {
+                             msgBox.setText(
+                                 tr( "You are using the latest version of klogg." ) );
+                         }
                          msgBox.exec();
                      } );
         }
@@ -314,30 +322,30 @@ class KloggApp : public QApplication {
         LOG_DEBUG << "newVersionNotification( " << new_version << " from " << url
                   << ", download: " << downloadUrl << " )";
 
-        QString message = QString( "<p>A new version of klogg (%1) is available for download.</p>"
-                                   "<p><a href=\"%2\">%2</a></p>" )
+        QString message = tr( "<p>A new version of klogg (%1) is available for download.</p>"
+                              "<p><a href=\"%2\">%2</a></p>" )
                               .arg( new_version, url );
 
         if ( !changes.empty() ) {
-            message.append( "<p>Important changes:</p><ul>" );
+            message.append( tr( "<p>Important changes:</p><ul>" ) );
             for ( const auto& change : changes ) {
-                message.append( QString( "<li>%1</li>" ).arg( change ) );
+                message.append( tr( "<li>%1</li>" ).arg( change ) );
             }
-            message.append( "</ul>" );
+            message.append( QStringLiteral( "</ul>" ) );
         }
 
         QMessageBox msgBox;
-        msgBox.setWindowTitle( QStringLiteral( "New Version Available" ) );
+        msgBox.setWindowTitle( tr( "New Version Available" ) );
         msgBox.setText( message );
         msgBox.setTextFormat( Qt::RichText );
         msgBox.setIcon( QMessageBox::Information );
 
         QPushButton* downloadButton
-            = msgBox.addButton( QStringLiteral( "Download" ), QMessageBox::AcceptRole );
+            = msgBox.addButton( tr( "Download" ), QMessageBox::AcceptRole );
         QPushButton* remindButton
-            = msgBox.addButton( QStringLiteral( "Remind Later" ), QMessageBox::RejectRole );
+            = msgBox.addButton( tr( "Remind Later" ), QMessageBox::RejectRole );
         QPushButton* skipButton
-            = msgBox.addButton( QStringLiteral( "Skip This Version" ),
+            = msgBox.addButton( tr( "Skip This Version" ),
                                 QMessageBox::DestructiveRole );
 
         msgBox.setDefaultButton( downloadButton );
@@ -376,23 +384,22 @@ class KloggApp : public QApplication {
         const auto urlFileName = QUrl( downloadUrl ).fileName();
         const auto localPath = downloadsPath + QDir::separator() + urlFileName;
 
+        // outputFile is shared with the completion lambda so it stays alive
+        // until the download finishes (no cycle — QFile is not a QObject).
         auto outputFile = std::make_shared<QFile>( localPath );
         if ( !outputFile->open( QIODevice::WriteOnly ) ) {
             LOG_ERROR << "Cannot open file for writing: " << localPath;
-            QMessageBox::warning( nullptr, QStringLiteral( "Download Failed" ),
-                                  QStringLiteral( "Could not create file:\n%1" ).arg( localPath ) );
+            QMessageBox::warning( nullptr, tr( "Download Failed" ),
+                                  tr( "Could not create file:\n%1" ).arg( localPath ) );
             return;
         }
 
-        auto downloader = std::make_shared<Downloader>();
-        std::weak_ptr<Downloader> weakDownloader = downloader;
+        // Use raw new + deleteLater to avoid the shared_ptr cycle that would
+        // leak, while keeping the Downloader alive for the async request.
+        auto* downloader = new Downloader();
 
-        QObject::connect( downloader.get(), &Downloader::finished,
-                          [ outputFile, weakDownloader, localPath ]( bool success ) {
-                              auto dl = weakDownloader.lock();
-                              if ( !dl ) {
-                                  return;
-                              }
+        QObject::connect( downloader, &Downloader::finished,
+                          [ outputFile, downloader, localPath ]( bool success ) {
                               outputFile->close();
                               if ( success ) {
                                   LOG_INFO << "Update downloaded to " << localPath;
@@ -400,13 +407,14 @@ class KloggApp : public QApplication {
                               }
                               else {
                                   LOG_ERROR << "Update download failed: "
-                                            << dl->lastError();
+                                            << downloader->lastError();
                                   QMessageBox::warning(
-                                      nullptr, QStringLiteral( "Download Failed" ),
-                                      QStringLiteral( "Failed to download update:\n%1" )
-                                          .arg( dl->lastError() ) );
+                                      nullptr, tr( "Download Failed" ),
+                                      tr( "Failed to download update:\n%1" )
+                                          .arg( downloader->lastError() ) );
                                   outputFile->remove();
                               }
+                              downloader->deleteLater();
                           } );
 
         downloader->download( QUrl( downloadUrl ), outputFile.get() );
