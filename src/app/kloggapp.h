@@ -32,11 +32,17 @@
 
 #include <QCborValue>
 
+#include <QDesktopServices>
 #include <QDir>
 #include <QFontDatabase>
 #include <QMessageBox>
 #include <QNetworkProxyFactory>
+#include <QPushButton>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QUuid>
+
+#include <memory>
 
 #ifdef Q_OS_MAC
 #include <QFileOpenEvent>
@@ -48,6 +54,7 @@
 
 #include "configuration.h"
 #include "crashhandler.h"
+#include "downloader.h"
 #include "klogg_version.h"
 #include "log.h"
 #include "session.h"
@@ -95,8 +102,8 @@ class KloggApp : public QApplication {
             // Version checker notification
             connect( &versionChecker_, &VersionChecker::newVersionFound,
                      [ this ]( const QString& new_version, const QString& url,
-                               const QStringList& changes ) {
-                         newVersionNotification( new_version, url, changes );
+                               const QString& downloadUrl, const QStringList& changes ) {
+                         newVersionNotification( new_version, url, downloadUrl, changes );
                      } );
 
             // Manual check completed without finding a new version
@@ -302,12 +309,13 @@ class KloggApp : public QApplication {
     }
 
     void newVersionNotification( const QString& new_version, const QString& url,
-                                 const QStringList& changes )
+                                 const QString& downloadUrl, const QStringList& changes )
     {
-        LOG_DEBUG << "newVersionNotification( " << new_version << " from " << url << " )";
+        LOG_DEBUG << "newVersionNotification( " << new_version << " from " << url
+                  << ", download: " << downloadUrl << " )";
 
-        QString message = QString( "<p> A new version of klogg (%1) is available for download </p>"
-                                   "<a href=\"%2\">%2</a>" )
+        QString message = QString( "<p>A new version of klogg (%1) is available for download.</p>"
+                                   "<p><a href=\"%2\">%2</a></p>" )
                               .arg( new_version, url );
 
         if ( !changes.empty() ) {
@@ -319,8 +327,86 @@ class KloggApp : public QApplication {
         }
 
         QMessageBox msgBox;
+        msgBox.setWindowTitle( QStringLiteral( "New Version Available" ) );
         msgBox.setText( message );
+        msgBox.setTextFormat( Qt::RichText );
+        msgBox.setIcon( QMessageBox::Information );
+
+        QPushButton* downloadButton
+            = msgBox.addButton( QStringLiteral( "Download" ), QMessageBox::AcceptRole );
+        QPushButton* remindButton
+            = msgBox.addButton( QStringLiteral( "Remind Later" ), QMessageBox::RejectRole );
+        Q_UNUSED( remindButton );
+        QPushButton* skipButton
+            = msgBox.addButton( QStringLiteral( "Skip This Version" ),
+                                QMessageBox::DestructiveRole );
+        Q_UNUSED( skipButton );
+
+        msgBox.setDefaultButton( downloadButton );
         msgBox.exec();
+
+        if ( msgBox.clickedButton() == downloadButton ) {
+            if ( !downloadUrl.isEmpty() ) {
+                downloadAndOpenUpdate( downloadUrl, new_version );
+            }
+            else {
+                // Fallback: open the release page in the browser
+                QDesktopServices::openUrl( QUrl( url ) );
+            }
+        }
+        else if ( msgBox.clickedButton() == remindButton ) {
+            // Set deadline to 1 day from now
+            auto& config = VersionCheckerConfig::get();
+            config.setNextDeadline( std::time( nullptr ) + 86400 ); // 24 hours
+            config.save();
+        }
+        else if ( msgBox.clickedButton() == skipButton ) {
+            // Store the version to ignore
+            auto& config = VersionCheckerConfig::get();
+            config.setIgnoredVersion( new_version );
+            config.save();
+        }
+    }
+
+    void downloadAndOpenUpdate( const QString& downloadUrl, const QString& version )
+    {
+        Q_UNUSED( version );
+        LOG_INFO << "Downloading update from " << downloadUrl;
+
+        const auto downloadsPath
+            = QStandardPaths::writableLocation( QStandardPaths::DownloadLocation );
+        const auto urlFileName = QUrl( downloadUrl ).fileName();
+        const auto localPath = downloadsPath + QDir::separator() + urlFileName;
+
+        auto outputFile = std::make_shared<QFile>( localPath );
+        if ( !outputFile->open( QIODevice::WriteOnly ) ) {
+            LOG_ERROR << "Cannot open file for writing: " << localPath;
+            QMessageBox::warning( nullptr, QStringLiteral( "Download Failed" ),
+                                  QStringLiteral( "Could not create file:\n%1" ).arg( localPath ) );
+            return;
+        }
+
+        auto downloader = std::make_shared<Downloader>();
+
+        QObject::connect( downloader.get(), &Downloader::finished,
+                          [ outputFile, downloader, localPath ]( bool success ) {
+                              outputFile->close();
+                              if ( success ) {
+                                  LOG_INFO << "Update downloaded to " << localPath;
+                                  QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
+                              }
+                              else {
+                                  LOG_ERROR << "Update download failed: "
+                                            << downloader->lastError();
+                                  QMessageBox::warning(
+                                      nullptr, QStringLiteral( "Download Failed" ),
+                                      QStringLiteral( "Failed to download update:\n%1" )
+                                          .arg( downloader->lastError() ) );
+                                  outputFile->remove();
+                              }
+                          } );
+
+        downloader->download( QUrl( downloadUrl ), outputFile.get() );
     }
 
     size_t nextWindowIndex() const

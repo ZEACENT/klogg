@@ -41,6 +41,15 @@
 #include "log.h"
 
 #include "klogg_version.h"
+#include "dispatch_to.h"
+
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSysInfo>
+#include <QUrl>
+#include <QtConcurrent>
 
 namespace {
 
@@ -70,6 +79,67 @@ bool isVersionNewer( const QString& current_version, const QString& new_version 
     return next > old;
 }
 
+QString selectAssetDownloadUrl( const QVariantList& assets )
+{
+    if ( assets.isEmpty() ) {
+        return {};
+    }
+
+    // Platform-specific extension(s)
+#if defined( Q_OS_MAC )
+    const QStringList platformExtensions{ QStringLiteral( ".dmg" ) };
+#elif defined( Q_OS_WIN )
+    const QStringList platformExtensions{ QStringLiteral( ".exe" ), QStringLiteral( ".msi" ) };
+#else
+    const QStringList platformExtensions{ QStringLiteral( ".AppImage" ), QStringLiteral( ".deb" ) };
+#endif
+
+    // Architecture aliases for the current CPU
+    const auto currentArch = QSysInfo::currentCpuArchitecture().toLower();
+    QStringList archAliases;
+    if ( currentArch == QStringLiteral( "arm64" ) || currentArch == QStringLiteral( "aarch64" ) ) {
+        archAliases = { QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
+    }
+    else if ( currentArch == QStringLiteral( "x86_64" )
+              || currentArch == QStringLiteral( "amd64" ) ) {
+        archAliases
+            = { QStringLiteral( "x86_64" ), QStringLiteral( "x64" ), QStringLiteral( "amd64" ) };
+    }
+    else {
+        archAliases = { currentArch };
+    }
+
+    auto assetMatchesExt = [ & ]( const QVariantMap& asset ) {
+        const auto name = asset.value( QStringLiteral( "name" ) ).toString().toLower();
+        return std::any_of( platformExtensions.begin(), platformExtensions.end(),
+                            [ & ]( const QString& ext ) { return name.endsWith( ext ); } );
+    };
+
+    // Pass 1: exact arch + platform match
+    for ( const auto& a : assets ) {
+        const auto assetMap = a.toMap();
+        if ( !assetMatchesExt( assetMap ) ) {
+            continue;
+        }
+        const auto name = assetMap.value( QStringLiteral( "name" ) ).toString().toLower();
+        for ( const auto& alias : archAliases ) {
+            if ( name.contains( alias ) ) {
+                return assetMap.value( QStringLiteral( "browser_download_url" ) ).toString();
+            }
+        }
+    }
+
+    // Pass 2: platform match only (fallback for un-arch'd assets)
+    for ( const auto& a : assets ) {
+        const auto assetMap = a.toMap();
+        if ( assetMatchesExt( assetMap ) ) {
+            return assetMap.value( QStringLiteral( "browser_download_url" ) ).toString();
+        }
+    }
+
+    return {};
+}
+
 } // namespace
 
 void VersionCheckerConfig::retrieveFromStorage( QSettings& settings )
@@ -78,6 +148,8 @@ void VersionCheckerConfig::retrieveFromStorage( QSettings& settings )
 
     if ( settings.contains( "VersionChecker/nextDeadline" ) )
         next_deadline_ = settings.value( "VersionChecker/nextDeadline" ).toLongLong();
+    if ( settings.contains( "VersionChecker/ignoredVersion" ) )
+        ignored_version_ = settings.value( "VersionChecker/ignoredVersion" ).toString();
 }
 
 void VersionCheckerConfig::saveToStorage( QSettings& settings ) const
@@ -85,13 +157,12 @@ void VersionCheckerConfig::saveToStorage( QSettings& settings ) const
     LOG_DEBUG << "VersionCheckerConfig::saveToStorage";
 
     settings.setValue( "VersionChecker/nextDeadline", static_cast<long long>( next_deadline_ ) );
+    settings.setValue( "VersionChecker/ignoredVersion", ignored_version_ );
 }
 
 VersionChecker::VersionChecker()
     : QObject()
-    , manager_( new QNetworkAccessManager( this ) )
 {
-    manager_->setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 }
 
 void VersionChecker::startCheck()
@@ -101,22 +172,44 @@ void VersionChecker::startCheck()
     const auto& deadlineConfig = VersionCheckerConfig::getSynced();
     const auto& appConfig = Configuration::get();
 
-    if ( appConfig.versionCheckingEnabled() ) {
-        // Check the deadline has been reached
-        if ( deadlineConfig.nextDeadline() < std::time( nullptr ) ) {
-            connect( manager_, &QNetworkAccessManager::finished, this,
-                     &VersionChecker::downloadFinished );
+    if ( !appConfig.versionCheckingEnabled() ) {
+        return;
+    }
 
-            LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
+    // Check the deadline has been reached
+    if ( deadlineConfig.nextDeadline() < std::time( nullptr ) ) {
+        LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
+
+        [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ this ] {
+            QNetworkAccessManager mgr;
+            mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 
             QNetworkRequest request;
             request.setUrl( QUrl( kReleaseApiUrl ) );
-            manager_->get( request );
-        }
-        else {
-            LOG_DEBUG << "Deadline not reached yet, next check in "
-                      << std::difftime( deadlineConfig.nextDeadline(), std::time( nullptr ) );
-        }
+
+            QNetworkReply* reply = mgr.get( request );
+
+            QEventLoop loop;
+            QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
+            loop.exec();
+
+            const bool hadError = ( reply->error() != QNetworkReply::NoError );
+            const QByteArray data = hadError ? QByteArray() : reply->readAll();
+
+            if ( hadError ) {
+                LOG_WARNING << "Version check download failed: err " << reply->error();
+            }
+
+            reply->deleteLater();
+
+            dispatchToMainThread( [ this, data, hadError ] {
+                processResponse( data, hadError, false );
+            } );
+        } );
+    }
+    else {
+        LOG_DEBUG << "Deadline not reached yet, next check in "
+                  << std::difftime( deadlineConfig.nextDeadline(), std::time( nullptr ) );
     }
 }
 
@@ -134,39 +227,50 @@ void VersionChecker::forceCheck()
 
     isManualCheck_ = true;
 
-    connect( manager_, &QNetworkAccessManager::finished, this,
-             &VersionChecker::downloadFinished );
+    [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ this ] {
+        QNetworkAccessManager mgr;
+        mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 
-    LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
+        QNetworkRequest request;
+        request.setUrl( QUrl( kReleaseApiUrl ) );
 
-    QNetworkRequest request;
-    request.setUrl( QUrl( kReleaseApiUrl ) );
-    manager_->get( request );
+        QNetworkReply* reply = mgr.get( request );
+
+        QEventLoop loop;
+        QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
+        loop.exec();
+
+        const bool hadError = ( reply->error() != QNetworkReply::NoError );
+        const QByteArray data = hadError ? QByteArray() : reply->readAll();
+
+        if ( hadError ) {
+            LOG_WARNING << "Version check download failed: err " << reply->error();
+        }
+
+        reply->deleteLater();
+
+        dispatchToMainThread( [ this, data, hadError ] {
+            processResponse( data, hadError, true );
+        } );
+    } );
 }
 
-void VersionChecker::downloadFinished( QNetworkReply* reply )
+void VersionChecker::processResponse( QByteArray data, bool hadError, bool wasManual )
 {
-    LOG_DEBUG << "VersionChecker::downloadFinished()";
+    LOG_DEBUG << "VersionChecker::processResponse()";
 
-    const bool wasManual = isManualCheck_;
-    isManualCheck_ = false;
-
-    if ( reply->error() == QNetworkReply::NoError ) {
-        const auto rawReply = reply->readAll();
-        const bool foundNewer = checkVersionData( rawReply );
+    if ( !hadError ) {
+        const bool foundNewer = checkVersionData( data );
 
         if ( !foundNewer && wasManual ) {
             Q_EMIT checkCompleted( false );
         }
     }
     else {
-        LOG_WARNING << "Download failed: err " << reply->error();
         if ( wasManual ) {
             Q_EMIT checkCompleted( false );
         }
     }
-
-    reply->deleteLater();
 
     // Extend the deadline
     auto& config = VersionCheckerConfig::get();
@@ -192,7 +296,19 @@ bool VersionChecker::checkVersionData( QByteArray versionData )
     const auto url = releaseMap.value( "html_url" ).toString();
     const auto changelogBody = releaseMap.value( "body" ).toString();
 
+    // Parse assets for the platform + architecture matched download URL
+    const auto assetsList = releaseMap.value( "assets" ).toList();
+    const auto downloadUrl = selectAssetDownloadUrl( assetsList );
+
     const auto currentVersion = kloggVersion();
+
+    // Check if this version has been explicitly ignored
+    const auto& deadlineConfig = VersionCheckerConfig::getSynced();
+    if ( !deadlineConfig.ignoredVersion().isEmpty()
+         && latestVersion == deadlineConfig.ignoredVersion() ) {
+        LOG_DEBUG << "Version " << latestVersion << " is ignored, skipping notification";
+        return false;
+    }
 
     // Use the release body as a single changelog entry
     QStringList changes;
@@ -205,7 +321,7 @@ bool VersionChecker::checkVersionData( QByteArray versionData )
     if ( isVersionNewer( currentVersion, latestVersion ) ) {
         LOG_INFO << "Sending new version notification";
 
-        Q_EMIT newVersionFound( latestVersion, url, changes );
+        Q_EMIT newVersionFound( latestVersion, url, downloadUrl, changes );
         return true;
     }
     return false;

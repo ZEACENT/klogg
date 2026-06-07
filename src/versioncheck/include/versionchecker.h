@@ -41,8 +41,10 @@
 
 #include <ctime>
 
+#include <QByteArray>
 #include <QObject>
-#include <QtNetwork>
+#include <QString>
+#include <QStringList>
 
 #include "persistable.h"
 
@@ -63,12 +65,22 @@ class VersionCheckerConfig final : public Persistable<VersionCheckerConfig, sess
         next_deadline_ = deadline;
     }
 
+    QString ignoredVersion() const
+    {
+        return ignored_version_;
+    }
+    void setIgnoredVersion( const QString& version )
+    {
+        ignored_version_ = version;
+    }
+
     // Reads/writes the current config in the QSettings object passed
     void saveToStorage( QSettings& settings ) const;
     void retrieveFromStorage( QSettings& settings );
 
   private:
     std::time_t next_deadline_ = {};
+    QString ignored_version_;
 };
 
 // This class compares the current version number with the latest
@@ -96,18 +108,18 @@ class VersionChecker : public QObject {
     bool checkVersionData( QByteArray versionData );
 
   Q_SIGNALS:
-    // New version "version" is available
-    void newVersionFound( const QString& version, const QString& url, const QStringList& changes );
+    // New version "version" is available, with downloadUrl pointing to the
+    // platform + architecture matched asset (empty if no matching asset found).
+    void newVersionFound( const QString& version, const QString& url,
+                          const QString& downloadUrl, const QStringList& changes );
 
     // Check completed without finding a new version
     void checkCompleted( bool newVersionFound );
 
-  private Q_SLOTS:
-    // Called when download is finished
-    void downloadFinished( QNetworkReply* );
-
   private:
-    QNetworkAccessManager* manager_ = nullptr;
+    // Called on the main thread after the background network request completes
+    void processResponse( QByteArray data, bool hadError, bool wasManual );
+
     bool isManualCheck_ = false;
 };
 
