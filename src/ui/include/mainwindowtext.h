@@ -80,6 +80,8 @@ extern const char* reportIssueText;
 extern const char* reportIssueStatusTip;
 extern const char* generateDumpText;
 extern const char* generateDumpStatusTip;
+extern const char* checkForNewVersionText;
+extern const char* checkForNewVersionStatusTip;
 extern const char* showScratchPadText;
 extern const char* showScratchPadStatusTip;
 extern const char* addToFavoritesText;

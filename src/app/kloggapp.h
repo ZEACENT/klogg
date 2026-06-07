@@ -98,6 +98,16 @@ class KloggApp : public QApplication {
                                const QStringList& changes ) {
                          newVersionNotification( new_version, url, changes );
                      } );
+
+            // Manual check completed without finding a new version
+            connect( &versionChecker_, &VersionChecker::checkCompleted,
+                     []( bool newVersionFound ) {
+                         Q_UNUSED( newVersionFound );
+                         QMessageBox msgBox;
+                         msgBox.setText(
+                             QStringLiteral( "You are using the latest version of klogg." ) );
+                         msgBox.exec();
+                     } );
         }
     }
 
@@ -254,6 +264,8 @@ class KloggApp : public QApplication {
         connect( window, &MainWindow::windowClosed,
                  [ this, window ]() { onWindowClosed( *window ); } );
         connect( window, &MainWindow::exitRequested, [ this ] { exitApplication(); } );
+        connect( window, &MainWindow::checkForNewVersionRequested,
+                 [ this ] { versionChecker_.forceCheck(); } );
 
         return window;
     }

@@ -226,7 +226,7 @@
           <item>
            <widget class="QCheckBox" name="checkForNewVersionCheckBox">
             <property name="text">
-             <string>Check for new version</string>
+             <string>Automatically check for new version</string>
             </property>
            </widget>
           </item>

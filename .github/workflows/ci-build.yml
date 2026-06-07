@@ -9,7 +9,6 @@ on:
       - CODE_OF_CONDUCT.md
       - CONTRIBUTING.md
       - README.md
-      - latest.json
       - .gitignore
   pull_request:
     branches: [ master ]
@@ -19,7 +18,6 @@ on:
       - CODE_OF_CONDUCT.md
       - CONTRIBUTING.md
       - README.md
-      - latest.json
       - .gitignore
   workflow_dispatch:
 

@@ -85,19 +85,30 @@ class VersionChecker : public QObject {
     // In case of error or if no new version is found, no signal is emitted.
     void startCheck();
 
+    // Forces an immediate check for a newer version, bypassing the deadline.
+    // Emits newVersionFound if a newer version is found.
+    // Emits checkCompleted(false) if no new version is available or on error.
+    void forceCheck();
+
+    // Parses version data JSON and checks against current version.
+    // Returns true if a newer version was found (and emits newVersionFound).
+    // Returns false if no newer version was found.
+    bool checkVersionData( QByteArray versionData );
+
   Q_SIGNALS:
     // New version "version" is available
     void newVersionFound( const QString& version, const QString& url, const QStringList& changes );
+
+    // Check completed without finding a new version
+    void checkCompleted( bool newVersionFound );
 
   private Q_SLOTS:
     // Called when download is finished
     void downloadFinished( QNetworkReply* );
 
   private:
-    void checkVersionData( QByteArray versionData );
-
-  private:
     QNetworkAccessManager* manager_ = nullptr;
+    bool isManualCheck_ = false;
 };
 
 #endif

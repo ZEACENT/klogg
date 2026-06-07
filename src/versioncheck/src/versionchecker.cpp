@@ -44,16 +44,8 @@
 
 namespace {
 
-#if defined( Q_OS_WIN )
-static constexpr QLatin1String OsSuffix = QLatin1String( "-win", 4 );
-#elif defined( Q_OS_MACOS )
-static constexpr QLatin1String OsSuffix = QLatin1String( "-osx", 4 );
-#else
-static constexpr QLatin1String OsSuffix = QLatin1String( "-linux", 6 );
-#endif
-
-const QLatin1String kReleaseFile
-    = QLatin1String( "https://raw.githubusercontent.com/ZEACENT/klogg/master/latest.json", 67 );
+const auto kReleaseApiUrl
+    = QLatin1String( "https://api.github.com/repos/ZEACENT/klogg/releases/latest", 58 );
 static constexpr std::time_t CHECK_INTERVAL_S = 3600 * 24 * 7; /* 7 days */
 
 bool isVersionNewer( const QString& current_version, const QString& new_version )
@@ -115,10 +107,10 @@ void VersionChecker::startCheck()
             connect( manager_, &QNetworkAccessManager::finished, this,
                      &VersionChecker::downloadFinished );
 
-            LOG_DEBUG << "Requesting new version info from " << kReleaseFile;
+            LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
 
             QNetworkRequest request;
-            request.setUrl( QUrl( kReleaseFile ) );
+            request.setUrl( QUrl( kReleaseApiUrl ) );
             manager_->get( request );
         }
         else {
@@ -128,16 +120,50 @@ void VersionChecker::startCheck()
     }
 }
 
+void VersionChecker::forceCheck()
+{
+    LOG_DEBUG << "VersionChecker::forceCheck()";
+
+    const auto& appConfig = Configuration::get();
+
+    if ( !appConfig.versionCheckingEnabled() ) {
+        LOG_DEBUG << "Version checking is disabled";
+        Q_EMIT checkCompleted( false );
+        return;
+    }
+
+    isManualCheck_ = true;
+
+    connect( manager_, &QNetworkAccessManager::finished, this,
+             &VersionChecker::downloadFinished );
+
+    LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
+
+    QNetworkRequest request;
+    request.setUrl( QUrl( kReleaseApiUrl ) );
+    manager_->get( request );
+}
+
 void VersionChecker::downloadFinished( QNetworkReply* reply )
 {
     LOG_DEBUG << "VersionChecker::downloadFinished()";
 
+    const bool wasManual = isManualCheck_;
+    isManualCheck_ = false;
+
     if ( reply->error() == QNetworkReply::NoError ) {
         const auto rawReply = reply->readAll();
-        checkVersionData( rawReply );
+        const bool foundNewer = checkVersionData( rawReply );
+
+        if ( !foundNewer && wasManual ) {
+            Q_EMIT checkCompleted( false );
+        }
     }
     else {
         LOG_WARNING << "Download failed: err " << reply->error();
+        if ( wasManual ) {
+            Q_EMIT checkCompleted( false );
+        }
     }
 
     reply->deleteLater();
@@ -150,41 +176,28 @@ void VersionChecker::downloadFinished( QNetworkReply* reply )
     config.save();
 }
 
-void VersionChecker::checkVersionData( QByteArray versionData )
+bool VersionChecker::checkVersionData( QByteArray versionData )
 {
     LOG_DEBUG << "Version reply: " << QString::fromUtf8( versionData );
 
-    const auto latestJson = QJsonDocument::fromJson( versionData );
-    const auto latestVersionMap = latestJson.toVariant().toMap();
+    const auto releaseJson = QJsonDocument::fromJson( versionData );
+    const auto releaseMap = releaseJson.toVariant().toMap();
 
-    QString latestVersion;
-    QString url;
-    const auto stableVersions = latestVersionMap.value( "releases" ).toList();
+    // The /releases/latest endpoint returns the latest non-prerelease, non-draft release.
+    // tag_name is e.g. "v26.05.27.958" — strip the "v" prefix for version comparison.
+    auto latestVersion = releaseMap.value( "tag_name" ).toString();
+    if ( latestVersion.startsWith( QLatin1Char( 'v' ) ) ) {
+        latestVersion = latestVersion.mid( 1 );
+    }
+    const auto url = releaseMap.value( "html_url" ).toString();
+    const auto changelogBody = releaseMap.value( "body" ).toString();
 
     const auto currentVersion = kloggVersion();
-    if ( std::any_of( stableVersions.begin(), stableVersions.end(),
-                      [ &currentVersion ]( const auto& version ) {
-                          return version.toString() == currentVersion;
-                      } ) ) {
-        latestVersion = latestVersionMap.value( "stable" ).toString();
-        url = latestVersionMap.value( "stable_url" ).toString();
-    }
-    else {
-        latestVersion = latestVersionMap.value( "ci" ).toString();
-        url = latestVersionMap.value( "ci_url" ).toString() + OsSuffix;
-    }
 
-    const auto changeLog = latestVersionMap.value( "changelog" ).toList();
-
+    // Use the release body as a single changelog entry
     QStringList changes;
-    for ( const auto& entry :  changeLog ) {
-        const auto entryData = entry.toMap();
-        const auto version = entryData.value( "version" ).toString();
-
-        if ( isVersionNewer( currentVersion, version ) ) {
-            changes
-                << QString( "%1: %2" ).arg( version, entryData.value( "description" ).toString() );
-        }
+    if ( !changelogBody.isEmpty() ) {
+        changes << changelogBody;
     }
 
     LOG_DEBUG << "Current version: " << currentVersion << ". Latest version is " << latestVersion
@@ -193,5 +206,7 @@ void VersionChecker::checkVersionData( QByteArray versionData )
         LOG_INFO << "Sending new version notification";
 
         Q_EMIT newVersionFound( latestVersion, url, changes );
+        return true;
     }
+    return false;
 }

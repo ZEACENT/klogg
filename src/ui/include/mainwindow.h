@@ -145,6 +145,7 @@ class MainWindow : public QMainWindow {
     void removeFromFavorites();
     void selectOpenedFile();
     void generateDump();
+    void checkForNewVersion();
 
     // Change the view settings
     void toggleOverviewVisibility( bool isVisible );
@@ -196,6 +197,7 @@ class MainWindow : public QMainWindow {
     void windowActivated();
     void windowClosed();
     void exitRequested();
+    void checkForNewVersionRequested();
 
   private:
     void createActions();
@@ -305,6 +307,7 @@ class MainWindow : public QMainWindow {
     QAction* exportFilterFavoritesAction;
     QAction* reportIssueAction;
     QAction* generateDumpAction;
+    QAction* checkForNewVersionAction;
     QAction* mergeTabsAction;
     QActionGroup* encodingGroup;
     QAction* addToFavoritesAction;
