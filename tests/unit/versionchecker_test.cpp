@@ -337,10 +337,22 @@ TEST_CASE( "checkVersionData: extracts download URL from assets matching current
 
     QVariantList assets;
     QVariantMap asset;
+#if defined( Q_OS_MAC )
     asset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-macOS-%1.dmg" ).arg( currentArch );
     asset[ "browser_download_url" ]
         = QStringLiteral( "https://example.com/download/klogg-99.0.0.0-macOS-%1.dmg" )
               .arg( currentArch );
+#elif defined( Q_OS_WIN )
+    asset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-win64-%1.exe" ).arg( currentArch );
+    asset[ "browser_download_url" ]
+        = QStringLiteral( "https://example.com/download/klogg-99.0.0.0-win64-%1.exe" )
+              .arg( currentArch );
+#else
+    asset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-linux-%1.appimage" ).arg( currentArch );
+    asset[ "browser_download_url" ]
+        = QStringLiteral( "https://example.com/download/klogg-99.0.0.0-linux-%1.appimage" )
+              .arg( currentArch );
+#endif
     assets << asset;
 
     const auto json = makeReleaseJsonForVersion(

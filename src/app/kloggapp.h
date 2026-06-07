@@ -385,9 +385,14 @@ class KloggApp : public QApplication {
         }
 
         auto downloader = std::make_shared<Downloader>();
+        std::weak_ptr<Downloader> weakDownloader = downloader;
 
         QObject::connect( downloader.get(), &Downloader::finished,
-                          [ outputFile, downloader, localPath ]( bool success ) {
+                          [ outputFile, weakDownloader, localPath ]( bool success ) {
+                              auto dl = weakDownloader.lock();
+                              if ( !dl ) {
+                                  return;
+                              }
                               outputFile->close();
                               if ( success ) {
                                   LOG_INFO << "Update downloaded to " << localPath;
@@ -395,11 +400,11 @@ class KloggApp : public QApplication {
                               }
                               else {
                                   LOG_ERROR << "Update download failed: "
-                                            << downloader->lastError();
+                                            << dl->lastError();
                                   QMessageBox::warning(
                                       nullptr, QStringLiteral( "Download Failed" ),
                                       QStringLiteral( "Failed to download update:\n%1" )
-                                          .arg( downloader->lastError() ) );
+                                          .arg( dl->lastError() ) );
                                   outputFile->remove();
                               }
                           } );

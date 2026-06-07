@@ -489,6 +489,10 @@ void MainWindow::reTranslateUI()
     generateDumpAction->setText( transAction( action::generateDumpText ) );
     generateDumpAction->setStatusTip( transAction( action::generateDumpStatusTip ) );
 
+    checkForNewVersionAction->setText( transAction( action::checkForNewVersionText ) );
+    checkForNewVersionAction->setStatusTip(
+        transAction( action::checkForNewVersionStatusTip ) );
+
     showScratchPadAction->setText( transAction( action::showScratchPadText ) );
     showScratchPadAction->setStatusTip( transAction( action::showScratchPadStatusTip ) );
 

@@ -92,22 +92,22 @@ QString selectAssetDownloadUrl( const QVariantList& assets )
 #elif defined( Q_OS_WIN )
     const QStringList platformExtensions{ QStringLiteral( ".exe" ), QStringLiteral( ".msi" ) };
 #else
-    const QStringList platformExtensions{ QStringLiteral( ".AppImage" ), QStringLiteral( ".deb" ) };
+    const QStringList platformExtensions{ QStringLiteral( ".appimage" ), QStringLiteral( ".deb" ) };
 #endif
 
     // Architecture aliases for the current CPU
     const auto currentArch = QSysInfo::currentCpuArchitecture().toLower();
     QStringList archAliases;
     if ( currentArch == QStringLiteral( "arm64" ) || currentArch == QStringLiteral( "aarch64" ) ) {
-        archAliases = { QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
+        archAliases = QStringList{ QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
     }
     else if ( currentArch == QStringLiteral( "x86_64" )
               || currentArch == QStringLiteral( "amd64" ) ) {
         archAliases
-            = { QStringLiteral( "x86_64" ), QStringLiteral( "x64" ), QStringLiteral( "amd64" ) };
+            = QStringList{ QStringLiteral( "x86_64" ), QStringLiteral( "x64" ), QStringLiteral( "amd64" ) };
     }
     else {
-        archAliases = { currentArch };
+        archAliases = QStringList{ currentArch };
     }
 
     auto assetMatchesExt = [ & ]( const QVariantMap& asset ) {
@@ -277,10 +277,13 @@ void VersionChecker::processResponse( QByteArray data, bool hadError, bool wasMa
         }
     }
 
-    // Extend the deadline
+    // Extend the deadline, but only if no user-set reminder is still active
     auto& config = VersionCheckerConfig::get();
 
-    config.setNextDeadline( std::time( nullptr ) + CHECK_INTERVAL_S );
+    const auto now = std::time( nullptr );
+    if ( config.nextDeadline() <= now ) {
+        config.setNextDeadline( now + CHECK_INTERVAL_S );
+    }
 
     config.save();
 }
