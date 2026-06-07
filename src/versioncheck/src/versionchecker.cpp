@@ -47,6 +47,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QSysInfo>
 #include <QUrl>
 #include <QtConcurrent>
@@ -180,7 +181,8 @@ void VersionChecker::startCheck()
     if ( deadlineConfig.nextDeadline() < std::time( nullptr ) ) {
         LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
 
-        [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ this ] {
+        QPointer<VersionChecker> guard( this );
+        [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ guard ] {
             QNetworkAccessManager mgr;
             mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 
@@ -202,8 +204,10 @@ void VersionChecker::startCheck()
 
             reply->deleteLater();
 
-            dispatchToMainThread( [ this, data, hadError ] {
-                processResponse( data, hadError, false );
+            dispatchToMainThread( [ guard, data, hadError ] {
+                if ( guard ) {
+                    guard->processResponse( data, hadError, false );
+                }
             } );
         } );
     }
@@ -225,9 +229,8 @@ void VersionChecker::forceCheck()
         return;
     }
 
-    isManualCheck_ = true;
-
-    [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ this ] {
+    QPointer<VersionChecker> guard( this );
+    [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ guard ] {
         QNetworkAccessManager mgr;
         mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 
@@ -249,8 +252,10 @@ void VersionChecker::forceCheck()
 
         reply->deleteLater();
 
-        dispatchToMainThread( [ this, data, hadError ] {
-            processResponse( data, hadError, true );
+        dispatchToMainThread( [ guard, data, hadError ] {
+            if ( guard ) {
+                guard->processResponse( data, hadError, true );
+            }
         } );
     } );
 }

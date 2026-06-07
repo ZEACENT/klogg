@@ -43,6 +43,7 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 
@@ -119,8 +120,6 @@ class VersionChecker : public QObject {
   private:
     // Called on the main thread after the background network request completes
     void processResponse( QByteArray data, bool hadError, bool wasManual );
-
-    bool isManualCheck_ = false;
 };
 
 #endif

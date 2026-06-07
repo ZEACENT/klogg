@@ -336,11 +336,9 @@ class KloggApp : public QApplication {
             = msgBox.addButton( QStringLiteral( "Download" ), QMessageBox::AcceptRole );
         QPushButton* remindButton
             = msgBox.addButton( QStringLiteral( "Remind Later" ), QMessageBox::RejectRole );
-        Q_UNUSED( remindButton );
         QPushButton* skipButton
             = msgBox.addButton( QStringLiteral( "Skip This Version" ),
                                 QMessageBox::DestructiveRole );
-        Q_UNUSED( skipButton );
 
         msgBox.setDefaultButton( downloadButton );
         msgBox.exec();
