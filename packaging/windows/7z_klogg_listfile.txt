@@ -10,3 +10,4 @@
 .\release\platforms\*
 .\release\styles\*
 .\release\imageformats\*
+.\release\tls\*

@@ -38,7 +38,7 @@ To build the Vectorscan regular expressions backend (default):
 To build installer for Windows:
 
 - nsis to build installer for Windows
-- Precompiled OpenSSl library to enable https support on Windows
+- Precompiled OpenSSL 1.1.x library (only needed for Qt5 builds; Qt6 uses Schannel TLS backend built into Windows)
 
 Building tests:
 
@@ -139,8 +139,7 @@ CMake should generate `klogg.sln` file in `<path_to_project_root>\build_root` di
 
 Binaries are placed into `build_root/output`.
 
-For https network urls support download precompiled openssl library https://mirror.firedaemon.com/OpenSSL/openssl-1.1.1l-dev.zip.
-Put libcrypto-1_1 and libssl-1_1 for desired architecture near klogg binaries.
+For https network urls support with Qt6, no additional libraries are required — Qt6 uses the Schannel TLS backend built into Windows. For Qt5 builds, download a precompiled OpenSSL 1.1.x library from https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip and place `libcrypto-1_1*.dll` and `libssl-1_1*.dll` for the desired architecture next to the klogg binaries.
 
 ### Building on Mac OS
 

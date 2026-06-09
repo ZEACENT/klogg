@@ -69,8 +69,12 @@ xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\vcruntime140.dll" %KLOGG
 xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\vcruntime140_1.dll" %KLOGG_WORKSPACE%\release\ /y
 
 echo "Copying ssl..."
-xcopy %SSL_DIR%\libcrypto-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
-xcopy %SSL_DIR%\libssl-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
+if "%KLOGG_QT%"=="Qt5" (
+    xcopy %SSL_DIR%\libcrypto-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
+    xcopy %SSL_DIR%\libssl-1_1%SSL_ARCH%.dll %KLOGG_WORKSPACE%\release\ /y
+) else (
+    echo "Qt6: Skipping OpenSSL DLLs (Schannel TLS backend will be used instead)"
+)
 
 echo "Copying Qt..."
 set "QTDIR=%KLOGG_QT_DIR:/=\%"
@@ -93,6 +97,13 @@ xcopy %QTDIR%\plugins\styles\qmodernwindowsstyle.dll %KLOGG_WORKSPACE%\release\s
 
 md %KLOGG_WORKSPACE%\release\imageformats
 xcopy %QTDIR%\plugins\imageformats\qsvg.dll %KLOGG_WORKSPACE%\release\imageformats\ /y
+
+rem Qt6 uses Schannel (built into Windows) instead of OpenSSL for TLS
+if "%KLOGG_QT%"=="Qt6" (
+    md %KLOGG_WORKSPACE%\release\tls 2>nul
+    xcopy %QTDIR%\plugins\tls\qschannelbackend.dll %KLOGG_WORKSPACE%\release\tls\ /y
+    echo "Schannel TLS backend deployed"
+)
 
 echo "Copying packaging files..."
 md %KLOGG_WORKSPACE%\chocolately

@@ -142,15 +142,20 @@ Section "MSVC Runtime libraries" vcruntime
     File release\msvcp140.dll
     File release\msvcp140_1.dll
     File release\vcruntime140.dll
-    
+
 !if ${PLATFORM} == "x64"
     File release\vcruntime140_1.dll
+!endif
 
+    ; Qt5 requires OpenSSL 1.1.x for TLS; Qt6 uses the Schannel backend (built into Windows)
+!if ${QT_MAJOR} == "Qt5"
+!if ${PLATFORM} == "x64"
     File release\libcrypto-1_1-x64.dll
     File release\libssl-1_1-x64.dll
 !else
     File release\libcrypto-1_1.dll
     File release\libssl-1_1.dll
+!endif
 !endif
 
 SectionEnd
@@ -220,10 +225,15 @@ Section "Uninstall"
     Delete "$INSTDIR\tbbmalloc_proxy.dll"
     Delete "$INSTDIR\klogg_tbbmalloc.dll"
     Delete "$INSTDIR\klogg_tbbmalloc_proxy.dll"
+!if ${QT_MAJOR} == "Qt5"
     Delete "$INSTDIR\libcrypto-1_1-x64.dll"
     Delete "$INSTDIR\libssl-1_1-x64.dll"
     Delete "$INSTDIR\libcrypto-1_1.dll"
     Delete "$INSTDIR\libssl-1_1.dll"
+!endif
+    ; Qt6 TLS backend (Schannel plugin)
+    Delete "$INSTDIR\tls\qschannelbackend.dll"
+    RMDir "$INSTDIR\tls"
     Delete "$INSTDIR\mimalloc.dll"
     Delete "$INSTDIR\mimalloc_override.dll"
     Delete "$INSTDIR\mimalloc_redirect.dll"

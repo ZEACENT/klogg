@@ -589,10 +589,11 @@ jobs:
           - os: windows
             os_version: 2022
             qt_version: 5.15.2
-            qt_modules: 
+            qt_modules:
             qt_archives: qtbase qtimageformats qttools qttranslations icu qtsvg
             qt_arch: win32_msvc2019
             arch: x86
+            ssl_arch: ""
             package_tag: QTRegex
             cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
             label: x86-qt5
@@ -603,17 +604,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
+        if: ${{ startsWith(matrix.config.qt_version, '5') }}
         with:
           name: openssl-archive
           path: ${{ github.workspace }}
 
       - name: Unpack prefetched openssl
+        if: ${{ startsWith(matrix.config.qt_version, '5') }}
         run: |
           if ( !(Test-Path openssl.zip) ) {
             Write-Error "Prefetched OpenSSL artifact is required but openssl.zip is missing"
             exit 1
           }
-          7z x openssl.zip 
+          7z x openssl.zip
 
       - uses: actions/download-artifact@v4
         with:
@@ -634,6 +637,7 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath $toolsRoot -Force
 
       - name: Set openssl paths
+        if: ${{ startsWith(matrix.config.qt_version, '5') }}
         shell: sh
         run: |
           echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ matrix.config.arch }}\bin" >> $GITHUB_ENV
@@ -807,7 +811,15 @@ jobs:
           s3-key-id: ${{ secrets.WIN_CS_KEY_ID }}
           s3-secret: ${{ secrets.WIN_CS_SECRET }}
           s3-bucket: ${{ secrets.WIN_CS_BUCKET }}
-     
+
+      - name: Verify SSL/TLS packaging
+        if: ${{ steps.run-tests.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
+          $script = Join-Path $env:GITHUB_WORKSPACE "packaging\windows\verify_ssl.ps1"
+          & $script -ReleaseDir $releaseDir -QtVersion $env:KLOGG_QT
+
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
         if: ${{ steps.run-tests.outcome == 'success' }}
