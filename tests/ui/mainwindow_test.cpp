@@ -261,14 +261,20 @@ SCENARIO( "Main window tests", "[ui]" )
             {
                 // Wait for the background loading thread to finish before
                 // closing the tab.  stopLoading() only sets an interrupt flag
-                // -- it does not synchronously join the thread.  On slower
-                // runners (Windows x86 32-bit) the thread may still hold heap
-                // references during teardown, corrupting malloc and causing
-                // SIGSEGV in downstream simdutf free().
+                // -- it does not synchronously join the thread.  On Windows
+                // runners the worker thread may still hold heap references or
+                // unwind simdutf-internal state after isFirstLoadDone() returns
+                // true, corrupting malloc and causing SIGSEGV on teardown.
                 REQUIRE( waitUiState( [&] {
                     auto* crawler = qobject_cast<CrawlerWidget*>(tabArea->currentWidget());
                     return crawler != nullptr && crawler->isFirstLoadDone();
                 } ) );
+
+                // Let the worker thread fully unwind before destroying the
+                // tab.  Even after isFirstLoadDone() returns true, the
+                // background thread may still be cleaning up — closing the
+                // tab during that window causes use-after-free.
+                QTest::qWait( 200 );
 
                 runInUiThread( [closeAction] {
                     LOG_INFO << "Close tab";

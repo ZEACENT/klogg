@@ -202,12 +202,14 @@ bool checkCrashpadReports( const QString& databasePath )
 
         // klogg_minidump_dump can hang on corrupted or very large minidumps.
         // Use a bounded wait so the GUI can still appear.  If it times out,
-        // kill the process, skip the report, and move on.
+        // kill the process, delete the report from the pending queue so it
+        // isn't retried on every launch, and move on.
         static constexpr int kMinidumpStackWalkTimeoutMs = 10000;
         if ( !stackProcess.waitForFinished( kMinidumpStackWalkTimeoutMs ) ) {
             LOG_WARNING << "minidump stack walk timed out for " << reportFile;
             stackProcess.kill();
             stackProcess.waitForFinished( 2000 );
+            database->DeleteReport( report.uuid );
             continue;
         }
 

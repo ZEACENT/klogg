@@ -48,6 +48,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSysInfo>
+#include <QTimer>
 #include <QUrl>
 #include <QVersionNumber>
 
@@ -218,9 +219,17 @@ void VersionChecker::startNetworkRequest( bool wasManual )
 
     QNetworkRequest request;
     request.setUrl( QUrl( kReleaseApiUrl ) );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
     request.setTransferTimeout( kTransferTimeoutMs );
+#endif
 
     QNetworkReply* reply = mgr->get( request );
+
+    // Qt < 5.15 does not have QNetworkRequest::setTransferTimeout.
+    // Use a single-shot timer to abort the reply as a fallback.
+#if QT_VERSION < QT_VERSION_CHECK( 5, 15, 0 )
+    QTimer::singleShot( kTransferTimeoutMs, reply, &QNetworkReply::abort );
+#endif
 
     // Use a QueuedConnection to the VersionChecker itself as the context
     // object.  If the VersionChecker is destroyed before the reply

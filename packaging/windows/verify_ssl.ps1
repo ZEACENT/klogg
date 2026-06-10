@@ -79,6 +79,7 @@ if ($QtVersion -eq "Qt6") {
         "tls/qschannelbackend.dll" = "tls"
         "platforms/qwindows.dll" = "platforms"
         "styles/qmodernwindowsstyle.dll" = "styles"
+        "styles/qwindowsvistastyle.dll" = "styles"
         "imageformats/qsvg.dll" = "imageformats"
     }
     foreach ($subPath in $pluginDlls.Keys) {
