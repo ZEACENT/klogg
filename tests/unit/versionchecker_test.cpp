@@ -110,7 +110,7 @@ TEST_CASE( "checkVersionData: older tag_name returns false, no signal", "[versio
 {
     VersionChecker checker;
     SafeQSignalSpy versionSpy( &checker, SIGNAL( newVersionFound( QString, QString, QString, QStringList ) ) );
-    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool ) ) );
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
 
     const auto json = makeReleaseJsonForVersion( QStringLiteral( "1.0.0.0" ),
                                                   QStringLiteral( "https://example.com" ) );
@@ -126,7 +126,7 @@ TEST_CASE( "checkVersionData: equal tag_name returns false, no signal", "[versio
 {
     VersionChecker checker;
     SafeQSignalSpy versionSpy( &checker, SIGNAL( newVersionFound( QString, QString, QString, QStringList ) ) );
-    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool ) ) );
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
 
     const auto currentVersion = QString::fromLatin1( kloggVersion().data(), kloggVersion().size() );
     const auto json = makeReleaseJsonForVersion( currentVersion,
@@ -229,7 +229,7 @@ TEST_CASE( "forceCheck: emits checkCompleted(false) when version checking is dis
     configGuard.setVersionCheckingEnabled( false );
 
     VersionChecker checker;
-    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool ) ) );
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
 
     checker.forceCheck();
 
