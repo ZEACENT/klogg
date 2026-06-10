@@ -73,6 +73,20 @@ if ($QtVersion -eq "Qt6") {
         Write-CheckResult "tls/qschannelbackend.dll is non-empty ($size bytes)" ($size -gt 0)
     }
 
+    # Qt plugin DLLs must live in their subdirectories, not in release root.
+    # A root-level copy is a packaging bug (e.g. misconfigured 7z flags).
+    $pluginDlls = @{
+        "tls/qschannelbackend.dll" = "tls"
+        "platforms/qwindows.dll" = "platforms"
+        "styles/qmodernwindowsstyle.dll" = "styles"
+        "imageformats/qsvg.dll" = "imageformats"
+    }
+    foreach ($subPath in $pluginDlls.Keys) {
+        $leaf = Split-Path $subPath -Leaf
+        $rootCopy = Join-Path $ReleaseDir $leaf
+        Write-CheckResult "No $leaf in release root (must be in $($pluginDlls[$subPath])/)" (-not (Test-Path $rootCopy))
+    }
+
 } elseif ($QtVersion -eq "Qt5") {
     Write-Host "`nQt5 assertions:"
     Write-Host "  Expected: OpenSSL 1.1.x DLLs present (x64 or x86 depending on arch)"

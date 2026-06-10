@@ -116,7 +116,7 @@ xcopy %KLOGG_WORKSPACE%\packaging\windows\klogg.nsi  /y
 xcopy %KLOGG_WORKSPACE%\packaging\windows\FileAssociation.nsh  /y
 
 echo "Making portable archive..."
-7z a -r %KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip @%KLOGG_WORKSPACE%\packaging\windows\7z_klogg_listfile.txt
+7z a %KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip @%KLOGG_WORKSPACE%\packaging\windows\7z_klogg_listfile.txt
 
 echo "Making PDB archive..."
 rem Create PDB archive, ignore warnings about missing files
