@@ -135,6 +135,11 @@ Section "Qt Runtime libraries" qtlibs
     SetOutPath $INSTDIR\imageformats
     File release\imageformats\qsvg.dll
 
+!if ${QT_MAJOR} == "Qt6"
+    SetOutPath $INSTDIR\tls
+    File release\tls\qschannelbackend.dll
+!endif
+
 SectionEnd
 
 Section "MSVC Runtime libraries" vcruntime
