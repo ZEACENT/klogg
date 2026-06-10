@@ -641,7 +641,14 @@ class Configuration final : public Persistable<Configuration> {
 
   private:
     // Configuration settings
+#ifdef Q_OS_MACOS
+    // macOS uses 72 DPI as its reference, so 13 pt is the right visual size.
     mutable QFont mainFont_ = { "DejaVu Sans Mono", 13 };
+#else
+    // Windows and Linux default to 96 DPI, making the same point size appear
+    // ~33% larger than on macOS. Use a smaller default for visual parity.
+    mutable QFont mainFont_ = { "DejaVu Sans Mono", 10 };
+#endif
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
     SearchRegexpType quickfindRegexpType_ = SearchRegexpType::ExtendedRegexp;
     bool quickfindIncremental_ = true;
