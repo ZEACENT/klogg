@@ -76,3 +76,14 @@ TEST_CASE( "Modern style sheet uses compact tab height for macOS 26 pill-tab loo
     // Tab padding should be compact (horizontal + vertical)
     REQUIRE( style.contains( QStringLiteral( "padding: 3px 12px" ) ) );
 }
+
+TEST_CASE( "Modern style sheet suppresses native focus rectangle on tabs" )
+{
+    const ScopedModernStyle styleGuard;
+
+    const auto style = qApp->styleSheet();
+    // Tab focus must use outline:none to prevent Windows native focus rect
+    // from drawing a sharp rectangle over the pill-shaped tab
+    REQUIRE( style.contains( QStringLiteral( "QTabBar::tab:focus" ) ) );
+    REQUIRE( style.contains( QStringLiteral( "outline: none" ) ) );
+}

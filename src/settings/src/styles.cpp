@@ -345,6 +345,9 @@ QTabBar::tab:hover:!selected {
     background-color: __BUTTON_HOVER__;
     color: __TEXT__;
 }
+QTabBar::tab:focus {
+    outline: none;
+}
 QTabBar::close-button {
     image: url(__TAB_CLOSE__);
     height: 12px;
