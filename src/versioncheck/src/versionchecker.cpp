@@ -41,22 +41,25 @@
 #include "log.h"
 
 #include "klogg_version.h"
-#include "dispatch_to.h"
 
-#include <QEventLoop>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QPointer>
 #include <QSysInfo>
 #include <QUrl>
-#include <QtConcurrent>
+#include <QVersionNumber>
 
 namespace {
 
 const auto kReleaseApiUrl
     = QLatin1String( "https://api.github.com/repos/ZEACENT/klogg/releases/latest", 58 );
 static constexpr std::time_t CHECK_INTERVAL_S = 3600 * 24 * 7; /* 7 days */
+
+// Timeout for version check network requests.  Prevents a hung TCP/TLS
+// handshake from permanently leaking a QNetworkAccessManager + reply.
+static constexpr int kTransferTimeoutMs = 15000;
 
 bool isVersionNewer( const QString& current_version, const QString& new_version )
 {
@@ -179,37 +182,7 @@ void VersionChecker::startCheck()
 
     // Check the deadline has been reached
     if ( deadlineConfig.nextDeadline() < std::time( nullptr ) ) {
-        LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
-
-        QPointer<VersionChecker> guard( this );
-        [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ guard ] {
-            QNetworkAccessManager mgr;
-            mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
-
-            QNetworkRequest request;
-            request.setUrl( QUrl( kReleaseApiUrl ) );
-
-            QNetworkReply* reply = mgr.get( request );
-
-            QEventLoop loop;
-            QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
-            loop.exec();
-
-            const bool hadError = ( reply->error() != QNetworkReply::NoError );
-            const QByteArray data = hadError ? QByteArray() : reply->readAll();
-
-            if ( hadError ) {
-                LOG_WARNING << "Version check download failed: err " << reply->error();
-            }
-
-            reply->deleteLater();
-
-            dispatchToMainThread( [ guard, data, hadError ] {
-                if ( guard ) {
-                    guard->processResponse( data, hadError, false );
-                }
-            } );
-        } );
+        startNetworkRequest( /*wasManual=*/false );
     }
     else {
         LOG_DEBUG << "Deadline not reached yet, next check in "
@@ -229,35 +202,45 @@ void VersionChecker::forceCheck()
         return;
     }
 
-    QPointer<VersionChecker> guard( this );
-    [[maybe_unused]] const auto versionCheckFuture = QtConcurrent::run( [ guard ] {
-        QNetworkAccessManager mgr;
-        mgr.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
+    startNetworkRequest( /*wasManual=*/true );
+}
 
-        QNetworkRequest request;
-        request.setUrl( QUrl( kReleaseApiUrl ) );
+void VersionChecker::startNetworkRequest( bool wasManual )
+{
+    LOG_DEBUG << "Requesting new version info from " << kReleaseApiUrl;
 
-        QNetworkReply* reply = mgr.get( request );
+    // QNetworkAccessManager is created as a child of VersionChecker so that
+    // it is automatically destroyed when the VersionChecker is destroyed.
+    // This avoids the thread-safety issues of running QNetworkAccessManager
+    // on a QThreadPool thread via QtConcurrent::run.
+    auto* mgr = new QNetworkAccessManager( this );
+    mgr->setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 
-        QEventLoop loop;
-        QObject::connect( reply, &QNetworkReply::finished, &loop, &QEventLoop::quit );
-        loop.exec();
+    QNetworkRequest request;
+    request.setUrl( QUrl( kReleaseApiUrl ) );
+    request.setTransferTimeout( kTransferTimeoutMs );
 
-        const bool hadError = ( reply->error() != QNetworkReply::NoError );
-        const QByteArray data = hadError ? QByteArray() : reply->readAll();
+    QNetworkReply* reply = mgr->get( request );
 
-        if ( hadError ) {
-            LOG_WARNING << "Version check download failed: err " << reply->error();
-        }
+    // Use a QueuedConnection to the VersionChecker itself as the context
+    // object.  If the VersionChecker is destroyed before the reply
+    // completes, the connection is automatically disconnected and the
+    // lambda is never invoked — no dangling pointer, no QPointer guard
+    // needed.
+    connect( reply, &QNetworkReply::finished, this,
+             [ this, reply, mgr, wasManual ]() {
+                 const bool hadError = ( reply->error() != QNetworkReply::NoError );
+                 const QByteArray data = hadError ? QByteArray() : reply->readAll();
 
-        reply->deleteLater();
+                 if ( hadError ) {
+                     LOG_WARNING << "Version check download failed: err " << reply->error();
+                 }
 
-        dispatchToMainThread( [ guard, data, hadError ] {
-            if ( guard ) {
-                guard->processResponse( data, hadError, true );
-            }
-        } );
-    } );
+                 reply->deleteLater();
+                 mgr->deleteLater();
+
+                 processResponse( data, hadError, wasManual );
+             } );
 }
 
 void VersionChecker::processResponse( QByteArray data, bool hadError, bool wasManual )

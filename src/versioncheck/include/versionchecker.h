@@ -120,8 +120,13 @@ class VersionChecker : public QObject {
     void checkCompleted( bool newVersionFound, bool hadError = false );
 
   private:
-    // Called on the main thread after the background network request completes
+    // Called on the main thread after the network request completes
     void processResponse( QByteArray data, bool hadError, bool wasManual );
+
+    // Starts the network request on the main thread. The VersionChecker
+    // owns the QNetworkAccessManager used for the request; cleanup is
+    // automatic via the QObject parent-child relationship.
+    void startNetworkRequest( bool wasManual );
 };
 
 #endif

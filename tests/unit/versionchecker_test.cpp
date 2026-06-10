@@ -451,3 +451,92 @@ TEST_CASE( "checkVersionData: no matching platform asset produces empty download
     CHECK( downloadUrl.isEmpty() );
 #endif
 }
+
+TEST_CASE( "startCheck: does nothing when version checking is disabled",
+           "[versionchecker]" )
+{
+    ScopedVersionCheckConfigGuard configGuard;
+    configGuard.setVersionCheckingEnabled( false );
+
+    VersionChecker checker;
+    SafeQSignalSpy versionSpy(
+        &checker, SIGNAL( newVersionFound( QString, QString, QString, QStringList ) ) );
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
+
+    checker.startCheck();
+
+    // startCheck returns immediately when version checking is disabled.
+    // No signals should be emitted (no network request is made).
+    CHECK( versionSpy.count() == 0 );
+    CHECK( completedSpy.count() == 0 );
+}
+
+TEST_CASE( "startCheck: does nothing when deadline not reached", "[versionchecker]" )
+{
+    ScopedVersionCheckConfigGuard configGuard;
+    configGuard.setVersionCheckingEnabled( true );
+
+    auto& deadlineConfig = VersionCheckerConfig::get();
+    // Set deadline far in the future
+    const auto futureDeadline = std::time( nullptr ) + 86400 * 365;
+    deadlineConfig.setNextDeadline( futureDeadline );
+    deadlineConfig.save();
+
+    VersionChecker checker;
+    SafeQSignalSpy versionSpy(
+        &checker, SIGNAL( newVersionFound( QString, QString, QString, QStringList ) ) );
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
+
+    checker.startCheck();
+
+    // No network request should be made — deadline hasn't passed
+    CHECK( versionSpy.count() == 0 );
+    CHECK( completedSpy.count() == 0 );
+
+    // Reset
+    deadlineConfig.setNextDeadline( 0 );
+    deadlineConfig.save();
+}
+
+TEST_CASE( "forceCheck: emits checkCompleted with hadError when version checking disabled",
+           "[versionchecker]" )
+{
+    ScopedVersionCheckConfigGuard configGuard;
+    configGuard.setVersionCheckingEnabled( false );
+
+    VersionChecker checker;
+    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
+
+    checker.forceCheck();
+
+    REQUIRE( completedSpy.count() == 1 );
+    CHECK_FALSE( completedSpy.at( 0 ).at( 0 ).toBool() );   // newVersionFound = false
+    CHECK( completedSpy.at( 0 ).at( 1 ).toBool() );          // hadError = true
+}
+
+TEST_CASE( "VersionChecker: lifecycle safety — destroy during pending check",
+           "[versionchecker]" )
+{
+    // Verify that destroying a VersionChecker while a check might be
+    // in-flight does not crash. The QNetworkAccessManager is a child
+    // of VersionChecker and should be cleaned up automatically.
+    ScopedVersionCheckConfigGuard configGuard;
+    configGuard.setVersionCheckingEnabled( true );
+
+    auto& deadlineConfig = VersionCheckerConfig::get();
+    deadlineConfig.setNextDeadline( 0 ); // past deadline
+    deadlineConfig.save();
+
+    {
+        VersionChecker checker;
+        checker.startCheck();
+        // checker is destroyed here — QNetworkAccessManager must be cleaned up
+    }
+
+    // Process any pending events to ensure cleanup
+    QTest::qWait( 100 );
+
+    // Reset
+    deadlineConfig.setNextDeadline( std::time( nullptr ) + 86400 * 365 );
+    deadlineConfig.save();
+}
