@@ -117,15 +117,12 @@ xcopy %KLOGG_WORKSPACE%\packaging\windows\FileAssociation.nsh  /y
 
 echo "Making portable archive..."
 rem Create portable archive, ignore warnings about missing files
-rem Exit code 0 = success, 1 = warning (non-fatal), 2 = fatal error
+rem Exit code 0 = success, 1 = warning (non-fatal), 2+ = fatal error
 7z a -r %KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip @%KLOGG_WORKSPACE%\packaging\windows\7z_klogg_listfile.txt
 if %ERRORLEVEL% LEQ 1 (
     echo "Portable archive created (exit code %ERRORLEVEL%)"
 )
-if %ERRORLEVEL% EQU 2 (
-    echo "Warning: Some files for portable archive were not found, but archive was created"
-)
-if %ERRORLEVEL% GTR 2 (
+if %ERRORLEVEL% GEQ 2 (
     echo "Error creating portable archive (exit code %ERRORLEVEL%)"
     exit /b %ERRORLEVEL%
 )
