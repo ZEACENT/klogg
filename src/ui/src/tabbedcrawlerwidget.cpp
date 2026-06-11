@@ -339,6 +339,9 @@ void TabbedCrawlerWidget::updateTabBarStyle()
                            "QTabBar::tab:hover:!selected {"
                            "background-color: %6;"
                            "color: %5;"
+                           "}"
+                           "QTabBar::tab:focus {"
+                           "outline: none;"
                            "}" )
                            .arg( trackColor.name(), borderColor.name(), mutedTextColor.name(),
                                  selectedColor.name(), textColor.name(), hoverColor.name() );
@@ -704,6 +707,13 @@ void CrawlerTabBar::resizeEvent( QResizeEvent* event )
 {
     QTabBar::resizeEvent( event );
     scheduleTabButtonGeometrySync();
+    updateShapeMask();
+}
+
+void CrawlerTabBar::showEvent( QShowEvent* event )
+{
+    QTabBar::showEvent( event );
+    updateShapeMask();
 }
 
 void CrawlerTabBar::paintEvent( QPaintEvent* event )
@@ -748,6 +758,21 @@ void CrawlerTabBar::scheduleTabButtonGeometrySync()
     // invalidate layout and trigger another paint, creating an
     // infinite repaint loop.
     syncGeometryTimer_.start();
+}
+
+void CrawlerTabBar::updateShapeMask()
+{
+    // Clips the tab bar to a pill (rounded rectangle) shape so that
+    // native-style focus rectangles and other rectangular artifacts
+    // drawn outside the CSS border-radius are masked away.
+    constexpr int kRadius = 14;
+    if ( rect().isEmpty() ) {
+        clearMask();
+        return;
+    }
+    QPainterPath path;
+    path.addRoundedRect( QRectF( rect() ), kRadius, kRadius );
+    setMask( path.toFillPolygon().toPolygon() );
 }
 
 void CrawlerTabBar::syncTabButtonGeometry()

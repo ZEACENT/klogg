@@ -64,6 +64,7 @@ class CrawlerTabBar : public QTabBar {
     void mouseReleaseEvent( QMouseEvent* ) override;
     void paintEvent( QPaintEvent* event ) override;
     void resizeEvent( QResizeEvent* event ) override;
+    void showEvent( QShowEvent* event ) override;
 
   private Q_SLOTS:
     void handleTabMoved( int from, int to );
@@ -71,6 +72,7 @@ class CrawlerTabBar : public QTabBar {
   private:
     void syncTabButtonGeometry();
     void scheduleTabButtonGeometrySync();
+    void updateShapeMask();
 
     bool leftButtonPressed_ = false;
     bool tabMovedWhilePressed_ = false;
