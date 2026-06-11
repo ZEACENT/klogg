@@ -7,7 +7,3 @@
 .\release\NOTICE
 .\release\README.md
 .\release\DOCUMENTATION.md
-.\release\platforms\*
-.\release\styles\*
-.\release\imageformats\*
-.\release\tls\*
