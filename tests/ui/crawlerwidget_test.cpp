@@ -551,6 +551,11 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         }
     }
 
+    void jumpToTop()
+    {
+        crawler->jumpToTop();
+    }
+
     void resizeViews( int width, int height )
     {
         crawler->logMainView_->resize( width, height );
@@ -780,6 +785,20 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         crawler->logMainView_->verticalScrollBar()->setValue(
             crawler->logMainView_->verticalScrollBar()->maximum() );
+        QTest::qWait( 50 );
+    }
+
+    void scrollMainVerticallyToMiddle()
+    {
+        const auto max = crawler->logMainView_->verticalScrollBar()->maximum();
+        crawler->logMainView_->verticalScrollBar()->setValue( max / 2 );
+        QTest::qWait( 50 );
+    }
+
+    void scrollFilteredVerticallyToMiddle()
+    {
+        const auto max = crawler->filteredView_->verticalScrollBar()->maximum();
+        crawler->filteredView_->verticalScrollBar()->setValue( max / 2 );
         QTest::qWait( 50 );
     }
 
@@ -2259,6 +2278,76 @@ SCENARIO( "Elastic pull-to-follow hook does not activate when scroll range is em
                 // The hook is not active, so shouldBottomAlignFrame
                 // returns false when lastLineAligned_ is also false.
                 REQUIRE_FALSE( crawlerVisitor.filteredShouldBottomAlign() );
+            }
+        }
+    }
+}
+
+SCENARIO( "Go to top (T) respects the focused view", "[ui][shortcut]" )
+{
+    QTemporaryFile file{ "crawler_gototop_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+
+    GIVEN( "both views scrolled away from the top and filtered view focused" )
+    {
+        crawlerVisitor.scrollMainVerticallyToMiddle();
+        crawlerVisitor.scrollFilteredVerticallyToMiddle();
+        crawlerVisitor.render();
+
+        REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+        REQUIRE( crawlerVisitor.mainTopLine().get() > 0 );
+        REQUIRE( crawlerVisitor.filteredTopLine().get() > 0 );
+
+        crawlerVisitor.focusFilteredView();
+
+        WHEN( "jumpToTop is called" )
+        {
+            crawlerVisitor.jumpToTop();
+            QTest::qWait( 50 );
+            crawlerVisitor.render();
+
+            THEN( "the filtered view scrolls to the top" )
+            {
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            }
+        }
+    }
+
+    GIVEN( "both views scrolled away from the top and main view focused" )
+    {
+        crawlerVisitor.scrollMainVerticallyToMiddle();
+        crawlerVisitor.scrollFilteredVerticallyToMiddle();
+        crawlerVisitor.render();
+
+        REQUIRE( crawlerVisitor.mainTopLine().get() > 0 );
+        REQUIRE( crawlerVisitor.filteredTopLine().get() > 0 );
+
+        crawlerVisitor.focusMainView();
+
+        WHEN( "jumpToTop is called" )
+        {
+            crawlerVisitor.jumpToTop();
+            QTest::qWait( 50 );
+            crawlerVisitor.render();
+
+            THEN( "the main view scrolls to the top" )
+            {
+                REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
             }
         }
     }

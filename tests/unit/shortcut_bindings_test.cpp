@@ -262,3 +262,22 @@ TEST_CASE( "Shortcut bindings: editable defaults have no duplicate displayed key
         }
     }
 }
+
+TEST_CASE( "Shortcut bindings: Follow file and Go to top have single-key defaults" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+
+    SECTION( "MainWindowFollowFile is bound to F" )
+    {
+        auto it = shortcuts.find( ShortcutAction::MainWindowFollowFile );
+        REQUIRE( it != shortcuts.end() );
+        REQUIRE( it->second.keySequence.contains( QKeySequence( Qt::Key_F ).toString() ) );
+    }
+
+    SECTION( "MainWindowGoToTop is bound to T" )
+    {
+        auto it = shortcuts.find( ShortcutAction::MainWindowGoToTop );
+        REQUIRE( it != shortcuts.end() );
+        REQUIRE( it->second.keySequence.contains( QKeySequence( Qt::Key_T ).toString() ) );
+    }
+}
