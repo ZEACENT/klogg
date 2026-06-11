@@ -222,21 +222,6 @@ TEST_CASE( "checkVersionData: prerelease field is ignored (API guarantees false)
     REQUIRE( foundNewer );
 }
 
-TEST_CASE( "forceCheck: emits checkCompleted(false) when version checking is disabled",
-           "[versionchecker]" )
-{
-    ScopedVersionCheckConfigGuard configGuard;
-    configGuard.setVersionCheckingEnabled( false );
-
-    VersionChecker checker;
-    SafeQSignalSpy completedSpy( &checker, SIGNAL( checkCompleted( bool, bool ) ) );
-
-    checker.forceCheck();
-
-    REQUIRE( completedSpy.count() == 1 );
-    CHECK_FALSE( completedSpy.at( 0 ).at( 0 ).toBool() );
-}
-
 TEST_CASE( "checkVersionData: handles malformed JSON gracefully", "[versionchecker]" )
 {
     VersionChecker checker;

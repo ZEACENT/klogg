@@ -204,8 +204,19 @@ bool checkCrashpadReports( const QString& databasePath )
         // Use a bounded wait so the GUI can still appear.  If it times out,
         // kill the process, delete the report from the pending queue so it
         // isn't retried on every launch, and move on.
+        //
+        // Distinguish a real timeout (process started but hung) from a
+        // launch failure (executable missing / permissions).  Deleting the
+        // report when the stackwalker can't start would silently discard
+        // every pending crash report on a packaging/path regression.
         static constexpr int kMinidumpStackWalkTimeoutMs = 10000;
         if ( !stackProcess.waitForFinished( kMinidumpStackWalkTimeoutMs ) ) {
+            if ( stackProcess.error() == QProcess::FailedToStart ) {
+                LOG_WARNING << "minidump stack walker failed to start for "
+                            << reportFile
+                            << "; skipping report (not deleting)";
+                continue;
+            }
             LOG_WARNING << "minidump stack walk timed out for " << reportFile;
             stackProcess.kill();
             stackProcess.waitForFinished( 2000 );
