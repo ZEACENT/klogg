@@ -608,6 +608,11 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         return crawler->logMainView_->isFollowEnabled();
     }
 
+    bool isFilteredFollowModeEnabled()
+    {
+        return crawler->filteredView_->isFollowEnabled();
+    }
+
     void applyConfiguration()
     {
         crawler->applyConfiguration();
@@ -2283,7 +2288,52 @@ SCENARIO( "Elastic pull-to-follow hook does not activate when scroll range is em
     }
 }
 
-SCENARIO( "Go to top (T) respects the focused view", "[ui][shortcut]" )
+SCENARIO( "Follow file (F) toggles follow mode on both views simultaneously", "[ui][shortcut]" )
+{
+    QTemporaryFile file{ "crawler_follow_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    GIVEN( "follow mode is off on both views" )
+    {
+        REQUIRE_FALSE( crawlerVisitor.isFollowModeEnabled() );
+        REQUIRE_FALSE( crawlerVisitor.isFilteredFollowModeEnabled() );
+
+        WHEN( "followSet(true) is emitted (F key pressed)" )
+        {
+            Q_EMIT crawlerVisitor.crawler->followSet( true );
+            QTest::qWait( 50 );
+
+            THEN( "both main and filtered views enable follow mode" )
+            {
+                REQUIRE( crawlerVisitor.isFollowModeEnabled() );
+                REQUIRE( crawlerVisitor.isFilteredFollowModeEnabled() );
+            }
+
+            AND_WHEN( "followSet(false) is emitted (F key pressed again)" )
+            {
+                Q_EMIT crawlerVisitor.crawler->followSet( false );
+                QTest::qWait( 50 );
+
+                THEN( "both main and filtered views disable follow mode" )
+                {
+                    REQUIRE_FALSE( crawlerVisitor.isFollowModeEnabled() );
+                    REQUIRE_FALSE( crawlerVisitor.isFilteredFollowModeEnabled() );
+                }
+            }
+        }
+    }
+}
+
+SCENARIO( "Go to top (T) scrolls both views regardless of focus", "[ui][shortcut]" )
 {
     QTemporaryFile file{ "crawler_gototop_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
@@ -2321,9 +2371,10 @@ SCENARIO( "Go to top (T) respects the focused view", "[ui][shortcut]" )
             QTest::qWait( 50 );
             crawlerVisitor.render();
 
-            THEN( "the filtered view scrolls to the top" )
+            THEN( "both views scroll to the top" )
             {
                 REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+                REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
             }
         }
     }
@@ -2345,9 +2396,10 @@ SCENARIO( "Go to top (T) respects the focused view", "[ui][shortcut]" )
             QTest::qWait( 50 );
             crawlerVisitor.render();
 
-            THEN( "the main view scrolls to the top" )
+            THEN( "both views scroll to the top" )
             {
                 REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
             }
         }
     }

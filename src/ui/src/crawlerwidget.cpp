@@ -353,7 +353,8 @@ bool CrawlerWidget::eventFilter( QObject* watched, QEvent* event )
 
 void CrawlerWidget::jumpToTop()
 {
-    activeView()->selectAndDisplayLine( 0_lnum );
+    logMainView_->selectAndDisplayLine( 0_lnum );
+    filteredView_->selectAndDisplayLine( 0_lnum );
 }
 
 void CrawlerWidget::goToLine()
