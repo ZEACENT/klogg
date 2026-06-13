@@ -189,27 +189,26 @@ jobs:
         name: Release v${{ env.KLOGG_VERSION }}
         body: |
           Release v${{ env.KLOGG_VERSION }}
-          
+
           ## Changes
           ${{ env.CHANGELOG }}
-          
+
           ## Downloads
-          - **Windows**: See [Windows packages](#windows)
-          - **Linux**: See [Linux packages](#linux)
-          - **macOS**: See [macOS packages](#macos)
-          
-          ## Windows {#windows}
-          - Windows x64 (Qt 6, Vectorscan AVX2): `klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe`
-          - Windows x86 (Qt 5, QT Regex engine): `klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe`
-          
-          ## Linux {#linux}
-          - Ubuntu 22.04 (Jammy, Vectorscan generic): `klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb`
-          - Ubuntu 24.04 (Noble, Vectorscan generic): `klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb`
-          - AppImage (Vectorscan generic): `klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage`
-          
-          ## macOS {#macos}
-          - Intel (x64, Vectorscan generic): `klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg`
-          - Apple Silicon (ARM64, Vectorscan): `klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg`
+
+          ### Windows
+          - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
+          - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
+          - Windows x86 (Qt 5, QT Regex engine): [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe)
+          - Windows x86 (Qt 5, QT Regex engine) portable: [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip)
+
+          ### Linux
+          - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
+          - Ubuntu 24.04 (Noble, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb)
+          - AppImage (Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage)
+
+          ### macOS
+          - Intel (x64, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg)
+          - Apple Silicon (ARM64, Vectorscan): [klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg)
         prerelease: false
         files: |
           ./packages-windows-x86-qt5-QTRegex/*
