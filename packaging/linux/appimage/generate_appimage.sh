@@ -20,4 +20,4 @@ cp /lib/x86_64-linux-gnu/libssl* appdir/usr/lib
 VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -appimage
 
 mkdir ./packages
-cp ./klogg-$KLOGG_VERSION-x86_64.AppImage ./packages/klogg-$KLOGG_VERSION-appimage-$KLOGG_PACKAGE_TAG.AppImage
+cp "./klogg-${KLOGG_VERSION}-x86_64.AppImage" "./packages/klogg-${KLOGG_VERSION}-appimage-${KLOGG_PACKAGE_TAG}.AppImage"
