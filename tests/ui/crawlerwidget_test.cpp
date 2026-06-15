@@ -2404,3 +2404,49 @@ SCENARIO( "Go to top (T) scrolls both views regardless of focus", "[ui][shortcut
         }
     }
 }
+
+SCENARIO( "Go to top moves main view to absolute top with active search",
+          "[ui][shortcut][regression]" )
+{
+    QTemporaryFile file{ "crawler_gototop_search_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    // Search for a specific line not at the top — filtered line 0 maps to main line 42
+    crawlerVisitor.setSearchPattern( "this is line 000042" );
+    crawlerVisitor.runSearch();
+
+    REQUIRE( waitUiState(
+        [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+
+    // Scroll main view away from top (filtered view has only 1 line, can't scroll)
+    crawlerVisitor.scrollMainVerticallyToMiddle();
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainTopLine().get() > 0 );
+
+    WHEN( "jumpToTop is called with active search" )
+    {
+        crawlerVisitor.jumpToTop();
+        QTest::qWait( 50 );
+        crawlerVisitor.render();
+
+        THEN( "main view scrolls to absolute top, not the matching line" )
+        {
+            REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
+        }
+    }
+}

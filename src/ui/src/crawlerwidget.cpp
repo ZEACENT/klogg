@@ -353,8 +353,11 @@ bool CrawlerWidget::eventFilter( QObject* watched, QEvent* event )
 
 void CrawlerWidget::jumpToTop()
 {
-    logMainView_->selectAndDisplayLine( 0_lnum );
+    // Scroll filtered view first — it emits newSelection which triggers
+    // jumpToMatchingLine, moving the main view to the matching line.
+    // Then scroll the main view to absolute line 0, overriding that.
     filteredView_->selectAndDisplayLine( 0_lnum );
+    logMainView_->selectAndDisplayLine( 0_lnum );
 }
 
 void CrawlerWidget::goToLine()
