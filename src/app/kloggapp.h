@@ -64,6 +64,7 @@
 
 #include "mainwindow.h"
 #include "messagereceiver.h"
+#include "newversiondialog.h"
 #include "versionchecker.h"
 
 class KloggApp : public QApplication {
@@ -322,36 +323,10 @@ class KloggApp : public QApplication {
         LOG_DEBUG << "newVersionNotification( " << new_version << " from " << url
                   << ", download: " << downloadUrl << " )";
 
-        QString message = tr( "<p>A new version of klogg (%1) is available for download.</p>"
-                              "<p><a href=\"%2\">%2</a></p>" )
-                              .arg( new_version, url );
+        NewVersionDialog dlg( new_version, url, changes );
+        dlg.exec();
 
-        if ( !changes.empty() ) {
-            message.append( tr( "<p>Important changes:</p><ul>" ) );
-            for ( const auto& change : changes ) {
-                message.append( tr( "<li>%1</li>" ).arg( change ) );
-            }
-            message.append( QStringLiteral( "</ul>" ) );
-        }
-
-        QMessageBox msgBox;
-        msgBox.setWindowTitle( tr( "New Version Available" ) );
-        msgBox.setText( message );
-        msgBox.setTextFormat( Qt::RichText );
-        msgBox.setIcon( QMessageBox::Information );
-
-        QPushButton* downloadButton
-            = msgBox.addButton( tr( "Download" ), QMessageBox::AcceptRole );
-        QPushButton* remindButton
-            = msgBox.addButton( tr( "Remind Later" ), QMessageBox::RejectRole );
-        QPushButton* skipButton
-            = msgBox.addButton( tr( "Skip This Version" ),
-                                QMessageBox::DestructiveRole );
-
-        msgBox.setDefaultButton( downloadButton );
-        msgBox.exec();
-
-        if ( msgBox.clickedButton() == downloadButton ) {
+        if ( dlg.clickedButton() == NewVersionDialog::Download ) {
             if ( !downloadUrl.isEmpty() ) {
                 downloadAndOpenUpdate( downloadUrl, new_version );
             }
@@ -360,13 +335,13 @@ class KloggApp : public QApplication {
                 QDesktopServices::openUrl( QUrl( url ) );
             }
         }
-        else if ( msgBox.clickedButton() == remindButton ) {
+        else if ( dlg.clickedButton() == NewVersionDialog::RemindLater ) {
             // Set deadline to 1 day from now
             auto& config = VersionCheckerConfig::get();
             config.setNextDeadline( std::time( nullptr ) + 86400 ); // 24 hours
             config.save();
         }
-        else if ( msgBox.clickedButton() == skipButton ) {
+        else if ( dlg.clickedButton() == NewVersionDialog::SkipVersion ) {
             // Store the version to ignore
             auto& config = VersionCheckerConfig::get();
             config.setIgnoredVersion( new_version );

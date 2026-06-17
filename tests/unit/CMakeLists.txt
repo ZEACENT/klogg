@@ -23,6 +23,7 @@ add_executable(klogg_tests
     tabbedcrawlerwidget_test.cpp
     filewatcher_test.cpp
     versionchecker_test.cpp
+    newversiondialog_test.cpp
     tests_main.cpp
 )
 
