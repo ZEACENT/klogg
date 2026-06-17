@@ -54,7 +54,6 @@
 
 #include "configuration.h"
 #include "crashhandler.h"
-#include "downloader.h"
 #include "klogg_version.h"
 #include "log.h"
 #include "session.h"
@@ -65,6 +64,7 @@
 #include "mainwindow.h"
 #include "messagereceiver.h"
 #include "newversiondialog.h"
+#include "updatedownloadhelper.h"
 #include "versionchecker.h"
 
 class KloggApp : public QApplication {
@@ -359,40 +359,32 @@ class KloggApp : public QApplication {
         const auto urlFileName = QUrl( downloadUrl ).fileName();
         const auto localPath = downloadsPath + QDir::separator() + urlFileName;
 
-        // outputFile is shared with the completion lambda so it stays alive
-        // until the download finishes (no cycle — QFile is not a QObject).
-        auto outputFile = std::make_shared<QFile>( localPath );
-        if ( !outputFile->open( QIODevice::WriteOnly ) ) {
+        QFile outputFile( localPath );
+        if ( !outputFile.open( QIODevice::WriteOnly ) ) {
             LOG_ERROR << "Cannot open file for writing: " << localPath;
             QMessageBox::warning( nullptr, tr( "Download Failed" ),
                                   tr( "Could not create file:\n%1" ).arg( localPath ) );
             return;
         }
 
-        // Use raw new + deleteLater to avoid the shared_ptr cycle that would
-        // leak, while keeping the Downloader alive for the async request.
-        auto* downloader = new Downloader();
+        // Show a modal progress dialog while downloading, matching the
+        // pattern used in MainWindow::openRemoteFile().
+        auto* progressDialog
+            = startUpdateDownload( QUrl( downloadUrl ), &outputFile, /*parent=*/nullptr );
 
-        QObject::connect( downloader, &Downloader::finished,
-                          [ outputFile, downloader, localPath ]( bool success ) {
-                              outputFile->close();
-                              if ( success ) {
-                                  LOG_INFO << "Update downloaded to " << localPath;
-                                  QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
-                              }
-                              else {
-                                  LOG_ERROR << "Update download failed: "
-                                            << downloader->lastError();
-                                  QMessageBox::warning(
-                                      nullptr, tr( "Download Failed" ),
-                                      tr( "Failed to download update:\n%1" )
-                                          .arg( downloader->lastError() ) );
-                                  outputFile->remove();
-                              }
-                              downloader->deleteLater();
-                          } );
+        if ( progressDialog->exec() == QDialog::Accepted ) {
+            LOG_INFO << "Update downloaded to " << localPath;
+            QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
+        }
+        else {
+            LOG_ERROR << "Update download was canceled or failed";
+            if ( outputFile.exists() ) {
+                outputFile.remove();
+            }
+        }
 
-        downloader->download( QUrl( downloadUrl ), outputFile.get() );
+        outputFile.close();
+        delete progressDialog;
     }
 
     size_t nextWindowIndex() const

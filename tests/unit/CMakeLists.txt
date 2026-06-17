@@ -24,6 +24,7 @@ add_executable(klogg_tests
     filewatcher_test.cpp
     versionchecker_test.cpp
     newversiondialog_test.cpp
+    updatedownload_test.cpp
     tests_main.cpp
 )
 
