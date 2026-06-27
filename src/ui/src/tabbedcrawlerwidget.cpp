@@ -95,6 +95,8 @@ QColor liveStatusColor( LiveTabStatus status )
         return QColor( 0xFF, 0xC1, 0x07 ); // Amber
     case LiveTabStatus::Error:
         return QColor( 0xF4, 0x43, 0x36 ); // Red
+    case LiveTabStatus::Reconnecting:
+        return QColor( 0x21, 0x96, 0xF3 ); // Blue — distinct from green/amber/red
     default:
         return {};
     }
@@ -280,6 +282,7 @@ void TabbedCrawlerWidget::loadIcons()
         LiveTabStatus::Connected,
         LiveTabStatus::Disconnected,
         LiveTabStatus::Error,
+        LiveTabStatus::Reconnecting,
     };
     constexpr DataStatus dataStatuses[] = {
         DataStatus::OLD_DATA,

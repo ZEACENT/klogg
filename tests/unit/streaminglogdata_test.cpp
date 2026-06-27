@@ -620,6 +620,82 @@ TEST_CASE( "Streaming live search uses pooled path for medium live update ranges
     REQUIRE( incrementalMatchers < incrementalOps * 4 );
 }
 
+TEST_CASE( "StreamingLogData setCaptureLimits trims data when limit is exceeded" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.setCaptureLimits( limits );
+
+    loadingSpy.clear();
+    for ( int i = 0; i < 20; ++i ) {
+        logData.appendUtf8( QStringLiteral( "stream-%1\n" ).arg( i ).toUtf8() );
+    }
+    REQUIRE( loadingSpy.safeWait() );
+
+    // File size should be within limits
+    CHECK( logData.getFileSize() <= limits.rollingMaxFileSize * limits.rollingBackupCount );
+
+    // Lines should still be readable
+    const auto lineCount = logData.getNbLine();
+    CHECK( lineCount.get() > 0 );
+    REQUIRE( logData.getLineString( LineNumber( lineCount.get() - 1 ) )
+             == QStringLiteral( "stream-19" ) );
+}
+
+TEST_CASE( "StreamingLogData trim emits Truncated signal and invalidates caches" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.setCaptureLimits( limits );
+
+    loadingSpy.clear();
+    SafeQSignalSpy fileSpy( &logData, SIGNAL( fileChanged( MonitoredFileStatus ) ) );
+
+    for ( int i = 0; i < 20; ++i ) {
+        logData.appendUtf8( QStringLiteral( "data-%1\n" ).arg( i ).toUtf8() );
+    }
+    REQUIRE( loadingSpy.safeWait() );
+
+    // At least one Truncated signal should have been emitted
+    bool sawTruncated = false;
+    for ( int i = 0; i < fileSpy.count(); ++i ) {
+        if ( fileSpy.at( i ).at( 0 ).value<MonitoredFileStatus>() == MonitoredFileStatus::Truncated ) {
+            sawTruncated = true;
+            break;
+        }
+    }
+    REQUIRE( sawTruncated );
+
+    // The search cache should work correctly after trim
+    const auto rawLines = logData.getLinesRaw( 0_lnum, logData.getNbLine() );
+    REQUIRE( rawLines.endOfLines.size() == static_cast<size_t>( logData.getNbLine().get() ) );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.back() == QStringLiteral( "data-19" ) );
+}
+
 TEST_CASE( "Streaming live search coalesces medium updates before starting operations" )
 {
     QTemporaryDir tempDir;

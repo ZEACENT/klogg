@@ -299,6 +299,23 @@ void Configuration::retrieveFromStorage( QSettings& settings )
         = settings.value( "iosLog.ansiOutput", DefaultConfiguration.iosLogAnsiOutputEnabled_ )
               .toBool();
 
+    liveAutoReconnectEnabled_
+        = settings.value( "liveSource.autoReconnectEnabled",
+                          DefaultConfiguration.liveAutoReconnectEnabled_ )
+              .toBool();
+    liveAutoReconnectMaxAttempts_
+        = settings.value( "liveSource.autoReconnectMaxAttempts",
+                          DefaultConfiguration.liveAutoReconnectMaxAttempts_ )
+              .toInt();
+    liveCaptureRollingMaxFileSize_
+        = settings.value( "liveSource.captureRollingMaxFileSize",
+                          DefaultConfiguration.liveCaptureRollingMaxFileSize_ )
+              .toLongLong();
+    liveCaptureRollingBackupCount_
+        = settings.value( "liveSource.captureRollingBackupCount",
+                          DefaultConfiguration.liveCaptureRollingBackupCount_ )
+              .toInt();
+
     // View settings
     overviewVisible_
         = settings.value( "view.overviewVisible", DefaultConfiguration.overviewVisible_ ).toBool();
@@ -480,6 +497,10 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "iosLog.executable", iosLogExecutable_ );
     settings.setValue( "iosLog.extraArgs", iosLogExtraArgs_ );
     settings.setValue( "iosLog.ansiOutput", iosLogAnsiOutputEnabled_ );
+    settings.setValue( "liveSource.autoReconnectEnabled", liveAutoReconnectEnabled_ );
+    settings.setValue( "liveSource.autoReconnectMaxAttempts", liveAutoReconnectMaxAttempts_ );
+    settings.setValue( "liveSource.captureRollingMaxFileSize", liveCaptureRollingMaxFileSize_ );
+    settings.setValue( "liveSource.captureRollingBackupCount", liveCaptureRollingBackupCount_ );
 
     settings.setValue( "view.overviewVisible", overviewVisible_ );
     settings.setValue( "view.lineNumbersVisibleInMain", lineNumbersVisibleInMain_ );

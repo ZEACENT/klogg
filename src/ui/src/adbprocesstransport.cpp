@@ -1,5 +1,6 @@
 #include "adbprocesstransport.h"
 #include "commandargumenttokenizer.h"
+#include "log.h"
 
 #include <QDir>
 #include <QFile>
@@ -179,6 +180,25 @@ QList<AdbDeviceInfo> AdbProcessTransport::listDevices( const QString& adbExecuta
     }
 
     return devices;
+}
+
+bool AdbProcessTransport::isDeviceAvailable() const
+{
+    QString error;
+    const auto devices = listDevices( normalizedAdbExecutable(), &error );
+    if ( !error.isEmpty() ) {
+        // The list command itself failed (e.g. adb not installed).
+        // Assume the device is available — let connectTransport() handle the
+        // actual connection attempt.
+        LOG_WARNING << "adb device pre-check unavailable: " << error;
+        return true;
+    }
+    for ( const auto& device : devices ) {
+        if ( device.serial == deviceSerial_ ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ProcessLiveSourceTransport::Command AdbProcessTransport::streamingCommand() const

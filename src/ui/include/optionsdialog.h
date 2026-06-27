@@ -118,6 +118,7 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void setupEncodings();
     void setupLanguageList();
     void setupIosLogSettings();
+    void setupLiveSourceSettings();
     void setupPanelResetButtons();
 
     int updateTranslate();
@@ -141,6 +142,11 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     QLineEdit* iosLogExecutableLineEdit_ = nullptr;
     QLineEdit* iosLogArgsLineEdit_ = nullptr;
     QCheckBox* iosLogAnsiOutputCheckBox_ = nullptr;
+    QGroupBox* liveSourceGroupBox_ = nullptr;
+    QCheckBox* liveSourceAutoReconnectCheckBox_ = nullptr;
+    QSpinBox* liveSourceMaxAttemptsSpinBox_ = nullptr;
+    QSpinBox* liveSourceRollingMaxFileSizeSpinBox_ = nullptr;
+    QSpinBox* liveSourceRollingBackupCountSpinBox_ = nullptr;
 };
 
 #endif

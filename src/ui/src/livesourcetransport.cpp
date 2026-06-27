@@ -1,7 +1,9 @@
 #include "livesourcetransport.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QMetaType>
 #include <QPointer>
 #include <QProcess>
@@ -36,6 +38,11 @@ void ProcessLiveSourceTransport::createProcess()
     process_ = std::make_unique<QProcess>();
     process_->setProcessChannelMode( QProcess::SeparateChannels );
 
+    // Redirect stderr to a temp file so it never reaches the log view.
+    // We read the file in the finished handler for error detection only.
+    stderrFilePath_ = QDir::tempPath() + QStringLiteral( "/klogg_stderr_%1.log" )
+                          .arg( reinterpret_cast<quintptr>( this ), 0, 16 );
+
     connect( process_.get(), &QProcess::readyReadStandardOutput, this, [ this ] {
         auto data = process_->readAllStandardOutput();
         if ( !data.isEmpty() ) {
@@ -43,14 +50,6 @@ void ProcessLiveSourceTransport::createProcess()
             if ( !data.isEmpty() ) {
                 Q_EMIT bytesReceived( data );
             }
-        }
-    } );
-
-    connect( process_.get(), &QProcess::readyReadStandardError, this, [ this ] {
-        const auto stdErr = QString::fromUtf8( process_->readAllStandardError() ).trimmed();
-        if ( !stdErr.isEmpty() ) {
-            lastError_ = stdErr;
-            LOG_WARNING << "live source stderr " << stdErr;
         }
     } );
 
@@ -79,6 +78,21 @@ void ProcessLiveSourceTransport::createProcess()
                  }
 
                  if ( state_ == State::Connected || state_ == State::Connecting ) {
+                     // Read stderr from the temp file for error detection.
+                     // Stderr never reaches the log view because it's
+                     // redirected to this file.
+                     if ( lastError_.isEmpty() ) {
+                         QFile stderrFile( stderrFilePath_ );
+                         if ( stderrFile.open( QIODevice::ReadOnly ) ) {
+                             const auto stdErr
+                                 = QString::fromUtf8( stderrFile.readAll() ).trimmed();
+                             if ( !stdErr.isEmpty() ) {
+                                 lastError_ = stdErr;
+                                 LOG_WARNING << "live source stderr " << stdErr;
+                             }
+                             stderrFile.close();
+                         }
+                     }
                      if ( lastError_.isEmpty() ) {
                          lastError_ = exitStatus == QProcess::NormalExit
                                           ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
@@ -87,6 +101,9 @@ void ProcessLiveSourceTransport::createProcess()
                      setState( State::Error );
                      Q_EMIT errorOccurred( lastError_ );
                  }
+
+                 // Clean up stderr temp file
+                 QFile::remove( stderrFilePath_ );
              } );
 }
 
@@ -104,6 +121,11 @@ bool ProcessLiveSourceTransport::connectTransport()
 
     const auto command = streamingCommand();
     lastError_.clear();
+    // Clean up any previous stderr temp file and redirect stderr so it never
+    // appears in the log view. We read it in the finished handler for error
+    // detection only.
+    QFile::remove( stderrFilePath_ );
+    process_->setStandardErrorFile( stderrFilePath_ );
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
     disconnectRequested_ = false;

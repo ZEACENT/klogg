@@ -25,6 +25,13 @@ class LiveSourceTransport : public QObject {
     virtual void disconnectTransport() = 0;
     virtual bool clearRemote( QString* error ) = 0;
     virtual QString lastError() const = 0;
+    // Check whether the target device is currently available. Returns true
+    // if the device can be found (e.g. via adb devices / pymobiledevice3).
+    // Default implementation returns true (no pre-check).
+    virtual bool isDeviceAvailable() const
+    {
+        return true;
+    }
 
   Q_SIGNALS:
     void bytesReceived( const QByteArray& data );
@@ -55,6 +62,15 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     virtual void filterReceivedBytes( QByteArray& data );
     bool runBlockingCommand( const Command& command, QByteArray* stdErr ) const;
 
+    // Path of the temp file that captures the subprocess stderr (it never
+    // reaches the log view).  Exposed so a transport that wraps the command in
+    // a PTY can redirect the inner command's stderr to this file *outside* the
+    // PTY — a PTY otherwise merges stderr into stdout.
+    QString stderrFilePath() const
+    {
+        return stderrFilePath_;
+    }
+
   private:
     void setState( State state );
     void createProcess();
@@ -63,6 +79,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     std::unique_ptr<QProcess> process_;
     State state_{ State::Disconnected };
     QString lastError_;
+    QString stderrFilePath_;
     bool destroyed_ = false;
     bool disconnectRequested_ = false;
 };

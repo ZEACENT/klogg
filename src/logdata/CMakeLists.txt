@@ -22,6 +22,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/ansicolorprocessor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/capturestore.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/rollingfilemanager.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/concatenatedlogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressedlinestorage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/encodingdetector.cpp

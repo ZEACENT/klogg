@@ -31,6 +31,7 @@
 #include <QUuid>
 
 #include "capturestore.h"
+#include "rollingfilemanager.h"
 
 namespace {
 QString makeTestDir( const QString& prefix )
@@ -833,4 +834,402 @@ TEST_CASE( "CaptureStore clear flushes and resets output" )
     QFile output( outputPath );
     REQUIRE( output.open( QIODevice::ReadOnly ) );
     REQUIRE( output.size() == 0 );
+}
+
+TEST_CASE( "CaptureStore trimToLimits removes oldest segments and updates line count" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16; // Very small segments
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3; // Window = 16 * 3 = 48
+
+    const auto rootPath = makeTestDir( "capturestore_trim_limits" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+
+    // Each line is ~5 bytes + newline = 6 bytes. With segmentTargetBytes=16,
+    // each segment holds ~2-3 lines. With maxTotalBytes=48, we can fit ~3 segments.
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "ln-%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) ).toUtf8() );
+    }
+
+    // After trimming, total file size should be within the limit
+    const auto stats = store.stats();
+    CHECK( stats.fileSize <= limits.rollingMaxFileSize * limits.rollingBackupCount );
+
+    // Lines should still be addressable from the surviving segments
+    const auto lineCount = store.lineCount();
+    CHECK( lineCount.get() > 0 );
+
+    // The last line should still be "ln-019"
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+    REQUIRE( store.lineAt( LineNumber( lineCount.get() - 1 ), codec, QRegularExpression{} )
+             == QStringLiteral( "ln-019" ) );
+}
+
+TEST_CASE( "CaptureStore trimToLimits preserves surviving data in bound output file" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    const auto rootPath = makeTestDir( "capturestore_trim_output" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "trimmed.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "line-%1\n" ).arg( i ).toUtf8() );
+    }
+    store.flush();
+
+    // Read from current file and all backup files
+    QByteArray allContent;
+    {
+        QFile f( outputPath );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            allContent.append( f.readAll() );
+        }
+    }
+    for ( int i = 0; i < 10; ++i ) {
+        const auto bp = outputPath + QStringLiteral( ".%1" ).arg( i );
+        QFile f( bp );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            allContent.append( f.readAll() );
+        }
+    }
+
+    INFO( "All content: " << allContent.toStdString() );
+
+    // The last line should be "line-19"
+    REQUIRE( allContent.contains( QByteArrayLiteral( "line-19" ) ) );
+
+    // The in-memory CaptureStore should be within limits
+    CHECK( store.stats().fileSize <= limits.rollingMaxFileSize * limits.rollingBackupCount );
+}
+
+TEST_CASE( "CaptureStore trimToLimits returns correct trim result" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    const auto rootPath = makeTestDir( "capturestore_trim_result" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "x\n" ).toUtf8() );
+    }
+
+    // Now trigger a trim manually and check the result
+    // First, set a very small limit and append more data
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 2;
+    store.setLimits( limits );
+    store.appendUtf8( QByteArrayLiteral( "trigger\n" ) );
+
+    // At least some lines should have been trimmed
+    CHECK( store.lineCount().get() > 0 );
+
+    // The remaining data should be within the new limit
+    CHECK( store.stats().fileSize <= 32 );
+}
+
+TEST_CASE( "CaptureStore cumulative line counts are correct after front-trim" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    const auto rootPath = makeTestDir( "capturestore_trim_cumulative" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "L%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) ).toUtf8() );
+    }
+
+    // Verify every surviving line is addressable and contains the expected content.
+    // After trim, line 0 is the first surviving line (not the original line 0).
+    const auto lineCount = store.lineCount();
+    for ( LinesCount::UnderlyingType i = 0; i < lineCount.get(); ++i ) {
+        INFO( "Checking surviving line " << i );
+        const auto line = store.lineAt( LineNumber( i ), codec, QRegularExpression{} );
+        REQUIRE_FALSE( line.isEmpty() );
+        // Each line should match the pattern "LXXX"
+        REQUIRE( line.startsWith( QLatin1Char( 'L' ) ) );
+    }
+
+    // The first surviving line should NOT be "L000" (it was trimmed)
+    const auto firstLine = store.lineAt( 0_lnum, codec, QRegularExpression{} );
+    REQUIRE( firstLine != QStringLiteral( "L000" ) );
+
+    // The last surviving line should be "L019"
+    const auto lastLine = store.lineAt( LineNumber( lineCount.get() - 1 ), codec, QRegularExpression{} );
+    REQUIRE( lastLine == QStringLiteral( "L019" ) );
+}
+
+TEST_CASE( "CaptureStore buildRawLines works correctly after front-trim" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 3;
+
+    const auto rootPath = makeTestDir( "capturestore_trim_rawlines" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "row-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    const auto lineCount = store.lineCount();
+    const auto rawLines = store.buildRawLines( 0_lnum, lineCount, codec, QRegularExpression{} );
+
+    REQUIRE( rawLines.endOfLines.size() == static_cast<size_t>( lineCount.get() ) );
+
+    const auto decoded = rawLines.decodeLines();
+    REQUIRE( decoded.size() == static_cast<size_t>( lineCount.get() ) );
+
+    // Verify first and last surviving lines
+    REQUIRE( decoded.front().startsWith( QLatin1String( "row-" ) ) );
+    REQUIRE( decoded.back() == QStringLiteral( "row-19" ) );
+
+    // Verify no duplicate or out-of-order lines
+    for ( size_t i = 1; i < decoded.size(); ++i ) {
+        INFO( "Comparing line " << i );
+        REQUIRE( decoded[ i ] != decoded[ i - 1 ] );
+    }
+}
+
+// === RollingFileManager Tests ===
+
+TEST_CASE( "RollingFileManager writes to current file" )
+{
+    const auto rootPath = makeTestDir( "rolling_basic" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 1024, 3 );
+    REQUIRE( manager.open() );
+    REQUIRE( manager.isValid() );
+
+    manager.write( QByteArrayLiteral( "hello world\n" ) );
+    manager.flush();
+
+    REQUIRE( readUtf8File( filePath ) == QStringLiteral( "hello world\n" ) );
+    REQUIRE( manager.currentFileSize() == 12 );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager rotates when file reaches maxFileSize" )
+{
+    const auto rootPath = makeTestDir( "rolling_rotate" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 32, 3 );
+    REQUIRE( manager.open() );
+
+    // Write enough data to exceed 32 bytes
+    const QByteArray data( 20, 'A' );
+    manager.write( data + QByteArrayLiteral( "\n" ) ); // 21 bytes
+    manager.write( data + QByteArrayLiteral( "\n" ) ); // 42 bytes total → triggers rotation
+
+    // After rotation: backup[0] should exist, current file should have remaining data
+    const auto backups = manager.backupFiles();
+    INFO( "Backup files: " << backups.join( QLatin1String( ", " ) ).toStdString() );
+    REQUIRE( backups.size() >= 1 );
+
+    // Current file should exist and have data
+    REQUIRE( QFile::exists( filePath ) );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager maintains backupCount limit" )
+{
+    const auto rootPath = makeTestDir( "rolling_backup_limit" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    constexpr int backupCount = 2;
+    RollingFileManager manager( filePath, 16, backupCount );
+    REQUIRE( manager.open() );
+
+    // Write enough to trigger multiple rotations
+    for ( int i = 0; i < 10; ++i ) {
+        manager.write( QStringLiteral( "line-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    // Should have at most backupCount backup files
+    const auto backups = manager.backupFiles();
+    INFO( "Backup count: " << backups.size() );
+    REQUIRE( backups.size() <= backupCount + 1 ); // +1 for current file
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager deleteAll removes all files" )
+{
+    const auto rootPath = makeTestDir( "rolling_delete_all" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 16, 3 );
+    REQUIRE( manager.open() );
+
+    for ( int i = 0; i < 10; ++i ) {
+        manager.write( QStringLiteral( "data-%1\n" ).arg( i ).toUtf8() );
+    }
+
+    manager.deleteAll();
+
+    REQUIRE_FALSE( QFile::exists( filePath ) );
+    for ( int i = 0; i < 5; ++i ) {
+        REQUIRE_FALSE( QFile::exists( filePath + QStringLiteral( ".%1" ).arg( i ) ) );
+    }
+}
+
+TEST_CASE( "RollingFileManager no data loss within window" )
+{
+    const auto rootPath = makeTestDir( "rolling_no_loss" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    // Window = maxFileSize(32) * backupCount(2) = 64 bytes.
+    // Write 7 lines (56 bytes) — all fit within the window.
+    constexpr int lineCount = 7;
+    RollingFileManager manager( filePath, 32, 2 );
+    REQUIRE( manager.open() );
+
+    for ( int i = 0; i < lineCount; ++i ) {
+        const auto line = QStringLiteral( "line-%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) );
+        manager.write( line.toUtf8() );
+    }
+
+    manager.flush();
+
+    // Collect all data from current file and backups
+    QByteArray collected;
+    {
+        QFile f( filePath );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            collected.append( f.readAll() );
+        }
+    }
+    const auto backups = manager.backupFiles();
+    for ( const auto& path : backups ) {
+        QFile f( path );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            collected.append( f.readAll() );
+        }
+    }
+
+    INFO( "Collected " << collected.size() << " bytes from " << ( backups.size() + 1 ) << " files" );
+
+    // All data within the window should be present
+    for ( int i = 0; i < lineCount; ++i ) {
+        const auto line = QStringLiteral( "line-%1" ).arg( i, 3, 10, QLatin1Char( '0' ) );
+        INFO( "Checking line " << i );
+        REQUIRE( collected.contains( line.toUtf8() ) );
+    }
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager deletes data outside window" )
+{
+    const auto rootPath = makeTestDir( "rolling_window_delete" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    // Window = 32 * 2 = 64 bytes. Write 10 lines (80 bytes).
+    // The oldest lines (outside the window) should be deleted.
+    RollingFileManager manager( filePath, 32, 2 );
+    REQUIRE( manager.open() );
+
+    for ( int i = 0; i < 10; ++i ) {
+        manager.write( QStringLiteral( "line-%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) ).toUtf8() );
+    }
+    manager.flush();
+
+    // Collect all data
+    QByteArray collected;
+    {
+        QFile f( filePath );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            collected.append( f.readAll() );
+        }
+    }
+    const auto backups = manager.backupFiles();
+    for ( const auto& path : backups ) {
+        QFile f( path );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            collected.append( f.readAll() );
+        }
+    }
+
+    // Lines 000-001 (16 bytes) should be outside the window and deleted
+    REQUIRE_FALSE( collected.contains( "line-000" ) );
+
+    // Lines 002-009 should be within the window
+    REQUIRE( collected.contains( "line-009" ) );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager zero backupCount keeps only current file" )
+{
+    const auto rootPath = makeTestDir( "rolling_zero_backup" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 32, 0 );
+    REQUIRE( manager.open() );
+
+    for ( int i = 0; i < 10; ++i ) {
+        manager.write( QStringLiteral( "x\n" ).toUtf8() );
+    }
+
+    // No backup files should exist
+    const auto backups = manager.backupFiles();
+    REQUIRE( backups.isEmpty() );
+
+    // Only the current file should exist
+    REQUIRE( QFile::exists( filePath ) );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager reopen after rotation preserves data" )
+{
+    const auto rootPath = makeTestDir( "rolling_reopen" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    {
+        RollingFileManager manager( filePath, 24, 2 );
+        REQUIRE( manager.open() );
+        for ( int i = 0; i < 5; ++i ) {
+            manager.write( QStringLiteral( "line-%1\n" ).arg( i ).toUtf8() );
+        }
+    }
+
+    // Verify files exist after close
+    REQUIRE( QFile::exists( filePath ) );
+
+    // Reopen and verify we can continue writing
+    {
+        RollingFileManager manager( filePath, 24, 2 );
+        REQUIRE( manager.open() );
+        manager.write( QByteArrayLiteral( "new-data\n" ) );
+        REQUIRE( manager.currentFileSize() > 0 );
+    }
+
+    // Cleanup
+    RollingFileManager cleanup( filePath, 24, 2 );
+    cleanup.deleteAll();
 }

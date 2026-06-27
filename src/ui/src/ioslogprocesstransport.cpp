@@ -1,6 +1,7 @@
 #include "ioslogprocesstransport.h"
 #include "commandargumenttokenizer.h"
 #include "iosdeviceparser.h"
+#include "log.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -199,6 +200,25 @@ QString IosLogProcessTransport::detectIosSyslogExecutable()
     return findExecutableAtKnownLocation( QStringLiteral( "pymobiledevice3" ) );
 }
 
+bool IosLogProcessTransport::isDeviceAvailable() const
+{
+    QString error;
+    const auto devices = listDevices( normalizedExecutable(), &error );
+    if ( !error.isEmpty() ) {
+        // The list command itself failed (e.g. pymobiledevice3 not found).
+        // Assume the device is available — let connectTransport() handle the
+        // actual connection attempt.
+        LOG_WARNING << "iOS device pre-check unavailable: " << error;
+        return true;
+    }
+    for ( const auto& device : devices ) {
+        if ( device.udid == deviceUdid_ ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool IosLogProcessTransport::clearRemote( QString* error )
 {
     if ( error ) {
@@ -223,10 +243,28 @@ ProcessLiveSourceTransport::Command IosLogProcessTransport::streamingCommand() c
     // QProcess pipes stdout, isatty() is false so ANSI escape codes are never
     // emitted.  Wrap with /usr/bin/script to allocate a PTY so that
     // pymobiledevice3 sees a terminal and actually produces colored output.
+    //
+    // A PTY merges the child's stderr into stdout, which would let
+    // pymobiledevice3's diagnostic output (ERROR logs, urllib3 warnings) leak
+    // into the log view.  Run the inner command via a shell that redirects its
+    // stderr to the transport's temp file *outside* the PTY:
+    //   sh -c 'exec "$@" 2>"$0"' <stderrFile> <program> <args...>
+    // "$0" is the stderr file, "$@" is the program + args (passed through
+    // literally, with no shell-quoting hazard).  stderr is still captured for
+    // error detection (read from the temp file in the finished handler) but
+    // never reaches the log view.  macOS script(1) runs the command "with an
+    // optional argument vector" (execvp directly), so the sh -c string and the
+    // following args pass through unmodified.
     if ( ansiOutputEnabled_ ) {
-        auto args = QStringList{ QStringLiteral( "-q" ), QStringLiteral( "/dev/null" ),
-                                 innerCommand.program }
-                    + innerCommand.arguments;
+        auto args = QStringList{
+            QStringLiteral( "-q" ),
+            QStringLiteral( "/dev/null" ),
+            QStringLiteral( "/bin/sh" ),
+            QStringLiteral( "-c" ),
+            QStringLiteral( "exec \"$@\" 2>\"$0\"" ),
+            stderrFilePath(),
+            innerCommand.program,
+        } + innerCommand.arguments;
         return Command{ QStringLiteral( "/usr/bin/script" ), std::move( args ) };
     }
 #endif

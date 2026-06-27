@@ -13,6 +13,7 @@
 #include <QString>
 
 #include "linetypes.h"
+#include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
 class CaptureStore {
@@ -20,6 +21,9 @@ class CaptureStore {
     struct Limits {
         qint64 segmentTargetBytes = 1024 * 1024;
         qint64 memoryBudgetBytes = 256 * 1024 * 1024;
+        qint64 rollingMaxFileSize = 0; // 0 = unlimited
+        int rollingBackupCount = 0;
+        qint64 maxTotalLines = 0; // 0 = unlimited
     };
 
     struct Segment {
@@ -67,8 +71,17 @@ class CaptureStore {
     AppendResult finishInput();
     void flush();
     void clear();
+
+    struct TrimResult {
+        LinesCount trimmedLines = 0_lcount;
+        qint64 trimmedBytes = 0;
+    };
+    TrimResult trimToLimits();
+    TrimResult lastTrimResult() const;
+    void clearTrimResult();
     bool bindOutputFile( const QString& outputPath );
     void setOutputFlushedCallback( std::function<void()> callback );
+    void setLimits( Limits limits );
     QString boundOutputFile() const;
     QString captureId() const;
     QString capturePath() const;
@@ -102,6 +115,7 @@ class CaptureStore {
     void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();
+    void trimToWindowSize();
 
     static constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
     static constexpr int OutputFlushLinesThreshold = 1000;
@@ -111,7 +125,7 @@ class CaptureStore {
     QString rootPath_;
     QString capturePath_;
     QString boundOutputFile_;
-    mutable std::unique_ptr<QFile> boundOutputHandle_;
+    RollingFileManager rollingOutput_;
     Limits limits_;
 
     klogg::vector<Segment> segments_;
@@ -128,6 +142,11 @@ class CaptureStore {
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
     std::function<void()> outputFlushedCallback_;
+    TrimResult lastTrimResult_;
+
+    // Spill throttling: avoid frequent small spills
+    static constexpr int SpillThrottleMs = 5000;
+    qint64 lastSpillTimeMs_ = 0;
 };
 
 #endif

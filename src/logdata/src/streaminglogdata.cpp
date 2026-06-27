@@ -7,8 +7,6 @@
 #include "logfiltereddata.h"
 
 namespace {
-constexpr qint64 OutputFlushBytesThreshold = 1024 * 1024;
-constexpr LinesCount::UnderlyingType OutputFlushLinesThreshold = 1000;
 constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
 constexpr int LiveAppendRefreshIntervalMs = 33;
 constexpr size_t AnsiDisplayCacheLineLimit = 4096;
@@ -29,9 +27,7 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
 
     outputFlushTimer_.setInterval( 1000 );
     connect( &outputFlushTimer_, &QTimer::timeout, this, [this] {
-        if ( boundOutputHandle_.isOpen() ) {
-            boundOutputHandle_.flush();
-        }
+        rollingDisplayOutput_.flush();
         if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
             captureStore_.flush();
         }
@@ -68,6 +64,20 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto t2 = std::chrono::steady_clock::now();
 #endif
 
+    // Check if trimming occurred during append (oldest segments removed due to limits)
+    const auto trimResult = captureStore_.lastTrimResult();
+    const bool wasTrimmed = trimResult.trimmedLines > 0_lcount;
+    if ( wasTrimmed ) {
+        captureStore_.clearTrimResult();
+        // Invalidate caches since line numbers shifted
+        {
+            std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+            cachedRawBatches_.clear();
+            cachedRawBytes_ = 0;
+        }
+        clearAnsiDisplayCache();
+    }
+
     rememberAppendedRawLines( appendResult );
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING
@@ -79,6 +89,9 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
          && currentLineCount != previousLineCount ) {
         writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
                                    currentLineCount - previousLineCount );
+    }
+    if ( wasTrimmed ) {
+        Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     }
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
@@ -92,6 +105,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>( t4 - t0 ).count();
     LOG_INFO << "PERF [streaming] appendUtf8 size=" << data.size()
              << " lines=" << ( currentLineCount.get() - previousLineCount.get() )
+             << " trimmed=" << trimResult.trimmedLines.get()
              << " capture_us=" << captureUs
              << " cache_us=" << cacheUs
              << " total_us=" << totalUs;
@@ -114,9 +128,7 @@ void StreamingLogData::finishInput()
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
-    if ( boundOutputHandle_.isOpen() ) {
-        boundOutputHandle_.flush();
-    }
+    rollingDisplayOutput_.flush();
 }
 
 void StreamingLogData::clearCapture()
@@ -124,6 +136,7 @@ void StreamingLogData::clearCapture()
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
+    clearAnsiDisplayCache();
     clearAnsiDisplayCache();
     {
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
@@ -143,6 +156,13 @@ void StreamingLogData::clearCapture()
 
     Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     scheduleLoadingFinished();
+}
+
+void StreamingLogData::setCaptureLimits( CaptureStore::Limits limits )
+{
+    rollingMaxFileSize_ = limits.rollingMaxFileSize;
+    rollingBackupCount_ = limits.rollingBackupCount;
+    captureStore_.setLimits( std::move( limits ) );
 }
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
@@ -409,8 +429,11 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
     }
 
     QDir().mkpath( QFileInfo( boundOutputFile_ ).absolutePath() );
-    boundOutputHandle_.setFileName( boundOutputFile_ );
-    if ( !boundOutputHandle_.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+
+    // Use CaptureStore's rolling settings for the display file
+    rollingDisplayOutput_ = RollingFileManager( boundOutputFile_, rollingMaxFileSize_,
+                                                 rollingBackupCount_ );
+    if ( !rollingDisplayOutput_.open() ) {
         boundOutputFile_.clear();
         return false;
     }
@@ -420,49 +443,42 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
         return false;
     }
 
-    boundOutputHandle_.flush();
+    rollingDisplayOutput_.flush();
     return true;
 }
 
 void StreamingLogData::closeDisplayOutputFile()
 {
-    if ( boundOutputHandle_.isOpen() ) {
-        boundOutputHandle_.flush();
-        boundOutputHandle_.close();
-    }
+    rollingDisplayOutput_.close();
+    rollingDisplayOutput_ = RollingFileManager();
     boundOutputFile_.clear();
 }
 
 bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount count )
 {
-    if ( !boundOutputHandle_.isOpen() || count <= 0_lcount ) {
+    if ( !rollingDisplayOutput_.isValid() || count <= 0_lcount ) {
         return true;
     }
 
-    qint64 unflushedBytes = 0;
-    LinesCount::UnderlyingType unflushedLines = 0;
     const auto lines = getLines( first, count );
     for ( const auto& line : lines ) {
-        const auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
-        if ( boundOutputHandle_.write( outputLine ) != outputLine.size()
-             || boundOutputHandle_.write( "\n", 1 ) != 1 ) {
+        auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+        outputLine.append( '\n' );
+
+        const auto sizeBefore = rollingDisplayOutput_.currentFileSize();
+        const auto written = rollingDisplayOutput_.write( outputLine );
+        if ( written <= 0 ) {
             closeDisplayOutputFile();
             return false;
         }
 
-        unflushedBytes += outputLine.size() + 1;
-        ++unflushedLines;
-        if ( unflushedBytes >= OutputFlushBytesThreshold
-             || unflushedLines >= OutputFlushLinesThreshold ) {
-            if ( !boundOutputHandle_.flush() ) {
-                closeDisplayOutputFile();
-                return false;
-            }
-            unflushedBytes = 0;
-            unflushedLines = 0;
-        }
+        // If rotation happened, the display file is now a rolling window.
+        // No need to trim CaptureStore here — it handles its own trimming
+        // when the Preserve mode rolling file rotates.
+        Q_UNUSED( sizeBefore );
     }
 
+    rollingDisplayOutput_.flush();
     return true;
 }
 

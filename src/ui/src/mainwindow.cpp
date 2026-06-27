@@ -2393,9 +2393,17 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
         const auto state = source->state();
         LiveTabStatus liveStatus = LiveTabStatus::Connected;
         if ( state == AdbLogcatSource::State::Error ) {
-            liveStatus = LiveTabStatus::Error;
-            if ( !source->lastError().isEmpty() ) {
-                toolTip = tr( "%1\nError: %2" ).arg( baseTip, source->lastError() );
+            if ( source->isAutoReconnectActive() ) {
+                liveStatus = LiveTabStatus::Reconnecting;
+                toolTip = tr( "%1\nReconnecting... (attempt %2)" )
+                              .arg( baseTip )
+                              .arg( source->reconnectAttempt() );
+            }
+            else {
+                liveStatus = LiveTabStatus::Error;
+                if ( !source->lastError().isEmpty() ) {
+                    toolTip = tr( "%1\nError: %2" ).arg( baseTip, source->lastError() );
+                }
             }
         }
         else if ( state == AdbLogcatSource::State::Disconnected ) {
@@ -2418,6 +2426,13 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
         return;
     }
 
+    // Apply auto-reconnect and capture limit configuration
+    const auto& config = Configuration::get();
+    adbSource->setAutoReconnectEnabled( config.liveAutoReconnectEnabled() );
+    adbSource->setAutoReconnectMaxAttempts( config.liveAutoReconnectMaxAttempts() );
+    adbSource->setCaptureLimits( config.liveCaptureRollingMaxFileSize(),
+                                 config.liveCaptureRollingBackupCount() );
+
     connect( adbSource, &AdbLogcatSource::stateChanged, this,
              [ this, crawler ]( AdbLogcatSource::State ) {
                  if ( currentCrawlerWidget() == crawler ) {
@@ -2434,6 +2449,8 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                  }
                  updateLiveTabAppearance( crawler );
              } );
+    connect( adbSource, &AdbLogcatSource::reconnectAttemptStarted, this,
+             [ this, crawler ]( int ) { updateLiveTabAppearance( crawler ); } );
 
     // Sync tab appearance immediately in case the source is already
     // in Error or Disconnected state (e.g. during session restore).
@@ -2518,7 +2535,7 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
     const auto sourceState
         = adbSource ? adbSource->state() : AdbLogcatSource::State::Disconnected;
     disconnectSourceAction->setEnabled( isLiveDocument
-                                        && sourceState == AdbLogcatSource::State::Connected );
+                                        && sourceState != AdbLogcatSource::State::Disconnected );
     reconnectSourceAction->setEnabled( isLiveDocument
                                        && sourceState != AdbLogcatSource::State::Connected );
 }

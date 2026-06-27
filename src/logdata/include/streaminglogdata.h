@@ -12,6 +12,7 @@
 #include <QTimer>
 
 #include "capturestore.h"
+#include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
 enum class LiveLogSaveAnsiMode {
@@ -29,6 +30,7 @@ class StreamingLogData : public SearchableLogData {
     void appendUtf8( const QByteArray& data );
     void finishInput();
     void clearCapture();
+    void setCaptureLimits( CaptureStore::Limits limits );
     bool bindOutputFile( const QString& outputPath );
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     QString boundOutputFile() const;
@@ -91,7 +93,9 @@ class StreamingLogData : public SearchableLogData {
     QTimer loadingFinishedTimer_;
     QTimer outputFlushTimer_;
     QString boundOutputFile_;
-    QFile boundOutputHandle_;
+    RollingFileManager rollingDisplayOutput_;
+    qint64 rollingMaxFileSize_ = 0;
+    int rollingBackupCount_ = 0;
     LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
     mutable std::mutex cachedRawBatchesMutex_;
     std::deque<CachedRawBatch> cachedRawBatches_;

@@ -5,6 +5,7 @@
 
 #include <QJsonObject>
 #include <QObject>
+#include <QTimer>
 
 #include "livesourcetransport.h"
 #include "streaminglogdata.h"
@@ -60,14 +61,30 @@ class AdbLogcatSource : public QObject {
     const AdbLogcatSessionData& sessionData() const;
     State state() const;
     QString lastError() const;
+    bool isManualDisconnect() const;
 
   Q_SIGNALS:
     void stateChanged( AdbLogcatSource::State state );
     void errorOccurred( const QString& error );
+    void reconnectAttemptStarted( int attempt );
+
+  public:
+    static constexpr int InitialReconnectDelayMs = 1000;
+    static constexpr int MaxReconnectDelayMs = 30000;
+
+    void setAutoReconnectEnabled( bool enabled );
+    void setAutoReconnectMaxAttempts( int maxAttempts );
+    bool isAutoReconnectActive() const;
+    int reconnectAttempt() const;
+    void cancelAutoReconnect();
+    void setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
+                           qint64 maxTotalLines = 0 );
 
   private:
     void setState( State state );
     void setStateFromTransport( LiveSourceTransport::State state );
+    void scheduleReconnect();
+    void attemptReconnect();
 
   private:
     AdbLogcatSessionData sessionData_;
@@ -75,6 +92,14 @@ class AdbLogcatSource : public QObject {
     std::unique_ptr<LiveSourceTransport> transport_;
     State state_{ State::Disconnected };
     QString lastError_;
+    bool manualDisconnect_ = false;
+
+    // Auto-reconnect state
+    bool autoReconnectEnabled_ = true;
+    int autoReconnectMaxAttempts_ = 0; // 0 = unlimited
+    int reconnectAttempt_ = 0;
+    bool reconnectionProven_ = false; // set when first stdout data arrives
+    QTimer reconnectTimer_;
 };
 
 #endif

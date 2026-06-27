@@ -39,7 +39,8 @@ enum class LiveTabStatus {
     None, // Normal file tab (no live source)
     Connected, // Live stream connected
     Disconnected, // Live stream disconnected
-    Error // Live stream error
+    Error, // Live stream error
+    Reconnecting // Auto-reconnect in progress
 };
 
 // This class represents glogg's main widget, a tabbed
@@ -164,7 +165,7 @@ class TabbedCrawlerWidget : public QTabWidget {
     QIcon newfiltered_icon_;
 
     // Colored icons for live stream tabs: [liveStatus][dataStatus]
-    QIcon live_icons_[ 4 ][ 3 ];
+    QIcon live_icons_[ 5 ][ 3 ];
 
     QString draggedTabPath_;
     bool tabDragInProgress_ = false;

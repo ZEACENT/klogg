@@ -2,8 +2,10 @@
 
 #include <QDateTime>
 #include <QJsonDocument>
+#include <QRandomGenerator>
 
 #include "adbprocesstransport.h"
+#include "capturestore.h"
 #include "ioslogprocesstransport.h"
 #include "log.h"
 #include "livesourcetransport.h"
@@ -136,10 +138,23 @@ AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
     , logData_( std::move( logData ) )
     , transport_( makeTransport( sessionData_ ) )
 {
+    reconnectTimer_.setSingleShot( true );
+    connect( &reconnectTimer_, &QTimer::timeout, this, &AdbLogcatSource::attemptReconnect );
+
     connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
              [ this ]( const QByteArray& data ) {
                  if ( logData_ ) {
                      logData_->appendUtf8( data );
+                 }
+                 // First stdout data after a reconnect proves the connection
+                 // is truly working — reset the backoff counter.  Reconnect
+                 // progress is surfaced via the status bar only; nothing is
+                 // written to the log view (fully silent retries).
+                 if ( !reconnectionProven_ && reconnectAttempt_ > 0 ) {
+                     reconnectionProven_ = true;
+                     LOG_INFO << "Auto-reconnect succeeded after " << reconnectAttempt_
+                              << " attempt(s)";
+                     reconnectAttempt_ = 0;
                  }
              } );
     connect( transport_.get(), &LiveSourceTransport::stateChanged, this,
@@ -156,6 +171,7 @@ AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
 
 AdbLogcatSource::~AdbLogcatSource()
 {
+    reconnectTimer_.stop();
     disconnectSource();
 }
 
@@ -169,6 +185,20 @@ bool AdbLogcatSource::connectSource()
 
     if ( state_ == State::Connected ) {
         return true;
+    }
+
+    manualDisconnect_ = false;
+
+    // Pre-check: verify the target device is available before starting the
+    // stream process. This avoids spawning pymobiledevice3 only to have it
+    // fail immediately when the device is gone (e.g. "Device not found").
+    if ( !transport_->isDeviceAvailable() ) {
+        lastError_ = tr( "Device not found: %1" )
+                         .arg( sessionData_.deviceSerial.isEmpty()
+                                   ? sessionData_.deviceDescription
+                                   : sessionData_.deviceSerial );
+        setState( State::Error );
+        return false;
     }
 
     if ( !transport_->connectTransport() ) {
@@ -187,6 +217,8 @@ void AdbLogcatSource::disconnectSource()
         return;
     }
 
+    manualDisconnect_ = true;
+    reconnectTimer_.stop();
     transport_->disconnectTransport();
 }
 
@@ -198,6 +230,7 @@ bool AdbLogcatSource::reconnectSource()
                                 .arg( QDateTime::currentDateTime().toString( Qt::ISODate ) );
         logData_->appendUtf8( marker.toUtf8() );
     }
+    manualDisconnect_ = false;
     return connectSource();
 }
 
@@ -274,6 +307,11 @@ QString AdbLogcatSource::lastError() const
     return lastError_;
 }
 
+bool AdbLogcatSource::isManualDisconnect() const
+{
+    return manualDisconnect_;
+}
+
 void AdbLogcatSource::setState( State state )
 {
     if ( state_ == state ) {
@@ -287,21 +325,34 @@ void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
 {
     switch ( state ) {
     case LiveSourceTransport::State::Connected:
+        reconnectTimer_.stop();
+        // The connection is not yet proven — we wait for the first stdout
+        // data before declaring success (see bytesReceived handler above).
+        // If the process dies without producing data, the failure is surfaced
+        // via the status bar / lastError_ (see setStateFromTransport(Error)).
+        reconnectionProven_ = false;
         setState( State::Connected );
         break;
     case LiveSourceTransport::State::Error:
+        // Reconnect failures are surfaced via the status bar / lastError_
+        // only — nothing is written to the log view (fully silent retries).
         if ( logData_ ) {
             logData_->finishInput();
         }
+        reconnectionProven_ = false;
         if ( transport_ ) {
             lastError_ = transport_->lastError();
         }
         setState( State::Error );
+        if ( !manualDisconnect_ && autoReconnectEnabled_ ) {
+            scheduleReconnect();
+        }
         break;
     case LiveSourceTransport::State::Connecting:
         setState( State::Disconnected );
         break;
     case LiveSourceTransport::State::Disconnected:
+        reconnectionProven_ = false;
         if ( logData_ ) {
             logData_->finishInput();
         }
@@ -309,3 +360,95 @@ void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
         break;
     }
 }
+
+void AdbLogcatSource::setAutoReconnectEnabled( bool enabled )
+{
+    autoReconnectEnabled_ = enabled;
+    if ( !enabled ) {
+        reconnectTimer_.stop();
+        reconnectAttempt_ = 0;
+    }
+}
+
+void AdbLogcatSource::setAutoReconnectMaxAttempts( int maxAttempts )
+{
+    autoReconnectMaxAttempts_ = maxAttempts;
+}
+
+bool AdbLogcatSource::isAutoReconnectActive() const
+{
+    return reconnectTimer_.isActive();
+}
+
+int AdbLogcatSource::reconnectAttempt() const
+{
+    return reconnectAttempt_;
+}
+
+void AdbLogcatSource::cancelAutoReconnect()
+{
+    reconnectTimer_.stop();
+    reconnectAttempt_ = 0;
+}
+
+void AdbLogcatSource::setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
+                                        qint64 maxTotalLines )
+{
+    if ( logData_ ) {
+        CaptureStore::Limits limits;
+        limits.rollingMaxFileSize = rollingMaxFileSize;
+        limits.rollingBackupCount = rollingBackupCount;
+        limits.maxTotalLines = maxTotalLines;
+        logData_->setCaptureLimits( std::move( limits ) );
+    }
+}
+
+void AdbLogcatSource::scheduleReconnect()
+{
+    if ( autoReconnectMaxAttempts_ > 0 && reconnectAttempt_ >= autoReconnectMaxAttempts_ ) {
+        // Reconnect exhaustion is surfaced via the status bar (state becomes
+        // Error with lastError_) — nothing is written to the log view.
+        LOG_INFO << "Auto-reconnect max attempts (" << autoReconnectMaxAttempts_ << ") reached, giving up";
+        return;
+    }
+
+    // Exponential backoff with ±20% jitter
+    const auto baseDelay
+        = qMin( InitialReconnectDelayMs * ( 1 << qMin( reconnectAttempt_, 15 ) ),
+                MaxReconnectDelayMs );
+    const auto jitter = QRandomGenerator::global()->bounded( baseDelay / 5 ); // ±20%
+    const auto delay = baseDelay + jitter - ( baseDelay / 10 );
+
+    LOG_INFO << "Scheduling auto-reconnect attempt " << ( reconnectAttempt_ + 1 ) << " in " << delay
+             << "ms";
+    reconnectTimer_.start( delay );
+    Q_EMIT reconnectAttemptStarted( reconnectAttempt_ + 1 );
+}
+
+void AdbLogcatSource::attemptReconnect()
+{
+    if ( !autoReconnectEnabled_ ) {
+        return;
+    }
+
+    ++reconnectAttempt_;
+    LOG_INFO << "Auto-reconnect attempt " << reconnectAttempt_;
+
+    if ( !transport_ ) {
+        LOG_WARNING << "Auto-reconnect: transport unavailable";
+        return;
+    }
+
+    // Reset manualDisconnect_ so setStateFromTransport() can trigger
+    // another scheduleReconnect() on failure.
+    manualDisconnect_ = false;
+
+    if ( !transport_->connectTransport() ) {
+        // connectTransport() failed synchronously — the transport emitted
+        // stateChanged(Error) which triggered setStateFromTransport(Error),
+        // which calls scheduleReconnect() (failures stay out of the log view).
+        LOG_WARNING << "Auto-reconnect attempt " << reconnectAttempt_ << " failed: "
+                    << transport_->lastError();
+    }
+}
+

@@ -27,6 +27,8 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
     // SDK / Homebrew install directories).
     static QString detectAdbExecutable();
 
+    bool isDeviceAvailable() const override;
+
   protected:
     Command streamingCommand() const override;
     Command clearCommand() const override;

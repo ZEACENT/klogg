@@ -18,6 +18,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
 
     bool clearRemote( QString* error ) override;
     bool connectTransport() override;
+    bool isDeviceAvailable() const override;
 
   protected:
     Command streamingCommand() const override;

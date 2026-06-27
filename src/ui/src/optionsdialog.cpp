@@ -81,6 +81,7 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     setupEncodings();
     setupLanguageList();
     setupIosLogSettings();
+    setupLiveSourceSettings();
     setupPanelResetButtons();
 
     // Validators
@@ -322,6 +323,111 @@ void OptionsDialog::setupIosLogSettings()
 #ifndef Q_OS_MAC
     iosLogGroupBox_->setVisible( false );
 #endif
+}
+
+void OptionsDialog::setupLiveSourceSettings()
+{
+    // Live Source group box with auto-reconnect and capture file rolling settings.
+    // These settings control the behavior of live log streams (ADB logcat, iOS log).
+    // Inserted on the File tab alongside the ADB and iOS log stream settings.
+
+    liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), file_watch_tab );
+    liveSourceGroupBox_->setObjectName( QStringLiteral( "liveSourceGroupBox" ) );
+
+    auto* layout = new QVBoxLayout( liveSourceGroupBox_ );
+
+    // Auto-reconnect toggle — enables/disables automatic reconnection when the
+    // live source unexpectedly disconnects or encounters an error. Uses
+    // exponential backoff starting at 1 second and capping at 30 seconds
+    // between attempts.
+    liveSourceAutoReconnectCheckBox_ = new QCheckBox(
+        tr( "Enable auto-reconnect on connection loss" ), liveSourceGroupBox_ );
+    liveSourceAutoReconnectCheckBox_->setObjectName(
+        QStringLiteral( "liveSourceAutoReconnectCheckBox" ) );
+    liveSourceAutoReconnectCheckBox_->setToolTip(
+        tr( "When enabled, klogg automatically attempts to reconnect to the live source "
+            "after an unexpected disconnection or error. Uses exponential backoff "
+            "starting at 1 second and capping at 30 seconds between attempts." ) );
+
+    // Max reconnect attempts — limits the number of automatic reconnection
+    // attempts. Set to 0 for unlimited retries. Each attempt uses increasing
+    // delay (1s, 2s, 4s, 8s, ... up to 30s).
+    auto* maxAttemptsRow = new QHBoxLayout();
+    auto* maxAttemptsLabel = new QLabel( tr( "Max reconnect attempts" ), liveSourceGroupBox_ );
+    maxAttemptsLabel->setToolTip(
+        tr( "Maximum number of automatic reconnection attempts. "
+            "Set to 0 for unlimited retries. Each retry waits longer (exponential backoff)." ) );
+    liveSourceMaxAttemptsSpinBox_ = new QSpinBox( liveSourceGroupBox_ );
+    liveSourceMaxAttemptsSpinBox_->setObjectName(
+        QStringLiteral( "liveSourceMaxAttemptsSpinBox" ) );
+    liveSourceMaxAttemptsSpinBox_->setRange( 0, 9999 );
+    liveSourceMaxAttemptsSpinBox_->setSpecialValueText( tr( "Unlimited" ) );
+    liveSourceMaxAttemptsSpinBox_->setToolTip(
+        tr( "Maximum number of automatic reconnection attempts. "
+            "Set to 0 for unlimited retries." ) );
+    maxAttemptsRow->addWidget( maxAttemptsLabel );
+    maxAttemptsRow->addWidget( liveSourceMaxAttemptsSpinBox_ );
+    maxAttemptsRow->addStretch();
+
+    // Max capture file size — when the live capture output file exceeds this
+    // size, it is rotated (renamed as a numbered backup) and a new file is
+    // started. Set to 0 to disable size-based rolling.
+    auto* maxFileSizeRow = new QHBoxLayout();
+    auto* maxFileSizeLabel = new QLabel( tr( "Max capture file size (MB)" ), liveSourceGroupBox_ );
+    maxFileSizeLabel->setToolTip(
+        tr( "When the capture file exceeds this size, it is rotated. "
+            "Set to 0 for unlimited size (no rotation by size)." ) );
+    liveSourceRollingMaxFileSizeSpinBox_ = new QSpinBox( liveSourceGroupBox_ );
+    liveSourceRollingMaxFileSizeSpinBox_->setObjectName(
+        QStringLiteral( "liveSourceRollingMaxFileSizeSpinBox" ) );
+    liveSourceRollingMaxFileSizeSpinBox_->setRange( 0, 1048576 ); // 0 to ~1 TB in MB
+    liveSourceRollingMaxFileSizeSpinBox_->setSpecialValueText( tr( "Unlimited" ) );
+    liveSourceRollingMaxFileSizeSpinBox_->setSuffix( tr( " MB" ) );
+    liveSourceRollingMaxFileSizeSpinBox_->setToolTip(
+        tr( "Maximum size of each rolling capture file in megabytes. "
+            "When exceeded, a new file is started and oldest files may be deleted "
+            "if the backup count is also set. Set to 0 to disable rolling by file size." ) );
+    maxFileSizeRow->addWidget( maxFileSizeLabel );
+    maxFileSizeRow->addWidget( liveSourceRollingMaxFileSizeSpinBox_ );
+    maxFileSizeRow->addStretch();
+
+    // Rolling backup count — number of old capture files to retain during
+    // rotation. Files beyond this count are deleted. Set to 0 to disable
+    // rolling backup (no backup files retained, only the current file).
+    auto* backupCountRow = new QHBoxLayout();
+    auto* backupCountLabel = new QLabel( tr( "Rolling backup count" ), liveSourceGroupBox_ );
+    backupCountLabel->setToolTip(
+        tr( "Number of old capture files to keep when rolling. "
+            "Older files beyond this count are automatically deleted. "
+            "Set to 0 to disable rolling backup (only the current file is kept)." ) );
+    liveSourceRollingBackupCountSpinBox_ = new QSpinBox( liveSourceGroupBox_ );
+    liveSourceRollingBackupCountSpinBox_->setObjectName(
+        QStringLiteral( "liveSourceRollingBackupCountSpinBox" ) );
+    liveSourceRollingBackupCountSpinBox_->setRange( 0, 999 );
+    liveSourceRollingBackupCountSpinBox_->setSpecialValueText( tr( "No rolling" ) );
+    liveSourceRollingBackupCountSpinBox_->setToolTip(
+        tr( "Number of backup capture files to retain during rotation. "
+            "Older files beyond this count are deleted. "
+            "Set to 0 to disable rolling backup." ) );
+    backupCountRow->addWidget( backupCountLabel );
+    backupCountRow->addWidget( liveSourceRollingBackupCountSpinBox_ );
+    backupCountRow->addStretch();
+
+    layout->addWidget( liveSourceAutoReconnectCheckBox_ );
+    layout->addLayout( maxAttemptsRow );
+    layout->addLayout( maxFileSizeRow );
+    layout->addLayout( backupCountRow );
+
+    // Help text explaining when settings take effect
+    auto* helpLabel = new QLabel( liveSourceGroupBox_ );
+    helpLabel->setWordWrap( true );
+    helpLabel->setText( tr( "These settings control live log stream capture behavior. "
+                            "Changes take effect for new live source connections." ) );
+    layout->addWidget( helpLabel );
+
+    // Insert before the spacer at the bottom of the File tab layout
+    const auto insertIndex = std::max( 0, verticalLayout_9->count() - 1 );
+    verticalLayout_9->insertWidget( insertIndex, liveSourceGroupBox_ );
 }
 
 void OptionsDialog::setupPanelResetButtons()
@@ -596,6 +702,20 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     if ( iosLogAnsiOutputCheckBox_ ) {
         iosLogAnsiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
     }
+    if ( liveSourceAutoReconnectCheckBox_ ) {
+        liveSourceAutoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
+    }
+    if ( liveSourceMaxAttemptsSpinBox_ ) {
+        liveSourceMaxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
+    }
+    if ( liveSourceRollingMaxFileSizeSpinBox_ ) {
+        // Configuration stores bytes, UI displays MB
+        liveSourceRollingMaxFileSizeSpinBox_->setValue(
+            static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+    }
+    if ( liveSourceRollingBackupCountSpinBox_ ) {
+        liveSourceRollingBackupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
+    }
 
     const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
     encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
@@ -768,6 +888,19 @@ void OptionsDialog::resetFileDefaults()
     }
     if ( iosLogAnsiOutputCheckBox_ ) {
         iosLogAnsiOutputCheckBox_->setChecked( defaults.iosLogAnsiOutputEnabled() );
+    }
+    if ( liveSourceAutoReconnectCheckBox_ ) {
+        liveSourceAutoReconnectCheckBox_->setChecked( defaults.liveAutoReconnectEnabled() );
+    }
+    if ( liveSourceMaxAttemptsSpinBox_ ) {
+        liveSourceMaxAttemptsSpinBox_->setValue( defaults.liveAutoReconnectMaxAttempts() );
+    }
+    if ( liveSourceRollingMaxFileSizeSpinBox_ ) {
+        liveSourceRollingMaxFileSizeSpinBox_->setValue(
+            static_cast<int>( defaults.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+    }
+    if ( liveSourceRollingBackupCountSpinBox_ ) {
+        liveSourceRollingBackupCountSpinBox_->setValue( defaults.liveCaptureRollingBackupCount() );
     }
 }
 
@@ -943,6 +1076,20 @@ void OptionsDialog::updateConfigFromDialog()
     }
     if ( iosLogAnsiOutputCheckBox_ ) {
         config.setIosLogAnsiOutputEnabled( iosLogAnsiOutputCheckBox_->isChecked() );
+    }
+    if ( liveSourceAutoReconnectCheckBox_ ) {
+        config.setLiveAutoReconnectEnabled( liveSourceAutoReconnectCheckBox_->isChecked() );
+    }
+    if ( liveSourceMaxAttemptsSpinBox_ ) {
+        config.setLiveAutoReconnectMaxAttempts( liveSourceMaxAttemptsSpinBox_->value() );
+    }
+    if ( liveSourceRollingMaxFileSizeSpinBox_ ) {
+        // Convert MB from UI back to bytes for Configuration
+        config.setLiveCaptureRollingMaxFileSize(
+            static_cast<qint64>( liveSourceRollingMaxFileSizeSpinBox_->value() ) * 1024 * 1024 );
+    }
+    if ( liveSourceRollingBackupCountSpinBox_ ) {
+        config.setLiveCaptureRollingBackupCount( liveSourceRollingBackupCountSpinBox_->value() );
     }
 
     const auto selectedStyle = styleComboBox->currentData().toString();
