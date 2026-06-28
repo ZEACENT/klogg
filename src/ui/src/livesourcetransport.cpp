@@ -199,13 +199,23 @@ void ProcessLiveSourceTransport::connectTransportAsync()
     // the existing handlers already transitioned to Error — the timer just
     // confirms the happy path.
     QPointer<ProcessLiveSourceTransport> self( this );
-    QTimer::singleShot( StartupFailureGracePeriodMs, this, [ this, self ]() {
+    // Capture the specific process instance so a reconnect that replaces
+    // process_ before the timer fires cannot promote the wrong process to
+    // Connected.
+    auto* startedProcess = process_.get();
+    QTimer::singleShot( StartupFailureGracePeriodMs, this,
+                         [ this, self, startedProcess ]() {
         if ( !self || destroyed_ || disconnectRequested_ ) {
             return;
         }
         // Another handler (errorOccurred / finished) already moved us past
         // Connecting — nothing to do.
         if ( state_ != State::Connecting ) {
+            return;
+        }
+
+        // A reconnect replaced process_ — this timer is stale.
+        if ( process_.get() != startedProcess ) {
             return;
         }
 

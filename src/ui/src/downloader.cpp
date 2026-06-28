@@ -74,12 +74,17 @@ void Downloader::download( const QUrl& url, QFile* outputFile )
 void Downloader::downloadFinished()
 {
     output_->close();
-    currentDownload_->deleteLater();
 
-    if ( currentDownload_->error() ) {
+    // Null currentDownload_ before any further handling so abort() never
+    // dereferences a reply that has already been scheduled for deletion.
+    auto* reply = currentDownload_;
+    currentDownload_ = nullptr;
+    reply->deleteLater();
+
+    if ( reply->error() ) {
         // download failed
-        LOG_ERROR << "Download failed: " << currentDownload_->errorString();
-        lastError_ = currentDownload_->errorString();
+        LOG_ERROR << "Download failed: " << reply->errorString();
+        lastError_ = reply->errorString();
         output_->remove();
         Q_EMIT finished( false );
     }

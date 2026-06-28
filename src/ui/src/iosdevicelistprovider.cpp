@@ -94,7 +94,9 @@ bool runPymobiledeviceListCommand( const QString& executable, const QStringList&
         return false;
     }
 
-    if ( !waitForFinishedOrKill( process, 5000 ) ) {
+    // pymobiledevice3 can take ~8s on the slow path; use 10s to avoid
+    // premature timeouts on healthy-but-slow probes.
+    if ( !waitForFinishedOrKill( process, 10000 ) ) {
         if ( error ) {
             *error = QObject::tr( "Timed out waiting for iOS device list output" );
         }

@@ -360,10 +360,18 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         return result;
     }
 
-    // Rolling window: rollingMaxFileSize * rollingBackupCount
-    const auto windowBytes = limits_.rollingMaxFileSize > 0 && limits_.rollingBackupCount > 0
-                                 ? limits_.rollingMaxFileSize * limits_.rollingBackupCount
-                                 : qint64{ 0 };
+    // Rolling window: rollingMaxFileSize * rollingBackupCount.
+    // backupCount is the number of retained backups; the current file is
+    // tracked separately via fileSize_.  Use checked multiplication to guard
+    // against overflow from hand-edited or session-restored limits.
+    qint64 windowBytes = 0;
+    if ( limits_.rollingMaxFileSize > 0 && limits_.rollingBackupCount > 0 ) {
+        const auto backupCount = static_cast<qint64>( limits_.rollingBackupCount );
+        windowBytes
+            = limits_.rollingMaxFileSize > std::numeric_limits<qint64>::max() / backupCount
+                  ? std::numeric_limits<qint64>::max()
+                  : limits_.rollingMaxFileSize * backupCount;
+    }
     const auto exceedsBytes = windowBytes > 0 && fileSize_ > windowBytes;
     const auto exceedsLines = limits_.maxTotalLines > 0 && totalLines_ > limits_.maxTotalLines;
 
@@ -417,7 +425,8 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
     // O(1) cumulative line count fixup: subtract removed lines from all remaining segments
     if ( totalRemovedLines > 0 ) {
         for ( auto& segment : segments_ ) {
-            segment.cumulativeEndLine -= totalRemovedLines;
+            segment.cumulativeEndLine
+                -= static_cast<qint64>( totalRemovedLines );
         }
     }
 

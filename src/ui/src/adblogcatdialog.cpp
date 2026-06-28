@@ -125,19 +125,19 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
 
 AdbLogcatSessionData AdbLogcatDialog::sessionData() const
 {
-    AdbLogcatSessionData data;
-    data.adbExecutable = adbExecutableEdit_->text().trimmed();
-    data.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
-    data.deviceDescription = deviceCombo_->currentText();
-    data.extraArgs = extraArgsEdit_->text().trimmed();
-    data.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
-    data.sourceType = LiveLogSourceType::AdbLogcat;
-    data.ansiOutputEnabled = ansiOutputCheckBox_->isChecked();
-    data.autoReconnectEnabled = autoReconnectCheckBox_->isChecked();
-    data.maxReconnectAttempts = maxAttemptsSpinBox_->value();
-    data.captureMaxFileSize = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
-    data.captureBackupCount = backupCountSpinBox_->value();
-    return data;
+    AdbLogcatSessionData sessionData;
+    sessionData.adbExecutable = adbExecutableEdit_->text().trimmed();
+    sessionData.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
+    sessionData.deviceDescription = deviceCombo_->currentText();
+    sessionData.extraArgs = extraArgsEdit_->text().trimmed();
+    sessionData.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    sessionData.sourceType = LiveLogSourceType::AdbLogcat;
+    sessionData.ansiOutputEnabled = ansiOutputCheckBox_->isChecked();
+    sessionData.autoReconnectEnabled = autoReconnectCheckBox_->isChecked();
+    sessionData.maxReconnectAttempts = maxAttemptsSpinBox_->value();
+    sessionData.captureMaxFileSize = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
+    sessionData.captureBackupCount = backupCountSpinBox_->value();
+    return sessionData;
 }
 
 void AdbLogcatDialog::refreshDevices()

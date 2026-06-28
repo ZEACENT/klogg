@@ -352,6 +352,55 @@ def _check_qt5_arg_limit(text: str, path: Path) -> list[tuple[int, str]]:
     return findings
 
 
+def _check_data_variable_shadowing(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag local variables named ``data`` inside QWidget subclass methods.
+
+    QWidget has a protected member ``data`` (QScopedPointer<QWidgetData>).
+    GCC/Clang ``-Wshadow`` does NOT warn about shadowing protected members,
+    but MSVC C4458 (enabled by /W4, promoted to error by /WX) does.  This
+    causes Windows-only CI failures that pass on macOS/Linux.
+
+    PR #38 exposed this in AdbLogcatDialog::sessionData() and
+    IosLogDialog::sessionData().
+
+    The check looks for:
+    - Files whose name contains "dialog" (heuristic for QDialog subclasses).
+    - A local variable declaration ``Type data;`` or ``Type data{}``.
+    """
+    if ALLOW_MARKER in text:
+        return []
+
+    if "dialog" not in path.name.lower():
+        return []
+
+    # Only flag if the file actually includes QWidget/QDialog headers
+    # or inherits from QDialog — avoids false positives in non-Qt files.
+    if "QDialog" not in text and "QWidget" not in text:
+        return []
+
+    findings: list[tuple[int, str]] = []
+    # Match: TypeIdentifier data;  or  TypeIdentifier data{...}
+    # Captures patterns like:  AdbLogcatSessionData data;
+    decl_re = re.compile(
+        r"^\s+\w+(?:::\w+)*\s+data\s*[;={]"
+    )
+    for i, line in enumerate(text.splitlines(), start=1):
+        if ALLOW_MARKER in line:
+            continue
+        if decl_re.match(line):
+            findings.append(
+                (
+                    i,
+                    "Local variable named 'data' shadows QWidget::data "
+                    "(protected member). GCC/Clang -Wshadow does NOT catch "
+                    "this, but MSVC C4458 does (promoted to error by /WX). "
+                    "Rename the variable (e.g. 'sessionData') to avoid a "
+                    "Windows-only CI failure. (PR #38)",
+                )
+            )
+    return findings
+
+
 def _check_hardcoded_text_viewport_row_assertion(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag text viewport height assertions that assume fixed font metrics.
 
@@ -444,6 +493,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qt5-string-arg-limit",
         "check": _check_qt5_arg_limit,
+    },
+    {
+        "name": "data-variable-shadowing",
+        "check": _check_data_variable_shadowing,
     },
 ]
 
