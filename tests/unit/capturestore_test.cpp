@@ -1310,23 +1310,29 @@ TEST_CASE( "RollingFileManager deletes data outside window" )
     manager.deleteAll();
 }
 
-TEST_CASE( "RollingFileManager zero backupCount keeps only current file" )
+TEST_CASE( "RollingFileManager zero backupCount keeps all rotated files" )
 {
     const auto rootPath = makeTestDir( "rolling_zero_backup" );
     const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
 
-    RollingFileManager manager( filePath, 32, 0 );
+    // maxFileSize = 16 bytes, backupCount = 0 (keep all rotated files)
+    RollingFileManager manager( filePath, 16, 0 );
     REQUIRE( manager.open() );
 
-    for ( int i = 0; i < 10; ++i ) {
-        manager.write( QStringLiteral( "x\n" ).toUtf8() );
+    // Write data in small chunks to trigger multiple rotations.
+    // Each "line-NN\n" is 8 bytes; maxFileSize = 16 → rotation every 2 lines.
+    for ( int i = 0; i < 20; ++i ) {
+        const auto line = QStringLiteral( "line-%1\n" )
+                              .arg( i, 2, 10, QLatin1Char( '0' ) )
+                              .toUtf8();
+        manager.write( line );
     }
 
-    // No backup files should exist
+    // Backup files should be retained (no cleanup when backupCount = 0)
     const auto backups = manager.backupFiles();
-    REQUIRE( backups.isEmpty() );
+    REQUIRE( backups.size() >= 2 );
 
-    // Only the current file should exist
+    // The current file should also exist
     REQUIRE( QFile::exists( filePath ) );
 
     manager.deleteAll();

@@ -751,7 +751,7 @@ class Configuration final : public Persistable<Configuration> {
     // (ADB logcat, iOS log stream) unexpectedly disconnects or encounters
     // an error. When enabled, klogg uses exponential backoff starting at
     // 1 second and capping at 30 seconds between attempts.
-    bool liveAutoReconnectEnabled_ = true;
+    bool liveAutoReconnectEnabled_ = false;
     // Maximum number of automatic reconnection attempts before giving up.
     // Set to 0 for unlimited retries. Each retry waits longer: the delay
     // doubles with each attempt (1s, 2s, 4s, 8s, ... up to 30s).
@@ -761,12 +761,12 @@ class Configuration final : public Persistable<Configuration> {
     // numbered backup) and a new file is started. Old backups beyond
     // liveCaptureRollingBackupCount_ are deleted. Set to 0 to disable
     // size-based rolling (single unlimited file).
-    qint64 liveCaptureRollingMaxFileSize_ = 0; // 0 = unlimited
+    qint64 liveCaptureRollingMaxFileSize_ = 1000LL * 1024 * 1024; // 1000 MB
     // Number of old capture backup files to retain when rolling by file
     // size. Files beyond this count are deleted (oldest first). Set to 0
-    // to disable rolling backup — only the current file is kept. Effective
+    // to keep all rotated files indefinitely (no cleanup). Effective
     // only when liveCaptureRollingMaxFileSize_ is also > 0.
-    int liveCaptureRollingBackupCount_ = 0;
+    int liveCaptureRollingBackupCount_ = 0; // 0 = keep all rotated files
 
     bool forceFontAntialiasing_ = false;
     bool enableQtHighDpi_ = true;

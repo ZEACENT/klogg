@@ -11,6 +11,7 @@ class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
 class AdbLogcatDialog : public QDialog {
     Q_OBJECT
@@ -34,6 +35,10 @@ class AdbLogcatDialog : public QDialog {
     QComboBox* deviceCombo_ = nullptr;
     QLineEdit* extraArgsEdit_ = nullptr;
     QCheckBox* ansiOutputCheckBox_ = nullptr;
+    QCheckBox* autoReconnectCheckBox_ = nullptr;
+    QSpinBox* maxAttemptsSpinBox_ = nullptr;
+    QSpinBox* maxFileSizeSpinBox_ = nullptr;
+    QSpinBox* backupCountSpinBox_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QDialogButtonBox* buttonBox_ = nullptr;
 };

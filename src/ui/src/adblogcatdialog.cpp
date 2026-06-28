@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QVBoxLayout>
 #include <QUuid>
 
@@ -20,7 +21,7 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
 {
     setWindowTitle( tr( "Open ADB Logcat" ) );
     setModal( true );
-    resize( 720, 220 );
+    resize( 720, 380 );
 
     auto* rootLayout = new QVBoxLayout( this );
     auto* formLayout = new QFormLayout();
@@ -42,10 +43,53 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
     ansiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), this );
     ansiOutputCheckBox_->setObjectName( QStringLiteral( "ansiOutputCheckBox" ) );
 
+    // Auto-reconnect: enables automatic reconnection with exponential backoff
+    autoReconnectCheckBox_
+        = new QCheckBox( tr( "Enable auto-reconnect on connection loss" ), this );
+    autoReconnectCheckBox_->setObjectName( QStringLiteral( "autoReconnectCheckBox" ) );
+    autoReconnectCheckBox_->setToolTip(
+        tr( "When enabled, klogg automatically attempts to reconnect to the live source "
+            "after an unexpected disconnection or error. Uses exponential backoff "
+            "starting at 1 second and capping at 30 seconds between attempts." ) );
+
+    // Max reconnect attempts
+    maxAttemptsSpinBox_ = new QSpinBox( this );
+    maxAttemptsSpinBox_->setObjectName( QStringLiteral( "maxAttemptsSpinBox" ) );
+    maxAttemptsSpinBox_->setRange( 0, 9999 );
+    maxAttemptsSpinBox_->setSpecialValueText( tr( "Unlimited" ) );
+    maxAttemptsSpinBox_->setToolTip(
+        tr( "Maximum number of automatic reconnection attempts before giving up. "
+            "Set to 0 for unlimited retries. Each retry uses increasing delay "
+            "(1s, 2s, 4s, 8s, ... up to 30s)." ) );
+
+    // Max capture file size (displayed in MB, stored in bytes)
+    maxFileSizeSpinBox_ = new QSpinBox( this );
+    maxFileSizeSpinBox_->setObjectName( QStringLiteral( "maxFileSizeSpinBox" ) );
+    maxFileSizeSpinBox_->setRange( 0, 1048576 ); // 0 to ~1 TB in MB
+    maxFileSizeSpinBox_->setSpecialValueText( tr( "Unlimited" ) );
+    maxFileSizeSpinBox_->setSuffix( tr( " MB" ) );
+    maxFileSizeSpinBox_->setToolTip(
+        tr( "Maximum size of each rolling capture file in megabytes. "
+            "When exceeded, the file is rotated and a new one is started. "
+            "Set to 0 to disable size-based rolling." ) );
+
+    // Rolling backup count
+    backupCountSpinBox_ = new QSpinBox( this );
+    backupCountSpinBox_->setObjectName( QStringLiteral( "backupCountSpinBox" ) );
+    backupCountSpinBox_->setRange( 0, 999 );
+    backupCountSpinBox_->setToolTip(
+        tr( "Number of old capture files to keep when rolling by file size. "
+            "Older files beyond this count are deleted. "
+            "Set to 0 to keep all rotated files indefinitely." ) );
+
     formLayout->addRow( tr( "ADB executable" ), adbRowLayout );
     formLayout->addRow( tr( "Device" ), deviceCombo_ );
     formLayout->addRow( tr( "Extra logcat args" ), extraArgsEdit_ );
     formLayout->addRow( QString{}, ansiOutputCheckBox_ );
+    formLayout->addRow( QString{}, autoReconnectCheckBox_ );
+    formLayout->addRow( tr( "Max reconnect attempts" ), maxAttemptsSpinBox_ );
+    formLayout->addRow( tr( "Max capture file size" ), maxFileSizeSpinBox_ );
+    formLayout->addRow( tr( "Rolling backup count" ), backupCountSpinBox_ );
 
     statusLabel_ = new QLabel( this );
     statusLabel_->setObjectName( QStringLiteral( "adbStatusLabel" ) );
@@ -73,16 +117,19 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
 
 AdbLogcatSessionData AdbLogcatDialog::sessionData() const
 {
-    return AdbLogcatSessionData{
-        adbExecutableEdit_->text().trimmed(),
-        deviceCombo_->currentData( Qt::UserRole ).toString(),
-        deviceCombo_->currentText(),
-        extraArgsEdit_->text().trimmed(),
-        QUuid::createUuid().toString( QUuid::WithoutBraces ),
-        {},
-        LiveLogSourceType::AdbLogcat,
-        ansiOutputCheckBox_->isChecked(),
-    };
+    AdbLogcatSessionData data;
+    data.adbExecutable = adbExecutableEdit_->text().trimmed();
+    data.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
+    data.deviceDescription = deviceCombo_->currentText();
+    data.extraArgs = extraArgsEdit_->text().trimmed();
+    data.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    data.sourceType = LiveLogSourceType::AdbLogcat;
+    data.ansiOutputEnabled = ansiOutputCheckBox_->isChecked();
+    data.autoReconnectEnabled = autoReconnectCheckBox_->isChecked();
+    data.maxReconnectAttempts = maxAttemptsSpinBox_->value();
+    data.captureMaxFileSize = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
+    data.captureBackupCount = backupCountSpinBox_->value();
+    return data;
 }
 
 void AdbLogcatDialog::refreshDevices()
@@ -120,6 +167,11 @@ void AdbLogcatDialog::loadSettings()
     adbExecutableEdit_->setText( config.adbExecutable() );
     extraArgsEdit_->setText( config.adbLogcatExtraArgs() );
     ansiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
+    autoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
+    maxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
+    maxFileSizeSpinBox_->setValue(
+        static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+    backupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
 }
 
 void AdbLogcatDialog::saveSettings() const
@@ -128,5 +180,10 @@ void AdbLogcatDialog::saveSettings() const
     config.setAdbExecutable( adbExecutableEdit_->text().trimmed() );
     config.setAdbLogcatExtraArgs( extraArgsEdit_->text().trimmed() );
     config.setAdbLogcatAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
+    config.setLiveAutoReconnectEnabled( autoReconnectCheckBox_->isChecked() );
+    config.setLiveAutoReconnectMaxAttempts( maxAttemptsSpinBox_->value() );
+    config.setLiveCaptureRollingMaxFileSize(
+        static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024 );
+    config.setLiveCaptureRollingBackupCount( backupCountSpinBox_->value() );
     config.save();
 }

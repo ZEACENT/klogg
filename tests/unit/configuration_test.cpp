@@ -149,6 +149,71 @@ TEST_CASE( "Configuration stores and restores iOS log defaults" )
     REQUIRE( restoredConfig.adbLogcatAnsiOutputEnabled() );
 }
 
+TEST_CASE( "Configuration defaults auto-reconnect to disabled" )
+{
+    Configuration config;
+
+    REQUIRE_FALSE( config.liveAutoReconnectEnabled() );
+}
+
+TEST_CASE( "Configuration stores and restores auto-reconnect settings" )
+{
+    const auto dirPath = makeTestDir( "configuration_reconnect" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-reconnect.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setLiveAutoReconnectEnabled( true );
+        config.setLiveAutoReconnectMaxAttempts( 5 );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredConfig.liveAutoReconnectEnabled() );
+    REQUIRE( restoredConfig.liveAutoReconnectMaxAttempts() == 5 );
+}
+
+TEST_CASE( "Configuration defaults max capture file size to 1000 MB" )
+{
+    Configuration config;
+
+    // 1000 MB in bytes
+    REQUIRE( config.liveCaptureRollingMaxFileSize() == 1000LL * 1024 * 1024 );
+}
+
+TEST_CASE( "Configuration stores and restores capture rolling settings" )
+{
+    const auto dirPath = makeTestDir( "configuration_capture" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-capture.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setLiveCaptureRollingMaxFileSize( 500LL * 1024 * 1024 );
+        config.setLiveCaptureRollingBackupCount( 3 );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredConfig.liveCaptureRollingMaxFileSize() == 500LL * 1024 * 1024 );
+    REQUIRE( restoredConfig.liveCaptureRollingBackupCount() == 3 );
+}
+
 TEST_CASE( "Configuration defaults empty filters to show all lines in filtered view" )
 {
     Configuration config;

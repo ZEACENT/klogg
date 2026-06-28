@@ -113,22 +113,36 @@ QJsonObject AdbLogcatSessionData::toJson() const
         { QStringLiteral( "captureId" ), captureId },
         { QStringLiteral( "boundOutputFile" ), boundOutputFile },
         { QStringLiteral( "ansiOutputEnabled" ), ansiOutputEnabled },
+        { QStringLiteral( "autoReconnectEnabled" ), autoReconnectEnabled },
+        { QStringLiteral( "maxReconnectAttempts" ), maxReconnectAttempts },
+        { QStringLiteral( "captureMaxFileSize" ), static_cast<qint64>( captureMaxFileSize ) },
+        { QStringLiteral( "captureBackupCount" ), captureBackupCount },
     };
 }
 
 AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
 {
     const auto jsonObject = QJsonDocument::fromJson( json.toUtf8() ).object();
-    return AdbLogcatSessionData{
-        jsonObject.value( QStringLiteral( "adbExecutable" ) ).toString(),
-        jsonObject.value( QStringLiteral( "deviceSerial" ) ).toString(),
-        jsonObject.value( QStringLiteral( "deviceDescription" ) ).toString(),
-        jsonObject.value( QStringLiteral( "extraArgs" ) ).toString(),
-        jsonObject.value( QStringLiteral( "captureId" ) ).toString(),
-        jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString(),
-        sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() ),
-        jsonObject.value( QStringLiteral( "ansiOutputEnabled" ) ).toBool( false ),
-    };
+    AdbLogcatSessionData data;
+    data.adbExecutable = jsonObject.value( QStringLiteral( "adbExecutable" ) ).toString();
+    data.deviceSerial = jsonObject.value( QStringLiteral( "deviceSerial" ) ).toString();
+    data.deviceDescription = jsonObject.value( QStringLiteral( "deviceDescription" ) ).toString();
+    data.extraArgs = jsonObject.value( QStringLiteral( "extraArgs" ) ).toString();
+    data.captureId = jsonObject.value( QStringLiteral( "captureId" ) ).toString();
+    data.boundOutputFile = jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString();
+    data.sourceType
+        = sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() );
+    data.ansiOutputEnabled
+        = jsonObject.value( QStringLiteral( "ansiOutputEnabled" ) ).toBool( false );
+    data.autoReconnectEnabled
+        = jsonObject.value( QStringLiteral( "autoReconnectEnabled" ) ).toBool( false );
+    data.maxReconnectAttempts
+        = jsonObject.value( QStringLiteral( "maxReconnectAttempts" ) ).toInt( 0 );
+    data.captureMaxFileSize
+        = jsonObject.value( QStringLiteral( "captureMaxFileSize" ) ).toVariant().toLongLong();
+    data.captureBackupCount
+        = jsonObject.value( QStringLiteral( "captureBackupCount" ) ).toInt( 0 );
+    return data;
 }
 
 AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,

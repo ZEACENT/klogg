@@ -2426,12 +2426,13 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
         return;
     }
 
-    // Apply auto-reconnect and capture limit configuration
-    const auto& config = Configuration::get();
-    adbSource->setAutoReconnectEnabled( config.liveAutoReconnectEnabled() );
-    adbSource->setAutoReconnectMaxAttempts( config.liveAutoReconnectMaxAttempts() );
-    adbSource->setCaptureLimits( config.liveCaptureRollingMaxFileSize(),
-                                 config.liveCaptureRollingBackupCount() );
+    // Apply auto-reconnect and capture limit configuration from session data
+    // (populated by the open dialog or session restore).
+    const auto& sessionData = adbSource->sessionData();
+    adbSource->setAutoReconnectEnabled( sessionData.autoReconnectEnabled );
+    adbSource->setAutoReconnectMaxAttempts( sessionData.maxReconnectAttempts );
+    adbSource->setCaptureLimits( sessionData.captureMaxFileSize,
+                                 sessionData.captureBackupCount );
 
     connect( adbSource, &AdbLogcatSource::stateChanged, this,
              [ this, crawler ]( AdbLogcatSource::State ) {

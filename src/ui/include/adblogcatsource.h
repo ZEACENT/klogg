@@ -26,6 +26,10 @@ struct AdbLogcatSessionData {
     QString boundOutputFile;
     LiveLogSourceType sourceType = LiveLogSourceType::AdbLogcat;
     bool ansiOutputEnabled = false;
+    bool autoReconnectEnabled = false;
+    int maxReconnectAttempts = 0; // 0 = unlimited
+    qint64 captureMaxFileSize = 0; // bytes, 0 = unlimited
+    int captureBackupCount = 0; // 0 = keep all rotated files
 
     QString displayName() const;
     QString documentId() const;

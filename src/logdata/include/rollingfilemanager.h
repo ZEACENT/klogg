@@ -8,7 +8,8 @@
 // Manages a rolling output file that rotates when it reaches a size limit.
 // When the current file exceeds maxFileSize, it is renamed as a numbered backup
 // and a new file is opened with the original name. Old backups beyond backupCount
-// are automatically deleted.
+// are automatically deleted. When backupCount is 0, all rotated files are kept
+// indefinitely (no cleanup).
 //
 // The rename is done atomically. To avoid data loss during the gap between closing
 // the old file and opening the new one, the rotation opens the new file BEFORE

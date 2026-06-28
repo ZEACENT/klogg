@@ -211,10 +211,17 @@ QFile* RollingFileManager::currentFile()
 QStringList RollingFileManager::backupFiles() const
 {
     QStringList files;
-    for ( int i = 0; i <= backupCount_ + 1; ++i ) {
+    // When backupCount_ = 0 (keep all), search a reasonable upper bound;
+    // otherwise search up to backupCount_ + 1 to catch any excess.
+    const int searchLimit = ( backupCount_ > 0 ) ? backupCount_ + 1 : 100;
+    for ( int i = 0; i <= searchLimit; ++i ) {
         const auto path = backupPath( i );
         if ( QFile::exists( path ) ) {
             files.append( path );
+        }
+        else if ( i > 0 ) {
+            // Stop at the first gap — backups are numbered sequentially
+            break;
         }
     }
     return files;
@@ -231,8 +238,15 @@ void RollingFileManager::deleteAll()
 {
     close();
     QFile::remove( basePath_ );
-    for ( int i = 0; i <= backupCount_ + 10; ++i ) {
-        QFile::remove( backupPath( i ) );
+    const int searchLimit = ( backupCount_ > 0 ) ? backupCount_ + 10 : 100;
+    for ( int i = 0; i <= searchLimit; ++i ) {
+        const auto path = backupPath( i );
+        if ( QFile::exists( path ) ) {
+            QFile::remove( path );
+        }
+        else if ( i > 0 ) {
+            break;
+        }
     }
     QFile::remove( basePath_ + QStringLiteral( ".tmp_rotate" ) );
 }
@@ -289,9 +303,26 @@ bool RollingFileManager::rotateInternal()
     // 3. Close old current file
     currentFile_.close();
 
-    // 4. Shift backups: backup[i-1] → backup[i] (oldest first to avoid overwrite)
+    // 4. Shift backups: backup[i-1] → backup[i] (oldest first to avoid overwrite).
     //    This frees up backup[0] for the old current file.
-    for ( int i = backupCount_ - 1; i >= 0; --i ) {
+    //    When backupCount_ = 0 (keep all), shift all existing backups up.
+    int shiftUpper;
+    if ( backupCount_ > 0 ) {
+        shiftUpper = backupCount_ - 1;
+    }
+    else {
+        // Find the highest existing backup index
+        shiftUpper = 0;
+        for ( int probe = 0; probe < 1000; ++probe ) {
+            if ( QFile::exists( backupPath( probe ) ) ) {
+                shiftUpper = probe;
+            }
+            else if ( probe > 0 ) {
+                break;
+            }
+        }
+    }
+    for ( int i = shiftUpper; i >= 0; --i ) {
         const auto src = backupPath( i );
         const auto dst = backupPath( i + 1 );
         QFile::remove( dst );
@@ -324,8 +355,10 @@ bool RollingFileManager::rotateInternal()
         return false;
     }
 
-    // 7. Cleanup excess backups
-    cleanupOldBackups();
+    // 7. Cleanup excess backups (skip when backupCount_ = 0: keep all rotated files)
+    if ( backupCount_ > 0 ) {
+        cleanupOldBackups();
+    }
 
     // 8. Open new current file
     return openNewFile();
