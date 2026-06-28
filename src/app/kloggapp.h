@@ -123,6 +123,11 @@ class KloggApp : public QApplication {
                                  tr( "You are using the latest version of klogg." ) );
                          }
                          msgBox.exec();
+
+                         // Drain stale Cocoa events while the dialog's NSWindow
+                         // is still alive.  See newVersionNotification() for the
+                         // full explanation of the macOS Cocoa lifecycle issue.
+                         QCoreApplication::processEvents();
                      } );
         }
     }
@@ -326,6 +331,12 @@ class KloggApp : public QApplication {
         NewVersionDialog dlg( new_version, url, changes );
         dlg.exec();
 
+        // Drain stale Cocoa events while the dialog's NSWindow is still alive.
+        // Without this, the destructor releases the NSWindow but orphaned events
+        // remain in the queue; the next processEvents() cycle in the main event
+        // loop tries to dispatch them to the dead window → ObjC exception → SIGABRT.
+        QCoreApplication::processEvents();
+
         if ( dlg.clickedButton() == NewVersionDialog::Download ) {
             if ( !downloadUrl.isEmpty() ) {
                 downloadAndOpenUpdate( downloadUrl, new_version );
@@ -377,6 +388,10 @@ class KloggApp : public QApplication {
         startUpdateDownload( QUrl( downloadUrl ), &outputFile, downloader, progressDialog );
 
         const auto result = progressDialog.exec();
+
+        // Drain stale Cocoa events while the dialog's NSWindow is still alive.
+        // See comment in newVersionNotification() for the full explanation.
+        QCoreApplication::processEvents();
 
         if ( result == QDialog::Accepted ) {
             LOG_INFO << "Update downloaded to " << localPath;

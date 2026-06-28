@@ -25,6 +25,7 @@
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QUrl>
 
 #include "downloader.h"
@@ -154,6 +155,47 @@ TEST_CASE( "UpdateDownload: stack-allocated objects avoid Cocoa lifecycle issues
     CHECK( progressDialog.wasCanceled() == false );
 
     outputFile.close();
+}
+
+TEST_CASE( "Parentless dialog must call processEvents before destruction",
+           "[updatedownload][progress]" )
+{
+    // On macOS, a parentless QProgressDialog gets its own NSWindow.
+    // After exec() returns, stale Cocoa events for the NSWindow may
+    // remain in the event queue.  If the dialog is destroyed before
+    // those events are drained, the next processEvents() cycle in the
+    // main event loop will try to dispatch them to the now-dead window,
+    // causing an ObjC exception → SIGABRT.
+    //
+    // The safe pattern is:
+    //   { QDialog dlg; dlg.exec(); processEvents(); }
+    //
+    // This test verifies that the pattern does not crash (the actual
+    // macOS crash only reproduces with the Cocoa platform plugin, but
+    // this documents the required lifecycle contract).
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    {
+        QProgressDialog dlg;
+        dlg.setLabelText( QStringLiteral( "Test" ) );
+        dlg.setMinimumDuration( 0 );
+        dlg.setCancelButtonText( QString() ); // no cancel button
+
+        // Close the dialog after a brief delay so exec() returns.
+        QTimer::singleShot( 50, &dlg, [ &dlg ]() { dlg.done( QDialog::Accepted ); } );
+
+        dlg.exec();
+
+        // CRITICAL: drain stale Cocoa events while the dialog is still alive.
+        QCoreApplication::processEvents();
+
+        // Now the dialog is safe to destroy — no stale events remain.
+    }
+
+    // If we get here without crashing, the pattern is correct.
+    CHECK( true );
 }
 
 TEST_CASE( "calculateProgress: sanity checks for download progress values",

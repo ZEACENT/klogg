@@ -324,6 +324,13 @@ CrashHandler::CrashHandler()
 
         QTimer::singleShot( 30 * 1000, &progressDialog, &QProgressDialog::cancel );
         progressDialog.exec();
+
+        // Drain stale Cocoa events while the dialog's NSWindow is still alive.
+        // On macOS, a parentless QProgressDialog gets its own NSWindow.  After
+        // exec() returns, orphaned Cocoa events may remain in the queue.  If the
+        // dialog is destroyed before those events are drained, the main event
+        // loop will try to dispatch them to the dead window → SIGABRT.
+        QCoreApplication::processEvents();
     }
 }
 
