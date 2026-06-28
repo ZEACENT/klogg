@@ -1394,9 +1394,20 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
     QString outputPath;
     {
         ScopedMainWindowShortcutSuspender shortcutSuspender( this );
+        // Use non-native dialog on macOS: the native NSSavePanel creates a
+        // standalone NSWindow.  After the panel is dismissed, stale Cocoa
+        // events linger in the queue.  bindOutputFile() below performs
+        // heavy synchronous I/O (writing buffered segments with file
+        // splitting), which blocks the event loop.  By the time control
+        // returns to the main event loop, the NSSavePanel's NSWindow is
+        // gone, and dispatching the stale events to the dead window
+        // triggers an ObjC exception → SIGABRT.
+        //
+        // The non-native Qt file dialog avoids the NSWindow altogether.
         outputPath = QFileDialog::getSaveFileName(
             this, tr( "Save live log" ), suggestedPath,
-            tr( "Log files (*.log *.txt);;All files (*)" ) );
+            tr( "Log files (*.log *.txt);;All files (*)" ), nullptr,
+            QFileDialog::DontUseNativeDialog );
     }
     if ( outputPath.isEmpty() ) {
         return;

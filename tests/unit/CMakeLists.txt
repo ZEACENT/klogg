@@ -25,6 +25,7 @@ add_executable(klogg_tests
     versionchecker_test.cpp
     newversiondialog_test.cpp
     updatedownload_test.cpp
+    live_save_split_test.cpp
     tests_main.cpp
 )
 
