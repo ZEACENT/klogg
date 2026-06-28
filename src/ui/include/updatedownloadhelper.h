@@ -28,56 +28,61 @@
 #include "downloader.h"
 #include "progress.h"
 
-// Starts an update download and returns a QProgressDialog that displays
-// download progress. The dialog is modal — call exec() to show it.
+// Wires up a stack-allocated Downloader and QProgressDialog for an update
+// download.  The caller owns both objects and controls their lifetime.
 //
-// The returned QProgressDialog is owned by the caller.
+// This is the safe pattern for macOS: stack allocation gives deterministic
+// LIFO destruction, so no processEvents() or explicit delete is needed
+// and no stale Cocoa NSWindow references can survive the function return.
+//
 // The outputFile must already be opened for writing and its lifetime must
 // cover the download duration.
 //
-// On cancel, the download is aborted and the dialog closes.
-// On completion, the dialog closes automatically — check the Downloader's
-// finished signal for success/failure.
+// On cancel, the download is aborted and the dialog closes (Rejected).
+// On completion, the dialog closes automatically (Accepted on success,
+// Rejected on failure).  Check progressDialog.property("downloadError")
+// for the error string after exec() returns Rejected.
+//
+// IMPORTANT: abort() disconnects the network reply, so the finished()
+// signal is never emitted after cancel.  Therefore it is safe to capture
+// &downloader in the finished handler — the handler only runs when the
+// download completes naturally (success or network error), never after
+// a user-initiated abort.
 
-inline QProgressDialog* startUpdateDownload( const QUrl& url, QFile* outputFile,
-                                              QWidget* parent = nullptr )
+inline void startUpdateDownload( const QUrl& url, QFile* outputFile,
+                                 Downloader& downloader,
+                                 QProgressDialog& progressDialog )
 {
-    auto* downloader = new Downloader();
-    auto* progressDialog = new QProgressDialog( parent );
-
-    progressDialog->setLabelText(
+    progressDialog.setLabelText(
         QCoreApplication::translate( "KloggApp", "Downloading %1" ).arg( url.fileName() ) );
-    progressDialog->setWindowTitle(
+    progressDialog.setWindowTitle(
         QCoreApplication::translate( "KloggApp", "Klogg - Update Download" ) );
-    progressDialog->setMinimumDuration( 0 );
-    progressDialog->setCancelButtonText(
+    progressDialog.setMinimumDuration( 0 );
+    progressDialog.setCancelButtonText(
         QCoreApplication::translate( "KloggApp", "Cancel" ) );
 
-    QObject::connect( downloader, &Downloader::downloadProgress,
-                      [ progressDialog ]( qint64 bytesReceived, qint64 bytesTotal ) {
+    QObject::connect( &downloader, &Downloader::downloadProgress,
+                      [ &progressDialog ]( qint64 bytesReceived, qint64 bytesTotal ) {
                           const auto progress = calculateProgress( bytesReceived, bytesTotal );
-                          progressDialog->setRange( 0, 100 );
-                          progressDialog->setValue( progress );
+                          progressDialog.setRange( 0, 100 );
+                          progressDialog.setValue( progress );
                       } );
 
-    QObject::connect( downloader, &Downloader::finished,
-                      [ progressDialog, downloader ]( bool success ) {
+    QObject::connect( &downloader, &Downloader::finished,
+                      [ &progressDialog, &downloader ]( bool success ) {
                           if ( !success ) {
-                              progressDialog->setProperty( "downloadError",
-                                                           downloader->lastError() );
+                              progressDialog.setProperty( "downloadError",
+                                                         downloader.lastError() );
                           }
-                          progressDialog->done( success ? QDialog::Accepted : QDialog::Rejected );
-                          downloader->deleteLater();
+                          progressDialog.done( success ? QDialog::Accepted
+                                                      : QDialog::Rejected );
                       } );
 
-    QObject::connect( progressDialog, &QProgressDialog::canceled, [ downloader ]() {
-        downloader->abort();
-        downloader->deleteLater();
+    QObject::connect( &progressDialog, &QProgressDialog::canceled, [ &downloader ]() {
+        downloader.abort();
     } );
 
-    downloader->download( url, outputFile );
-
-    return progressDialog;
+    downloader.download( url, outputFile );
 }
 
 #endif // KLOGG_UPDATEDOWNLOADHELPER_H

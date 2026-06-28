@@ -34,31 +34,30 @@
 TEST_CASE( "UpdateDownload: progress dialog is created for download",
            "[updatedownload][progress]" )
 {
-    // When an update download is started, a QProgressDialog must be created
-    // and connected to the Downloader's progress and finished signals.
+    // When an update download is started, the progress dialog must be
+    // connected to the Downloader's progress and finished signals.
 
     QTemporaryDir tempDir;
     REQUIRE( tempDir.isValid() );
 
     const auto outputPath = tempDir.filePath( QStringLiteral( "test_update.dmg" ) );
-    auto* outputFile = new QFile( outputPath, /*parent=*/nullptr );
-    REQUIRE( outputFile->open( QIODevice::WriteOnly ) );
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::WriteOnly ) );
 
     QUrl testUrl( QStringLiteral( "https://example.com/klogg-99.0.0.0-arm64.dmg" ) );
 
-    // The helper must return a non-null QProgressDialog pointer
-    auto* progressDialog = startUpdateDownload( testUrl, outputFile, /*parent=*/nullptr );
-    REQUIRE( progressDialog != nullptr );
+    Downloader downloader;
+    QProgressDialog progressDialog;
+
+    startUpdateDownload( testUrl, &outputFile, downloader, progressDialog );
 
     // The dialog should show the download URL or a meaningful label
-    CHECK_FALSE( progressDialog->labelText().isEmpty() );
+    CHECK_FALSE( progressDialog.labelText().isEmpty() );
 
     // The dialog should start in a usable state
-    CHECK( progressDialog->minimumDuration() >= 0 );
+    CHECK( progressDialog.minimumDuration() >= 0 );
 
-    // Clean up
-    delete outputFile;
-    delete progressDialog;
+    outputFile.close();
 }
 
 TEST_CASE( "UpdateDownload: cancel button aborts download", "[updatedownload][progress]" )
@@ -70,21 +69,21 @@ TEST_CASE( "UpdateDownload: cancel button aborts download", "[updatedownload][pr
     REQUIRE( tempDir.isValid() );
 
     const auto outputPath = tempDir.filePath( QStringLiteral( "test_update.exe" ) );
-    auto* outputFile = new QFile( outputPath, /*parent=*/nullptr );
-    REQUIRE( outputFile->open( QIODevice::WriteOnly ) );
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::WriteOnly ) );
 
     QUrl testUrl( QStringLiteral( "https://example.com/klogg-99.0.0.0-setup.exe" ) );
 
-    auto* progressDialog = startUpdateDownload( testUrl, outputFile, /*parent=*/nullptr );
-    REQUIRE( progressDialog != nullptr );
+    Downloader downloader;
+    QProgressDialog progressDialog;
+
+    startUpdateDownload( testUrl, &outputFile, downloader, progressDialog );
 
     // The dialog should be cancelable
-    CHECK( progressDialog->isVisible() == false ); // not shown until exec() or show()
-    CHECK( progressDialog->wasCanceled() == false );
+    CHECK( progressDialog.isVisible() == false ); // not shown until exec() or show()
+    CHECK( progressDialog.wasCanceled() == false );
 
-    // Clean up
-    delete outputFile;
-    delete progressDialog;
+    outputFile.close();
 }
 
 TEST_CASE( "Downloader abort prevents finished signal",
@@ -114,6 +113,45 @@ TEST_CASE( "Downloader abort prevents finished signal",
     QCoreApplication::processEvents();
 
     CHECK( finishedSpy.count() == 0 );
+
+    outputFile.close();
+}
+
+TEST_CASE( "UpdateDownload: stack-allocated objects avoid Cocoa lifecycle issues",
+           "[updatedownload][progress]" )
+{
+    // On macOS, heap-allocated parentless QProgressDialog creates its own
+    // NSWindow.  Calling processEvents() after exec() can dispatch stale
+    // Cocoa events for the torn-down NSWindow, causing a SIGABRT crash.
+    //
+    // The fix: startUpdateDownload() must accept stack-allocated Downloader
+    // and QProgressDialog references (matching the safe pattern in
+    // MainWindow::openRemoteFile) so the caller controls lifetime and
+    // never needs processEvents() + explicit delete.
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "test_update.dmg" ) );
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::WriteOnly ) );
+
+    QUrl testUrl( QStringLiteral( "https://example.com/klogg-99.0.0.0-arm64.dmg" ) );
+
+    // Stack-allocated objects — deterministic LIFO destruction, no NSWindow leak.
+    Downloader downloader;
+    QProgressDialog progressDialog;
+
+    // This call must compile and wire up signals between the two objects.
+    // The overload must accept (QUrl, QFile*, Downloader&, QProgressDialog&).
+    startUpdateDownload( testUrl, &outputFile, downloader, progressDialog );
+
+    // The dialog label should be set from the URL.
+    CHECK_FALSE( progressDialog.labelText().isEmpty() );
+
+    // The dialog should be in a usable initial state.
+    CHECK( progressDialog.minimumDuration() >= 0 );
+    CHECK( progressDialog.wasCanceled() == false );
 
     outputFile.close();
 }

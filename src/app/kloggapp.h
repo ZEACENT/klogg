@@ -367,25 +367,23 @@ class KloggApp : public QApplication {
             return;
         }
 
-        // Show a modal progress dialog while downloading, matching the
-        // pattern used in MainWindow::openRemoteFile().
-        auto* progressDialog
-            = startUpdateDownload( QUrl( downloadUrl ), &outputFile, /*parent=*/nullptr );
+        // Stack-allocated objects — same safe pattern as
+        // MainWindow::openRemoteFile().  Deterministic LIFO destruction
+        // avoids the macOS Cocoa crash caused by processEvents() +
+        // delete after a modal dialog exec().
+        Downloader downloader;
+        QProgressDialog progressDialog;
 
-        const auto result = progressDialog->exec();
+        startUpdateDownload( QUrl( downloadUrl ), &outputFile, downloader, progressDialog );
 
-        // Process deferred deletions so the Downloader (scheduled by the
-        // cancel or finished handler) is destroyed before we delete the
-        // dialog and outputFile go out of scope.  This prevents the
-        // finished lambda from accessing a dangling progressDialog pointer.
-        QCoreApplication::processEvents();
+        const auto result = progressDialog.exec();
 
         if ( result == QDialog::Accepted ) {
             LOG_INFO << "Update downloaded to " << localPath;
             QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
         }
         else {
-            const auto error = progressDialog->property( "downloadError" ).toString();
+            const auto error = progressDialog.property( "downloadError" ).toString();
             if ( !error.isEmpty() ) {
                 LOG_ERROR << "Update download failed: " << error;
                 QMessageBox::warning( nullptr, tr( "Download Failed" ),
@@ -400,7 +398,6 @@ class KloggApp : public QApplication {
         }
 
         outputFile.close();
-        delete progressDialog;
     }
 
     size_t nextWindowIndex() const
