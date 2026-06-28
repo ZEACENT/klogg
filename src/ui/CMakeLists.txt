@@ -3,9 +3,11 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adbdevicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatsource.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/commandargumenttokenizer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/devicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighteredit.h
@@ -21,6 +23,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/infoline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogprocesstransport.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdevicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdeviceparser.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logmainview.h
@@ -68,6 +71,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbprocesstransport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adbdevicelistprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
@@ -84,6 +88,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/infoline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogprocesstransport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosdevicelistprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosdeviceparser.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/pathline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logmainview.cpp

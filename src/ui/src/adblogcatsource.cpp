@@ -189,18 +189,10 @@ bool AdbLogcatSource::connectSource()
 
     manualDisconnect_ = false;
 
-    // Pre-check: verify the target device is available before starting the
-    // stream process. This avoids spawning pymobiledevice3 only to have it
-    // fail immediately when the device is gone (e.g. "Device not found").
-    if ( !transport_->isDeviceAvailable() ) {
-        lastError_ = tr( "Device not found: %1" )
-                         .arg( sessionData_.deviceSerial.isEmpty()
-                                   ? sessionData_.deviceDescription
-                                   : sessionData_.deviceSerial );
-        setState( State::Error );
-        return false;
-    }
-
+    // connectTransport() handles device-not-found errors directly.
+    // The isDeviceAvailable() pre-check was removed because it runs a
+    // blocking subprocess (adb devices / pymobiledevice3 usbmux list)
+    // on the UI thread for up to 8 seconds.
     if ( !transport_->connectTransport() ) {
         lastError_ = transport_->lastError();
         return false;

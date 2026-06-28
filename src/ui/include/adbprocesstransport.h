@@ -2,14 +2,11 @@
 #define ADBPROCESSTRANSPORT_H
 
 #include <QList>
+#include <memory>
 
+#include "adbdeviceinfo.h"
+#include "adbdevicelistprovider.h"
 #include "livesourcetransport.h"
-
-struct AdbDeviceInfo {
-    QString serial;
-    QString displayName;
-    QString description;
-};
 
 class AdbProcessTransport : public ProcessLiveSourceTransport {
     Q_OBJECT
@@ -18,16 +15,16 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
     AdbProcessTransport( QString adbExecutable, QString deviceSerial, QString extraArgs,
                          bool ansiOutputEnabled = false, QObject* parent = nullptr );
 
+    // Delegate to AdbDeviceListProvider.  Kept for backward compatibility
+    // with dialog callers that call this static method directly.
     static QList<AdbDeviceInfo> listDevices( const QString& adbExecutable, QString* error );
 
     // Probe well-known adb install locations and return the absolute path of
-    // the first executable hit.  Returns an empty string when no candidate
-    // exists.  Useful for "Detect adb" UI affordances; see docs/PORTABILITY.md
-    // for the rationale (macOS GUI launchd PATH does not include the typical
-    // SDK / Homebrew install directories).
+    // the first executable hit.
     static QString detectAdbExecutable();
 
-    bool isDeviceAvailable() const override;
+    // Access the device list provider for async enumeration.
+    AdbDeviceListProvider* deviceListProvider() const;
 
   protected:
     Command streamingCommand() const override;
@@ -42,6 +39,7 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
     QString deviceSerial_;
     QString extraArgs_;
     bool ansiOutputEnabled_;
+    std::unique_ptr<AdbDeviceListProvider> deviceProvider_;
 };
 
 #endif

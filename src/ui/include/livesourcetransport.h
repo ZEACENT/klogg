@@ -25,13 +25,6 @@ class LiveSourceTransport : public QObject {
     virtual void disconnectTransport() = 0;
     virtual bool clearRemote( QString* error ) = 0;
     virtual QString lastError() const = 0;
-    // Check whether the target device is currently available. Returns true
-    // if the device can be found (e.g. via adb devices / pymobiledevice3).
-    // Default implementation returns true (no pre-check).
-    virtual bool isDeviceAvailable() const
-    {
-        return true;
-    }
 
   Q_SIGNALS:
     void bytesReceived( const QByteArray& data );

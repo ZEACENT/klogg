@@ -2,7 +2,9 @@
 #define IOSLOGPROCESSTRANSPORT_H
 
 #include <QList>
+#include <memory>
 
+#include "iosdevicelistprovider.h"
 #include "iosdeviceparser.h"
 #include "livesourcetransport.h"
 
@@ -13,12 +15,16 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     IosLogProcessTransport( QString executable, QString deviceUdid, QString extraArgs,
                             bool ansiOutputEnabled = false, QObject* parent = nullptr );
 
+    // Delegate to IosDeviceListProvider.  Kept for backward compatibility
+    // with dialog callers that call this static method directly.
     static QList<IosDeviceInfo> listDevices( const QString& executable, QString* error );
     static QString detectIosSyslogExecutable();
 
+    // Access the device list provider for async enumeration.
+    IosDeviceListProvider* deviceListProvider() const;
+
     bool clearRemote( QString* error ) override;
     bool connectTransport() override;
-    bool isDeviceAvailable() const override;
 
   protected:
     Command streamingCommand() const override;
@@ -35,6 +41,7 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     bool ansiOutputEnabled_;
     bool ptyPrefixStripped_ = false;
     QByteArray pendingPrefixProbe_;
+    std::unique_ptr<IosDeviceListProvider> deviceProvider_;
 };
 
 #endif

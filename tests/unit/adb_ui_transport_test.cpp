@@ -40,6 +40,7 @@
 #include <map>
 
 #include "adbprocesstransport.h"
+#include "adbdevicelistprovider.h"
 #include "adblogcatsource.h"
 #include "adblogcatdialog.h"
 #include "commandargumenttokenizer.h"
@@ -705,6 +706,65 @@ TEST_CASE( "AdbProcessTransport listDevices returns an error when adb cannot sta
 
     REQUIRE( devices.isEmpty() );
     REQUIRE_FALSE( error.isEmpty() );
+}
+
+TEST_CASE( "AdbDeviceListProvider returns same results as static listDevices" )
+{
+    // The provider abstraction should return identical results to the
+    // old static method on AdbProcessTransport.
+    QString providerError;
+    AdbDeviceListProvider provider( QStringLiteral( "/path/that/does/not/exist/adb" ) );
+    const auto devices = provider.listDevices( &providerError );
+
+    QString staticError;
+    const auto staticDevices
+        = AdbProcessTransport::listDevices( QStringLiteral( "/path/that/does/not/exist/adb" ),
+                                            &staticError );
+
+    REQUIRE( devices.isEmpty() );
+    REQUIRE( staticDevices.isEmpty() );
+    REQUIRE_FALSE( providerError.isEmpty() );
+    REQUIRE_FALSE( staticError.isEmpty() );
+}
+
+TEST_CASE( "AdbDeviceListProvider isDeviceAvailable returns true on subprocess error" )
+{
+    // When the list command itself fails, isDeviceAvailable should return true
+    // (optimistic fallback — let connectTransport handle the real error).
+    AdbDeviceListProvider provider( QStringLiteral( "/nonexistent/adb" ) );
+    CHECK( provider.isDeviceAvailable( QStringLiteral( "any-serial" ) ) );
+}
+
+TEST_CASE( "AdbDeviceListProvider listDevicesAsync returns a valid future" )
+{
+    AdbDeviceListProvider provider( QStringLiteral( "/nonexistent/adb" ) );
+    auto future = provider.listDevicesAsync();
+
+    // The future should be valid (has been started).
+    REQUIRE( future.isValid() );
+
+    // Wait for it to complete — should resolve to an empty list since
+    // the executable doesn't exist.
+    future.waitForFinished();
+    REQUIRE( future.result().isEmpty() );
+}
+
+TEST_CASE( "IosDeviceListProvider isDeviceAvailable returns true on subprocess error" )
+{
+    IosDeviceListProvider provider( QStringLiteral( "/nonexistent/pymobiledevice3" ) );
+    CHECK( provider.isDeviceAvailable( QStringLiteral( "any-udid" ) ) );
+}
+
+TEST_CASE( "IosDeviceListProvider listDevicesAsync returns a valid future" )
+{
+    IosDeviceListProvider provider( QStringLiteral( "/nonexistent/pymobiledevice3" ) );
+    auto future = provider.listDevicesAsync();
+
+    REQUIRE( future.isValid() );
+
+    future.waitForFinished();
+    // On non-macOS or with nonexistent executable, result should be empty.
+    REQUIRE( future.result().isEmpty() );
 }
 
 TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transport errors" )
