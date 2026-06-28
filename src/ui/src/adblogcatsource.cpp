@@ -451,12 +451,12 @@ void AdbLogcatSource::attemptReconnect()
     // another scheduleReconnect() on failure.
     manualDisconnect_ = false;
 
-    if ( !transport_->connectTransport() ) {
-        // connectTransport() failed synchronously — the transport emitted
-        // stateChanged(Error) which triggered setStateFromTransport(Error),
-        // which calls scheduleReconnect() (failures stay out of the log view).
-        LOG_WARNING << "Auto-reconnect attempt " << reconnectAttempt_ << " failed: "
-                    << transport_->lastError();
-    }
+    // Use the non-blocking async path: connectTransportAsync() starts the
+    // subprocess and sets up signal-driven startup detection (grace timer +
+    // error/finished handlers) instead of blocking the GUI thread for up to
+    // 3.25 seconds.  The result (Connected or Error) arrives via stateChanged
+    // → setStateFromTransport, which handles the reconnect cycle.
+    transport_->connectTransportAsync();
+    LOG_INFO << "Auto-reconnect attempt " << reconnectAttempt_ << " started (async)";
 }
 

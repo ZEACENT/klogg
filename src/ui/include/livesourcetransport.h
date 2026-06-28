@@ -22,6 +22,11 @@ class LiveSourceTransport : public QObject {
     ~LiveSourceTransport() override = default;
 
     virtual bool connectTransport() = 0;
+    // Non-blocking variant: starts the subprocess and sets up signal-driven
+    // startup detection (grace timer + error/finished handlers) instead of
+    // blocking the calling thread.  Intended for the auto-reconnect path
+    // where the caller does not need a synchronous success/failure result.
+    virtual void connectTransportAsync() = 0;
     virtual void disconnectTransport() = 0;
     virtual bool clearRemote( QString* error ) = 0;
     virtual QString lastError() const = 0;
@@ -45,6 +50,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     ~ProcessLiveSourceTransport() override;
 
     bool connectTransport() override;
+    void connectTransportAsync() override;
     void disconnectTransport() override;
     bool clearRemote( QString* error ) override;
     QString lastError() const override;

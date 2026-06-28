@@ -177,6 +177,57 @@ bool ProcessLiveSourceTransport::connectTransport()
     return true;
 }
 
+void ProcessLiveSourceTransport::connectTransportAsync()
+{
+    if ( state_ == State::Connected ) {
+        return;
+    }
+
+    const auto command = streamingCommand();
+    lastError_.clear();
+    QFile::remove( stderrFilePath_ );
+    process_->setStandardErrorFile( stderrFilePath_ );
+    process_->setProgram( command.program );
+    process_->setArguments( command.arguments );
+    disconnectRequested_ = false;
+    setState( State::Connecting );
+    process_->start();
+
+    // After the grace period, if we're still in Connecting state and the
+    // process is running, we're connected.  If the process failed to start
+    // (errorOccurred FailedToStart) or crashed during the grace (finished),
+    // the existing handlers already transitioned to Error — the timer just
+    // confirms the happy path.
+    QPointer<ProcessLiveSourceTransport> self( this );
+    QTimer::singleShot( StartupFailureGracePeriodMs, this, [ this, self ]() {
+        if ( !self || destroyed_ || disconnectRequested_ ) {
+            return;
+        }
+        // Another handler (errorOccurred / finished) already moved us past
+        // Connecting — nothing to do.
+        if ( state_ != State::Connecting ) {
+            return;
+        }
+
+        if ( process_->state() == QProcess::Running ) {
+            setState( State::Connected );
+        }
+        else {
+            // Process exited during the grace without triggering the normal
+            // errorOccurred/finished handlers — read stderr for diagnostics.
+            QString stdErr;
+            QFile stderrFile( stderrFilePath_ );
+            if ( stderrFile.open( QIODevice::ReadOnly ) ) {
+                stdErr = QString::fromUtf8( stderrFile.readAll() ).trimmed();
+                stderrFile.close();
+            }
+            lastError_ = stdErr.isEmpty() ? tr( "Live source terminated during startup" ) : stdErr;
+            setState( State::Error );
+            Q_EMIT errorOccurred( lastError_ );
+        }
+    } );
+}
+
 void ProcessLiveSourceTransport::disconnectTransport()
 {
     if ( !process_ || process_->state() == QProcess::NotRunning ) {

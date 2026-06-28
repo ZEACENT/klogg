@@ -1197,6 +1197,111 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
     QCoreApplication::processEvents();
 }
 
+// ---------------------------------------------------------------------------
+// connectTransportAsync — non-blocking startup detection (replaces the
+// blocking waitForStarted + grace loop for the auto-reconnect path)
+// ---------------------------------------------------------------------------
+
+TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync returns immediately" )
+{
+    LongRunningTestTransport transport;
+
+    QElapsedTimer timer;
+    timer.start();
+    transport.connectTransportAsync();
+    const auto elapsed = timer.elapsed();
+
+    // Must not block for the 250ms grace period or 3s waitForStarted.
+    CHECK( elapsed < 100 );
+
+    transport.disconnectTransport();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+}
+
+namespace {
+bool spyContainsState( const SafeQSignalSpy& spy, LiveSourceTransport::State target )
+{
+    for ( int i = 0; i < spy.count(); ++i ) {
+        if ( spy.at( i ).at( 0 ).value<LiveSourceTransport::State>() == target ) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync connects via grace timer" )
+{
+    LongRunningTestTransport transport;
+
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    transport.connectTransportAsync();
+
+    // safeWait returns on the first signal (Connecting); we must keep
+    // processing events until the grace timer fires and transitions to
+    // Connected.
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Connected )
+            && deadline.elapsed() < 2000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+    }
+    REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
+
+    transport.disconnectTransport();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+}
+
+TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects startup failure" )
+{
+    TestAdbProcessTransport transport( QStringLiteral( "/path/that/does/not/exist/adb" ),
+                                      QStringLiteral( "serial" ), {} );
+
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    transport.connectTransportAsync();
+
+    // A non-existent executable triggers errorOccurred(FailedToStart) within
+    // the next event loop cycle.
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Error )
+            && deadline.elapsed() < 2000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+    }
+    REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    REQUIRE( errorSpy.count() >= 1 );
+    REQUIRE_FALSE( transport.lastError().isEmpty() );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects fast exit" )
+{
+    StartupStderrFailureTransport transport;
+
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    transport.connectTransportAsync();
+
+    // The process exits (with stderr) within the grace period; the finished
+    // handler must detect this and transition to Error.
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Error )
+            && deadline.elapsed() < 2000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+    }
+    REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
+
+    transport.disconnectTransport();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+}
+
 TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async disconnect" )
 {
     LongRunningTestTransport transport;
