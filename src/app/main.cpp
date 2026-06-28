@@ -46,6 +46,95 @@
 #include <windows.h>
 #endif // _WIN32
 
+#ifdef Q_OS_MAC
+// macOS uncaught-NSException diagnostic.
+//
+// Qt's QCocoaEventDispatcher turns an ObjC NSException thrown during event
+// dispatch into a C++ exception that propagates through __cxa_rethrow /
+// objc_exception_rethrow and aborts (SIGABRT).  The stock macOS crash report
+// only shows the terminate path (abort -> -[NSApplication run]), NOT the
+// exception's name/reason — so the actual defect is invisible.  This handler
+// runs from _objc_terminate before abort() and dumps name + reason to stderr
+// and to ~/klogg_nsexception.txt, making the real cause diagnosable.
+//
+// Pure C / objc-runtime only so this file stays a translation unit of C++.
+#include <objc/message.h>
+#include <objc/objc.h>
+#include <objc/runtime.h>
+
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+struct NSException; // opaque ObjC object
+extern "C" void NSSetUncaughtExceptionHandler( void ( *handler )( NSException* ) );
+
+namespace {
+id objcSend( id receiver, SEL sel )
+{
+    using SendId = id ( * )( id, SEL );
+    return reinterpret_cast<SendId>( objc_msgSend )( receiver, sel );
+}
+
+const char* objcUtf8( id receiver, const char* selectorName )
+{
+    if ( receiver == nullptr ) {
+        return "(null)";
+    }
+    const id value = objcSend( receiver, sel_registerName( selectorName ) );
+    if ( value == nullptr ) {
+        return "(null)";
+    }
+    using SendCstr = const char* ( * )( id, SEL );
+    return reinterpret_cast<SendCstr>( objc_msgSend )( value, sel_registerName( "UTF8String" ) );
+}
+
+void writeAll( int fd, const char* text )
+{
+    if ( text != nullptr && *text != '\0' ) {
+        const auto len = static_cast<size_t>( std::strlen( text ) );
+        ssize_t written = 0;
+        while ( static_cast<size_t>( written ) < len ) {
+            const auto n = ::write( fd, text + written, len - static_cast<size_t>( written ) );
+            if ( n <= 0 ) {
+                break;
+            }
+            written += n;
+        }
+    }
+}
+
+void dumpException( int fd, NSException* exception )
+{
+    writeAll( fd, "\n===== KLOGG uncaught NSException =====\nname:   " );
+    writeAll( fd, objcUtf8( reinterpret_cast<id>( exception ), "name" ) );
+    writeAll( fd, "\nreason: " );
+    writeAll( fd, objcUtf8( reinterpret_cast<id>( exception ), "reason" ) );
+    writeAll( fd, "\n" );
+}
+
+void kloggUncaughtNSExceptionHandler( NSException* exception )
+{
+    dumpException( STDERR_FILENO, exception );
+
+    if ( const auto home = std::getenv( "HOME" ) ) {
+        char path[ 1024 ];
+        const auto n = std::snprintf( path, sizeof( path ), "%s/klogg_nsexception.txt", home );
+        if ( n > 0 && n < static_cast<int>( sizeof( path ) ) ) {
+            const auto fd = ::open( path, O_WRONLY | O_CREAT | O_APPEND, 0644 );
+            if ( fd >= 0 ) {
+                dumpException( fd, exception );
+                ::close( fd );
+            }
+        }
+    }
+}
+} // namespace
+#endif // Q_OS_MAC
+
 #include <mimalloc.h>
 #include <roaring.hh>
 
@@ -144,6 +233,12 @@ QSet<QString> retainedAdbCaptureIds( const SessionInfo& sessionInfo )
 
 int main( int argc, char* argv[] )
 {
+#ifdef Q_OS_MAC
+    // Install as early as possible: NSExceptions can fly during QApplication
+    // construction and the very first event-loop spin.
+    NSSetUncaughtExceptionHandler( &kloggUncaughtNSExceptionHandler );
+#endif
+
 #ifdef KLOGG_USE_MIMALLOC
     mi_process_init();
 #endif

@@ -26,6 +26,7 @@ add_executable(klogg_tests
     newversiondialog_test.cpp
     updatedownload_test.cpp
     live_save_split_test.cpp
+    live_save_crash_repro_test.cpp
     tests_main.cpp
 )
 

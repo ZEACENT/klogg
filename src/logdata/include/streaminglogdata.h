@@ -80,6 +80,12 @@ class StreamingLogData : public SearchableLogData {
     bool openDisplayOutputFile( const QString& outputPath );
     void closeDisplayOutputFile();
     bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
+    // Writes the lines appended in `appendResult` to the Strip-mode display
+    // file.  Addresses the appended lines by their current tail position so it
+    // is correct even when trimming has shifted line numbers — never by a
+    // [previous, current) delta (which underflows when trimming removes more
+    // lines than were added).
+    void writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult );
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
     void rememberAppendedRawLines( const CaptureStore::AppendResult& appendResult );
     std::optional<RawLines> tryBuildCachedRawLines( LineNumber first, LinesCount number ) const;

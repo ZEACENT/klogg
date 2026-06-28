@@ -85,11 +85,12 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 #endif
 
     const auto currentLineCount = captureStore_.lineCount();
-    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
-         && currentLineCount != previousLineCount ) {
-        writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
-                                   currentLineCount - previousLineCount );
-    }
+    // Write the freshly appended lines to the Strip-mode display file.  This
+    // MUST go by appended count / tail position (see writeAppendedDisplayLines),
+    // NOT by a [previousLineCount, currentLineCount) delta: trimming can remove
+    // more lines than were appended, making currentLineCount < previousLineCount
+    // and underflowing the uint64 range -> std::length_error -> SIGABRT.
+    writeAppendedDisplayLines( appendResult );
     if ( wasTrimmed ) {
         Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     }
@@ -104,7 +105,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto cacheUs = std::chrono::duration_cast<std::chrono::microseconds>( t3 - t2 ).count();
     const auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>( t4 - t0 ).count();
     LOG_INFO << "PERF [streaming] appendUtf8 size=" << data.size()
-             << " lines=" << ( currentLineCount.get() - previousLineCount.get() )
+             << " lines=" << appendResult.lineCount.get()
              << " trimmed=" << trimResult.trimmedLines.get()
              << " capture_us=" << captureUs
              << " cache_us=" << cacheUs
@@ -118,12 +119,9 @@ void StreamingLogData::finishInput()
     const auto previousLineCount = captureStore_.lineCount();
     const auto appendResult = captureStore_.finishInput();
     rememberAppendedRawLines( appendResult );
+    // Same tail-position write as appendUtf8() — never an underflowing delta.
+    writeAppendedDisplayLines( appendResult );
     const auto currentLineCount = captureStore_.lineCount();
-    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
-         && currentLineCount != previousLineCount ) {
-        writeDisplayLinesToOutput( LineNumber( previousLineCount.get() ),
-                                   currentLineCount - previousLineCount );
-    }
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
@@ -481,12 +479,47 @@ bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount c
     return true;
 }
 
+void StreamingLogData::writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult )
+{
+    if ( outputSaveAnsiMode_ != LiveLogSaveAnsiMode::Strip ) {
+        return;
+    }
+
+    const auto appended = appendResult.lineCount.get();
+    if ( appended == 0 ) {
+        return;
+    }
+
+    // CaptureStore::trimToLimits() removes oldest segments from the FRONT, so
+    // the freshly appended lines always live at the TAIL, at
+    // [totalLines - appended, totalLines).  Addressing them there is correct
+    // whether or not trimming occurred, and cannot underflow.
+    //
+    // The previous code used writeDisplayLinesToOutput(previousLineCount,
+    // currentLineCount - previousLineCount): when trimming removed more lines
+    // than were appended, currentLineCount < previousLineCount, the uint64
+    // subtraction wrapped to ~2^64, and getLines() reserve() threw
+    // std::length_error("vector") -> uncaught on the macOS main event loop ->
+    // SIGABRT (objc_exception_rethrow -> -[NSApplication run]).
+    const auto totalLines = captureStore_.lineCount().get();
+    const auto safeAppended = std::min( appended, totalLines );
+    const auto firstLine = totalLines - safeAppended;
+    writeDisplayLinesToOutput( LineNumber( firstLine ), LinesCount( safeAppended ) );
+}
+
 klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount number ) const
 {
+    // Clamp to the valid [0, nbLine) range.  A caller may pass a first/count
+    // derived from line counts that shifted (e.g. after trimming); never throw
+    // std::length_error from reserve() on an out-of-range or inverted request —
+    // returning the available subset is the correct, crash-free behavior.
+    const auto totalLines = doGetNbLine().get();
+    const auto begin = std::min( first.get(), totalLines );
+    const auto count = std::min( number.get(), totalLines - begin );
+
     klogg::vector<QString> lines;
-    const auto lastLine = qMin( first.get() + number.get(), doGetNbLine().get() );
-    lines.reserve( qMax<LinesCount::UnderlyingType>( 0, lastLine - first.get() ) );
-    for ( auto line = first.get(); line < lastLine; ++line ) {
+    lines.reserve( static_cast<size_t>( count ) );
+    for ( auto line = begin; line < begin + count; ++line ) {
         lines.push_back( doGetLineString( LineNumber( line ) ) );
     }
     return lines;
