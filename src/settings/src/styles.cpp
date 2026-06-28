@@ -373,6 +373,7 @@ QGroupBox::title {
 
 QLabel {
     color: __TEXT__;
+    padding: 2px 0;
 }
 
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QKeySequenceEdit,
@@ -476,6 +477,8 @@ QToolButton:checked:hover {
 
 QCheckBox, QRadioButton {
     spacing: 6px;
+    min-height: 20px;
+    padding: 2px 0;
 }
 QCheckBox::indicator, QRadioButton::indicator {
     width: 14px;

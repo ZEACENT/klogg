@@ -83,6 +83,7 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     setupIosLogSettings();
     setupLiveSourceSettings();
     setupPanelResetButtons();
+    standardizeLayoutSpacing();
 
     // Validators
     QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax );
@@ -254,10 +255,11 @@ void OptionsDialog::setupIosLogSettings()
         adbLayout->insertWidget( std::max( 0, adbLayout->count() - 1 ), adbAnsiOutputCheckBox_ );
     }
 
-    iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), file_watch_tab );
+    iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), liveSourceTab );
     iosLogGroupBox_->setObjectName( QStringLiteral( "iosLogGroupBox" ) );
 
     auto* layout = new QVBoxLayout( iosLogGroupBox_ );
+    layout->setSpacing( 6 );
 
     auto* executableRow = new QHBoxLayout();
     auto* executableLabel = new QLabel( tr( "pymobiledevice3 executable" ), iosLogGroupBox_ );
@@ -293,8 +295,8 @@ void OptionsDialog::setupIosLogSettings()
     layout->addWidget( iosLogAnsiOutputCheckBox_ );
     layout->addWidget( helpLabel );
 
-    const auto insertIndex = std::max( 0, verticalLayout_9->count() - 1 );
-    verticalLayout_9->insertWidget( insertIndex, iosLogGroupBox_ );
+    const auto insertIndex = std::max( 0, verticalLayout_liveSource->count() - 1 );
+    verticalLayout_liveSource->insertWidget( insertIndex, iosLogGroupBox_ );
 
     connect( detectButton, &QPushButton::clicked, this, [ this ] {
         const auto resolved = IosLogProcessTransport::detectIosSyslogExecutable();
@@ -331,10 +333,11 @@ void OptionsDialog::setupLiveSourceSettings()
     // These settings control the behavior of live log streams (ADB logcat, iOS log).
     // Inserted on the File tab alongside the ADB and iOS log stream settings.
 
-    liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), file_watch_tab );
+    liveSourceGroupBox_ = new QGroupBox( tr( "Live Source" ), liveSourceTab );
     liveSourceGroupBox_->setObjectName( QStringLiteral( "liveSourceGroupBox" ) );
 
     auto* layout = new QVBoxLayout( liveSourceGroupBox_ );
+    layout->setSpacing( 6 );
 
     // Auto-reconnect toggle — enables/disables automatic reconnection when the
     // live source unexpectedly disconnects or encounters an error. Uses
@@ -426,8 +429,8 @@ void OptionsDialog::setupLiveSourceSettings()
     layout->addWidget( helpLabel );
 
     // Insert before the spacer at the bottom of the File tab layout
-    const auto insertIndex = std::max( 0, verticalLayout_9->count() - 1 );
-    verticalLayout_9->insertWidget( insertIndex, liveSourceGroupBox_ );
+    const auto insertIndex = std::max( 0, verticalLayout_liveSource->count() - 1 );
+    verticalLayout_liveSource->insertWidget( insertIndex, liveSourceGroupBox_ );
 }
 
 void OptionsDialog::setupPanelResetButtons()
@@ -453,8 +456,41 @@ void OptionsDialog::setupPanelResetButtons()
                     &OptionsDialog::resetViewDefaults );
     addResetButton( file_watch_tab, QStringLiteral( "resetFileDefaultsButton" ),
                     &OptionsDialog::resetFileDefaults );
+    addResetButton( liveSourceTab, QStringLiteral( "resetLiveSourceDefaultsButton" ),
+                    &OptionsDialog::resetLiveSourceDefaults );
     addResetButton( advanced_tab, QStringLiteral( "resetAdvancedDefaultsButton" ),
                     &OptionsDialog::resetAdvancedDefaults );
+}
+
+// Apply uniform vertical spacing to every group-box layout in every tab.
+// This prevents "line overlap" caused by inconsistent or missing spacing
+// between widgets inside group boxes.
+void OptionsDialog::standardizeLayoutSpacing()
+{
+    static constexpr int kGroupBoxLayoutSpacing = 6;
+    static constexpr int kTabLayoutSpacing = 6;
+
+    const QList<QWidget*> tabs = { general_tab, viewTab, file_watch_tab,
+                                   liveSourceTab, shortcutsTab, advanced_tab };
+
+    for ( auto* tab : tabs ) {
+        if ( !tab ) {
+            continue;
+        }
+        // Consistent spacing between group boxes on the tab surface
+        if ( auto* tabLayout = tab->layout() ) {
+            tabLayout->setSpacing( kTabLayoutSpacing );
+        }
+
+        // Consistent spacing inside every group box (covers both .ui-defined
+        // and dynamically-created boxes like iOS Log Stream / Live Source)
+        const auto groupBoxes = tab->findChildren<QGroupBox*>();
+        for ( auto* groupBox : groupBoxes ) {
+            if ( auto* groupLayout = groupBox->layout() ) {
+                groupLayout->setSpacing( kGroupBoxLayoutSpacing );
+            }
+        }
+    }
 }
 
 void OptionsDialog::setupPolling()
@@ -875,6 +911,12 @@ void OptionsDialog::resetFileDefaults()
     setupArchives();
 
     verifySslCheckBox->setChecked( defaults.verifySslPeers() );
+}
+
+void OptionsDialog::resetLiveSourceDefaults()
+{
+    const Configuration defaults;
+
     adbExecutableLineEdit->setText( defaults.adbExecutable() );
     adbLogcatArgsLineEdit->setText( defaults.adbLogcatExtraArgs() );
     if ( adbAnsiOutputCheckBox_ ) {

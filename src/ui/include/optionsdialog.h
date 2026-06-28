@@ -103,6 +103,7 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void resetGeneralDefaults();
     void resetViewDefaults();
     void resetFileDefaults();
+    void resetLiveSourceDefaults();
     void resetShortcutsDefaults();
     void resetAdvancedDefaults();
 
@@ -120,6 +121,7 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void setupIosLogSettings();
     void setupLiveSourceSettings();
     void setupPanelResetButtons();
+    void standardizeLayoutSpacing();
 
     int updateTranslate();
 

@@ -29,13 +29,17 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
+#include <QGroupBox>
 #include <QJsonDocument>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QUuid>
+#include <QWidget>
 
 #include <map>
 
@@ -903,6 +907,7 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
         QStringLiteral( "resetGeneralDefaultsButton" ),
         QStringLiteral( "resetViewDefaultsButton" ),
         QStringLiteral( "resetFileDefaultsButton" ),
+        QStringLiteral( "resetLiveSourceDefaultsButton" ),
         QStringLiteral( "restoreShortcutsDefaults" ),
         QStringLiteral( "resetAdvancedDefaultsButton" ),
     };
@@ -943,6 +948,68 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
     for ( const auto& defaultShortcut : defaultOpenFileShortcuts ) {
         CHECK( restoredOpenFileShortcuts.contains( defaultShortcut ) );
     }
+}
+
+TEST_CASE( "OptionsDialog File and Live Source tab widgets do not overlap vertically" )
+{
+    ScopedOptionsDialogConfigurationGuard configGuard;
+
+    OptionsDialog dialog;
+
+    auto* tabWidget = dialog.findChild<QTabWidget*>( QStringLiteral( "tabWidget" ) );
+    REQUIRE( tabWidget != nullptr );
+
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    // Check each tab for widget overlap at minimum dialog size
+    const QStringList tabNames{
+        QStringLiteral( "file_watch_tab" ),
+        QStringLiteral( "liveSourceTab" ),
+    };
+
+    for ( const auto& tabName : tabNames ) {
+        auto* tab = dialog.findChild<QWidget*>( tabName );
+        REQUIRE( tab != nullptr );
+        tabWidget->setCurrentWidget( tab );
+        QCoreApplication::processEvents();
+
+        dialog.resize( dialog.minimumSizeHint() );
+        QCoreApplication::processEvents();
+
+        auto* layout = tab->layout();
+        REQUIRE( layout != nullptr );
+
+        QList<QWidget*> visibleChildren;
+        for ( int i = 0; i < layout->count(); ++i ) {
+            auto* item = layout->itemAt( i );
+            if ( item && item->widget() && item->widget()->isVisible() ) {
+                visibleChildren.append( item->widget() );
+            }
+        }
+
+        REQUIRE( visibleChildren.size() >= 2 );
+
+        for ( int i = 0; i < visibleChildren.size() - 1; ++i ) {
+            auto* current = visibleChildren[i];
+            auto* next = visibleChildren[i + 1];
+
+            const auto currentBottom = current->geometry().bottom();
+            const auto nextTop = next->geometry().top();
+            const int gap = nextTop - currentBottom;
+
+            INFO( "[" << tabName.toStdString() << "] Widget " << i << ": \""
+                  << current->objectName().toStdString() << "\" bottom=" << currentBottom
+                  << " vs Widget " << ( i + 1 ) << ": \""
+                  << next->objectName().toStdString() << "\" top=" << nextTop
+                  << " gap=" << gap );
+
+            CHECK( gap >= 1 );
+        }
+    }
+
+    dialog.close();
+    QCoreApplication::processEvents();
 }
 
 TEST_CASE( "OptionsDialog adb detect button fills the executable field with the resolved adb path" )
