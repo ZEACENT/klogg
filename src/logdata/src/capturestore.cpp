@@ -307,6 +307,7 @@ void CaptureStore::clear()
     maxLineLength_ = 0;
     nextSegmentId_ = 0;
     lastModified_ = QDateTime::currentDateTime();
+    lastTrimResult_ = {};
 
     const auto files = QDir( capturePath_ ).entryList( QDir::Files | QDir::NoDotAndDotDot );
     for ( const auto& fileName : files ) {
@@ -317,7 +318,11 @@ void CaptureStore::clear()
         rollingOutput_.deleteAll();
         rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
                                              limits_.rollingBackupCount );
-        rollingOutput_.open( true );
+        if ( !rollingOutput_.open( true ) ) {
+            LOG_WARNING << "CaptureStore::clear: failed to reopen output file: "
+                        << boundOutputFile_;
+            boundOutputFile_.clear();
+        }
     }
 }
 
@@ -452,6 +457,9 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
             return false;
         }
     }
+    // Replay writes directly to QFile, bypassing RollingFileManager::write().
+    // Sync the byte counter so needsRotation() reflects the true file size.
+    rollingOutput_.resyncSize();
     rollingOutput_.flush();
 
     resetOutputFlushCounters();
@@ -1129,17 +1137,6 @@ bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* devi
     return true;
 }
 
-bool CaptureStore::writeCaptureToDevice( QIODevice* device ) const
-{
-    for ( const auto& segment : segments_ ) {
-        if ( !writeSegmentToDevice( segment, device ) ) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
 {
     if ( !rollingOutput_.isValid() ) {
@@ -1174,7 +1171,15 @@ void CaptureStore::flushOutputIfNeeded()
 
     if ( unflushedOutputBytes_ >= OutputFlushBytesThreshold
          || unflushedOutputLines_ >= OutputFlushLinesThreshold ) {
-        rollingOutput_.flush();
+        if ( !rollingOutput_.flush() ) {
+            LOG_WARNING << "Rolling output file flush failed, unbinding: "
+                        << boundOutputFile_;
+            rollingOutput_.close();
+            rollingOutput_ = RollingFileManager();
+            boundOutputFile_.clear();
+            resetOutputFlushCounters();
+            return;
+        }
         resetOutputFlushCounters();
         if ( outputFlushedCallback_ ) {
             outputFlushedCallback_();
@@ -1191,11 +1196,8 @@ void CaptureStore::resetOutputFlushCounters()
 void CaptureStore::trimToWindowSize()
 {
     // Called when the rolling file rotates. Trim in-memory segments to match the window.
-    // The caller (appendOutputBytes) already holds the mutex via commitLines → appendUtf8.
-    const auto windowBytes = limits_.rollingMaxFileSize > 0 && limits_.rollingBackupCount > 0
-                                 ? limits_.rollingMaxFileSize * limits_.rollingBackupCount
-                                 : qint64{ 0 };
-    if ( windowBytes > 0 ) {
-        trimToLimits();
-    }
+    // trimToLimits() already checks whether any limits are configured and
+    // acquires the (recursive) mutex — safe because the caller chain
+    // (appendOutputBytes → commitLines → appendUtf8) already holds it.
+    trimToLimits();
 }

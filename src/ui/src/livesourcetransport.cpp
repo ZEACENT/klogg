@@ -176,6 +176,11 @@ void ProcessLiveSourceTransport::disconnectTransport()
         return;
     }
 
+    // Clean up the stderr temp file before detaching the process.
+    // The finished lambda (which normally removes this file) will never
+    // fire because we're about to disconnect it.
+    QFile::remove( stderrFilePath_ );
+
     // Detach old process and cut all signal connections
     auto* dying = process_.release();
     dying->disconnect( this );

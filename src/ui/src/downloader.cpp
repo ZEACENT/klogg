@@ -35,6 +35,18 @@ QString Downloader::lastError() const
     return lastError_;
 }
 
+void Downloader::abort()
+{
+    if ( currentDownload_ ) {
+        // Disconnect all signals from the reply so downloadFinished/downloadReadyRead
+        // are never called after abort.
+        currentDownload_->disconnect( this );
+        currentDownload_->abort();
+        currentDownload_->deleteLater();
+        currentDownload_ = nullptr;
+    }
+}
+
 void Downloader::download( const QUrl& url, QFile* outputFile )
 {
     output_ = outputFile;

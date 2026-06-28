@@ -22,8 +22,13 @@ RollingFileManager::RollingFileManager( RollingFileManager&& other ) noexcept
     if ( other.currentFile_.isOpen() ) {
         other.currentFile_.close();
         currentFile_.setFileName( basePath_ );
-        (void) currentFile_.open( QIODevice::WriteOnly | QIODevice::Append );
-        currentBytes_ = currentFile_.size();
+        if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::Append ) ) {
+            currentBytes_ = currentFile_.size();
+        }
+        else {
+            LOG_WARNING << "RollingFileManager: reopen failed during move: " << basePath_;
+            currentBytes_ = 0;
+        }
     }
 }
 
@@ -38,8 +43,14 @@ RollingFileManager& RollingFileManager::operator=( RollingFileManager&& other ) 
         if ( other.currentFile_.isOpen() ) {
             other.currentFile_.close();
             currentFile_.setFileName( basePath_ );
-            (void) currentFile_.open( QIODevice::WriteOnly | QIODevice::Append );
-            currentBytes_ = currentFile_.size();
+            if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::Append ) ) {
+                currentBytes_ = currentFile_.size();
+            }
+            else {
+                LOG_WARNING << "RollingFileManager: reopen failed during move assign: "
+                            << basePath_;
+                currentBytes_ = 0;
+            }
         }
     }
     return *this;
@@ -70,11 +81,12 @@ void RollingFileManager::close()
     currentBytes_ = 0;
 }
 
-void RollingFileManager::flush()
+bool RollingFileManager::flush()
 {
     if ( currentFile_.isOpen() ) {
-        currentFile_.flush();
+        return currentFile_.flush();
     }
+    return false;
 }
 
 qint64 RollingFileManager::write( const QByteArray& data )
@@ -206,6 +218,13 @@ QStringList RollingFileManager::backupFiles() const
         }
     }
     return files;
+}
+
+void RollingFileManager::resyncSize()
+{
+    if ( currentFile_.isOpen() ) {
+        currentBytes_ = currentFile_.size();
+    }
 }
 
 void RollingFileManager::deleteAll()

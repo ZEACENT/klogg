@@ -307,11 +307,6 @@ QString AdbLogcatSource::lastError() const
     return lastError_;
 }
 
-bool AdbLogcatSource::isManualDisconnect() const
-{
-    return manualDisconnect_;
-}
-
 void AdbLogcatSource::setState( State state )
 {
     if ( state_ == state ) {

@@ -25,7 +25,7 @@ class RollingFileManager {
     bool isValid() const;
     bool open( bool truncate = false );
     void close();
-    void flush();
+    bool flush();
 
     // Write data to the current file. Automatically rotates if the file exceeds
     // maxFileSize. Returns the number of bytes written (may be less than data.size()
@@ -43,6 +43,11 @@ class RollingFileManager {
 
     // List backup files in order (oldest first).
     QStringList backupFiles() const;
+
+    // Re-read the current file's size from disk.  Call this after writing
+    // directly to currentFile() (bypassing write()) so that needsRotation()
+    // and currentFileSize() reflect the true on-disk size.
+    void resyncSize();
 
     // Delete all files (current + backups).
     void deleteAll();

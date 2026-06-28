@@ -62,14 +62,16 @@ inline QProgressDialog* startUpdateDownload( const QUrl& url, QFile* outputFile,
 
     QObject::connect( downloader, &Downloader::finished,
                       [ progressDialog, downloader ]( bool success ) {
-                          Q_UNUSED( success );
+                          if ( !success ) {
+                              progressDialog->setProperty( "downloadError",
+                                                           downloader->lastError() );
+                          }
                           progressDialog->done( success ? QDialog::Accepted : QDialog::Rejected );
                           downloader->deleteLater();
                       } );
 
     QObject::connect( progressDialog, &QProgressDialog::canceled, [ downloader ]() {
-        // Downloader doesn't expose abort, but we can close the dialog
-        // and the finished signal will handle cleanup.
+        downloader->abort();
         downloader->deleteLater();
     } );
 

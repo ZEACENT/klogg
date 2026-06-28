@@ -61,7 +61,6 @@ class AdbLogcatSource : public QObject {
     const AdbLogcatSessionData& sessionData() const;
     State state() const;
     QString lastError() const;
-    bool isManualDisconnect() const;
 
   Q_SIGNALS:
     void stateChanged( AdbLogcatSource::State state );

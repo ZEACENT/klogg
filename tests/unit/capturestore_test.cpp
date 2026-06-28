@@ -234,6 +234,104 @@ TEST_CASE( "CaptureStore bindOutputFile overwrites existing files and replays sp
              == QStringLiteral( "alpha\nbeta\ngamma\ndelta\nepsilon\n" ) );
 }
 
+TEST_CASE( "RollingFileManager resyncSize reads actual file size after direct writes" )
+{
+    const auto rootPath = makeTestDir( "rolling_resync" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 64, 2 );
+    REQUIRE( manager.open() );
+
+    // Write directly to the underlying QFile (bypassing write()).
+    // This is what bindOutputFile does when replaying segments.
+    auto* file = manager.currentFile();
+    REQUIRE( file != nullptr );
+    file->write( QByteArray( 50, 'A' ) );
+    file->flush();
+
+    // Without resyncSize(), currentBytes_ is 0 even though the file has 50 bytes.
+    CHECK( manager.currentFileSize() == 0 );
+    CHECK_FALSE( manager.needsRotation() );
+
+    // After resyncSize(), the size is correct.
+    manager.resyncSize();
+    CHECK( manager.currentFileSize() == 50 );
+    // 50 < 64, so no rotation needed yet
+    CHECK_FALSE( manager.needsRotation() );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager resyncSize enables rotation after direct writes" )
+{
+    const auto rootPath = makeTestDir( "rolling_resync_rotate" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    RollingFileManager manager( filePath, 32, 2 );
+    REQUIRE( manager.open() );
+
+    // Write 50 bytes directly to QFile (bypassing write()).
+    auto* file = manager.currentFile();
+    REQUIRE( file != nullptr );
+    file->write( QByteArray( 50, 'B' ) );
+    file->flush();
+
+    // Sync the size so needsRotation() works correctly.
+    manager.resyncSize();
+    CHECK( manager.currentFileSize() == 50 );
+    CHECK( manager.needsRotation() ); // 50 >= 32
+
+    // The next write() call should trigger rotation because we're over the limit.
+    manager.write( QByteArray( 10, 'C' ) );
+
+    // After rotation, the current file should only contain the new data.
+    manager.flush();
+    QFile output( filePath );
+    REQUIRE( output.open( QIODevice::ReadOnly ) );
+    CHECK( output.size() == 10 );
+
+    // Backup should contain the old 50-byte file.
+    const auto backups = manager.backupFiles();
+    CHECK( backups.size() >= 1 );
+
+    manager.deleteAll();
+}
+
+TEST_CASE( "CaptureStore bindOutputFile syncs rolling file size after replay" )
+{
+    // Use small limits so replayed data exceeds rollingMaxFileSize.
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 32;
+    limits.rollingBackupCount = 2;
+
+    const auto rootPath = makeTestDir( "capturestore_bind_tracking" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "tracked.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+
+    // Append data that exceeds rollingMaxFileSize (32 bytes).
+    for ( int i = 0; i < 10; ++i ) {
+        store.appendUtf8( QByteArrayLiteral( "abcdefgh\n" ) );
+    }
+
+    // Bind output file — replays all data into the rolling file
+    // via writeSegmentToDevice() which bypasses RollingFileManager::write().
+    REQUIRE( store.bindOutputFile( outputPath ) );
+
+    // Append more data — rotation should trigger because resyncSize()
+    // updated currentBytes_ to reflect the replayed data.
+    for ( int i = 0; i < 5; ++i ) {
+        store.appendUtf8( QByteArrayLiteral( "new\n" ) );
+    }
+
+    // At least one rotation should have occurred, producing backup files.
+    const auto backups = QDir( rootPath ).entryList(
+        { QFileInfo( outputPath ).fileName() + ".*" }, QDir::Files );
+    CHECK( backups.size() >= 1 );
+}
+
 TEST_CASE( "CaptureStore finishInput commits a trailing partial line without adding a newline" )
 {
     CaptureStore::Limits limits;
@@ -834,6 +932,35 @@ TEST_CASE( "CaptureStore clear flushes and resets output" )
     QFile output( outputPath );
     REQUIRE( output.open( QIODevice::ReadOnly ) );
     REQUIRE( output.size() == 0 );
+}
+
+TEST_CASE( "CaptureStore clear resets lastTrimResult" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 2;
+
+    const auto rootPath = makeTestDir( "capturestore_clear_trim_result" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+
+    // Append enough data to exceed the window and trigger trimming
+    for ( int i = 0; i < 20; ++i ) {
+        store.appendUtf8( QStringLiteral( "line-%1\n" ).arg( i, 3, 10, QLatin1Char( '0' ) ).toUtf8() );
+    }
+
+    // After auto-trim during append, lastTrimResult should be non-zero
+    const auto trimResult = store.lastTrimResult();
+    CHECK( trimResult.trimmedLines > 0_lcount );
+
+    // Clear the store
+    store.clear();
+
+    // After clear, lastTrimResult should be reset to zero
+    const auto afterClear = store.lastTrimResult();
+    CHECK( afterClear.trimmedLines == 0_lcount );
+    CHECK( afterClear.trimmedBytes == 0 );
 }
 
 TEST_CASE( "CaptureStore trimToLimits removes oldest segments and updates line count" )

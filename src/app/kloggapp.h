@@ -372,12 +372,28 @@ class KloggApp : public QApplication {
         auto* progressDialog
             = startUpdateDownload( QUrl( downloadUrl ), &outputFile, /*parent=*/nullptr );
 
-        if ( progressDialog->exec() == QDialog::Accepted ) {
+        const auto result = progressDialog->exec();
+
+        // Process deferred deletions so the Downloader (scheduled by the
+        // cancel or finished handler) is destroyed before we delete the
+        // dialog and outputFile go out of scope.  This prevents the
+        // finished lambda from accessing a dangling progressDialog pointer.
+        QCoreApplication::processEvents();
+
+        if ( result == QDialog::Accepted ) {
             LOG_INFO << "Update downloaded to " << localPath;
             QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
         }
         else {
-            LOG_ERROR << "Update download was canceled or failed";
+            const auto error = progressDialog->property( "downloadError" ).toString();
+            if ( !error.isEmpty() ) {
+                LOG_ERROR << "Update download failed: " << error;
+                QMessageBox::warning( nullptr, tr( "Download Failed" ),
+                                      tr( "Download failed:\n%1" ).arg( error ) );
+            }
+            else {
+                LOG_INFO << "Update download canceled by user";
+            }
             if ( outputFile.exists() ) {
                 outputFile.remove();
             }

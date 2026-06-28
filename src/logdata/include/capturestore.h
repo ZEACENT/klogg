@@ -111,7 +111,6 @@ class CaptureStore {
     void scanSegment( Segment& segment );
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
     bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
-    bool writeCaptureToDevice( QIODevice* device ) const;
     void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();

@@ -30,6 +30,11 @@ class Downloader : public QObject {
 
     void download( const QUrl& url, QFile* outputFile );
 
+    // Abort the current download.  After this call the Downloader is safe to
+    // delete — no further signals will be emitted and the QNetworkReply is
+    // terminated.
+    void abort();
+
     QString lastError() const;
 
   Q_SIGNALS:

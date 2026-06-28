@@ -323,6 +323,55 @@ TEST_CASE( "StreamingLogData can strip ANSI while saving current and future live
     REQUIRE( outputFile.readAll() == QByteArrayLiteral( "I/App first\nE/App second\n" ) );
 }
 
+TEST_CASE( "StreamingLogData clearCapture truncates display output file" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+
+    REQUIRE( loadingSpy.safeWait() );
+    loadingSpy.clear();
+
+    logData.appendUtf8( QByteArrayLiteral( "first line\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "display.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+
+    // Output file now contains "first line\n"
+    QFile output1( outputPath );
+    REQUIRE( output1.open( QIODevice::ReadOnly ) );
+    REQUIRE( output1.readAll() == QByteArrayLiteral( "first line\n" ) );
+    output1.close();
+
+    // Simulate a reconnect: clearCapture reopens the display output file.
+    loadingSpy.clear();
+    logData.clearCapture();
+    REQUIRE( loadingSpy.safeWait() );
+
+    // After clearCapture, the output file should be truncated (empty),
+    // not still containing "first line\n".
+    QFile output2( outputPath );
+    REQUIRE( output2.open( QIODevice::ReadOnly ) );
+    const auto afterClear = output2.readAll();
+    output2.close();
+
+    // The file should be empty — clearCapture should have truncated it.
+    CHECK( afterClear.isEmpty() );
+
+    // New data after clear should be written cleanly (no old data prepended).
+    loadingSpy.clear();
+    logData.appendUtf8( QByteArrayLiteral( "second line\n" ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    QFile output3( outputPath );
+    REQUIRE( output3.open( QIODevice::ReadOnly ) );
+    REQUIRE( output3.readAll() == QByteArrayLiteral( "second line\n" ) );
+    output3.close();
+}
+
 TEST_CASE( "StreamingLogData can preserve ANSI while saving current and future live log lines" )
 {
     QTemporaryDir tempDir;

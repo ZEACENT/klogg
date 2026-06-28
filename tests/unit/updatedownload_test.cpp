@@ -87,6 +87,37 @@ TEST_CASE( "UpdateDownload: cancel button aborts download", "[updatedownload][pr
     delete progressDialog;
 }
 
+TEST_CASE( "Downloader abort prevents finished signal",
+           "[updatedownload][downloader]" )
+{
+    // After abort(), the Downloader must not emit finished() — doing so
+    // would cause use-after-free when the caller has already cleaned up.
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    QFile outputFile( tempDir.filePath( QStringLiteral( "out.bin" ) ) );
+    REQUIRE( outputFile.open( QIODevice::WriteOnly ) );
+
+    Downloader downloader;
+    QSignalSpy finishedSpy( &downloader, &Downloader::finished );
+
+    // Start a download to a URL that will never respond quickly.
+    downloader.download( QUrl( QStringLiteral( "http://192.0.2.1:1/nope" ) ), &outputFile );
+
+    // Abort immediately — the reply should be terminated and disconnected.
+    downloader.abort();
+
+    // Process events briefly to verify no signal is emitted.
+    QCoreApplication::processEvents();
+    QThread::msleep( 50 );
+    QCoreApplication::processEvents();
+
+    CHECK( finishedSpy.count() == 0 );
+
+    outputFile.close();
+}
+
 TEST_CASE( "calculateProgress: sanity checks for download progress values",
            "[progress][updatedownload]" )
 {

@@ -137,7 +137,6 @@ void StreamingLogData::clearCapture()
     stopOutputFlushTimer();
     captureStore_.clear();
     clearAnsiDisplayCache();
-    clearAnsiDisplayCache();
     {
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
         cachedRawBatches_.clear();
@@ -433,7 +432,7 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
     // Use CaptureStore's rolling settings for the display file
     rollingDisplayOutput_ = RollingFileManager( boundOutputFile_, rollingMaxFileSize_,
                                                  rollingBackupCount_ );
-    if ( !rollingDisplayOutput_.open() ) {
+    if ( !rollingDisplayOutput_.open( true ) ) {
         boundOutputFile_.clear();
         return false;
     }
