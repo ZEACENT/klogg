@@ -31,6 +31,7 @@
 #include "downloader.h"
 #include "progress.h"
 #include "updatedownloadhelper.h"
+#include "updatedownloadhelper.h"
 
 TEST_CASE( "UpdateDownload: progress dialog is created for download",
            "[updatedownload][progress]" )
@@ -215,4 +216,25 @@ TEST_CASE( "calculateProgress: sanity checks for download progress values",
     // Edge: download just started, unknown total
     // When total is -1 (unknown), the calculation should still work
     CHECK( calculateProgress( 0LL, -1LL ) == 0 );
+}
+
+TEST_CASE( "discardDownloadedFile closes the handle and removes the file" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    const auto path = tempDir.filePath( QStringLiteral( "partial.dmg" ) );
+
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::WriteOnly ) );
+    file.write( "partial" );
+    REQUIRE( file.isOpen() );
+
+    // Must close BEFORE removing (Windows refuses to delete an open file); the
+    // handle is open at this point, so the helper's ordering is what's tested.
+    REQUIRE( discardDownloadedFile( file ) );
+    REQUIRE_FALSE( file.isOpen() );
+    REQUIRE_FALSE( QFile::exists( path ) );
+
+    // Calling again on an already-removed file is a no-op success.
+    REQUIRE( discardDownloadedFile( file ) );
 }

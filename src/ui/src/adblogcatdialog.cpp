@@ -12,7 +12,11 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QUuid>
+#include <QtConcurrent>
 
+#include <memory>
+
+#include "adbdevicelistprovider.h"
 #include "adbprocesstransport.h"
 #include "configuration.h"
 
@@ -111,6 +115,10 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
     } );
     connect( buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject );
 
+    deviceRefreshWatcher_ = new QFutureWatcher<QList<AdbDeviceInfo>>( this );
+    connect( deviceRefreshWatcher_, &QFutureWatcher<QList<AdbDeviceInfo>>::finished, this,
+             &AdbLogcatDialog::onDevicesEnumerated );
+
     loadSettings();
     refreshDevices();
 }
@@ -135,16 +143,29 @@ AdbLogcatSessionData AdbLogcatDialog::sessionData() const
 void AdbLogcatDialog::refreshDevices()
 {
     deviceCombo_->clear();
+    updateAcceptState();
+    statusLabel_->setText( tr( "Detecting ADB devices..." ) );
 
-    QString error;
-    const auto devices = AdbProcessTransport::listDevices( adbExecutableEdit_->text(), &error );
+    // Enumerate off the GUI thread: `adb devices` can block for up to ~8s, and
+    // the previous synchronous call froze the whole dialog. A shared_ptr keeps
+    // the provider alive for the entire task, so this is use-after-free safe
+    // even if the dialog is closed mid-enumeration (the watcher is a dialog
+    // child; its finished handler is disconnected automatically on destruction).
+    auto provider = std::make_shared<AdbDeviceListProvider>( adbExecutableEdit_->text() );
+    deviceRefreshWatcher_->setFuture(
+        QtConcurrent::run( [provider]() { return provider->listDevices(); } ) );
+}
+
+void AdbLogcatDialog::onDevicesEnumerated()
+{
+    const auto devices = deviceRefreshWatcher_->result();
     for ( const auto& device : devices ) {
         deviceCombo_->addItem( device.displayName, device.serial );
         deviceCombo_->setItemData( deviceCombo_->count() - 1, device.description, Qt::ToolTipRole );
     }
 
     if ( devices.isEmpty() ) {
-        statusLabel_->setText( error.isEmpty() ? tr( "No online ADB devices detected." ) : error );
+        statusLabel_->setText( tr( "No online ADB devices detected." ) );
     }
     else {
         statusLabel_->setText(
@@ -169,8 +190,7 @@ void AdbLogcatDialog::loadSettings()
     ansiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
     autoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
     maxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
-    maxFileSizeSpinBox_->setValue(
-        static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+    maxFileSizeSpinBox_->setValue( config.liveCaptureRollingMaxFileSizeMb() );
     backupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
 }
 
@@ -182,8 +202,7 @@ void AdbLogcatDialog::saveSettings() const
     config.setAdbLogcatAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.setLiveAutoReconnectEnabled( autoReconnectCheckBox_->isChecked() );
     config.setLiveAutoReconnectMaxAttempts( maxAttemptsSpinBox_->value() );
-    config.setLiveCaptureRollingMaxFileSize(
-        static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024 );
+    config.setLiveCaptureRollingMaxFileSizeMb( maxFileSizeSpinBox_->value() );
     config.setLiveCaptureRollingBackupCount( backupCountSpinBox_->value() );
     config.save();
 }

@@ -156,7 +156,16 @@ bool ProcessLiveSourceTransport::connectTransport()
 
     if ( state_ == State::Error || process_->state() == QProcess::NotRunning ) {
         if ( lastError_.isEmpty() ) {
-            const auto stdErr = QString::fromUtf8( process_->readAllStandardError() ).trimmed();
+            // stderr is redirected to stderrFilePath_ via setStandardErrorFile(),
+            // so readAllStandardError() is always empty here. Read the temp file
+            // instead so the real startup error surfaces (matches the finished
+            // handler).
+            QString stdErr;
+            QFile stderrFile( stderrFilePath_ );
+            if ( stderrFile.open( QIODevice::ReadOnly ) ) {
+                stdErr = QString::fromUtf8( stderrFile.readAll() ).trimmed();
+                stderrFile.close();
+            }
             lastError_ = stdErr.isEmpty() ? tr( "Live source terminated during startup" ) : stdErr;
             setState( State::Error );
             Q_EMIT errorOccurred( lastError_ );

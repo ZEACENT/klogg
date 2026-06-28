@@ -395,6 +395,7 @@ class KloggApp : public QApplication {
 
         if ( result == QDialog::Accepted ) {
             LOG_INFO << "Update downloaded to " << localPath;
+            outputFile.close();
             QDesktopServices::openUrl( QUrl::fromLocalFile( localPath ) );
         }
         else {
@@ -407,12 +408,10 @@ class KloggApp : public QApplication {
             else {
                 LOG_INFO << "Update download canceled by user";
             }
-            if ( outputFile.exists() ) {
-                outputFile.remove();
-            }
+            // Closes our handle before removing: Windows refuses to delete an
+            // open file, so removing first silently leaked the partial download.
+            discardDownloadedFile( outputFile );
         }
-
-        outputFile.close();
     }
 
     size_t nextWindowIndex() const

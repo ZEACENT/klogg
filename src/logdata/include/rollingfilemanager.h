@@ -37,6 +37,10 @@ class RollingFileManager {
     void rotate();
 
     bool needsRotation() const;
+    // True if the most recent write() call (or a force-rotate) rotated the file.
+    // More reliable than comparing currentFileSize() before/after a write, which
+    // misses rotations that leave the new file at least as large as the old one.
+    bool rotated() const;
     qint64 currentFileSize() const;
     qint64 maxFileSize() const;
     int backupCount() const;
@@ -64,6 +68,7 @@ class RollingFileManager {
     int backupCount_ = 0;
     QFile currentFile_;
     qint64 currentBytes_ = 0;
+    bool rotated_ = false;
 };
 
 #endif

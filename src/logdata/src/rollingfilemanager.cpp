@@ -1,14 +1,24 @@
 #include "rollingfilemanager.h"
 
+#include <algorithm>
+
 #include <QDir>
 #include <QFileInfo>
 
 #include "log.h"
 
+namespace {
+// Sanity ceiling for backupCount. The GUI spinbox tops out at 999, but the
+// value also arrives from session-restore JSON / Configuration without range
+// validation; clamping here keeps every `backupCount_ + N` expression safely
+// within int range (and the rolling-window byte product within qint64).
+constexpr int kMaxBackupCount = 100000;
+} // namespace
+
 RollingFileManager::RollingFileManager( QString basePath, qint64 maxFileSize, int backupCount )
     : basePath_( std::move( basePath ) )
     , maxFileSize_( maxFileSize )
-    , backupCount_( backupCount )
+    , backupCount_( std::clamp( backupCount, 0, kMaxBackupCount ) )
 {
 }
 
@@ -95,86 +105,86 @@ qint64 RollingFileManager::write( const QByteArray& data )
         return 0;
     }
 
-    // Auto-rotate if current file is full (from previous writes)
-    if ( needsRotation() ) {
-        if ( !rotateInternal() ) {
-            return 0;
-        }
-    }
+    rotated_ = false;
 
-    // maxFileSize_ = 0 means no rolling: write everything without size checks
-    if ( maxFileSize_ <= 0 ) {
-        const auto written = currentFile_.write( data );
-        if ( written > 0 ) {
-            currentBytes_ += written;
-        }
-        return written;
-    }
+    qint64 totalWritten = 0;
+    int offset = 0;
+    const int size = static_cast<int>( data.size() );
 
-    const auto remainingCapacity = maxFileSize_ - currentBytes_;
-
-    // If the entire data fits, write it all
-    if ( data.size() <= remainingCapacity ) {
-        const auto written = currentFile_.write( data );
-        if ( written > 0 ) {
-            currentBytes_ += written;
-        }
-        // Rotate if we've hit the limit
+    while ( offset < size ) {
+        // Auto-rotate if the current file is full from previous writes.
         if ( needsRotation() ) {
-            rotateInternal();
-        }
-        return written;
-    }
-
-    // Data doesn't fit entirely. Find the last complete line that fits.
-    // Write only complete lines to avoid splitting across files.
-    auto bytesToWrite = static_cast<qint64>( data.size() );
-    if ( bytesToWrite > remainingCapacity ) {
-        bytesToWrite = remainingCapacity;
-    }
-
-    // Search backwards for a newline within the write range
-    const auto lastNewline = data.lastIndexOf( '\n', static_cast<int>( bytesToWrite ) - 1 );
-    if ( lastNewline >= 0 ) {
-        // Write up to and including the last complete line
-        bytesToWrite = lastNewline + 1;
-    }
-    else {
-        // No complete line fits in remaining space. Rotate first, then retry.
-        if ( !rotateInternal() ) {
-            return 0;
-        }
-        // After rotation, the file is fresh. Write the entire data.
-        const auto written = currentFile_.write( data );
-        if ( written > 0 ) {
-            currentBytes_ += written;
-        }
-        return written;
-    }
-
-    if ( bytesToWrite <= 0 ) {
-        return 0;
-    }
-
-    const auto written = currentFile_.write( data.constData(), bytesToWrite );
-    if ( written > 0 ) {
-        currentBytes_ += written;
-    }
-
-    // Rotate if we've hit the limit, then write remaining data to the new file
-    if ( needsRotation() ) {
-        rotateInternal();
-        const auto remaining = data.mid( static_cast<int>( written ) );
-        if ( !remaining.isEmpty() && currentFile_.isOpen() ) {
-            const auto extraWritten = currentFile_.write( remaining );
-            if ( extraWritten > 0 ) {
-                currentBytes_ += extraWritten;
+            if ( !rotateInternal() ) {
+                break; // unable to rotate; preserve what was already written
             }
-            return written + extraWritten;
+        }
+
+        // maxFileSize_ = 0 means no rolling: write everything left in one go.
+        if ( maxFileSize_ <= 0 ) {
+            const auto written = currentFile_.write( data.constData() + offset, size - offset );
+            if ( written > 0 ) {
+                currentBytes_ += written;
+                totalWritten += written;
+            }
+            break;
+        }
+
+        const qint64 remainingCapacity = maxFileSize_ - currentBytes_;
+        const qint64 chunkLeft = static_cast<qint64>( size ) - offset;
+
+        // The entire remainder fits in the current file.
+        if ( chunkLeft <= remainingCapacity ) {
+            const auto written = currentFile_.write( data.constData() + offset,
+                                                     static_cast<qint64>( chunkLeft ) );
+            if ( written > 0 ) {
+                currentBytes_ += written;
+                totalWritten += written;
+            }
+            if ( needsRotation() ) {
+                rotateInternal();
+            }
+            break;
+        }
+
+        // Find the last newline within the capacity window so only complete
+        // lines are written to this file (a line is never split across files).
+        const auto searchFrom = static_cast<int>(
+            std::min<qint64>( offset + remainingCapacity - 1, size - 1 ) );
+        const auto lastNewline = data.lastIndexOf( '\n', searchFrom );
+
+        if ( lastNewline >= offset ) {
+            const auto bytesToWrite = lastNewline - offset + 1;
+            const auto written = currentFile_.write( data.constData() + offset, bytesToWrite );
+            if ( written <= 0 ) {
+                break;
+            }
+            currentBytes_ += written;
+            totalWritten += written;
+            offset += static_cast<int>( written );
+            // Loop: the file is now (near) full, so the next iteration rotates
+            // and continues writing the remaining complete lines.
+        }
+        else {
+            // No complete line fits in the remaining capacity: the next line is
+            // longer than the space left. Rotate to a fresh file and write that
+            // one (possibly oversized) line whole so nothing is dropped.
+            if ( !rotateInternal() ) {
+                break;
+            }
+            const auto nextNewline = data.indexOf( '\n', offset );
+            const int lineEnd = ( nextNewline >= 0 ) ? static_cast<int>( nextNewline ) + 1 : size;
+            const auto written = currentFile_.write( data.constData() + offset,
+                                                     lineEnd - offset );
+            if ( written <= 0 ) {
+                break;
+            }
+            currentBytes_ += written;
+            totalWritten += written;
+            offset = lineEnd;
         }
     }
 
-    return written;
+    return totalWritten;
 }
 
 void RollingFileManager::rotate()
@@ -186,6 +196,11 @@ bool RollingFileManager::needsRotation() const
 {
     // maxFileSize_ = 0 means no rolling (single unlimited file)
     return maxFileSize_ > 0 && currentBytes_ >= maxFileSize_;
+}
+
+bool RollingFileManager::rotated() const
+{
+    return rotated_;
 }
 
 qint64 RollingFileManager::currentFileSize() const
@@ -258,7 +273,11 @@ QString RollingFileManager::backupPath( int index ) const
 
 void RollingFileManager::cleanupOldBackups()
 {
-    for ( int i = backupCount_; i < backupCount_ + 100; ++i ) {
+    // backupCount_ is clamped to kMaxBackupCount at construction, so this upper
+    // bound can never overflow int (the previous `backupCount_ + 100` was UB
+    // when backupCount_ was within 100 of INT_MAX and skipped cleanup entirely).
+    const int scanLimit = backupCount_ + 100;
+    for ( int i = backupCount_; i < scanLimit; ++i ) {
         const auto path = backupPath( i );
         if ( QFile::exists( path ) ) {
             QFile::remove( path );
@@ -287,6 +306,8 @@ bool RollingFileManager::rotateInternal()
     if ( !currentFile_.isOpen() ) {
         return openNewFile();
     }
+
+    rotated_ = true;
 
     // 1. Flush pending data
     currentFile_.flush();

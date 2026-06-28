@@ -42,6 +42,28 @@ void reserveSegmentMemory( QByteArray& data, qint64 targetBytes, qint64 budgetBy
     data.reserve( type_safe::narrow_cast<int>( cappedTarget ) );
 }
 
+// Appended lines always live at the tail of the store. Their first line number
+// must be derived from the CURRENT total (after commit + trim) so it stays
+// correct when trimming shifts every absolute line number down. Using the
+// pre-commit total leaves firstLine stale (too large by the trimmed count).
+LineNumber tailFirstLine( qint64 totalLines, LinesCount lineCount )
+{
+    const auto count = static_cast<qint64>( lineCount.get() );
+    return LineNumber( static_cast<LineNumber::UnderlyingType>(
+        totalLines >= count ? totalLines - count : 0 ) );
+}
+
+// Clamp untrusted limit inputs (session-restore JSON, hand-edited .ini) so the
+// rolling window math (rollingMaxFileSize * rollingBackupCount) and the backup
+// cleanup loop stay within their integer ranges.
+CaptureStore::Limits sanitizeLimits( CaptureStore::Limits limits )
+{
+    constexpr int kMaxRollingBackupCount = 100000;
+    limits.rollingBackupCount
+        = std::clamp( limits.rollingBackupCount, 0, kMaxRollingBackupCount );
+    return limits;
+}
+
 QDateTime latestModificationTime( const QFileInfo& entry )
 {
     auto latestModification = entry.lastModified().toUTC();
@@ -111,7 +133,7 @@ CaptureStore::CaptureStore( QString captureId, QString rootPath, Limits limits )
     : captureId_( std::move( captureId ) )
     , rootPath_( rootPath.isEmpty() ? defaultRootPath() : std::move( rootPath ) )
     , capturePath_( QDir( rootPath_ ).filePath( captureId_ ) )
-    , limits_( limits )
+    , limits_( sanitizeLimits( limits ) )
 {
     ensureCaptureDir();
 }
@@ -234,6 +256,7 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
         appendResult.lineCount
             = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
         commitLines( appendResult );
+        appendResult.firstLine = tailFirstLine( totalLines_, appendResult.lineCount );
         if ( totalLines_ != originalLineCount ) {
             lastModified_ = QDateTime::currentDateTime();
         }
@@ -251,6 +274,7 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
     appendResult.lineCount
         = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
     commitLines( appendResult );
+    appendResult.firstLine = tailFirstLine( totalLines_, appendResult.lineCount );
     if ( totalLines_ != originalLineCount ) {
         lastModified_ = QDateTime::currentDateTime();
     }
@@ -276,6 +300,7 @@ CaptureStore::AppendResult CaptureStore::finishInput()
         appendResult.lineCount = 1_lcount;
         lastModified_ = QDateTime::currentDateTime();
     }
+    appendResult.firstLine = tailFirstLine( totalLines_, appendResult.lineCount );
 
     // Flush any pending output data
     if ( rollingOutput_.isValid() && unflushedOutputBytes_ > 0 ) {
@@ -474,7 +499,7 @@ void CaptureStore::setOutputFlushedCallback( std::function<void()> callback )
 void CaptureStore::setLimits( Limits limits )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    limits_ = std::move( limits );
+    limits_ = sanitizeLimits( std::move( limits ) );
 }
 
 QString CaptureStore::boundOutputFile() const
@@ -1143,7 +1168,6 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
         return;
     }
 
-    const auto sizeBefore = rollingOutput_.currentFileSize();
     const auto written = rollingOutput_.write( bytes );
     if ( written <= 0 ) {
         LOG_WARNING << "Rolling output file write failed, unbinding: " << boundOutputFile_;
@@ -1153,8 +1177,12 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
         return;
     }
 
-    // Detect rotation: if file size decreased, a rotation happened
-    if ( rollingOutput_.currentFileSize() < sizeBefore ) {
+    // write() now writes the whole batch across rotations and reports whether it
+    // rotated. The previous size-before/after heuristic missed rotations that
+    // left the new file at least as large as the old one (e.g. a single write
+    // that fills, rotates and writes a large remainder from an empty file),
+    // skipping the in-memory window trim on the single-line commit path.
+    if ( rollingOutput_.rotated() ) {
         trimToWindowSize();
     }
 

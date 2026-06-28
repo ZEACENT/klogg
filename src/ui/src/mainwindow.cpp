@@ -2425,7 +2425,7 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
                 liveStatus = LiveTabStatus::Reconnecting;
                 toolTip = tr( "%1\nReconnecting... (attempt %2)" )
                               .arg( baseTip )
-                              .arg( source->reconnectAttempt() );
+                              .arg( source->reconnectAttempt() + 1 );
             }
             else {
                 liveStatus = LiveTabStatus::Error;

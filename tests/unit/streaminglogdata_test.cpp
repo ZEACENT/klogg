@@ -791,3 +791,55 @@ TEST_CASE( "Streaming live search coalesces medium updates before starting opera
     REQUIRE( incrementalOps < 4 );
     REQUIRE( coalescedUpdates > 0 );
 }
+
+TEST_CASE( "StreamingLogData finishInput emits Truncated on single-line rotation trim",
+           "[streaming]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 2;
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    logData.setCaptureLimits( limits );
+
+    // Preserve mode routes output through CaptureStore, so finishInput()'s
+    // commitLine() -> appendOutputBytes() path can rotate and trim. appendUtf8()
+    // already handles this; finishInput() previously did not.
+    const auto outPath = QDir( tempDir.path() ).filePath( "out.log" );
+    REQUIRE( logData.bindOutputFile( outPath, LiveLogSaveAnsiMode::Preserve ) );
+
+    SafeQSignalSpy fileSpy( &logData, SIGNAL( fileChanged( MonitoredFileStatus ) ) );
+
+    // Partial lines (no trailing newline) committed via finishInput, forcing
+    // many rotations through the single-line commit path.
+    for ( int i = 0; i < 30; ++i ) {
+        logData.appendUtf8( QStringLiteral( "data-%1" ).arg( i ).toUtf8() );
+        logData.finishInput();
+    }
+    REQUIRE( loadingSpy.safeWait() );
+
+    bool sawTruncated = false;
+    for ( int i = 0; i < fileSpy.count(); ++i ) {
+        if ( fileSpy.at( i ).at( 0 ).value<MonitoredFileStatus>()
+             == MonitoredFileStatus::Truncated ) {
+            sawTruncated = true;
+            break;
+        }
+    }
+    REQUIRE( sawTruncated );
+
+    // Guard: the store must stay readable (tail line resolvable) after
+    // finishInput-driven trims.
+    REQUIRE( logData.getNbLine().get() > 0 );
+    const auto tail = logData.getNbLine().get() - 1;
+    const auto tailLine = logData.getLinesRaw( LineNumber( tail ), 1_lcount );
+    REQUIRE( tailLine.endOfLines.size() == 1 );
+}

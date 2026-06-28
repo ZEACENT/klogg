@@ -243,3 +243,28 @@ TEST_CASE( "Configuration stores and restores empty-filter filtered-view behavio
 
     REQUIRE_FALSE( restoredConfig.showAllInFilteredViewWhenSearchEmpty() );
 }
+
+TEST_CASE( "Configuration live-capture rolling size MB view does not truncate sub-MB values",
+           "[configuration]" )
+{
+    Configuration config;
+
+    // A sub-megabyte byte value must round up to 1 MB, not truncate to 0
+    // (which the live-source dialog treats as "unlimited").
+    config.setLiveCaptureRollingMaxFileSize( 512LL * 1024 );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 1 );
+
+    // A value just under half a megabyte rounds down to 0 (legitimately
+    // "unlimited"); exactly half rounds up.
+    config.setLiveCaptureRollingMaxFileSize( 400LL * 1024 );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 0 );
+
+    // Whole-megabyte values round-trip exactly through the MB helpers.
+    config.setLiveCaptureRollingMaxFileSizeMb( 250 );
+    REQUIRE( config.liveCaptureRollingMaxFileSize() == 250LL * 1024 * 1024 );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 250 );
+
+    // 0 bytes stays 0 MB.
+    config.setLiveCaptureRollingMaxFileSize( 0 );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 0 );
+}

@@ -2,7 +2,9 @@
 #define ADBLOGCATDIALOG_H
 
 #include <QDialog>
+#include <QFutureWatcher>
 
+#include "adbdeviceinfo.h"
 #include "adblogcatsource.h"
 
 class QComboBox;
@@ -28,8 +30,11 @@ class AdbLogcatDialog : public QDialog {
     void updateAcceptState();
     void loadSettings();
     void saveSettings() const;
+    // Populates the device combo from the async refresh result.
+    void onDevicesEnumerated();
 
   private:
+    QFutureWatcher<QList<AdbDeviceInfo>>* deviceRefreshWatcher_ = nullptr;
     QLineEdit* adbExecutableEdit_ = nullptr;
     QPushButton* refreshButton_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;

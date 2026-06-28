@@ -64,21 +64,19 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto t2 = std::chrono::steady_clock::now();
 #endif
 
-    // Check if trimming occurred during append (oldest segments removed due to limits)
-    const auto trimResult = captureStore_.lastTrimResult();
+    // consumeTrimResult() clears line-keyed caches when CaptureStore trimmed
+    // during the append (oldest segments removed -> absolute line numbers shift).
+    const auto trimResult = consumeTrimResult();
     const bool wasTrimmed = trimResult.trimmedLines > 0_lcount;
-    if ( wasTrimmed ) {
-        captureStore_.clearTrimResult();
-        // Invalidate caches since line numbers shifted
-        {
-            std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
-            cachedRawBatches_.clear();
-            cachedRawBytes_ = 0;
-        }
-        clearAnsiDisplayCache();
-    }
 
-    rememberAppendedRawLines( appendResult );
+    // Cache the appended batch unless trimming removed some of its own lines
+    // (a burst larger than the whole window): then the batch no longer lines up
+    // with the surviving tail and serving it would return stale data.
+    const auto preAppendTotal = static_cast<qint64>( previousLineCount.get() );
+    if ( !wasTrimmed
+         || static_cast<qint64>( trimResult.trimmedLines.get() ) <= preAppendTotal ) {
+        rememberAppendedRawLines( appendResult );
+    }
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING
     const auto t3 = std::chrono::steady_clock::now();
@@ -118,15 +116,48 @@ void StreamingLogData::finishInput()
     stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
     const auto appendResult = captureStore_.finishInput();
-    rememberAppendedRawLines( appendResult );
+
+    // finishInput() can rotate+trim the Preserve-mode output via the single-line
+    // commit path (commitLine -> appendOutputBytes). Handle it exactly like
+    // appendUtf8() so caches stay consistent and Truncated fires — previously
+    // finishInput() skipped this entirely.
+    const auto trimResult = consumeTrimResult();
+    const bool wasTrimmed = trimResult.trimmedLines > 0_lcount;
+    const auto preAppendTotal = static_cast<qint64>( previousLineCount.get() );
+    if ( !wasTrimmed
+         || static_cast<qint64>( trimResult.trimmedLines.get() ) <= preAppendTotal ) {
+        rememberAppendedRawLines( appendResult );
+    }
+
     // Same tail-position write as appendUtf8() — never an underflowing delta.
     writeAppendedDisplayLines( appendResult );
+    if ( wasTrimmed ) {
+        Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
+    }
     const auto currentLineCount = captureStore_.lineCount();
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
     rollingDisplayOutput_.flush();
+}
+
+CaptureStore::TrimResult StreamingLogData::consumeTrimResult()
+{
+    const auto trimResult = captureStore_.lastTrimResult();
+    if ( trimResult.trimmedLines <= 0_lcount ) {
+        return trimResult;
+    }
+    captureStore_.clearTrimResult();
+    // Trimming removes oldest segments, shifting every absolute line number
+    // down; both caches are keyed by absolute line number, so drop them all.
+    {
+        std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+        cachedRawBatches_.clear();
+        cachedRawBytes_ = 0;
+    }
+    clearAnsiDisplayCache();
+    return trimResult;
 }
 
 void StreamingLogData::clearCapture()

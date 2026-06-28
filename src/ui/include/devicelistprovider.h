@@ -22,6 +22,7 @@
 
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QString>
 
 #include <QtConcurrent>
@@ -57,10 +58,18 @@ class DeviceListProviderBase : public QObject {
 
     // Asynchronous device enumeration.  Runs on the global thread pool.
     // The returned QFuture resolves to the device list.
+    //
+    // The provider is guarded by a QPointer: if the provider (or its owning
+    // transport) is destroyed before the pool runs the task, the lambda returns
+    // an empty list instead of dereferencing freed memory. (Full mid-execution
+    // safety would require shared_ptr ownership of the provider; callers that
+    // need that guarantee should hold a shared_ptr themselves.)
     QFuture<QList<DeviceInfo>> listDevicesAsync() const
     {
-        auto* self = const_cast<DeviceListProviderBase*>( this );
-        return QtConcurrent::run( [self]() { return self->doListDevices( nullptr ); } );
+        const QPointer<DeviceListProviderBase> self(
+            const_cast<DeviceListProviderBase*>( this ) );
+        return QtConcurrent::run(
+            [self]() { return self ? self->doListDevices( nullptr ) : QList<DeviceInfo>{}; } );
     }
 
     // Check whether a specific device (serial / UDID) is connected.

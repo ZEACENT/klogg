@@ -2,8 +2,10 @@
 #define IOSLOGDIALOG_H
 
 #include <QDialog>
+#include <QFutureWatcher>
 
 #include "adblogcatsource.h"
+#include "iosdeviceparser.h"
 
 class QComboBox;
 class QDialogButtonBox;
@@ -28,8 +30,11 @@ class IosLogDialog : public QDialog {
     void updateAcceptState();
     void loadSettings();
     void saveSettings() const;
+    // Populates the device combo from the async refresh result.
+    void onDevicesEnumerated();
 
   private:
+    QFutureWatcher<QList<IosDeviceInfo>>* deviceRefreshWatcher_ = nullptr;
     QLineEdit* executableEdit_ = nullptr;
     QPushButton* refreshButton_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;

@@ -1366,3 +1366,113 @@ TEST_CASE( "RollingFileManager reopen after rotation preserves data" )
     RollingFileManager cleanup( filePath, 24, 2 );
     cleanup.deleteAll();
 }
+
+TEST_CASE( "RollingFileManager writes every complete line across rotations", "[rolling]" )
+{
+    const auto dir = makeTestDir( "rolling_no_dataloss" );
+    const auto filePath = QDir( dir ).filePath( "live.log" );
+
+    // maxFileSize=30; a 3-line batch (33 bytes) must split. The last newline
+    // that fits lands strictly before the capacity boundary, which previously
+    // caused the trailing complete line to be dropped silently.
+    RollingFileManager manager( filePath, 30, 5 );
+    REQUIRE( manager.open( true ) );
+
+    const QByteArray data = QByteArrayLiteral( "0123456789\n0123456789\n0123456789\n" );
+    const auto written = manager.write( data );
+    manager.flush();
+
+    // Every input byte must be accounted for (old code returned 22, dropping 11).
+    REQUIRE( written == data.size() );
+
+    // Reassemble backups (oldest first) + current and confirm no line was lost.
+    QByteArray all;
+    for ( const auto& path : manager.backupFiles() ) {
+        QFile f( path );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            all.append( f.readAll() );
+        }
+    }
+    {
+        QFile f( filePath );
+        if ( f.open( QIODevice::ReadOnly ) ) {
+            all.append( f.readAll() );
+        }
+    }
+    REQUIRE( all.count( '\n' ) == data.count( '\n' ) );
+    REQUIRE( all.contains( QByteArrayLiteral( "0123456789\n0123456789\n0123456789\n" ) ) );
+
+    RollingFileManager( filePath, 30, 5 ).deleteAll();
+}
+
+TEST_CASE( "RollingFileManager reports rotation via rotated()", "[rolling]" )
+{
+    const auto dir = makeTestDir( "rolling_rotated_flag" );
+    const auto filePath = QDir( dir ).filePath( "live.log" );
+
+    RollingFileManager manager( filePath, 16, 3 );
+    REQUIRE( manager.open( true ) );
+
+    // A write that fits entirely must not report a rotation.
+    manager.write( QByteArrayLiteral( "short\n" ) );
+    REQUIRE_FALSE( manager.rotated() );
+
+    // A write that overflows the file must rotate and report it.
+    manager.write( QByteArrayLiteral( "0123456789ABCDEF0123456789ABCDEF\n" ) );
+    REQUIRE( manager.rotated() );
+
+    RollingFileManager( filePath, 16, 3 ).deleteAll();
+}
+
+TEST_CASE( "RollingFileManager clamps absurd backup counts", "[rolling]" )
+{
+    const auto dir = makeTestDir( "rolling_clamp" );
+    const auto filePath = QDir( dir ).filePath( "live.log" );
+
+    // A backup count within 100 of INT_MAX previously made cleanupOldBackups()
+    // compute `backupCount_ + 100` with signed overflow (UB) and skip cleanup.
+    RollingFileManager manager( filePath, 16, 2147483600 );
+    REQUIRE( manager.backupCount() <= 100000 );
+    REQUIRE( manager.backupCount() >= 0 );
+
+    REQUIRE( manager.open( true ) );
+    for ( int i = 0; i < 4; ++i ) {
+        manager.write( QByteArrayLiteral( "0123456789ABCDEF\n" ) ); // 17 bytes > 16 -> rotate
+    }
+    manager.flush();
+    // Cleanup must have run without overflow; only a bounded number of backups
+    // survive (clamped count + the current file).
+    REQUIRE( manager.backupFiles().size() <= manager.backupCount() + 1 );
+
+    RollingFileManager( filePath, 16, 2147483600 ).deleteAll();
+}
+
+TEST_CASE( "CaptureStore AppendResult firstLine reflects post-trim position", "[capturestore]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 16;
+    limits.rollingBackupCount = 1; // window = 16 bytes
+
+    const auto rootPath = makeTestDir( "capture_firstline_trim" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+
+    // Pre-fill well past the window so the store is already trimming (oldest
+    // segments removed down to the window).
+    store.appendUtf8( QByteArrayLiteral( "AAA\nAAA\nAAA\nAAA\nAAA\nAAA\nAAA\nAAA\nAAA\nAAA\n" ) );
+    const auto preTotal = store.lineCount().get();
+
+    // Small append that forces another trim of OLD data only; its single line
+    // survives at the tail. Its AppendResult.firstLine must address the
+    // post-trim tail position, not the stale pre-trim total.
+    const auto result = store.appendUtf8( QByteArrayLiteral( "BBB\n" ) );
+
+    const auto total = store.lineCount().get();
+    // Guard: trimming must have removed older lines during this append.
+    REQUIRE( total < preTotal + result.lineCount.get() );
+
+    const auto expectedFirst = static_cast<LineNumber::UnderlyingType>(
+        total > result.lineCount.get() ? total - result.lineCount.get() : 0 );
+    REQUIRE( result.firstLine.get() == expectedFirst );
+}

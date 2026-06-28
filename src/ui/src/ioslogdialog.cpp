@@ -12,8 +12,12 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QUuid>
+#include <QtConcurrent>
+
+#include <memory>
 
 #include "configuration.h"
+#include "iosdevicelistprovider.h"
 #include "ioslogprocesstransport.h"
 
 IosLogDialog::IosLogDialog( QWidget* parent )
@@ -113,6 +117,10 @@ IosLogDialog::IosLogDialog( QWidget* parent )
     } );
     connect( buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject );
 
+    deviceRefreshWatcher_ = new QFutureWatcher<QList<IosDeviceInfo>>( this );
+    connect( deviceRefreshWatcher_, &QFutureWatcher<QList<IosDeviceInfo>>::finished, this,
+             &IosLogDialog::onDevicesEnumerated );
+
     loadSettings();
     QTimer::singleShot( 0, this, &IosLogDialog::refreshDevices );
 }
@@ -137,16 +145,28 @@ AdbLogcatSessionData IosLogDialog::sessionData() const
 void IosLogDialog::refreshDevices()
 {
     deviceCombo_->clear();
+    updateAcceptState();
+    statusLabel_->setText( tr( "Detecting iOS devices..." ) );
 
-    QString error;
-    const auto devices = IosLogProcessTransport::listDevices( executableEdit_->text(), &error );
+    // Enumerate off the GUI thread: pymobiledevice3 can block for up to ~8s,
+    // and the previous synchronous call froze the whole dialog. A shared_ptr
+    // keeps the provider alive for the entire task, so this is use-after-free
+    // safe even if the dialog is closed mid-enumeration.
+    auto provider = std::make_shared<IosDeviceListProvider>( executableEdit_->text() );
+    deviceRefreshWatcher_->setFuture(
+        QtConcurrent::run( [provider]() { return provider->listDevices(); } ) );
+}
+
+void IosLogDialog::onDevicesEnumerated()
+{
+    const auto devices = deviceRefreshWatcher_->result();
     for ( const auto& device : devices ) {
         deviceCombo_->addItem( device.displayName, device.udid );
         deviceCombo_->setItemData( deviceCombo_->count() - 1, device.description, Qt::ToolTipRole );
     }
 
     if ( devices.isEmpty() ) {
-        statusLabel_->setText( error.isEmpty() ? tr( "No iOS devices detected." ) : error );
+        statusLabel_->setText( tr( "No iOS devices detected." ) );
     }
     else {
         statusLabel_->setText(
@@ -171,8 +191,7 @@ void IosLogDialog::loadSettings()
     ansiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
     autoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
     maxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
-    maxFileSizeSpinBox_->setValue(
-        static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+    maxFileSizeSpinBox_->setValue( config.liveCaptureRollingMaxFileSizeMb() );
     backupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
 }
 
@@ -184,8 +203,7 @@ void IosLogDialog::saveSettings() const
     config.setIosLogAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.setLiveAutoReconnectEnabled( autoReconnectCheckBox_->isChecked() );
     config.setLiveAutoReconnectMaxAttempts( maxAttemptsSpinBox_->value() );
-    config.setLiveCaptureRollingMaxFileSize(
-        static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024 );
+    config.setLiveCaptureRollingMaxFileSizeMb( maxFileSizeSpinBox_->value() );
     config.setLiveCaptureRollingBackupCount( backupCountSpinBox_->value() );
     config.save();
 }

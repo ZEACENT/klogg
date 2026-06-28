@@ -97,8 +97,11 @@ class AdbLogcatSource : public QObject {
     QString lastError_;
     bool manualDisconnect_ = false;
 
-    // Auto-reconnect state
-    bool autoReconnectEnabled_ = true;
+    // Auto-reconnect state. Defaults to disabled: the user's setting is applied
+    // via setAutoReconnectEnabled() before the first connect. A true default
+    // armed the reconnect timer during the construction-to-registration window
+    // with the wrong (unlimited) setting.
+    bool autoReconnectEnabled_ = false;
     int autoReconnectMaxAttempts_ = 0; // 0 = unlimited
     int reconnectAttempt_ = 0;
     bool reconnectionProven_ = false; // set when first stdout data arrives

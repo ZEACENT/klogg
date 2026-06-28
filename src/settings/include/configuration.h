@@ -489,6 +489,23 @@ class Configuration final : public Persistable<Configuration> {
         liveCaptureRollingMaxFileSize_ = maxFileSize;
     }
 
+    // Whole-megabyte view used by the live-source dialogs' spinboxes. Converting
+    // bytes->MB rounds to the nearest megabyte so a sub-megabyte stored value
+    // (e.g. migrated from an older format, or hand-edited) is not silently
+    // truncated to 0 (which the UI treats as "unlimited").
+    static constexpr qint64 LiveCaptureRollingBytesPerMb = 1024LL * 1024;
+    int liveCaptureRollingMaxFileSizeMb() const
+    {
+        const qint64 mb = ( liveCaptureRollingMaxFileSize_ + LiveCaptureRollingBytesPerMb / 2 )
+                          / LiveCaptureRollingBytesPerMb;
+        return static_cast<int>( qMin( mb, static_cast<qint64>( 2000000000LL ) ) );
+    }
+    void setLiveCaptureRollingMaxFileSizeMb( int megabytes )
+    {
+        liveCaptureRollingMaxFileSize_
+            = static_cast<qint64>( megabytes ) * LiveCaptureRollingBytesPerMb;
+    }
+
     int liveCaptureRollingBackupCount() const
     {
         return liveCaptureRollingBackupCount_;

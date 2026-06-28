@@ -85,4 +85,22 @@ inline void startUpdateDownload( const QUrl& url, QFile* outputFile,
     downloader.download( url, outputFile );
 }
 
+// Close our write handle (if open) and delete a (partial) downloaded file.
+// Closing BEFORE removing is required on Windows, which refuses to delete a
+// file that is still open — the previous cancel path removed the file while the
+// handle was still open, so on Windows the delete silently failed and the
+// partial download leaked onto disk. On POSIX the file is unlinked regardless
+// of an open handle, so this is an ordering no-op there, but the idiom is
+// correct cross-platform.
+inline bool discardDownloadedFile( QFile& file )
+{
+    if ( file.isOpen() ) {
+        file.close();
+    }
+    if ( file.exists() ) {
+        return file.remove();
+    }
+    return true;
+}
+
 #endif // KLOGG_UPDATEDOWNLOADHELPER_H

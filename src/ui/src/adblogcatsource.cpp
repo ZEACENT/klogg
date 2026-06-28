@@ -203,6 +203,13 @@ bool AdbLogcatSource::connectSource()
 
     manualDisconnect_ = false;
 
+    // A fresh (re)connect starts a new reconnect cycle: reset the attempt
+    // counter and cancel any pending auto-reconnect. Without this, a manual
+    // Reconnect after auto-reconnect exhaustion left reconnectAttempt_ at its
+    // stale high value, suppressing further retries.
+    reconnectTimer_.stop();
+    reconnectAttempt_ = 0;
+
     // connectTransport() handles device-not-found errors directly.
     // The isDeviceAvailable() pre-check was removed because it runs a
     // blocking subprocess (adb devices / pymobiledevice3 usbmux list)

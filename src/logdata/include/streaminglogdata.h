@@ -75,6 +75,10 @@ class StreamingLogData : public SearchableLogData {
     void scheduleLoadingFinished( int delayMs = 0 );
     ProcessedAnsiLine processedAnsiLine( LineNumber line ) const;
     void clearAnsiDisplayCache();
+    // Reads CaptureStore's pending trim result; if nonzero, clears it and
+    // invalidates the line-keyed raw/ANSI caches (their absolute line numbers
+    // shifted). Returns the consumed result so the caller can emit Truncated.
+    CaptureStore::TrimResult consumeTrimResult();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
     bool openDisplayOutputFile( const QString& outputPath );

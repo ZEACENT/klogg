@@ -1102,6 +1102,32 @@ class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
 #endif
     }
 };
+
+// Exits during startup after writing a recognizable line to stderr — exercises
+// the connectTransport() startup-failure error-capture path.
+class StartupStderrFailureTransport : public ProcessLiveSourceTransport {
+  public:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ),
+                 { QStringLiteral( "/c" ),
+                   QStringLiteral( "echo startup-boom 1>&2 & exit /b 13" ) } };
+#else
+        return { QStringLiteral( "/bin/sh" ),
+                 { QStringLiteral( "-c" ), QStringLiteral( "echo startup-boom >&2; exit 13" ) } };
+#endif
+    }
+
+    Command clearCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ), { QStringLiteral( "/c" ), QStringLiteral( "echo" ) } };
+#else
+        return { QStringLiteral( "true" ), {} };
+#endif
+    }
+};
 } // namespace
 
 TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intentional disconnect" )
@@ -2029,4 +2055,132 @@ TEST_CASE( "OptionsDialog reset restores live source settings to defaults" )
            == defaults.liveCaptureRollingMaxFileSize() );
     CHECK( restoredConfig.liveCaptureRollingBackupCount()
            == defaults.liveCaptureRollingBackupCount() );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport surfaces real stderr on startup failure" )
+{
+    StartupStderrFailureTransport transport;
+
+    REQUIRE_FALSE( transport.connectTransport() );
+    // stderr is redirected to a file via setStandardErrorFile(); the startup
+    // path must read that file (not readAllStandardError(), which is empty).
+    REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
+
+    transport.disconnectTransport();
+    QTest::qWait( 200 );
+}
+
+TEST_CASE( "AdbLogcatSource does not auto-reconnect before being enabled" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based auto-reconnect default test on Windows." );
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    // A non-existent executable fails connectTransport() deterministically in
+    // waitForStarted() (no dependence on the 250ms startup-grace window).
+    const AdbLogcatSessionData sessionData{
+        QStringLiteral( "/path/that/does/not/exist/adb" ),
+        QStringLiteral( "emulator-5554" ),
+        QStringLiteral( "Pixel Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+    AdbLogcatSource source( sessionData, logData );
+
+    // No setAutoReconnectEnabled() call: the member default must be disabled so
+    // a failing connect does not arm the reconnect timer.
+    REQUIRE_FALSE( source.connectSource() );
+    QCoreApplication::processEvents();
+    REQUIRE_FALSE( source.isAutoReconnectActive() );
+
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
+}
+
+TEST_CASE( "AdbLogcatSource manual reconnect resets the attempt counter" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based reconnect reset test on Windows." );
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+    // A non-existent executable fails connectTransport() deterministically in
+    // waitForStarted() (no dependence on the 250ms startup-grace window).
+    const AdbLogcatSessionData sessionData{
+        QStringLiteral( "/path/that/does/not/exist/adb" ),
+        QStringLiteral( "emulator-5554" ),
+        QStringLiteral( "Pixel Test" ),
+        QString{},
+        captureId,
+        QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+    AdbLogcatSource source( sessionData, logData );
+    source.setAutoReconnectEnabled( true );
+    source.setAutoReconnectMaxAttempts( 50 );
+
+    REQUIRE_FALSE( source.connectSource() ); // fails, schedules first reconnect (~1s)
+
+    // Wait for at least one auto-reconnect attempt to fire and increment.
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( source.reconnectAttempt() < 1 && deadline.elapsed() < 5000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+        QTest::qWait( 20 );
+    }
+    REQUIRE( source.reconnectAttempt() >= 1 );
+
+    // A manual reconnect must reset the stale attempt counter.
+    source.reconnectSource();
+    REQUIRE( source.reconnectAttempt() == 0 );
+
+    source.setAutoReconnectEnabled( false );
+    source.disconnectSource();
+    QCoreApplication::processEvents();
+    QTest::qWait( 200 );
+    QCoreApplication::processEvents();
+#endif
+}
+
+TEST_CASE( "DeviceListProvider async enumeration is safe against provider destruction" )
+{
+#ifdef Q_OS_WIN
+    WARN( "Skipping POSIX shell based device-provider lifetime test on Windows." );
+#else
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    // A slow fake adb keeps the async task in flight while we destroy the
+    // provider, exercising the lifetime guard in listDevicesAsync().
+    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
+    QFile script( scriptPath );
+    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
+    script.write( "#!/bin/sh\nsleep 1\nexit 0\n" );
+    script.close();
+    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
+
+    auto* provider = new AdbDeviceListProvider( scriptPath );
+    QFuture<QList<AdbDeviceInfo>> future = provider->listDevicesAsync();
+
+    // Destroy the provider while the task is still in flight. The QPointer guard
+    // must keep this from dereferencing freed memory.
+    delete provider;
+    future.waitForFinished(); // must not crash
+
+    REQUIRE( future.resultCount() == 1 );
+    // Guarded path yields an empty list when the provider no longer exists.
+    REQUIRE( future.result().isEmpty() );
+#endif
 }
