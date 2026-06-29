@@ -105,6 +105,7 @@ class AdbLogcatSource : public QObject {
     int autoReconnectMaxAttempts_ = 0; // 0 = unlimited
     int reconnectAttempt_ = 0;
     bool reconnectionProven_ = false; // set when first stdout data arrives
+    bool reconnectingActive_ = false; // true while async connectTransport is in-flight
     QTimer reconnectTimer_;
 };
 

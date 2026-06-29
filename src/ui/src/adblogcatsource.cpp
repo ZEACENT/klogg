@@ -334,6 +334,7 @@ void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
     switch ( state ) {
     case LiveSourceTransport::State::Connected:
         reconnectTimer_.stop();
+        reconnectingActive_ = false;
         // The connection is not yet proven — we wait for the first stdout
         // data before declaring success (see bytesReceived handler above).
         // If the process dies without producing data, the failure is surfaced
@@ -348,6 +349,7 @@ void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
             logData_->finishInput();
         }
         reconnectionProven_ = false;
+        reconnectingActive_ = false;
         if ( transport_ ) {
             lastError_ = transport_->lastError();
         }
@@ -385,7 +387,7 @@ void AdbLogcatSource::setAutoReconnectMaxAttempts( int maxAttempts )
 
 bool AdbLogcatSource::isAutoReconnectActive() const
 {
-    return reconnectTimer_.isActive();
+    return reconnectTimer_.isActive() || reconnectingActive_;
 }
 
 int AdbLogcatSource::reconnectAttempt() const
@@ -397,6 +399,7 @@ void AdbLogcatSource::cancelAutoReconnect()
 {
     reconnectTimer_.stop();
     reconnectAttempt_ = 0;
+    reconnectingActive_ = false;
 }
 
 void AdbLogcatSource::setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
@@ -420,12 +423,12 @@ void AdbLogcatSource::scheduleReconnect()
         return;
     }
 
-    // Exponential backoff with ±20% jitter
+    // Exponential backoff with ±10% jitter
     const auto baseDelay
         = qMin( InitialReconnectDelayMs * ( 1 << qMin( reconnectAttempt_, 15 ) ),
                 MaxReconnectDelayMs );
-    const auto jitter = QRandomGenerator::global()->bounded( baseDelay / 5 ); // ±20%
-    const auto delay = baseDelay + jitter - ( baseDelay / 10 );
+    const auto jitter = QRandomGenerator::global()->bounded( baseDelay / 5 ); // [0, 20%)
+    const auto delay = baseDelay + jitter - ( baseDelay / 10 ); // baseDelay ±10%
 
     LOG_INFO << "Scheduling auto-reconnect attempt " << ( reconnectAttempt_ + 1 ) << " in " << delay
              << "ms";
@@ -440,6 +443,7 @@ void AdbLogcatSource::attemptReconnect()
     }
 
     ++reconnectAttempt_;
+    reconnectingActive_ = true;
     LOG_INFO << "Auto-reconnect attempt " << reconnectAttempt_;
 
     if ( !transport_ ) {

@@ -304,7 +304,13 @@ CaptureStore::AppendResult CaptureStore::finishInput()
 
     // Flush any pending output data
     if ( rollingOutput_.isValid() && unflushedOutputBytes_ > 0 ) {
-        rollingOutput_.flush();
+        if ( !rollingOutput_.flush() ) {
+            LOG_WARNING << "Rolling output file flush failed in finishInput, unbinding: "
+                        << boundOutputFile_;
+            rollingOutput_.close();
+            rollingOutput_ = RollingFileManager();
+            boundOutputFile_.clear();
+        }
         resetOutputFlushCounters();
     }
     return appendResult;
@@ -314,7 +320,13 @@ void CaptureStore::flush()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     if ( rollingOutput_.isValid() && unflushedOutputBytes_ > 0 ) {
-        rollingOutput_.flush();
+        if ( !rollingOutput_.flush() ) {
+            LOG_WARNING << "Rolling output file flush failed in flush(), unbinding: "
+                        << boundOutputFile_;
+            rollingOutput_.close();
+            rollingOutput_ = RollingFileManager();
+            boundOutputFile_.clear();
+        }
         resetOutputFlushCounters();
     }
 }
