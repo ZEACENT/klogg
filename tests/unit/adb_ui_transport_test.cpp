@@ -745,7 +745,9 @@ TEST_CASE( "AdbDeviceListProvider listDevicesAsync returns a valid future" )
     auto future = provider.listDevicesAsync();
 
     // The future should be valid (has been started).
-    REQUIRE( future.isValid() );
+    // Use isStarted() instead of isValid() for Qt 5 compatibility
+    // (isValid() was added in Qt 6.0).
+    REQUIRE( future.isStarted() );
 
     // Wait for it to complete — should resolve to an empty list since
     // the executable doesn't exist.
@@ -764,7 +766,8 @@ TEST_CASE( "IosDeviceListProvider listDevicesAsync returns a valid future" )
     IosDeviceListProvider provider( QStringLiteral( "/nonexistent/pymobiledevice3" ) );
     auto future = provider.listDevicesAsync();
 
-    REQUIRE( future.isValid() );
+    // Use isStarted() instead of isValid() for Qt 5 compatibility.
+    REQUIRE( future.isStarted() );
 
     future.waitForFinished();
     // On non-macOS or with nonexistent executable, result should be empty.

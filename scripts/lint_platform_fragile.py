@@ -367,10 +367,7 @@ def _check_data_variable_shadowing(text: str, path: Path) -> list[tuple[int, str
     - Files whose name contains "dialog" (heuristic for QDialog subclasses).
     - A local variable declaration ``Type data;`` or ``Type data{}``.
     """
-    if ALLOW_MARKER in text:
-        return []
-
-    if "dialog" not in path.name.lower():
+    if "dialog" not in path.name.lower() and "widget" not in path.name.lower():
         return []
 
     # Only flag if the file actually includes QWidget/QDialog headers
