@@ -8,7 +8,9 @@ RUN apt-get update -y && \
                     gnupg dirmngr \
                     wget ca-certificates \
                     -y && \
-    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
+    echo "deb http://ppa.launchpad.net/ubuntu-toolchain-r/test/ubuntu focal main" \
+        > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
     apt-get update -y && \
     apt-get install --no-install-recommends \
                     qtbase5-dev qt5-qmake qtbase5-dev-tools qttools5-dev qttranslations5-l10n \
