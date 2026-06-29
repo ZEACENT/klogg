@@ -43,6 +43,7 @@
 #include <QMenu>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
+#include <QTimer>
 
 #include <QTranslator>
 #include <array>
@@ -235,6 +236,10 @@ class MainWindow : public QMainWindow {
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
 
+    void startReconnectCountdown( CrawlerWidget* crawler, int delayMs );
+    void stopReconnectCountdown();
+    void updateReconnectCountdown();
+
     WindowSession session_;
     QString loadingFileName;
 
@@ -350,6 +355,12 @@ class MainWindow : public QMainWindow {
     bool isCloseFromTray_ = false;
     bool suspendSessionPersistence_ = false;
     bool shutdownInProgress_ = false;
+
+    // Reconnect countdown state
+    QTimer* reconnectCountdownTimer_ = nullptr;
+    CrawlerWidget* reconnectCountdownCrawler_ = nullptr;
+    qint64 reconnectCountdownEndMs_ = 0;
+    qint64 reconnectCountdownTotalMs_ = 0;
 
     std::once_flag screenChangesConnect_;
 };

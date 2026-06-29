@@ -395,6 +395,11 @@ int AdbLogcatSource::reconnectAttempt() const
     return reconnectAttempt_;
 }
 
+int AdbLogcatSource::reconnectRemainingMs() const
+{
+    return reconnectTimer_.isActive() ? reconnectTimer_.remainingTime() : 0;
+}
+
 void AdbLogcatSource::cancelAutoReconnect()
 {
     reconnectTimer_.stop();

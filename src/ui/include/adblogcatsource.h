@@ -79,6 +79,7 @@ class AdbLogcatSource : public QObject {
     void setAutoReconnectMaxAttempts( int maxAttempts );
     bool isAutoReconnectActive() const;
     int reconnectAttempt() const;
+    int reconnectRemainingMs() const;
     void cancelAutoReconnect();
     void setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
                            qint64 maxTotalLines = 0 );

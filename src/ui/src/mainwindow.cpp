@@ -245,6 +245,12 @@ MainWindow::MainWindow( WindowSession session )
     signalMux_.connect( SIGNAL( filteredViewChanged() ), this,
                         SLOT( handleFilteredViewChanged() ) );
 
+    // Reconnect countdown timer (fires every second to update the info line)
+    reconnectCountdownTimer_ = new QTimer( this );
+    reconnectCountdownTimer_->setInterval( 1000 );
+    connect( reconnectCountdownTimer_, &QTimer::timeout,
+             this, &MainWindow::updateReconnectCountdown );
+
     // Configure the main tabbed widget
     mainTabWidget_.setDocumentMode( true );
     mainTabWidget_.setMovable( true );
@@ -1417,6 +1423,8 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
 void MainWindow::disconnectCurrentSource()
 {
+    stopReconnectCountdown();
+
     auto* crawler = currentCrawlerWidget();
     if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
         return;
@@ -1859,6 +1867,11 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
     assert( widget );
 
+    // Stop reconnect countdown if the closing tab is the countdown target
+    if ( widget == reconnectCountdownCrawler_ ) {
+        stopReconnectCountdown();
+    }
+
     const auto documentId = session_.getDocumentId( widget );
     const auto displayName = session_.getDisplayName( widget );
     const auto associatedPath = session_.getAssociatedPath( widget );
@@ -1936,6 +1949,12 @@ void MainWindow::currentTabChanged( int index )
         updateMenuBarFromDocument( crawler_widget );
         updateTitleBar( session_.getDisplayName( crawler_widget ) );
         updateFavoritesMenu();
+
+        // Update infoLine when switching to a tab that isn't the countdown target
+        if ( reconnectCountdownTimer_->isActive()
+             && crawler_widget != reconnectCountdownCrawler_ ) {
+            updateInfoLine();
+        }
 
         editMenu->setEnabled( true );
     }
@@ -2463,9 +2482,12 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                                  sessionData.captureBackupCount );
 
     connect( adbSource, &AdbLogcatSource::stateChanged, this,
-             [ this, crawler ]( AdbLogcatSource::State ) {
+             [ this, crawler ]( AdbLogcatSource::State state ) {
                  if ( currentCrawlerWidget() == crawler ) {
                      updateMenuBarFromDocument( crawler );
+                     if ( state == AdbLogcatSource::State::Connected ) {
+                         stopReconnectCountdown();
+                     }
                      updateInfoLine();
                  }
                  updateOpenedFilesMenu();
@@ -2479,11 +2501,72 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                  updateLiveTabAppearance( crawler );
              } );
     connect( adbSource, &AdbLogcatSource::reconnectAttemptStarted, this,
-             [ this, crawler ]( int ) { updateLiveTabAppearance( crawler ); } );
+             [ this, crawler ]( int ) {
+                 updateLiveTabAppearance( crawler );
+                 const auto* source = session_.getAdbLogcatSource( crawler );
+                 if ( source ) {
+                     startReconnectCountdown( crawler, source->reconnectRemainingMs() );
+                 }
+             } );
 
     // Sync tab appearance immediately in case the source is already
     // in Error or Disconnected state (e.g. during session restore).
     updateLiveTabAppearance( crawler );
+}
+
+void MainWindow::startReconnectCountdown( CrawlerWidget* crawler, int delayMs )
+{
+    reconnectCountdownCrawler_ = crawler;
+    reconnectCountdownTotalMs_ = delayMs;
+    reconnectCountdownEndMs_ = QDateTime::currentMSecsSinceEpoch() + delayMs;
+    reconnectCountdownTimer_->start();
+    updateReconnectCountdown(); // immediate first update
+}
+
+void MainWindow::stopReconnectCountdown()
+{
+    if ( !reconnectCountdownTimer_->isActive() ) {
+        return;
+    }
+    reconnectCountdownTimer_->stop();
+    reconnectCountdownCrawler_ = nullptr;
+    reconnectCountdownEndMs_ = 0;
+    reconnectCountdownTotalMs_ = 0;
+    infoLine->hideGauge();
+    // Restore normal infoLine if the current tab matches
+    if ( currentCrawlerWidget() ) {
+        updateInfoLine();
+    }
+}
+
+void MainWindow::updateReconnectCountdown()
+{
+    if ( !reconnectCountdownCrawler_
+         || currentCrawlerWidget() != reconnectCountdownCrawler_ ) {
+        return;
+    }
+
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    const auto remainingMs = static_cast<int>( reconnectCountdownEndMs_ - now );
+    const auto displayName = session_.getDisplayName( reconnectCountdownCrawler_ );
+
+    if ( remainingMs <= 0 ) {
+        // Timer expired — the reconnect attempt is about to fire.
+        // Keep showing "Reconnecting..." until state changes.
+        infoLine->setText( QDir::toNativeSeparators( displayName )
+                           + tr( " - Reconnecting..." ) );
+        infoLine->displayGauge( 100 );
+        return;
+    }
+
+    const auto remainingSec = ( remainingMs + 999 ) / 1000; // round up
+    infoLine->setText( QDir::toNativeSeparators( displayName )
+                       + tr( " - Reconnect in %1 seconds..." ).arg( remainingSec ) );
+
+    // Gauge: percentage of delay elapsed (fills left-to-right as time passes)
+    const auto elapsedMs = reconnectCountdownTotalMs_ - remainingMs;
+    const auto pct = static_cast<int>( elapsedMs * 100 / reconnectCountdownTotalMs_ );
+    infoLine->displayGauge( pct );
 }
 
 // Updates the actions for the recent files.
@@ -2572,6 +2655,12 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
 // Update the top info line from the session
 void MainWindow::updateInfoLine()
 {
+    // Don't overwrite the reconnect countdown display when on the countdown tab
+    if ( reconnectCountdownTimer_ && reconnectCountdownTimer_->isActive()
+         && currentCrawlerWidget() == reconnectCountdownCrawler_ ) {
+        return;
+    }
+
     QLocale defaultLocale;
 
     // Following should always work as we will only receive enter
