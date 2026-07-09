@@ -10,6 +10,7 @@ add_executable(klogg_tests
     configuration_test.cpp
     highlighter_vectorscan_test.cpp
     linepositionarray_test.cpp
+    mergefileorder_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     searchgeneration_test.cpp

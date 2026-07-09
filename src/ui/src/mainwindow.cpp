@@ -104,6 +104,7 @@
 #include "klogg_version.h"
 #include "logger.h"
 #include "mainwindowtext.h"
+#include "mergefileorder.h"
 #include "openfilehelper.h"
 #include "optionsdialog.h"
 #include "predefinedfilters.h"
@@ -3037,6 +3038,11 @@ void MainWindow::generateDump()
 
 std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePaths )
 {
+    // Show files in dictionary order (case-insensitive natural sort); see
+    // mergefileorder.h. Display order is independent of the merge order, which
+    // the user sets by checking boxes below.
+    const std::vector<QString> sortedPaths = sortedMergeFilePaths( filePaths );
+
     QDialog dialog( this );
     dialog.setWindowTitle( tr( "Merge Files" ) );
     dialog.setMinimumWidth( 400 );
@@ -3048,7 +3054,7 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     // Qt::UserRole = file path, Qt::UserRole+1 = original display name, Qt::UserRole+2 = check order
     int checkCounter = 0;
 
-    for ( const auto& filePath : filePaths ) {
+    for ( const auto& filePath : sortedPaths ) {
         const auto displayName = QFileInfo( filePath ).fileName();
         auto* item = new QListWidgetItem( displayName );
         item->setData( Qt::UserRole, filePath );
