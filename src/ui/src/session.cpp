@@ -33,6 +33,7 @@
 
 #include "logdata.h"
 #include "logfiltereddata.h"
+#include "foldercrawlerwidget.h"
 #include "savedsearches.h"
 #include "sessioninfo.h"
 #include "streaminglogdata.h"
@@ -132,6 +133,39 @@ ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
     return openAlways( tempFilePath, view_factory, {} );
 }
 
+ViewInterface* Session::openFolder( const QString& folderPath, const std::vector<QString>& filePaths )
+{
+    if ( folderPath.isEmpty() ) {
+        return nullptr;
+    }
+
+    auto* view = new FolderCrawlerWidget();
+    view->setQuickFindPattern( quickFindPattern_ );
+    view->setSavedSearches( savedSearches_ );
+
+    QStringList paths;
+    paths.reserve( static_cast<int>( filePaths.size() ) );
+    for ( const auto& p : filePaths ) {
+        paths << p;
+    }
+    view->setFolder( folderPath, paths );
+
+    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folderPath ).fileName() );
+
+    openFiles_.insert( { view,
+                         OpenFile{ folderPath,  // fileName
+                                   folderPath,  // documentId
+                                   displayName,
+                                   folderPath, // associatedPath
+                                   DocumentKind::Folder,
+                                   nullptr,    // logData (folder mode streams, no index)
+                                   nullptr,    // logFilteredData
+                                   nullptr,    // adbLogcatSource
+                                   view } } );
+
+    return view;
+}
+
 ViewInterface* Session::openAdbLogcat( const AdbLogcatSessionData& sessionData,
                                        const std::function<ViewInterface*()>& view_factory,
                                        bool startConnected, const QString& viewContext )
@@ -207,6 +241,14 @@ void Session::getFileInfo( const ViewInterface* view, uint64_t* fileSize, uint64
     const OpenFile* file = findOpenFileFromView( view );
 
     assert( file );
+
+    // Folder documents have no single backing LogData.
+    if ( file->logData == nullptr ) {
+        *fileSize = 0;
+        *fileNbLine = 0;
+        *lastModified = {};
+        return;
+    }
 
     *fileSize = static_cast<uint64_t>( file->logData->getFileSize() );
     *fileNbLine = file->logData->getNbLine().get();

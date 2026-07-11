@@ -23,6 +23,9 @@ add_executable(klogg_tests
     tabgroupmanager_test.cpp
     tabbedcrawlerwidget_test.cpp
     filewatcher_test.cpp
+    folderenumeration_test.cpp
+    foldersearchengine_test.cpp
+    foldersearchresults_test.cpp
     versionchecker_test.cpp
     newversiondialog_test.cpp
     updatedownload_test.cpp

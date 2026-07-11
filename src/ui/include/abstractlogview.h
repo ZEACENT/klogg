@@ -59,6 +59,7 @@
 #endif
 
 #include "abstractlogdata.h"
+#include "linekind.h"
 #include "highlighterset.h"
 #include "linetypes.h"
 #include "overviewwidget.h"
@@ -131,6 +132,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Refresh the widget when the data set has changed.
     void updateData();
+
+    // Swap the underlying data set to `newLogData` (folder mode: the main view
+    // is repointed at the file of the selected result row). Resets scroll,
+    // selection and the wrap/line cache, then forces a full redraw. The caller
+    // keeps ownership of the data and must keep it alive across paints.
+    void setDataSource( const AbstractLogData* newLogData );
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
@@ -180,6 +187,13 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // (used for coloured bullets)
     virtual AbstractLogData::LineType lineType( LineNumber lineNumber ) const = 0;
 
+    // What kind of row this visible line is. Plain single-file views only have
+    // Data rows; folder-search results additionally interleave Header rows
+    // (one per source file group). The base default is Data, so single-file
+    // views are unaffected. Header rows skip the bullet/line-number gutters and
+    // route clicks to collapse/expand instead of selection.
+    virtual LineKind lineKind( LineNumber lineNumber ) const;
+
     // Line number to display for line at the given index
     virtual LineNumber displayLineNumber( LineNumber lineNumber ) const;
     virtual LineNumber lineIndex( LineNumber lineNumber ) const;
@@ -213,6 +227,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Sent when a new line has been selected by the user
     void newSelection( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                        LineLength nSymbols );
+    // Sent when a Header row is clicked (folder mode) so the view can
+    // collapse/expand that file's result group. Not emitted for Data rows.
+    void headerClicked( LineNumber lineNumber );
     // Sent up when quickFind wants to show a message to the user.
     void notifyQuickFind( const QFNotification& message );
     // Sent up when quickFind wants to clear the notification.

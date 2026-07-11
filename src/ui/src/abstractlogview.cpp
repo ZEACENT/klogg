@@ -498,6 +498,13 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         // Mark selection as changed for overlay redraw
         selectionChanged_ = true;
 
+        // A Header row (folder-mode group header) toggles collapse/expand
+        // instead of selecting or marking.
+        if ( line.has_value() && lineKind( *line ) == LineKind::Header ) {
+            Q_EMIT headerClicked( *line );
+            return;
+        }
+
         if ( line.has_value() && mouseEvent->modifiers() & Qt::ShiftModifier ) {
             selection_.selectRangeFromPrevious( *line );
             selectionCurrentEndPos_ = convertCoordToFilePos( mouseEvent->pos() );
@@ -1982,6 +1989,27 @@ void AbstractLogView::forceRefresh()
     update();
 }
 
+LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
+{
+    // Single-file views have only Data rows; FolderFilteredView overrides this
+    // to identify group-header rows.
+    return LineKind::Data;
+}
+
+void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
+{
+    logData_ = newLogData;
+    firstLine_ = 0_lnum;
+    firstCol_ = 0_lcol;
+    selection_.clear();
+    wrappedLinesInfo_.clear();
+    verticalScrollBar()->setValue( 0 );
+    horizontalScrollBar()->setValue( 0 );
+    quickFind_->resetLimits();
+    updateScrollBars();
+    forceRefresh();
+}
+
 void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine )
 {
     searchStart_ = startLine;
@@ -3132,7 +3160,8 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                viewport()->width(), yPos + finalLineHeight - 1 );
         }
 
-        // Then draw the bullet
+        // Then draw the bullet (folder-mode Header rows have no bullet).
+        if ( lineKind( lineNumber ) == LineKind::Data ) {
         painter->setPen( Qt::black );
         const int circleSize = 3;
         const int arrowHeight = 4;
@@ -3168,9 +3197,10 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             painter->drawEllipse( middleXLine - circleSize, middleYLine - circleSize,
                                   circleSize * 2, circleSize * 2 );
         }
+        } // end Data-only bullet draw
 
-        // Draw the line number
-        if ( lineNumbersVisible_ ) {
+        // Draw the line number (Header rows have no line number).
+        if ( lineNumbersVisible_ && lineKind( lineNumber ) == LineKind::Data ) {
             static const QString lineNumberFormat( "%1" );
             const QString& lineNumberStr = lineNumberFormat.arg(
                 displayLineNumber( lineNumber ).get(), nbDigitsInLineNumber );

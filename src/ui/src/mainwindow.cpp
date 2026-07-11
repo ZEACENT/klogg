@@ -93,6 +93,8 @@
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
+#include "foldercrawlerwidget.h"
+#include "folderenumeration.h"
 #include "dispatch_to.h"
 #include "downloader.h"
 #include "encodings.h"
@@ -579,6 +581,10 @@ void MainWindow::createActions()
     openAction->setStatusTip( tr( action::openStatusTip ) );
     connect( openAction, &QAction::triggered, [ this ]( auto ) { this->open(); } );
 
+    openFolderAction = new QAction( tr( "Open Folder..." ), this );
+    openFolderAction->setStatusTip( tr( "Search every file in a folder (like grep -EIrn)" ) );
+    connect( openFolderAction, &QAction::triggered, [ this ]( auto ) { this->openFolder(); } );
+
     openAdbLogcatAction = new QAction( tr( "Open ADB Logcat..." ), this );
     openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
     connect( openAdbLogcatAction, &QAction::triggered, this,
@@ -922,6 +928,7 @@ void MainWindow::createMenus()
     fileMenu->setToolTipsVisible( true );
     fileMenu->addAction( newWindowAction );
     fileMenu->addAction( openAction );
+    fileMenu->addAction( openFolderAction );
     fileMenu->addAction( openAdbLogcatAction );
     fileMenu->addAction( openIosLogStreamAction );
     fileMenu->addAction( openClipboardAction );
@@ -1141,6 +1148,43 @@ void MainWindow::open()
     for ( const auto& remoteFile : remoteFiles ) {
         openRemoteFile( remoteFile );
     }
+}
+
+void MainWindow::openFolder()
+{
+    QString defaultDir = ".";
+    if ( auto current = currentCrawlerWidget() ) {
+        const QString currentFile = session_.getAssociatedPath( current );
+        const QFileInfo fileInfo( currentFile );
+        if ( fileInfo.exists() ) {
+            defaultDir = fileInfo.path();
+        }
+    }
+
+    const QString folder
+        = QFileDialog::getExistingDirectory( this, tr( "Open folder" ), defaultDir );
+    if ( folder.isEmpty() ) {
+        return;
+    }
+
+    const auto filePaths = enumerateFolderFiles( folder );
+    if ( filePaths.empty() ) {
+        QMessageBox::information( this, tr( "Open folder" ),
+                                  tr( "No readable files found in %1" ).arg( folder ) );
+        return;
+    }
+
+    auto* view = session_.openFolder(
+        folder, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
+    if ( view == nullptr ) {
+        return;
+    }
+
+    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folder ).fileName() );
+    const auto index = mainTabWidget_.addCrawler( static_cast<FolderCrawlerWidget*>( view ),
+                                                  folder, displayName, folder );
+    mainTabWidget_.setCurrentIndex( index );
+    updateOpenedFilesMenu();
 }
 
 void MainWindow::openAdbLogcat()
