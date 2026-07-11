@@ -33,6 +33,7 @@
 #include "log.h"
 #include "logdata.h"
 #include "logmainview.h"
+#include "overviewwidget.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
 #include "searchablelogdata.h"
@@ -71,8 +72,11 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     toolbar->addWidget( statusLabel_ );
 
     // --- views ---
-    mainView_ = new LogMainView( placeholderData_.get(), quickFindPattern_.get(), nullptr, nullptr,
-                                 this );
+    overviewWidget_ = new OverviewWidget( this );
+    overviewWidget_->setOverview( &overview_ );
+    overviewWidget_->hide(); // per-file overview is a v2; LogMainView still needs the pair.
+    mainView_ = new LogMainView( placeholderData_.get(), quickFindPattern_.get(), &overview_,
+                                 overviewWidget_, this );
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
 
@@ -120,6 +124,22 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
     filePaths_ = filePaths;
     statusLabel_->setText(
         tr( "Folder: %1  (%n file(s))", "", static_cast<int>( filePaths_.size() ) ).arg( folderPath_ ) );
+}
+
+void FolderCrawlerWidget::searchFor( const QString& pattern )
+{
+    searchEdit_->setText( pattern );
+    startSearch();
+}
+
+void FolderCrawlerWidget::selectResultRow( LineNumber line )
+{
+    onResultSelected( line, 1_lcount, 0_lcol, 0_length );
+}
+
+void FolderCrawlerWidget::clickHeaderRow( LineNumber line )
+{
+    onHeaderClicked( line );
 }
 
 void FolderCrawlerWidget::doSetData( std::shared_ptr<SearchableLogData>,

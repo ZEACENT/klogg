@@ -30,11 +30,14 @@
 
 #include <QWidget>
 
+#include "overview.h"
+
 class FolderFilteredView;
 class FolderSearchEngine;
 class FolderSearchResults;
 class LogMainView;
 class LogData;
+class OverviewWidget;
 class QuickFindPattern;
 class QSplitter;
 class QLineEdit;
@@ -72,6 +75,22 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     // Identify the folder + its (already enumerated, natural-sorted) files.
     void setFolder( const QString& folderPath, const QStringList& filePaths );
 
+    // --- Test access / programmatic driving (no UI events needed) ---
+    FolderSearchResults* folderResults() const { return folderResults_.get(); }
+    QString currentMainFilePath() const { return currentMainFilePath_; }
+    // Set the pattern and kick off a search (async; results land via the
+    // searchFinished signal).
+    void searchFor( const QString& pattern );
+    // Simulate selecting a result row (opens its source file in the main view).
+    void selectResultRow( LineNumber line );
+    // Simulate clicking a group-header row (toggles that group's collapse).
+    void clickHeaderRow( LineNumber line );
+
+    // Collapse / expand every group (wired to the toolbar buttons; public so
+    // they can be driven programmatically / from tests).
+    void collapseAll();
+    void expandAll();
+
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
     // signal). Folder tabs are static, so this is never emitted for now.
@@ -96,8 +115,6 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     void onResultSelected( LineNumber line, LinesCount nLines, LineColumn startCol,
                            LineLength nSymbols );
     void onHeaderClicked( LineNumber line );
-    void collapseAll();
-    void expandAll();
 
   private:
     void openFileInMainView( const QString& filePath, LineNumber localLine );
@@ -112,6 +129,11 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     FolderFilteredView* filteredView_ = nullptr;
     LogMainView* mainView_ = nullptr;
     QSplitter* splitter_ = nullptr;
+
+    // LogMainView requires a (non-null) Overview/OverviewWidget pair; in folder
+    // mode we keep one but hide the widget (per-file overview is a v2).
+    Overview overview_;
+    OverviewWidget* overviewWidget_ = nullptr;
 
     QLineEdit* searchEdit_ = nullptr;
     QLabel* statusLabel_ = nullptr;
