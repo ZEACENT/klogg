@@ -56,6 +56,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewinterface.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewtools.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/scratchpad.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/searchtoolbar.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/tabbedscratchpad.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodings.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/favoritefiles.h
@@ -123,6 +124,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabgroupdropresolver.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/viewtools.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/scratchpad.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/searchtoolbar.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabbedscratchpad.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/favoritefiles.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabnamemapping.cpp

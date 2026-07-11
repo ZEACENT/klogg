@@ -26,6 +26,8 @@
 #include "linekind.h"
 #include "linetypes.h"
 
+class QTextCodec;
+
 namespace klogg::folder {
 
 // Identifies a source file within a FolderSearchResults set. Stable for the
@@ -61,6 +63,13 @@ struct MatchRecord {
 struct FileGroup {
     QString filePath;
     std::vector<MatchRecord> matches; // ordered by localLine ascending
+    // Source-file codec detected on the first block (mirrors the indexer's
+    // guessEncoding). Used by FolderSearchResults::readMatchLine to decode the
+    // fetched match bytes with the SAME codec that interpreted the file during
+    // the scan, rather than the view-layer display encoding. Nullptr means
+    // UTF-8/ASCII (the common fast path). Qt owns codec singletons, so a raw
+    // pointer is safe (matches IndexingData in logdataworker.h).
+    QTextCodec* sourceCodec = nullptr;
 };
 
 // Resolves a visible result row back to its origin (used by the filtered view

@@ -29,6 +29,7 @@
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QTextCodec>
 
 namespace {
 QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArray& bytes )
@@ -46,6 +47,43 @@ std::unique_ptr<PatternMatcher> matcherFor( const QString& pattern )
     RegularExpression re{ RegularExpressionPattern{ pattern } };
     REQUIRE( re.isValid() );
     return re.createMatcher();
+}
+
+// Encodes an ASCII QString into UTF-16 little-endian bytes, optionally with a
+// BOM (FF FE). For ASCII text every code unit's high byte is 0x00, which is
+// exactly what exercises the multi-byte newline finder.
+QByteArray toUtf16LE( const QString& text, bool withBom )
+{
+    QByteArray out;
+    if ( withBom ) {
+        out.append( '\xff' );
+        out.append( '\xfe' );
+    }
+    for ( const QChar& ch : text ) {
+        const unsigned int u = ch.unicode();
+        out.append( static_cast<char>( u & 0xFF ) );
+        out.append( static_cast<char>( ( u >> 8 ) & 0xFF ) );
+    }
+    return out;
+}
+
+// Encodes an ASCII QString into UTF-16 big-endian bytes, optionally with a BOM
+// (FE FF). For UTF-16BE the LF sequence is 0x00 0x0A, so the 0x0A byte sits at
+// lineFeedIndex==1 -- this exercises the !isCheckForward branch of
+// findNextMultiByteDelimeter.
+QByteArray toUtf16BE( const QString& text, bool withBom )
+{
+    QByteArray out;
+    if ( withBom ) {
+        out.append( '\xfe' );
+        out.append( '\xff' );
+    }
+    for ( const QChar& ch : text ) {
+        const unsigned int u = ch.unicode();
+        out.append( static_cast<char>( ( u >> 8 ) & 0xFF ) );
+        out.append( static_cast<char>( u & 0xFF ) );
+    }
+    return out;
 }
 } // namespace
 
@@ -216,4 +254,149 @@ TEST_CASE( "FolderSearchEngine interrupt stops the scan", "[folder]" )
     engine.runSearch( engine.currentGeneration(), QStringList{ path },
                       RegularExpressionPattern( "MATCH" ) );
     REQUIRE( engine.takeResults().empty() );
+}
+
+// --- multi-encoding support (read-only) ---
+
+TEST_CASE( "scanFile matches UTF-16LE text with correct raw byte offsets", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // UTF-16LE with BOM (FF FE) so detection is deterministic. Each char is
+    // 2 bytes, so the BOM shifts every offset by 2 vs. the no-BOM case.
+    //   BOM(2) "foo\n"(8) -> line 0 = [0,10)
+    //   "ERROR here\n"(22) -> line 1 = [10,32)
+    //   "baz\n"(8) -> line 2 = [32,40)
+    const QByteArray content = toUtf16LE( QStringLiteral( "foo\nERROR here\nbaz\n" ), true );
+    const QString path = writeFile( dir, "utf16le.log", content );
+
+    auto matcher = matcherFor( "ERROR" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher );
+
+    REQUIRE( group.filePath == path );
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.sourceCodec != nullptr );
+    // Detection must have picked a UTF-16 codec (not fallen back to UTF-8).
+    REQUIRE( group.sourceCodec->name().contains( "UTF-16" ) );
+    REQUIRE( group.matches[ 0 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 10 ) );
+    REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( 32 ) ); // past the whole LF
+}
+
+TEST_CASE( "scanFile matches UTF-16BE text (lineFeedIndex==1 advance path)", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // UTF-16BE with BOM (FE FF). Same byte layout as the LE case (2 bytes/char
+    // + 2-byte BOM), so offsets match -- but the LF sequence is 0x00 0x0A, so
+    // lineFeedIndex==1 and the past-newline advance must use nl+1, not nl+2.
+    const QByteArray content = toUtf16BE( QStringLiteral( "foo\nERROR here\nbaz\n" ), true );
+    const QString path = writeFile( dir, "utf16be.log", content );
+
+    auto matcher = matcherFor( "ERROR" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher );
+
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.sourceCodec != nullptr );
+    REQUIRE( group.sourceCodec->name().contains( "UTF-16" ) );
+    REQUIRE( group.matches[ 0 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 10 ) );
+    REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( 32 ) );
+}
+
+TEST_CASE( "scanFile does not skip a UTF-16LE file as binary", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // A UTF-16LE ASCII file is full of 0x00 high bytes; the binary NUL check
+    // is gated on lineFeedWidth==1, so this must NOT be skipped as binary and
+    // MUST still match.
+    const QByteArray content = toUtf16LE( QStringLiteral( "all good\nMATCH line\n" ), true );
+    const QString path = writeFile( dir, "utf16le_nul.log", content );
+
+    auto matcher = matcherFor( "MATCH" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher );
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.matches[ 0 ].localLine == 1_lnum );
+}
+
+TEST_CASE( "scanFile multi-byte line spanning a read-block boundary", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // A UTF-16LE line longer than the tiny block size, with the LF sequence
+    // split across the carried bytes -- proves carry keeps raw bytes and the
+    // multi-byte finder resolves the LF in the joined view.
+    const QByteArray content = toUtf16LE(
+        QStringLiteral( "aaaaaa NEEDLE bbbbbbbbbbbb\n" ), true );
+    const QString path = writeFile( dir, "long16.log", content );
+
+    auto matcher = matcherFor( "NEEDLE" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, 16 ); // tiny block size
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    // Line 0 includes the BOM in its raw byte range ([0, end)); the codec
+    // strips the BOM on decode, so this is correct raw-file-space accounting.
+    REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 0 ) );
+    REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( content.size() ) );
+}
+
+TEST_CASE( "FolderSearchEngine mixes UTF-8 and UTF-16LE files with per-file codec", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString utf8Path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
+    const QString utf16Path
+        = writeFile( dir, "b.log", toUtf16LE( QStringLiteral( "MATCH\n" ), true ) );
+
+    FolderSearchEngine engine;
+    engine.scanSynchronously( QStringList{ utf8Path, utf16Path },
+                              RegularExpressionPattern( "MATCH" ) );
+    const auto results = engine.takeResults();
+
+    REQUIRE( results.size() == 2 );
+    REQUIRE( results[ 0 ].filePath == utf8Path );
+    REQUIRE( results[ 0 ].matches.size() == 1 );
+    // UTF-8 file: sourceCodec may be the UTF-8 codec, but must not be a UTF-16.
+    REQUIRE( results[ 1 ].filePath == utf16Path );
+    REQUIRE( results[ 1 ].matches.size() == 1 );
+    REQUIRE( results[ 1 ].sourceCodec != nullptr );
+    REQUIRE( results[ 1 ].sourceCodec->name().contains( "UTF-16" ) );
+    REQUIRE( engine.matchCount() == 2 );
+}
+
+TEST_CASE( "scanFile resolves a UTF-16LE line-feed split across a block boundary", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // "AA NEEDLE\nBB NEEDLE\n" in UTF-16LE: 20 bytes/line; the first LF (0x0A 0x00)
+    // is at raw bytes 18-19. blockSize=19 leaves the 0x0A at the end of block 1
+    // and the 0x00 at the start of block 2 -- a split LF that must still produce
+    // TWO matched lines (regression: without seam handling it merges into one).
+    const QByteArray content = toUtf16LE( QStringLiteral( "AA NEEDLE\nBB NEEDLE\n" ), true );
+    const QString path = writeFile( dir, "le.log", content );
+
+    auto matcher = matcherFor( "NEEDLE" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, 19 );
+
+    REQUIRE( group.matches.size() == 2 );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+}
+
+TEST_CASE( "scanFile resolves a UTF-16BE line-feed split across a block boundary", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // UTF-16BE LF is 0x00 0x0A; with blockSize=19 the 0x00 sits at the end of
+    // block 1 and the 0x0A at the start of block 2. Must still be two lines.
+    const QByteArray content = toUtf16BE( QStringLiteral( "AA NEEDLE\nBB NEEDLE\n" ), true );
+    const QString path = writeFile( dir, "be.log", content );
+
+    auto matcher = matcherFor( "NEEDLE" );
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, 19 );
+
+    REQUIRE( group.matches.size() == 2 );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
 }

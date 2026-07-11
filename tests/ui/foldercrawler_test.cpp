@@ -32,11 +32,17 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
 #include <functional>
+#include <vector>
 
 #include "foldercrawlerwidget.h"
+#include "folderfilteredview.h"
 #include "foldersearchresults.h"
 #include "linetypes.h"
+#include "logmainview.h"
+#include "overview.h"
+#include "overviewwidget.h"
 
 namespace {
 QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArray& bytes )
@@ -47,6 +53,20 @@ QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArr
     f.write( bytes );
     f.close();
     return path;
+}
+
+// Builds a file of `totalLines` lines where each line ends with '\n'. Lines
+// whose 0-based index is in `matchLines` contain "ERROR" (so a search for
+// "ERROR" produces exactly those localLine values); all other lines are filler.
+QString makeFile( const QTemporaryDir& dir, const QString& name, int totalLines,
+                  const std::vector<int>& matchLines )
+{
+    QByteArray bytes;
+    for ( int i = 0; i < totalLines; ++i ) {
+        const bool isMatch = std::find( matchLines.begin(), matchLines.end(), i ) != matchLines.end();
+        bytes.append( isMatch ? "ERROR line\n" : "padding line\n" );
+    }
+    return writeFile( dir, name, bytes );
 }
 
 // Pump the event loop in small steps until `predicate` is true or `timeoutMs`
@@ -77,7 +97,7 @@ TEST_CASE( "FolderCrawlerWidget search populates grouped results", "[folder]" )
     widget.setFolder( dir.path(), QStringList{ a, b } );
     widget.searchFor( "ERROR" );
 
-    REQUIRE( waitFor( [ & ]() { return widget.folderResults()->getNbLine().get() > 0; } ) );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // a: header + 2 matches = 3 rows; b: header + 1 match = 2 rows; total 5.
     REQUIRE( widget.folderResults()->getNbLine() == 5_lcount );
@@ -98,7 +118,7 @@ TEST_CASE( "FolderCrawlerWidget selecting a result opens the source file", "[fol
     widget.setFolder( dir.path(), QStringList{ a } );
     widget.searchFor( "ERROR" );
 
-    REQUIRE( waitFor( [ & ]() { return widget.folderResults()->getNbLine().get() > 0; } ) );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     // Visible rows: [header(0), match(1)].
     REQUIRE( widget.folderResults()->lineKind( 1_lnum ) == LineKind::Data );
 
@@ -118,7 +138,7 @@ TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without relo
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a } );
     widget.searchFor( "ERROR" );
-    REQUIRE( waitFor( [ & ]() { return widget.folderResults()->getNbLine().get() > 0; } ) );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     widget.selectResultRow( 1_lnum ); // first select -> async load + swap
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
@@ -139,7 +159,7 @@ TEST_CASE( "FolderCrawlerWidget collapse-all and expand-all change visible rows"
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a, b } );
     widget.searchFor( "ERROR" );
-    REQUIRE( waitFor( [ & ]() { return widget.folderResults()->getNbLine().get() > 0; } ) );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     const auto expanded = widget.folderResults()->getNbLine(); // 2 headers + 3 matches = 5
     REQUIRE( expanded == 5_lcount );
@@ -165,7 +185,7 @@ TEST_CASE( "FolderCrawlerWidget header-click toggles a single group", "[folder]"
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a, b } );
     widget.searchFor( "ERROR" );
-    REQUIRE( waitFor( [ & ]() { return widget.folderResults()->getNbLine().get() > 0; } ) );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     REQUIRE_FALSE( widget.folderResults()->isCollapsed( 0 ) );
 
     widget.clickHeaderRow( 0_lnum ); // toggle group a
@@ -192,8 +212,148 @@ TEST_CASE( "FolderCrawlerWidget search with no matches leaves results empty", "[
     widget.setFolder( dir.path(), QStringList{ a } );
     widget.searchFor( "ERROR" );
 
-    // searchFinished fires (with 0 matches) but getNbLine stays 0.
-    QTest::qWait( 200 );
+    // searchFinished fires (with 0 matches) but getNbLine stays 0. Wait for the
+    // search to complete before asserting so streaming timing is not a factor.
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
     REQUIRE( widget.currentMainFilePath().isEmpty() );
+}
+
+TEST_CASE( "FolderCrawlerWidget forwards search pattern to filtered view for match highlighting",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR three\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show(); // realize the widget tree so the filtered view can paint headlessly
+    widget.searchFor( "ERROR" );
+
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // a: header + 2 matches = 3 rows; b: header + 1 match = 2 rows; total 5.
+    REQUIRE( widget.folderResults()->getNbLine() == 5_lcount );
+
+    // The folder search pattern must be forwarded to the filtered view so the
+    // paint-time highlight path (AbstractLogView::drawTextArea, which rebuilds
+    // patternHighlight from searchPattern_ on every repaint) highlights the
+    // matched substring inside each result row, exactly like single-file
+    // FilteredView. This is the wiring assertion; the highlight itself is a
+    // paint-time pixel effect that cannot be asserted headlessly.
+    REQUIRE( widget.filteredView() != nullptr );
+    REQUIRE( widget.filteredView()->searchPattern().pattern == QStringLiteral( "ERROR" ) );
+
+    // Force a headless repaint of the filtered view's viewport to prove the
+    // paint path (which re-applies the search regex to every visible line) runs
+    // to completion with searchPattern_ set, without throwing.
+    REQUIRE_NOTHROW( widget.filteredView()->viewport()->repaint() );
+    QTest::qWait( 200 ); // settle per CLAUDE.md after a paint-triggering action
+}
+
+TEST_CASE( "FolderCrawlerWidget overview reflects the opened file and swaps on reselect",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // Two files with DIFFERENT match sets so we can prove the overview repoints:
+    //  - a.log: matches at localLine {0, 100}  -> 2 matches
+    //  - b.log: matches at localLine {0, 50, 100} -> 3 matches
+    const QString a = makeFile( dir, "a.log", 200, { 0, 100 } );
+    const QString b = makeFile( dir, "b.log", 200, { 0, 50, 100 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show(); // realize the widget tree so the overview widget can layout
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Visible rows: a(header 0, match 1, match 2), b(header 3, match 4, match 5,
+    // match 6) = 7 rows.
+    REQUIRE( widget.folderResults()->getNbLine() == 7_lcount );
+
+    // The overview follows Configuration (default visible).
+    REQUIRE( widget.overview()->isVisible() );
+
+    // Helper to drive the Overview recompute deterministically. paintEvent would
+    // call updateView(height) lazily; here we force it so the assertion does not
+    // depend on headless widget sizing. A large height keeps every match on its
+    // own y position (no collapse), so #weighted lines == #matches in the file.
+    auto overviewMatchCount = []( FolderCrawlerWidget& w ) -> size_t {
+        Overview* ov = w.overview();
+        REQUIRE( ov != nullptr );
+        ov->updateView( 10000 );
+        return ov->getMatchLines()->size();
+    };
+
+    // --- Open file A (async first load) ---
+    widget.selectResultRow( 1_lnum ); // a's first match (localLine 0)
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 ); // settle per CLAUDE.md
+
+    // refreshOverview must have shown the overview widget alongside the viewport.
+    auto* overviewWidget = widget.mainView()->findChild<OverviewWidget*>();
+    REQUIRE( overviewWidget != nullptr );
+    REQUIRE( overviewWidget->isVisible() );
+
+    // The overview now reflects a.log's matches (2), not b.log's (3), and no marks.
+    REQUIRE( overviewMatchCount( widget ) == 2 );
+    REQUIRE( widget.overview()->getMarkLines()->empty() );
+
+    // --- Open file B (different match set -> cached/async swap repoints) ---
+    widget.selectResultRow( 4_lnum ); // b's first match (localLine 0)
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 ); // settle
+
+    // The overview must now reflect b.log's matches (3): the repoint happened.
+    REQUIRE( overviewMatchCount( widget ) == 3 );
+
+    // --- Switch back to A (now served from the cache) -> overview repoints again.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    REQUIRE( overviewMatchCount( widget ) == 2 );
+}
+
+TEST_CASE( "FolderCrawlerWidget overview click emits lineClicked for jump parity",
+           "[folder]" )
+{
+    // Proves the single-file click-to-jump wiring needs no new code in folder
+    // mode: OverviewWidget::lineClicked is already connected to jumpToLine in
+    // AbstractLogView::setOverview, so emitting it must reach the main view.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 200, { 0, 100 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    const auto firstVisibleBefore = widget.mainView()->getTopLine();
+
+    // Emit the overview click signal the same way a real mouse press does
+    // (AbstractLogView connects OverviewWidget::lineClicked -> jumpToLine).
+    auto* overviewWidget = widget.mainView()->findChild<OverviewWidget*>();
+    REQUIRE( overviewWidget != nullptr );
+    Q_EMIT overviewWidget->lineClicked( 150_lnum );
+    QTest::qWait( 200 );
+
+    // jumpToLine centers the target line, so the new top line is the clicked
+    // line minus half a viewport (NOT exactly 150). What we assert is that the
+    // click reached jumpToLine: the first visible line CHANGED and moved down
+    // toward the clicked line (which started near 0 after opening at localLine 0).
+    const auto topAfter = widget.mainView()->getTopLine();
+    REQUIRE( topAfter != firstVisibleBefore );
+    REQUIRE( topAfter > firstVisibleBefore ); // scrolled down toward 150
+    REQUIRE( topAfter <= 150_lnum );          // centering keeps top at/above the target
 }

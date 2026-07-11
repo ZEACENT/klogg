@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -102,6 +103,13 @@ class FolderSearchEngine : public QObject {
     // Thread-safe: swap out the accumulated result groups.
     std::vector<klogg::folder::FileGroup> takeResults();
 
+    // Thread-safe: move out the per-file streaming group for `fileIndex` (the
+    // main-thread consumer pulls each finished group this way as fileGroupReady
+    // fires). Returns nullopt if the index is out of range or the group was
+    // already taken. Used by the streaming (widget) path; the sync/test/benchmark
+    // path uses takeResults() instead.
+    std::optional<klogg::folder::FileGroup> takeCompletedGroup( int fileIndex );
+
     // Scan a single file synchronously. Returns its FileGroup (empty matches if
     // the file is binary, unreadable, or has no matches). The pure, testable
     // unit: a function of (path, matcher, block size, stop predicate) only.
@@ -113,6 +121,10 @@ class FolderSearchEngine : public QObject {
     void searchStarted( quint64 generation );
     void searchProgressed( quint64 nbMatches, int progressPercent, quint64 generation );
     void searchFinished( quint64 generation );
+    // Fired per file once its scan completes (crosses thread boundaries on a
+    // queued connection; carries only plain int + quint64, like searchProgressed).
+    // The main thread responds by calling takeCompletedGroup(fileIndex).
+    void fileGroupReady( int fileIndex, quint64 generation );
 
   private:
     void workerLoop();
@@ -135,6 +147,12 @@ class FolderSearchEngine : public QObject {
 
     std::mutex resultsMutex_;
     std::vector<klogg::folder::FileGroup> results_;
+    // Per-file streaming buffer indexed by file index. Workers store each
+    // finished FileGroup here under resultsMutex_ before emitting fileGroupReady;
+    // the main-thread consumer drains it via takeCompletedGroup. Rebuilt in
+    // enumeration order into results_ at the end of each search so takeResults()
+    // (sync/test/benchmark) returns a deterministic, enumeration-ordered set.
+    std::vector<std::optional<klogg::folder::FileGroup>> pending_;
     std::atomic<quint64> matchCount_{ 0 };
 };
 

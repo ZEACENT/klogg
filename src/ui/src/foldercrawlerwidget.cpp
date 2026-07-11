@@ -19,13 +19,14 @@
 
 #include "foldercrawlerwidget.h"
 
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QLineEdit>
 #include <QSplitter>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "configuration.h"
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
 #include "foldersearchresults.h"
@@ -37,6 +38,7 @@
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
 #include "searchablelogdata.h"
+#include "searchtoolbar.h"
 
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
@@ -48,13 +50,10 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     engine_ = new FolderSearchEngine( this ); // QObject-owned
 
     // --- toolbar ---
-    searchEdit_ = new QLineEdit( this );
-    searchEdit_->setPlaceholderText( tr( "Search regex (e.g. ERROR|WARN)" ) );
-    searchButton_ = new QToolButton( this );
-    searchButton_->setText( tr( "Search" ) );
-    stopButton_ = new QToolButton( this );
-    stopButton_->setText( tr( "Stop" ) );
-    stopButton_->setEnabled( false );
+    // SearchToolbar (shared with CrawlerWidget) owns the search input + option
+    // toggles + Search/Stop buttons. Folder mode passes null SavedSearches
+    // (no history). Collapse/expand + status label sit alongside it.
+    searchToolbar_ = new SearchToolbar( this, nullptr );
     collapseAllButton_ = new QToolButton( this );
     collapseAllButton_->setText( tr( "Collapse all" ) );
     expandAllButton_ = new QToolButton( this );
@@ -62,9 +61,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     statusLabel_ = new QLabel( this );
 
     auto* toolbar = new QHBoxLayout;
-    toolbar->addWidget( searchEdit_, 1 );
-    toolbar->addWidget( searchButton_ );
-    toolbar->addWidget( stopButton_ );
+    toolbar->addWidget( searchToolbar_, 1 );
     toolbar->addSpacing( 12 );
     toolbar->addWidget( collapseAllButton_ );
     toolbar->addWidget( expandAllButton_ );
@@ -72,11 +69,17 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     toolbar->addWidget( statusLabel_ );
 
     // --- views ---
+    // Overview pair is constructed up-front because LogMainView's ctor needs
+    // non-null Overview + OverviewWidget (refreshOverview derefs them). The
+    // widget is re-parented to mainView_ below so AbstractLogView owns its
+    // placement (geometry set in resizeEvent), exactly like CrawlerWidget.
     overviewWidget_ = new OverviewWidget( this );
     overviewWidget_->setOverview( &overview_ );
-    overviewWidget_->hide(); // per-file overview is a v2; LogMainView still needs the pair.
     mainView_ = new LogMainView( placeholderData_.get(), quickFindPattern_.get(), &overview_,
                                  overviewWidget_, this );
+    overviewWidget_->setParent( mainView_ );
+    overview_.setVisible( Configuration::getSynced().isOverviewVisible() );
+    mainView_->refreshOverview();
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
 
@@ -91,17 +94,20 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     root->addWidget( splitter_, 1 );
 
     // --- signals ---
-    connect( searchButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::startSearch );
-    connect( stopButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::stopSearch );
+    connect( searchToolbar_, &SearchToolbar::searchRequested, this,
+             &FolderCrawlerWidget::startSearch );
+    connect( searchToolbar_, &SearchToolbar::stopRequested, this,
+             &FolderCrawlerWidget::stopSearch );
     connect( collapseAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::collapseAll );
     connect( expandAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::expandAll );
-    connect( searchEdit_, &QLineEdit::returnPressed, this, &FolderCrawlerWidget::startSearch );
 
     connect( engine_, &FolderSearchEngine::searchStarted, this, &FolderCrawlerWidget::onSearchStarted );
     connect( engine_, &FolderSearchEngine::searchProgressed, this,
              &FolderCrawlerWidget::onSearchProgressed );
     connect( engine_, &FolderSearchEngine::searchFinished, this,
              &FolderCrawlerWidget::onSearchFinished );
+    connect( engine_, &FolderSearchEngine::fileGroupReady, this,
+             &FolderCrawlerWidget::onFileGroupReady );
 
     connect( filteredView_, &FolderFilteredView::newSelection, this,
              &FolderCrawlerWidget::onResultSelected );
@@ -128,7 +134,13 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )
 {
-    searchEdit_->setText( pattern );
+    // Set the pattern text WITHOUT triggering setSearchPattern's auto-run /
+    // reset side effects (which would double-fire startSearch when
+    // autoRunSearchOnPatternChange is on), then start exactly one search.
+    auto* combo = searchToolbar_->searchLineEdit();
+    const bool wasBlocked = combo->blockSignals( true );
+    combo->setEditText( pattern );
+    combo->blockSignals( wasBlocked );
     startSearch();
 }
 
@@ -179,13 +191,25 @@ void FolderCrawlerWidget::startSearch()
     if ( filePaths_.isEmpty() ) {
         return;
     }
-    const auto pattern = searchEdit_->text();
+    const auto pattern = searchToolbar_->currentSearchText();
     if ( pattern.isEmpty() ) {
         return;
     }
-    searchButton_->setEnabled( false );
-    stopButton_->setEnabled( true );
-    engine_->startSearch( filePaths_, RegularExpressionPattern{ pattern } );
+    searchToolbar_->setSearchInProgress( true );
+    searchActive_ = true;
+    // Reset the view for streaming: beginSearch sizes the pending buffer and
+    // clears any prior result set so file groups stream into a clean view. This
+    // also covers the invalid-pattern path (which never emits searchStarted).
+    folderResults_->beginSearch( filePaths_ );
+
+    // Build the pattern from the toolbar's option flags (case / regex / inverse
+    // / boolean). This UPGRADES folder search from the former plain-text
+    // RegularExpressionPattern{ pattern } to honor the toggles for free.
+    const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
+    currentSearchGeneration_ = engine_->startSearch( filePaths_, regexpPattern );
+    if ( filteredView_ != nullptr ) {
+        filteredView_->setSearchPattern( regexpPattern );
+    }
 }
 
 void FolderCrawlerWidget::stopSearch()
@@ -203,23 +227,38 @@ void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, qu
     statusLabel_->setText( tr( "%1 match(es)  %2%" ).arg( static_cast<qulonglong>( nbMatches ) ).arg( percent ) );
 }
 
-void FolderCrawlerWidget::onSearchFinished( quint64 )
+void FolderCrawlerWidget::onSearchFinished( quint64 generation )
 {
-    searchButton_->setEnabled( true );
-    stopButton_->setEnabled( false );
-
-    auto groups = engine_->takeResults();
-    quint64 total = 0;
-    for ( const auto& g : groups ) {
-        total += g.matches.size();
+    if ( generation != currentSearchGeneration_ ) {
+        return; // stale: superseded by a newer search
     }
-    folderResults_->setResults( std::move( groups ) ); // emits layoutChanged -> view refreshes
 
+    // Defensive safety net: commit any groups still buffered (interrupted
+    // scans may leave a predecessor that never arrived). Under normal
+    // completion all per-file groups were already committed incrementally via
+    // onFileGroupReady before searchFinished was emitted.
+    folderResults_->flushPending();
+
+    searchToolbar_->setSearchInProgress( false );
+    searchActive_ = false;
+
+    const quint64 total = engine_->matchCount();
     if ( total == 0 ) {
         statusLabel_->setText( tr( "No matches" ) );
     }
     else {
         statusLabel_->setText( tr( "%1 match(es)" ).arg( static_cast<qulonglong>( total ) ) );
+    }
+}
+
+void FolderCrawlerWidget::onFileGroupReady( int fileIndex, quint64 generation )
+{
+    if ( generation != currentSearchGeneration_ ) {
+        return; // stale: superseded by a newer search
+    }
+    auto group = engine_->takeCompletedGroup( fileIndex );
+    if ( group.has_value() ) {
+        folderResults_->addFileGroup( fileIndex, std::move( *group ) );
     }
 }
 
@@ -273,13 +312,17 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         return;
     }
 
-    // Cached (recently opened) -> swap instantly.
+    // Cached (recently opened) -> swap instantly. Promote to most-recently-used
+    // so the LRU eviction policy keeps it resident.
     const auto it = mainViewCache_.find( filePath );
     if ( it != mainViewCache_.end() ) {
-        currentMainData_ = it->second;
+        mainViewCacheOrder_.splice( mainViewCacheOrder_.begin(), mainViewCacheOrder_,
+                                    it->second.second );
+        currentMainData_ = it->second.first;
         currentMainFilePath_ = filePath;
         mainView_->setDataSource( currentMainData_.get() );
         mainView_->jumpToLine( localLine );
+        refreshFileOverview( filePath );
         return;
     }
 
@@ -299,6 +342,9 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
 
                  mainView_->setDataSource( currentMainData_.get() );
                  mainView_->jumpToLine( pendingJumpLine_ );
+                 // getNbLine() is only valid now that indexing finished: the
+                 // overview repoint MUST happen here, not at attachFile time.
+                 refreshFileOverview( pendingMainFilePath_ );
 
                  pendingMainData_.reset();
                  pendingMainFilePath_.clear();
@@ -308,16 +354,35 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     pendingMainData_->attachFile( filePath );
 }
 
+void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
+{
+    // No-op until a real file is loaded and the overview is user-visible.
+    if ( !overview_.isVisible() || currentMainData_ == nullptr || folderResults_ == nullptr ) {
+        return;
+    }
+    overview_.setMatchLines( folderResults_->matchLinesForFile( filePath ) );
+    overview_.updateData( currentMainData_->getNbLine() );
+    mainView_->refreshOverview();
+}
+
 void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> data )
 {
     if ( filePath.isEmpty() ) {
         return;
     }
-    mainViewCache_[ filePath ] = std::move( data );
+    // Insert at the front (most-recently-used). If the file was already cached,
+    // drop its prior order entry first so we do not leak stale list nodes.
+    const auto existing = mainViewCache_.find( filePath );
+    if ( existing != mainViewCache_.end() ) {
+        mainViewCacheOrder_.erase( existing->second.second );
+    }
+    mainViewCacheOrder_.push_front( filePath );
+    mainViewCache_[ filePath ] = { std::move( data ), mainViewCacheOrder_.begin() };
+
+    // Evict least-recently-used entries (back of the order list) to bound memory.
     while ( mainViewCache_.size() > MainViewCacheLimit ) {
-        // Evict an arbitrary (oldest-insertion-order is not tracked; unordered_map
-        // gives us some victim) entry to bound memory. The file is re-indexed on
-        // next access if needed.
-        mainViewCache_.erase( mainViewCache_.begin() );
+        const auto lru = mainViewCacheOrder_.back();
+        mainViewCache_.erase( lru );
+        mainViewCacheOrder_.pop_back();
     }
 }

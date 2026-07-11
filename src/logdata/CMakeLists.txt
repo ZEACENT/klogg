@@ -6,6 +6,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/concatenatedlogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchengine.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchresults.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchtypes.h

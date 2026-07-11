@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QTextCodec>
 
 namespace {
 klogg::folder::MatchRecord match( uint64_t localLine, int64_t start, int64_t end,
@@ -222,4 +223,120 @@ TEST_CASE( "FolderSearchResults reads match line text from the source file", "[f
     REQUIRE( r.lineKind( 1_lnum ) == LineKind::Data );
     REQUIRE( r.getLineString( 1_lnum ) == QString( "beta ERROR" ) );
     REQUIRE( r.getLineLength( 1_lnum ) == 10_length );
+}
+
+TEST_CASE( "FolderSearchResults readMatchLine decodes with the file source codec", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // Write a UTF-16LE file (with BOM) holding:
+    //   BOM(2) "foo\n"(8) -> line 0 = [0,10)
+    //   "ERROR here\n"(22) -> line 1 = [10,32)
+    QByteArray content;
+    content.append( '\xff' );
+    content.append( '\xfe' ); // BOM
+    const std::string text = "foo\nERROR here\nbaz\n";
+    for ( char c : text ) {
+        content.append( c );
+        content.append( '\0' ); // UTF-16LE low/high
+    }
+    const QString path = QDir( dir.path() ).absoluteFilePath( "utf16le.log" );
+    {
+        QFile f( path );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( content );
+        f.close();
+    }
+
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = path;
+    g.sourceCodec = QTextCodec::codecForName( "UTF-16LE" );
+    g.matches.push_back( match( 1, 10, 32, 10, 5 ) ); // "ERROR here"
+    r.setResults( { g } );
+
+    REQUIRE( r.lineKind( 0_lnum ) == LineKind::Header );
+    REQUIRE( r.lineKind( 1_lnum ) == LineKind::Data );
+    // Decoded with the SOURCE codec, not the default UTF-8 display encoding:
+    // the raw bytes [10,32) are "ERROR here\n" in UTF-16LE.
+    const QString line = r.getLineString( 1_lnum );
+    INFO( "decoded line: " << line.toStdString() );
+    REQUIRE( line == QStringLiteral( "ERROR here" ) );
+    // No BOM leaks into non-line-0 lines.
+    REQUIRE_FALSE( line.startsWith( QChar( 0xFEFF ) ) );
+}
+
+TEST_CASE( "FolderSearchResults readMatchLine falls back to UTF-8 with no source codec", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QStringList lines{ "alpha", "beta ERROR", "gamma" };
+    const QString path = writeFile( dir, "a.log", lines );
+
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = path;
+    // sourceCodec left null -> readMatchLine must decode as UTF-8.
+    g.matches.push_back( match( 1, 6, 17, 10, 5 ) ); // "beta ERROR"
+    r.setResults( { g } );
+
+    REQUIRE( r.getLineString( 1_lnum ) == QString( "beta ERROR" ) );
+}
+
+TEST_CASE( "FolderSearchResults matchLinesForFile returns ascending local lines", "[folder]" )
+{
+    FolderSearchResults r;
+    klogg::folder::FileGroup a;
+    a.filePath = "/a.log";
+    a.matches.push_back( match( 3, 0, 5, 5, 1 ) );
+    a.matches.push_back( match( 7, 0, 5, 5, 1 ) );
+    a.matches.push_back( match( 42, 0, 5, 5, 1 ) );
+    klogg::folder::FileGroup b;
+    b.filePath = "/b.log";
+    b.matches.push_back( match( 1, 0, 5, 5, 1 ) );
+    r.setResults( { a, b } );
+
+    const auto aLines = r.matchLinesForFile( "/a.log" );
+    REQUIRE( aLines.size() == 3 );
+    REQUIRE( aLines[ 0 ] == 3_lnum );
+    REQUIRE( aLines[ 1 ] == 7_lnum );
+    REQUIRE( aLines[ 2 ] == 42_lnum );
+
+    const auto bLines = r.matchLinesForFile( "/b.log" );
+    REQUIRE( bLines.size() == 1 );
+    REQUIRE( bLines[ 0 ] == 1_lnum );
+}
+
+TEST_CASE( "FolderSearchResults matchLinesForFile is empty for an absent file", "[folder]" )
+{
+    FolderSearchResults r;
+    klogg::folder::FileGroup a;
+    a.filePath = "/a.log";
+    a.matches.push_back( match( 0, 0, 5, 5, 1 ) );
+    r.setResults( { a } );
+
+    REQUIRE( r.matchLinesForFile( "/not/here.log" ).empty() );
+    REQUIRE( r.matchLinesForFile( QString() ).empty() );
+}
+
+TEST_CASE( "FolderSearchResults matchLinesForFile ignores collapse state", "[folder]" )
+{
+    // matchLinesForFile reads groups_, not visibleRows_, so collapsing a group
+    // must NOT change the per-file match list (the folder overview needs the full
+    // set even when the results view is collapsed).
+    FolderSearchResults r;
+    klogg::folder::FileGroup a;
+    a.filePath = "/a.log";
+    a.matches.push_back( match( 0, 0, 5, 5, 1 ) );
+    a.matches.push_back( match( 1, 0, 5, 5, 1 ) );
+    a.matches.push_back( match( 2, 0, 5, 5, 1 ) );
+    r.setResults( { a } );
+    REQUIRE( r.matchLinesForFile( "/a.log" ).size() == 3 );
+
+    r.collapseAll();
+    REQUIRE( r.getNbLine() == 1_lcount ); // only the header is visible now
+    REQUIRE( r.matchLinesForFile( "/a.log" ).size() == 3 ); // ...but still 3 matches
+
+    r.toggleCollapse( 0 );
+    REQUIRE( r.matchLinesForFile( "/a.log" ).size() == 3 );
 }

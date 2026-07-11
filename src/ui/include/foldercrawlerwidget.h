@@ -22,6 +22,8 @@
 
 #include <QString>
 #include <QStringList>
+#include <cstdint>
+#include <list>
 #include <memory>
 #include <unordered_map>
 
@@ -40,9 +42,9 @@ class LogData;
 class OverviewWidget;
 class QuickFindPattern;
 class QSplitter;
-class QLineEdit;
 class QLabel;
 class QToolButton;
+class SearchToolbar;
 
 enum class DataStatus;
 
@@ -77,7 +79,16 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
 
     // --- Test access / programmatic driving (no UI events needed) ---
     FolderSearchResults* folderResults() const { return folderResults_.get(); }
+    FolderFilteredView* filteredView() const { return filteredView_; }
+    LogMainView* mainView() const { return mainView_; }
+    // Mutable access for test-driving (e.g. forcing updateView); const variant
+    // below for read-only inspection.
+    Overview* overview() { return &overview_; }
+    const Overview* overview() const { return &overview_; }
     QString currentMainFilePath() const { return currentMainFilePath_; }
+    // True while a search is running (cleared on searchFinished). Lets
+    // integration tests wait for completion before asserting exact counts.
+    bool isSearchActive() const { return searchActive_; }
     // Set the pattern and kick off a search (async; results land via the
     // searchFinished signal).
     void searchFor( const QString& pattern );
@@ -112,6 +123,7 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     void onSearchStarted( quint64 generation );
     void onSearchProgressed( quint64 nbMatches, int percent, quint64 generation );
     void onSearchFinished( quint64 generation );
+    void onFileGroupReady( int fileIndex, quint64 generation );
     void onResultSelected( LineNumber line, LinesCount nLines, LineColumn startCol,
                            LineLength nSymbols );
     void onHeaderClicked( LineNumber line );
@@ -119,6 +131,12 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
   private:
     void openFileInMainView( const QString& filePath, LineNumber localLine );
     void cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> data );
+    // Re-point the per-file overview at the opened file: that file's folder-search
+    // matches become the Overview marks, and linesInFile_ is sized to the file so
+    // the viewport box + click-to-jump map within the file. No-op until a file is
+    // loaded into currentMainData_. Folder mode uses an explicit match-line list
+    // (no LogFilteredData), so this is a pure else-branch on the Overview.
+    void refreshFileOverview( const QString& filePath );
 
     QString folderPath_;
     QStringList filePaths_;
@@ -130,31 +148,48 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     LogMainView* mainView_ = nullptr;
     QSplitter* splitter_ = nullptr;
 
-    // LogMainView requires a (non-null) Overview/OverviewWidget pair; in folder
-    // mode we keep one but hide the widget (per-file overview is a v2).
+    // LogMainView requires a (non-null) Overview/OverviewWidget pair. In folder
+    // mode the Overview is driven per-file: when a result is opened, that file's
+    // folder-search matches become the overview marks and linesInFile_ is sized to
+    // the file. The widget is re-parented to mainView_ so AbstractLogView places
+    // it; visibility follows Configuration::isOverviewVisible() (mirrors
+    // CrawlerWidget).
     Overview overview_;
     OverviewWidget* overviewWidget_ = nullptr;
 
-    QLineEdit* searchEdit_ = nullptr;
+    // Shared search toolbar (replaces the former inline QLineEdit + hand-built
+    // Search/Stop buttons). Folder mode passes a null SavedSearches (no
+    // history); the toolbar guards that. Collapse/expand buttons live
+    // alongside the toolbar in this widget's own layout.
+    SearchToolbar* searchToolbar_ = nullptr;
     QLabel* statusLabel_ = nullptr;
-    QToolButton* searchButton_ = nullptr;
-    QToolButton* stopButton_ = nullptr;
     QToolButton* collapseAllButton_ = nullptr;
     QToolButton* expandAllButton_ = nullptr;
 
     // Main-view file data: a placeholder (empty) until a row is clicked, then
-    // the selected file's LogData. Recently-used files are cached so switching
-    // between files is instant.
+    // the selected file's LogData. Recently-used files are cached (true LRU,
+    // MainViewCacheLimit entries) so switching between files is instant.
     std::shared_ptr<LogData> placeholderData_;
     std::shared_ptr<LogData> currentMainData_;
     QString currentMainFilePath_;
-    std::unordered_map<QString, std::shared_ptr<LogData>> mainViewCache_;
+    // value: { data, iterator into mainViewCacheOrder_ }; order tracks access
+    // recency (front = most-recently-used). std::list iterators stay valid on
+    // splice/erase, so the map is never invalidated by reordering.
+    std::unordered_map<QString,
+                       std::pair<std::shared_ptr<LogData>, std::list<QString>::iterator>>
+        mainViewCache_;
+    std::list<QString> mainViewCacheOrder_;
     static constexpr size_t MainViewCacheLimit = 8;
 
     // Pending async load (file clicked before its index finished building).
     std::shared_ptr<LogData> pendingMainData_;
     QString pendingMainFilePath_;
     LineNumber pendingJumpLine_ = 0_lnum;
+
+    // Current search generation: streaming fileGroupReady/searchFinished signals
+    // whose generation differs are dropped (superseded by a newer search).
+    quint64 currentSearchGeneration_ = 0;
+    bool searchActive_ = false;
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

@@ -66,6 +66,7 @@
 #include "overview.h"
 #include "predefinedfilterscombobox.h"
 #include "searchablelogdata.h"
+#include "searchtoolbar.h"
 #include "signalmux.h"
 #include "viewinterface.h"
 
@@ -238,18 +239,6 @@ class CrawlerWidget : public QSplitter,
     // Called when the checkbox for search auto-refresh is changed
     void searchRefreshChangedHandler( bool isRefreshing );
 
-    // Called when the checkbox for case sensitivity is changed
-    void matchCaseChangedHandler( bool shouldMatchCase );
-
-    // Called when the checkbox for boolean combining is changed
-    void booleanCombiningChangedHandler( bool shouldCombine );
-
-    // Called when the checkbox for using regex is changed
-    void useRegexpChangeHandler( bool shouldUseRegex );
-
-    // Called when the text on the search line is modified
-    void searchTextChangeHandler( QString );
-
     // Called when the user change the visibility combobox
     void changeFilteredViewVisibility( int index );
 
@@ -269,9 +258,6 @@ class CrawlerWidget : public QSplitter,
     // Save current search as a favorite filter
     void saveAsFavorite();
     void setSearchPatternFromPredefinedFilters( const QList<PredefinedFilter>& filters );
-
-    // Search Context Menu
-    void showSearchContextMenu();
 
     // Called when a match is hovered on in the filtered view
     void mouseHoveredOverMatch( LineNumber line );
@@ -367,10 +353,6 @@ class CrawlerWidget : public QSplitter,
     // Reload predefined filters after changing settings
     void reloadPredefinedFilters() const;
 
-    QString escapeSearchPattern( const QString& searchPattern, bool isRegex = false ) const;
-    QString& combinePatterns( QString& currentPattern, const QString& newPattern ) const;
-    void setSearchPattern( const QString& searchPattern );
-
     void resetStateOnSearchPatternChanges();
 
     void updateColorLabels( const ColorLabelsManager::QuickHighlightersCollection& labels );
@@ -403,28 +385,16 @@ class CrawlerWidget : public QSplitter,
 
     OverviewWidget* overviewWidget_;
 
+    // Shared search toolbar: owns the search-input QComboBox, option toggle
+    // buttons (match case / regex / inverse / boolean / auto-refresh), the
+    // clear / search / keep-results / stop buttons, predefined-filters combo,
+    // favorite button, and the RegularExpressionPattern construction.
+    SearchToolbar* searchToolbar_ = nullptr;
+
     QComboBox* visibilityBox_;
     QStandardItemModel* visibilityModel_;
 
-    PredefinedFiltersComboBox* predefinedFilters_;
-
-    QComboBox* searchLineEdit_;
-    QMenu* searchLineContextMenu_;
-    QCompleter* searchLineCompleter_;
-
     InfoLine* searchInfoLine_;
-
-    QToolButton* clearButton_;
-    QToolButton* searchButton_;
-    QToolButton* keepSearchResultsButton_;
-    QToolButton* favoriteFilterButton_;
-    QToolButton* stopButton_;
-
-    QToolButton* matchCaseButton_;
-    QToolButton* useRegexpButton_;
-    QToolButton* inverseButton_;
-    QToolButton* booleanButton_;
-    QToolButton* searchRefreshButton_;
 
     // Context lines controls
     QSpinBox* contextLinesSpinBox_;

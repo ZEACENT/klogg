@@ -52,6 +52,68 @@ void FolderSearchResults::setResults( std::vector<klogg::folder::FileGroup> grou
     Q_EMIT layoutChanged();
 }
 
+void FolderSearchResults::beginSearch( const QStringList& expectedFileOrder )
+{
+    groups_.clear();
+    openFiles_.clear();
+    collapsed_.clear();
+    pendingByIndex_.assign( static_cast<size_t>( expectedFileOrder.size() ), std::nullopt );
+    nextExpectedIndex_ = 0;
+    rebuildVisibleRows();
+    Q_EMIT layoutChanged();
+}
+
+void FolderSearchResults::addFileGroup( int fileIndex, klogg::folder::FileGroup group )
+{
+    if ( fileIndex < 0 || static_cast<size_t>( fileIndex ) >= pendingByIndex_.size() ) {
+        return;
+    }
+    pendingByIndex_[ static_cast<size_t>( fileIndex ) ] = std::move( group );
+
+    bool appended = false;
+    // Drain every consecutive completed predecessor from the cursor. This makes
+    // the display order always match enumeration order, no matter which file
+    // finished first: file[5] cannot appear until file[0..4] are all committed.
+    while ( nextExpectedIndex_ < pendingByIndex_.size()
+            && pendingByIndex_[ nextExpectedIndex_ ].has_value() ) {
+        auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
+        if ( !opt->matches.empty() ) {
+            groups_.push_back( std::move( *opt ) );
+            // Keep file-handle slots aligned to fileId (== group index), matching
+            // the setResults contract so fileForGroup() can index directly.
+            openFiles_.resize( groups_.size() );
+            appended = true;
+        }
+        ++nextExpectedIndex_;
+    }
+
+    if ( appended ) {
+        rebuildVisibleRows();
+        Q_EMIT layoutChanged();
+    }
+}
+
+void FolderSearchResults::flushPending()
+{
+    bool appended = false;
+    // Commit every remaining present group, skipping missing/empty slots (an
+    // interrupted scan may leave a predecessor that will never arrive).
+    while ( nextExpectedIndex_ < pendingByIndex_.size() ) {
+        auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
+        if ( opt.has_value() && !opt->matches.empty() ) {
+            groups_.push_back( std::move( *opt ) );
+            openFiles_.resize( groups_.size() );
+            appended = true;
+        }
+        ++nextExpectedIndex_;
+    }
+
+    if ( appended ) {
+        rebuildVisibleRows();
+        Q_EMIT layoutChanged();
+    }
+}
+
 LineKind FolderSearchResults::lineKind( LineNumber visibleIndex ) const
 {
     const auto* row = visibleRowAt( visibleIndex );
@@ -80,6 +142,24 @@ klogg::folder::SourceRef FolderSearchResults::sourceForLine( LineNumber visibleI
         }
     }
     return ref;
+}
+
+std::vector<LineNumber> FolderSearchResults::matchLinesForFile( const QString& filePath ) const
+{
+    std::vector<LineNumber> out;
+    // Linear scan of groups_ (small: number of files with matches). groups are
+    // unique per file, so we stop at the first match. Reads groups_, not
+    // visibleRows_, so collapse state has no effect.
+    for ( const auto& g : groups_ ) {
+        if ( g.filePath == filePath ) {
+            out.reserve( g.matches.size() );
+            for ( const auto& m : g.matches ) {
+                out.push_back( m.localLine );
+            }
+            break;
+        }
+    }
+    return out;
 }
 
 klogg::folder::FileId FolderSearchResults::groupCount() const
@@ -327,10 +407,17 @@ QString FolderSearchResults::readMatchLine( klogg::folder::FileId fileId, size_t
     }
 
     const QByteArray bytes = file->read( end - start );
-    auto* codec = QTextCodec::codecForName( displayEncodingName_ );
-    QString text = codec != nullptr ? codec->toUnicode( bytes ) : QString::fromUtf8( bytes );
+    // Decode with the SOURCE file's codec (detected during the scan and stored
+    // on the FileGroup), not displayEncodingName_. This mirrors LogData, which
+    // reads raw line bytes and decodes with codec_.makeDecoder() (logdata.cpp)
+    // -- the source codec interprets the bytes. displayEncodingName_ stays for
+    // the view layer and must not override source interpretation.
+    auto* src = groups_[ static_cast<size_t>( fileId ) ].sourceCodec;
+    QString text = src != nullptr ? src->toUnicode( bytes ) : QString::fromUtf8( bytes );
 
-    // Strip the trailing newline (and a preceding CR for CRLF files).
+    // Strip the trailing newline (and a preceding CR for CRLF files). For
+    // multi-byte encodings codec->toUnicode of the multi-byte LF yields '\n',
+    // so this strip works uniformly.
     while ( text.endsWith( QLatin1Char( '\n' ) ) || text.endsWith( QLatin1Char( '\r' ) ) ) {
         text.chop( 1 );
     }

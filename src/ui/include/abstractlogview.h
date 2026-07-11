@@ -164,6 +164,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     void setSearchPattern( const RegularExpressionPattern& pattern );
 
+    // Read-only access to the currently-wired search pattern. Used by tests to
+    // assert that the host widget forwarded the search pattern (e.g. folder mode
+    // forwards it so the paint pass highlights in-result matches). Has no
+    // functional effect; the pattern is only consumed at paint time.
+    RegularExpressionPattern searchPattern() const
+    {
+        return searchPattern_;
+    }
+
     using QuickHighlighters = QList<QuickLabelEntry>;
     void setQuickHighlighters( const std::vector<QuickHighlighters>& wordHighlighters );
 

@@ -11,9 +11,11 @@ add_executable(klogg_tests
     highlighter_vectorscan_test.cpp
     linepositionarray_test.cpp
     mergefileorder_test.cpp
+    overview_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     searchgeneration_test.cpp
+    searchtoolbar_test.cpp
     logfiltereddataworker_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
@@ -25,7 +27,9 @@ add_executable(klogg_tests
     filewatcher_test.cpp
     folderenumeration_test.cpp
     foldersearchengine_test.cpp
+    foldersearchengine_parallel_test.cpp
     foldersearchresults_test.cpp
+    foldersearchresults_streaming_test.cpp
     versionchecker_test.cpp
     newversiondialog_test.cpp
     updatedownload_test.cpp

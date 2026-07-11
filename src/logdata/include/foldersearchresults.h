@@ -24,6 +24,7 @@
 #include <QString>
 #include <QTextCodec>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "abstractlogdata.h"
@@ -59,6 +60,23 @@ class FolderSearchResults : public AbstractLogData {
     // filtered out by the caller. Resets collapse state. Emits layoutChanged().
     void setResults( std::vector<klogg::folder::FileGroup> groups );
 
+    // --- Streaming API (stable incremental display) ---
+    // beginSearch resets for a streaming search and sizes the internal pending
+    // buffer to the number of files in `expectedFileOrder`. Call once at the
+    // start of a search. Emits layoutChanged().
+    void beginSearch( const QStringList& expectedFileOrder );
+    // Buffer `group` by its file index, then commit every consecutive completed
+    // predecessor in enumeration order (advancing an internal cursor). This
+    // guarantees display order always matches the natural-sorted enumeration,
+    // regardless of which file finishes first. Empty groups advance the cursor
+    // without creating a header (grep-style "no header for zero-match files").
+    // Emits a single batched layoutChanged() if any groups were appended.
+    void addFileGroup( int fileIndex, klogg::folder::FileGroup group );
+    // Commit any remaining buffered groups, skipping gaps from files that never
+    // arrived (interrupted/incomplete scan). Called at searchFinished so the
+    // display never stalls. Emits layoutChanged() if anything was committed.
+    void flushPending();
+
     // --- Folder-specific API (not part of AbstractLogData) ---
 
     LineKind lineKind( LineNumber visibleIndex ) const;
@@ -69,6 +87,11 @@ class FolderSearchResults : public AbstractLogData {
     // Returns the source file + local line for a visible Match row. For a
     // Header row returns the group's filePath with localLine == 0.
     klogg::folder::SourceRef sourceForLine( LineNumber visibleIndex ) const;
+
+    // All match local-line numbers for filePath (ascending, as stored), empty if
+    // the file is not in the result set. Used by the folder main-view overview.
+    // Reads groups_ (not visibleRows_), so it is unaffected by collapse state.
+    std::vector<LineNumber> matchLinesForFile( const QString& filePath ) const;
 
     // The total number of matches in a group (always shown on the header, even
     // when collapsed). Returns 0 for an out-of-range fileId.
@@ -121,6 +144,13 @@ class FolderSearchResults : public AbstractLogData {
     std::vector<klogg::folder::FileGroup> groups_;
     std::vector<VisibleRow> visibleRows_;
     QSet<klogg::folder::FileId> collapsed_;
+
+    // Streaming commit state. pendingByIndex_ buffers out-of-order groups keyed
+    // by file enumeration index; nextExpectedIndex_ is the in-order commit
+    // cursor (the next index that must be committed before any later index can
+    // appear). All FolderSearchResults mutation happens on the main thread.
+    std::vector<std::optional<klogg::folder::FileGroup>> pendingByIndex_;
+    size_t nextExpectedIndex_ = 0;
     LineLength maxLength_ = 0_length;
     LineNumber maxLocalLine_ = 0_lnum;
     mutable LineLength headerMaxLength_ = 0_length;
@@ -128,6 +158,11 @@ class FolderSearchResults : public AbstractLogData {
     // Lazily-opened per-group file handles for on-demand match-line text fetch.
     // Indexed by fileId (== group index), so a dense vector rather than a map.
     mutable std::vector<std::unique_ptr<QFile>> openFiles_;
+    // View-layer display encoding only. readMatchLine decodes match bytes with
+    // each file's source codec (FileGroup::sourceCodec), NOT this value; this
+    // is retained so the inherited doSetDisplayEncoding/doGetDisplayEncoding
+    // API still works for the view layer and must not override source
+    // interpretation.
     QByteArray displayEncodingName_ = "UTF-8";
 };
 
