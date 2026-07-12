@@ -142,14 +142,22 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // After setDataSource it must span the whole document, otherwise every body
     // line renders as "out of search range" (gray).
     LineNumber searchEndLine() const { return searchEnd_; }
-    // True when the visible-line coordinate map matches the current data/layout
-    // (false after a layout change or data swap, until the next paint rebuilds it).
-    bool isLineMapCurrent() const { return !textAreaCache_.invalid_; }
+    // True when the visible-line coordinate map is populated for the current
+    // layout (false after a layout change or data swap, until the next paint --
+    // or ensureLineMapFresh -- rebuilds it). Tests assert this to know whether a
+    // click will resolve; it reflects the map (wrappedLinesInfo_), not the
+    // pixmap cache, so a paint-free rebuild (buildVisibleLineMap) satisfies it.
+    bool isLineMapCurrent() const { return !wrappedLinesInfo_.empty(); }
     // Synchronously rebuild the visible-line map if a layout change (forceRefresh)
     // or data swap (setDataSource) has invalidated it. The mouse handlers call
     // this before converting coordinates so a click delivered before the next
-    // async paint resolves to the current row instead of a stale/empty map.
+    // async paint -- or on a viewport Qt never painted (hidden/unrealized) --
+    // resolves to the current row instead of a stale/empty map.
     void ensureLineMapFresh();
+    // Exposed for testing: resolve a viewport y to a line using the current map
+    // (nullopt when the map is empty). Lets headless tests verify the paint-free
+    // rebuild without synthesizing a mouse event.
+    OptionalLineNumber lineAtYForTest( int yPos ) const { return convertCoordToLine( yPos ); }
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
@@ -540,6 +548,13 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     FilePosition convertCoordToFilePos( const QPoint& pos ) const;
     OptionalLineNumber convertCoordToLine( int yPos ) const;
     LineColumn convertCoordToColumn( int xPos ) const;
+    // Rebuild wrappedLinesInfo_ (the viewport-y -> LineNumber map) from the
+    // current data/layout WITHOUT a QPainter -- the geometry-only subset of
+    // drawTextArea's per-line loop. Used by ensureLineMapFresh so hit-testing
+    // works on viewports Qt never painted (hidden/unrealized) or right after a
+    // streaming updateData that left the map stale. KEEP IN SYNC with the wrap
+    // math in drawTextArea (same leftMarginPx_, availableWidth, font metrics).
+    void buildVisibleLineMap();
 
     void displayLine( LineNumber line );
     void moveSelection( LinesCount delta, bool isDeltaNegative );

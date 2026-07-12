@@ -994,6 +994,38 @@ TEST_CASE( "FolderCrawlerWidget records folder searches into the shared history"
              >= 0 );
 }
 
+TEST_CASE( "FolderCrawlerWidget main-view map rebuilds paint-free on an unrealized viewport",
+           "[folder]" )
+{
+    // The visible-line map (wrappedLinesInfo_) is a side effect of drawTextArea
+    // (paintEvent). On a hidden/unrealized viewport Qt skips repaint(), and a
+    // streaming updateData() can leave a stale map, so a click delivered in that
+    // window resolved to nullopt and selected nothing. ensureLineMapFresh must
+    // rebuild the map WITHOUT a paint so hit-testing works headlessly too.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR here\nline2\nline3\n" ) );
+
+    FolderCrawlerWidget widget; // deliberately NOT shown -> viewport never realized
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum ); // opens a.log -> setDataSource clears the map
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // No paint was ever delivered, so the map is empty and hit-testing fails.
+    REQUIRE_FALSE( widget.mainView()->isLineMapCurrent() );
+    REQUIRE_FALSE( widget.mainView()->lineAtYForTest( 5 ).has_value() );
+
+    // The on-demand refresh mousePressEvent calls must rebuild paint-free.
+    widget.mainView()->ensureLineMapFresh();
+    REQUIRE( widget.mainView()->isLineMapCurrent() );
+    // And the rebuilt map now resolves a viewport coordinate.
+    REQUIRE( widget.mainView()->lineAtYForTest( 5 ).has_value() );
+}
+
 TEST_CASE( "FolderCrawlerWidget announces the main-view line position when a result opens",
            "[folder]" )
 {

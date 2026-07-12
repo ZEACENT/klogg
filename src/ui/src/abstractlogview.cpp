@@ -2044,17 +2044,86 @@ void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine 
 
 void AbstractLogView::ensureLineMapFresh()
 {
-    // A layout change (forceRefresh) or data swap (setDataSource) marks the text
-    // cache invalid (textAreaCache_.invalid_) and either leaves the visible-line
-    // map (wrappedLinesInfo_) stale or empties it; the map is only rebuilt inside
-    // drawTextArea, i.e. on the next (async) paint. A mouse event delivered
-    // before that paint therefore converted coordinates against a stale/empty
-    // map: in folder mode a click on a Data row that had shifted onto a Header
-    // index toggled collapse instead of selecting, and a click on a freshly
-    // swapped main view was swallowed (convertCoordToLine -> nullopt). Force a
-    // synchronous repaint so the map is current before any coordinate conversion.
-    if ( textAreaCache_.invalid_ || wrappedLinesInfo_.empty() ) {
-        viewport()->repaint();
+    // A layout change (forceRefresh) or data swap (setDataSource) invalidates the
+    // visible-line map (wrappedLinesInfo_), which is normally rebuilt as a side
+    // effect of drawTextArea on the next (async) paint. A mouse event delivered
+    // before that paint -- or on a viewport Qt never painted (hidden/unrealized,
+    // where QWidget::repaint() is a no-op) -- converted coordinates against a
+    // stale/empty map: a click on a freshly swapped folder main view was
+    // swallowed (convertCoordToLine -> nullopt -> no selection). Rebuild the map
+    // paint-free so hit-testing is correct at click time regardless of paint
+    // delivery. Cheap (visible lines only) and called only from mouse handlers.
+    buildVisibleLineMap();
+}
+
+void AbstractLogView::buildVisibleLineMap()
+{
+    // Geometry-only subset of drawTextArea's per-line loop: reproduces the
+    // viewport-y -> LineNumber map (wrappedLinesInfo_) WITHOUT a QPainter. The
+    // wrap math MUST mirror drawTextArea (same leftMarginPx_, availableWidth and
+    // font metrics); in non-wrap mode the map is just firstLine_+i so the margin
+    // constants are irrelevant, but in wrap mode a drift would mis-resolve rows.
+    // The four margin constants below duplicate drawTextArea's static constexpr
+    // locals (SeparatorWidth/BulletAreaWidth/ContentMarginWidth/LineNumberPadding).
+    wrappedLinesInfo_.clear();
+
+    if ( logData_ == nullptr ) {
+        return;
+    }
+
+    const auto linesInFile = logData_->getNbLine();
+    if ( firstLine_ >= linesInFile ) {
+        return;
+    }
+
+    if ( charHeight_ <= 0 ) {
+        return;
+    }
+
+    constexpr int SeparatorWidth = 1;
+    constexpr int BulletAreaWidth = 11;
+    constexpr int ContentMarginWidth = 1;
+    constexpr int LineNumberPadding = 3;
+
+    // Recompute leftMarginPx_ (drawTextArea's preamble sets it during paint; it
+    // may still be 0 on a never-painted viewport). getNbVisibleCols guards on
+    // leftMarginPx_ > 0, so it must be set before any wrap-width math.
+    int contentStartPosX = BulletAreaWidth + SeparatorWidth;
+    if ( lineNumbersVisible_ ) {
+        const int nbDigitsInLineNumber = countDigits( maxDisplayLineNumber().get() );
+        const auto lineNumberWidth = charWidth_ * nbDigitsInLineNumber;
+        const auto lineNumberAreaWidth = 2 * LineNumberPadding + lineNumberWidth;
+        contentStartPosX += lineNumberAreaWidth;
+    }
+    leftMarginPx_ = contentStartPosX + SeparatorWidth;
+    cachedVisibleColsValid_ = false;
+
+    const auto maxLinesToFetch = useTextWrap_
+        ? ( linesInFile - LinesCount( firstLine_.get() ) )
+        : qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
+
+    const auto logLines = logData_->getLines( firstLine_, maxLinesToFetch );
+
+    for ( auto currentLine = 0_lcount; currentLine < maxLinesToFetch; ++currentLine ) {
+        const auto lineNumber = firstLine_ + currentLine;
+        QString logLine = logLines[ currentLine.get() ];
+        const QString expandedLine = untabify( std::move( logLine ) );
+
+        const WrappedString wrappedLineView = [ &, this ] {
+            if ( useTextWrap_ ) {
+                const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
+                auto twFn = [ this ]( QStringView s ) -> int {
+                    return textWidth( pixmapFontMetrics_, s );
+                };
+                return WrappedString{ expandedLine, availableWidth, twFn };
+            }
+            return WrappedString{ expandedLine,
+                                  LineLength{ klogg::isize( expandedLine ) + 1 } };
+        }();
+
+        for ( size_t i = 0u; i < wrappedLineView.wrappedLinesCount(); ++i ) {
+            wrappedLinesInfo_.emplace_back( WrappedLineData{ lineNumber, i, wrappedLineView } );
+        }
     }
 }
 
