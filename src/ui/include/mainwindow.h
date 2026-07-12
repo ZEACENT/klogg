@@ -210,6 +210,10 @@ class MainWindow : public QMainWindow {
     void readSettings();
     void writeSettings();
     bool loadFile( const QString& fileName, bool followFile = false );
+    // Opens a folder as a crawler tab (the shared body of openFolder() and the
+    // directory-drop path in dropEvent). Safe to call on any path:
+    // enumerateFolderFiles returns {} for non-dir / empty input.
+    void openFolderByPath( const QString& folderPath );
     bool openAdbLogcatSource( const AdbLogcatSessionData& sessionData,
                               bool startConnected = true );
     bool extractAndLoadFile( const QString& fileName );

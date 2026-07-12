@@ -28,6 +28,7 @@
 #include <unordered_map>
 
 #include "linetypes.h"
+#include "regularexpressionpattern.h"
 #include "viewinterface.h"
 
 #include <QWidget>
@@ -81,6 +82,9 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     FolderSearchResults* folderResults() const { return folderResults_.get(); }
     FolderFilteredView* filteredView() const { return filteredView_; }
     LogMainView* mainView() const { return mainView_; }
+    // Read-only access to the toolbar (pattern text + option toggles). Used by
+    // tests to assert view-context round-trip and to drive toggle state.
+    SearchToolbar* searchToolbar() const { return searchToolbar_; }
     // Mutable access for test-driving (e.g. forcing updateView); const variant
     // below for read-only inspection.
     Overview* overview() { return &overview_; }
@@ -190,6 +194,14 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     // whose generation differs are dropped (superseded by a newer search).
     quint64 currentSearchGeneration_ = 0;
     bool searchActive_ = false;
+
+    // The last search pattern run by startSearch. Forwarded to mainView_ so that
+    // when a result is clicked and its file opens, the matched substring is
+    // highlighted in the opened file (single-file parity). Stored here so the
+    // pattern can be re-applied right after each setDataSource swap in
+    // openFileInMainView (setDataSource does not reset searchPattern_, but the
+    // re-apply makes the parity intent explicit and is robust to future changes).
+    RegularExpressionPattern currentSearchPattern_;
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

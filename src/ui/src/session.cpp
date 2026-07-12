@@ -34,6 +34,7 @@
 #include "logdata.h"
 #include "logfiltereddata.h"
 #include "foldercrawlerwidget.h"
+#include "folderenumeration.h"
 #include "savedsearches.h"
 #include "sessioninfo.h"
 #include "streaminglogdata.h"
@@ -135,7 +136,9 @@ ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
 
 ViewInterface* Session::openFolder( const QString& folderPath, const std::vector<QString>& filePaths )
 {
-    if ( folderPath.isEmpty() ) {
+    if ( folderPath.isEmpty() || filePaths.empty() ) {
+        // Empty filePaths means the folder is gone/empty: return nullptr so the
+        // restore loop skips it gracefully rather than showing an empty tab.
         return nullptr;
     }
 
@@ -406,17 +409,32 @@ void WindowSession::save(
         assert( file );
 
         LOG_DEBUG << "Saving " << file->fileName.toLocal8Bit().data() << " in session.";
-        session_files.emplace_back( file->documentId, top_line, view_context->toString(),
-                                    file->kind == DocumentKind::AdbLogcat && file->adbLogcatSource
-                                        ? file->adbLogcatSource->sessionData().persistedSourceType()
-                                        : QString{},
-                                    file->displayName,
-                                    file->adbLogcatSource
-                                        ? QString::fromUtf8( QJsonDocument(
-                                                                 file->adbLogcatSource->sessionData()
-                                                                     .toJson() )
-                                                                 .toJson( QJsonDocument::Compact ) )
-                                        : QString{} );
+
+        // Discriminate the document kind via the free-form sourceType column
+        // (no SessionInfo version bump: the v2 schema already stores it). Folders
+        // are tagged "folder" so restore can re-enumerate + openFolder instead of
+        // trying to index a directory as a plain file.
+        QString sourceType;
+        if ( file->kind == DocumentKind::AdbLogcat && file->adbLogcatSource ) {
+            sourceType = file->adbLogcatSource->sessionData().persistedSourceType();
+        }
+        else if ( file->kind == DocumentKind::Folder ) {
+            sourceType = QStringLiteral( "folder" );
+        }
+
+        const QString sourceSpec
+            = file->adbLogcatSource
+                  ? QString::fromUtf8( QJsonDocument( file->adbLogcatSource->sessionData().toJson() )
+                                           .toJson( QJsonDocument::Compact ) )
+                  : QString{};
+
+        // Defensive null-guard: a future buggy view returning a null context must
+        // not crash save (FolderCrawlerWidget::doGetViewContext never returns
+        // null, but guard regardless).
+        const QString viewContextStr = view_context ? view_context->toString() : QString{};
+
+        session_files.emplace_back( file->documentId, top_line, viewContextStr, sourceType,
+                                    file->displayName, sourceSpec );
     }
 
     auto& session = SessionInfo::getSynced();
@@ -444,6 +462,25 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
             if ( sessionData.isValid() ) {
                 view = appSession_->openAdbAlways( sessionData, view_factory, false,
                                                    file.viewContext );
+            }
+        }
+        else if ( file.sourceType == QStringLiteral( "folder" ) ) {
+            // Folder tab: re-enumerate the directory (keeps the session file
+            // small and always reflects current contents) and open it via the
+            // folder path. view_factory is ignored (openFolder builds its own
+            // FolderCrawlerWidget). An empty/gone folder yields nullptr and is
+            // skipped below.
+            const auto filePaths = enumerateFolderFiles( file.fileName );
+            if ( !filePaths.empty() ) {
+                view = appSession_->openFolder(
+                    file.fileName, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
+                if ( view != nullptr && !file.viewContext.isEmpty() ) {
+                    view->setViewContext( file.viewContext );
+                }
+            }
+            else {
+                LOG_WARNING << "Folder has no readable files, skipping: "
+                            << file.fileName.toLocal8Bit().data();
             }
         }
         else {

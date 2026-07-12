@@ -126,3 +126,46 @@ TEST_CASE( "SessionInfo can read legacy v1 session format without currentFileInd
     REQUIRE( restoredOpenFiles.at( 0 ).topLine == 7 );
     REQUIRE( restoredOpenFiles.at( 0 ).viewContext == "legacy-ctx" );
 }
+
+TEST_CASE( "SessionInfo round-trips a folder-tagged document via sourceType", "[folder]" )
+{
+    // Proves the existing v2 schema carries a folder document (sourceType=
+    // "folder", fileName = folder path, plus a view-context blob) through
+    // saveToStorage -> retrieveFromStorage with no format change. This is the
+    // persistence contract the folder session save/restore path relies on.
+    const auto dirPath = makeTestDir( "sessioninfo_folder" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "sessioninfo-folder.ini" );
+
+    const QString folderPath = "/var/log/myapp";
+    const QString viewContext = R"({"P":"ERROR","IC":true,"RE":false,"IR":false,"BC":false})";
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        SessionInfo sessionInfo;
+        sessionInfo.add( "window-folder" );
+        sessionInfo.setOpenFiles(
+            "window-folder",
+            { SessionInfo::OpenFile{ folderPath, 0, viewContext,
+                                     /*sourceType=*/QStringLiteral( "folder" ),
+                                     /*displayName=*/QStringLiteral( "[Folder] myapp" ),
+                                     /*sourceSpec=*/QString{} } } );
+        sessionInfo.setCurrentFileIndex( "window-folder", 0 );
+        sessionInfo.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    SessionInfo restoredSession;
+    restoredSession.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredSession.windows().contains( "window-folder" ) );
+    const auto restoredOpenFiles = restoredSession.openFiles( "window-folder" );
+    REQUIRE( restoredOpenFiles.size() == 1 );
+    REQUIRE( restoredOpenFiles.at( 0 ).fileName == folderPath );
+    REQUIRE( restoredOpenFiles.at( 0 ).sourceType == QStringLiteral( "folder" ) );
+    REQUIRE( restoredOpenFiles.at( 0 ).displayName == QStringLiteral( "[Folder] myapp" ) );
+    REQUIRE( restoredOpenFiles.at( 0 ).viewContext == viewContext );
+}

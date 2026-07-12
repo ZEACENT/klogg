@@ -107,6 +107,7 @@
 #include "logger.h"
 #include "mainwindowtext.h"
 #include "mergefileorder.h"
+#include "droppathclassification.h"
 #include "openfilehelper.h"
 #include "optionsdialog.h"
 #include "predefinedfilters.h"
@@ -338,6 +339,19 @@ void MainWindow::reloadSession()
 
     for ( const auto& open_file : openedFiles ) {
         const auto& documentInfo = open_file.first;
+
+        if ( documentInfo.kind == DocumentKind::Folder ) {
+            // Folder tab: FolderCrawlerWidget already built by Session::openFolder
+            // during restore (view_factory is not used for folders). Add it to the
+            // tab bar with its display name; do NOT follow-file or register adb.
+            auto* folder_widget = static_cast<FolderCrawlerWidget*>( open_file.second );
+            if ( folder_widget != nullptr ) {
+                mainTabWidget_.addCrawler( folder_widget, documentInfo.documentId,
+                                           documentInfo.displayName, documentInfo.toolTip );
+            }
+            continue;
+        }
+
         auto* crawler_widget = static_cast<CrawlerWidget*>( open_file.second );
 
         if ( crawler_widget ) {
@@ -1167,22 +1181,27 @@ void MainWindow::openFolder()
         return;
     }
 
-    const auto filePaths = enumerateFolderFiles( folder );
+    openFolderByPath( folder );
+}
+
+void MainWindow::openFolderByPath( const QString& folderPath )
+{
+    const auto filePaths = enumerateFolderFiles( folderPath );
     if ( filePaths.empty() ) {
         QMessageBox::information( this, tr( "Open folder" ),
-                                  tr( "No readable files found in %1" ).arg( folder ) );
+                                  tr( "No readable files found in %1" ).arg( folderPath ) );
         return;
     }
 
     auto* view = session_.openFolder(
-        folder, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
+        folderPath, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
     if ( view == nullptr ) {
         return;
     }
 
-    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folder ).fileName() );
+    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folderPath ).fileName() );
     const auto index = mainTabWidget_.addCrawler( static_cast<FolderCrawlerWidget*>( view ),
-                                                  folder, displayName, folder );
+                                                  folderPath, displayName, folderPath );
     mainTabWidget_.setCurrentIndex( index );
     updateOpenedFilesMenu();
 }
@@ -2145,36 +2164,52 @@ void MainWindow::dropEvent( QDropEvent* event )
 {
     const QList<QUrl> urls = event->mimeData()->urls();
 
-    QStringList fileNames;
+    QStringList localPaths;
     for ( const auto& url : urls ) {
         auto fileName = url.toLocalFile();
         if ( !fileName.isEmpty() ) {
-            fileNames.append( fileName );
+            localPaths.append( fileName );
         }
     }
 
-    if ( fileNames.size() > 1 ) {
+    const auto classified = classifyLocalPaths( localPaths );
+
+    // Show the merge question over the dropped files BEFORE opening anything,
+    // so Cancel aborts the whole drop (no half-applied state with some tabs
+    // already opened). The prompt is only about files; directories are opened
+    // unconditionally as folder tabs.
+    bool mergeRequested = false;
+    if ( classified.files.size() > 1 ) {
         const auto userAction = QMessageBox::question(
             this, tr( "Multiple Files" ),
             tr( "You dropped %1 files. Do you want to merge them into a single view?" )
-                .arg( fileNames.size() ),
+                .arg( classified.files.size() ),
             QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes );
 
         if ( userAction == QMessageBox::Cancel ) {
             return;
         }
-
-        if ( userAction == QMessageBox::Yes ) {
-            auto filesToMerge = showMergeFilesDialog( fileNames );
-            if ( !filesToMerge.empty() ) {
-                executeMerge( filesToMerge );
-                return;
-            }
-            // User cancelled merge dialog -- fall through to open files separately
-        }
+        mergeRequested = ( userAction == QMessageBox::Yes );
     }
 
-    for ( const auto& fileName : fileNames ) {
+    // Open each dropped directory as its own folder crawler tab. This is the
+    // fix: previously a dropped directory fell through to loadFile and failed
+    // in Decompressor::action.
+    for ( const auto& dir : classified.dirs ) {
+        openFolderByPath( dir );
+    }
+
+    // Handle the dropped files via the existing merge / loadFile flow.
+    if ( mergeRequested ) {
+        auto filesToMerge = showMergeFilesDialog( classified.files );
+        if ( !filesToMerge.empty() ) {
+            executeMerge( filesToMerge );
+            return;
+        }
+        // User cancelled merge dialog -- fall through to open files separately
+    }
+
+    for ( const auto& fileName : classified.files ) {
         loadFile( fileName );
     }
 }
@@ -2997,7 +3032,16 @@ void MainWindow::writeSettings()
         std::tuple<const ViewInterface*, uint64_t, std::shared_ptr<const ViewContextInterface>>>
         widget_list;
     for ( int i = 0; i < mainTabWidget_.count(); ++i ) {
-        auto view = qobject_cast<const CrawlerWidget*>( mainTabWidget_.widget( i ) );
+        // dynamic_cast (not qobject_cast<CrawlerWidget*>) so that BOTH
+        // CrawlerWidget and FolderCrawlerWidget tabs are captured: they
+        // multiply-inherit ViewInterface, so the cross-cast succeeds for
+        // both. qobject_cast<CrawlerWidget*> returned nullptr for folder
+        // tabs and view->context() then dereferenced null -> crash on
+        // persistSessionState (called from tab switch/close/periodic).
+        const auto view = dynamic_cast<const ViewInterface*>( mainTabWidget_.widget( i ) );
+        if ( view == nullptr ) {
+            continue;
+        }
         widget_list.emplace_back( view, 0UL, view->context() );
     }
     session_.save( widget_list, saveGeometry(), mainTabWidget_.currentIndex() );

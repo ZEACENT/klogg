@@ -43,6 +43,9 @@
 #include "logmainview.h"
 #include "overview.h"
 #include "overviewwidget.h"
+#include "regularexpressionpattern.h"
+#include "searchtoolbar.h"
+#include "viewinterface.h"
 
 namespace {
 QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArray& bytes )
@@ -251,6 +254,103 @@ TEST_CASE( "FolderCrawlerWidget forwards search pattern to filtered view for mat
     // to completion with searchPattern_ set, without throwing.
     REQUIRE_NOTHROW( widget.filteredView()->viewport()->repaint() );
     QTest::qWait( 200 ); // settle per CLAUDE.md after a paint-triggering action
+}
+
+TEST_CASE( "FolderCrawlerWidget forwards search pattern to main view for opened-file highlighting",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show(); // realize the widget tree so the main view can paint headlessly
+    widget.searchFor( "ERROR" );
+
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // PRE-open wiring: startSearch must forward the pattern to mainView_ (parity
+    // with the filteredView assertion above). Default toolbar toggles yield a
+    // case-insensitive plain-text pattern (isPlainText = !useRegexp = true).
+    REQUIRE( widget.mainView() != nullptr );
+    REQUIRE( widget.mainView()->searchPattern()
+             == RegularExpressionPattern( "ERROR", /*caseSensitive=*/false, /*inverse=*/false,
+                                          /*boolean=*/false, /*plainText=*/true ) );
+
+    // Open a result row -> async load + setDataSource swap of mainView_.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 ); // settle per CLAUDE.md
+
+    // POST-open wiring: the pattern survived the setDataSource swap (re-applied
+    // in openFileInMainView), so the opened file highlights its matches at the
+    // next paint.
+    REQUIRE( widget.mainView()->searchPattern().pattern == QStringLiteral( "ERROR" ) );
+    REQUIRE_NOTHROW( widget.mainView()->viewport()->repaint() );
+    QTest::qWait( 200 );
+}
+
+TEST_CASE( "FolderCrawlerWidget view context round-trips pattern and option toggles",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nERROR two\n" ) );
+
+    FolderCrawlerWidget source;
+    source.setFolder( dir.path(), QStringList{ a } );
+    // Drive a known pattern + non-default toggles via the shared toolbar.
+    source.searchToolbar()->setUseRegexp( true );
+    source.searchToolbar()->setInverse( true );
+    source.searchFor( "WARNING" );
+    REQUIRE( waitFor( [ & ]() { return !source.isSearchActive(); } ) );
+
+    // doGetViewContext must return a non-null context (a null one crashes the
+    // session save path via view_context->toString()).
+    const auto context = source.context();
+    REQUIRE( context != nullptr );
+    const auto json = context->toString();
+    REQUIRE( json.contains( "WARNING" ) );
+
+    // Restore into a fresh widget via doSetViewContext (public setViewContext).
+    FolderCrawlerWidget restored;
+    restored.setFolder( dir.path(), QStringList{ a } );
+    restored.setViewContext( json );
+
+    REQUIRE( restored.searchToolbar()->currentSearchText() == QStringLiteral( "WARNING" ) );
+    REQUIRE( restored.searchToolbar()->isUseRegexp() );
+    REQUIRE( restored.searchToolbar()->isInverse() );
+    // No auto-run kicked off by setViewContext.
+    REQUIRE_FALSE( restored.isSearchActive() );
+}
+
+TEST_CASE( "FolderCrawlerWidget setViewContext prefills pattern without auto-running search",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "PREFILLED one\n" ) );
+
+    // Build a context string carrying a pattern from a source widget.
+    FolderCrawlerWidget source;
+    source.setFolder( dir.path(), QStringList{ a } );
+    source.searchFor( "PREFILLED" );
+    REQUIRE( waitFor( [ & ]() { return !source.isSearchActive(); } ) );
+    const auto json = source.context()->toString();
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.setViewContext( json );
+
+    // Pattern is prefilled into the toolbar...
+    REQUIRE( widget.searchToolbar()->currentSearchText() == QStringLiteral( "PREFILLED" ) );
+    // ...but NO search was started by setViewContext (one Enter re-runs).
+    REQUIRE_FALSE( widget.isSearchActive() );
+
+    // One Enter (searchFor) re-runs to completion.
+    widget.searchFor( "PREFILLED" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 }
 
 TEST_CASE( "FolderCrawlerWidget overview reflects the opened file and swaps on reselect",

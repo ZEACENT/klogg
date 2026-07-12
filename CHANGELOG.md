@@ -1,3 +1,6 @@
+# 2026-07:
+## New features:
+ - Open Folder: search an entire directory with a streaming, parallel grep-style engine; results are grouped into collapsible per-file sections with match counts and a per-file overview, clickable to open the file at the matching line, with multi-encoding support.
 # 2022-06:
 ## Documentation:
  - [d711ddeb](https://github.com/variar/klogg/commit/d711ddeb): update build documentation [skip ci] (Anton Filimonov)

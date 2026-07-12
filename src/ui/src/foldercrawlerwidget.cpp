@@ -21,6 +21,7 @@
 
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QSplitter>
 #include <QToolButton>
@@ -39,6 +40,102 @@
 #include "regularexpressionpattern.h"
 #include "searchablelogdata.h"
 #include "searchtoolbar.h"
+
+// Implementation of the view context for FolderCrawlerWidget (mirrors
+// CrawlerWidgetContext in crawlerwidget.cpp:96-170). Serializes the search
+// pattern text + option toggles (+ optional splitter sizes) so folder tabs can
+// be persisted and restored across sessions. doSetViewContext restores the
+// pattern + toggles WITHOUT auto-running a search (one Enter re-runs), matching
+// the requirement that restoring a session does not kick off heavy work.
+class FolderCrawlerContext : public ViewContextInterface {
+  public:
+    // Construct from the stored JSON string (forwarded by setViewContext).
+    explicit FolderCrawlerContext( const QString& json )
+    {
+        loadFromJson( json );
+    }
+
+    // Construct from the live widget state (used by doGetViewContext).
+    FolderCrawlerContext( QString pattern, bool ignoreCase, bool useRegexp, bool inverse,
+                          bool boolean, QList<int> sizes )
+        : pattern_{ std::move( pattern ) }
+        , ignoreCase_{ ignoreCase }
+        , useRegexp_{ useRegexp }
+        , inverse_{ inverse }
+        , boolean_{ boolean }
+        , sizes_{ std::move( sizes ) }
+    {
+    }
+
+    QString toString() const override
+    {
+        QVariantMap properties;
+        properties[ "P" ] = pattern_;
+        properties[ "IC" ] = ignoreCase_;
+        properties[ "RE" ] = useRegexp_;
+        properties[ "IR" ] = inverse_;
+        properties[ "BC" ] = boolean_;
+
+        QVariantList sizeVariants;
+        for ( const auto s : sizes_ ) {
+            sizeVariants.append( s );
+        }
+        properties[ "S" ] = sizeVariants;
+
+        return QJsonDocument::fromVariant( properties ).toJson( QJsonDocument::Compact );
+    }
+
+    const QString& pattern() const
+    {
+        return pattern_;
+    }
+    bool ignoreCase() const
+    {
+        return ignoreCase_;
+    }
+    bool useRegexp() const
+    {
+        return useRegexp_;
+    }
+    bool inverse() const
+    {
+        return inverse_;
+    }
+    bool boolean() const
+    {
+        return boolean_;
+    }
+    QList<int> sizes() const
+    {
+        return sizes_;
+    }
+
+  private:
+    void loadFromJson( const QString& json )
+    {
+        const auto properties = QJsonDocument::fromJson( json.toLatin1() ).toVariant().toMap();
+
+        pattern_ = properties.value( "P" ).toString();
+        ignoreCase_ = properties.value( "IC" ).toBool();
+        useRegexp_ = properties.value( "RE" ).toBool();
+        inverse_ = properties.value( "IR" ).toBool();
+        boolean_ = properties.value( "BC" ).toBool();
+
+        if ( properties.contains( "S" ) ) {
+            const auto sizes = properties.value( "S" ).toList();
+            for ( const auto& s : sizes ) {
+                sizes_.append( s.toInt() );
+            }
+        }
+    }
+
+    QString pattern_;
+    bool ignoreCase_ = false;
+    bool useRegexp_ = false;
+    bool inverse_ = false;
+    bool boolean_ = false;
+    QList<int> sizes_;
+};
 
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
@@ -177,13 +274,53 @@ void FolderCrawlerWidget::doSetSavedSearches( SavedSearches* )
 {
 }
 
-void FolderCrawlerWidget::doSetViewContext( const QString& )
+void FolderCrawlerWidget::doSetViewContext( const QString& view_context )
 {
+    // Parse the stored context and restore the pattern text + option toggles
+    // WITHOUT auto-running a search (one Enter re-runs). Mirrors searchFor's
+    // blockSignals+setEditText pattern (foldercrawlerwidget.cpp) minus the
+    // startSearch() call, and CrawlerWidget::doSetViewContext's toggle restore.
+    const FolderCrawlerContext context{ view_context };
+
+    if ( splitter_ != nullptr && !context.sizes().isEmpty() ) {
+        splitter_->setSizes( context.sizes() );
+    }
+
+    // Restore toggles first (idempotent; optionsChanged is not wired to a
+    // search in folder mode, so no search is triggered).
+    searchToolbar_->setMatchCase( !context.ignoreCase() );
+    searchToolbar_->setUseRegexp( context.useRegexp() );
+    searchToolbar_->setInverse( context.inverse() );
+    searchToolbar_->setBoolean( context.boolean() );
+
+    // Restore the pattern text into the combo without emitting searchRequested
+    // (blockSignals so setEditText does not fire auto-run on pattern change).
+    if ( !context.pattern().isNull() ) {
+        auto* combo = searchToolbar_->searchLineEdit();
+        const bool wasBlocked = combo->blockSignals( true );
+        combo->setEditText( context.pattern() );
+        combo->blockSignals( wasBlocked );
+    }
 }
 
 std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContext() const
 {
-    return {};
+    // Build the context from the live toolbar state. NEVER return null: the
+    // session save path dereferences this (WindowSession::save calls
+    // view_context->toString()), and a null shared_ptr crashes it.
+    QList<int> sizes;
+    if ( splitter_ != nullptr ) {
+        sizes = splitter_->sizes();
+    }
+
+    auto context = std::make_shared<const FolderCrawlerContext>(
+        searchToolbar_ != nullptr ? searchToolbar_->currentSearchText() : QString{},
+        searchToolbar_ != nullptr ? !searchToolbar_->isMatchCase() : false,
+        searchToolbar_ != nullptr ? searchToolbar_->isUseRegexp() : false,
+        searchToolbar_ != nullptr ? searchToolbar_->isInverse() : false,
+        searchToolbar_ != nullptr ? searchToolbar_->isBoolean() : false, sizes );
+
+    return static_cast<std::shared_ptr<const ViewContextInterface>>( context );
 }
 
 void FolderCrawlerWidget::startSearch()
@@ -207,8 +344,17 @@ void FolderCrawlerWidget::startSearch()
     // RegularExpressionPattern{ pattern } to honor the toggles for free.
     const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
     currentSearchGeneration_ = engine_->startSearch( filePaths_, regexpPattern );
+    // Store + forward the pattern to BOTH views so that the matched substring
+    // is highlighted in the filtered results AND in any file already open in
+    // the main view (single-file parity: crawlerwidget.cpp forwards to both
+    // logMainView_ and filteredView_). Storing here also lets openFileInMainView
+    // re-apply the pattern right after each setDataSource swap.
+    currentSearchPattern_ = regexpPattern;
     if ( filteredView_ != nullptr ) {
         filteredView_->setSearchPattern( regexpPattern );
+    }
+    if ( mainView_ != nullptr ) {
+        mainView_->setSearchPattern( regexpPattern );
     }
 }
 
@@ -321,6 +467,10 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         currentMainData_ = it->second.first;
         currentMainFilePath_ = filePath;
         mainView_->setDataSource( currentMainData_.get() );
+        // Re-apply the current search pattern so the swapped-in (cached) file
+        // highlights its matches at first paint (idempotent: setDataSource does
+        // not reset searchPattern_, this is the explicit parity guarantee).
+        mainView_->setSearchPattern( currentSearchPattern_ );
         mainView_->jumpToLine( localLine );
         refreshFileOverview( filePath );
         return;
@@ -341,6 +491,11 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  cacheMainViewData( currentMainFilePath_, currentMainData_ );
 
                  mainView_->setDataSource( currentMainData_.get() );
+                 // Re-apply the current search pattern so the freshly-indexed
+                 // file highlights its matches at first paint. Runs on the main
+                 // thread (loadingFinished is a queued signal), so threading is
+                 // correct.
+                 mainView_->setSearchPattern( currentSearchPattern_ );
                  mainView_->jumpToLine( pendingJumpLine_ );
                  // getNbLine() is only valid now that indexing finished: the
                  // overview repoint MUST happen here, not at attachFile time.
