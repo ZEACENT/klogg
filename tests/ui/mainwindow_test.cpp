@@ -931,10 +931,15 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 
                             THEN( "No crash and folder tab is current" )
                             {
-                                QTest::qWait( 200 );
-                                REQUIRE( qobject_cast<FolderCrawlerWidget*>(
-                                             tabArea->currentWidget() )
-                                         != nullptr );
+                                // Settle deterministically: setCurrentIndex fires
+                                // currentChanged asynchronously (MainWindow wires
+                                // optionsChanged/applyConfiguration on it), and a
+                                // fixed delay flaked on the slower ubuntu-20.04 CI.
+                                REQUIRE( waitUiState( [ & ] {
+                                    return qobject_cast<FolderCrawlerWidget*>(
+                                               tabArea->currentWidget() )
+                                           != nullptr;
+                                } ) );
 
                                 AND_WHEN( "Switching back to the file tab (index 1)" )
                                 {
@@ -944,10 +949,11 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 
                                     THEN( "No crash and file tab is current" )
                                     {
-                                        QTest::qWait( 200 );
-                                        REQUIRE( qobject_cast<CrawlerWidget*>(
-                                                     tabArea->currentWidget() )
-                                                 != nullptr );
+                                        REQUIRE( waitUiState( [ & ] {
+                                            return qobject_cast<CrawlerWidget*>(
+                                                       tabArea->currentWidget() )
+                                                   != nullptr;
+                                        } ) );
 
                                         AND_THEN( "Closing the folder tab does not crash" )
                                         {
