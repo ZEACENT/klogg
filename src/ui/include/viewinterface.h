@@ -26,7 +26,6 @@ class SearchableLogData;
 class LogFilteredData;
 class SavedSearches;
 class QuickFindPattern;
-class FolderSearchResults;
 
 // ViewContextInterface represents the private information
 // the concrete view will be able to save and restore.
@@ -49,13 +48,6 @@ class ViewInterface {
                   std::shared_ptr<LogFilteredData> filtered_data )
     {
         doSetData( log_data, filtered_data );
-    }
-
-    // Folder mode: associate the folder search results with this view. Default
-    // no-op (only FolderCrawlerWidget implements it). Single-file views ignore.
-    void setFolderData( std::shared_ptr<FolderSearchResults> folder_results )
-    {
-        doSetFolderData( folder_results );
     }
 
     // Set the (shared) quickfind pattern object
@@ -89,9 +81,6 @@ class ViewInterface {
     virtual void doSetData( std::shared_ptr<SearchableLogData> log_data,
                             std::shared_ptr<LogFilteredData> filtered_data )
         = 0;
-    virtual void doSetFolderData( std::shared_ptr<FolderSearchResults> /*folder_results*/ )
-    {
-    }
     virtual void doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp ) = 0;
     virtual void doSetSavedSearches( SavedSearches* saved_searches ) = 0;
     virtual void doSetViewContext( const QString& view_context ) = 0;

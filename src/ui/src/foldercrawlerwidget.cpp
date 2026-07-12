@@ -20,6 +20,7 @@
 #include "foldercrawlerwidget.h"
 
 #include <QComboBox>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
@@ -180,6 +181,22 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
 
+    // Seed view config + search toggles from Configuration, mirroring CrawlerWidget
+    // (crawlerwidget.cpp:842,852 for line numbers; :1311-1314 for search toggles).
+    // Set BEFORE the toolbar signal connections below so the toolbar's internal
+    // completer/setup runs cleanly with no folder-side handler attached yet
+    // (same ordering rationale as CrawlerWidget). Without this, the filtered
+    // view's default line-numbers-ON never took effect (AbstractLogView defaults
+    // lineNumbersVisible_ to false) and every fresh folder tab opened with all
+    // toggles unchecked regardless of the global search defaults.
+    const auto& config = Configuration::get();
+    mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
+    filteredView_->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+    searchToolbar_->setAutoRefresh( config.isSearchAutoRefreshDefault() );
+    searchToolbar_->setMatchCase( !config.isSearchIgnoreCaseDefault() );
+    searchToolbar_->setUseRegexp( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
+    searchToolbar_->setBoolean( config.isSearchLogicalCombiningDefault() );
+
     splitter_ = new QSplitter( Qt::Vertical, this );
     splitter_->addWidget( mainView_ );
     splitter_->addWidget( filteredView_ );
@@ -217,6 +234,12 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
             filteredView_->forceRefresh();
         }
     } );
+
+    // Apply Configuration (font, line numbers, overview, view shortcuts) now
+    // that both views + the toolbar exist. Also re-applied on every
+    // MainWindow::optionsChanged (the folder's applyConfiguration is connected
+    // to optionsChanged by MainWindow::currentTabChanged).
+    applyConfiguration();
 }
 
 FolderCrawlerWidget::~FolderCrawlerWidget() = default;
@@ -227,6 +250,45 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
     filePaths_ = filePaths;
     statusLabel_->setText(
         tr( "Folder: %1  (%n file(s))", "", static_cast<int>( filePaths_.size() ) ).arg( folderPath_ ) );
+}
+
+void FolderCrawlerWidget::applyConfiguration()
+{
+    // Mirrors CrawlerWidget::applyConfiguration (crawlerwidget.cpp:811-855) for
+    // the subset relevant to folder mode: re-apply line-number visibility, font,
+    // and overview to both views, and (re-)register view shortcuts. Called on
+    // construction and whenever MainWindow emits optionsChanged (the View-menu
+    // toggles), via a direct, deduplicated connection -- the folder is
+    // intentionally NOT a signalMux document (it lacks the file/live-source
+    // slots the mux routes), so optionsChanged is delivered directly.
+    const auto& config = Configuration::get();
+
+    QFont font = config.mainFont();
+    font.setKerning( false );
+    font.setFixedPitch( true );
+    if ( config.forceFontAntialiasing() ) {
+        font.setStyleStrategy( QFont::PreferAntialias );
+    }
+    font.setBold( config.useBoldFont() );
+
+    mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
+    filteredView_->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+    overview_.setVisible( config.isOverviewVisible() );
+    mainView_->refreshOverview();
+    mainView_->updateFont( font );
+    filteredView_->updateFont( font );
+
+    registerShortcuts();
+}
+
+void FolderCrawlerWidget::registerShortcuts()
+{
+    // Register view-level keyboard shortcuts on both views, mirroring
+    // CrawlerWidget (crawlerwidget.cpp:1725-1726). Without this, arrow keys,
+    // PgUp/PgDn, jump-to-top/bottom, and the other AbstractLogView shortcuts are
+    // not active in folder views.
+    mainView_->registerShortcuts();
+    filteredView_->registerShortcuts();
 }
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )
@@ -255,11 +317,6 @@ void FolderCrawlerWidget::doSetData( std::shared_ptr<SearchableLogData>,
                                      std::shared_ptr<LogFilteredData> )
 {
     // Single-file data injection does not apply to folder mode.
-}
-
-void FolderCrawlerWidget::doSetFolderData( std::shared_ptr<FolderSearchResults> )
-{
-    // The widget owns its own FolderSearchResults (populated by its engine).
 }
 
 void FolderCrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp )

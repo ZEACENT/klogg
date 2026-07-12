@@ -2185,7 +2185,24 @@ void MainWindow::currentTabChanged( int index )
             signalMux_.setCurrentDocument( nullptr );
             quickFindMux_.registerSelector( nullptr );
 
-            // Folder widget listens for font/wrap option changes.
+            auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( widget );
+            if ( folder_widget != nullptr ) {
+                // Deliver config/view option changes (line numbers, font,
+                // overview visibility, wrap) to the folder's applyConfiguration.
+                // The folder is NOT a signalMux document (it lacks the
+                // file/live-source slots the mux routes -- goToLine/reload/
+                // stopLoading/follow/textWrap -- and registering it would emit a
+                // flurry of "No such slot" warnings), so optionsChanged is
+                // delivered via this deduplicated direct connection instead.
+                // UniqueConnection: survives repeated tab switches without
+                // duplicating; redundant fires while a non-folder tab is current
+                // are harmless (applyConfiguration is idempotent and the folder
+                // views are hidden). QuickFind registration is deferred (P1b).
+                connect( this, &MainWindow::optionsChanged, folder_widget,
+                         &FolderCrawlerWidget::applyConfiguration, Qt::UniqueConnection );
+            }
+
+            // Routes to the folder via the connection above.
             Q_EMIT optionsChanged();
 
             // Session accessors assert on a null ViewInterface*, so the folder

@@ -68,7 +68,7 @@
 #include "searchablelogdata.h"
 #include "searchtoolbar.h"
 #include "signalmux.h"
-#include "viewinterface.h"
+#include "abstractcrawlerwidget.h"
 
 class InfoLine;
 class QuickFindPattern;
@@ -82,7 +82,7 @@ class OverviewWidget;
 // lines and various buttons.
 class CrawlerWidget : public QSplitter,
                       public QuickFindMuxSelectorInterface,
-                      public ViewInterface,
+                      public AbstractCrawlerWidget,
                       public MuxableDocumentInterface {
     Q_OBJECT
 
@@ -119,7 +119,7 @@ class CrawlerWidget : public QSplitter,
 
     qint64 searchPendingLines() const { return searchPendingLines_; }
 
-    void registerShortcuts();
+    void registerShortcuts() override;
 
   public Q_SLOTS:
     // Stop the asynchoronous loading of the file if one is in progress
@@ -135,7 +135,7 @@ class CrawlerWidget : public QSplitter,
     void jumpToTop();
 
     // Instructs the widget to reconfigure itself because Config() has changed.
-    void applyConfiguration();
+    void applyConfiguration() override;
 
   public:
     template <class T>

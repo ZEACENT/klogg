@@ -29,7 +29,7 @@
 
 #include "linetypes.h"
 #include "regularexpressionpattern.h"
-#include "viewinterface.h"
+#include "abstractcrawlerwidget.h"
 
 #include <QWidget>
 
@@ -65,7 +65,7 @@ enum class DataStatus;
 // opens its source file in the main view: the file is indexed on demand (the
 // only place klogg's index is used in folder mode) and cached so re-selecting a
 // file is instant.
-class FolderCrawlerWidget : public QWidget, public ViewInterface {
+class FolderCrawlerWidget : public QWidget, public AbstractCrawlerWidget {
     Q_OBJECT
 
   public:
@@ -106,6 +106,15 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     void collapseAll();
     void expandAll();
 
+    // Re-apply Configuration (line numbers, font, overview, shortcuts) to both
+    // views. Called on construction and on MainWindow::optionsChanged (the
+    // View-menu toggles for line numbers / overview / wrap). Overrides
+    // AbstractCrawlerWidget.
+    void applyConfiguration() override;
+    // Register view-level keyboard shortcuts on both views (arrow keys, PgUp/
+    // PgDn, jump-to-top/bottom, ...). Overrides AbstractCrawlerWidget.
+    void registerShortcuts() override;
+
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
     // signal). Folder tabs are static, so this is never emitted for now.
@@ -115,7 +124,6 @@ class FolderCrawlerWidget : public QWidget, public ViewInterface {
     // ViewInterface (single-file APIs are no-ops in folder mode).
     void doSetData( std::shared_ptr<SearchableLogData> log_data,
                     std::shared_ptr<LogFilteredData> filtered_data ) override;
-    void doSetFolderData( std::shared_ptr<FolderSearchResults> folder_results ) override;
     void doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp ) override;
     void doSetSavedSearches( SavedSearches* saved_searches ) override;
     void doSetViewContext( const QString& view_context ) override;

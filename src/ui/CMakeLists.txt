@@ -1,5 +1,6 @@
 add_library(
   klogg_ui STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractcrawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h

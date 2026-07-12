@@ -36,6 +36,8 @@
 #include <functional>
 #include <vector>
 
+#include "abstractcrawlerwidget.h"
+#include "configuration.h"
 #include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
 #include "foldersearchresults.h"
@@ -87,6 +89,47 @@ bool waitFor( const std::function<bool()>& predicate, int timeoutMs = 5000 )
     }
     return true;
 }
+
+// RAII save/restore of the global Configuration fields the folder ctor reads,
+// so a test can force deterministic non-default values without leaking state
+// into sibling tests (which assert e.g. a default plain-text/regex pattern).
+struct ConfigGuard {
+    Configuration& cfg;
+    bool mainLines;
+    bool filteredLines;
+    bool autoRefresh;
+    bool ignoreCase;
+    SearchRegexpType regexpType;
+    bool logicalCombining;
+
+    ConfigGuard()
+        : cfg( Configuration::getSynced() )
+        , mainLines( cfg.mainLineNumbersVisible() )
+        , filteredLines( cfg.filteredLineNumbersVisible() )
+        , autoRefresh( cfg.isSearchAutoRefreshDefault() )
+        , ignoreCase( cfg.isSearchIgnoreCaseDefault() )
+        , regexpType( cfg.mainRegexpType() )
+        , logicalCombining( cfg.isSearchLogicalCombiningDefault() )
+    {
+        // Force values the unseeded folder ctor will NOT match, so every
+        // assertion below is genuinely Red before the fix.
+        cfg.setMainLineNumbersVisible( true );
+        cfg.setFilteredLineNumbersVisible( true );
+        cfg.setSearchAutoRefreshDefault( true );
+        cfg.setSearchIgnoreCaseDefault( false );
+        cfg.setMainRegexpType( SearchRegexpType::ExtendedRegexp );
+        cfg.setSearchLogicalCombiningDefault( true );
+    }
+    ~ConfigGuard()
+    {
+        cfg.setMainLineNumbersVisible( mainLines );
+        cfg.setFilteredLineNumbersVisible( filteredLines );
+        cfg.setSearchAutoRefreshDefault( autoRefresh );
+        cfg.setSearchIgnoreCaseDefault( ignoreCase );
+        cfg.setMainRegexpType( regexpType );
+        cfg.setSearchLogicalCombiningDefault( logicalCombining );
+    }
+};
 } // namespace
 
 TEST_CASE( "FolderCrawlerWidget search populates grouped results", "[folder]" )
@@ -266,13 +309,18 @@ TEST_CASE( "FolderCrawlerWidget forwards search pattern to main view for opened-
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a } );
     widget.show(); // realize the widget tree so the main view can paint headlessly
+    // Drive explicit toggles so the assertion is independent of Configuration
+    // search defaults (P0 now seeds those into the folder toolbar, so the
+    // default useRegexp follows mainRegexpType rather than being unchecked).
+    widget.searchToolbar()->setUseRegexp( false );
+    widget.searchToolbar()->setMatchCase( false );
     widget.searchFor( "ERROR" );
 
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // PRE-open wiring: startSearch must forward the pattern to mainView_ (parity
-    // with the filteredView assertion above). Default toolbar toggles yield a
-    // case-insensitive plain-text pattern (isPlainText = !useRegexp = true).
+    // with the filteredView assertion above). With useRegexp off + matchCase off
+    // the pattern is a case-insensitive plain-text one.
     REQUIRE( widget.mainView() != nullptr );
     REQUIRE( widget.mainView()->searchPattern()
              == RegularExpressionPattern( "ERROR", /*caseSensitive=*/false, /*inverse=*/false,
@@ -456,4 +504,99 @@ TEST_CASE( "FolderCrawlerWidget overview click emits lineClicked for jump parity
     REQUIRE( topAfter != firstVisibleBefore );
     REQUIRE( topAfter > firstVisibleBefore ); // scrolled down toward 150
     REQUIRE( topAfter <= 150_lnum );          // centering keeps top at/above the target
+}
+
+TEST_CASE( "FolderCrawlerWidget seeds view config and search toggles from Configuration",
+           "[folder]" )
+{
+    // The folder ctor must seed line-number visibility on BOTH views and seed
+    // the toolbar toggles from Configuration -- mirroring CrawlerWidget
+    // (crawlerwidget.cpp:842,852,1311-1314). Without it, the filtered view
+    // (whose config default is line-numbers-ON) showed no gutter, and a fresh
+    // folder tab opened with all toggles unchecked regardless of Configuration.
+    ConfigGuard guard;
+    auto& config = Configuration::get();
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    REQUIRE( widget.mainView()->isLineNumbersVisible() == config.mainLineNumbersVisible() );
+    REQUIRE( widget.filteredView()->isLineNumbersVisible()
+             == config.filteredLineNumbersVisible() );
+
+    REQUIRE( widget.searchToolbar()->isAutoRefresh() == config.isSearchAutoRefreshDefault() );
+    REQUIRE( widget.searchToolbar()->isMatchCase() == !config.isSearchIgnoreCaseDefault() );
+    REQUIRE( widget.searchToolbar()->isUseRegexp()
+             == ( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp ) );
+    REQUIRE( widget.searchToolbar()->isBoolean() == config.isSearchLogicalCombiningDefault() );
+}
+
+TEST_CASE( "FolderCrawlerWidget is an AbstractCrawlerWidget (polymorphic dispatch target)",
+           "[folder]" )
+{
+    // MainWindow obtains a single AbstractCrawlerWidget* per tab (via
+    // dynamic_cast from QWidget*) and dispatches applyConfiguration /
+    // registerShortcuts through it, instead of qobject_cast-ing to each concrete
+    // type at every site -- the cast-branch pattern that caused the original
+    // folder-tab crash (a static_cast<CrawlerWidget*> on a FolderCrawlerWidget).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // The folder tab must be reachable as the common dispatch base.
+    auto* base = dynamic_cast<AbstractCrawlerWidget*>( &widget );
+    REQUIRE( base != nullptr );
+
+    // The default hooks are no-ops for the folder widget today (P1 overrides
+    // them); calling them through the base must not throw or crash.
+    REQUIRE_NOTHROW( base->applyConfiguration() );
+    REQUIRE_NOTHROW( base->registerShortcuts() );
+
+    // It is still a ViewInterface (Session stores ViewInterface*).
+    REQUIRE( dynamic_cast<const ViewInterface*>( &widget ) != nullptr );
+}
+
+TEST_CASE( "FolderCrawlerWidget applyConfiguration re-applies view config on demand",
+           "[folder]" )
+{
+    // applyConfiguration() (mirrors CrawlerWidget::applyConfiguration) must
+    // re-read Configuration and re-apply line-number visibility / font /
+    // overview to both views whenever MainWindow emits optionsChanged (the
+    // View-menu toggles). Without the override, the inherited no-op leaves the
+    // views stuck at their ctor-seeded state, so toggling line numbers from the
+    // menu has no effect on a folder tab.
+    ConfigGuard guard;
+    auto& config = Configuration::get();
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // Flip config AFTER construction so the ctor's initial seeding is not what
+    // is under test -- applyConfiguration() must re-read Configuration itself.
+    config.setMainLineNumbersVisible( false );
+    config.setFilteredLineNumbersVisible( false );
+    widget.applyConfiguration();
+    REQUIRE_FALSE( widget.mainView()->isLineNumbersVisible() );
+    REQUIRE_FALSE( widget.filteredView()->isLineNumbersVisible() );
+
+    config.setMainLineNumbersVisible( true );
+    config.setFilteredLineNumbersVisible( true );
+    widget.applyConfiguration();
+    REQUIRE( widget.mainView()->isLineNumbersVisible() );
+    REQUIRE( widget.filteredView()->isLineNumbersVisible() );
+
+    // registerShortcuts() registers the views' keyboard navigation; it must be
+    // callable and not throw (called by applyConfiguration and the ctor).
+    REQUIRE_NOTHROW( widget.registerShortcuts() );
 }
