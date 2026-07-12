@@ -994,6 +994,52 @@ TEST_CASE( "FolderCrawlerWidget records folder searches into the shared history"
              >= 0 );
 }
 
+TEST_CASE( "FolderCrawlerWidget filtered-view M shortcut marks the selected result row",
+           "[folder]" )
+{
+    // The M shortcut (markSelected -> markLines) on the folder results view was
+    // a dead signal: filteredView_->markLines was never connected, so pressing M
+    // did nothing. Marking a result row must record (file, localLine) in the
+    // shared per-file store AND render the mark bullet (lineType Mark flag).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nERROR two\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR three\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // rows: [H0(a), D1(a:0), D2(a:1), H3(b), D4(b:0)]
+
+    // Select result row 1 (a.log localLine 0) and drive the M-shortcut path
+    // (markSelected -> emits markLines for the selection).
+    widget.filteredView()->selectAndDisplayLine( 1_lnum );
+    widget.filteredView()->markSelected();
+    QTest::qWait( 50 );
+
+    // The mark landed on result row 1 (resolved to a.log:0)...
+    REQUIRE( widget.isFilteredResultRowMarked( 1_lnum ) );
+    // ...and NOT on a neighbouring row.
+    REQUIRE_FALSE( widget.isFilteredResultRowMarked( 2_lnum ) );
+
+    // The bullet will render: row 1's lineType now carries the Mark flag.
+    REQUIRE( widget.filteredView()->lineTypeForTest( 1_lnum )
+                 .testFlag( AbstractLogData::LineTypeFlags::Mark ) );
+
+    // The mark is shared with the main view: open a.log and line 0 is marked.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.isMainViewLineMarked( 0_lnum ) );
+
+    // deleteMark clears it.
+    widget.filteredView()->selectAndDisplayLine( 1_lnum );
+    widget.filteredView()->deleteMarksSelected();
+    QTest::qWait( 50 );
+    REQUIRE_FALSE( widget.isFilteredResultRowMarked( 1_lnum ) );
+}
+
 TEST_CASE( "FolderCrawlerWidget main-view map rebuilds paint-free on an unrealized viewport",
            "[folder]" )
 {

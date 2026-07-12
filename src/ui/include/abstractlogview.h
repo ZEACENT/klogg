@@ -62,6 +62,7 @@
 #include "linekind.h"
 #include "highlighterset.h"
 #include "linetypes.h"
+#include "markprovider.h"
 #include "overviewwidget.h"
 #include "quickfind.h"
 #include "quickfindmux.h"
@@ -169,6 +170,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool isPartialSelection() const;
     // Instructs the widget to select the whole text.
     void selectAll();
+    // Inject a read-only mark source (for views without LogFilteredData, e.g.
+    // the folder main view and folder results view). Subclass lineType()
+    // overrides OR in LineTypeFlags::Mark from it; the LogViewNextMark/PrevMark
+    // navigation consults markAfter/markBefore. The caller owns the provider.
+    void setMarkProvider( const MarkProvider* provider ) { markProvider_ = provider; }
 
     bool isFollowEnabled() const
     {
@@ -232,6 +238,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // FilteredView overrides this to return false since all visible lines are part of the filter
     virtual bool shouldApplySearchRangeGraying() const;
 
+    // Read-only mark source (folder views), or null. Subclass lineType()
+    // overrides consult this to OR in LineTypeFlags::Mark.
+    const MarkProvider* markProvider_ = nullptr;
 
     // Get the overview associated with this view, or NULL if there is none
     Overview* getOverview() const
@@ -308,6 +317,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void selectAndDisplayLine( LineNumber line );
     void selectPortionAndDisplayLine( LineNumber line, LinesCount nLines, LineColumn startCol,
                                       LineLength nSymbols );
+    // Toggle a mark / delete a mark on the current selection (the M / N
+    // shortcuts). Public so hosts can drive them programmatically (and tests
+    // can exercise the markLines/deleteMarkLines wiring without a real
+    // keypress, which is unreliable headless).
+    void markSelected();
+    void deleteMarksSelected();
 
     // Use the current QFP to go and select the next match.
     void searchForward() override;
@@ -373,8 +388,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void findPreviousSelected();
     void copy();
     void copyWithLineNumbers();
-    void markSelected();
-    void deleteMarksSelected();
     void saveToFile();
     void saveSelectedToFile();
     void setSearchStart();

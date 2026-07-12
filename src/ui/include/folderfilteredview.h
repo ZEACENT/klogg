@@ -46,6 +46,15 @@ class FolderFilteredView : public AbstractLogView {
     // not apply.
     bool shouldApplySearchRangeGraying() const override;
 
+  public:
+    // Test seam: the line-type the paint path uses for a result row, exposed so
+    // headless tests can assert the Mark bullet will render (lineType itself is
+    // protected).
+    AbstractLogData::LineType lineTypeForTest( LineNumber lineNumber ) const
+    {
+        return lineType( lineNumber );
+    }
+
   private:
     FolderSearchResults* results_;
 };

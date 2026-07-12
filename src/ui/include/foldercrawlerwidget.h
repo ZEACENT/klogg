@@ -31,6 +31,7 @@
 
 #include "linetypes.h"
 #include "markprovider.h"
+#include "foldersearchresults.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
 #include "abstractcrawlerwidget.h"
@@ -110,6 +111,10 @@ class FolderCrawlerWidget : public QWidget,
     // True if `line` is marked in the file currently shown in the main view.
     // (Test accessor for folder-mode marks, which live in the per-file store.)
     bool isMainViewLineMarked( LineNumber line ) const;
+    // True if the result row (a filtered-view line index) is marked -- resolves
+    // the row to (file, localLine) via the results model and checks the shared
+    // per-file mark store. Test accessor for filtered-view marks.
+    bool isFilteredResultRowMarked( LineNumber row ) const;
     // Programmatic mark toggle on a line of the file currently in the main view
     // (the M shortcut / left-margin click do the same through the markLines
     // signal). Exposed for test-driving; forceRefresh re-renders the bullet.
@@ -340,8 +345,65 @@ class FolderCrawlerWidget : public QWidget,
         }
     };
     MainViewMarkProvider mainViewMarkProvider_;
+
+    // MarkProvider over folderMarks_ for the folder RESULTS (filtered) view,
+    // where a view row resolves to (file, localLine) via FolderSearchResults.
+    // Reads folderMarks_ live so marks are shared with the main view. The
+    // results pointer is stable (folderResults_ is created once and mutated in
+    // place across searches).
+    class FolderFilteredMarkProvider : public MarkProvider {
+      public:
+        const QHash<QString, std::set<uint64_t>>* marks = nullptr;
+        const FolderSearchResults* results = nullptr;
+        bool isMarked( LineNumber row ) const override
+        {
+            if ( marks == nullptr || results == nullptr ) {
+                return false;
+            }
+            if ( results->lineKind( row ) != LineKind::Data ) {
+                return false;
+            }
+            const auto src = results->sourceForLine( row );
+            const auto it = marks->find( src.filePath );
+            return it != marks->end() && it->count( src.localLine.get() ) > 0;
+        }
+        std::optional<LineNumber> markAfter( LineNumber row ) const override
+        {
+            if ( results == nullptr ) {
+                return {};
+            }
+            const uint64_t total = results->getNbLine().get();
+            for ( uint64_t i = row.get() + 1; i < total; ++i ) {
+                const LineNumber r{ i };
+                if ( isMarked( r ) ) {
+                    return r;
+                }
+            }
+            return {};
+        }
+        std::optional<LineNumber> markBefore( LineNumber row ) const override
+        {
+            if ( results == nullptr ) {
+                return {};
+            }
+            const uint64_t start = row.get();
+            for ( uint64_t i = start; i-- > 0; ) {
+                const LineNumber r{ i };
+                if ( isMarked( r ) ) {
+                    return r;
+                }
+            }
+            return {};
+        }
+    };
+    FolderFilteredMarkProvider folderFilteredMarkProvider_;
     void addMark( const QString& file, LineNumber line );
     void removeMark( const QString& file, LineNumber line );
+    // filteredView_->markLines / deleteMarkLines handlers: resolve each result
+    // row to (file, localLine) via the results model and update the shared
+    // per-file store, then refresh so the bullet re-renders.
+    void onFilteredViewMarkLines( const klogg::vector<LineNumber>& rows );
+    void onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows );
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

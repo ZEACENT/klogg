@@ -35,7 +35,15 @@ AbstractLogData::LineType FolderFilteredView::lineType( LineNumber lineNumber ) 
     if ( results_ != nullptr && results_->lineKind( lineNumber ) == LineKind::Header ) {
         return {};
     }
-    return AbstractLogData::LineTypeFlags::Match;
+    // A result row the user marked (via the M shortcut) shows the mark bullet
+    // too -- the mark source resolves the row to (file, localLine) and checks
+    // the shared per-file store. Parity with single-file FilteredView, whose
+    // lineTypeByLine returns Match|Mark.
+    AbstractLogData::LineType flags = AbstractLogData::LineTypeFlags::Match;
+    if ( markProvider_ != nullptr && markProvider_->isMarked( lineNumber ) ) {
+        flags |= AbstractLogData::LineTypeFlags::Mark;
+    }
+    return flags;
 }
 
 LineNumber FolderFilteredView::displayLineNumber( LineNumber lineNumber ) const

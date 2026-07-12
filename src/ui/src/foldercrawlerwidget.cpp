@@ -209,8 +209,15 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     mainViewMarkProvider_.marks = &folderMarks_;
     mainViewMarkProvider_.currentFile = &currentMainFilePath_;
     mainView_->setMarkProvider( &mainViewMarkProvider_ );
+    // The filtered (results) view shares the same per-file mark store; its
+    // provider resolves a result row to (file, localLine) via the results
+    // model. folderResults_ is created once (above) and mutated in place, so
+    // the raw pointer is stable for the widget's lifetime.
+    folderFilteredMarkProvider_.marks = &folderMarks_;
+    folderFilteredMarkProvider_.results = folderResults_.get();
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
+    filteredView_->setMarkProvider( &folderFilteredMarkProvider_ );
 
     // Seed view config + search toggles from Configuration, mirroring CrawlerWidget
     // (crawlerwidget.cpp:842,852 for line numbers; :1311-1314 for search toggles).
@@ -312,6 +319,16 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     connect( filteredView_, &FolderFilteredView::headerClicked, this,
              &FolderCrawlerWidget::onHeaderClicked );
 
+    // Mark toggles from the RESULTS view (M shortcut / left-margin click on a
+    // result row): resolve each row to (file, localLine) via the results model
+    // and update the shared per-file store, then refresh so the bullet
+    // re-renders. This was the dead-signal bug -- filteredView_->markLines was
+    // never connected, so M did nothing in the results view.
+    connect( filteredView_, &AbstractLogView::markLines, this,
+             &FolderCrawlerWidget::onFilteredViewMarkLines );
+    connect( filteredView_, &AbstractLogView::deleteMarkLines, this,
+             &FolderCrawlerWidget::onFilteredViewDeleteMarkLines );
+
     // Mark toggles from the main view (M shortcut / left-margin click): record
     // the line against the file currently shown, then refresh so the bullet
     // appears/disappears. Folder mode has no LogFilteredData, so the widget owns
@@ -402,9 +419,62 @@ void FolderCrawlerWidget::removeMark( const QString& file, LineNumber line )
     }
 }
 
+void FolderCrawlerWidget::onFilteredViewMarkLines( const klogg::vector<LineNumber>& rows )
+{
+    // Each row is a result-view line; resolve it to (file, localLine) and mark
+    // it in the shared per-file store. Skip headers (no source line).
+    if ( folderResults_ == nullptr ) {
+        return;
+    }
+    bool changed = false;
+    for ( const auto& row : rows ) {
+        if ( folderResults_->lineKind( row ) != LineKind::Data ) {
+            continue;
+        }
+        const auto src = folderResults_->sourceForLine( row );
+        addMark( src.filePath, src.localLine );
+        changed = true;
+    }
+    if ( changed ) {
+        filteredView_->forceRefresh();
+    }
+}
+
+void FolderCrawlerWidget::onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows )
+{
+    if ( folderResults_ == nullptr ) {
+        return;
+    }
+    bool changed = false;
+    for ( const auto& row : rows ) {
+        if ( folderResults_->lineKind( row ) != LineKind::Data ) {
+            continue;
+        }
+        const auto src = folderResults_->sourceForLine( row );
+        removeMark( src.filePath, src.localLine );
+        changed = true;
+    }
+    if ( changed ) {
+        filteredView_->forceRefresh();
+    }
+}
+
 bool FolderCrawlerWidget::isMainViewLineMarked( LineNumber line ) const
 {
     return mainViewMarkProvider_.isMarked( line );
+}
+
+bool FolderCrawlerWidget::isFilteredResultRowMarked( LineNumber row ) const
+{
+    // Resolves a filtered-view row to (file, localLine) and checks the shared
+    // per-file mark store -- the source of truth both the main view and the
+    // filtered view render from.
+    if ( folderResults_ == nullptr ) {
+        return false;
+    }
+    const auto src = folderResults_->sourceForLine( row );
+    const auto it = folderMarks_.find( src.filePath );
+    return it != folderMarks_.end() && it->count( src.localLine.get() ) > 0;
 }
 
 void FolderCrawlerWidget::markMainViewLine( LineNumber line )

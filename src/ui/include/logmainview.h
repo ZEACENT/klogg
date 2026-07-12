@@ -66,12 +66,6 @@ class LogMainView : public AbstractLogView
     void selectNextMark();
     void selectPrevMark();
 
-    // Inject a mark source for folder mode (where filteredData_ stays null).
-    // The bullet for marked lines (LineTypeFlags::Mark) and the
-    // LogViewNextMark/PrevMark navigation then consult it instead of
-    // LogFilteredData. The caller owns the provider and must keep it alive.
-    void setMarkProvider( const MarkProvider* provider ) { markProvider_ = provider; }
-
   protected:
     // Implements the virtual function
     SearchableLogData::LineType lineType( LineNumber lineNumber ) const override;
@@ -80,7 +74,6 @@ class LogMainView : public AbstractLogView
 
   private:
     LogFilteredData* filteredData_;
-    const MarkProvider* markProvider_ = nullptr;
 };
 
 #endif
