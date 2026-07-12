@@ -95,6 +95,9 @@ class FolderCrawlerWidget : public QWidget,
     Overview* overview() { return &overview_; }
     const Overview* overview() const { return &overview_; }
     QString currentMainFilePath() const { return currentMainFilePath_; }
+    // Search-toolbar status text (file count / match count / search state).
+    // Exposed so tests can assert no file path leaks into the toolbar.
+    QString statusText() const;
     // True while a search is running (cleared on searchFinished). Lets
     // integration tests wait for completion before asserting exact counts.
     bool isSearchActive() const { return searchActive_; }

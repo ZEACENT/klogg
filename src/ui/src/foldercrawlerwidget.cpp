@@ -211,14 +211,26 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     searchToolbar_->setUseRegexp( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
     searchToolbar_->setBoolean( config.isSearchLogicalCombiningDefault() );
 
+    // Composite "bottom window" mirroring CrawlerWidget: pane 1 is the main
+    // view, pane 2 packs the search-toolbar row above the results view, so the
+    // toolbar renders BETWEEN the two views (as in single-file tabs) rather than
+    // pinned above the splitter. bottomWindow->setLayout reparents the toolbar
+    // widgets into the bottom pane, exactly like CrawlerWidget.
+    auto* bottomWindow = new QWidget;
+    bottomWindow->setContentsMargins( 2, 0, 2, 0 );
+    auto* bottomLayout = new QVBoxLayout;
+    bottomLayout->setContentsMargins( 2, 2, 2, 2 );
+    bottomLayout->addLayout( toolbar );
+    bottomLayout->addWidget( filteredView_ );
+    bottomWindow->setLayout( bottomLayout );
+
     splitter_ = new QSplitter( Qt::Vertical, this );
     splitter_->addWidget( mainView_ );
-    splitter_->addWidget( filteredView_ );
+    splitter_->addWidget( bottomWindow );
     splitter_->setStretchFactor( 0, 3 );
     splitter_->setStretchFactor( 1, 2 );
 
     auto* root = new QVBoxLayout( this );
-    root->addLayout( toolbar );
     root->addWidget( splitter_, 1 );
 
     // --- signals ---
@@ -271,8 +283,14 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
 {
     folderPath_ = folderPath;
     filePaths_ = filePaths;
-    statusLabel_->setText(
-        tr( "Folder: %1  (%n file(s))", "", static_cast<int>( filePaths_.size() ) ).arg( folderPath_ ) );
+    // The folder path itself is shown in MainWindow's info line (status bar);
+    // the toolbar status surfaces only the file count.
+    statusLabel_->setText( tr( "Ready  (%n file(s))", "", static_cast<int>( filePaths_.size() ) ) );
+}
+
+QString FolderCrawlerWidget::statusText() const
+{
+    return statusLabel_ != nullptr ? statusLabel_->text() : QString();
 }
 
 void FolderCrawlerWidget::applyConfiguration()
@@ -689,7 +707,8 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  pendingMainFilePath_.clear();
              } );
 
-    statusLabel_->setText( tr( "Opening %1..." ).arg( filePath ) );
+    // The opened file's path/size/date surface in MainWindow's info line; keep
+    // the toolbar status focused on search state (no path leak here).
     pendingMainData_->attachFile( filePath );
 }
 

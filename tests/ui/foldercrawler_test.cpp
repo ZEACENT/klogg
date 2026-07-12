@@ -269,6 +269,45 @@ TEST_CASE( "FolderCrawlerWidget main view line map refreshes on demand after a d
     REQUIRE( widget.mainView()->isLineMapCurrent() );
 }
 
+TEST_CASE( "FolderCrawlerWidget search toolbar shares the results pane (sits between the views)",
+           "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // The toolbar lives in the SAME pane as the results view (the composite
+    // "bottom window"), in a DIFFERENT pane from the main view -> it renders
+    // between the two views, matching single-file tabs (whose toolbar row sits
+    // above the filtered view, inside the splitter's bottom pane).
+    REQUIRE( widget.searchToolbar()->parentWidget() == widget.filteredView()->parentWidget() );
+    REQUIRE( widget.mainView()->parentWidget() != widget.searchToolbar()->parentWidget() );
+}
+
+TEST_CASE( "FolderCrawlerWidget toolbar status never leaks the opened file path", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    // setFolder surfaces the file count, not the folder path.
+    REQUIRE_FALSE( widget.statusText().contains( dir.path() ) );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum ); // async load of a.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    // No "Opening <path>" leak while/after loading the file.
+    REQUIRE_FALSE( widget.statusText().startsWith( QStringLiteral( "Opening" ) ) );
+    REQUIRE_FALSE( widget.statusText().contains( a ) );
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {
