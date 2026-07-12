@@ -85,6 +85,13 @@ class MainWindow : public QMainWindow {
     // Loads the initial file (parameter passed or from config file)
     void loadInitialFile( QString fileName, bool followFile );
 
+    // Opens a folder as a crawler tab (the shared body of openFolder() and the
+    // directory-drop path in dropEvent). Safe to call on any path:
+    // enumerateFolderFiles returns {} for non-dir / empty input.
+    // Must be called on the GUI thread (shows a QMessageBox on empty folders
+    // and interacts with the tab widget).
+    void openFolderByPath( const QString& folderPath );
+
     void reTranslateUI();
 
     static int installLanguage( QString lang );
@@ -113,6 +120,7 @@ class MainWindow : public QMainWindow {
     void openAdbLogcat();
     void openIosLogStream();
     void openFileFromRecent( QAction* action );
+    void openFolderFromRecent( QAction* action );
     void openFileFromFavorites( QAction* action );
     void switchToOpenedFile( QAction* action );
     void closeTab( ActionInitiator initiator );
@@ -210,18 +218,17 @@ class MainWindow : public QMainWindow {
     void readSettings();
     void writeSettings();
     bool loadFile( const QString& fileName, bool followFile = false );
-    // Opens a folder as a crawler tab (the shared body of openFolder() and the
-    // directory-drop path in dropEvent). Safe to call on any path:
-    // enumerateFolderFiles returns {} for non-dir / empty input.
-    void openFolderByPath( const QString& folderPath );
     bool openAdbLogcatSource( const AdbLogcatSessionData& sessionData,
                               bool startConnected = true );
     bool extractAndLoadFile( const QString& fileName );
     void openRemoteFile( const QUrl& url );
     void updateTitleBar( const QString& fileName );
     void addRecentFile( const QString& fileName );
+    void addRecentFolder( const QString& folderPath );
     void updateRecentFileActions();
     void clearRecentFileActions();
+    void updateRecentFolderActions();
+    void clearRecentFolderActions();
     void updateFavoritesMenu();
     void updateOpenedFilesMenu();
     void updateHighlightersMenu();
@@ -251,9 +258,13 @@ class MainWindow : public QMainWindow {
     std::array<QAction*, MAX_RECENT_FILES> recentFileActions;
     QActionGroup* recentFilesGroup;
 
+    std::array<QAction*, MAX_RECENT_FILES> recentFolderActions;
+    QActionGroup* recentFoldersGroup;
+
     QMenu* fileMenu;
     QMenu* saveCurrentLiveLogMenu;
     QMenu* recentFilesMenu;
+    QMenu* recentFoldersMenu;
     QMenu* editMenu;
     QMenu* viewMenu;
     QMenu* toolsMenu;
@@ -326,6 +337,7 @@ class MainWindow : public QMainWindow {
     QAction* removeFromFavoritesAction;
     QAction* selectOpenFileAction;
     QAction* recentFilesCleanup;
+    QAction* recentFoldersCleanup;
     QActionGroup* favoritesGroup;
     QActionGroup* openedFilesGroup;
     QActionGroup* highlightersActionGroup = nullptr;

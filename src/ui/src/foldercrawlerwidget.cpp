@@ -313,12 +313,15 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
         sizes = splitter_->sizes();
     }
 
+    // searchToolbar_ is constructed unconditionally in the ctor and never
+    // reset, so it is always non-null here -- no null-guard needed (mirrors
+    // CrawlerWidget, which derefs searchToolbar_ unconditionally throughout).
     auto context = std::make_shared<const FolderCrawlerContext>(
-        searchToolbar_ != nullptr ? searchToolbar_->currentSearchText() : QString{},
-        searchToolbar_ != nullptr ? !searchToolbar_->isMatchCase() : false,
-        searchToolbar_ != nullptr ? searchToolbar_->isUseRegexp() : false,
-        searchToolbar_ != nullptr ? searchToolbar_->isInverse() : false,
-        searchToolbar_ != nullptr ? searchToolbar_->isBoolean() : false, sizes );
+        searchToolbar_->currentSearchText(),
+        !searchToolbar_->isMatchCase(),
+        searchToolbar_->isUseRegexp(),
+        searchToolbar_->isInverse(),
+        searchToolbar_->isBoolean(), sizes );
 
     return static_cast<std::shared_ptr<const ViewContextInterface>>( context );
 }

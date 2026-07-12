@@ -45,3 +45,8 @@ DroppedPathClassification classifyLocalPaths( const QStringList& localPaths )
 
     return result;
 }
+
+bool isDirectoryPath( const QString& path )
+{
+    return QFileInfo( path ).isDir();
+}

@@ -120,30 +120,101 @@ TEST_CASE( "classifyLocalPaths classifies a directory given with a trailing slas
 
 TEST_CASE( "classifyLocalPaths sorts the returned lists", "[drop]" )
 {
-    QTemporaryDir d1;
-    QTemporaryDir d2;
-    QTemporaryFile f1;
-    QTemporaryFile f2;
-    REQUIRE( d1.isValid() );
-    REQUIRE( d2.isValid() );
-    REQUIRE( f1.open() );
-    REQUIRE( f2.open() );
+    // Independent verification of the documented contract: the returned lists
+    // are sorted by fileName() in case-insensitive natural (numeric) order, NOT
+    // by raw full-path string. We use controlled leaf names under one base
+    // temp dir so the expected positions are known a priori and independent of
+    // the random hex prefixes QTemporaryDir/QTemporaryFile produce.
+    //
+    // This deliberately does NOT call sortedMergeFilePaths (the helper
+    // classifyLocalPaths delegates to internally) -- asserting against it
+    // would be circular: a change that breaks the real contract but stays
+    // self-consistent would still pass.
+    QTemporaryDir base;
+    REQUIRE( base.isValid() );
+    const QDir root( base.path() );
+    REQUIRE( root.mkpath( QStringLiteral( "adir" ) ) );
+    REQUIRE( root.mkpath( QStringLiteral( "zdir" ) ) );
+    writeFile( root.absoluteFilePath( QStringLiteral( "afile.log" ) ) );
+    writeFile( root.absoluteFilePath( QStringLiteral( "zfile.log" ) ) );
 
-    // Names chosen so the natural sort (by QFileInfo::fileName()) differs from
-    // insertion order: z-dir precedes a-dir on input but must come out last.
-    const QString zDir = d1.path();
-    const QString aDir = d2.path();
-    const QString zFile = f1.fileName();
-    const QString aFile = f2.fileName();
+    const QString aDir = root.absoluteFilePath( QStringLiteral( "adir" ) );
+    const QString zDir = root.absoluteFilePath( QStringLiteral( "zdir" ) );
+    const QString aFile = root.absoluteFilePath( QStringLiteral( "afile.log" ) );
+    const QString zFile = root.absoluteFilePath( QStringLiteral( "zfile.log" ) );
 
+    // Feed the input interleaved and z-before-a so a non-sorting implementation
+    // would emit the input order verbatim and fail the positional checks below.
     const QStringList input{ zDir, zFile, aDir, aFile };
     const auto result = classifyLocalPaths( input );
 
     REQUIRE( result.dirs.size() == 2 );
     REQUIRE( result.files.size() == 2 );
-    // Deterministic ordering (stable regardless of input order); the exact
-    // key is fileName(), so just assert it is sorted and stable.
-    const auto dirSorted = sortedMergeFilePaths( QStringList{ aDir, zDir } );
-    REQUIRE( result.dirs.at( 0 ) == QString( dirSorted.at( 0 ) ) );
-    REQUIRE( result.dirs.at( 1 ) == QString( dirSorted.at( 1 ) ) );
+
+    // Explicit positional assertions keyed on fileName() -- the real contract.
+    REQUIRE( QFileInfo( result.dirs.at( 0 ) ).fileName() == QStringLiteral( "adir" ) );
+    REQUIRE( QFileInfo( result.dirs.at( 1 ) ).fileName() == QStringLiteral( "zdir" ) );
+    REQUIRE( QFileInfo( result.files.at( 0 ) ).fileName() == QStringLiteral( "afile.log" ) );
+    REQUIRE( QFileInfo( result.files.at( 1 ) ).fileName() == QStringLiteral( "zfile.log" ) );
+
+    // Determinism: the sort is stable regardless of input ordering.
+    const auto resultRev = classifyLocalPaths( QStringList{ aFile, aDir, zFile, zDir } );
+    REQUIRE( resultRev.dirs == result.dirs );
+    REQUIRE( resultRev.files == result.files );
+}
+
+TEST_CASE( "isDirectoryPath returns true for a directory", "[drop]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    REQUIRE( isDirectoryPath( dir.path() ) );
+}
+
+TEST_CASE( "isDirectoryPath returns true for a directory with a trailing separator", "[drop]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    const QString withSlash = dir.path() + QDir::separator();
+    REQUIRE( isDirectoryPath( withSlash ) );
+}
+
+TEST_CASE( "isDirectoryPath returns false for a file", "[drop]" )
+{
+    QTemporaryFile file;
+    REQUIRE( file.open() );
+
+    REQUIRE( !isDirectoryPath( file.fileName() ) );
+}
+
+TEST_CASE( "isDirectoryPath returns false for a non-existent path", "[drop]" )
+{
+    // QFileInfo::isDir() is false for a missing path, so the loadFile guard
+    // will NOT route it to openFolderByPath -- matching classifyLocalPaths,
+    // which also puts a missing path in `files`.
+    const QString missing = "/no/such/path/here";
+    REQUIRE( !isDirectoryPath( missing ) );
+}
+
+TEST_CASE( "isDirectoryPath follows a symlink to a directory", "[drop]" )
+{
+    QTemporaryDir target;
+    REQUIRE( target.isValid() );
+    // Create the symlink in a temp file path so it auto-cleans.
+    QTemporaryFile linkHolder;
+    REQUIRE( linkHolder.open() );
+    const QString linkPath = linkHolder.fileName() + "_link";
+    linkHolder.close();
+    QFile::remove( linkPath );
+
+    if ( QFile::link( target.path(), linkPath ) ) {
+        // QFileInfo::isDir() follows symlinks, so a symlink-to-dir counts as a dir.
+        REQUIRE( isDirectoryPath( linkPath ) );
+        QFile::remove( linkPath );
+    }
+    else {
+        // Some CI sandboxes forbid symlink creation; document the contract instead.
+        INFO( "symlink creation not permitted in this environment; skipping" );
+    }
 }

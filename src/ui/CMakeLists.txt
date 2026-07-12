@@ -45,6 +45,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/quicklabelpattern.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/quickfindwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/recentfiles.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/recentfolders.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/savedsearches.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/selection.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/session.h
@@ -115,6 +116,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/quicklabelpattern.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/quickfindwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/recentfiles.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/recentfolders.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/savedsearches.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/selection.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/session.cpp

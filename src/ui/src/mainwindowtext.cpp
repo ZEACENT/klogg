@@ -31,6 +31,7 @@ const char* action::newWindowStatusTip = QT_TR_NOOP( "Create new klogg window" )
 const char* action::openText = QT_TR_NOOP( "&Open..." );
 const char* action::openStatusTip = QT_TR_NOOP( "Open a file" );
 const char* action::recentFilesCleanupText = QT_TR_NOOP("Clear list");
+const char* action::recentFoldersCleanupText = QT_TR_NOOP("Clear list");
 const char* action::closeText = QT_TR_NOOP( "&Close" );
 const char* action::closeStatusTip = QT_TR_NOOP( "Close document" );
 const char* action::closeAllText = QT_TR_NOOP( "Close &All" );

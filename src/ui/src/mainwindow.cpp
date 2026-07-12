@@ -115,6 +115,7 @@
 #include "progress.h"
 #include "readablesize.h"
 #include "recentfiles.h"
+#include "recentfolders.h"
 #include "sessioninfo.h"
 #include "shortcuts.h"
 #include "styles.h"
@@ -389,6 +390,14 @@ void MainWindow::loadInitialFile( QString fileName, bool followFile )
 
     // Is there a file passed as argument?
     if ( !fileName.isEmpty() ) {
+        // Explicit folder routing for the CLI entry point (klogg <folder>):
+        // makes the CLI intent self-documenting at its real entry point. The
+        // loadFile directory guard remains as the backstop for the other
+        // callers (loadFileNonInteractive/recent/favorites).
+        if ( isDirectoryPath( fileName ) ) {
+            openFolderByPath( fileName );
+            return;
+        }
         loadFile( fileName, followFile );
     }
 }
@@ -428,6 +437,7 @@ void MainWindow::reTranslateUI()
     openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
 
     recentFilesCleanup->setText( transAction( action::recentFilesCleanupText ) );
+    recentFoldersCleanup->setText( transAction( action::recentFoldersCleanupText ) );
 
     closeAction->setText( transAction( action::closeText ) );
     closeAction->setStatusTip( transAction( action::closeStatusTip ) );
@@ -616,6 +626,10 @@ void MainWindow::createActions()
     connect( recentFilesCleanup, &QAction::triggered, this,
              [ this ]( auto ) { this->clearRecentFileActions(); } );
 
+    recentFoldersCleanup = new QAction( tr( action::recentFoldersCleanupText ), this );
+    connect( recentFoldersCleanup, &QAction::triggered, this,
+             [ this ]( auto ) { this->clearRecentFolderActions(); } );
+
     closeAction = new QAction( tr( action::closeText ), this );
     closeAction->setObjectName( QStringLiteral( "closeAction" ) );
     closeAction->setStatusTip( tr( action::closeStatusTip ) );
@@ -636,6 +650,18 @@ void MainWindow::createActions()
         } );
         recentFileActions[ i ]->setVisible( false );
         recentFileActions[ i ]->setActionGroup( recentFilesGroup );
+    }
+
+    recentFoldersGroup = new QActionGroup( this );
+    connect( recentFoldersGroup, &QActionGroup::triggered, this, &MainWindow::openFolderFromRecent );
+    for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
+        recentFolderActions[ i ] = new QAction( this );
+        connect( recentFolderActions[ i ], &QAction::hovered,
+                 [ this, a = recentFolderActions[ i ] ]() {
+                     QToolTip::showText( QCursor::pos(), a->toolTip(), this );
+                 } );
+        recentFolderActions[ i ]->setVisible( false );
+        recentFolderActions[ i ]->setActionGroup( recentFoldersGroup );
     }
 
     exitAction = new QAction( tr( action::exitText ), this );
@@ -954,6 +980,15 @@ void MainWindow::createMenus()
     recentFilesMenu->addSeparator();
     recentFilesMenu->addAction( recentFilesCleanup );
     recentFilesMenu->setEnabled( false );
+
+    recentFoldersMenu = fileMenu->addMenu( tr( "Open Recent Fol&der" ) );
+    for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
+        recentFoldersMenu->addAction( recentFolderActions[ i ] );
+    }
+    recentFoldersMenu->addSeparator();
+    recentFoldersMenu->addAction( recentFoldersCleanup );
+    recentFoldersMenu->setEnabled( false );
+
     fileMenu->addSeparator();
 
     fileMenu->addAction( closeAction );
@@ -1204,6 +1239,8 @@ void MainWindow::openFolderByPath( const QString& folderPath )
                                                   folderPath, displayName, folderPath );
     mainTabWidget_.setCurrentIndex( index );
     updateOpenedFilesMenu();
+    // Record the folder only on success (non-empty + tab added).
+    addRecentFolder( folderPath );
 }
 
 void MainWindow::openAdbLogcat()
@@ -1304,6 +1341,31 @@ void MainWindow::openFileFromRecent( QAction* action )
 
         if ( userAction == QMessageBox::Yes ) {
             removeFromRecent( filename );
+        }
+    }
+}
+
+void MainWindow::openFolderFromRecent( QAction* action )
+{
+    if ( !action ) {
+        return;
+    }
+
+    const auto folderPath = action->data().toString();
+    if ( QFileInfo{ folderPath }.isDir() ) {
+        openFolderByPath( folderPath );
+    }
+    else {
+        const auto userAction = QMessageBox::question(
+            this, tr( "klogg - remove from recent folders" ),
+            tr( "Folder %1 does not exist. Remove it from recent folders?" ).arg( folderPath ),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
+
+        if ( userAction == QMessageBox::Yes ) {
+            auto& recentFolders = RecentFolders::get();
+            recentFolders.removeRecent( folderPath );
+            recentFolders.save();
+            updateRecentFolderActions();
         }
     }
 }
@@ -1664,6 +1726,7 @@ void MainWindow::options()
 
         updateShortcuts();
         updateRecentFileActions();
+        updateRecentFolderActions();
     } );
     dialog.exec();
 
@@ -2344,6 +2407,18 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
 {
     LOG_DEBUG << "loadFile ( " << fileName.toStdString() << " )";
 
+    // Directory guard: any caller that hands loadFile a directory is routed to
+    // the folder-open flow instead of falling into Decompressor::action /
+    // session_.open (which fail on a directory). This single guard covers every
+    // caller (loadInitialFile/CLI, loadFileNonInteractive/IPC+FileOpenEvent,
+    // recent, favorites, open, openRemoteFile, extractAndLoadFile). Returns
+    // true to signal 'handled' -- matching loadFile's success contract; the
+    // boolean is ignored by loadInitialFile/loadFileNonInteractive.
+    if ( isDirectoryPath( fileName ) ) {
+        openFolderByPath( fileName );
+        return true;
+    }
+
     // First check if the file is already open...
     auto* existing_crawler = static_cast<CrawlerWidget*>( session_.getViewIfOpen( fileName ) );
 
@@ -2500,6 +2575,14 @@ void MainWindow::addRecentFile( const QString& fileName )
     recentFiles.addRecent( fileName );
     recentFiles.save();
     updateRecentFileActions();
+}
+
+void MainWindow::addRecentFolder( const QString& folderPath )
+{
+    auto& recentFolders = RecentFolders::getSynced();
+    recentFolders.addRecent( folderPath );
+    recentFolders.save();
+    updateRecentFolderActions();
 }
 
 void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
@@ -2689,6 +2772,47 @@ void MainWindow::clearRecentFileActions()
     recentFiles.removeAll();
     recentFiles.save();
     updateRecentFileActions();
+}
+
+// Updates the actions for the recent folders.
+// Must be called after having added a new folder to the list.
+void MainWindow::updateRecentFolderActions()
+{
+    auto& recentFolders = RecentFolders::get();
+    QStringList recent_folders = recentFolders.recentFolders();
+    int recent_folders_max_items = recentFolders.getNumberItemsToShow();
+
+    if ( recentFolders.recentFolders().count() > 0 ) {
+        recentFoldersMenu->setEnabled( true );
+        for ( auto j = 0; j < MAX_RECENT_FILES; ++j ) {
+            const auto actionIndex = static_cast<size_t>( j );
+            if ( j < recent_folders_max_items ) {
+                int key = j + ( ( j < 9 ) ? 0x31 : ( 0x61 - 9 ) ); // shortcuts: 1..9 next a,b...
+                QString text = tr( "&%1 %2" )
+                                   .arg( QChar( key ) )
+                                   .arg( strippedName( recent_folders[ j ] ) );
+                recentFolderActions[ actionIndex ]->setText( text );
+                recentFolderActions[ actionIndex ]->setToolTip( recent_folders[ j ] );
+                recentFolderActions[ actionIndex ]->setData( recent_folders[ j ] );
+                recentFolderActions[ actionIndex ]->setVisible( true );
+            }
+            else {
+                recentFolderActions[ actionIndex ]->setVisible( false );
+            }
+        }
+    }
+    else {
+        recentFoldersMenu->setEnabled( false );
+    }
+}
+
+// Clear the list of the recent folders
+void MainWindow::clearRecentFolderActions()
+{
+    auto& recentFolders = RecentFolders::getSynced();
+    recentFolders.removeAll();
+    recentFolders.save();
+    updateRecentFolderActions();
 }
 // Update our menu bar to match the settings of the crawler
 // (used when the tab is changed)
@@ -3070,6 +3194,10 @@ void MainWindow::readSettings()
     // History of recent files
     RecentFiles::getSynced();
     updateRecentFileActions();
+
+    // History of recent folders
+    RecentFolders::getSynced();
+    updateRecentFolderActions();
 
     FavoriteFiles::getSynced();
     updateFavoritesMenu();

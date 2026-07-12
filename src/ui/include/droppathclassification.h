@@ -41,4 +41,11 @@ struct DroppedPathClassification {
 // must already have been filtered out by the caller (dropEvent does this).
 DroppedPathClassification classifyLocalPaths( const QStringList& localPaths );
 
+// Returns true if `path` resolves to a directory. Uses QFileInfo::isDir() so it
+// follows symlinks (a symlink-to-dir counts as a directory) and returns false
+// for a non-existent path -- identical semantics to classifyLocalPaths, which
+// dropEvent already relies on. Exposed as a free predicate so the loadFile
+// directory guard is unit-testable outside MainWindow.
+bool isDirectoryPath( const QString& path );
+
 #endif // DROPPATHCLASSIFICATION_H
