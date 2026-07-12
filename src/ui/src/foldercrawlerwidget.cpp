@@ -19,6 +19,7 @@
 
 #include "foldercrawlerwidget.h"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QFont>
 #include <QHBoxLayout>
@@ -28,6 +29,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "abstractlogview.h"
 #include "configuration.h"
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
@@ -289,6 +291,36 @@ void FolderCrawlerWidget::registerShortcuts()
     // not active in folder views.
     mainView_->registerShortcuts();
     filteredView_->registerShortcuts();
+}
+
+AbstractLogView* FolderCrawlerWidget::activeView() const
+{
+    // The focused view if one of ours has focus, else the results view (the
+    // primary folder surface). Mirrors CrawlerWidget::activeView.
+    if ( ( mainView_ != nullptr && mainView_->hasFocus() )
+         || ( filteredView_ != nullptr && filteredView_->hasFocus() ) ) {
+        return qobject_cast<AbstractLogView*>( QApplication::focusWidget() );
+    }
+    return filteredView_;
+}
+
+QString FolderCrawlerWidget::getSelectedText() const
+{
+    auto* view = activeView();
+    return view != nullptr ? view->getSelectedText() : QString{};
+}
+
+bool FolderCrawlerWidget::isPartialSelection() const
+{
+    auto* view = activeView();
+    return view != nullptr ? view->isPartialSelection() : false;
+}
+
+void FolderCrawlerWidget::selectAll()
+{
+    if ( auto* view = activeView() ) {
+        view->selectAll();
+    }
 }
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )

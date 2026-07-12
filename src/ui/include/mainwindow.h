@@ -234,6 +234,11 @@ class MainWindow : public QMainWindow {
     void updateHighlightersMenu();
     QString strippedName( const QString& fullFileName ) const;
     CrawlerWidget* currentCrawlerWidget() const;
+    // The AbstractCrawlerWidget* cross-cast of the current tab -- the polymorphic
+    // dispatch target for copy/selectAll (succeeds for both CrawlerWidget and
+    // FolderCrawlerWidget). Replaces currentCrawlerWidget()-only dispatch that
+    // was a silent no-op on folder tabs.
+    AbstractCrawlerWidget* currentDocument() const;
     // True if the tab at `index` is a FolderCrawlerWidget (not a CrawlerWidget).
     // Used at explicit folder branch points (currentTabChanged, closeTab).
     bool isFolderTab( int index ) const;

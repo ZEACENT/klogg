@@ -92,16 +92,16 @@ class CrawlerWidget : public QSplitter,
     // Get the line number of the first line displayed.
     LineNumber getTopLine() const;
     // Get the selected text as a string (from the main window)
-    QString getSelectedText() const;
+    QString getSelectedText() const override;
     // True for partial selection
-    bool isPartialSelection() const;
+    bool isPartialSelection() const override;
 
     // Display the QFB at the bottom, remembering where the focus was
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
 
     // Instructs the widget to select all the text in the window the user
     // is interacting with
-    void selectAll();
+    void selectAll() override;
 
     std::optional<int> encodingMib() const;
 

@@ -35,6 +35,7 @@
 
 #include "overview.h"
 
+class AbstractLogView;
 class FolderFilteredView;
 class FolderSearchEngine;
 class FolderSearchResults;
@@ -115,6 +116,13 @@ class FolderCrawlerWidget : public QWidget, public AbstractCrawlerWidget {
     // PgDn, jump-to-top/bottom, ...). Overrides AbstractCrawlerWidget.
     void registerShortcuts() override;
 
+    // Edit-menu dispatch (AbstractCrawlerWidget): copy/selectAll delegate to the
+    // focused view, so MainWindow::copy/selectAll work on folder tabs instead of
+    // being enabled no-ops (currentCrawlerWidget() is null for a folder tab).
+    QString getSelectedText() const override;
+    bool isPartialSelection() const override;
+    void selectAll() override;
+
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
     // signal). Folder tabs are static, so this is never emitted for now.
@@ -141,6 +149,10 @@ class FolderCrawlerWidget : public QWidget, public AbstractCrawlerWidget {
     void onHeaderClicked( LineNumber line );
 
   private:
+    // The view that should receive copy/selectAll/quickfind: the focused view if
+    // one of ours has focus, else the results view (the primary folder surface).
+    // Mirrors CrawlerWidget::activeView (crawlerwidget.cpp:1017).
+    AbstractLogView* activeView() const;
     void openFileInMainView( const QString& filePath, LineNumber localLine );
     void cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> data );
     // Re-point the per-file overview at the opened file: that file's folder-search

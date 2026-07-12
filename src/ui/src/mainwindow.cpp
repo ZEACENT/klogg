@@ -1419,7 +1419,7 @@ void MainWindow::selectAll()
     if ( infoLine->hasFocus() ) {
         infoLine->setSelection( 0, klogg::isize( infoLine->text() ) );
     }
-    else if ( auto current = currentCrawlerWidget(); current != nullptr ) {
+    else if ( auto current = currentDocument(); current != nullptr ) {
         current->selectAll();
     }
 }
@@ -1433,7 +1433,7 @@ void MainWindow::copy()
             return;
         }
 
-        if ( auto current = currentCrawlerWidget(); current != nullptr ) {
+        if ( auto current = currentDocument(); current != nullptr ) {
             auto text = current->getSelectedText();
             text.replace( QChar::Null, QChar::Space );
 
@@ -2684,6 +2684,14 @@ CrawlerWidget* MainWindow::currentCrawlerWidget() const
     auto current = qobject_cast<CrawlerWidget*>( mainTabWidget_.currentWidget() );
 
     return current;
+}
+
+// The AbstractCrawlerWidget* of the current tab (CrawlerWidget or
+// FolderCrawlerWidget) -- the polymorphic dispatch target. nullptr only when
+// there is no current tab.
+AbstractCrawlerWidget* MainWindow::currentDocument() const
+{
+    return dynamic_cast<AbstractCrawlerWidget*>( mainTabWidget_.currentWidget() );
 }
 
 // True if the tab at `index` is a FolderCrawlerWidget (folder mode), not a

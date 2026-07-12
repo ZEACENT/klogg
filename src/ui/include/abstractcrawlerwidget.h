@@ -49,6 +49,20 @@ class AbstractCrawlerWidget : public ViewInterface {
     // Register this tab's view-level shortcuts (keyboard navigation, marks,
     // scratchpad send, color labels). Default no-op.
     virtual void registerShortcuts() {}
+
+    // Return the currently selected text from the active view (Edit -> Copy).
+    // Default empty.
+    virtual QString getSelectedText() const
+    {
+        return {};
+    }
+    // Select all text in the active view (Edit -> Select All). Default no-op.
+    virtual void selectAll() {}
+    // True if the active view has a partial (non-full-line) selection.
+    virtual bool isPartialSelection() const
+    {
+        return false;
+    }
 };
 
 #endif // ABSTRACTCRAWLERWIDGET_H

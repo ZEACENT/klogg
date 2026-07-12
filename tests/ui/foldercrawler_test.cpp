@@ -600,3 +600,35 @@ TEST_CASE( "FolderCrawlerWidget applyConfiguration re-applies view config on dem
     // callable and not throw (called by applyConfiguration and the ctor).
     REQUIRE_NOTHROW( widget.registerShortcuts() );
 }
+
+TEST_CASE( "FolderCrawlerWidget copy/selectAll delegate to the active view", "[folder]" )
+{
+    // FolderCrawlerWidget must override getSelectedText/selectAll/isPartialSelection
+    // (AbstractCrawlerWidget) so MainWindow::copy/selectAll work on folder tabs.
+    // Previously they gated on currentCrawlerWidget() (qobject_cast<CrawlerWidget*>,
+    // null for a folder tab) and the Edit-menu items were enabled but silent
+    // no-ops. Through the AbstractCrawlerWidget* dispatch base, copy/selectAll
+    // must reach the folder's active view.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* base = dynamic_cast<AbstractCrawlerWidget*>( &widget );
+    REQUIRE( base != nullptr );
+
+    // Drive the active (filtered) view: selectAll selects every visible line,
+    // getSelectedText then returns its text.
+    widget.filteredView()->setFocus();
+    REQUIRE_NOTHROW( base->selectAll() );
+    QTest::qWait( 50 );
+    const auto text = base->getSelectedText();
+    REQUIRE_FALSE( text.isEmpty() );
+    REQUIRE( text.contains( QStringLiteral( "ERROR" ) ) );
+    REQUIRE_NOTHROW( base->isPartialSelection() );
+}
