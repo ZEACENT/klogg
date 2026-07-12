@@ -47,6 +47,7 @@ class QuickFindPattern;
 class QSplitter;
 class QLabel;
 class QToolButton;
+class SavedSearches;
 class SearchToolbar;
 
 enum class DataStatus;
@@ -198,6 +199,10 @@ class FolderCrawlerWidget : public QWidget,
     // history); the toolbar guards that. Collapse/expand buttons live
     // alongside the toolbar in this widget's own layout.
     SearchToolbar* searchToolbar_ = nullptr;
+    // Session-wide search history (injected via doSetSavedSearches); folder
+    // searches are recorded into it so recent grep patterns appear in the
+    // dropdown. Null if the host never injects one.
+    SavedSearches* savedSearches_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QToolButton* collapseAllButton_ = nullptr;
     QToolButton* expandAllButton_ = nullptr;

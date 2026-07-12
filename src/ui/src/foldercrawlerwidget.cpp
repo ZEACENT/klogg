@@ -40,8 +40,10 @@
 #include "logdata.h"
 #include "logmainview.h"
 #include "overviewwidget.h"
+#include "predefinedfilterscombobox.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
+#include "savedsearches.h"
 #include "searchablelogdata.h"
 #include "searchtoolbar.h"
 
@@ -155,6 +157,15 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // toggles + Search/Stop buttons. Folder mode passes null SavedSearches
     // (no history). Collapse/expand + status label sit alongside it.
     searchToolbar_ = new SearchToolbar( this, nullptr );
+    // Folder search is a one-shot grep (no file watching) with no notion of
+    // predefined filters, favorites, keep-results, or auto-refresh -- hide
+    // those file-search-only controls so the toolbar is not littered with
+    // inert buttons. The toggles that matter for grep (case / regex / inverse
+    // / boolean) and the search-history dropdown stay.
+    searchToolbar_->searchRefreshButton()->hide();
+    searchToolbar_->predefinedFilters()->hide();
+    searchToolbar_->favoriteFilterButton()->hide();
+    searchToolbar_->keepSearchResultsButton()->hide();
     collapseAllButton_ = new QToolButton( this );
     collapseAllButton_->setText( tr( "Collapse all" ) );
     expandAllButton_ = new QToolButton( this );
@@ -215,6 +226,15 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
              &FolderCrawlerWidget::startSearch );
     connect( searchToolbar_, &SearchToolbar::stopRequested, this,
              &FolderCrawlerWidget::stopSearch );
+    connect( searchToolbar_, &SearchToolbar::optionsChanged, this, [ this ]() {
+        // An option that affects the search changed (case/regex/inverse/
+        // boolean); the existing result is stale until the user re-runs. Surface
+        // it so the toggle is not silently ignored (the search only re-runs on
+        // Enter / Search).
+        if ( statusLabel_ != nullptr ) {
+            statusLabel_->setText( tr( "Options changed - press Enter to re-run" ) );
+        }
+    } );
     connect( collapseAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::collapseAll );
     connect( expandAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::expandAll );
 
@@ -414,8 +434,19 @@ void FolderCrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPatter
     }
 }
 
-void FolderCrawlerWidget::doSetSavedSearches( SavedSearches* )
+void FolderCrawlerWidget::doSetSavedSearches( SavedSearches* saved_searches )
 {
+    // Wire the session-wide search history into the toolbar so the folder's
+    // recent grep patterns appear in the dropdown (and startSearch records into
+    // it). The toolbar was constructed with null SavedSearches (no history);
+    // setSearchHistory + setItems populate it post-construction.
+    savedSearches_ = saved_searches;
+    if ( searchToolbar_ != nullptr ) {
+        searchToolbar_->setSearchHistory( saved_searches );
+        if ( saved_searches != nullptr ) {
+            searchToolbar_->setItems( saved_searches->recentSearches() );
+        }
+    }
 }
 
 void FolderCrawlerWidget::doSetViewContext( const QString& view_context )
@@ -478,6 +509,12 @@ void FolderCrawlerWidget::startSearch()
     const auto pattern = searchToolbar_->currentSearchText();
     if ( pattern.isEmpty() ) {
         return;
+    }
+    // Record the search into the shared history (if injected) so the dropdown
+    // shows recent grep patterns -- parity with single-file search.
+    if ( savedSearches_ != nullptr ) {
+        savedSearches_->addRecent( pattern );
+        searchToolbar_->setItems( savedSearches_->recentSearches() );
     }
     searchToolbar_->setSearchInProgress( true );
     searchActive_ = true;

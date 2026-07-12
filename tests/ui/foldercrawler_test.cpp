@@ -26,6 +26,7 @@
 #include <catch2/catch.hpp>
 
 #include <QByteArray>
+#include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -49,6 +50,7 @@
 #include "quickfindmux.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
+#include "savedsearches.h"
 #include "searchtoolbar.h"
 #include "viewinterface.h"
 
@@ -704,4 +706,28 @@ TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folde
     // both an explicit MIB and the detected encoding.
     REQUIRE_NOTHROW( widget.setEncoding( 106 ) );          // UTF-8
     REQUIRE_NOTHROW( widget.setEncoding( std::nullopt ) ); // detected
+}
+
+TEST_CASE( "FolderCrawlerWidget records folder searches into the shared history", "[folder]" )
+{
+    // doSetSavedSearches must wire the session-wide SavedSearches into the
+    // toolbar, and startSearch must record the pattern into it -- parity with
+    // single-file search (recent grep patterns appear in the dropdown).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    SavedSearches ss;
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.setSavedSearches( &ss ); // doSetSavedSearches wires history
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // The pattern was recorded into the shared history AND surfaced in the
+    // toolbar dropdown.
+    REQUIRE( ss.recentSearches().contains( QStringLiteral( "ERROR" ) ) );
+    REQUIRE( widget.searchToolbar()->searchLineEdit()->findText( QStringLiteral( "ERROR" ) )
+             >= 0 );
 }
