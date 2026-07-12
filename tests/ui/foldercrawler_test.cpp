@@ -30,6 +30,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
@@ -48,6 +49,7 @@
 #include "logmainview.h"
 #include "overview.h"
 #include "overviewwidget.h"
+#include "predefinedfilters.h"
 #include "predefinedfilterscombobox.h"
 #include "quickfindmux.h"
 #include "quickfindpattern.h"
@@ -135,6 +137,30 @@ struct ConfigGuard {
         cfg.setSearchIgnoreCaseDefault( ignoreCase );
         cfg.setMainRegexpType( regexpType );
         cfg.setSearchLogicalCombiningDefault( logicalCombining );
+    }
+};
+
+// RAII save/restore of the shared PredefinedFiltersCollection (a Persistable ->
+// QSettings on disk). A failed REQUIRE throws, so the restore must run on stack
+// unwinding; otherwise a test filter leaks into the user's real settings. The
+// ctor also strips any leftover test filter from prior failed runs so this test
+// (and siblings) start from a clean slate.
+struct PredefinedFiltersGuard {
+    PredefinedFiltersCollection::Collection saved;
+    explicit PredefinedFiltersGuard( const QString& testName )
+    {
+        auto& c = PredefinedFiltersCollection::getSynced();
+        saved = c.getSyncedFilters();
+        saved.erase( std::remove_if( saved.begin(), saved.end(),
+                                     [ &testName ]( const PredefinedFilter& f ) {
+                                         return f.name == testName;
+                                     } ),
+                     saved.end() );
+        c.saveToStorage( saved ); // clean slate for construction
+    }
+    ~PredefinedFiltersGuard()
+    {
+        PredefinedFiltersCollection::getSynced().saveToStorage( saved );
     }
 };
 } // namespace
@@ -967,3 +993,131 @@ TEST_CASE( "FolderCrawlerWidget records folder searches into the shared history"
     REQUIRE( widget.searchToolbar()->searchLineEdit()->findText( QStringLiteral( "ERROR" ) )
              >= 0 );
 }
+
+TEST_CASE( "FolderCrawlerWidget announces the main-view line position when a result opens",
+           "[folder]" )
+{
+    // Opening a result must select + announce the match line (newSelection) so
+    // MainWindow's lineNumberHandler renders "Ln: x/y" immediately. Single-file
+    // tabs get this via signalMux::doSendAllStateSignals; the folder is not a
+    // mux document, so the announce must come from the open path itself.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    QSignalSpy spy( widget.mainView(), &LogMainView::newSelection );
+    widget.selectResultRow( 1_lnum ); // opens a.log at the match line (localLine 1)
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 ); // settle: setDataSource + announce run in the loadingFinished queue
+
+    REQUIRE( spy.count() >= 1 );
+    const auto first = spy.takeFirst();
+    REQUIRE( first.at( 0 ).value<LineNumber>() == 1_lnum );
+
+    // The line count needed to render "Ln:2/3" is exposed alongside.
+    const auto info = widget.currentMainViewInfo();
+    REQUIRE( info.has_value() );
+    REQUIRE( info->nbLines == 3 );
+}
+
+TEST_CASE( "FolderCrawlerWidget main view shows each opened file's detected encoding",
+           "[folder]" )
+{
+    // The auto-open path must sync the display codec to the detected encoding
+    // (parity with CrawlerWidget::updateEncoding). Without it a non-UTF-8 file is
+    // indexed with correct line positions but DISPLAYED decoded as UTF-8
+    // (mojibake) and the info line wrongly reports UTF-8.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // Pure-ASCII is detected as US-ASCII by uchardet; embed a multibyte UTF-8
+    // sequence (é = 0xC3 0xA9) so detection is unambiguously UTF-8 and the
+    // display codec mirrors it after applyDetectedEncoding.
+    const QString utf8 = writeFile( dir, "utf8.log", QByteArray( "ERROR \xc3\xa9 tag\n" ) );
+
+    // UTF-16LE with BOM: the indexer detects UTF-16LE; display must follow.
+    QByteArray utf16;
+    utf16.append( "\xff\xfe" ); // BOM
+    const QByteArray msg = "ERROR utf16\n";
+    for ( const char c : msg ) {
+        utf16.append( c );
+        utf16.append( '\0' );
+    }
+    const QString utf16File = writeFile( dir, "utf16.log", utf16 );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ utf8, utf16File } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Rows: [H0(utf8), D1(utf8 match), H2(utf16), D3(utf16 match)].
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == utf8; } ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainViewInfo()->encodingText.toLower().contains( "utf-8" ) );
+
+    widget.selectResultRow( 3_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == utf16File; } ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainViewInfo()->encodingText.toLower().contains( "utf-16" ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget clearHistoryRequested clears the shared search history",
+           "[folder]" )
+{
+    // The toolbar's clear-history action (context menu on the search line) must
+    // clear the shared SavedSearches like single-file. The signal is currently
+    // dropped in the folder ctor, so emitting it is a no-op (RED).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    SavedSearches ss;
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.setSavedSearches( &ss );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( ss.recentSearches().contains( QStringLiteral( "ERROR" ) ) );
+
+    Q_EMIT widget.searchToolbar()->clearHistoryRequested();
+    QTest::qWait( 50 );
+
+    REQUIRE( ss.recentSearches().isEmpty() );
+}
+
+TEST_CASE( "FolderCrawlerWidget applyConfiguration repopulates predefined filters",
+           "[folder]" )
+{
+    // applyConfiguration must re-sync the predefined-filters combo from the
+    // shared collection (parity with CrawlerWidget, crawlerwidget.cpp:866), so a
+    // filter saved after construction appears after optionsChanged. Currently
+    // the folder's applyConfiguration skips reloadPredefinedFilters (RED).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    // RAII: strips any leftover test filter and restores the user's real
+    // collection on scope exit (even if a REQUIRE throws). Must be constructed
+    // BEFORE the widget so the ctor's reloadPredefinedFilters reads a clean
+    // store.
+    const QString testName = QStringLiteral( "zzz_late_filter_test" );
+    PredefinedFiltersGuard guard{ testName };
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    REQUIRE( widget.searchToolbar()->predefinedFilters()->findText( testName ) < 0 );
+
+    PredefinedFiltersCollection::getSynced().saveToStorage(
+        { { testName, QStringLiteral( "WARN" ), false } } );
+
+    widget.applyConfiguration();
+    REQUIRE( widget.searchToolbar()->predefinedFilters()->findText( testName ) >= 0 );
+}
+

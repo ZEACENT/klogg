@@ -98,6 +98,12 @@ class FolderCrawlerWidget : public QWidget,
     Overview* overview() { return &overview_; }
     const Overview* overview() const { return &overview_; }
     QString currentMainFilePath() const { return currentMainFilePath_; }
+    // The last line announced for the file in the main view (the jump target on
+    // open). Lets MainWindow restore the "Ln: x/y" field when switching back to
+    // a folder tab that already has a file open (single-file tabs get this via
+    // the signalMux state broadcast; the folder is intentionally not a mux
+    // document, so the broadcast never fires for it).
+    LineNumber currentMainViewLine() const { return lastMainViewLine_; }
     // Search-toolbar status text (file count / match count / search state).
     // Exposed so tests can assert no file path leaks into the toolbar.
     QString statusText() const;
@@ -199,6 +205,17 @@ class FolderCrawlerWidget : public QWidget,
     void saveAsFavorite();
     void updatePredefinedFiltersWidget();
     void reloadPredefinedFilters() const;
+    // Search-history context-menu actions (parity with CrawlerWidget): the
+    // toolbar emits clearHistoryRequested / editHistoryRequested; the host owns
+    // the shared SavedSearches + dialogs.
+    void clearSearchHistory();
+    void editSearchHistory();
+    // Sync the main view's display codec to the indexer-detected encoding for
+    // the file currently in the main view (parity with
+    // CrawlerWidget::updateEncoding). Without it a non-UTF-8 file is indexed
+    // with correct line positions but displayed decoded as UTF-8 (mojibake) and
+    // the info line wrongly reports UTF-8.
+    void applyDetectedEncoding();
 
     QString folderPath_;
     QStringList filePaths_;
@@ -238,6 +255,9 @@ class FolderCrawlerWidget : public QWidget,
     std::shared_ptr<LogData> placeholderData_;
     std::shared_ptr<LogData> currentMainData_;
     QString currentMainFilePath_;
+    // The last line opened/announced in the main view (jump target). Tracked so
+    // MainWindow can restore "Ln: x/y" when switching back to this folder tab.
+    LineNumber lastMainViewLine_ = 0_lnum;
     // value: { data, iterator into mainViewCacheOrder_ }; order tracks access
     // recency (front = most-recently-used). std::list iterators stay valid on
     // splice/erase, so the map is never invalidated by reordering.

@@ -22,7 +22,9 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QInputDialog>
 #include <QMessageBox>
+#include <QStringListModel>
 #include <QTextCodec>
 #include <QFont>
 #include <QHBoxLayout>
@@ -267,6 +269,19 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // (+regex) to the toolbar so the next search uses it.
     connect( searchToolbar_, &SearchToolbar::saveFavoriteRequested, this,
              &FolderCrawlerWidget::saveAsFavorite );
+    // Predefined-filter dropdown selection: update the predefined-filters state
+    // only (must NOT toggle auto-refresh tracking). Mirrors
+    // crawlerwidget.cpp:1348-1349; without this the combo's currentIndex is not
+    // reset after a selection.
+    connect( searchToolbar_, &SearchToolbar::predefinedFilterActivated, this,
+             [ this ]( QString ) { updatePredefinedFiltersWidget(); } );
+    // Search-history context-menu actions: the host owns the shared
+    // SavedSearches + dialogs (parity with CrawlerWidget). Without these the
+    // toolbar's clear/edit-history actions are silent no-ops in folder mode.
+    connect( searchToolbar_, &SearchToolbar::clearHistoryRequested, this,
+             &FolderCrawlerWidget::clearSearchHistory );
+    connect( searchToolbar_, &SearchToolbar::editHistoryRequested, this,
+             &FolderCrawlerWidget::editSearchHistory );
     connect( searchToolbar_->predefinedFilters(), &PredefinedFiltersComboBox::filterChanged, this,
              [ this ]( const QList<PredefinedFilter>& filters ) {
                  if ( filters.isEmpty() ) {
@@ -523,6 +538,12 @@ void FolderCrawlerWidget::applyConfiguration()
     mainView_->updateFont( font );
     filteredView_->updateFont( font );
 
+    // Re-sync the predefined-filters combo from the shared collection, mirroring
+    // CrawlerWidget::applyConfiguration (crawlerwidget.cpp:866). A filter saved
+    // via another tab (or the options dialog) must appear here on the next
+    // optionsChanged broadcast without restarting klogg.
+    reloadPredefinedFilters();
+
     registerShortcuts();
 }
 
@@ -602,6 +623,67 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
     currentMainData_->setDisplayEncoding( codec->name() );
     mainView_->forceRefresh();
     Q_EMIT mainViewFileChanged();
+}
+
+void FolderCrawlerWidget::applyDetectedEncoding()
+{
+    // Mirror CrawlerWidget::updateEncoding (crawlerwidget.cpp:1873) for the
+    // auto-open path: bridge the indexer-detected encoding
+    // (IndexingData::encodingGuess_, exposed via getDetectedEncoding) into the
+    // display decoder (LogData::codec_). Without this bridge a non-UTF-8 file is
+    // indexed with correct line positions but displayed decoded as UTF-8
+    // (mojibake) and the info line reports the wrong codec. doSetDisplayEncoding
+    // short-circuits (no re-index) when the display codec already equals the
+    // detected guess, so this is a no-op for UTF-8 files.
+    if ( currentMainData_ == nullptr || currentMainData_ == placeholderData_ ) {
+        return;
+    }
+    auto* codec = currentMainData_->getDetectedEncoding();
+    if ( codec == nullptr ) {
+        codec = QTextCodec::codecForName( "UTF-8" );
+    }
+    currentMainData_->setDisplayEncoding( codec->name() );
+}
+
+void FolderCrawlerWidget::clearSearchHistory()
+{
+    // Mirrors CrawlerWidget::clearSearchHistory (crawlerwidget.cpp:478).
+    searchToolbar_->searchLineEdit()->clear();
+    if ( savedSearches_ != nullptr ) {
+        auto& searches = SavedSearches::getSynced();
+        savedSearches_->clear();
+        searches.save();
+    }
+    searchToolbar_->setItems( {} );
+}
+
+void FolderCrawlerWidget::editSearchHistory()
+{
+    // Mirrors CrawlerWidget::editSearchHistory (crawlerwidget.cpp:492). The host
+    // owns the shared SavedSearches; the toolbar owns the dropdown model.
+    if ( savedSearches_ == nullptr ) {
+        return;
+    }
+    auto& searches = SavedSearches::getSynced();
+
+    const auto history = savedSearches_->recentSearches().join( QChar::LineFeed );
+    bool ok = false;
+    const auto newHistory = QInputDialog::getMultiLineText( this, tr( "klogg" ),
+                                                            tr( "Search history:" ), history, &ok );
+
+    if ( ok ) {
+        savedSearches_->clear();
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
+        const auto items = newHistory.split( QChar::LineFeed, Qt::SkipEmptyParts );
+#else
+        const auto items = newHistory.split( QChar::LineFeed, QString::SkipEmptyParts );
+#endif
+        std::for_each( items.rbegin(), items.rend(), [ this ]( const auto& item ) {
+            savedSearches_->addRecent( item );
+        } );
+    }
+    searches.save();
+    searchToolbar_->setItems( savedSearches_->recentSearches() );
 }
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )
@@ -861,7 +943,11 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
 
     // Already showing this file -> just jump.
     if ( filePath == currentMainFilePath_ && currentMainData_ != nullptr ) {
-        mainView_->jumpToLine( localLine );
+        lastMainViewLine_ = localLine;
+        // select+announce (not just scroll) so the Ln: field and the selection
+        // highlight track the clicked result -- parity with single-file, whose
+        // main view selects the line a filtered-view click jumps to.
+        mainView_->selectAndDisplayLine( localLine );
         return;
     }
 
@@ -873,12 +959,15 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                                     it->second.second );
         currentMainData_ = it->second.first;
         currentMainFilePath_ = filePath;
+        lastMainViewLine_ = localLine;
         mainView_->setDataSource( currentMainData_.get() );
         // Re-apply the current search pattern so the swapped-in (cached) file
         // highlights its matches at first paint (idempotent: setDataSource does
         // not reset searchPattern_, this is the explicit parity guarantee).
         mainView_->setSearchPattern( currentSearchPattern_ );
-        mainView_->jumpToLine( localLine );
+        // A cached file already had its display codec synced on first load, so
+        // no applyDetectedEncoding() here.
+        mainView_->selectAndDisplayLine( localLine );
         refreshFileOverview( filePath );
         Q_EMIT mainViewFileChanged();
         return;
@@ -896,7 +985,16 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  }
                  currentMainData_ = pendingMainData_;
                  currentMainFilePath_ = pendingMainFilePath_;
+                 lastMainViewLine_ = pendingJumpLine_;
                  cacheMainViewData( currentMainFilePath_, currentMainData_ );
+
+                 // Sync the display codec to the indexer-detected encoding
+                 // BEFORE setDataSource renders, so a non-UTF-8 file decodes
+                 // correctly at first paint and the info line reports the right
+                 // encoding (parity with CrawlerWidget::updateEncoding, which
+                 // single-file calls from its own loadingFinished). Idempotent
+                 // for UTF-8 (detected == default codec -> no reload).
+                 applyDetectedEncoding();
 
                  mainView_->setDataSource( currentMainData_.get() );
                  // Re-apply the current search pattern so the freshly-indexed
@@ -904,7 +1002,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  // thread (loadingFinished is a queued signal), so threading is
                  // correct.
                  mainView_->setSearchPattern( currentSearchPattern_ );
-                 mainView_->jumpToLine( pendingJumpLine_ );
+                 mainView_->selectAndDisplayLine( pendingJumpLine_ );
                  // getNbLine() is only valid now that indexing finished: the
                  // overview repoint MUST happen here, not at attachFile time.
                  refreshFileOverview( pendingMainFilePath_ );

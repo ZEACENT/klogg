@@ -170,6 +170,12 @@ class MainWindow : public QMainWindow {
     void lineNumberHandler( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                             LineLength nSymbols );
     void refreshLineNumberField();
+    // Routes a folder main view's newSelection to lineNumberHandler, but only
+    // when a folder tab is current (a backgrounded folder's selection must not
+    // overwrite the current tab's status bar). A real slot (not a lambda) so the
+    // Qt::UniqueConnection in currentTabChanged can dedupe across tab switches.
+    void onFolderMainViewNewSelection( LineNumber startLine, LinesCount nLines,
+                                       LineColumn startCol, LineLength nSymbols );
 
     // Instructs the widget to update the loading progress gauge
     void updateLoadingProgress( int progress );

@@ -1930,6 +1930,19 @@ void MainWindow::refreshLineNumberField()
     lineNumberHandler( lastStartLine_, lastNLines_, lastStartCol_, lastNSymbols_ );
 }
 
+void MainWindow::onFolderMainViewNewSelection( LineNumber startLine, LinesCount nLines,
+                                               LineColumn startCol, LineLength nSymbols )
+{
+    // The folder main view's newSelection is wired per-folder-widget in
+    // currentTabChanged with Qt::UniqueConnection. Only act when a folder tab is
+    // current so a backgrounded folder's selection never overwrites the status
+    // bar of the active (e.g. single-file) tab. File tabs get the same broadcast
+    // via signalMux; the folder is intentionally not a mux document.
+    if ( currentCrawlerWidget() == nullptr ) {
+        lineNumberHandler( startLine, nLines, startCol, nSymbols );
+    }
+}
+
 void MainWindow::updateLoadingProgress( int progress )
 {
     LOG_DEBUG << "Loading progress: " << progress;
@@ -2214,15 +2227,11 @@ void MainWindow::currentTabChanged( int index )
                 connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
                          &MainWindow::updateInfoLine, Qt::UniqueConnection );
                 // Forward the folder main view's Ln:col selection to the status
-                // bar (file tabs get this via signalMux). Guarded so a non-folder
-                // tab's selection is never overwritten by a backgrounded folder.
+                // bar (file tabs get this via signalMux). A real slot (not a
+                // lambda) so Qt::UniqueConnection can dedupe across tab switches
+                // (lambda+UniqueConnection warns and accumulates duplicates).
                 connect( folder_widget->mainView(), &AbstractLogView::newSelection, this,
-                         [ this ]( LineNumber s, LinesCount n, LineColumn c, LineLength l ) {
-                             if ( currentCrawlerWidget() == nullptr ) {
-                                 lineNumberHandler( s, n, c, l );
-                             }
-                         },
-                         Qt::UniqueConnection );
+                         &MainWindow::onFolderMainViewNewSelection, Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.
@@ -2249,7 +2258,17 @@ void MainWindow::currentTabChanged( int index )
             // currently in the main view (path/size/date/encoding), or the
             // folder path when no file is open.
             updateInfoLine();
-            lineNbField->clear();
+            // Restore "Ln: x/y" for the file already in the folder main view.
+            // Single-file tabs get this from signalMux's state broadcast; the
+            // folder is intentionally not a mux document, so re-derive the
+            // field from the widget's last announced line. Clear when no file.
+            if ( folder_widget != nullptr && folder_widget->currentMainViewInfo().has_value() ) {
+                lineNumberHandler( folder_widget->currentMainViewLine(), LinesCount( 1 ),
+                                   LineColumn( 0 ), LineLength( 0 ) );
+            }
+            else {
+                lineNbField->clear();
+            }
 
             // Folder view supports select/copy.
             editMenu->setEnabled( true );
