@@ -45,7 +45,14 @@ std::vector<QString> enumerateFolderFiles( const QString& folder,
     collected.reserve( 64 );
     QDirIterator iterator( folder, filters, QDirIterator::Subdirectories );
     while ( iterator.hasNext() ) {
-        collected << iterator.next();
+        const QString path = iterator.next();
+        // QDir::NoSymLinks is best-effort and is not honoured consistently on
+        // Windows; skip symlinks explicitly so enumeration never follows a link
+        // when the caller did not ask to.
+        if ( !options.followSymlinks && QFileInfo( path ).isSymLink() ) {
+            continue;
+        }
+        collected << path;
     }
 
     return sortedMergeFilePaths( collected );

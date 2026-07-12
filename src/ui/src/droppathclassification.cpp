@@ -48,5 +48,13 @@ DroppedPathClassification classifyLocalPaths( const QStringList& localPaths )
 
 bool isDirectoryPath( const QString& path )
 {
-    return QFileInfo( path ).isDir();
+    const QFileInfo info( path );
+    if ( info.isDir() ) {
+        return true;
+    }
+    // QFileInfo::isDir() does not resolve a symlink-to-directory on every
+    // platform (notably Windows); resolve the symlink explicitly so a link to a
+    // directory is still classified as a directory.
+    const QString canonical = info.canonicalFilePath();
+    return !canonical.isEmpty() && QFileInfo( canonical ).isDir();
 }

@@ -94,9 +94,14 @@ TEST_CASE( "enumerateFolderFiles does not follow symlinks by default", "[folder]
     REQUIRE( dir.isValid() );
     const QDir root( dir.path() );
     writeFile( root.absoluteFilePath( "real.log" ) );
-    // link.log -> real.log
-    REQUIRE( QFile::link( root.absoluteFilePath( "real.log" ),
-                          root.absoluteFilePath( "link.log" ) ) );
+    // link.log -> real.log. Symlink creation needs privilege on some platforms
+    // (notably Windows without developer mode); skip cleanly when unsupported.
+    if ( !QFile::link( root.absoluteFilePath( "real.log" ),
+                       root.absoluteFilePath( "link.log" ) )
+         || !QFileInfo( root.absoluteFilePath( "link.log" ) ).isSymLink() ) {
+        INFO( "symlink creation not permitted in this environment; skipping" );
+        return;
+    }
 
     const auto files = enumerateFolderFiles( dir.path() );
     REQUIRE( files.size() == 1 );
