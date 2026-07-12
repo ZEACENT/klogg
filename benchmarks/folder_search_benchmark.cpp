@@ -126,6 +126,12 @@ int main( int argc, char* argv[] )
     const qint64 matchEvery = valueOf( "--match-every", "1000" ).toLongLong();
     const bool vsGrep = hasFlag( "--vs-grep" );
 
+    if ( files <= 0 || linesPerFile <= 0 || iterations <= 0 || matchEvery <= 0 ) {
+        std::fprintf( stderr,
+                      "--files, --lines-per-file, --iterations, and --match-every must be positive\n" );
+        return 1;
+    }
+
     // --- fixture ---
     const QString root = QDir( tmpDir ).filePath( "klogg_folder_bench" );
     QDir( root ).removeRecursively();
@@ -139,7 +145,11 @@ int main( int argc, char* argv[] )
         totalBytes += writeFixtureFile( path, linesPerFile, pattern, matchEvery );
         filePaths.push_back( path );
     }
-    const quint64 expectedMatches = static_cast<quint64>( files ) * static_cast<quint64>( linesPerFile / matchEvery );
+    // The fixture embeds the pattern on line 0 and every matchEvery-th line
+    // thereafter, so each file has floor((lines-1)/matchEvery)+1 matches (the
+    // naive lines/matchEvery undercounts when the division has a remainder).
+    const quint64 matchesPerFile = static_cast<quint64>( ( linesPerFile - 1 ) / matchEvery ) + 1;
+    const quint64 expectedMatches = static_cast<quint64>( files ) * matchesPerFile;
     const double totalMiB = static_cast<double>( totalBytes ) / ( 1024.0 * 1024.0 );
 
     QTextStream out( stdout );
@@ -179,7 +189,7 @@ int main( int argc, char* argv[] )
             t.start();
             QProcess proc;
             proc.setWorkingDirectory( root );
-            proc.start( "grep", QStringList{ "-EIrn", pattern, "." } );
+            proc.start( "grep", QStringList{ "-EIrn", "--", pattern, "." } );
             if ( !proc.waitForFinished( 10 * 60 * 1000 ) ) {
                 out << "grep timed out\n";
                 return 2;

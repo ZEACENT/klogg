@@ -327,9 +327,10 @@ class FolderCrawlerWidget : public QWidget,
     LineNumber lastMainViewLine_ = 0_lnum;
     // value: { data, iterator into mainViewCacheOrder_ }; order tracks access
     // recency (front = most-recently-used). std::list iterators stay valid on
-    // splice/erase, so the map is never invalidated by reordering.
-    std::unordered_map<QString,
-                       std::pair<std::shared_ptr<LogData>, std::list<QString>::iterator>>
+    // splice/erase, so the map is never invalidated by reordering. QHash (not
+    // std::unordered_map) so it works on Qt 5, which does not provide
+    // std::hash<QString>.
+    QHash<QString, std::pair<std::shared_ptr<LogData>, std::list<QString>::iterator>>
         mainViewCache_;
     std::list<QString> mainViewCacheOrder_;
     static constexpr size_t MainViewCacheLimit = 8;

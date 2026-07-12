@@ -354,6 +354,15 @@ void FolderSearchResults::rebuildVisibleRows()
     maxLength_ = 0_length;
     maxLocalLine_ = 0_lnum;
 
+    // maxLocalLine_ sizes the line-number gutter; it must cover ALL records
+    // (independent of collapse/visibility) so the gutter is wide enough when a
+    // collapsed group is later expanded.
+    for ( const auto& group : groups_ ) {
+        for ( const auto& rec : group.matches ) {
+            maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
+        }
+    }
+
     const bool marksOnly = ( visibility_ == Visibility::Marks );
 
     for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups_.size() ); ++fid ) {

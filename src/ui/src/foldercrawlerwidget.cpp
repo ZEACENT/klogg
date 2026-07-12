@@ -1331,8 +1331,8 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     const auto it = mainViewCache_.find( filePath );
     if ( it != mainViewCache_.end() ) {
         mainViewCacheOrder_.splice( mainViewCacheOrder_.begin(), mainViewCacheOrder_,
-                                    it->second.second );
-        currentMainData_ = it->second.first;
+                                    it.value().second );
+        currentMainData_ = it.value().first;
         currentMainFilePath_ = filePath;
         lastMainViewLine_ = localLine;
         mainView_->setDataSource( currentMainData_.get() );
@@ -1415,15 +1415,15 @@ void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::share
     // drop its prior order entry first so we do not leak stale list nodes.
     const auto existing = mainViewCache_.find( filePath );
     if ( existing != mainViewCache_.end() ) {
-        mainViewCacheOrder_.erase( existing->second.second );
+        mainViewCacheOrder_.erase( existing.value().second );
     }
     mainViewCacheOrder_.push_front( filePath );
     mainViewCache_[ filePath ] = { std::move( logData ), mainViewCacheOrder_.begin() };
 
     // Evict least-recently-used entries (back of the order list) to bound memory.
-    while ( mainViewCache_.size() > MainViewCacheLimit ) {
+    while ( mainViewCache_.size() > static_cast<qsizetype>( MainViewCacheLimit ) ) {
         const auto lru = mainViewCacheOrder_.back();
-        mainViewCache_.erase( lru );
+        mainViewCache_.remove( lru );
         mainViewCacheOrder_.pop_back();
     }
 }
