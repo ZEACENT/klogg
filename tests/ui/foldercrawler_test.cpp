@@ -311,8 +311,9 @@ TEST_CASE( "FolderCrawlerWidget search toolbar shares the results pane (sits bet
     // The toolbar lives in the SAME pane as the results view (the composite
     // "bottom window"), in a DIFFERENT pane from the main view -> it renders
     // between the two views, matching single-file tabs (whose toolbar row sits
-    // above the filtered view, inside the splitter's bottom pane).
-    REQUIRE( widget.searchToolbar()->parentWidget() == widget.filteredView()->parentWidget() );
+    // above the results, inside the splitter's bottom pane). The results live in
+    // a QTabWidget (resultsTabs) that shares the toolbar's bottom pane.
+    REQUIRE( widget.searchToolbar()->parentWidget() == widget.resultsTabs()->parentWidget() );
     REQUIRE( widget.mainView()->parentWidget() != widget.searchToolbar()->parentWidget() );
 }
 
@@ -437,9 +438,11 @@ TEST_CASE( "FolderCrawlerWidget exposes predefined filters and favorites in the 
 
     REQUIRE_FALSE( widget.searchToolbar()->predefinedFilters()->isHidden() );
     REQUIRE_FALSE( widget.searchToolbar()->favoriteFilterButton()->isHidden() );
-    // Auto-refresh + keep-results are file-search-only and stay hidden.
+    // Auto-refresh is file-search-only (folder search has no file watching) and
+    // stays hidden; keep-results is now VISIBLE (folder search supports keeping
+    // results across searches in separate tabs).
     REQUIRE( widget.searchToolbar()->searchRefreshButton()->isHidden() );
-    REQUIRE( widget.searchToolbar()->keepSearchResultsButton()->isHidden() );
+    REQUIRE_FALSE( widget.searchToolbar()->keepSearchResultsButton()->isHidden() );
 }
 
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
@@ -1319,4 +1322,49 @@ TEST_CASE( "FolderCrawlerWidget -A search emits context rows that render plain",
     const auto ctx = widget.folderResults()->sourceForLine( 2_lnum );
     REQUIRE( ctx.filePath == a );
     REQUIRE( ctx.localLine == 2_lnum );
+}
+
+TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new search",
+           "[folder][keep]" )
+{
+    // Toggling Keep + running a new search snapshots the current pane (it becomes
+    // a frozen tab) and starts the new search in a fresh pane. Mirrors
+    // CrawlerWidget::startNewSearch.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "foo line\nbar line\nfoo again\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    REQUIRE( widget.paneCount() == 1 );
+
+    // First search: "foo" -> 2 matches in pane 0.
+    widget.searchFor( "foo" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.paneCount() == 1 );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // header + 2 matches
+
+    // Keep + search "bar" -> pane 0 frozen (foo), pane 1 active (bar).
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "bar" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 2 );
+
+    // The active pane holds the bar match.
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // header + 1 match
+
+    // The frozen pane (tab 0) retains the foo matches.
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+    // Keep auto-resets after each search, so a plain follow-up overwrites the
+    // active pane (no new tab).
+    widget.resultsTabs()->setCurrentIndex( 1 );
+    QTest::qWait( 100 );
+    widget.searchFor( "foo" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
 }

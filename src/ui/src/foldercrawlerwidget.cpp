@@ -34,6 +34,7 @@
 #include <QLabel>
 #include <QSplitter>
 #include <QToolButton>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -154,12 +155,16 @@ class FolderCrawlerContext : public ViewContextInterface {
     QList<int> sizes_;
 };
 
+// Defined out-of-line so the unique_ptr<FolderFilteredMarkProvider> member
+// (incomplete in the header) destroys where the provider type is complete.
+FolderCrawlerWidget::ResultPane::ResultPane() = default;
+FolderCrawlerWidget::ResultPane::~ResultPane() = default;
+
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
 {
     placeholderData_ = std::make_shared<LogData>();
     currentMainData_ = placeholderData_;
-    folderResults_ = std::make_shared<FolderSearchResults>();
     quickFindPattern_ = std::make_shared<QuickFindPattern>();
     engine_ = new FolderSearchEngine( this ); // QObject-owned
 
@@ -174,7 +179,8 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // inert buttons. The toggles that matter for grep (case / regex / inverse
     // / boolean) and the search-history dropdown stay.
     searchToolbar_->searchRefreshButton()->hide();
-    searchToolbar_->keepSearchResultsButton()->hide();
+    // keepSearchResultsButton stays VISIBLE: folder search supports Keep results
+    // (snapshot the current pane, start the next search in a new tab).
     // Predefined filters + favorites are shared global pattern stores; they
     // apply to folder search the same way as single-file (wired below).
     collapseAllButton_ = new QToolButton( this );
@@ -242,40 +248,29 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     mainViewMarkProvider_.marks = &folderMarks_;
     mainViewMarkProvider_.currentFile = &currentMainFilePath_;
     mainView_->setMarkProvider( &mainViewMarkProvider_ );
-    // The filtered (results) view shares the same per-file mark store; its
-    // provider resolves a result row to (file, localLine) via the results
-    // model. folderResults_ is created once (above) and mutated in place, so
-    // the raw pointer is stable for the widget's lifetime.
-    folderFilteredMarkProvider_.marks = &folderMarks_;
-    folderFilteredMarkProvider_.results = folderResults_.get();
-    // The Marks visibility filter on FolderSearchResults consults this query
-    // (filePath, localLine) -> marked, reading the shared per-file store live.
-    folderResults_->setMarkedLineQuery( [ this ]( const QString& file, LineNumber line ) {
-        const auto it = folderMarks_.find( file );
-        return it != folderMarks_.end() && it->count( line.get() ) > 0;
-    } );
-    filteredView_
-        = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
-    filteredView_->setMarkProvider( &folderFilteredMarkProvider_ );
 
-    // Seed view config + search toggles from Configuration, mirroring CrawlerWidget
-    // (crawlerwidget.cpp:842,852 for line numbers; :1311-1314 for search toggles).
-    // Set BEFORE the toolbar signal connections below so the toolbar's internal
-    // completer/setup runs cleanly with no folder-side handler attached yet
-    // (same ordering rationale as CrawlerWidget). Without this, the filtered
-    // view's default line-numbers-ON never took effect (AbstractLogView defaults
-    // lineNumbersVisible_ to false) and every fresh folder tab opened with all
-    // toggles unchecked regardless of the global search defaults.
+    // Seed view config + search toggles from Configuration, mirroring CrawlerWidget.
     const auto& config = Configuration::get();
     mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
-    filteredView_->setLineNumbersVisible( config.filteredLineNumbersVisible() );
     searchToolbar_->setAutoRefresh( config.isSearchAutoRefreshDefault() );
     searchToolbar_->setMatchCase( !config.isSearchIgnoreCaseDefault() );
     searchToolbar_->setUseRegexp( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
     searchToolbar_->setBoolean( config.isSearchLogicalCombiningDefault() );
 
+    // Results are shown in a tabbed set of panes (Keep results in a new window).
+    // Each pane owns its own FolderSearchResults + FolderFilteredView + mark
+    // provider; the main view is shared. createPane wires per-pane signals.
+    resultsTabs_ = new QTabWidget( this );
+    resultsTabs_->setDocumentMode( true );
+    resultsTabs_->setTabsClosable( true );
+    resultsTabs_->setTabBarAutoHide( true );
+    connect( resultsTabs_, &QTabWidget::currentChanged, this,
+             &FolderCrawlerWidget::onActivePaneChanged );
+    connect( resultsTabs_, &QTabWidget::tabCloseRequested, this,
+             &FolderCrawlerWidget::onClosePane );
+
     // Composite "bottom window" mirroring CrawlerWidget: pane 1 is the main
-    // view, pane 2 packs the search-toolbar row above the results view, so the
+    // view, pane 2 packs the search-toolbar row above the results tabs, so the
     // toolbar renders BETWEEN the two views (as in single-file tabs) rather than
     // pinned above the splitter. bottomWindow->setLayout reparents the toolbar
     // widgets into the bottom pane, exactly like CrawlerWidget.
@@ -284,7 +279,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     auto* bottomLayout = new QVBoxLayout;
     bottomLayout->setContentsMargins( 2, 2, 2, 2 );
     bottomLayout->addLayout( toolbar );
-    bottomLayout->addWidget( filteredView_ );
+    bottomLayout->addWidget( resultsTabs_ );
     bottomWindow->setLayout( bottomLayout );
 
     splitter_ = new QSplitter( Qt::Vertical, this );
@@ -292,6 +287,14 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     splitter_->addWidget( bottomWindow );
     splitter_->setStretchFactor( 0, 3 );
     splitter_->setStretchFactor( 1, 2 );
+
+    // Seed the first pane AFTER resultsTabs_ is laid out + mainView_ exists.
+    // Block currentChanged so the seed addTab does not fire onActivePaneChanged
+    // while panes_ is empty.
+    {
+        QSignalBlocker blocker( resultsTabs_ );
+        createPane( QString() );
+    }
 
     auto* root = new QVBoxLayout( this );
     root->addWidget( splitter_, 1 );
@@ -359,46 +362,29 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     connect( engine_, &FolderSearchEngine::fileGroupReady, this,
              &FolderCrawlerWidget::onFileGroupReady );
 
-    connect( filteredView_, &FolderFilteredView::newSelection, this,
-             &FolderCrawlerWidget::onResultSelected );
-    connect( filteredView_, &FolderFilteredView::headerClicked, this,
-             &FolderCrawlerWidget::onHeaderClicked );
-
-    // Mark toggles from the RESULTS view (M shortcut / left-margin click on a
-    // result row): resolve each row to (file, localLine) via the results model
-    // and update the shared per-file store, then refresh so the bullet
-    // re-renders. This was the dead-signal bug -- filteredView_->markLines was
-    // never connected, so M did nothing in the results view.
-    connect( filteredView_, &AbstractLogView::markLines, this,
-             &FolderCrawlerWidget::onFilteredViewMarkLines );
-    connect( filteredView_, &AbstractLogView::deleteMarkLines, this,
-             &FolderCrawlerWidget::onFilteredViewDeleteMarkLines );
+    // Per-pane view/result connections (newSelection/headerClicked/markLines/
+    // deleteMarkLines + the pane's own results::layoutChanged) are wired in
+    // createPane, so every pane -- including Keep-results snapshots -- is
+    // self-contained.
 
     // Mark toggles from the main view (M shortcut / left-margin click): record
-    // the line against the file currently shown, then refresh so the bullet
-    // appears/disappears. Folder mode has no LogFilteredData, so the widget owns
-    // the per-file mark store itself.
+    // the line against the file currently shown, then fan out a refresh to every
+    // pane (marks live in the shared per-file store, so a main-view mark must
+    // repaint in all result panes, frozen ones too).
     connect( mainView_, &AbstractLogView::markLines, this,
              [ this ]( const klogg::vector<LineNumber>& lines ) {
                  for ( const auto& l : lines ) {
                      addMark( currentMainFilePath_, l );
                  }
-                 mainView_->forceRefresh();
+                 refreshAllPanesForMarks();
              } );
     connect( mainView_, &AbstractLogView::deleteMarkLines, this,
              [ this ]( const klogg::vector<LineNumber>& lines ) {
                  for ( const auto& l : lines ) {
                      removeMark( currentMainFilePath_, l );
                  }
-                 mainView_->forceRefresh();
+                 refreshAllPanesForMarks();
              } );
-
-    connect( folderResults_.get(), &FolderSearchResults::layoutChanged, this, [ this ]() {
-        if ( filteredView_ != nullptr ) {
-            filteredView_->updateData();
-            filteredView_->forceRefresh();
-        }
-    } );
 
     // Apply Configuration (font, line numbers, overview, view shortcuts) now
     // that both views + the toolbar exist. Also re-applied on every
@@ -467,43 +453,44 @@ void FolderCrawlerWidget::removeMark( const QString& file, LineNumber line )
 void FolderCrawlerWidget::onFilteredViewMarkLines( const klogg::vector<LineNumber>& rows )
 {
     // Each row is a result-view line; resolve it to (file, localLine) and mark
-    // it in the shared per-file store. Skip headers (no source line).
-    if ( folderResults_ == nullptr ) {
+    // it in the shared per-file store. Skip headers (no source line). Only the
+    // active/visible tab can be clicked, so activeResults() is the right model.
+    auto* results = activeResults();
+    if ( results == nullptr ) {
         return;
     }
     bool changed = false;
     for ( const auto& row : rows ) {
-        if ( folderResults_->lineKind( row ) != LineKind::Data ) {
+        if ( results->lineKind( row ) != LineKind::Data ) {
             continue;
         }
-        const auto src = folderResults_->sourceForLine( row );
+        const auto src = results->sourceForLine( row );
         addMark( src.filePath, src.localLine );
         changed = true;
     }
     if ( changed ) {
-        filteredView_->forceRefresh();
-        // Under the Marks visibility filter the visible set depends on marks.
-        folderResults_->refreshForMarksChange();
+        // Marks are shared: refresh every pane (frozen ones too).
+        refreshAllPanesForMarks();
     }
 }
 
 void FolderCrawlerWidget::onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows )
 {
-    if ( folderResults_ == nullptr ) {
+    auto* results = activeResults();
+    if ( results == nullptr ) {
         return;
     }
     bool changed = false;
     for ( const auto& row : rows ) {
-        if ( folderResults_->lineKind( row ) != LineKind::Data ) {
+        if ( results->lineKind( row ) != LineKind::Data ) {
             continue;
         }
-        const auto src = folderResults_->sourceForLine( row );
+        const auto src = results->sourceForLine( row );
         removeMark( src.filePath, src.localLine );
         changed = true;
     }
     if ( changed ) {
-        filteredView_->forceRefresh();
-        folderResults_->refreshForMarksChange();
+        refreshAllPanesForMarks();
     }
 }
 
@@ -511,7 +498,8 @@ void FolderCrawlerWidget::changeFilteredViewVisibility( int index )
 {
     // visibilityBox_ index order: 0 = Marks and matches, 1 = Marks, 2 = Matches.
     using V = FolderSearchResults::Visibility;
-    if ( folderResults_ == nullptr ) {
+    auto* results = activeResults();
+    if ( results == nullptr ) {
         return;
     }
     const auto v = [ index ]() -> V {
@@ -524,7 +512,7 @@ void FolderCrawlerWidget::changeFilteredViewVisibility( int index )
                 return V::MarksAndMatches;
         }
     }();
-    folderResults_->setVisibility( v ); // emits layoutChanged -> view refreshes
+    results->setVisibility( v ); // emits layoutChanged -> active view refreshes
 }
 
 void FolderCrawlerWidget::updateContextFromControls()
@@ -568,7 +556,7 @@ void FolderCrawlerWidget::onContextControlsChanged()
 
 void FolderCrawlerWidget::setResultsVisibility( FolderSearchResults::Visibility visibility )
 {
-    if ( visibilityBox_ == nullptr || folderResults_ == nullptr ) {
+    if ( visibilityBox_ == nullptr || activeResults() == nullptr ) {
         return;
     }
     using V = FolderSearchResults::Visibility;
@@ -576,8 +564,146 @@ void FolderCrawlerWidget::setResultsVisibility( FolderSearchResults::Visibility 
     // setCurrentIndex fires changeFilteredViewVisibility when it changes; set
     // the model directly too so it holds even if the index was already current.
     visibilityBox_->setCurrentIndex( index );
-    if ( folderResults_->visibility() != visibility ) {
-        folderResults_->setVisibility( visibility );
+    if ( activeResults()->visibility() != visibility ) {
+        activeResults()->setVisibility( visibility );
+    }
+}
+
+void FolderCrawlerWidget::refreshAllPanesForMarks()
+{
+    // Marks live in the shared folderMarks_ store; every pane's mark query +
+    // mark provider read it live, so a mark change must repaint/rebuild ALL
+    // panes (frozen ones too), not just the active one. refreshForMarksChange is
+    // a no-op except under the Marks visibility filter (where it rebuilds the
+    // visible row set); forceRefresh always repaints the (possibly changed)
+    // bullets.
+    for ( auto& pane : panes_ ) {
+        if ( pane == nullptr ) {
+            continue;
+        }
+        if ( pane->results != nullptr ) {
+            pane->results->refreshForMarksChange();
+        }
+        if ( pane->view != nullptr ) {
+            pane->view->forceRefresh();
+        }
+    }
+    if ( mainView_ != nullptr ) {
+        mainView_->forceRefresh();
+    }
+}
+
+FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString& title )
+{
+    // Build a self-contained pane: its own FolderSearchResults +
+    // FolderFilteredView + FolderFilteredMarkProvider (pointing at this pane's
+    // results + the shared folderMarks_), wired with the same connections the
+    // single pane used to get in the ctor. Parenting the view to resultsTabs_
+    // lets QTabWidget reparent it into its stack on addTab.
+    auto pane = std::make_unique<ResultPane>();
+    pane->results = std::make_shared<FolderSearchResults>();
+    pane->title = title;
+    auto* const view = new FolderFilteredView( pane->results.get(), quickFindPattern_.get(),
+                                               resultsTabs_ );
+    pane->view = view;
+
+    pane->markProvider = std::make_unique<FolderFilteredMarkProvider>();
+    pane->markProvider->marks = &folderMarks_;
+    pane->markProvider->results = pane->results.get();
+    view->setMarkProvider( pane->markProvider.get() );
+
+    // The Marks visibility filter consults this query (filePath, localLine) ->
+    // marked, reading the shared per-file store live (same lambda every pane
+    // uses; it captures this, valid for the widget's lifetime).
+    pane->results->setMarkedLineQuery( [ this ]( const QString& file, LineNumber line ) {
+        const auto it = folderMarks_.find( file );
+        return it != folderMarks_.end() && it->count( line.get() ) > 0;
+    } );
+
+    // Seed config so a pane created mid-session (Keep) matches the others.
+    const auto& config = Configuration::get();
+    view->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+    QFont font = config.mainFont();
+    font.setKerning( false );
+    font.setFixedPitch( true );
+    if ( config.forceFontAntialiasing() ) {
+        font.setStyleStrategy( QFont::PreferAntialias );
+    }
+    font.setBold( config.useBoldFont() );
+    view->updateFont( font );
+    view->registerShortcuts();
+    if ( quickFindPattern_ != nullptr ) {
+        view->setQuickFindPattern( quickFindPattern_.get() );
+    }
+    view->setSearchPattern( currentSearchPattern_ );
+
+    // Per-pane signal wiring (self-contained: switching tabs needs no re-wiring).
+    connect( view, &FolderFilteredView::newSelection, this, &FolderCrawlerWidget::onResultSelected );
+    connect( view, &FolderFilteredView::headerClicked, this, &FolderCrawlerWidget::onHeaderClicked );
+    connect( view, &AbstractLogView::markLines, this,
+             &FolderCrawlerWidget::onFilteredViewMarkLines );
+    connect( view, &AbstractLogView::deleteMarkLines, this,
+             &FolderCrawlerWidget::onFilteredViewDeleteMarkLines );
+    // v is captured by value; the connection is auto-disconnected when the pane
+    // results object is destroyed (on pane erase, after the view is deleted).
+    connect( pane->results.get(), &FolderSearchResults::layoutChanged, this,
+             [ view ]() {
+                 view->updateData();
+                 view->forceRefresh();
+             } );
+
+    const int tabIndex = resultsTabs_->addTab( view, title );
+    ResultPane* raw = pane.get();
+    panes_.push_back( std::move( pane ) );
+    activePaneIndex_ = static_cast<int>( panes_.size() ) - 1;
+    // Keep tab index == pane index (append-only; close erases same index).
+    resultsTabs_->setCurrentIndex( tabIndex );
+    return raw;
+}
+
+void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
+{
+    // tab index == pane index (append-only + same-index erase). Re-apply the
+    // global visibility combo to the now-active pane (all panes share the one
+    // toolbar combo).
+    if ( panes_.empty() || tabIndex < 0 || tabIndex >= static_cast<int>( panes_.size() ) ) {
+        return;
+    }
+    activePaneIndex_ = tabIndex;
+    if ( visibilityBox_ != nullptr ) {
+        changeFilteredViewVisibility( visibilityBox_->currentIndex() );
+    }
+}
+
+void FolderCrawlerWidget::onClosePane( int tabIndex )
+{
+    if ( panes_.empty() || tabIndex < 0 || tabIndex >= static_cast<int>( panes_.size() ) ) {
+        return;
+    }
+    // Always keep one results surface.
+    if ( panes_.size() == 1 ) {
+        return;
+    }
+    // Capture the raw results pointer BEFORE erase so we can clear
+    // searchTargetResults_ if the closed pane was the search target.
+    const auto* const erased = panes_[ static_cast<size_t>( tabIndex ) ]->results.get();
+    FolderFilteredView* const view = panes_[ static_cast<size_t>( tabIndex ) ]->view;
+
+    // Delete the view SYNCHRONOUSLY before its results + mark provider are
+    // destroyed: the view holds raw pointers to both (results_ in
+    // FolderFilteredView, markProvider_ in AbstractLogView), and erase frees
+    // them via the unique_ptr. Safe because this slot runs from
+    // tabCloseRequested, not from inside the view's own event handling.
+    resultsTabs_->removeTab( tabIndex );
+    delete view;
+    panes_.erase( panes_.begin() + tabIndex );
+
+    activePaneIndex_ = resultsTabs_->currentIndex();
+    if ( searchTargetResults_ == erased ) {
+        if ( searchActive_ ) {
+            engine_->interrupt();
+        }
+        searchTargetResults_ = nullptr;
     }
 }
 
@@ -590,11 +716,12 @@ bool FolderCrawlerWidget::isFilteredResultRowMarked( LineNumber row ) const
 {
     // Resolves a filtered-view row to (file, localLine) and checks the shared
     // per-file mark store -- the source of truth both the main view and the
-    // filtered view render from.
-    if ( folderResults_ == nullptr ) {
+    // filtered view render from. Uses the active pane's results.
+    auto* results = activeResults();
+    if ( results == nullptr ) {
         return false;
     }
-    const auto src = folderResults_->sourceForLine( row );
+    const auto src = results->sourceForLine( row );
     const auto it = folderMarks_.find( src.filePath );
     return it != folderMarks_.end() && it->count( src.localLine.get() ) > 0;
 }
@@ -724,11 +851,17 @@ void FolderCrawlerWidget::applyConfiguration()
     font.setBold( config.useBoldFont() );
 
     mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
-    filteredView_->setLineNumbersVisible( config.filteredLineNumbersVisible() );
     overview_.setVisible( config.isOverviewVisible() );
     mainView_->refreshOverview();
     mainView_->updateFont( font );
-    filteredView_->updateFont( font );
+    // Apply font + line-numbers to EVERY pane (Keep-results snapshots included),
+    // mirroring CrawlerWidget looping over all result tabs.
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->view != nullptr ) {
+            pane->view->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+            pane->view->updateFont( font );
+        }
+    }
 
     // Re-sync the predefined-filters combo from the shared collection, mirroring
     // CrawlerWidget::applyConfiguration (crawlerwidget.cpp:866). A filter saved
@@ -746,18 +879,25 @@ void FolderCrawlerWidget::registerShortcuts()
     // PgUp/PgDn, jump-to-top/bottom, and the other AbstractLogView shortcuts are
     // not active in folder views.
     mainView_->registerShortcuts();
-    filteredView_->registerShortcuts();
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->view != nullptr ) {
+            pane->view->registerShortcuts();
+        }
+    }
 }
 
 AbstractLogView* FolderCrawlerWidget::activeView() const
 {
-    // The focused view if one of ours has focus, else the results view (the
-    // primary folder surface). Mirrors CrawlerWidget::activeView.
+    // The focused view if one of ours has focus, else the active results view
+    // (the primary folder surface). Mirrors CrawlerWidget::activeView. Only the
+    // visible tab's view can hold focus, so activeFilteredView() is the only
+    // candidate among panes.
+    auto* const fv = activeFilteredView();
     if ( ( mainView_ != nullptr && mainView_->hasFocus() )
-         || ( filteredView_ != nullptr && filteredView_->hasFocus() ) ) {
+         || ( fv != nullptr && fv->hasFocus() ) ) {
         return qobject_cast<AbstractLogView*>( QApplication::focusWidget() );
     }
-    return filteredView_;
+    return fv;
 }
 
 SearchableWidgetInterface* FolderCrawlerWidget::doGetActiveSearchable() const
@@ -769,8 +909,9 @@ SearchableWidgetInterface* FolderCrawlerWidget::doGetActiveSearchable() const
 std::vector<QObject*> FolderCrawlerWidget::doGetAllSearchables() const
 {
     // Both views are QObjects; the QuickFindMux registers pattern listeners on
-    // each so incremental search works in whichever the user is focused on.
-    return { mainView_, filteredView_ };
+    // each so incremental search works in whichever the user is focused on. Only
+    // the active (visible) results pane can hold focus / be searched.
+    return { mainView_, activeFilteredView() };
 }
 
 QString FolderCrawlerWidget::getSelectedText() const
@@ -924,8 +1065,11 @@ void FolderCrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPatter
         if ( mainView_ != nullptr ) {
             mainView_->setQuickFindPattern( qfp.get() );
         }
-        if ( filteredView_ != nullptr ) {
-            filteredView_->setQuickFindPattern( qfp.get() );
+        // Re-point EVERY pane so QuickFind works on frozen tabs too.
+        for ( auto& pane : panes_ ) {
+            if ( pane != nullptr && pane->view != nullptr ) {
+                pane->view->setQuickFindPattern( qfp.get() );
+            }
         }
         quickFindPattern_ = std::move( qfp );
     }
@@ -1015,10 +1159,34 @@ void FolderCrawlerWidget::startSearch()
     }
     searchToolbar_->setSearchInProgress( true );
     searchActive_ = true;
+
+    // Keep results: if checked AND the current pane already has results,
+    // snapshot it (it becomes a frozen tab) and start the new search in a fresh
+    // pane. Mirrors CrawlerWidget::startNewSearch. Reset the toggle so the next
+    // search defaults to overwriting the active pane (parity with single-file).
+    if ( searchToolbar_->isKeepResultsChecked() ) {
+        searchToolbar_->setKeepResultsChecked( false );
+        const bool hasResults
+            = activeResults() != nullptr && activeResults()->getNbLine().get() > 0;
+        if ( hasResults ) {
+            if ( resultsTabs_ != nullptr && !currentSearchPattern_.pattern.isEmpty() ) {
+                resultsTabs_->setTabText(
+                    resultsTabs_->currentIndex(),
+                    QStringLiteral( "Find \"%1\"" ).arg( currentSearchPattern_.pattern ) );
+            }
+            createPane( QString() );
+        }
+    }
+
+    // The pane the new search streams into. Set BEFORE engine_->startSearch so
+    // the first queued signal cannot arrive before the target is pinned.
+    searchTargetResults_ = activeResults();
     // Reset the view for streaming: beginSearch sizes the pending buffer and
     // clears any prior result set so file groups stream into a clean view. This
     // also covers the invalid-pattern path (which never emits searchStarted).
-    folderResults_->beginSearch( filePaths_ );
+    if ( searchTargetResults_ != nullptr ) {
+        searchTargetResults_->beginSearch( filePaths_ );
+    }
 
     // Build the pattern from the toolbar's option flags (case / regex / inverse
     // / boolean). This UPGRADES folder search from the former plain-text
@@ -1036,11 +1204,15 @@ void FolderCrawlerWidget::startSearch()
     // logMainView_ and filteredView_). Storing here also lets openFileInMainView
     // re-apply the pattern right after each setDataSource swap.
     currentSearchPattern_ = regexpPattern;
-    if ( filteredView_ != nullptr ) {
-        filteredView_->setSearchPattern( regexpPattern );
+    if ( activeFilteredView() != nullptr ) {
+        activeFilteredView()->setSearchPattern( regexpPattern );
     }
     if ( mainView_ != nullptr ) {
         mainView_->setSearchPattern( regexpPattern );
+    }
+    if ( resultsTabs_ != nullptr ) {
+        resultsTabs_->setTabText( resultsTabs_->currentIndex(),
+                                  QStringLiteral( "Find \"%1\"" ).arg( pattern ) );
     }
 }
 
@@ -1068,8 +1240,12 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
     // Defensive safety net: commit any groups still buffered (interrupted
     // scans may leave a predecessor that never arrived). Under normal
     // completion all per-file groups were already committed incrementally via
-    // onFileGroupReady before searchFinished was emitted.
-    folderResults_->flushPending();
+    // onFileGroupReady before searchFinished was emitted. Stream into the pane
+    // the search targets (NOT necessarily the active one if the user switched
+    // tabs mid-search).
+    if ( searchTargetResults_ != nullptr ) {
+        searchTargetResults_->flushPending();
+    }
 
     searchToolbar_->setSearchInProgress( false );
     searchActive_ = false;
@@ -1089,46 +1265,48 @@ void FolderCrawlerWidget::onFileGroupReady( int fileIndex, quint64 generation )
         return; // stale: superseded by a newer search
     }
     auto group = engine_->takeCompletedGroup( fileIndex );
-    if ( group.has_value() ) {
-        folderResults_->addFileGroup( fileIndex, std::move( *group ) );
+    if ( group.has_value() && searchTargetResults_ != nullptr ) {
+        searchTargetResults_->addFileGroup( fileIndex, std::move( *group ) );
     }
 }
 
 void FolderCrawlerWidget::onResultSelected( LineNumber line, LinesCount, LineColumn, LineLength )
 {
-    if ( folderResults_ == nullptr || line >= folderResults_->getNbLine() ) {
+    auto* results = activeResults();
+    if ( results == nullptr || line >= results->getNbLine() ) {
         return;
     }
-    if ( folderResults_->lineKind( line ) != LineKind::Data ) {
+    if ( results->lineKind( line ) != LineKind::Data ) {
         return;
     }
-    const auto source = folderResults_->sourceForLine( line );
+    const auto source = results->sourceForLine( line );
     openFileInMainView( source.filePath, source.localLine );
 }
 
 void FolderCrawlerWidget::onHeaderClicked( LineNumber line )
 {
-    if ( folderResults_ == nullptr ) {
+    auto* results = activeResults();
+    if ( results == nullptr ) {
         return;
     }
-    const auto fileId = folderResults_->fileIdForLine( line );
+    const auto fileId = results->fileIdForLine( line );
     if ( fileId < 0 ) {
         return;
     }
-    folderResults_->toggleCollapse( fileId ); // emits layoutChanged -> view refreshes
+    results->toggleCollapse( fileId ); // emits layoutChanged -> view refreshes
 }
 
 void FolderCrawlerWidget::collapseAll()
 {
-    if ( folderResults_ != nullptr ) {
-        folderResults_->collapseAll();
+    if ( activeResults() != nullptr ) {
+        activeResults()->collapseAll();
     }
 }
 
 void FolderCrawlerWidget::expandAll()
 {
-    if ( folderResults_ != nullptr ) {
-        folderResults_->expandAll();
+    if ( activeResults() != nullptr ) {
+        activeResults()->expandAll();
     }
 }
 
@@ -1216,11 +1394,14 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
 
 void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
 {
-    // No-op until a real file is loaded and the overview is user-visible.
-    if ( !overview_.isVisible() || currentMainData_ == nullptr || folderResults_ == nullptr ) {
+    // No-op until a real file is loaded and the overview is user-visible. Uses
+    // the active pane's matches (the overview belongs to whatever results the
+    // user is browsing).
+    auto* results = activeResults();
+    if ( !overview_.isVisible() || currentMainData_ == nullptr || results == nullptr ) {
         return;
     }
-    overview_.setMatchLines( folderResults_->matchLinesForFile( filePath ) );
+    overview_.setMatchLines( results->matchLinesForFile( filePath ) );
     overview_.updateData( currentMainData_->getNbLine() );
     mainView_->refreshOverview();
 }

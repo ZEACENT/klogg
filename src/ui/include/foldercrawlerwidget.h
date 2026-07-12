@@ -29,6 +29,7 @@
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "linetypes.h"
 #include "markprovider.h"
@@ -54,6 +55,7 @@ class QLabel;
 class QToolButton;
 class QComboBox;
 class QSpinBox;
+class QTabWidget;
 class SavedSearches;
 class SearchToolbar;
 
@@ -91,8 +93,13 @@ class FolderCrawlerWidget : public QWidget,
     void setFolder( const QString& folderPath, const QStringList& filePaths );
 
     // --- Test access / programmatic driving (no UI events needed) ---
-    FolderSearchResults* folderResults() const { return folderResults_.get(); }
-    FolderFilteredView* filteredView() const { return filteredView_; }
+    // folderResults()/filteredView() return the ACTIVE pane's objects (keeps
+    // existing single-pane callers + tests working now that results live in a
+    // tabbed set of panes).
+    FolderSearchResults* folderResults() const { return activeResults(); }
+    FolderFilteredView* filteredView() const { return activeFilteredView(); }
+    int paneCount() const { return static_cast<int>( panes_.size() ); }
+    QTabWidget* resultsTabs() const { return resultsTabs_; }
     LogMainView* mainView() const { return mainView_; }
     // Read-only access to the toolbar (pattern text + option toggles). Used by
     // tests to assert view-context round-trip and to drive toggle state.
@@ -236,11 +243,47 @@ class FolderCrawlerWidget : public QWidget,
     QStringList filePaths_;
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
-    std::shared_ptr<FolderSearchResults> folderResults_;
     FolderSearchEngine* engine_ = nullptr;
-    FolderFilteredView* filteredView_ = nullptr;
     LogMainView* mainView_ = nullptr;
     QSplitter* splitter_ = nullptr;
+
+    // Results are shown in a tabbed set of panes (Keep results in a new window).
+    // Each pane owns its own FolderSearchResults + FolderFilteredView + mark
+    // provider; the main view is shared. Pane index == resultsTabs_ tab index
+    // (append-only + same-index erase keeps them 1:1). markProvider is a
+    // unique_ptr because FolderFilteredMarkProvider is defined later in this
+    // class (incomplete here).
+    class FolderFilteredMarkProvider;
+    struct ResultPane {
+        ResultPane();
+        ~ResultPane();
+        std::shared_ptr<FolderSearchResults> results;
+        FolderFilteredView* view = nullptr;
+        std::unique_ptr<FolderFilteredMarkProvider> markProvider;
+        QString title;
+    };
+    std::vector<std::unique_ptr<ResultPane>> panes_;
+    int activePaneIndex_ = -1;
+    // The pane the in-flight search streams into. Set in startSearch BEFORE
+    // engine_->startSearch; the streaming handlers (onFileGroupReady/
+    // onSearchFinished) write here, NOT necessarily the active pane (the user
+    // may switch tabs mid-search). Null when no search is active.
+    FolderSearchResults* searchTargetResults_ = nullptr;
+    QTabWidget* resultsTabs_ = nullptr;
+    // Active-pane accessors (clicks come from the visible tab). folderResults()/
+    // filteredView() wrap these so existing call sites + tests keep working.
+    FolderSearchResults* activeResults() const
+    {
+        return ( activePaneIndex_ >= 0 && activePaneIndex_ < static_cast<int>( panes_.size() ) )
+                   ? panes_[ static_cast<size_t>( activePaneIndex_ ) ]->results.get()
+                   : nullptr;
+    }
+    FolderFilteredView* activeFilteredView() const
+    {
+        return ( activePaneIndex_ >= 0 && activePaneIndex_ < static_cast<int>( panes_.size() ) )
+                   ? panes_[ static_cast<size_t>( activePaneIndex_ ) ]->view
+                   : nullptr;
+    }
 
     // LogMainView requires a (non-null) Overview/OverviewWidget pair. In folder
     // mode the Overview is driven per-file: when a result is opened, that file's
@@ -415,7 +458,6 @@ class FolderCrawlerWidget : public QWidget,
             return {};
         }
     };
-    FolderFilteredMarkProvider folderFilteredMarkProvider_;
     void addMark( const QString& file, LineNumber line );
     void removeMark( const QString& file, LineNumber line );
     // filteredView_->markLines / deleteMarkLines handlers: resolve each result
@@ -423,6 +465,10 @@ class FolderCrawlerWidget : public QWidget,
     // per-file store, then refresh so the bullet re-renders.
     void onFilteredViewMarkLines( const klogg::vector<LineNumber>& rows );
     void onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows );
+    // Refresh every pane (results + view) for a mark change: marks live in the
+    // shared folderMarks_ store, so a mark added in one pane must repaint/rebuild
+    // in ALL panes (frozen ones too), not just the active one.
+    void refreshAllPanesForMarks();
     // visibilityBox_ currentIndexChanged handler -> FolderSearchResults setVisibility.
     void changeFilteredViewVisibility( int index );
     // Resolve (before, after) from the context combo+spinbox into contextBefore_/
@@ -431,6 +477,10 @@ class FolderCrawlerWidget : public QWidget,
     // Context combo/spinbox changed -> recompute (before,after) and, if a pattern
     // is present, re-run the search (context is a scan-time property).
     void onContextControlsChanged();
+    // Results-pane management (Keep results in a new window).
+    ResultPane* createPane( const QString& title );
+    void onActivePaneChanged( int tabIndex );
+    void onClosePane( int tabIndex );
 };
 
 #endif // FOLDERCRAWLERWIDGET_H
