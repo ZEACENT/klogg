@@ -234,9 +234,21 @@ class MainWindow : public QMainWindow {
     void updateHighlightersMenu();
     QString strippedName( const QString& fullFileName ) const;
     CrawlerWidget* currentCrawlerWidget() const;
+    // True if the tab at `index` is a FolderCrawlerWidget (not a CrawlerWidget).
+    // Used at explicit folder branch points (currentTabChanged, closeTab).
+    bool isFolderTab( int index ) const;
+    // The ViewInterface cross-cast of the current tab widget. Succeeds for BOTH
+    // CrawlerWidget and FolderCrawlerWidget (both implement ViewInterface);
+    // returns nullptr only when there is no current tab. Required because
+    // Session accessors (getDisplayName/getDocumentKind/...) key on a
+    // ViewInterface* and assert on nullptr -- a folder tab's display name must
+    // be fetched via this cross-cast, never via a nullptr CrawlerWidget*.
+    const ViewInterface* currentView() const;
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
     void updateMenuBarFromDocument( const CrawlerWidget* crawler );
     void updateInfoLine();
+    // Disable every file-specific menu action (used for folder / no-tab states).
+    void disableFileSpecificActions();
     void showInfoLabels( bool show );
     void logScreenInfo( QScreen* screen );
     void removeFromFavorites( const QString& pathToRemove );
