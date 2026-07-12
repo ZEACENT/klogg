@@ -192,6 +192,14 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     overviewWidget_->setParent( mainView_ );
     overview_.setVisible( Configuration::getSynced().isOverviewVisible() );
     mainView_->refreshOverview();
+
+    // Folder-mode marks: inject a per-file MarkProvider so the main view's mark
+    // bullet + Next/Prev-mark navigation work without LogFilteredData. The
+    // provider reads folderMarks_ + currentMainFilePath_ by pointer, so it stays
+    // correct as files are swapped.
+    mainViewMarkProvider_.marks = &folderMarks_;
+    mainViewMarkProvider_.currentFile = &currentMainFilePath_;
+    mainView_->setMarkProvider( &mainViewMarkProvider_ );
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
 
@@ -263,6 +271,25 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     connect( filteredView_, &FolderFilteredView::headerClicked, this,
              &FolderCrawlerWidget::onHeaderClicked );
 
+    // Mark toggles from the main view (M shortcut / left-margin click): record
+    // the line against the file currently shown, then refresh so the bullet
+    // appears/disappears. Folder mode has no LogFilteredData, so the widget owns
+    // the per-file mark store itself.
+    connect( mainView_, &AbstractLogView::markLines, this,
+             [ this ]( const klogg::vector<LineNumber>& lines ) {
+                 for ( const auto& l : lines ) {
+                     addMark( currentMainFilePath_, l );
+                 }
+                 mainView_->forceRefresh();
+             } );
+    connect( mainView_, &AbstractLogView::deleteMarkLines, this,
+             [ this ]( const klogg::vector<LineNumber>& lines ) {
+                 for ( const auto& l : lines ) {
+                     removeMark( currentMainFilePath_, l );
+                 }
+                 mainView_->forceRefresh();
+             } );
+
     connect( folderResults_.get(), &FolderSearchResults::layoutChanged, this, [ this ]() {
         if ( filteredView_ != nullptr ) {
             filteredView_->updateData();
@@ -310,6 +337,43 @@ FolderCrawlerWidget::currentMainViewInfo() const
         info.encodingText = QString::fromLatin1( codec->name() );
     }
     return info;
+}
+
+void FolderCrawlerWidget::addMark( const QString& file, LineNumber line )
+{
+    if ( file.isEmpty() ) {
+        return;
+    }
+    folderMarks_[ file ].insert( line.get() );
+}
+
+void FolderCrawlerWidget::removeMark( const QString& file, LineNumber line )
+{
+    const auto it = folderMarks_.find( file );
+    if ( it == folderMarks_.end() ) {
+        return;
+    }
+    it->erase( line.get() );
+    if ( it->empty() ) {
+        folderMarks_.erase( it );
+    }
+}
+
+bool FolderCrawlerWidget::isMainViewLineMarked( LineNumber line ) const
+{
+    return mainViewMarkProvider_.isMarked( line );
+}
+
+void FolderCrawlerWidget::markMainViewLine( LineNumber line )
+{
+    addMark( currentMainFilePath_, line );
+    mainView_->forceRefresh();
+}
+
+void FolderCrawlerWidget::unmarkMainViewLine( LineNumber line )
+{
+    removeMark( currentMainFilePath_, line );
+    mainView_->forceRefresh();
 }
 
 void FolderCrawlerWidget::applyConfiguration()

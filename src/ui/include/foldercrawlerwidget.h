@@ -20,14 +20,17 @@
 #ifndef FOLDERCRAWLERWIDGET_H
 #define FOLDERCRAWLERWIDGET_H
 
+#include <QHash>
 #include <QString>
 #include <QStringList>
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <set>
 #include <unordered_map>
 
 #include "linetypes.h"
+#include "markprovider.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
 #include "abstractcrawlerwidget.h"
@@ -98,6 +101,14 @@ class FolderCrawlerWidget : public QWidget,
     // Search-toolbar status text (file count / match count / search state).
     // Exposed so tests can assert no file path leaks into the toolbar.
     QString statusText() const;
+    // True if `line` is marked in the file currently shown in the main view.
+    // (Test accessor for folder-mode marks, which live in the per-file store.)
+    bool isMainViewLineMarked( LineNumber line ) const;
+    // Programmatic mark toggle on a line of the file currently in the main view
+    // (the M shortcut / left-margin click do the same through the markLines
+    // signal). Exposed for test-driving; forceRefresh re-renders the bullet.
+    void markMainViewLine( LineNumber line );
+    void unmarkMainViewLine( LineNumber line );
     // True while a search is running (cleared on searchFinished). Lets
     // integration tests wait for completion before asserting exact counts.
     bool isSearchActive() const { return searchActive_; }
@@ -248,6 +259,64 @@ class FolderCrawlerWidget : public QWidget,
     // openFileInMainView (setDataSource does not reset searchPattern_, but the
     // re-apply makes the parity intent explicit and is robust to future changes).
     RegularExpressionPattern currentSearchPattern_;
+
+    // --- folder-mode marks (no LogFilteredData) ---
+    // file path -> sorted set of marked line numbers (stored as the underlying
+    // value). Injected into the main view via mainViewMarkProvider_ so the mark
+    // bullet (LineTypeFlags::Mark) and Next/Prev-mark navigation work, and kept
+    // per-file so marks survive switching result files within a session.
+    QHash<QString, std::set<uint64_t>> folderMarks_;
+    // MarkProvider over folderMarks_ for the file currently in the main view;
+    // reads currentMainFilePath_ live so it stays correct across file swaps.
+    class MainViewMarkProvider : public MarkProvider {
+      public:
+        const QHash<QString, std::set<uint64_t>>* marks = nullptr;
+        const QString* currentFile = nullptr;
+        bool isMarked( LineNumber line ) const override
+        {
+            if ( marks == nullptr || currentFile == nullptr ) {
+                return false;
+            }
+            const auto it = marks->find( *currentFile );
+            return it != marks->end() && it->count( line.get() ) > 0;
+        }
+        std::optional<LineNumber> markAfter( LineNumber line ) const override
+        {
+            if ( marks == nullptr || currentFile == nullptr ) {
+                return {};
+            }
+            const auto it = marks->find( *currentFile );
+            if ( it == marks->end() ) {
+                return {};
+            }
+            const auto& s = it.value();
+            const auto ub = s.upper_bound( line.get() );
+            if ( ub == s.end() ) {
+                return {};
+            }
+            return LineNumber( *ub );
+        }
+        std::optional<LineNumber> markBefore( LineNumber line ) const override
+        {
+            if ( marks == nullptr || currentFile == nullptr ) {
+                return {};
+            }
+            const auto it = marks->find( *currentFile );
+            if ( it == marks->end() ) {
+                return {};
+            }
+            const auto& s = it.value();
+            auto lb = s.lower_bound( line.get() );
+            if ( lb == s.begin() ) {
+                return {};
+            }
+            --lb;
+            return LineNumber( *lb );
+        }
+    };
+    MainViewMarkProvider mainViewMarkProvider_;
+    void addMark( const QString& file, LineNumber line );
+    void removeMark( const QString& file, LineNumber line );
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

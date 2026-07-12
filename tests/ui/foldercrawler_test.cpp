@@ -346,6 +346,54 @@ TEST_CASE( "FolderCrawlerWidget exposes main-view file info for the status bar",
     REQUIRE( infoB->nbLines == 1 );
 }
 
+TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps", "[folder]" )
+{
+    // Folder mode has no LogFilteredData, so the widget owns a per-file mark
+    // store and injects it into the main view via MarkProvider. The M shortcut
+    // (markSelected -> markLines) and margin click toggle marks; marks render
+    // (LineTypeFlags::Mark) and are kept per file path so they survive opening
+    // other result files and returning.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\npad\npad\n" ) ); // 3 lines
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR two\n" ) );           // 1 line
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Open A (match at localLine 0).
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // Mark line 1 in the current (A) file. markMainViewLine is the programmatic
+    // equivalent of the M shortcut / margin click (which route through the
+    // markLines signal to the same addMark path).
+    widget.markMainViewLine( 1_lnum );
+    REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
+
+    // Remove it.
+    widget.unmarkMainViewLine( 1_lnum );
+    REQUIRE_FALSE( widget.isMainViewLineMarked( 1_lnum ) );
+
+    // Re-mark, then switch to file B: the mark must NOT show in B (per-file)...
+    widget.markMainViewLine( 1_lnum );
+    REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
+
+    widget.selectResultRow( 3_lnum ); // b.log match
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 );
+    REQUIRE_FALSE( widget.isMainViewLineMarked( 1_lnum ) );
+
+    // ...and must reappear when A is reopened (cached swap).
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {

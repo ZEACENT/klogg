@@ -77,6 +77,10 @@ AbstractLogData::LineType LogMainView::lineType( LineNumber lineNumber ) const
     if ( filteredData_ ) {
         return filteredData_->lineTypeByLine( lineNumber );
     }
+    // Folder mode (no LogFilteredData): show the mark bullet for marked lines.
+    if ( markProvider_ != nullptr && markProvider_->isMarked( lineNumber ) ) {
+        return AbstractLogData::LineTypeFlags::Mark;
+    }
     return AbstractLogData::LineTypeFlags::Plain;
 }
 
@@ -90,12 +94,14 @@ void LogMainView::doRegisterShortcuts()
 
 void LogMainView::selectNextMark()
 {
-    // Folder mode never calls useNewFiltering, so filteredData_ is null; the
-    // mark-navigation shortcuts used to dereference it and crash. No-op there.
-    if ( filteredData_ == nullptr ) {
-        return;
+    std::optional<LineNumber> line;
+    if ( filteredData_ != nullptr ) {
+        line = filteredData_->getMarkAfter( getViewPosition() );
     }
-    const auto line = filteredData_->getMarkAfter( getViewPosition() );
+    else if ( markProvider_ != nullptr ) {
+        // Folder mode: navigate the injected per-file mark source.
+        line = markProvider_->markAfter( getViewPosition() );
+    }
     if ( line.has_value() ) {
         selectAndDisplayLine( *line );
     }
@@ -103,10 +109,13 @@ void LogMainView::selectNextMark()
 
 void LogMainView::selectPrevMark()
 {
-    if ( filteredData_ == nullptr ) {
-        return;
+    std::optional<LineNumber> line;
+    if ( filteredData_ != nullptr ) {
+        line = filteredData_->getMarkBefore( getViewPosition() );
     }
-    const auto line = filteredData_->getMarkBefore( getViewPosition() );
+    else if ( markProvider_ != nullptr ) {
+        line = markProvider_->markBefore( getViewPosition() );
+    }
     if ( line.has_value() ) {
         selectAndDisplayLine( *line );
     }
