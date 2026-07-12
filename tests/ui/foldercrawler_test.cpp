@@ -179,6 +179,52 @@ TEST_CASE( "FolderCrawlerWidget selecting a result opens the source file", "[fol
     REQUIRE( widget.currentMainFilePath() == a );
 }
 
+TEST_CASE( "FolderCrawlerWidget main view mark-navigation is safe without filtered data",
+           "[folder]" )
+{
+    // LogMainView registers LogViewNextMark/LogViewPrevMark shortcuts whose
+    // handlers used to dereference filteredData_, which is null in folder mode
+    // (useNewFiltering is never called). Driving the same logic directly must
+    // be a no-op, not a null-deref crash.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    REQUIRE( widget.mainView() != nullptr );
+    REQUIRE_NOTHROW( widget.mainView()->selectNextMark() );
+    REQUIRE_NOTHROW( widget.mainView()->selectPrevMark() );
+}
+
+TEST_CASE( "FolderCrawlerWidget main view search range spans the opened file",
+           "[folder]" )
+{
+    // setDataSource must reset the search range to span the new document;
+    // otherwise every body line renders as "out of search range" (gray), because
+    // the view was constructed on an empty placeholder whose range ended at 0.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // No file open yet: placeholder (0 lines) -> search range end is 0.
+    REQUIRE( widget.mainView()->searchEndLine() == 0_lnum );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum ); // opens a.log (3 lines) in the main view
+
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 ); // settle: setDataSource runs in the loadingFinished queue
+
+    // The whole 3-line file is in range -> body text is not grayed.
+    REQUIRE( widget.mainView()->searchEndLine() == 3_lnum );
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {

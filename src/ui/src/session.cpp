@@ -153,7 +153,7 @@ ViewInterface* Session::openFolder( const QString& folderPath, const std::vector
     }
     view->setFolder( folderPath, paths );
 
-    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folderPath ).fileName() );
+    const QString displayName = QFileInfo( folderPath ).fileName();
 
     openFiles_.insert( { view,
                          OpenFile{ folderPath,  // fileName

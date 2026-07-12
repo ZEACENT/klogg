@@ -2013,6 +2013,13 @@ LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
 void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
 {
     logData_ = newLogData;
+    // A new document invalidates the search range inherited from the previous
+    // data: the folder main view is built on an empty placeholder, so the
+    // inherited range ended at line 0 and every line of a real file rendered as
+    // "out of search range" (gray). Span the whole new document, matching the
+    // constructor and CrawlerWidget::setSearchLimits(0, getNbLine()).
+    searchStart_ = 0_lnum;
+    searchEnd_ = LineNumber{ newLogData->getNbLine().get() };
     firstLine_ = 0_lnum;
     firstCol_ = 0_lcol;
     selection_.clear();

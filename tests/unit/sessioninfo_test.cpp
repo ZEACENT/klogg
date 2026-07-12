@@ -149,7 +149,7 @@ TEST_CASE( "SessionInfo round-trips a folder-tagged document via sourceType", "[
             "window-folder",
             { SessionInfo::OpenFile{ folderPath, 0, viewContext,
                                      /*sourceType=*/QStringLiteral( "folder" ),
-                                     /*displayName=*/QStringLiteral( "[Folder] myapp" ),
+                                     /*displayName=*/QStringLiteral( "myapp" ),
                                      /*sourceSpec=*/QString{} } } );
         sessionInfo.setCurrentFileIndex( "window-folder", 0 );
         sessionInfo.saveToStorage( settings );
@@ -166,6 +166,6 @@ TEST_CASE( "SessionInfo round-trips a folder-tagged document via sourceType", "[
     REQUIRE( restoredOpenFiles.size() == 1 );
     REQUIRE( restoredOpenFiles.at( 0 ).fileName == folderPath );
     REQUIRE( restoredOpenFiles.at( 0 ).sourceType == QStringLiteral( "folder" ) );
-    REQUIRE( restoredOpenFiles.at( 0 ).displayName == QStringLiteral( "[Folder] myapp" ) );
+    REQUIRE( restoredOpenFiles.at( 0 ).displayName == QStringLiteral( "myapp" ) );
     REQUIRE( restoredOpenFiles.at( 0 ).viewContext == viewContext );
 }

@@ -1234,7 +1234,7 @@ void MainWindow::openFolderByPath( const QString& folderPath )
         return;
     }
 
-    const QString displayName = QString( "[Folder] %1" ).arg( QFileInfo( folderPath ).fileName() );
+    const QString displayName = QFileInfo( folderPath ).fileName();
     const auto index = mainTabWidget_.addCrawler( static_cast<FolderCrawlerWidget*>( view ),
                                                   folderPath, displayName, folderPath );
     mainTabWidget_.setCurrentIndex( index );

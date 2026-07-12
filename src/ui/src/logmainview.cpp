@@ -84,16 +84,30 @@ void LogMainView::doRegisterShortcuts()
 {
     LOG_INFO << "Registering shortcuts for main view";
     AbstractLogView::doRegisterShortcuts();
-    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] {
-        const auto line = filteredData_->getMarkAfter( getViewPosition() );
-        if ( line.has_value() ) {
-            selectAndDisplayLine( *line );
-        }
-    } );
-    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] {
-        const auto line = filteredData_->getMarkBefore( getViewPosition() );
-        if ( line.has_value() ) {
-            selectAndDisplayLine( *line );
-        }
-    } );
+    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] { selectNextMark(); } );
+    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] { selectPrevMark(); } );
+}
+
+void LogMainView::selectNextMark()
+{
+    // Folder mode never calls useNewFiltering, so filteredData_ is null; the
+    // mark-navigation shortcuts used to dereference it and crash. No-op there.
+    if ( filteredData_ == nullptr ) {
+        return;
+    }
+    const auto line = filteredData_->getMarkAfter( getViewPosition() );
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
+}
+
+void LogMainView::selectPrevMark()
+{
+    if ( filteredData_ == nullptr ) {
+        return;
+    }
+    const auto line = filteredData_->getMarkBefore( getViewPosition() );
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
 }

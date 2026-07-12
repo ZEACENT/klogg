@@ -138,6 +138,10 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // selection and the wrap/line cache, then forces a full redraw. The caller
     // keeps ownership of the data and must keep it alive across paints.
     void setDataSource( const AbstractLogData* newLogData );
+    // Exposed for testing: the exclusive end of the current search range.
+    // After setDataSource it must span the whole document, otherwise every body
+    // line renders as "out of search range" (gray).
+    LineNumber searchEndLine() const { return searchEnd_; }
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();

@@ -905,6 +905,9 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
                 QTest::qWait( 200 );
                 REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
                          != nullptr );
+                // The tab label is the bare folder basename, matching single-file
+                // tabs (no "[Folder]" prefix).
+                REQUIRE( tabArea->tabText( 0 ) == QDir( tempDirPath ).dirName() );
 
                 AND_WHEN( "A file tab is also opened" )
                 {
