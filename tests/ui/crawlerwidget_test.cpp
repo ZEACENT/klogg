@@ -369,7 +369,7 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 
         QTest::qWait( 100 );
 
-        waitUiState( [ & ]() { return crawler->searchToolbar_->stopButton()->isHidden(); } );
+        REQUIRE( waitUiState( [ & ]() { return crawler->searchToolbar_->stopButton()->isHidden(); } ) );
     }
 
     void render()

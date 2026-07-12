@@ -275,7 +275,12 @@ QString SearchToolbar::escapeSearchPattern( const QString& pattern, bool isRegex
                               : pattern;
 
     if ( booleanButton_->isChecked() ) {
-        escapedPattern.replace( '"', "\"" ).prepend( '"' ).append( '"' );
+        // Escape embedded double-quotes (replace " with \") before wrapping in
+        // "...". The literal "\\\"" is the 2-char string backslash+quote; a bare
+        // "\""" would be a 1-char string (the backslash only escapes the quote)
+        // and the replace would be a no-op, leaving embedded quotes to break the
+        // boolean expression.
+        escapedPattern.replace( '"', "\\\"" ).prepend( '"' ).append( '"' );
     }
 
     return escapedPattern;

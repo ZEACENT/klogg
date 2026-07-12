@@ -38,7 +38,15 @@ DroppedPathClassification classifyLocalPaths( const QStringList& localPaths )
 
     const auto sortToList = []( const QStringList& paths ) -> QStringList {
         const auto sorted = sortedMergeFilePaths( paths );
-        return QStringList{ sorted.begin(), sorted.end() };
+        // Build explicitly rather than QStringList{ begin, end }: the iterator-
+        // range brace-init is not accepted by older Qt 5 (e.g. ubuntu-20.04's
+        // appimage base), which only matches std::initializer_list<QString>.
+        QStringList out;
+        out.reserve( static_cast<int>( sorted.size() ) );
+        for ( const auto& s : sorted ) {
+            out.append( s );
+        }
+        return out;
     };
     result.dirs = sortToList( result.dirs );
     result.files = sortToList( result.files );
