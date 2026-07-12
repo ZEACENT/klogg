@@ -94,6 +94,7 @@
 #include "crawlerwidget.h"
 #include "decompressor.h"
 #include "foldercrawlerwidget.h"
+#include "abstractlogview.h"
 #include "folderenumeration.h"
 #include "dispatch_to.h"
 #include "downloader.h"
@@ -1878,6 +1879,13 @@ void MainWindow::lineNumberHandler( LineNumber startLine, LinesCount nLines, Lin
     if ( auto* cw = currentCrawlerWidget() ) {
         session_.getFileInfo( cw, &fileSize, &fileNbLine, &lastModified );
     }
+    else if ( auto* doc = currentDocument() ) {
+        // Folder tab: line count of the file currently in the folder main view
+        // (0 when none is open -> lineNbField cleared below).
+        if ( const auto info = doc->currentMainViewInfo() ) {
+            fileNbLine = info->nbLines;
+        }
+    }
 
     if ( fileNbLine != 0 ) {
         QString lineText;
@@ -2201,6 +2209,20 @@ void MainWindow::currentTabChanged( int index )
                 // views are hidden).
                 connect( this, &MainWindow::optionsChanged, folder_widget,
                          &FolderCrawlerWidget::applyConfiguration, Qt::UniqueConnection );
+                // Refresh the info line (path/size/date/encoding) when the file
+                // shown in the folder main view changes.
+                connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
+                         &MainWindow::updateInfoLine, Qt::UniqueConnection );
+                // Forward the folder main view's Ln:col selection to the status
+                // bar (file tabs get this via signalMux). Guarded so a non-folder
+                // tab's selection is never overwritten by a backgrounded folder.
+                connect( folder_widget->mainView(), &AbstractLogView::newSelection, this,
+                         [ this ]( LineNumber s, LinesCount n, LineColumn c, LineLength l ) {
+                             if ( currentCrawlerWidget() == nullptr ) {
+                                 lineNumberHandler( s, n, c, l );
+                             }
+                         },
+                         Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.
@@ -2223,11 +2245,10 @@ void MainWindow::currentTabChanged( int index )
             openContainingFolderAction->setEnabled( true );
 
             infoLine->hideGauge();
-            infoLine->setText( view != nullptr ? session_.getDisplayName( view ) : QString() );
-            infoLine->setPath( QString() );
-            sizeField->clear();
-            encodingField->clear();
-            dateField->hide();
+            // updateInfoLine now owns the folder info line: it shows the file
+            // currently in the main view (path/size/date/encoding), or the
+            // folder path when no file is open.
+            updateInfoLine();
             lineNbField->clear();
 
             // Folder view supports select/copy.
@@ -3059,15 +3080,44 @@ void MainWindow::updateInfoLine()
         return;
     }
 
-    // A folder tab (or no tab) has no single file/encoding/line-count: its info
-    // line is owned by currentTabChanged. Session accessors below assert on a
-    // null ViewInterface* (session.cpp:358), so we must bail out here.
+    QLocale defaultLocale;
+
     auto* crawler = currentCrawlerWidget();
     if ( crawler == nullptr ) {
+        // Folder tab (or no tab): the info line reflects the file currently in
+        // the folder main view, falling back to the folder path when none.
+        auto* doc = currentDocument();
+        if ( doc == nullptr ) {
+            return;
+        }
+        const auto info = doc->currentMainViewInfo();
+        if ( info.has_value() ) {
+            const auto currentFile = QDir::toNativeSeparators( info->path );
+            infoLine->setText( currentFile );
+            infoLine->setPath( currentFile );
+            sizeField->setText( readableSize( info->size ) );
+            encodingField->setText( info->encodingText );
+            if ( info->lastModified.isValid() ) {
+                dateField->setText( tr( "modified on %1" )
+                                        .arg( defaultLocale.toString( info->lastModified, QLocale::NarrowFormat ) ) );
+                dateField->show();
+            }
+            else {
+                dateField->hide();
+            }
+        }
+        else {
+            // No file in the main view: show the folder path.
+            const auto folderPath = QDir::toNativeSeparators( session_.getAssociatedPath( doc ) );
+            const auto display = session_.getDisplayName( doc );
+            infoLine->setText( folderPath.isEmpty() ? display : folderPath );
+            infoLine->setPath( folderPath );
+            sizeField->clear();
+            encodingField->clear();
+            dateField->hide();
+        }
         return;
     }
-
-    QLocale defaultLocale;
 
     const auto associatedPath = session_.getAssociatedPath( crawler );
     const auto currentFile = QDir::toNativeSeparators(

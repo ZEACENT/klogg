@@ -22,6 +22,9 @@
 
 #include "viewinterface.h"
 
+#include <QDateTime>
+#include <QString>
+#include <cstdint>
 #include <optional>
 
 // Common interface for top-level tab document widgets: CrawlerWidget (files and
@@ -69,6 +72,24 @@ class AbstractCrawlerWidget : public ViewInterface {
     // std::nullopt means "use the detected encoding". Default no-op.
     virtual void setEncoding( std::optional<int> /*mib*/ )
     {
+    }
+
+    // Snapshot of the file currently displayed in this tab's main view (folder
+    // mode: the main view shows one selected result file at a time, distinct
+    // from the tab's own folder path). MainWindow's info line sources path /
+    // size / modified-date / encoding / line-count from this for folder tabs.
+    // Returns nullopt when no file is shown (MainWindow falls back to the tab's
+    // own path). Default nullopt: single-file tabs source this from Session.
+    struct MainViewInfo {
+        QString path;
+        uint64_t size = 0;
+        QDateTime lastModified;
+        QString encodingText;
+        uint64_t nbLines = 0;
+    };
+    virtual std::optional<MainViewInfo> currentMainViewInfo() const
+    {
+        return {};
     }
 };
 

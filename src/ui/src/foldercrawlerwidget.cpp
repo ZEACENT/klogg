@@ -293,6 +293,25 @@ QString FolderCrawlerWidget::statusText() const
     return statusLabel_ != nullptr ? statusLabel_->text() : QString();
 }
 
+std::optional<AbstractCrawlerWidget::MainViewInfo>
+FolderCrawlerWidget::currentMainViewInfo() const
+{
+    // No real file loaded (still the empty placeholder) -> nullopt so MainWindow
+    // falls back to the folder path in the info line.
+    if ( currentMainData_ == nullptr || currentMainData_ == placeholderData_ ) {
+        return {};
+    }
+    MainViewInfo info;
+    info.path = currentMainFilePath_;
+    info.size = static_cast<uint64_t>( currentMainData_->getFileSize() );
+    info.lastModified = currentMainData_->getLastModifiedDate();
+    info.nbLines = currentMainData_->getNbLine().get();
+    if ( auto* codec = currentMainData_->getDisplayEncoding() ) {
+        info.encodingText = QString::fromLatin1( codec->name() );
+    }
+    return info;
+}
+
 void FolderCrawlerWidget::applyConfiguration()
 {
     // Mirrors CrawlerWidget::applyConfiguration (crawlerwidget.cpp:811-855) for
@@ -397,6 +416,7 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
     }
     currentMainData_->setDisplayEncoding( codec->name() );
     mainView_->forceRefresh();
+    Q_EMIT mainViewFileChanged();
 }
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )
@@ -675,6 +695,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         mainView_->setSearchPattern( currentSearchPattern_ );
         mainView_->jumpToLine( localLine );
         refreshFileOverview( filePath );
+        Q_EMIT mainViewFileChanged();
         return;
     }
 
@@ -702,6 +723,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  // getNbLine() is only valid now that indexing finished: the
                  // overview repoint MUST happen here, not at attachFile time.
                  refreshFileOverview( pendingMainFilePath_ );
+                 Q_EMIT mainViewFileChanged();
 
                  pendingMainData_.reset();
                  pendingMainFilePath_.clear();

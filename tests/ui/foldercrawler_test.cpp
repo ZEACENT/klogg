@@ -308,6 +308,44 @@ TEST_CASE( "FolderCrawlerWidget toolbar status never leaks the opened file path"
     REQUIRE_FALSE( widget.statusText().contains( a ) );
 }
 
+TEST_CASE( "FolderCrawlerWidget exposes main-view file info for the status bar", "[folder]" )
+{
+    // currentMainViewInfo() is the data path MainWindow's info line consumes for
+    // folder tabs: path / size / modified-date / encoding / line-count of the
+    // file currently in the main view, or nullopt (-> folder path) when none.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\npad\npad\n" ) ); // 3 lines
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR two\n" ) );           // 1 line
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    // No file open yet -> nullopt (MainWindow falls back to the folder path).
+    REQUIRE_FALSE( widget.currentMainViewInfo().has_value() );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // Visible rows: [H0(a), D1(a match), H2(b), D3(b match)].
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    const auto infoA = widget.currentMainViewInfo();
+    REQUIRE( infoA.has_value() );
+    REQUIRE( infoA->path == a );
+    REQUIRE( infoA->nbLines == 3 );
+    REQUIRE( infoA->size > 0 );
+    REQUIRE_FALSE( infoA->encodingText.isEmpty() );
+
+    widget.selectResultRow( 3_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 );
+    const auto infoB = widget.currentMainViewInfo();
+    REQUIRE( infoB.has_value() );
+    REQUIRE( infoB->path == b );
+    REQUIRE( infoB->nbLines == 1 );
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {

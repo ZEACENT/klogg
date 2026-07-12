@@ -132,11 +132,17 @@ class FolderCrawlerWidget : public QWidget,
     // Apply the chosen encoding to the file currently open in the main view
     // (no-op until a file is opened). Overrides AbstractCrawlerWidget.
     void setEncoding( std::optional<int> mib ) override;
+    // Snapshot of the file currently in the main view, for MainWindow's info
+    // line (path/size/date/encoding/line-count). Nullopt when no file is open.
+    std::optional<MainViewInfo> currentMainViewInfo() const override;
 
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
     // signal). Folder tabs are static, so this is never emitted for now.
     void dataStatusChanged( DataStatus status );
+    // Emitted when the file shown in the main view changes (a result is opened
+    // or the encoding is changed) so MainWindow refreshes the info line.
+    void mainViewFileChanged();
 
   protected:
     // ViewInterface (single-file APIs are no-ops in folder mode).
