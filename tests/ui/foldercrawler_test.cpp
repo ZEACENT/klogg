@@ -225,6 +225,50 @@ TEST_CASE( "FolderCrawlerWidget main view search range spans the opened file",
     REQUIRE( widget.mainView()->searchEndLine() == 3_lnum );
 }
 
+TEST_CASE( "FolderCrawlerWidget main view line map refreshes on demand after a data swap",
+           "[folder]" )
+{
+    // A cached re-select runs setDataSource synchronously and clears the main
+    // view's visible-line map; the map is only rebuilt on the next (async) paint.
+    // A click delivered before that paint used to be swallowed
+    // (convertCoordToLine -> nullopt) or resolve to a stale row (in the filtered
+    // view, a Data row that shifted onto a Header index toggled collapse). The
+    // mouse handlers now force a synchronous refresh (ensureLineMapFresh) before
+    // converting coordinates.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR in b\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    // Shown + sized so viewport()->repaint() (used by ensureLineMapFresh) actually
+    // issues a paintEvent -- Qt skips painting hidden widgets.
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Open A then B (both async-indexed and cached), settling so maps rebuild.
+    widget.selectResultRow( 1_lnum ); // a.log match -> row 1
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    widget.selectResultRow( 3_lnum ); // b.log match -> row 3
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 );
+
+    // Cached re-select of A: setDataSource runs synchronously and leaves the map
+    // stale/empty (no paint is processed before selectResultRow returns).
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( widget.currentMainFilePath() == a );
+    REQUIRE_FALSE( widget.mainView()->isLineMapCurrent() );
+
+    // The on-demand refresh the mouse handlers use rebuilds the map synchronously.
+    widget.mainView()->ensureLineMapFresh();
+    REQUIRE( widget.mainView()->isLineMapCurrent() );
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {

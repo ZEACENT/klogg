@@ -142,6 +142,14 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // After setDataSource it must span the whole document, otherwise every body
     // line renders as "out of search range" (gray).
     LineNumber searchEndLine() const { return searchEnd_; }
+    // True when the visible-line coordinate map matches the current data/layout
+    // (false after a layout change or data swap, until the next paint rebuilds it).
+    bool isLineMapCurrent() const { return !textAreaCache_.invalid_; }
+    // Synchronously rebuild the visible-line map if a layout change (forceRefresh)
+    // or data swap (setDataSource) has invalidated it. The mouse handlers call
+    // this before converting coordinates so a click delivered before the next
+    // async paint resolves to the current row instead of a stale/empty map.
+    void ensureLineMapFresh();
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();

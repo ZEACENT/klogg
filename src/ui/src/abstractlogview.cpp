@@ -492,6 +492,7 @@ void AbstractLogView::changeEvent( QEvent* changeEvent )
 
 void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     auto line = convertCoordToLine( mouseEvent->pos().y() );
 
     if ( mouseEvent->button() == Qt::LeftButton ) {
@@ -696,6 +697,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
 void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     // Selection implementation
     if ( selectionStarted_ ) {
         // Mark selection as changed for overlay redraw (don't invalidate text cache)
@@ -753,6 +755,7 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 
 void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     if ( markingClickInitiated_ ) {
         markingClickInitiated_ = false;
         const auto line = convertCoordToLine( mouseEvent->pos().y() );
@@ -2037,6 +2040,22 @@ void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine 
     searchEnd_ = endLine;
 
     forceRefresh();
+}
+
+void AbstractLogView::ensureLineMapFresh()
+{
+    // A layout change (forceRefresh) or data swap (setDataSource) marks the text
+    // cache invalid (textAreaCache_.invalid_) and either leaves the visible-line
+    // map (wrappedLinesInfo_) stale or empties it; the map is only rebuilt inside
+    // drawTextArea, i.e. on the next (async) paint. A mouse event delivered
+    // before that paint therefore converted coordinates against a stale/empty
+    // map: in folder mode a click on a Data row that had shifted onto a Header
+    // index toggled collapse instead of selecting, and a click on a freshly
+    // swapped main view was swallowed (convertCoordToLine -> nullopt). Force a
+    // synchronous repaint so the map is current before any coordinate conversion.
+    if ( textAreaCache_.invalid_ || wrappedLinesInfo_.empty() ) {
+        viewport()->repaint();
+    }
 }
 
 //
