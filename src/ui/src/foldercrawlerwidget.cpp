@@ -180,12 +180,20 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     expandAllButton_ = new QToolButton( this );
     expandAllButton_->setText( tr( "Expand all" ) );
     statusLabel_ = new QLabel( this );
+    // Results-view visibility filter (parity with CrawlerWidget). Index order
+    // maps to FolderSearchResults::Visibility in changeFilteredViewVisibility.
+    visibilityBox_ = new QComboBox( this );
+    visibilityBox_->addItem( tr( "Marks and matches" ) );
+    visibilityBox_->addItem( tr( "Marks" ) );
+    visibilityBox_->addItem( tr( "Matches" ) );
+    visibilityBox_->setCurrentIndex( 0 );
 
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget( searchToolbar_, 1 );
     toolbar->addSpacing( 12 );
     toolbar->addWidget( collapseAllButton_ );
     toolbar->addWidget( expandAllButton_ );
+    toolbar->addWidget( visibilityBox_ );
     toolbar->addSpacing( 12 );
     toolbar->addWidget( statusLabel_ );
 
@@ -215,6 +223,12 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // the raw pointer is stable for the widget's lifetime.
     folderFilteredMarkProvider_.marks = &folderMarks_;
     folderFilteredMarkProvider_.results = folderResults_.get();
+    // The Marks visibility filter on FolderSearchResults consults this query
+    // (filePath, localLine) -> marked, reading the shared per-file store live.
+    folderResults_->setMarkedLineQuery( [ this ]( const QString& file, LineNumber line ) {
+        const auto it = folderMarks_.find( file );
+        return it != folderMarks_.end() && it->count( line.get() ) > 0;
+    } );
     filteredView_
         = new FolderFilteredView( folderResults_.get(), quickFindPattern_.get(), this );
     filteredView_->setMarkProvider( &folderFilteredMarkProvider_ );
@@ -305,6 +319,8 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
              [ this ]( QString ) { updatePredefinedFiltersWidget(); } );
     connect( collapseAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::collapseAll );
     connect( expandAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::expandAll );
+    connect( visibilityBox_, qOverload<int>( &QComboBox::currentIndexChanged ), this,
+             &FolderCrawlerWidget::changeFilteredViewVisibility );
 
     connect( engine_, &FolderSearchEngine::searchStarted, this, &FolderCrawlerWidget::onSearchStarted );
     connect( engine_, &FolderSearchEngine::searchProgressed, this,
@@ -437,6 +453,8 @@ void FolderCrawlerWidget::onFilteredViewMarkLines( const klogg::vector<LineNumbe
     }
     if ( changed ) {
         filteredView_->forceRefresh();
+        // Under the Marks visibility filter the visible set depends on marks.
+        folderResults_->refreshForMarksChange();
     }
 }
 
@@ -456,6 +474,42 @@ void FolderCrawlerWidget::onFilteredViewDeleteMarkLines( const klogg::vector<Lin
     }
     if ( changed ) {
         filteredView_->forceRefresh();
+        folderResults_->refreshForMarksChange();
+    }
+}
+
+void FolderCrawlerWidget::changeFilteredViewVisibility( int index )
+{
+    // visibilityBox_ index order: 0 = Marks and matches, 1 = Marks, 2 = Matches.
+    using V = FolderSearchResults::Visibility;
+    if ( folderResults_ == nullptr ) {
+        return;
+    }
+    const auto v = [ index ]() -> V {
+        switch ( index ) {
+            case 1:
+                return V::Marks;
+            case 2:
+                return V::Matches;
+            default:
+                return V::MarksAndMatches;
+        }
+    }();
+    folderResults_->setVisibility( v ); // emits layoutChanged -> view refreshes
+}
+
+void FolderCrawlerWidget::setResultsVisibility( FolderSearchResults::Visibility visibility )
+{
+    if ( visibilityBox_ == nullptr || folderResults_ == nullptr ) {
+        return;
+    }
+    using V = FolderSearchResults::Visibility;
+    const int index = visibility == V::Marks ? 1 : visibility == V::Matches ? 2 : 0;
+    // setCurrentIndex fires changeFilteredViewVisibility when it changes; set
+    // the model directly too so it holds even if the index was already current.
+    visibilityBox_->setCurrentIndex( index );
+    if ( folderResults_->visibility() != visibility ) {
+        folderResults_->setVisibility( visibility );
     }
 }
 

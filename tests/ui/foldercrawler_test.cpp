@@ -994,6 +994,49 @@ TEST_CASE( "FolderCrawlerWidget records folder searches into the shared history"
              >= 0 );
 }
 
+TEST_CASE( "FolderCrawlerWidget results visibility: Marks shows only marked rows",
+           "[folder]" )
+{
+    // The Marks/Marks-and-matches/Matches combo must work on folder results
+    // (parity with single-file). Since every folder Data row is a match,
+    // MarksAndMatches and Matches both show all rows; Marks shows only the
+    // marked rows (plus a header for each group that has a mark).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "ERROR one\nERROR two\nERROR three\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // rows: [H0, D1, D2, D3] = 4 rows.
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+
+    // Mark result row 2 (a.log localLine 1) only.
+    widget.filteredView()->selectAndDisplayLine( 2_lnum );
+    widget.filteredView()->markSelected();
+    QTest::qWait( 50 );
+    REQUIRE( widget.isFilteredResultRowMarked( 2_lnum ) );
+
+    // Marks view: header + the single marked row.
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+
+    // Unmarking under Marks view hides the row (and, with no marks left, the
+    // group header too) via refreshForMarksChange.
+    widget.filteredView()->selectAndDisplayLine( 1_lnum ); // the marked row is now at index 1
+    widget.filteredView()->deleteMarksSelected();
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+
+    // Back to MarksAndMatches: all rows return (new search state not needed).
+    widget.setResultsVisibility( FolderSearchResults::Visibility::MarksAndMatches );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+}
+
 TEST_CASE( "FolderCrawlerWidget filtered-view M shortcut marks the selected result row",
            "[folder]" )
 {

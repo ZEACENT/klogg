@@ -23,6 +23,7 @@
 #include <QSet>
 #include <QString>
 #include <QTextCodec>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -108,6 +109,21 @@ class FolderSearchResults : public AbstractLogData {
     void expandAll();
     bool isCollapsed( klogg::folder::FileId fileId ) const;
 
+    // --- Visibility filter (parity with LogFilteredData::Visibility) ---
+    // Every folder Data row is a match, so MarksAndMatches and Matches both show
+    // all rows; Marks shows only the marked match rows (plus a header for each
+    // group that has at least one marked row).
+    enum class Visibility { MarksAndMatches, Marks, Matches };
+    void setVisibility( Visibility visibility );
+    Visibility visibility() const { return visibility_; }
+    // Inject the mark query the Marks filter consults (filePath, localLine) ->
+    // marked. The widget owns the mark store; this keeps FolderSearchResults free
+    // of UI-side mark ownership. Call before/with setVisibility(Marks).
+    void setMarkedLineQuery( std::function<bool( const QString&, LineNumber )> query );
+    // Rebuild + emit layoutChanged. Called by the widget when marks change while
+    // the Marks filter is active (the visible set depends on marks).
+    void refreshForMarksChange();
+
   Q_SIGNALS:
     // Emitted whenever the visible-row layout changes (new results, collapse
     // toggle, collapse/expand all). The view responds with updateData() +
@@ -136,6 +152,7 @@ class FolderSearchResults : public AbstractLogData {
     };
 
     void rebuildVisibleRows();
+    bool isLineMarked( const QString& filePath, LineNumber localLine ) const;
     QString headerText( klogg::folder::FileId fileId ) const;
     QString readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const;
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
@@ -144,6 +161,9 @@ class FolderSearchResults : public AbstractLogData {
     std::vector<klogg::folder::FileGroup> groups_;
     std::vector<VisibleRow> visibleRows_;
     QSet<klogg::folder::FileId> collapsed_;
+
+    Visibility visibility_ = Visibility::MarksAndMatches;
+    std::function<bool( const QString&, LineNumber )> isMarkedLine_;
 
     // Streaming commit state. pendingByIndex_ buffers out-of-order groups keyed
     // by file enumeration index; nextExpectedIndex_ is the in-order commit

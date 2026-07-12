@@ -51,6 +51,7 @@ class QuickFindPattern;
 class QSplitter;
 class QLabel;
 class QToolButton;
+class QComboBox;
 class SavedSearches;
 class SearchToolbar;
 
@@ -123,6 +124,9 @@ class FolderCrawlerWidget : public QWidget,
     // True while a search is running (cleared on searchFinished). Lets
     // integration tests wait for completion before asserting exact counts.
     bool isSearchActive() const { return searchActive_; }
+    // Set the results-view visibility filter (Marks / Marks and matches /
+    // Matches). Public so tests can drive it without manipulating the combo.
+    void setResultsVisibility( FolderSearchResults::Visibility visibility );
     // Set the pattern and kick off a search (async; results land via the
     // searchFinished signal).
     void searchFor( const QString& pattern );
@@ -253,6 +257,9 @@ class FolderCrawlerWidget : public QWidget,
     QLabel* statusLabel_ = nullptr;
     QToolButton* collapseAllButton_ = nullptr;
     QToolButton* expandAllButton_ = nullptr;
+    // Results-view visibility filter (Marks / Marks and matches / Matches),
+    // mirroring CrawlerWidget's visibility combo.
+    QComboBox* visibilityBox_ = nullptr;
 
     // Main-view file data: a placeholder (empty) until a row is clicked, then
     // the selected file's LogData. Recently-used files are cached (true LRU,
@@ -404,6 +411,8 @@ class FolderCrawlerWidget : public QWidget,
     // per-file store, then refresh so the bullet re-renders.
     void onFilteredViewMarkLines( const klogg::vector<LineNumber>& rows );
     void onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows );
+    // visibilityBox_ currentIndexChanged handler -> FolderSearchResults setVisibility.
+    void changeFilteredViewVisibility( int index );
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

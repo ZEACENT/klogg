@@ -340,10 +340,28 @@ void FolderSearchResults::rebuildVisibleRows()
     maxLength_ = 0_length;
     maxLocalLine_ = 0_lnum;
 
+    const bool marksOnly = ( visibility_ == Visibility::Marks );
+
     for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups_.size() ); ++fid ) {
         const auto& group = groups_[ static_cast<size_t>( fid ) ];
 
-        // Every group always shows its header (collapsed or not).
+        if ( marksOnly ) {
+            // Under the Marks filter a group with no marked rows is hidden
+            // entirely (no header), matching how single-file Marks view omits
+            // unmarked lines.
+            bool anyMarked = false;
+            for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
+                if ( isLineMarked( group.filePath, group.matches[ mi ].localLine ) ) {
+                    anyMarked = true;
+                    break;
+                }
+            }
+            if ( !anyMarked ) {
+                continue;
+            }
+        }
+
+        // Every shown group always shows its header (collapsed or not).
         visibleRows_.push_back( VisibleRow{ LineKind::Header, fid, 0 } );
         maxLength_ = std::max( maxLength_, LineLength( headerText( fid ).size() ) );
 
@@ -351,10 +369,44 @@ void FolderSearchResults::rebuildVisibleRows()
             continue;
         }
         for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
+            if ( marksOnly
+                 && !isLineMarked( group.filePath, group.matches[ mi ].localLine ) ) {
+                continue;
+            }
             visibleRows_.push_back( VisibleRow{ LineKind::Data, fid, mi } );
             maxLength_ = std::max( maxLength_, group.matches[ mi ].lineLength );
             maxLocalLine_ = std::max( maxLocalLine_, group.matches[ mi ].localLine );
         }
+    }
+}
+
+bool FolderSearchResults::isLineMarked( const QString& filePath, LineNumber localLine ) const
+{
+    return isMarkedLine_ != nullptr && isMarkedLine_( filePath, localLine );
+}
+
+void FolderSearchResults::setVisibility( Visibility visibility )
+{
+    visibility_ = visibility;
+    rebuildVisibleRows();
+    Q_EMIT layoutChanged();
+}
+
+void FolderSearchResults::setMarkedLineQuery( std::function<bool( const QString&, LineNumber )> query )
+{
+    isMarkedLine_ = std::move( query );
+    if ( visibility_ == Visibility::Marks ) {
+        rebuildVisibleRows();
+        Q_EMIT layoutChanged();
+    }
+}
+
+void FolderSearchResults::refreshForMarksChange()
+{
+    // The visible set depends on marks only under the Marks filter.
+    if ( visibility_ == Visibility::Marks ) {
+        rebuildVisibleRows();
+        Q_EMIT layoutChanged();
     }
 }
 
