@@ -22,7 +22,7 @@
 // multi-file tree, and asserts match-count parity.
 //
 // Build:  cmake --build build_root --target folder_search_benchmark
-// Run:    ./folder_search_benchmark --files 200 --lines-per-file 4000 \
+// Run:    ./folder_search_benchmark --files 200 --lines-per-file 4000
 //           --pattern 'NEEDLE' --vs-grep
 
 #include <chrono>

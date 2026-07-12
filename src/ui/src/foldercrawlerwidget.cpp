@@ -1406,7 +1406,7 @@ void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
     mainView_->refreshOverview();
 }
 
-void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> data )
+void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> logData )
 {
     if ( filePath.isEmpty() ) {
         return;
@@ -1418,7 +1418,7 @@ void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::share
         mainViewCacheOrder_.erase( existing->second.second );
     }
     mainViewCacheOrder_.push_front( filePath );
-    mainViewCache_[ filePath ] = { std::move( data ), mainViewCacheOrder_.begin() };
+    mainViewCache_[ filePath ] = { std::move( logData ), mainViewCacheOrder_.begin() };
 
     // Evict least-recently-used entries (back of the order list) to bound memory.
     while ( mainViewCache_.size() > MainViewCacheLimit ) {

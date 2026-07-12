@@ -2440,7 +2440,11 @@ SCENARIO( "Go to top moves main view to absolute top with active search",
     WHEN( "jumpToTop is called with active search" )
     {
         crawlerVisitor.jumpToTop();
-        QTest::qWait( 50 );
+        // Settle deterministically: jumpToTop can trigger async re-positioning,
+        // and a fixed delay flaked on the slower arm64 CI. Wait for the main
+        // view to actually reach the top before asserting (CLAUDE.md race-prone
+        // settle-delay guidance).
+        REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.mainTopLine().get() == 0; } ) );
         crawlerVisitor.render();
 
         THEN( "main view scrolls to absolute top, not the matching line" )
