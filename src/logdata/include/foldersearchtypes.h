@@ -35,6 +35,28 @@ namespace klogg::folder {
 // group list, which is also the order results are displayed.
 using FileId = int;
 
+// Distinguishes a real match row from a grep -A/-B/-C context row. Both live in
+// FileGroup::matches (one flat, localLine-sorted, deduplicated vector); the role
+// drives rendering (context rows have no Match bullet) and counting (only Match
+// rows count toward the header total, matchLinesForFile, and the engine match
+// count). Default Match keeps every legacy emission/test unchanged.
+enum class RecordRole : unsigned char {
+    Match,
+    Context,
+};
+
+// grep -A/-B/-C context-window selection, captured at scan time. before = -B
+// (lines before each match), after = -A (lines after). Both default 0 (no
+// context, the legacy behavior). Context is a SCAN-TIME property of folder
+// search (there is no line-number index, so a context line's text can only be
+// fetched later by the byte offset recorded while streaming); changing the
+// window requires a full re-scan via startSearch. Context never crosses a file
+// boundary (each file is an independent scanFile stream).
+struct ContextOptions {
+    int before = 0;
+    int after = 0;
+};
+
 // One matched line, as captured by the streaming search engine.
 //
 // Storage is deliberately offset-based rather than holding the line text: the
@@ -56,13 +78,18 @@ struct MatchRecord {
     LineLength lineLength = 0_length;
     // Length of the matched substring within the line (for match highlighting).
     LineLength matchLen = 0_length;
+    // Match vs Context (grep -A/-B/-C). LAST field so aggregate init order is
+    // {localLine, lineStartByte, lineEndByte, lineLength, matchLen, role}.
+    RecordRole role = RecordRole::Match;
 };
 
 // All matches from one source file. Files with zero matches are never emitted
 // (they are hidden from results), so every FileGroup has matches.size() >= 1.
 struct FileGroup {
     QString filePath;
-    std::vector<MatchRecord> matches; // ordered by localLine ascending
+    // Flat, sorted by localLine ascending, deduplicated; holds Match AND Context
+    // records (grep -A/-B/-C). A line that is both is emitted once as Match.
+    std::vector<MatchRecord> matches;
     // Source-file codec detected on the first block (mirrors the indexer's
     // guessEncoding). Used by FolderSearchResults::readMatchLine to decode the
     // fetched match bytes with the SAME codec that interpreted the file during

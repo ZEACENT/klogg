@@ -120,6 +120,16 @@ LineKind FolderSearchResults::lineKind( LineNumber visibleIndex ) const
     return row ? row->kind : LineKind::Data;
 }
 
+bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
+{
+    const auto* row = visibleRowAt( visibleIndex );
+    if ( row == nullptr || row->kind != LineKind::Data ) {
+        return false;
+    }
+    const auto& group = groups_[ static_cast<size_t>( row->fileId ) ];
+    return group.matches[ row->matchIndex ].role == klogg::folder::RecordRole::Match;
+}
+
 klogg::folder::FileId FolderSearchResults::fileIdForLine( LineNumber visibleIndex ) const
 {
     const auto* row = visibleRowAt( visibleIndex );
@@ -154,7 +164,11 @@ std::vector<LineNumber> FolderSearchResults::matchLinesForFile( const QString& f
         if ( g.filePath == filePath ) {
             out.reserve( g.matches.size() );
             for ( const auto& m : g.matches ) {
-                out.push_back( m.localLine );
+                // Context rows (grep -A/-B/-C) are not matches: keep them out of
+                // the main-view overview marks.
+                if ( m.role == klogg::folder::RecordRole::Match ) {
+                    out.push_back( m.localLine );
+                }
             }
             break;
         }
@@ -346,12 +360,14 @@ void FolderSearchResults::rebuildVisibleRows()
         const auto& group = groups_[ static_cast<size_t>( fid ) ];
 
         if ( marksOnly ) {
-            // Under the Marks filter a group with no marked rows is hidden
-            // entirely (no header), matching how single-file Marks view omits
-            // unmarked lines.
+            // Under the Marks filter a group with no marked MATCH rows is hidden
+            // entirely (context rows are never marks). Matches single-file Marks
+            // view omitting unmarked lines.
             bool anyMarked = false;
             for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
-                if ( isLineMarked( group.filePath, group.matches[ mi ].localLine ) ) {
+                const auto& rec = group.matches[ mi ];
+                if ( rec.role == klogg::folder::RecordRole::Match
+                     && isLineMarked( group.filePath, rec.localLine ) ) {
                     anyMarked = true;
                     break;
                 }
@@ -368,14 +384,24 @@ void FolderSearchResults::rebuildVisibleRows()
         if ( collapsed_.contains( fid ) ) {
             continue;
         }
+        // group.matches holds Match AND Context records (grep -A/-B/-C), already
+        // sorted by localLine ascending and deduplicated by the engine, so the
+        // linear walk produces grep grouping (context interleaved with matches)
+        // for free. Under Marks, context rows are hidden (not marks) and unmarked
+        // matches are hidden.
         for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
-            if ( marksOnly
-                 && !isLineMarked( group.filePath, group.matches[ mi ].localLine ) ) {
-                continue;
+            const auto& rec = group.matches[ mi ];
+            if ( marksOnly ) {
+                if ( rec.role != klogg::folder::RecordRole::Match ) {
+                    continue;
+                }
+                if ( !isLineMarked( group.filePath, rec.localLine ) ) {
+                    continue;
+                }
             }
             visibleRows_.push_back( VisibleRow{ LineKind::Data, fid, mi } );
-            maxLength_ = std::max( maxLength_, group.matches[ mi ].lineLength );
-            maxLocalLine_ = std::max( maxLocalLine_, group.matches[ mi ].localLine );
+            maxLength_ = std::max( maxLength_, rec.lineLength );
+            maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
         }
     }
 }
@@ -427,7 +453,15 @@ QString FolderSearchResults::headerText( klogg::folder::FileId fileId ) const
     text += QLatin1Char( ' ' );
     text += QChar( 0x2014 ); // em dash —
     text += QLatin1Char( ' ' );
-    text += QString::number( static_cast<int>( group.matches.size() ) );
+    // Count only real Match rows: with -A/-B/-C the group also holds Context
+    // records that must not inflate the per-file result count.
+    int matchCount = 0;
+    for ( const auto& r : group.matches ) {
+        if ( r.role == klogg::folder::RecordRole::Match ) {
+            ++matchCount;
+        }
+    }
+    text += QString::number( matchCount );
     text += QLatin1String( " results" );
     return text;
 }

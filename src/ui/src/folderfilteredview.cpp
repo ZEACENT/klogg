@@ -31,15 +31,17 @@ FolderFilteredView::FolderFilteredView( FolderSearchResults* results,
 
 AbstractLogData::LineType FolderFilteredView::lineType( LineNumber lineNumber ) const
 {
-    // Match rows are real search hits; header rows are decorative.
+    // Header rows are decorative.
     if ( results_ != nullptr && results_->lineKind( lineNumber ) == LineKind::Header ) {
         return {};
     }
-    // A result row the user marked (via the M shortcut) shows the mark bullet
-    // too -- the mark source resolves the row to (file, localLine) and checks
-    // the shared per-file store. Parity with single-file FilteredView, whose
-    // lineTypeByLine returns Match|Mark.
-    AbstractLogData::LineType flags = AbstractLogData::LineTypeFlags::Match;
+    // A grep -A/-B/-C context row renders PLAIN (no Match bullet); a real Match
+    // row carries Match. Either may also carry Mark if the user marked that
+    // source line. Parity with single-file FilteredView's Match|Mark.
+    AbstractLogData::LineType flags{};
+    if ( results_ != nullptr && results_->isMatchRow( lineNumber ) ) {
+        flags |= AbstractLogData::LineTypeFlags::Match;
+    }
     if ( markProvider_ != nullptr && markProvider_->isMarked( lineNumber ) ) {
         flags |= AbstractLogData::LineTypeFlags::Mark;
     }

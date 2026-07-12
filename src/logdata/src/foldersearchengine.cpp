@@ -64,24 +64,26 @@ FolderSearchEngine::~FolderSearchEngine()
 }
 
 quint64 FolderSearchEngine::startSearch( const QStringList& filePaths,
-                                         const RegularExpressionPattern& pattern )
+                                         const RegularExpressionPattern& pattern,
+                                         klogg::folder::ContextOptions context )
 {
     const quint64 gen = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
     interruptRequested_ = false;
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
-        pendingRequest_ = Request{ gen, filePaths, pattern, true };
+        pendingRequest_ = Request{ gen, filePaths, pattern, context, true };
     }
     requestCv_.notify_one();
     return gen;
 }
 
 quint64 FolderSearchEngine::scanSynchronously( const QStringList& filePaths,
-                                               const RegularExpressionPattern& pattern )
+                                               const RegularExpressionPattern& pattern,
+                                               klogg::folder::ContextOptions context )
 {
     const quint64 gen = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
     interruptRequested_ = false;
-    runSearch( gen, filePaths, pattern );
+    runSearch( gen, filePaths, pattern, context );
     return gen;
 }
 
@@ -115,7 +117,8 @@ std::optional<klogg::folder::FileGroup> FolderSearchEngine::takeCompletedGroup( 
 }
 
 void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
-                                    const RegularExpressionPattern& pattern )
+                                    const RegularExpressionPattern& pattern,
+                                    klogg::folder::ContextOptions context )
 {
     // A queued request whose generation is no longer current must do nothing.
     if ( generation_.load( std::memory_order_relaxed ) != gen ) {
@@ -159,7 +162,7 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
                || interruptRequested_.load( std::memory_order_relaxed );
     };
 
-    auto worker = [ this, &expression, &filePaths, total, gen, &nextFileIndex,
+    auto worker = [ this, &expression, &filePaths, total, gen, context, &nextFileIndex,
                     &completedCount, &shouldStop ]() {
         // Each worker owns its own PatternMatcher (private vectorscan scratch +
         // matcher context), created once and reused across every file it
@@ -175,10 +178,18 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
                 break;
             }
 
-            auto group = scanFile( filePaths[ i ], *matcher, DefaultBlockSize, shouldStop );
+            auto group = scanFile( filePaths[ i ], *matcher, DefaultBlockSize, shouldStop, context );
 
             if ( !group.matches.empty() ) {
-                matchCount_.fetch_add( group.matches.size(), std::memory_order_relaxed );
+                // Count ONLY real matches: with -A/-B/-C the vector also holds
+                // Context rows that must not inflate the status/header count.
+                const auto trueMatches = std::count_if(
+                    group.matches.begin(), group.matches.end(),
+                    []( const klogg::folder::MatchRecord& r ) {
+                        return r.role == klogg::folder::RecordRole::Match;
+                    } );
+                matchCount_.fetch_add( static_cast<quint64>( trueMatches ),
+                                       std::memory_order_relaxed );
             }
             {
                 std::lock_guard<std::mutex> lock( resultsMutex_ );
@@ -254,14 +265,15 @@ void FolderSearchEngine::workerLoop()
             req = std::move( pendingRequest_ );
             pendingRequest_.valid = false;
         }
-        runSearch( req.generation, req.filePaths, req.pattern );
+        runSearch( req.generation, req.filePaths, req.pattern, req.context );
     }
 }
 
 klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                                                        const PatternMatcher& matcher,
                                                        qint64 blockSize,
-                                                       std::function<bool()> shouldStop )
+                                                       std::function<bool()> shouldStop,
+                                                       klogg::folder::ContextOptions context )
 {
     klogg::folder::FileGroup group;
     group.filePath = path;
@@ -286,6 +298,101 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
     // single-byte UTF-8/ASCII fast path active until detection runs.
     QTextCodec* codec = nullptr;
     EncodingParameters params;
+
+    // --- grep -A/-B/-C context capture (per-file; never crosses a file
+    // boundary since scanFile is called once per file) ---
+    // beforeRing holds the last `before` completed lines (-B candidates);
+    // afterRemaining is the -A countdown armed on each match. Dedup relies on
+    // the monotonic invariant: emission is strictly ascending in localLine, so a
+    // candidate already emitted (as Match or Context) satisfies
+    // `localLine <= lastEmittedLocalLine` and is skipped (grep overlap merge).
+    const int before = context.before;
+    const int after = context.after;
+    struct LineTuple {
+        OffsetInFile start;
+        OffsetInFile end;
+        LineNumber localLine;
+        LineLength length;
+    };
+    std::vector<LineTuple> beforeRing;
+    if ( before > 0 ) {
+        beforeRing.reserve( static_cast<size_t>( before ) );
+    }
+    int afterRemaining = 0;
+    LineNumber lastEmittedLocalLine = 0_lnum;
+    bool haveEmittedRow = false;
+
+    // Emits one Match or Context record for the line at (localLine, lineStartAbs
+    // .. endByte). On a match it also flushes the -B ring (as Context) and arms
+    // the -A countdown; a non-match either feeds the ring or drains the -A
+    // window. Mirrors LogFilteredData::rebuildContextLinesList's std::set union
+    // via the streaming monotonic dedup above.
+    auto recordLine = [ & ]( std::string_view lineView, OffsetInFile startByte,
+                             OffsetInFile endByte, bool isMatch ) {
+        // Default fast path: no context window active and not a match -> nothing
+        // to capture. Keeps before=0/after=0 byte-count-identical to the legacy
+        // per-line path (no getUntabifiedLength call for non-matches).
+        if ( !isMatch && before == 0 && afterRemaining <= 0 ) {
+            return;
+        }
+        const LineLength len = getUntabifiedLength( lineView );
+        if ( isMatch ) {
+            if ( before > 0 ) {
+                for ( const auto& t : beforeRing ) {
+                    if ( !haveEmittedRow || t.localLine > lastEmittedLocalLine ) {
+                        klogg::folder::MatchRecord r;
+                        r.localLine = t.localLine;
+                        r.lineStartByte = t.start;
+                        r.lineEndByte = t.end;
+                        r.lineLength = t.length;
+                        r.matchLen = 0_length;
+                        r.role = klogg::folder::RecordRole::Context;
+                        group.matches.push_back( std::move( r ) );
+                        lastEmittedLocalLine = t.localLine;
+                        haveEmittedRow = true;
+                    }
+                }
+                beforeRing.clear();
+            }
+            klogg::folder::MatchRecord r;
+            r.localLine = localLine;
+            r.lineStartByte = startByte;
+            r.lineEndByte = endByte;
+            r.lineLength = len;
+            r.matchLen = 0_length;
+            r.role = klogg::folder::RecordRole::Match;
+            group.matches.push_back( std::move( r ) );
+            lastEmittedLocalLine = localLine;
+            haveEmittedRow = true;
+            afterRemaining = after;
+        }
+        else {
+            if ( before > 0 ) {
+                beforeRing.push_back( LineTuple{ startByte, endByte, localLine, len } );
+                if ( static_cast<int>( beforeRing.size() ) > before ) {
+                    beforeRing.erase( beforeRing.begin() );
+                }
+            }
+            // Only drain an ACTIVE after-window. The fast-path guard above does
+            // NOT short-circuit when before>0 (the ring must still be fed), so
+            // gate the after-context emit explicitly on afterRemaining > 0.
+            if ( afterRemaining > 0 ) {
+                if ( !haveEmittedRow || localLine > lastEmittedLocalLine ) {
+                    klogg::folder::MatchRecord r;
+                    r.localLine = localLine;
+                    r.lineStartByte = startByte;
+                    r.lineEndByte = endByte;
+                    r.lineLength = len;
+                    r.matchLen = 0_length;
+                    r.role = klogg::folder::RecordRole::Context;
+                    group.matches.push_back( std::move( r ) );
+                    lastEmittedLocalLine = localLine;
+                    haveEmittedRow = true;
+                }
+                --afterRemaining;
+            }
+        }
+    };
 
     QByteArray block = file.read( blockSize );
     while ( !block.isEmpty() ) {
@@ -366,15 +473,9 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                             lineView = std::string_view(
                                 decoded.constData(), static_cast<size_t>( decoded.size() ) );
                         }
-                        if ( matcher.hasMatch( lineView ) ) {
-                            klogg::folder::MatchRecord m;
-                            m.localLine = localLine;
-                            m.lineStartByte = lineStartAbs;
-                            m.lineEndByte = OffsetInFile( lineStartAbs.get() + feedEnd );
-                            m.lineLength = getUntabifiedLength( lineView );
-                            m.matchLen = 0_length;
-                            group.matches.push_back( std::move( m ) );
-                        }
+                        recordLine( lineView, lineStartAbs,
+                                    OffsetInFile( lineStartAbs.get() + feedEnd ),
+                                    matcher.hasMatch( lineView ) );
                         ++localLine;
                         lineStartAbs = OffsetInFile( lineStartAbs.get() + feedEnd );
                         carry.clear();
@@ -457,15 +558,9 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                 }
             }
 
-            if ( matcher.hasMatch( lineView ) ) {
-                klogg::folder::MatchRecord m;
-                m.localLine = localLine;
-                m.lineStartByte = lineStartAbs;
-                m.lineEndByte = OffsetInFile( fileOffset.get() + lineFeedEnd );
-                m.lineLength = getUntabifiedLength( lineView );
-                m.matchLen = 0_length;
-                group.matches.push_back( std::move( m ) );
-            }
+            recordLine( lineView, lineStartAbs,
+                        OffsetInFile( fileOffset.get() + lineFeedEnd ),
+                        matcher.hasMatch( lineView ) );
 
             ++localLine;
             carry.clear();
@@ -498,15 +593,7 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
             lineView = std::string_view(
                 decoded.constData(), static_cast<size_t>( decoded.size() ) );
         }
-        if ( matcher.hasMatch( lineView ) ) {
-            klogg::folder::MatchRecord m;
-            m.localLine = localLine;
-            m.lineStartByte = lineStartAbs;
-            m.lineEndByte = fileOffset; // EOF
-            m.lineLength = getUntabifiedLength( lineView );
-            m.matchLen = 0_length;
-            group.matches.push_back( std::move( m ) );
-        }
+        recordLine( lineView, lineStartAbs, fileOffset /*EOF*/, matcher.hasMatch( lineView ) );
     }
 
     return group;

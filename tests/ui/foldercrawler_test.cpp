@@ -31,6 +31,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
@@ -1242,3 +1243,80 @@ TEST_CASE( "FolderCrawlerWidget applyConfiguration repopulates predefined filter
     REQUIRE( widget.searchToolbar()->predefinedFilters()->findText( testName ) >= 0 );
 }
 
+
+TEST_CASE( "FolderCrawlerWidget context controls map -A/-B/-C to (before,after)", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    REQUIRE( widget.contextLinesComboBox() != nullptr );
+    REQUIRE( widget.contextLinesSpinBox() != nullptr );
+    // Default is None -> (0,0).
+    REQUIRE( widget.currentContext() == std::make_pair( 0, 0 ) );
+
+    // Before -B with value 2 -> (2,0). No pattern -> no search kicked off.
+    widget.contextLinesComboBox()->setCurrentIndex( 1 ); // "Before (-B)"
+    widget.contextLinesSpinBox()->setValue( 2 );
+    QTest::qWait( 30 );
+    REQUIRE( widget.currentContext() == std::make_pair( 2, 0 ) );
+
+    // After -A with value 3 -> (0,3).
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // "After (-A)"
+    widget.contextLinesSpinBox()->setValue( 3 );
+    QTest::qWait( 30 );
+    REQUIRE( widget.currentContext() == std::make_pair( 0, 3 ) );
+
+    // Around -C with value 1 -> (1,1).
+    widget.contextLinesComboBox()->setCurrentIndex( 3 ); // "Around (-C)"
+    widget.contextLinesSpinBox()->setValue( 1 );
+    QTest::qWait( 30 );
+    REQUIRE( widget.currentContext() == std::make_pair( 1, 1 ) );
+
+    // Value 0 clears the window but keeps the chosen mode.
+    widget.contextLinesSpinBox()->setValue( 0 );
+    QTest::qWait( 30 );
+    REQUIRE( widget.currentContext() == std::make_pair( 0, 0 ) );
+    REQUIRE( widget.contextLinesComboBox()->currentIndex() == 3 );
+}
+
+TEST_CASE( "FolderCrawlerWidget -A search emits context rows that render plain", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // match on line 1 (HIT); -A2 -> context lines 2 and 3 follow it.
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nHIT\nline2\nline3\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // After -A
+    widget.contextLinesSpinBox()->setValue( 2 );
+
+    widget.searchFor( "HIT" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Visible rows: [H0, D1(Match HIT), D2(Context line2), D3(Context line3)].
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+    REQUIRE( widget.folderResults()->lineKind( 1_lnum ) == LineKind::Data );
+    REQUIRE( widget.folderResults()->lineKind( 2_lnum ) == LineKind::Data );
+
+    // The match row carries the Match bullet; context rows render PLAIN.
+    REQUIRE( widget.filteredView()->lineTypeForTest( 1_lnum )
+                 .testFlag( AbstractLogData::LineTypeFlags::Match ) );
+    REQUIRE_FALSE( widget.filteredView()->lineTypeForTest( 2_lnum )
+                       .testFlag( AbstractLogData::LineTypeFlags::Match ) );
+    REQUIRE_FALSE( widget.filteredView()->lineTypeForTest( 3_lnum )
+                       .testFlag( AbstractLogData::LineTypeFlags::Match ) );
+
+    // isMatchRow distinguishes them.
+    REQUIRE( widget.folderResults()->isMatchRow( 1_lnum ) );
+    REQUIRE_FALSE( widget.folderResults()->isMatchRow( 2_lnum ) );
+
+    // Clicking a context row still resolves to its source line (openable).
+    const auto ctx = widget.folderResults()->sourceForLine( 2_lnum );
+    REQUIRE( ctx.filePath == a );
+    REQUIRE( ctx.localLine == 2_lnum );
+}

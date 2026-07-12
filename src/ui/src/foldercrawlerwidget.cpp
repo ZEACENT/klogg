@@ -22,8 +22,10 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QFontMetrics>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QSpinBox>
 #include <QStringListModel>
 #include <QTextCodec>
 #include <QFont>
@@ -187,6 +189,27 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     visibilityBox_->addItem( tr( "Marks" ) );
     visibilityBox_->addItem( tr( "Matches" ) );
     visibilityBox_->setCurrentIndex( 0 );
+    // grep -A/-B/-C context controls (mirrors CrawlerWidget's
+    // contextLinesSpinBox_ + contextLinesComboBox_). Combo itemData encodes the
+    // mode: 0=None, 1=Before(-B), 2=After(-A), 3=Around(-C).
+    contextLinesSpinBox_ = new QSpinBox( this );
+    contextLinesSpinBox_->setMinimum( 0 );
+    contextLinesSpinBox_->setMaximum( 1000 );
+    contextLinesSpinBox_->setValue( 0 );
+    contextLinesSpinBox_->setToolTip( tr( "Number of context lines" ) );
+    contextLinesSpinBox_->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Minimum );
+    contextLinesSpinBox_->setMinimumWidth(
+        QFontMetrics( contextLinesSpinBox_->font() ).horizontalAdvance( QStringLiteral( "0000" ) )
+        + 32 );
+    contextLinesComboBox_ = new QComboBox( this );
+    contextLinesComboBox_->setToolTip( tr( "Context lines mode" ) );
+    contextLinesComboBox_->setSizePolicy( QSizePolicy::Fixed, QSizePolicy::Fixed );
+    contextLinesComboBox_->setContentsMargins( 2, 2, 2, 2 );
+    contextLinesComboBox_->addItem( tr( "None" ), 0 );
+    contextLinesComboBox_->addItem( tr( "Before (-B)" ), 1 );
+    contextLinesComboBox_->addItem( tr( "After (-A)" ), 2 );
+    contextLinesComboBox_->addItem( tr( "Around (-C)" ), 3 );
+    contextLinesComboBox_->setCurrentIndex( 0 );
 
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget( searchToolbar_, 1 );
@@ -194,6 +217,8 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     toolbar->addWidget( collapseAllButton_ );
     toolbar->addWidget( expandAllButton_ );
     toolbar->addWidget( visibilityBox_ );
+    toolbar->addWidget( contextLinesSpinBox_ );
+    toolbar->addWidget( contextLinesComboBox_ );
     toolbar->addSpacing( 12 );
     toolbar->addWidget( statusLabel_ );
 
@@ -321,6 +346,10 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     connect( expandAllButton_, &QToolButton::clicked, this, &FolderCrawlerWidget::expandAll );
     connect( visibilityBox_, qOverload<int>( &QComboBox::currentIndexChanged ), this,
              &FolderCrawlerWidget::changeFilteredViewVisibility );
+    connect( contextLinesComboBox_, qOverload<int>( &QComboBox::currentIndexChanged ), this,
+             &FolderCrawlerWidget::onContextControlsChanged );
+    connect( contextLinesSpinBox_, qOverload<int>( &QSpinBox::valueChanged ), this,
+             &FolderCrawlerWidget::onContextControlsChanged );
 
     connect( engine_, &FolderSearchEngine::searchStarted, this, &FolderCrawlerWidget::onSearchStarted );
     connect( engine_, &FolderSearchEngine::searchProgressed, this,
@@ -496,6 +525,45 @@ void FolderCrawlerWidget::changeFilteredViewVisibility( int index )
         }
     }();
     folderResults_->setVisibility( v ); // emits layoutChanged -> view refreshes
+}
+
+void FolderCrawlerWidget::updateContextFromControls()
+{
+    // Mirrors CrawlerWidget::applyContextLines (crawlerwidget.cpp ~2177): combo
+    // itemData encodes the mode (0 None, 1 -B, 2 -A, 3 -C); value 0 clears the
+    // window but preserves the user's chosen mode for the next edit.
+    const int mode = contextLinesComboBox_ ? contextLinesComboBox_->currentData().toInt() : 0;
+    const int n = contextLinesSpinBox_ ? contextLinesSpinBox_->value() : 0;
+    switch ( mode ) {
+        case 1:
+            contextBefore_ = n;
+            contextAfter_ = 0;
+            break; // -B
+        case 2:
+            contextBefore_ = 0;
+            contextAfter_ = n;
+            break; // -A
+        case 3:
+            contextBefore_ = n;
+            contextAfter_ = n;
+            break; // -C
+        default:
+            contextBefore_ = 0;
+            contextAfter_ = 0;
+            break; // None
+    }
+}
+
+void FolderCrawlerWidget::onContextControlsChanged()
+{
+    // grep semantics: context is selected at scan time, so a control change must
+    // re-scan (the engine captures context offsets while streaming). Re-run only
+    // when a pattern is present so tweaking the controls before the first search
+    // does not flash the "Searching..." status.
+    updateContextFromControls();
+    if ( !searchToolbar_->currentSearchText().isEmpty() ) {
+        startSearch(); // bumps generation -> supersedes any in-flight scan
+    }
 }
 
 void FolderCrawlerWidget::setResultsVisibility( FolderSearchResults::Visibility visibility )
@@ -956,7 +1024,12 @@ void FolderCrawlerWidget::startSearch()
     // / boolean). This UPGRADES folder search from the former plain-text
     // RegularExpressionPattern{ pattern } to honor the toggles for free.
     const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
-    currentSearchGeneration_ = engine_->startSearch( filePaths_, regexpPattern );
+    // Context is a scan-time property: resolve the current -A/-B/-C window from
+    // the toolbar so programmatic startSearch (searchFor, session restore) also
+    // honors it, not just direct control edits.
+    updateContextFromControls();
+    currentSearchGeneration_ = engine_->startSearch(
+        filePaths_, regexpPattern, klogg::folder::ContextOptions{ contextBefore_, contextAfter_ } );
     // Store + forward the pattern to BOTH views so that the matched substring
     // is highlighted in the filtered results AND in any file already open in
     // the main view (single-file parity: crawlerwidget.cpp forwards to both

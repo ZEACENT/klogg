@@ -82,6 +82,11 @@ class FolderSearchResults : public AbstractLogData {
 
     LineKind lineKind( LineNumber visibleIndex ) const;
 
+    // True iff the visible row is a real Match (not a grep -A/-B/-C Context row
+    // and not a Header). Exposed so FolderFilteredView can suppress the Match
+    // bullet on context rows without touching the records vector.
+    bool isMatchRow( LineNumber visibleIndex ) const;
+
     // The source group (fileId) a visible row belongs to (Header or Match).
     klogg::folder::FileId fileIdForLine( LineNumber visibleIndex ) const;
 

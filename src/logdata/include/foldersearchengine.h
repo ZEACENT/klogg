@@ -71,21 +71,25 @@ class FolderSearchEngine : public QObject {
     // Async full scan. Bumps the generation (superseding any in-progress scan),
     // posts the request to the worker thread, and returns the new generation.
     // Receivers compare the signal-supplied generation against
-    // currentGeneration() to drop stale signals.
-    quint64 startSearch( const QStringList& filePaths, const RegularExpressionPattern& pattern );
+    // currentGeneration() to drop stale signals. `context` selects grep -A/-B/-C
+    // context lines captured at scan time (re-run startSearch to change it).
+    quint64 startSearch( const QStringList& filePaths, const RegularExpressionPattern& pattern,
+                         klogg::folder::ContextOptions context = {} );
 
     // Synchronous full scan on the calling thread (bumps generation first).
     // Used by tests and the benchmark. Emits searchStarted/searchProgressed/
     // searchFinished for the new generation.
     quint64 scanSynchronously( const QStringList& filePaths,
-                               const RegularExpressionPattern& pattern );
+                               const RegularExpressionPattern& pattern,
+                               klogg::folder::ContextOptions context = {} );
 
     // Run a scan for a SPECIFIC generation on the calling thread. Aborts before
     // it starts if currentGeneration() != generation, and aborts between files
     // if interrupt was requested. Public so generation-staleness is unit
     // testable without the worker thread.
     void runSearch( quint64 generation, const QStringList& filePaths,
-                    const RegularExpressionPattern& pattern );
+                    const RegularExpressionPattern& pattern,
+                    klogg::folder::ContextOptions context = {} );
 
     // Stop the in-progress scan (and cancel any queued request). Does not bump
     // the generation; the running scan emits its own searchFinished as it winds
@@ -112,10 +116,12 @@ class FolderSearchEngine : public QObject {
 
     // Scan a single file synchronously. Returns its FileGroup (empty matches if
     // the file is binary, unreadable, or has no matches). The pure, testable
-    // unit: a function of (path, matcher, block size, stop predicate) only.
+    // unit: a function of (path, matcher, block size, stop predicate, context)
+    // only. `context` captures grep -A/-B/-C rows around each match.
     static klogg::folder::FileGroup scanFile( const QString& path, const PatternMatcher& matcher,
                                               qint64 blockSize = DefaultBlockSize,
-                                              std::function<bool()> shouldStop = {} );
+                                              std::function<bool()> shouldStop = {},
+                                              klogg::folder::ContextOptions context = {} );
 
   Q_SIGNALS:
     void searchStarted( quint64 generation );
@@ -139,6 +145,7 @@ class FolderSearchEngine : public QObject {
         quint64 generation = 0;
         QStringList filePaths;
         RegularExpressionPattern pattern;
+        klogg::folder::ContextOptions context;
         bool valid = false;
     };
     Request pendingRequest_; // guarded by requestMutex_

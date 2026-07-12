@@ -28,6 +28,7 @@
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
 #include "linetypes.h"
 #include "markprovider.h"
@@ -52,6 +53,7 @@ class QSplitter;
 class QLabel;
 class QToolButton;
 class QComboBox;
+class QSpinBox;
 class SavedSearches;
 class SearchToolbar;
 
@@ -127,6 +129,10 @@ class FolderCrawlerWidget : public QWidget,
     // Set the results-view visibility filter (Marks / Marks and matches /
     // Matches). Public so tests can drive it without manipulating the combo.
     void setResultsVisibility( FolderSearchResults::Visibility visibility );
+    // Test accessors for the grep -A/-B/-C context controls.
+    QComboBox* contextLinesComboBox() const { return contextLinesComboBox_; }
+    QSpinBox* contextLinesSpinBox() const { return contextLinesSpinBox_; }
+    std::pair<int, int> currentContext() const { return { contextBefore_, contextAfter_ }; }
     // Set the pattern and kick off a search (async; results land via the
     // searchFinished signal).
     void searchFor( const QString& pattern );
@@ -260,6 +266,12 @@ class FolderCrawlerWidget : public QWidget,
     // Results-view visibility filter (Marks / Marks and matches / Matches),
     // mirroring CrawlerWidget's visibility combo.
     QComboBox* visibilityBox_ = nullptr;
+    // grep -A/-B/-C context controls + resolved window (mirrors CrawlerWidget's
+    // contextLinesSpinBox_/contextLinesComboBox_).
+    QComboBox* contextLinesComboBox_ = nullptr;
+    QSpinBox* contextLinesSpinBox_ = nullptr;
+    int contextBefore_ = 0;
+    int contextAfter_ = 0;
 
     // Main-view file data: a placeholder (empty) until a row is clicked, then
     // the selected file's LogData. Recently-used files are cached (true LRU,
@@ -413,6 +425,12 @@ class FolderCrawlerWidget : public QWidget,
     void onFilteredViewDeleteMarkLines( const klogg::vector<LineNumber>& rows );
     // visibilityBox_ currentIndexChanged handler -> FolderSearchResults setVisibility.
     void changeFilteredViewVisibility( int index );
+    // Resolve (before, after) from the context combo+spinbox into contextBefore_/
+    // contextAfter_, mirroring CrawlerWidget::applyContextLines.
+    void updateContextFromControls();
+    // Context combo/spinbox changed -> recompute (before,after) and, if a pattern
+    // is present, re-run the search (context is a scan-time property).
+    void onContextControlsChanged();
 };
 
 #endif // FOLDERCRAWLERWIDGET_H

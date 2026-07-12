@@ -400,3 +400,141 @@ TEST_CASE( "scanFile resolves a UTF-16BE line-feed split across a block boundary
     REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
     REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
 }
+
+// ============================ grep -A/-B/-C context ============================
+
+TEST_CASE( "scanFile -A emits N after-context rows tagged Context", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "HIT\nx1\nx2\nx3\nx4\n" ) );
+    auto matcher = matcherFor( "HIT" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 0, /*after=*/2 } );
+    REQUIRE( group.matches.size() == 3 );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 1 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 2 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 2 ].localLine == 2_lnum );
+}
+
+TEST_CASE( "scanFile -B emits N before-context rows with correct byte offsets", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // "p1\np2\nHIT\n" -> p1 at [0,3), p2 at [3,6), HIT at [6,10)
+    const QString path = writeFile( dir, "a.log", QByteArray( "p1\np2\nHIT\n" ) );
+    auto matcher = matcherFor( "HIT" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 2 /*before*/, 0 } );
+    REQUIRE( group.matches.size() == 3 );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 0 ) );
+    REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( 3 ) );
+    REQUIRE( group.matches[ 1 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 2 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 2 ].localLine == 2_lnum );
+}
+
+TEST_CASE( "scanFile -C merges overlapping windows without duplicate rows", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // lines: 0:m0, 1:a, 2:m1 -- m0 and m1 both match; -C1 -> before=1,after=1
+    const QString path = writeFile( dir, "a.log", QByteArray( "m0\na\nm1\n" ) );
+    auto matcher = matcherFor( "m" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 1, 1 } );
+    REQUIRE( group.matches.size() == 3 ); // {m0, a(context), m1} -- no duplicate
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 1 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 2 ].localLine == 2_lnum );
+    REQUIRE( group.matches[ 2 ].role == klogg::folder::RecordRole::Match );
+}
+
+TEST_CASE( "scanFile -B at the first line emits no before-context (no underflow)", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "HIT\nx\n" ) );
+    auto matcher = matcherFor( "HIT" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 5 /*before*/, 0 } );
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+}
+
+TEST_CASE( "scanFile -A past EOF stops cleanly (trailing line, no final newline)", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "HIT\nx1" ) ); // no trailing \n
+    auto matcher = matcherFor( "HIT" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 0, 3 } );
+    REQUIRE( group.matches.size() == 2 ); // Match@0, Context@1; after undrained
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 1 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+}
+
+TEST_CASE( "scanFile default context is byte-identical to legacy match-only", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "foo\nbar ERROR\nbaz\n" ) );
+    auto matcher = matcherFor( "ERROR" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher ); // default context {}
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 0 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 4 ) );
+    REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( 14 ) );
+    REQUIRE( group.matches[ 0 ].lineLength == 9_length );
+}
+
+TEST_CASE( "FolderSearchEngine matchCount counts only Match rows with context", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "HIT\nx1\nx2\n" ) );
+    auto matcher = matcherFor( "HIT" );
+
+    FolderSearchEngine engine;
+    engine.scanSynchronously( QStringList{ path }, RegularExpressionPattern{ QStringLiteral( "HIT" ) },
+                              { 0, 2 } );
+    // 3 records (1 Match + 2 Context) but only 1 true match.
+    REQUIRE( engine.matchCount() == 1 );
+}
+
+TEST_CASE( "scanFile context window larger than the file", "[folder][context]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // 3-line file, match on line 1, before=100/after=100 -> {C0, M1, C2}
+    const QString path = writeFile( dir, "a.log", QByteArray( "p\nHIT\nq\n" ) );
+    auto matcher = matcherFor( "HIT" );
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                                     {}, { 100, 100 } );
+    REQUIRE( group.matches.size() == 3 );
+    REQUIRE( group.matches[ 0 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 0 ].localLine == 0_lnum );
+    REQUIRE( group.matches[ 1 ].role == klogg::folder::RecordRole::Match );
+    REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
+    REQUIRE( group.matches[ 2 ].role == klogg::folder::RecordRole::Context );
+    REQUIRE( group.matches[ 2 ].localLine == 2_lnum );
+}
