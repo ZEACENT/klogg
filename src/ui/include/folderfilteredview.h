@@ -39,7 +39,6 @@ class FolderFilteredView : public AbstractLogView {
   protected:
     AbstractLogData::LineType lineType( LineNumber lineNumber ) const override;
     LineNumber displayLineNumber( LineNumber lineNumber ) const override;
-    LineNumber lineIndex( LineNumber lineNumber ) const override;
     LineNumber maxDisplayLineNumber() const override;
     LineKind lineKind( LineNumber lineNumber ) const override;
 

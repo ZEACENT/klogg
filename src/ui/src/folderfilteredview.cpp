@@ -52,11 +52,6 @@ LineNumber FolderFilteredView::displayLineNumber( LineNumber lineNumber ) const
     return source.localLine + 1_lcount;
 }
 
-LineNumber FolderFilteredView::lineIndex( LineNumber lineNumber ) const
-{
-    return lineNumber;
-}
-
 LineNumber FolderFilteredView::maxDisplayLineNumber() const
 {
     if ( results_ == nullptr ) {
