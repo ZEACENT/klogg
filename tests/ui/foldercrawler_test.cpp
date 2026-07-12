@@ -876,7 +876,7 @@ TEST_CASE( "FolderCrawlerWidget copy/selectAll delegate to the active view", "[f
 {
     // FolderCrawlerWidget must override getSelectedText/selectAll/isPartialSelection
     // (AbstractCrawlerWidget) so MainWindow::copy/selectAll work on folder tabs.
-    // Previously they gated on currentCrawlerWidget() (qobject_cast<CrawlerWidget*>,
+    // Previously they gated on the current crawler widget (a CrawlerWidget cast,
     // null for a folder tab) and the Edit-menu items were enabled but silent
     // no-ops. Through the AbstractCrawlerWidget* dispatch base, copy/selectAll
     // must reach the folder's active view.
