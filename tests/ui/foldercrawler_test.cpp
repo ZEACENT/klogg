@@ -32,6 +32,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QToolButton>
 
 #include <algorithm>
 #include <functional>
@@ -47,6 +48,7 @@
 #include "logmainview.h"
 #include "overview.h"
 #include "overviewwidget.h"
+#include "predefinedfilterscombobox.h"
 #include "quickfindmux.h"
 #include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
@@ -392,6 +394,25 @@ TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps",
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
     QTest::qWait( 200 );
     REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget exposes predefined filters and favorites in the toolbar", "[folder]" )
+{
+    // Predefined filters + favorites are shared global pattern stores; they are
+    // shown (not hidden) so folder search can reuse / save filters like
+    // single-file (selecting a predefined filter applies its pattern + regex).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    REQUIRE_FALSE( widget.searchToolbar()->predefinedFilters()->isHidden() );
+    REQUIRE_FALSE( widget.searchToolbar()->favoriteFilterButton()->isHidden() );
+    // Auto-refresh + keep-results are file-search-only and stay hidden.
+    REQUIRE( widget.searchToolbar()->searchRefreshButton()->isHidden() );
+    REQUIRE( widget.searchToolbar()->keepSearchResultsButton()->isHidden() );
 }
 
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
