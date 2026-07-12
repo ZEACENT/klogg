@@ -28,6 +28,7 @@
 #include <unordered_map>
 
 #include "linetypes.h"
+#include "quickfindmux.h"
 #include "regularexpressionpattern.h"
 #include "abstractcrawlerwidget.h"
 
@@ -66,7 +67,9 @@ enum class DataStatus;
 // opens its source file in the main view: the file is indexed on demand (the
 // only place klogg's index is used in folder mode) and cached so re-selecting a
 // file is instant.
-class FolderCrawlerWidget : public QWidget, public AbstractCrawlerWidget {
+class FolderCrawlerWidget : public QWidget,
+                           public AbstractCrawlerWidget,
+                           public QuickFindMuxSelectorInterface {
     Q_OBJECT
 
   public:
@@ -136,6 +139,12 @@ class FolderCrawlerWidget : public QWidget, public AbstractCrawlerWidget {
     void doSetSavedSearches( SavedSearches* saved_searches ) override;
     void doSetViewContext( const QString& view_context ) override;
     std::shared_ptr<const ViewContextInterface> doGetViewContext() const override;
+
+    // QuickFindMuxSelectorInterface -- the folder's main + filtered views are
+    // the searchables; Ctrl+F dispatches to the focused one (or the filtered
+    // view by default) via activeView().
+    SearchableWidgetInterface* doGetActiveSearchable() const override;
+    std::vector<QObject*> doGetAllSearchables() const override;
 
   private Q_SLOTS:
     void startSearch();

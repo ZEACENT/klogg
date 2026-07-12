@@ -45,6 +45,8 @@
 #include "logmainview.h"
 #include "overview.h"
 #include "overviewwidget.h"
+#include "quickfindmux.h"
+#include "quickfindpattern.h"
 #include "regularexpressionpattern.h"
 #include "searchtoolbar.h"
 #include "viewinterface.h"
@@ -631,4 +633,48 @@ TEST_CASE( "FolderCrawlerWidget copy/selectAll delegate to the active view", "[f
     REQUIRE_FALSE( text.isEmpty() );
     REQUIRE( text.contains( QStringLiteral( "ERROR" ) ) );
     REQUIRE_NOTHROW( base->isPartialSelection() );
+}
+
+TEST_CASE( "FolderCrawlerWidget is a QuickFind selector (Ctrl+F dispatch target)", "[folder]" )
+{
+    // FolderCrawlerWidget must implement QuickFindMuxSelectorInterface so the
+    // main-window Ctrl+F bar dispatches searchForward/searchBackward to the
+    // folder's views. Previously the folder tab registered a null selector and
+    // the QuickFind bar was inert.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    auto* selector = dynamic_cast<QuickFindMuxSelectorInterface*>( &widget );
+    REQUIRE( selector != nullptr );
+    REQUIRE( selector->getActiveSearchable() != nullptr );
+    const auto searchables = selector->getAllSearchables();
+    REQUIRE( searchables.size() == 2 ); // main view + filtered view
+}
+
+TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPattern", "[folder]" )
+{
+    // doSetQuickFindPattern must re-point both views to the passed pattern via
+    // AbstractLogView::setQuickFindPattern, so the app-wide QuickFindMux (which
+    // drives the session pattern) actually drives the folder's views. Without
+    // this, the views keep the ctor-local pattern the mux never updates and
+    // typing in the QuickFind bar does nothing.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // Before rebind, the views hold the ctor-local pattern (not the session one).
+    auto sessionQfp = std::make_shared<QuickFindPattern>();
+    REQUIRE( widget.filteredView()->quickFindPattern() != sessionQfp.get() );
+
+    widget.setQuickFindPattern( sessionQfp ); // doSetQuickFindPattern -> views re-pointed
+
+    REQUIRE( widget.filteredView()->quickFindPattern() == sessionQfp.get() );
+    REQUIRE( widget.mainView()->quickFindPattern() == sessionQfp.get() );
 }

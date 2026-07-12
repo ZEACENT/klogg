@@ -304,6 +304,19 @@ AbstractLogView* FolderCrawlerWidget::activeView() const
     return filteredView_;
 }
 
+SearchableWidgetInterface* FolderCrawlerWidget::doGetActiveSearchable() const
+{
+    // activeView() is an AbstractLogView, which IS-A SearchableWidgetInterface.
+    return activeView();
+}
+
+std::vector<QObject*> FolderCrawlerWidget::doGetAllSearchables() const
+{
+    // Both views are QObjects; the QuickFindMux registers pattern listeners on
+    // each so incremental search works in whichever the user is focused on.
+    return { mainView_, filteredView_ };
+}
+
 QString FolderCrawlerWidget::getSelectedText() const
 {
     auto* view = activeView();
@@ -353,8 +366,25 @@ void FolderCrawlerWidget::doSetData( std::shared_ptr<SearchableLogData>,
 
 void FolderCrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp )
 {
-    // Folder mode uses its own QuickFindPattern for v1; accept but don't rewire.
+    // Accept the session-wide QuickFindPattern and RE-POINT both views to it
+    // (AbstractLogView::setQuickFindPattern), so the app-wide QuickFindMux --
+    // which drives this pattern -- actually drives the folder's views. Without
+    // the rebind the views keep the ctor-local pattern the mux never updates,
+    // and the Ctrl+F QuickFind bar is inert on folder tabs.
+    //
+    // Re-point the views BEFORE replacing quickFindPattern_: the views hold RAW
+    // pointers into the current pattern, and AbstractLogView::setQuickFindPattern
+    // disconnects that pattern's patternUpdated signal. Reassigning the member
+    // first would drop the last shared_ptr (the views don't own one), freeing
+    // the pattern mid-disconnect -- a use-after-free. Keeping the member alive
+    // until after the rebind avoids that.
     if ( qfp != nullptr ) {
+        if ( mainView_ != nullptr ) {
+            mainView_->setQuickFindPattern( qfp.get() );
+        }
+        if ( filteredView_ != nullptr ) {
+            filteredView_->setQuickFindPattern( qfp.get() );
+        }
         quickFindPattern_ = std::move( qfp );
     }
 }

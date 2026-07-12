@@ -327,6 +327,17 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
         return lineNumbersVisible_;
     }
 
+    // Swap the QuickFindPattern this view listens to (disconnects the old
+    // pattern's patternUpdated signal and connects the new one). Used by folder
+    // mode to rebind the views to the session-wide QuickFindPattern after
+    // construction, so the app-wide QuickFindMux drives the folder's views.
+    void setQuickFindPattern( const QuickFindPattern* qfp );
+    // Inspection accessor for the current QuickFindPattern (tests + rebind checks).
+    const QuickFindPattern* quickFindPattern() const
+    {
+        return quickFindPattern_;
+    }
+
     // Force the next refresh to fully redraw the view by invalidating the cache.
     // To be used if the data might have changed.
     void forceRefresh();
@@ -476,7 +487,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     std::map<QString, QShortcut*> shortcuts_;
 
     // Pointer to the CrawlerWidget's QFP object
-    const QuickFindPattern* const quickFindPattern_;
+    const QuickFindPattern* quickFindPattern_;
     // Our own QuickFind object
     QuickFind* quickFind_;
 

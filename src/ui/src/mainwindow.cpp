@@ -2176,28 +2176,26 @@ void MainWindow::currentTabChanged( int index )
         }
         else {
             // --- Folder tab (FolderCrawlerWidget) ---
-            // Folder mode owns its own QuickFindPattern + SearchToolbar, so the
-            // main-window QuickFind mux is pointed at nothing (its Ctrl-F bar is
-            // inert while a folder tab is current; the folder toolbar stays
-            // fully functional). setCurrentDocument(nullptr) /
-            // registerSelector(nullptr) are both null-safe (signalmux.cpp:106,
-            // quickfindmux.cpp:51 early-return).
+            // The folder is NOT registered as the signalMux document: the mux
+            // routes file/live-source slots (goToLine/reload/stopLoading/
+            // follow/textWrap relays) the folder does not implement, and
+            // registering it would emit "No such slot" warnings. config/view
+            // option changes (line numbers, font, overview, wrap) are delivered
+            // directly to applyConfiguration via the connection below.
             signalMux_.setCurrentDocument( nullptr );
-            quickFindMux_.registerSelector( nullptr );
 
             auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( widget );
+            // The folder implements QuickFindMuxSelectorInterface and its views
+            // were rebound to the session QuickFindPattern (doSetQuickFindPattern
+            // -> AbstractLogView::setQuickFindPattern), so the mux's pattern now
+            // drives them -- Ctrl+F QuickFind works on folder tabs.
+            quickFindMux_.registerSelector( folder_widget );
+
             if ( folder_widget != nullptr ) {
-                // Deliver config/view option changes (line numbers, font,
-                // overview visibility, wrap) to the folder's applyConfiguration.
-                // The folder is NOT a signalMux document (it lacks the
-                // file/live-source slots the mux routes -- goToLine/reload/
-                // stopLoading/follow/textWrap -- and registering it would emit a
-                // flurry of "No such slot" warnings), so optionsChanged is
-                // delivered via this deduplicated direct connection instead.
                 // UniqueConnection: survives repeated tab switches without
                 // duplicating; redundant fires while a non-folder tab is current
                 // are harmless (applyConfiguration is idempotent and the folder
-                // views are hidden). QuickFind registration is deferred (P1b).
+                // views are hidden).
                 connect( this, &MainWindow::optionsChanged, folder_widget,
                          &FolderCrawlerWidget::applyConfiguration, Qt::UniqueConnection );
             }

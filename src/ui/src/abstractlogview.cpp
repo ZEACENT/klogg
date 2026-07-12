@@ -1980,6 +1980,20 @@ void AbstractLogView::setLineNumbersVisible( bool lineNumbersVisible )
     cachedVisibleColsValid_ = false;
 }
 
+void AbstractLogView::setQuickFindPattern( const QuickFindPattern* qfp )
+{
+    if ( qfp == quickFindPattern_ ) {
+        return;
+    }
+    if ( quickFindPattern_ != nullptr ) {
+        disconnect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
+    }
+    quickFindPattern_ = qfp;
+    if ( quickFindPattern_ != nullptr ) {
+        connect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
+    }
+}
+
 void AbstractLogView::forceRefresh()
 {
     // Invalidate our cache
