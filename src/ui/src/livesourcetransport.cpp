@@ -212,7 +212,16 @@ void ProcessLiveSourceTransport::connectTransportAsync()
     graceTimer_->setSingleShot( true );
     connect( graceTimer_, &QTimer::timeout, this,
              [ this, self, startedProcess ]() {
+        // Single-shot timer fired: drop the handle and free the QTimer. The
+        // object was only stop()ed+null'd on cancel; on fire it would otherwise
+        // linger parented to this until destruction (cancelGraceTimer deletes
+        // it synchronously; here deleteLater is required since we are inside the
+        // timer's own timeout signal).
+        auto* const firedTimer = graceTimer_;
         graceTimer_ = nullptr;
+        if ( firedTimer != nullptr ) {
+            firedTimer->deleteLater();
+        }
 
         if ( !self || destroyed_ || disconnectRequested_ ) {
             return;
