@@ -128,7 +128,7 @@ class CrawlerWidget : public QSplitter,
     // Reload the displayed file
     void reload();
     // Set the encoding
-    void setEncoding( std::optional<int> mib );
+    void setEncoding( std::optional<int> mib ) override;
 
     void focusSearchEdit();
     void goToLine();

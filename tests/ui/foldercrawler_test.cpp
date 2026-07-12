@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "abstractcrawlerwidget.h"
@@ -677,4 +678,30 @@ TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPatter
 
     REQUIRE( widget.filteredView()->quickFindPattern() == sessionQfp.get() );
     REQUIRE( widget.mainView()->quickFindPattern() == sessionQfp.get() );
+}
+
+TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folder]" )
+{
+    // setEncoding (Edit -> Encoding) must route to the folder and apply to the
+    // file currently shown in the main view. No-op (safe) before a file is
+    // opened; applies without throwing once one is.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nnope\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    // No file opened yet -> safe no-op (currentMainData_ is the placeholder).
+    REQUIRE_NOTHROW( widget.setEncoding( 106 ) ); // UTF-8 MIB
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return !widget.currentMainFilePath().isEmpty(); } ) );
+
+    // File opened -> applies (re-displays the opened file); must not throw for
+    // both an explicit MIB and the detected encoding.
+    REQUIRE_NOTHROW( widget.setEncoding( 106 ) );          // UTF-8
+    REQUIRE_NOTHROW( widget.setEncoding( std::nullopt ) ); // detected
 }

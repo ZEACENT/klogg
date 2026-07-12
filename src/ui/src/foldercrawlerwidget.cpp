@@ -21,6 +21,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QTextCodec>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -334,6 +335,30 @@ void FolderCrawlerWidget::selectAll()
     if ( auto* view = activeView() ) {
         view->selectAll();
     }
+}
+
+void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
+{
+    // Apply the chosen encoding to the file currently shown in the main view
+    // (mirrors CrawlerWidget::updateEncoding for the opened-file case). No-op
+    // until a file is opened (currentMainData_ is the placeholder). The folder
+    // results view decodes via its own per-file detected codec
+    // (FileGroup::sourceCodec) and is unaffected.
+    if ( currentMainData_ == nullptr || currentMainData_ == placeholderData_ ) {
+        return;
+    }
+    QTextCodec* codec = nullptr;
+    if ( mib.has_value() ) {
+        codec = QTextCodec::codecForMib( *mib );
+    }
+    else {
+        codec = currentMainData_->getDetectedEncoding();
+    }
+    if ( codec == nullptr ) {
+        codec = QTextCodec::codecForName( "UTF-8" );
+    }
+    currentMainData_->setDisplayEncoding( codec->name() );
+    mainView_->forceRefresh();
 }
 
 void FolderCrawlerWidget::searchFor( const QString& pattern )

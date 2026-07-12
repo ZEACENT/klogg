@@ -1579,25 +1579,28 @@ void MainWindow::reconnectCurrentSource()
 
 void MainWindow::copyFullPath()
 {
-    auto* crawler = currentCrawlerWidget();
-    if ( !crawler ) {
+    // Route via currentView() (not currentCrawlerWidget()) so folder tabs work
+    // too -- a folder tab's associated path is the folder path. Session
+    // accessors key on ViewInterface*, which both tab kinds implement.
+    auto* view = currentView();
+    if ( view == nullptr ) {
         return;
     }
 
-    const auto associatedPath = session_.getAssociatedPath( crawler );
-    const auto text
-        = associatedPath.isEmpty() ? session_.getDocumentId( crawler ) : associatedPath;
+    const auto associatedPath = session_.getAssociatedPath( view );
+    const auto text = associatedPath.isEmpty() ? session_.getDocumentId( view ) : associatedPath;
     sendTextToClipboard( QDir::toNativeSeparators( text ) );
 }
 
 void MainWindow::openContainingFolder()
 {
-    auto* crawler = currentCrawlerWidget();
-    if ( !crawler ) {
+    // Route via currentView() so folder tabs work too (reveals the folder).
+    auto* view = currentView();
+    if ( view == nullptr ) {
         return;
     }
 
-    const auto associatedPath = session_.getAssociatedPath( crawler );
+    const auto associatedPath = session_.getAssociatedPath( view );
     if ( !associatedPath.isEmpty() ) {
         showPathInFileExplorer( associatedPath );
     }
@@ -1810,8 +1813,8 @@ void MainWindow::encodingChanged( QAction* action )
     }
 
     LOG_DEBUG << "encodingChanged, encoding " << mib.value_or( 0 );
-    if ( auto crawler = currentCrawlerWidget() ) {
-        crawler->setEncoding( mib );
+    if ( auto doc = currentDocument() ) {
+        doc->setEncoding( mib );
         updateInfoLine();
     }
 }
@@ -2211,6 +2214,13 @@ void MainWindow::currentTabChanged( int index )
             updateTitleBar( view != nullptr ? session_.getDisplayName( view ) : QString() );
 
             disableFileSpecificActions();
+            // A folder tab has a valid filesystem path (the folder), so Copy
+            // Path and Open Containing Folder are meaningful (they operate on
+            // the folder path via currentView()). Re-enable them; the other
+            // actions disabled above (follow, live-log save, disconnect/
+            // reconnect, open-in-editor) remain folder-inapplicable.
+            copyPathToClipboardAction->setEnabled( true );
+            openContainingFolderAction->setEnabled( true );
 
             infoLine->hideGauge();
             infoLine->setText( view != nullptr ? session_.getDisplayName( view ) : QString() );

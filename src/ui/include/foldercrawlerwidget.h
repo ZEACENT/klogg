@@ -125,6 +125,9 @@ class FolderCrawlerWidget : public QWidget,
     QString getSelectedText() const override;
     bool isPartialSelection() const override;
     void selectAll() override;
+    // Apply the chosen encoding to the file currently open in the main view
+    // (no-op until a file is opened). Overrides AbstractCrawlerWidget.
+    void setEncoding( std::optional<int> mib ) override;
 
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this

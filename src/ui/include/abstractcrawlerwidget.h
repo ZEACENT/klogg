@@ -22,6 +22,8 @@
 
 #include "viewinterface.h"
 
+#include <optional>
+
 // Common interface for top-level tab document widgets: CrawlerWidget (files and
 // live sources) and FolderCrawlerWidget (Open Folder). It declares the
 // behavioral hooks MainWindow dispatches uniformly across tab kinds, so a call
@@ -62,6 +64,11 @@ class AbstractCrawlerWidget : public ViewInterface {
     virtual bool isPartialSelection() const
     {
         return false;
+    }
+    // Apply the chosen encoding to the displayed document (Edit -> Encoding).
+    // std::nullopt means "use the detected encoding". Default no-op.
+    virtual void setEncoding( std::optional<int> /*mib*/ )
+    {
     }
 };
 
