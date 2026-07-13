@@ -147,6 +147,17 @@ TEST_CASE( "SearchToolbar escape/combine helpers (ports crawlerwidget.cpp:1155-1
         REQUIRE( escaped.endsWith( '"' ) );
     }
 
+    SECTION( "boolean escape backslash-escapes embedded double-quotes" )
+    {
+        // Regression: escapeSearchPattern used to call replace('"',"\"") -- a
+        // 1-char literal (just '"') so the replace was a no-op and an embedded
+        // quote broke the wrapped boolean expression. The 2-char literal "\\\""
+        // (backslash+quote) escapes it to \".
+        toolbar.setBoolean( true );
+        const auto escaped = toolbar.escapeSearchPattern( "a\"b", false );
+        REQUIRE( escaped == "\"a\\\"b\"" );
+    }
+
     SECTION( "combine joins regex with '|'" )
     {
         toolbar.setUseRegexp( true );
@@ -170,6 +181,39 @@ TEST_CASE( "SearchToolbar escape/combine helpers (ports crawlerwidget.cpp:1155-1
         QString current;
         toolbar.combinePatterns( current, "first" );
         REQUIRE( current == "first" );
+    }
+}
+
+TEST_CASE( "SearchToolbar wrapBooleanOperand quotes and escapes (excludeFromSearch path)",
+           "[searchtoolbar]" )
+{
+    // CrawlerWidget::excludeFromSearch calls wrapBooleanOperand directly on the
+    // current search text when transitioning into boolean mode -- the toggle may
+    // still be off, so it can't rely on escapeSearchPattern's boolean branch.
+    // This locks the operand-wrapping contract independently of the toggle.
+    SearchToolbar toolbar( nullptr, nullptr );
+
+    SECTION( "plain pattern is surrounded by quotes" )
+    {
+        REQUIRE( toolbar.wrapBooleanOperand( "error" ) == "\"error\"" );
+    }
+
+    SECTION( "embedded double-quote is backslash-escaped" )
+    {
+        // Regression: excludeFromSearch inlined replace('"',"\"") -- a no-op
+        // 1-char literal -- so input a"b wrapped to the broken "a"b" instead of
+        // the correct "a\"b".
+        REQUIRE( toolbar.wrapBooleanOperand( "a\"b" ) == "\"a\\\"b\"" );
+    }
+
+    SECTION( "empty pattern becomes a pair of quotes" )
+    {
+        REQUIRE( toolbar.wrapBooleanOperand( "" ) == "\"\"" );
+    }
+
+    SECTION( "multiple embedded quotes are each escaped" )
+    {
+        REQUIRE( toolbar.wrapBooleanOperand( "\"quoted\"" ) == "\"\\\"quoted\\\"\"" );
     }
 }
 

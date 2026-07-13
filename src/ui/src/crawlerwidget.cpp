@@ -1105,7 +1105,10 @@ void CrawlerWidget::excludeFromSearch( const QString& searchString )
 
     const auto wasInBooleanCombinationMode = searchToolbar_->isBoolean();
     if ( !wasInBooleanCombinationMode ) {
-        currentPattern.replace( '"', "\"" ).prepend( '"' ).append( '"' );
+        // Wrap the existing pattern as one boolean operand. Must backslash-escape
+        // embedded double-quotes (not the no-op replace('"',"\"")); reuse the
+        // shared helper so this can't drift from escapeSearchPattern again.
+        currentPattern = searchToolbar_->wrapBooleanOperand( currentPattern );
     }
 
     searchToolbar_->setBoolean( true );
