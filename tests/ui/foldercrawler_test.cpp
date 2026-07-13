@@ -298,6 +298,59 @@ TEST_CASE( "FolderCrawlerWidget main view line map refreshes on demand after a d
     REQUIRE( widget.mainView()->isLineMapCurrent() );
 }
 
+TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged mouse events",
+           "[folder]" )
+{
+    // ensureLineMapFresh runs on every press/move/release. In wrap mode each call
+    // used to re-read and re-wrap every line from the viewport to EOF. When two
+    // consecutive mouse events share the same data/geometry (the common case --
+    // the user is just moving the mouse), the rebuild is pure waste. The signature
+    // cache must skip it, and must still rebuild when an input actually changes
+    // (here: a data swap via setDataSource).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR in b\nmore\nmore2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum ); // open a.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+
+    // First refresh builds the map.
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->isLineMapCurrent() );
+    const int buildsAfterFirst = mainView->visibleLineMapBuildCount();
+
+    // A second refresh with no data/geometry change must be a cache hit: it must
+    // NOT re-enter the paint-free rebuild. (RED before the cache: count rises.)
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterFirst );
+
+    // Swapping the underlying file changes the map's inputs (data ptr + line
+    // count), so the cache must invalidate and the next refresh must rebuild.
+    widget.selectResultRow( 3_lnum ); // open b.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 );
+
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() > buildsAfterFirst );
+
+    // ...and a follow-up refresh on the new file is again a cache hit.
+    const int buildsAfterSwap = mainView->visibleLineMapBuildCount();
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterSwap );
+}
+
 TEST_CASE( "FolderCrawlerWidget search toolbar shares the results pane (sits between the views)",
            "[folder]" )
 {
