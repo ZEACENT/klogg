@@ -44,6 +44,7 @@ struct AdbLogcatSessionData;
 enum class DocumentKind {
     File,
     AdbLogcat,
+    Folder,
 };
 
 struct OpenedDocumentInfo {
@@ -97,6 +98,12 @@ class Session : public std::enable_shared_from_this<Session> {
     ViewInterface* openAdbLogcat( const AdbLogcatSessionData& sessionData,
                                   const std::function<ViewInterface*()>& view_factory,
                                   bool startConnected, const QString& viewContext = {} );
+
+    // Open a folder for grep-style search across all its (non-binary) files.
+    // filePaths must already be enumerated and natural-sorted. The folder is
+    // NOT byte-concatenated (unlike openMerged); each file is streamed on
+    // demand by the folder search engine. Returns the new view.
+    ViewInterface* openFolder( const QString& folderPath, const std::vector<QString>& filePaths );
 
     // Get the file name for the passed view.
     QString getFilename( const ViewInterface* view ) const;
@@ -224,6 +231,15 @@ class WindowSession {
                                   bool startConnected )
     {
         auto* view = appSession_->openAdbLogcat( sessionData, view_factory, startConnected );
+        if ( view ) {
+            openedDocuments_.push_back( appSession_->getDocumentId( view ) );
+        }
+        return view;
+    }
+
+    ViewInterface* openFolder( const QString& folderPath, const std::vector<QString>& filePaths )
+    {
+        auto* view = appSession_->openFolder( folderPath, filePaths );
         if ( view ) {
             openedDocuments_.push_back( appSession_->getDocumentId( view ) );
         }

@@ -79,6 +79,7 @@ class AdbLogcatSource : public QObject {
     void setAutoReconnectMaxAttempts( int maxAttempts );
     bool isAutoReconnectActive() const;
     int reconnectAttempt() const;
+    int reconnectRemainingMs() const;
     void cancelAutoReconnect();
     void setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
                            qint64 maxTotalLines = 0 );
@@ -105,6 +106,7 @@ class AdbLogcatSource : public QObject {
     int autoReconnectMaxAttempts_ = 0; // 0 = unlimited
     int reconnectAttempt_ = 0;
     bool reconnectionProven_ = false; // set when first stdout data arrives
+    bool reconnectingActive_ = false; // true while async connectTransport is in-flight
     QTimer reconnectTimer_;
 };
 

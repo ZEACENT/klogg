@@ -10,6 +10,7 @@
 #include <QStringList>
 
 class QProcess;
+class QTimer;
 
 class LiveSourceTransport : public QObject {
     Q_OBJECT
@@ -73,9 +74,11 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
   private:
     void setState( State state );
     void createProcess();
+    void cancelGraceTimer();
 
   private:
     std::unique_ptr<QProcess> process_;
+    QTimer* graceTimer_{ nullptr };
     State state_{ State::Disconnected };
     QString lastError_;
     QString stderrFilePath_;

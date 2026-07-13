@@ -23,6 +23,7 @@
 #include "linetypes.h"
 #include <QList>
 #include <QVector>
+#include <vector>
 
 class LogFilteredData;
 
@@ -74,6 +75,10 @@ class Overview {
 
     // Associate the passed filteredData to this Overview
     void setFilteredData( const LogFilteredData* logFilteredData );
+    // Replace any LogFilteredData association with an explicit match-line list
+    // (folder mode: per-file matches from FolderSearchResults). Marks are not
+    // represented. Pass an empty list (or call setFilteredData) to clear.
+    void setMatchLines( const std::vector<LineNumber>& matchLines );
     // Signal the overview its attached LogFilteredData has been changed and
     // the overview must be updated with the provided total number
     // of line of the file.
@@ -117,6 +122,10 @@ class Overview {
   private:
     // List of matches associated with this Overview.
     const LogFilteredData* logFilteredData_;
+    // Folder-mode explicit match-line list (used only when logFilteredData_ is
+    // null). Populated by setMatchLines; consumed by the else-if branch in
+    // recalculatesLines.
+    std::vector<LineNumber> explicitMatchLines_;
     // Total number of lines in the file.
     LinesCount linesInFile_;
     // Whether the overview is visible.

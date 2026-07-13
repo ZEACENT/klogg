@@ -43,6 +43,17 @@ void Overview::setFilteredData( const LogFilteredData* logFilteredData )
     LOG_INFO << "OverviewWidget::setFilteredData " << (void*)logFilteredData;
 
     logFilteredData_ = logFilteredData;
+    // Drop any folder-mode explicit list so a later single-file attach takes
+    // precedence (symmetric with setMatchLines clearing the LogFilteredData ptr).
+    explicitMatchLines_.clear();
+    dirty_ = true;
+}
+
+void Overview::setMatchLines( const std::vector<LineNumber>& matchLines )
+{
+    explicitMatchLines_ = matchLines;
+    // Folder mode owns its match list; decouple from any LogFilteredData.
+    logFilteredData_ = nullptr;
     dirty_ = true;
 }
 
@@ -111,10 +122,12 @@ void Overview::recalculatesLines()
 {
     LOG_INFO << "OverviewWidget::recalculatesLines";
 
-    if ( logFilteredData_ != nullptr ) {
-        matchLines_.clear();
-        markLines_.clear();
+    // Clear in every branch so a transition between data sources (single-file
+    // <-> folder) cannot leave stale entries from the previous mode.
+    matchLines_.clear();
+    markLines_.clear();
 
+    if ( logFilteredData_ != nullptr ) {
         if ( linesInFile_.get() > 0 ) {
             logFilteredData_->iterateOverLines( [ this ]( LineNumber line ) {
                 const auto lineType = logFilteredData_->lineTypeByLine( line );
@@ -140,6 +153,21 @@ void Overview::recalculatesLines()
                     }
                 }
             } );
+        }
+    }
+    else if ( !explicitMatchLines_.empty() && linesInFile_.get() > 0 ) {
+        // Folder mode: an explicit per-file match-line list (no marks). Cost is
+        // O(matches in file), identical to the single-file iterateOverLines path
+        // (which also walks only the match/mark result set, not every file line).
+        for ( const auto& line : explicitMatchLines_ ) {
+            const auto position = yFromFileLine( line );
+            if ( ( !matchLines_.empty() ) && matchLines_.back().position() == position ) {
+                // Collapses to the same y as the previous match: darken it.
+                matchLines_.back().load();
+            }
+            else {
+                matchLines_.emplace_back( position );
+            }
         }
     }
     else

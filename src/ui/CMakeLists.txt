@@ -1,5 +1,6 @@
 add_library(
   klogg_ui STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractcrawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h
@@ -9,12 +10,16 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/devicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/folderenumeration.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/folderfilteredview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/foldercrawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighteredit.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersetedit.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighterset.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersmenu.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightedmatch.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/markprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfilters.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfilterscombobox.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfiltersdialog.h
@@ -30,6 +35,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livesourcetransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindow.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindowtext.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/mergefileorder.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/menu.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/optionsdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/overview.h
@@ -41,6 +47,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/quicklabelpattern.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/quickfindwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/recentfiles.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/recentfolders.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/savedsearches.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/selection.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/session.h
@@ -52,6 +59,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewinterface.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewtools.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/scratchpad.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/searchtoolbar.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/tabbedscratchpad.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodings.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/favoritefiles.h
@@ -59,6 +67,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iconloader.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/displayfilepath.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/downloader.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/droppathclassification.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/decompressor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/fontutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelsmanager.h
@@ -75,6 +84,9 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderenumeration.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilteredview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/foldercrawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightersdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlighteredit.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightersmenu.cpp
@@ -95,6 +107,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/mergefileorder.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/menu.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/optionsdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/overview.cpp
@@ -105,6 +118,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/quicklabelpattern.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/quickfindwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/recentfiles.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/recentfolders.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/savedsearches.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/selection.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/session.cpp
@@ -115,6 +129,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabgroupdropresolver.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/viewtools.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/scratchpad.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/searchtoolbar.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabbedscratchpad.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/favoritefiles.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabnamemapping.cpp
@@ -123,6 +138,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/downloader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/decompressor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/colorlabelsmanager.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/droppathclassification.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/newversiondialog.cpp
 )
 

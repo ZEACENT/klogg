@@ -41,6 +41,7 @@
 #define LOGMAINVIEW_H
 
 #include "abstractlogview.h"
+#include "markprovider.h"
 #include "searchablelogdata.h"
 
 // Class implementing the main (top) view widget.
@@ -58,6 +59,12 @@ class LogMainView : public AbstractLogView
     // (used for couloured bullets)
     // Should be NULL or the empty LFD if no filtering is used
     void useNewFiltering( LogFilteredData* filteredData );
+
+    // Jump the cursor to the next / previous marked line. No-op when the view
+    // has no LogFilteredData (folder mode never calls useNewFiltering) -- the
+    // LogViewNextMark/LogViewPrevMark shortcuts used to dereference it and crash.
+    void selectNextMark();
+    void selectPrevMark();
 
   protected:
     // Implements the virtual function

@@ -77,6 +77,10 @@ AbstractLogData::LineType LogMainView::lineType( LineNumber lineNumber ) const
     if ( filteredData_ ) {
         return filteredData_->lineTypeByLine( lineNumber );
     }
+    // Folder mode (no LogFilteredData): show the mark bullet for marked lines.
+    if ( markProvider_ != nullptr && markProvider_->isMarked( lineNumber ) ) {
+        return AbstractLogData::LineTypeFlags::Mark;
+    }
     return AbstractLogData::LineTypeFlags::Plain;
 }
 
@@ -84,16 +88,35 @@ void LogMainView::doRegisterShortcuts()
 {
     LOG_INFO << "Registering shortcuts for main view";
     AbstractLogView::doRegisterShortcuts();
-    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] {
-        const auto line = filteredData_->getMarkAfter( getViewPosition() );
-        if ( line.has_value() ) {
-            selectAndDisplayLine( *line );
-        }
-    } );
-    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] {
-        const auto line = filteredData_->getMarkBefore( getViewPosition() );
-        if ( line.has_value() ) {
-            selectAndDisplayLine( *line );
-        }
-    } );
+    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] { selectNextMark(); } );
+    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] { selectPrevMark(); } );
+}
+
+void LogMainView::selectNextMark()
+{
+    std::optional<LineNumber> line;
+    if ( filteredData_ != nullptr ) {
+        line = filteredData_->getMarkAfter( getViewPosition() );
+    }
+    else if ( markProvider_ != nullptr ) {
+        // Folder mode: navigate the injected per-file mark source.
+        line = markProvider_->markAfter( getViewPosition() );
+    }
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
+}
+
+void LogMainView::selectPrevMark()
+{
+    std::optional<LineNumber> line;
+    if ( filteredData_ != nullptr ) {
+        line = filteredData_->getMarkBefore( getViewPosition() );
+    }
+    else if ( markProvider_ != nullptr ) {
+        line = markProvider_->markBefore( getViewPosition() );
+    }
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
 }

@@ -59,8 +59,10 @@
 #endif
 
 #include "abstractlogdata.h"
+#include "linekind.h"
 #include "highlighterset.h"
 #include "linetypes.h"
+#include "markprovider.h"
 #include "overviewwidget.h"
 #include "quickfind.h"
 #include "quickfindmux.h"
@@ -131,6 +133,32 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Refresh the widget when the data set has changed.
     void updateData();
+
+    // Swap the underlying data set to `newLogData` (folder mode: the main view
+    // is repointed at the file of the selected result row). Resets scroll,
+    // selection and the wrap/line cache, then forces a full redraw. The caller
+    // keeps ownership of the data and must keep it alive across paints.
+    void setDataSource( const AbstractLogData* newLogData );
+    // Exposed for testing: the exclusive end of the current search range.
+    // After setDataSource it must span the whole document, otherwise every body
+    // line renders as "out of search range" (gray).
+    LineNumber searchEndLine() const { return searchEnd_; }
+    // True when the visible-line coordinate map is populated for the current
+    // layout (false after a layout change or data swap, until the next paint --
+    // or ensureLineMapFresh -- rebuilds it). Tests assert this to know whether a
+    // click will resolve; it reflects the map (wrappedLinesInfo_), not the
+    // pixmap cache, so a paint-free rebuild (buildVisibleLineMap) satisfies it.
+    bool isLineMapCurrent() const { return !wrappedLinesInfo_.empty(); }
+    // Synchronously rebuild the visible-line map if a layout change (forceRefresh)
+    // or data swap (setDataSource) has invalidated it. The mouse handlers call
+    // this before converting coordinates so a click delivered before the next
+    // async paint -- or on a viewport Qt never painted (hidden/unrealized) --
+    // resolves to the current row instead of a stale/empty map.
+    void ensureLineMapFresh();
+    // Exposed for testing: resolve a viewport y to a line using the current map
+    // (nullopt when the map is empty). Lets headless tests verify the paint-free
+    // rebuild without synthesizing a mouse event.
+    OptionalLineNumber lineAtYForTest( int yPos ) const { return convertCoordToLine( yPos ); }
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
@@ -142,6 +170,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool isPartialSelection() const;
     // Instructs the widget to select the whole text.
     void selectAll();
+    // Inject a read-only mark source (for views without LogFilteredData, e.g.
+    // the folder main view and folder results view). Subclass lineType()
+    // overrides OR in LineTypeFlags::Mark from it; the LogViewNextMark/PrevMark
+    // navigation consults markAfter/markBefore. The caller owns the provider.
+    void setMarkProvider( const MarkProvider* provider ) { markProvider_ = provider; }
 
     bool isFollowEnabled() const
     {
@@ -156,6 +189,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void allowFollowMode( bool allow );
 
     void setSearchPattern( const RegularExpressionPattern& pattern );
+
+    // Read-only access to the currently-wired search pattern. Used by tests to
+    // assert that the host widget forwarded the search pattern (e.g. folder mode
+    // forwards it so the paint pass highlights in-result matches). Has no
+    // functional effect; the pattern is only consumed at paint time.
+    RegularExpressionPattern searchPattern() const
+    {
+        return searchPattern_;
+    }
 
     using QuickHighlighters = QList<QuickLabelEntry>;
     void setQuickHighlighters( const std::vector<QuickHighlighters>& wordHighlighters );
@@ -180,6 +222,13 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // (used for coloured bullets)
     virtual AbstractLogData::LineType lineType( LineNumber lineNumber ) const = 0;
 
+    // What kind of row this visible line is. Plain single-file views only have
+    // Data rows; folder-search results additionally interleave Header rows
+    // (one per source file group). The base default is Data, so single-file
+    // views are unaffected. Header rows skip the bullet/line-number gutters and
+    // route clicks to collapse/expand instead of selection.
+    virtual LineKind lineKind( LineNumber lineNumber ) const;
+
     // Line number to display for line at the given index
     virtual LineNumber displayLineNumber( LineNumber lineNumber ) const;
     virtual LineNumber lineIndex( LineNumber lineNumber ) const;
@@ -189,6 +238,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // FilteredView overrides this to return false since all visible lines are part of the filter
     virtual bool shouldApplySearchRangeGraying() const;
 
+    // Read-only mark source (folder views), or null. Subclass lineType()
+    // overrides consult this to OR in LineTypeFlags::Mark.
+    const MarkProvider* markProvider_ = nullptr;
 
     // Get the overview associated with this view, or NULL if there is none
     Overview* getOverview() const
@@ -213,6 +265,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Sent when a new line has been selected by the user
     void newSelection( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                        LineLength nSymbols );
+    // Sent when a Header row is clicked (folder mode) so the view can
+    // collapse/expand that file's result group. Not emitted for Data rows.
+    void headerClicked( LineNumber lineNumber );
     // Sent up when quickFind wants to show a message to the user.
     void notifyQuickFind( const QFNotification& message );
     // Sent up when quickFind wants to clear the notification.
@@ -262,6 +317,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void selectAndDisplayLine( LineNumber line );
     void selectPortionAndDisplayLine( LineNumber line, LinesCount nLines, LineColumn startCol,
                                       LineLength nSymbols );
+    // Toggle a mark / delete a mark on the current selection (the M / N
+    // shortcuts). Public so hosts can drive them programmatically (and tests
+    // can exercise the markLines/deleteMarkLines wiring without a real
+    // keypress, which is unreliable headless).
+    void markSelected();
+    void deleteMarksSelected();
 
     // Use the current QFP to go and select the next match.
     void searchForward() override;
@@ -293,6 +354,25 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Configure the setting of whether to show line number margin
     void setLineNumbersVisible( bool lineNumbersVisible );
 
+    // Whether the line-number margin is currently shown. Mirrors
+    // setLineNumbersVisible; used to re-apply Configuration after a data-source
+    // swap and by tests.
+    bool isLineNumbersVisible() const
+    {
+        return lineNumbersVisible_;
+    }
+
+    // Swap the QuickFindPattern this view listens to (disconnects the old
+    // pattern's patternUpdated signal and connects the new one). Used by folder
+    // mode to rebind the views to the session-wide QuickFindPattern after
+    // construction, so the app-wide QuickFindMux drives the folder's views.
+    void setQuickFindPattern( const QuickFindPattern* qfp );
+    // Inspection accessor for the current QuickFindPattern (tests + rebind checks).
+    const QuickFindPattern* quickFindPattern() const
+    {
+        return quickFindPattern_;
+    }
+
     // Force the next refresh to fully redraw the view by invalidating the cache.
     // To be used if the data might have changed.
     void forceRefresh();
@@ -308,8 +388,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void findPreviousSelected();
     void copy();
     void copyWithLineNumbers();
-    void markSelected();
-    void deleteMarksSelected();
     void saveToFile();
     void saveSelectedToFile();
     void setSearchStart();
@@ -442,7 +520,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     std::map<QString, QShortcut*> shortcuts_;
 
     // Pointer to the CrawlerWidget's QFP object
-    const QuickFindPattern* const quickFindPattern_;
+    const QuickFindPattern* quickFindPattern_;
     // Our own QuickFind object
     QuickFind* quickFind_;
 
@@ -483,6 +561,13 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     FilePosition convertCoordToFilePos( const QPoint& pos ) const;
     OptionalLineNumber convertCoordToLine( int yPos ) const;
     LineColumn convertCoordToColumn( int xPos ) const;
+    // Rebuild wrappedLinesInfo_ (the viewport-y -> LineNumber map) from the
+    // current data/layout WITHOUT a QPainter -- the geometry-only subset of
+    // drawTextArea's per-line loop. Used by ensureLineMapFresh so hit-testing
+    // works on viewports Qt never painted (hidden/unrealized) or right after a
+    // streaming updateData that left the map stale. KEEP IN SYNC with the wrap
+    // math in drawTextArea (same leftMarginPx_, availableWidth, font metrics).
+    void buildVisibleLineMap();
 
     void displayLine( LineNumber line );
     void moveSelection( LinesCount delta, bool isDeltaNegative );

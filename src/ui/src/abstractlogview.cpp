@@ -492,11 +492,19 @@ void AbstractLogView::changeEvent( QEvent* changeEvent )
 
 void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     auto line = convertCoordToLine( mouseEvent->pos().y() );
 
     if ( mouseEvent->button() == Qt::LeftButton ) {
         // Mark selection as changed for overlay redraw
         selectionChanged_ = true;
+
+        // A Header row (folder-mode group header) toggles collapse/expand
+        // instead of selecting or marking.
+        if ( line.has_value() && lineKind( *line ) == LineKind::Header ) {
+            Q_EMIT headerClicked( *line );
+            return;
+        }
 
         if ( line.has_value() && mouseEvent->modifiers() & Qt::ShiftModifier ) {
             selection_.selectRangeFromPrevious( *line );
@@ -689,6 +697,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
 void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     // Selection implementation
     if ( selectionStarted_ ) {
         // Mark selection as changed for overlay redraw (don't invalidate text cache)
@@ -746,6 +755,7 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 
 void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
 {
+    ensureLineMapFresh();
     if ( markingClickInitiated_ ) {
         markingClickInitiated_ = false;
         const auto line = convertCoordToLine( mouseEvent->pos().y() );
@@ -1973,6 +1983,20 @@ void AbstractLogView::setLineNumbersVisible( bool lineNumbersVisible )
     cachedVisibleColsValid_ = false;
 }
 
+void AbstractLogView::setQuickFindPattern( const QuickFindPattern* qfp )
+{
+    if ( qfp == quickFindPattern_ ) {
+        return;
+    }
+    if ( quickFindPattern_ != nullptr ) {
+        disconnect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
+    }
+    quickFindPattern_ = qfp;
+    if ( quickFindPattern_ != nullptr ) {
+        connect( quickFindPattern_, SIGNAL( patternUpdated() ), this, SLOT( handlePatternUpdated() ) );
+    }
+}
+
 void AbstractLogView::forceRefresh()
 {
     // Invalidate our cache
@@ -1982,12 +2006,125 @@ void AbstractLogView::forceRefresh()
     update();
 }
 
+LineKind AbstractLogView::lineKind( LineNumber /*lineNumber*/ ) const
+{
+    // Single-file views have only Data rows; FolderFilteredView overrides this
+    // to identify group-header rows.
+    return LineKind::Data;
+}
+
+void AbstractLogView::setDataSource( const AbstractLogData* newLogData )
+{
+    logData_ = newLogData;
+    // A new document invalidates the search range inherited from the previous
+    // data: the folder main view is built on an empty placeholder, so the
+    // inherited range ended at line 0 and every line of a real file rendered as
+    // "out of search range" (gray). Span the whole new document, matching the
+    // constructor and CrawlerWidget::setSearchLimits(0, getNbLine()).
+    searchStart_ = 0_lnum;
+    searchEnd_ = LineNumber{ newLogData->getNbLine().get() };
+    firstLine_ = 0_lnum;
+    firstCol_ = 0_lcol;
+    selection_.clear();
+    wrappedLinesInfo_.clear();
+    verticalScrollBar()->setValue( 0 );
+    horizontalScrollBar()->setValue( 0 );
+    quickFind_->resetLimits();
+    updateScrollBars();
+    forceRefresh();
+}
+
 void AbstractLogView::setSearchLimits( LineNumber startLine, LineNumber endLine )
 {
     searchStart_ = startLine;
     searchEnd_ = endLine;
 
     forceRefresh();
+}
+
+void AbstractLogView::ensureLineMapFresh()
+{
+    // A layout change (forceRefresh) or data swap (setDataSource) invalidates the
+    // visible-line map (wrappedLinesInfo_), which is normally rebuilt as a side
+    // effect of drawTextArea on the next (async) paint. A mouse event delivered
+    // before that paint -- or on a viewport Qt never painted (hidden/unrealized,
+    // where QWidget::repaint() is a no-op) -- converted coordinates against a
+    // stale/empty map: a click on a freshly swapped folder main view was
+    // swallowed (convertCoordToLine -> nullopt -> no selection). Rebuild the map
+    // paint-free so hit-testing is correct at click time regardless of paint
+    // delivery. Cheap (visible lines only) and called only from mouse handlers.
+    buildVisibleLineMap();
+}
+
+void AbstractLogView::buildVisibleLineMap()
+{
+    // Geometry-only subset of drawTextArea's per-line loop: reproduces the
+    // viewport-y -> LineNumber map (wrappedLinesInfo_) WITHOUT a QPainter. The
+    // wrap math MUST mirror drawTextArea (same leftMarginPx_, availableWidth and
+    // font metrics); in non-wrap mode the map is just firstLine_+i so the margin
+    // constants are irrelevant, but in wrap mode a drift would mis-resolve rows.
+    // The four margin constants below duplicate drawTextArea's static constexpr
+    // locals (SeparatorWidth/BulletAreaWidth/ContentMarginWidth/LineNumberPadding).
+    wrappedLinesInfo_.clear();
+
+    if ( logData_ == nullptr ) {
+        return;
+    }
+
+    const auto linesInFile = logData_->getNbLine();
+    if ( firstLine_ >= linesInFile ) {
+        return;
+    }
+
+    if ( charHeight_ <= 0 ) {
+        return;
+    }
+
+    constexpr int SeparatorWidth = 1;
+    constexpr int BulletAreaWidth = 11;
+    constexpr int ContentMarginWidth = 1;
+    constexpr int LineNumberPadding = 3;
+
+    // Recompute leftMarginPx_ (drawTextArea's preamble sets it during paint; it
+    // may still be 0 on a never-painted viewport). getNbVisibleCols guards on
+    // leftMarginPx_ > 0, so it must be set before any wrap-width math.
+    int contentStartPosX = BulletAreaWidth + SeparatorWidth;
+    if ( lineNumbersVisible_ ) {
+        const int nbDigitsInLineNumber = countDigits( maxDisplayLineNumber().get() );
+        const auto lineNumberWidth = charWidth_ * nbDigitsInLineNumber;
+        const auto lineNumberAreaWidth = 2 * LineNumberPadding + lineNumberWidth;
+        contentStartPosX += lineNumberAreaWidth;
+    }
+    leftMarginPx_ = contentStartPosX + SeparatorWidth;
+    cachedVisibleColsValid_ = false;
+
+    const auto maxLinesToFetch = useTextWrap_
+        ? ( linesInFile - LinesCount( firstLine_.get() ) )
+        : qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
+
+    const auto logLines = logData_->getLines( firstLine_, maxLinesToFetch );
+
+    for ( auto currentLine = 0_lcount; currentLine < maxLinesToFetch; ++currentLine ) {
+        const auto lineNumber = firstLine_ + currentLine;
+        QString logLine = logLines[ currentLine.get() ];
+        const QString expandedLine = untabify( std::move( logLine ) );
+
+        const WrappedString wrappedLineView = [ &, this ] {
+            if ( useTextWrap_ ) {
+                const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
+                auto twFn = [ this ]( QStringView s ) -> int {
+                    return textWidth( pixmapFontMetrics_, s );
+                };
+                return WrappedString{ expandedLine, availableWidth, twFn };
+            }
+            return WrappedString{ expandedLine,
+                                  LineLength{ klogg::isize( expandedLine ) + 1 } };
+        }();
+
+        for ( size_t i = 0u; i < wrappedLineView.wrappedLinesCount(); ++i ) {
+            wrappedLinesInfo_.emplace_back( WrappedLineData{ lineNumber, i, wrappedLineView } );
+        }
+    }
 }
 
 //
@@ -3132,7 +3269,8 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                viewport()->width(), yPos + finalLineHeight - 1 );
         }
 
-        // Then draw the bullet
+        // Then draw the bullet (folder-mode Header rows have no bullet).
+        if ( lineKind( lineNumber ) == LineKind::Data ) {
         painter->setPen( Qt::black );
         const int circleSize = 3;
         const int arrowHeight = 4;
@@ -3168,9 +3306,10 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             painter->drawEllipse( middleXLine - circleSize, middleYLine - circleSize,
                                   circleSize * 2, circleSize * 2 );
         }
+        } // end Data-only bullet draw
 
-        // Draw the line number
-        if ( lineNumbersVisible_ ) {
+        // Draw the line number (Header rows have no line number).
+        if ( lineNumbersVisible_ && lineKind( lineNumber ) == LineKind::Data ) {
             static const QString lineNumberFormat( "%1" );
             const QString& lineNumberStr = lineNumberFormat.arg(
                 displayLineNumber( lineNumber ).get(), nbDigitsInLineNumber );

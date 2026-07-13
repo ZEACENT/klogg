@@ -43,6 +43,7 @@
 #include <QMenu>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
+#include <QTimer>
 
 #include <QTranslator>
 #include <array>
@@ -84,6 +85,13 @@ class MainWindow : public QMainWindow {
     // Loads the initial file (parameter passed or from config file)
     void loadInitialFile( QString fileName, bool followFile );
 
+    // Opens a folder as a crawler tab (the shared body of openFolder() and the
+    // directory-drop path in dropEvent). Safe to call on any path:
+    // enumerateFolderFiles returns {} for non-dir / empty input.
+    // Must be called on the GUI thread (shows a QMessageBox on empty folders
+    // and interacts with the tab widget).
+    void openFolderByPath( const QString& folderPath );
+
     void reTranslateUI();
 
     static int installLanguage( QString lang );
@@ -108,9 +116,11 @@ class MainWindow : public QMainWindow {
 
   private Q_SLOTS:
     void open();
+    void openFolder();
     void openAdbLogcat();
     void openIosLogStream();
     void openFileFromRecent( QAction* action );
+    void openFolderFromRecent( QAction* action );
     void openFileFromFavorites( QAction* action );
     void switchToOpenedFile( QAction* action );
     void closeTab( ActionInitiator initiator );
@@ -160,6 +170,12 @@ class MainWindow : public QMainWindow {
     void lineNumberHandler( LineNumber startLine, LinesCount nLines, LineColumn startCol,
                             LineLength nSymbols );
     void refreshLineNumberField();
+    // Routes a folder main view's newSelection to lineNumberHandler, but only
+    // when a folder tab is current (a backgrounded folder's selection must not
+    // overwrite the current tab's status bar). A real slot (not a lambda) so the
+    // Qt::UniqueConnection in currentTabChanged can dedupe across tab switches.
+    void onFolderMainViewNewSelection( LineNumber startLine, LinesCount nLines,
+                                       LineColumn startCol, LineLength nSymbols );
 
     // Instructs the widget to update the loading progress gauge
     void updateLoadingProgress( int progress );
@@ -214,16 +230,36 @@ class MainWindow : public QMainWindow {
     void openRemoteFile( const QUrl& url );
     void updateTitleBar( const QString& fileName );
     void addRecentFile( const QString& fileName );
+    void addRecentFolder( const QString& folderPath );
     void updateRecentFileActions();
     void clearRecentFileActions();
+    void updateRecentFolderActions();
+    void clearRecentFolderActions();
     void updateFavoritesMenu();
     void updateOpenedFilesMenu();
     void updateHighlightersMenu();
     QString strippedName( const QString& fullFileName ) const;
     CrawlerWidget* currentCrawlerWidget() const;
+    // The AbstractCrawlerWidget* cross-cast of the current tab -- the polymorphic
+    // dispatch target for copy/selectAll (succeeds for both CrawlerWidget and
+    // FolderCrawlerWidget). Replaces currentCrawlerWidget()-only dispatch that
+    // was a silent no-op on folder tabs.
+    AbstractCrawlerWidget* currentDocument() const;
+    // True if the tab at `index` is a FolderCrawlerWidget (not a CrawlerWidget).
+    // Used at explicit folder branch points (currentTabChanged, closeTab).
+    bool isFolderTab( int index ) const;
+    // The ViewInterface cross-cast of the current tab widget. Succeeds for BOTH
+    // CrawlerWidget and FolderCrawlerWidget (both implement ViewInterface);
+    // returns nullptr only when there is no current tab. Required because
+    // Session accessors (getDisplayName/getDocumentKind/...) key on a
+    // ViewInterface* and assert on nullptr -- a folder tab's display name must
+    // be fetched via this cross-cast, never via a nullptr CrawlerWidget*.
+    const ViewInterface* currentView() const;
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
     void updateMenuBarFromDocument( const CrawlerWidget* crawler );
     void updateInfoLine();
+    // Disable every file-specific menu action (used for folder / no-tab states).
+    void disableFileSpecificActions();
     void showInfoLabels( bool show );
     void logScreenInfo( QScreen* screen );
     void removeFromFavorites( const QString& pathToRemove );
@@ -235,15 +271,23 @@ class MainWindow : public QMainWindow {
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
 
+    void startReconnectCountdown( CrawlerWidget* crawler, int delayMs );
+    void stopReconnectCountdown();
+    void updateReconnectCountdown();
+
     WindowSession session_;
     QString loadingFileName;
 
     std::array<QAction*, MAX_RECENT_FILES> recentFileActions;
     QActionGroup* recentFilesGroup;
 
+    std::array<QAction*, MAX_RECENT_FILES> recentFolderActions;
+    QActionGroup* recentFoldersGroup;
+
     QMenu* fileMenu;
     QMenu* saveCurrentLiveLogMenu;
     QMenu* recentFilesMenu;
+    QMenu* recentFoldersMenu;
     QMenu* editMenu;
     QMenu* viewMenu;
     QMenu* toolsMenu;
@@ -269,6 +313,7 @@ class MainWindow : public QMainWindow {
 
     QAction* newWindowAction;
     QAction* openAction;
+    QAction* openFolderAction;
     QAction* openAdbLogcatAction;
     QAction* openIosLogStreamAction;
     QAction* closeAction;
@@ -315,6 +360,7 @@ class MainWindow : public QMainWindow {
     QAction* removeFromFavoritesAction;
     QAction* selectOpenFileAction;
     QAction* recentFilesCleanup;
+    QAction* recentFoldersCleanup;
     QActionGroup* favoritesGroup;
     QActionGroup* openedFilesGroup;
     QActionGroup* highlightersActionGroup = nullptr;
@@ -350,6 +396,12 @@ class MainWindow : public QMainWindow {
     bool isCloseFromTray_ = false;
     bool suspendSessionPersistence_ = false;
     bool shutdownInProgress_ = false;
+
+    // Reconnect countdown state
+    QTimer* reconnectCountdownTimer_ = nullptr;
+    CrawlerWidget* reconnectCountdownCrawler_ = nullptr;
+    qint64 reconnectCountdownEndMs_ = 0;
+    qint64 reconnectCountdownTotalMs_ = 0;
 
     std::once_flag screenChangesConnect_;
 };

@@ -306,12 +306,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 
     void setSearchPattern( const QString& pattern )
     {
-        QTest::keyClicks( crawler->searchLineEdit_, pattern );
+        QTest::keyClicks( crawler->searchToolbar_->searchLineEdit(), pattern );
     }
 
     void replaceSearchPattern( const QString& pattern )
     {
-        crawler->searchLineEdit_->lineEdit()->setText( pattern );
+        crawler->searchToolbar_->searchLineEdit()->lineEdit()->setText( pattern );
     }
 
     void focusSearchPattern()
@@ -319,57 +319,57 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->show();
         const auto windowExposed = QTest::qWaitForWindowExposed( crawler.get() );
         (void) windowExposed;
-        crawler->searchLineEdit_->lineEdit()->setFocus();
+        crawler->searchToolbar_->searchLineEdit()->lineEdit()->setFocus();
         QTest::qWait( 20 );
     }
 
     void setSearchPatternCursorPosition( int position )
     {
-        crawler->searchLineEdit_->lineEdit()->setCursorPosition( position );
+        crawler->searchToolbar_->searchLineEdit()->lineEdit()->setCursorPosition( position );
     }
 
     int searchPatternCursorPosition() const
     {
-        return crawler->searchLineEdit_->lineEdit()->cursorPosition();
+        return crawler->searchToolbar_->searchLineEdit()->lineEdit()->cursorPosition();
     }
 
     void pressSearchPatternKey( Qt::Key key )
     {
-        QTest::keyClick( crawler->searchLineEdit_->lineEdit(), key );
+        QTest::keyClick( crawler->searchToolbar_->searchLineEdit()->lineEdit(), key );
         QTest::qWait( 20 );
     }
 
     void enableCaseSensitiveSearch()
     {
-        if ( !crawler->matchCaseButton_->isChecked() ) {
-            QTest::mouseClick( crawler->matchCaseButton_, Qt::LeftButton );
+        if ( !crawler->searchToolbar_->matchCaseButton()->isChecked() ) {
+            QTest::mouseClick( crawler->searchToolbar_->matchCaseButton(), Qt::LeftButton );
             QTest::qWait( 100 );
         }
     }
 
     void enableInverseMatch()
     {
-        if ( !crawler->inverseButton_->isChecked() ) {
-            QTest::mouseClick( crawler->inverseButton_, Qt::LeftButton );
+        if ( !crawler->searchToolbar_->inverseButton()->isChecked() ) {
+            QTest::mouseClick( crawler->searchToolbar_->inverseButton(), Qt::LeftButton );
             QTest::qWait( 100 );
         }
     }
 
     void enableBooleanCombinationMode()
     {
-        if ( !crawler->booleanButton_->isChecked() ) {
-            QTest::mouseClick( crawler->booleanButton_, Qt::LeftButton );
+        if ( !crawler->searchToolbar_->booleanButton()->isChecked() ) {
+            QTest::mouseClick( crawler->searchToolbar_->booleanButton(), Qt::LeftButton );
             QTest::qWait( 100 );
         }
     }
 
     void runSearch()
     {
-        QTest::mouseClick( crawler->searchButton_, Qt::LeftButton );
+        QTest::mouseClick( crawler->searchToolbar_->searchButton(), Qt::LeftButton );
 
         QTest::qWait( 100 );
 
-        waitUiState( [ & ]() { return crawler->stopButton_->isHidden(); } );
+        REQUIRE( waitUiState( [ & ]() { return crawler->searchToolbar_->stopButton()->isHidden(); } ) );
     }
 
     void render()
@@ -2440,7 +2440,11 @@ SCENARIO( "Go to top moves main view to absolute top with active search",
     WHEN( "jumpToTop is called with active search" )
     {
         crawlerVisitor.jumpToTop();
-        QTest::qWait( 50 );
+        // Settle deterministically: jumpToTop can trigger async re-positioning,
+        // and a fixed delay flaked on the slower arm64 CI. Wait for the main
+        // view to actually reach the top before asserting (CLAUDE.md race-prone
+        // settle-delay guidance).
+        REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.mainTopLine().get() == 0; } ) );
         crawlerVisitor.render();
 
         THEN( "main view scrolls to absolute top, not the matching line" )

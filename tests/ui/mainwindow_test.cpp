@@ -41,6 +41,7 @@
 #include "adblogcatsource.h"
 #include "capturestore.h"
 #include "crawlerwidget.h"
+#include "foldercrawlerwidget.h"
 #include "log.h"
 #include "mainwindow.h"
 #include "persistentinfo.h"
@@ -819,4 +820,191 @@ SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][sessio
     REQUIRE( adbSource->sessionData().boundOutputFile.isEmpty() );
 
     appSession->close( view );
+}
+
+// Regression gate for the folder-tab crash: opening/switching-to/closing a
+// FolderCrawlerWidget tab inside MainWindow used to EXC_BAD_ACCESS because
+// currentTabChanged did a static_cast<CrawlerWidget*> on the folder widget and
+// dereferenced the garbage pointer. None of the existing itests opened a
+// folder tab through MainWindow, so the bug was invisible. This scenario
+// drives the real path (Session::openFolder + MainWindow::openFolderByPath +
+// TabbedCrawlerWidget::addCrawler, which calls setCurrentIndex -> the crash
+// site) and asserts it stays alive.
+SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
+          "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-tab-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    // closeAction triggers the private closeTab(ActionInitiator) slot via the
+    // Qt signal/slot mechanism (the slot + ActionInitiator enum are private, so
+    // they cannot be named directly from the test).
+    QAction* closeAction = mainWindow->findChild<QAction*>( QStringLiteral( "closeAction" ) );
+    REQUIRE( closeAction != nullptr );
+
+    // Folder with a couple of readable files (enumerateFolderFiles skips empty
+    // dirs by showing a modal message box and returning early).
+    const auto tempDirPath = makeTestDir( "foldertab" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    for ( const auto& name : { "a.log", "b.log" } ) {
+        QFile f( QDir{ tempDirPath }.filePath( name ) );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( "hello world\n" );
+    }
+    // A standalone file to open as a regular CrawlerWidget tab alongside.
+    const auto standaloneFile = QDir{ tempDirPath }.filePath( "standalone.log" );
+    {
+        QFile f( standaloneFile );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( "single file line\n" );
+    }
+
+    GIVEN( "An open MainWindow with no tabs" )
+    {
+        // Make closes non-interactive: closeAction triggers the User-initiator
+        // path, which would otherwise pop a modal confirm dialog
+        // (confirmTabClose defaults to true) and block the headless test.
+        Configuration::get().setConfirmTabClose( false );
+
+        REQUIRE( tabArea->count() == 0 );
+
+        WHEN( "A folder tab is opened via openFolderByPath" )
+        {
+            // addCrawler -> setCurrentIndex -> currentTabChanged: the original
+            // crash site (static_cast<CrawlerWidget*> on a FolderCrawlerWidget).
+            runInUiThread( [ &mainWindow, tempDirPath ] {
+                mainWindow->openFolderByPath( tempDirPath );
+            } );
+
+            THEN( "The folder tab is added without crashing" )
+            {
+                REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+                // Settle so currentTabChanged fully applies its folder fallback
+                // (signal routing is async on some platforms).
+                QTest::qWait( 200 );
+                REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
+                         != nullptr );
+                // The tab label is the bare folder basename, matching single-file
+                // tabs (no "[Folder]" prefix).
+                REQUIRE( tabArea->tabText( 0 ) == QDir( tempDirPath ).dirName() );
+
+                AND_WHEN( "A file tab is also opened" )
+                {
+                    runInUiThread( [ &mainWindow, standaloneFile ] {
+                        mainWindow->loadInitialFile( standaloneFile, false );
+                    } );
+
+                    THEN( "Both tabs coexist and file tab is current" )
+                    {
+                        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+                        QTest::qWait( 200 );
+                        REQUIRE( qobject_cast<CrawlerWidget*>(
+                                     tabArea->currentWidget() )
+                                 != nullptr );
+
+                        AND_WHEN( "Switching back to the folder tab (index 0)" )
+                        {
+                            runInUiThread( [ tabArea ] {
+                                tabArea->setCurrentIndex( 0 );
+                            } );
+
+                            THEN( "No crash and folder tab is current" )
+                            {
+                                // Settle deterministically: setCurrentIndex fires
+                                // currentChanged asynchronously (MainWindow wires
+                                // optionsChanged/applyConfiguration on it), and a
+                                // fixed delay flaked on the slower ubuntu-20.04 CI.
+                                REQUIRE( waitUiState( [ & ] {
+                                    return qobject_cast<FolderCrawlerWidget*>(
+                                               tabArea->currentWidget() )
+                                           != nullptr;
+                                } ) );
+
+                                AND_WHEN( "Switching back to the file tab (index 1)" )
+                                {
+                                    runInUiThread( [ tabArea ] {
+                                        tabArea->setCurrentIndex( 1 );
+                                    } );
+
+                                    THEN( "No crash and file tab is current" )
+                                    {
+                                        REQUIRE( waitUiState( [ & ] {
+                                            return qobject_cast<CrawlerWidget*>(
+                                                       tabArea->currentWidget() )
+                                                   != nullptr;
+                                        } ) );
+
+                                        AND_THEN( "Closing the folder tab does not crash" )
+                                        {
+                                            // Switch to the folder tab and close
+                                            // the current tab via closeAction
+                                            // (closeTab is a private slot).
+                                            runInUiThread( [ closeAction, tabArea ] {
+                                                tabArea->setCurrentIndex( 0 );
+                                                closeAction->trigger();
+                                            } );
+
+                                            REQUIRE( waitUiState(
+                                                [&] { return tabArea->count() == 1; } ) );
+                                            QTest::qWait( 200 );
+                                            // Remaining tab is the file tab.
+                                            REQUIRE( qobject_cast<CrawlerWidget*>(
+                                                         tabArea->currentWidget() )
+                                                     != nullptr );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        WHEN( "A folder tab is opened as the only tab and then closed" )
+        {
+            runInUiThread( [ &mainWindow, tempDirPath ] {
+                mainWindow->openFolderByPath( tempDirPath );
+            } );
+            REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+            QTest::qWait( 200 );
+            REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
+                     != nullptr );
+
+            // closeTab on the folder current tab exercises the folder close
+            // branch (BEFORE the CrawlerWidget assert) and then the no-tab-left
+            // else branch in currentTabChanged. Triggered via closeAction
+            // (closeTab is a private slot).
+            runInUiThread( [ closeAction ] {
+                closeAction->trigger();
+            } );
+
+            THEN( "No assert-abort and no tabs remain" )
+            {
+                REQUIRE( waitUiState( [&] { return tabArea->count() == 0; } ) );
+                QTest::qWait( 200 );
+            }
+        }
+    }
 }

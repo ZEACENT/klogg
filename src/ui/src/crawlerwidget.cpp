@@ -226,7 +226,7 @@ bool CrawlerWidget::isTextWrapEnabled() const
 
 void CrawlerWidget::reloadPredefinedFilters() const
 {
-    predefinedFilters_->populatePredefinedFilters();
+    searchToolbar_->predefinedFilters()->populatePredefinedFilters();
 }
 
 QString CrawlerWidget::encodingText() const
@@ -310,45 +310,15 @@ void CrawlerWidget::setEncoding( std::optional<int> mib )
 
 void CrawlerWidget::focusSearchEdit()
 {
-    searchLineEdit_->lineEdit()->setFocus( Qt::ShortcutFocusReason );
+    searchToolbar_->searchLineEdit()->lineEdit()->setFocus( Qt::ShortcutFocusReason );
 }
 
 bool CrawlerWidget::eventFilter( QObject* watched, QEvent* event )
 {
-    const auto* searchEdit = searchLineEdit_ != nullptr ? searchLineEdit_->lineEdit() : nullptr;
-    const auto isSearchInput = watched == searchLineEdit_ || watched == searchEdit;
-    if ( !isSearchInput ) {
-        return QSplitter::eventFilter( watched, event );
-    }
-
-    if ( event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress ) {
-        return QSplitter::eventFilter( watched, event );
-    }
-
-    auto* keyEvent = static_cast<QKeyEvent*>( event );
-    const auto key = keyEvent->key();
-    if ( key != Qt::Key_Home && key != Qt::Key_End ) {
-        return QSplitter::eventFilter( watched, event );
-    }
-
-    const auto modifiers = keyEvent->modifiers() & ~Qt::KeypadModifier;
-    if ( modifiers != Qt::NoModifier ) {
-        return QSplitter::eventFilter( watched, event );
-    }
-
-    if ( event->type() == QEvent::ShortcutOverride ) {
-        event->accept();
-        return false;
-    }
-
-    if ( key == Qt::Key_Home ) {
-        searchLineEdit_->lineEdit()->setCursorPosition( 0 );
-    }
-    else {
-        searchLineEdit_->lineEdit()->end( false );
-    }
-    event->accept();
-    return true;
+    // The search-input Home/End handling now lives in SearchToolbar (which
+    // installs its own eventFilter on the combo it owns). CrawlerWidget no
+    // longer filters the search input.
+    return QSplitter::eventFilter( watched, event );
 }
 
 void CrawlerWidget::jumpToTop()
@@ -409,12 +379,12 @@ void CrawlerWidget::doSetViewContext( const QString& view_context )
     const auto context = CrawlerWidgetContext{ view_context };
 
     setSizes( context.sizes() );
-    matchCaseButton_->setChecked( !context.ignoreCase() );
-    useRegexpButton_->setChecked( context.useRegexp() );
-    inverseButton_->setChecked( context.inverseRegexp() );
-    booleanButton_->setChecked( context.useBooleanCombination() );
+    searchToolbar_->setMatchCase( !context.ignoreCase() );
+    searchToolbar_->setUseRegexp( context.useRegexp() );
+    searchToolbar_->setInverse( context.inverseRegexp() );
+    searchToolbar_->setBoolean( context.useBooleanCombination() );
 
-    searchRefreshButton_->setChecked( context.autoRefresh() );
+    searchToolbar_->setAutoRefresh( context.autoRefresh() );
     // Manually call the handler as it is not called when changing the state programmatically
     searchRefreshChangedHandler( context.autoRefresh() );
 
@@ -430,9 +400,9 @@ void CrawlerWidget::doSetViewContext( const QString& view_context )
 std::shared_ptr<const ViewContextInterface> CrawlerWidget::doGetViewContext() const
 {
     auto context = std::make_shared<const CrawlerWidgetContext>(
-        sizes(), ( !matchCaseButton_->isChecked() ), searchRefreshButton_->isChecked(),
-        logMainView_->isFollowEnabled(), useRegexpButton_->isChecked(), inverseButton_->isChecked(),
-        booleanButton_->isChecked(), logFilteredData_->getMarks() );
+        sizes(), ( !searchToolbar_->isMatchCase() ), searchToolbar_->isAutoRefresh(),
+        logMainView_->isFollowEnabled(), searchToolbar_->isUseRegexp(), searchToolbar_->isInverse(),
+        searchToolbar_->isBoolean(), logFilteredData_->getMarks() );
 
     return static_cast<std::shared_ptr<const ViewContextInterface>>( context );
 }
@@ -443,8 +413,8 @@ std::shared_ptr<const ViewContextInterface> CrawlerWidget::doGetViewContext() co
 
 void CrawlerWidget::startNewSearch()
 {
-    if ( keepSearchResultsButton_->isChecked() ) {
-        keepSearchResultsButton_->setChecked( false );
+    if ( searchToolbar_->isKeepResultsChecked() ) {
+        searchToolbar_->setKeepResultsChecked( false );
 
         searchUpdateThrottleTimer_.stop();
         searchUpdatePending_ = false;
@@ -472,24 +442,24 @@ void CrawlerWidget::startNewSearch()
     }
 
     tabbedFilteredView_->setTabText( tabbedFilteredView_->currentIndex(),
-                                     "Find \"" + searchLineEdit_->currentText() + "\"" );
+                                     "Find \"" + searchToolbar_->currentSearchText() + "\"" );
 
     // Record the search line in the recent list
     // (reload the list first in case another glogg changed it)
     const auto& searches = SavedSearches::getSynced();
-    savedSearches_->addRecent( searchLineEdit_->currentText() );
+    savedSearches_->addRecent( searchToolbar_->currentSearchText() );
     searches.save();
 
     // Update the SearchLine (history)
     updateSearchCombo();
     // Call the private function to do the search
-    replaceCurrentSearch( searchLineEdit_->currentText() );
+    replaceCurrentSearch( searchToolbar_->currentSearchText() );
 }
 
 void CrawlerWidget::updatePredefinedFiltersWidget()
 {
-    predefinedFilters_->updateSearchPattern( searchLineEdit_->currentText(),
-                                             booleanButton_->isChecked() );
+    searchToolbar_->predefinedFilters()->updateSearchPattern( searchToolbar_->currentSearchText(),
+                                                              searchToolbar_->isBoolean() );
 }
 
 void CrawlerWidget::stopSearch()
@@ -508,14 +478,15 @@ void CrawlerWidget::stopSearch()
 void CrawlerWidget::clearSearchHistory()
 {
     // Clear line
-    searchLineEdit_->clear();
+    searchToolbar_->searchLineEdit()->clear();
 
     // Sync and clear saved searches
     auto& searches = SavedSearches::getSynced();
     savedSearches_->clear();
     searches.save();
 
-    searchLineCompleter_->setModel( new QStringListModel( {}, searchLineCompleter_ ) );
+    searchToolbar_->searchLineCompleter()->setModel(
+        new QStringListModel( {}, searchToolbar_->searchLineCompleter() ) );
 }
 
 void CrawlerWidget::editSearchHistory()
@@ -547,13 +518,13 @@ void CrawlerWidget::editSearchHistory()
 
 void CrawlerWidget::saveAsFavorite()
 {
-    const auto currentText = searchLineEdit_->currentText().trimmed();
+    const auto currentText = searchToolbar_->currentSearchText().trimmed();
     if ( currentText.isEmpty() ) {
         return;
     }
 
     auto filters = PredefinedFiltersCollection::getSynced().getFilters();
-    const auto useRegex = useRegexpButton_->isChecked();
+    const auto useRegex = searchToolbar_->isUseRegexp();
 
     SaveFavoriteDialog dialog( currentText, filters, this );
     if ( dialog.exec() != QDialog::Accepted ) {
@@ -628,12 +599,6 @@ void CrawlerWidget::saveAsFavorite()
     reloadPredefinedFilters();
 }
 
-void CrawlerWidget::showSearchContextMenu()
-{
-    if ( searchLineContextMenu_ )
-        searchLineContextMenu_->exec( QCursor::pos( activeScreen( this ) ) );
-}
-
 // When receiving the 'newDataAvailable' signal from LogFilteredData
 void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
                                         LineNumber initialPosition,
@@ -671,10 +636,7 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
         printSearchInfoMessage( nbMatches );
         searchInfoLine_->hideGauge();
         // De-activate the stop button
-        stopButton_->setEnabled( false );
-        stopButton_->hide();
-        searchButton_->show();
-        clearButton_->show();
+        searchToolbar_->setSearchInProgress( false );
     }
     else {
         // Search in progress
@@ -907,14 +869,14 @@ void CrawlerWidget::applyConfiguration()
 
 void CrawlerWidget::applyEmptyFilterBehavior()
 {
-    if ( !logFilteredData_ || !filteredView_ || !searchLineEdit_ ) {
+    if ( !logFilteredData_ || !filteredView_ || !searchToolbar_ ) {
         return;
     }
 
-    const bool showAll = searchLineEdit_->currentText().isEmpty()
+    const bool showAll = searchToolbar_->currentSearchText().isEmpty()
         && Configuration::get().showAllInFilteredViewWhenSearchEmpty();
     logFilteredData_->setAllLinesVisible( showAll );
-    if ( searchLineEdit_->currentText().isEmpty() ) {
+    if ( searchToolbar_->currentSearchText().isEmpty() ) {
         filteredView_->updateData();
     }
 }
@@ -964,7 +926,7 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
             // We need to restart the search
             searchUpdateThrottleTimer_.stop();
             searchUpdatePending_ = false;
-            replaceCurrentSearch( searchLineEdit_->currentText() );
+            replaceCurrentSearch( searchToolbar_->currentSearchText() );
         }
         else if ( logData_->isLiveSource() ) {
             // For live sources, defer search updates through a throttle timer
@@ -1101,30 +1063,6 @@ void CrawlerWidget::searchRefreshChangedHandler( bool isRefreshing )
     printSearchInfoMessage( logFilteredData_->getNbMatches() );
 }
 
-void CrawlerWidget::matchCaseChangedHandler( bool shouldMatchCase )
-{
-    searchLineCompleter_->setCaseSensitivity( shouldMatchCase ? Qt::CaseSensitive
-                                                              : Qt::CaseInsensitive );
-
-    resetStateOnSearchPatternChanges();
-}
-
-void CrawlerWidget::booleanCombiningChangedHandler( bool )
-{
-    resetStateOnSearchPatternChanges();
-}
-
-void CrawlerWidget::useRegexpChangeHandler( bool )
-{
-    resetStateOnSearchPatternChanges();
-}
-
-void CrawlerWidget::searchTextChangeHandler( QString )
-{
-    resetStateOnSearchPatternChanges();
-    updatePredefinedFiltersWidget();
-}
-
 void CrawlerWidget::changeFilteredViewVisibility( int index )
 {
     QStandardItem* item = visibilityModel_->item( index );
@@ -1145,85 +1083,46 @@ void CrawlerWidget::setSearchPatternFromPredefinedFilters( const QList<Predefine
     }
 
     const auto& filter = filters.front();
-    if ( useRegexpButton_->isChecked() != filter.useRegex ) {
-        useRegexpButton_->setChecked( filter.useRegex );
+    if ( searchToolbar_->isUseRegexp() != filter.useRegex ) {
+        searchToolbar_->setUseRegexp( filter.useRegex );
     }
 
-    setSearchPattern( escapeSearchPattern( filter.pattern, filter.useRegex ) );
-}
-
-QString CrawlerWidget::escapeSearchPattern( const QString& pattern, bool isRegex ) const
-{
-    auto escapedPattern = ( !isRegex && useRegexpButton_->isChecked() )
-                              ? QRegularExpression::escape( pattern )
-                              : pattern;
-
-    if ( booleanButton_->isChecked() ) {
-        escapedPattern.replace( '"', "\"" ).prepend( '"' ).append( '"' );
-    }
-
-    return escapedPattern;
-}
-
-QString& CrawlerWidget::combinePatterns( QString& currentPattern, const QString& newPattern ) const
-{
-    if ( !currentPattern.isEmpty() ) {
-        if ( booleanButton_->isChecked() ) {
-            currentPattern.append( " or " );
-        }
-        else if ( useRegexpButton_->isChecked() ) {
-            currentPattern.append( '|' );
-        }
-    }
-
-    currentPattern.append( newPattern );
-
-    return currentPattern;
+    searchToolbar_->setSearchPattern(
+        searchToolbar_->escapeSearchPattern( filter.pattern, filter.useRegex ) );
 }
 
 void CrawlerWidget::addToSearch( const QString& searchString )
 {
-    const auto newPattern = escapeSearchPattern( searchString );
-    QString currentPattern = searchLineEdit_->currentText();
-    setSearchPattern( combinePatterns( currentPattern, newPattern ) );
+    const auto newPattern = searchToolbar_->escapeSearchPattern( searchString );
+    QString currentPattern = searchToolbar_->currentSearchText();
+    searchToolbar_->setSearchPattern(
+        searchToolbar_->combinePatterns( currentPattern, newPattern ) );
 }
 
 void CrawlerWidget::excludeFromSearch( const QString& searchString )
 {
-    QString currentPattern = searchLineEdit_->currentText();
+    QString currentPattern = searchToolbar_->currentSearchText();
 
-    const auto wasInBooleanCombinationMode = booleanButton_->isChecked();
+    const auto wasInBooleanCombinationMode = searchToolbar_->isBoolean();
     if ( !wasInBooleanCombinationMode ) {
         currentPattern.replace( '"', "\"" ).prepend( '"' ).append( '"' );
     }
 
-    booleanButton_->setChecked( true );
+    searchToolbar_->setBoolean( true );
 
-    const auto newPattern = escapeSearchPattern( searchString );
+    const auto newPattern = searchToolbar_->escapeSearchPattern( searchString );
 
     if ( !currentPattern.isEmpty() ) {
         currentPattern.append( " and " );
     }
 
     currentPattern.append( "not(" ).append( newPattern ).append( ')' );
-    setSearchPattern( currentPattern );
+    searchToolbar_->setSearchPattern( currentPattern );
 }
 
 void CrawlerWidget::replaceSearch( const QString& searchString )
 {
-    setSearchPattern( escapeSearchPattern( searchString ) );
-}
-
-void CrawlerWidget::setSearchPattern( const QString& searchPattern )
-{
-    searchLineEdit_->setEditText( searchPattern );
-    updatePredefinedFiltersWidget();
-    // Set the focus to lineEdit so that the user can press 'Return' immediately
-    searchLineEdit_->lineEdit()->setFocus();
-
-    if ( Configuration::get().autoRunSearchOnPatternChange() ) {
-        dispatchToMainThread( [ this ] { startNewSearch(); } );
-    }
+    searchToolbar_->setSearchPattern( searchToolbar_->escapeSearchPattern( searchString ) );
 }
 
 void CrawlerWidget::mouseHoveredOverMatch( LineNumber line )
@@ -1347,93 +1246,11 @@ void CrawlerWidget::setup()
     searchInfoLineDefaultPalette_ = this->palette();
     searchInfoLine_->setContentsMargins( 2, 2, 2, 2 );
 
-    matchCaseButton_ = new QToolButton();
-    matchCaseButton_->setToolTip( tr( "Match case" ) );
-    matchCaseButton_->setCheckable( true );
-    matchCaseButton_->setFocusPolicy( Qt::NoFocus );
-    matchCaseButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    useRegexpButton_ = new QToolButton();
-    useRegexpButton_->setToolTip( tr( "Use regex" ) );
-    useRegexpButton_->setCheckable( true );
-    useRegexpButton_->setFocusPolicy( Qt::NoFocus );
-    useRegexpButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    inverseButton_ = new QToolButton();
-    inverseButton_->setToolTip( tr( "Inverse match" ) );
-    inverseButton_->setCheckable( true );
-    inverseButton_->setFocusPolicy( Qt::NoFocus );
-    inverseButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    booleanButton_ = new QToolButton();
-    booleanButton_->setToolTip( tr( "Enable regular expression logical combining" ) );
-    booleanButton_->setCheckable( true );
-    booleanButton_->setFocusPolicy( Qt::NoFocus );
-    booleanButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    searchRefreshButton_ = new QToolButton();
-    searchRefreshButton_->setToolTip( tr( "Auto-refresh" ) );
-    searchRefreshButton_->setCheckable( true );
-    searchRefreshButton_->setFocusPolicy( Qt::NoFocus );
-    searchRefreshButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    // Construct the Search line
-    searchLineCompleter_ = new QCompleter( savedSearches_->recentSearches(), this );
-    searchLineEdit_ = new QComboBox;
-    searchLineEdit_->setEditable( true );
-    searchLineEdit_->setCompleter( searchLineCompleter_ );
-    searchLineEdit_->addItems( savedSearches_->recentSearches() );
-    searchLineEdit_->lineEdit()->clear();
-    searchLineEdit_->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Minimum );
-    searchLineEdit_->setSizeAdjustPolicy( QComboBox::AdjustToMinimumContentsLengthWithIcon );
-    searchLineEdit_->lineEdit()->setMaxLength( std::numeric_limits<int>::max() / 1024 );
-    searchLineEdit_->setContentsMargins( 2, 2, 2, 2 );
-    searchLineEdit_->installEventFilter( this );
-    searchLineEdit_->lineEdit()->installEventFilter( this );
-
-    QAction* clearSearchHistoryAction = new QAction( tr( "Clear search history" ), this );
-    QAction* editSearchHistoryAction = new QAction( tr( "Edit search history" ), this );
-    QAction* addFavoriteFilterAction = new QAction( tr( "Add to favorites" ), this );
-
-    searchLineContextMenu_ = searchLineEdit_->lineEdit()->createStandardContextMenu();
-    searchLineContextMenu_->addSeparator();
-    searchLineContextMenu_->addAction( addFavoriteFilterAction );
-    searchLineContextMenu_->addSeparator();
-    searchLineContextMenu_->addAction( editSearchHistoryAction );
-    searchLineContextMenu_->addAction( clearSearchHistoryAction );
-    searchLineEdit_->setContextMenuPolicy( Qt::CustomContextMenu );
-
-    setFocusProxy( searchLineEdit_ );
-
-    clearButton_ = new QToolButton();
-    clearButton_->setText( tr( "Clear search text" ) );
-    clearButton_->setAutoRaise( true );
-    clearButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    searchButton_ = new QToolButton();
-    searchButton_->setText( tr( "Search" ) );
-    searchButton_->setAutoRaise( true );
-    searchButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    keepSearchResultsButton_ = new QToolButton();
-    keepSearchResultsButton_->setText( tr( "Keep Results" ) );
-    keepSearchResultsButton_->setToolTip(
-        tr( "Keep these results and show subsequent results in a new window" ) );
-    keepSearchResultsButton_->setCheckable( true );
-    keepSearchResultsButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    stopButton_ = new QToolButton();
-    stopButton_->setAutoRaise( true );
-    stopButton_->setEnabled( false );
-    stopButton_->setVisible( false );
-    stopButton_->setContentsMargins( 2, 2, 2, 2 );
-
-    predefinedFilters_ = new PredefinedFiltersComboBox( this );
-    favoriteFilterButton_ = new QToolButton();
-    favoriteFilterButton_->setAutoRaise( true );
-    favoriteFilterButton_->setToolTip( tr( "Add current filter to favorites" ) );
-    favoriteFilterButton_->setFocusPolicy( Qt::NoFocus );
-    favoriteFilterButton_->setContentsMargins( 2, 2, 2, 2 );
+    // Shared search toolbar: owns the search-input QComboBox, option toggles,
+    // action buttons, predefined-filters combo and the RegularExpressionPattern
+    // construction. CrawlerWidget wires itself to the toolbar's signals below.
+    searchToolbar_ = new SearchToolbar( this, savedSearches_ );
+    setFocusProxy( searchToolbar_ );
 
     // Context lines controls
     contextLinesSpinBox_ = new QSpinBox();
@@ -1465,20 +1282,9 @@ void CrawlerWidget::setup()
     searchLineLayout->setContentsMargins( 2, 2, 2, 2 );
 
     searchLineLayout->addWidget( visibilityBox_ );
-    searchLineLayout->addWidget( matchCaseButton_ );
-    searchLineLayout->addWidget( useRegexpButton_ );
-    searchLineLayout->addWidget( inverseButton_ );
-    searchLineLayout->addWidget( booleanButton_ );
-    searchLineLayout->addWidget( searchRefreshButton_ );
-    searchLineLayout->addWidget( predefinedFilters_ );
-    searchLineLayout->addWidget( favoriteFilterButton_ );
-    searchLineLayout->addWidget( searchLineEdit_ );
+    searchLineLayout->addWidget( searchToolbar_ );
     searchLineLayout->addWidget( contextLinesSpinBox_ );
     searchLineLayout->addWidget( contextLinesComboBox_ );
-    searchLineLayout->addWidget( clearButton_ );
-    searchLineLayout->addWidget( searchButton_ );
-    searchLineLayout->addWidget( keepSearchResultsButton_ );
-    searchLineLayout->addWidget( stopButton_ );
     searchLineLayout->addWidget( searchInfoLine_ );
 
     // Construct the bottom window
@@ -1497,18 +1303,19 @@ void CrawlerWidget::setup()
     addWidget( logMainView_ );
     addWidget( bottomWindow );
 
-    // Default search checkboxes
+    // Default search checkboxes (set BEFORE wiring CrawlerWidget to the toolbar
+    // signals, matching the original order: the toolbar's internal connections
+    // update the completer case sensitivity; the emitted optionsChanged /
+    // autoRefreshChanged go nowhere until we connect below).
     auto& config = Configuration::get();
-    searchRefreshButton_->setChecked( config.isSearchAutoRefreshDefault() );
-    matchCaseButton_->setChecked( !config.isSearchIgnoreCaseDefault() );
-    useRegexpButton_->setChecked( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
-    booleanButton_->setChecked( config.isSearchLogicalCombiningDefault() );
+    searchToolbar_->setAutoRefresh( config.isSearchAutoRefreshDefault() );
+    searchToolbar_->setMatchCase( !config.isSearchIgnoreCaseDefault() );
+    searchToolbar_->setUseRegexp( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
+    searchToolbar_->setBoolean( config.isSearchLogicalCombiningDefault() );
 
     // Manually call the handler as it is not called when changing the state programmatically
-    searchRefreshChangedHandler( searchRefreshButton_->isChecked() );
-    useRegexpChangeHandler( useRegexpButton_->isChecked() );
-    matchCaseChangedHandler( matchCaseButton_->isChecked() );
-    booleanCombiningChangedHandler( booleanButton_->isChecked() );
+    searchRefreshChangedHandler( searchToolbar_->isAutoRefresh() );
+    resetStateOnSearchPatternChanges();
 
     // Default splitter position (usually overridden by the config file)
     setSizes( config.splitterSizes() );
@@ -1516,35 +1323,54 @@ void CrawlerWidget::setup()
     registerShortcuts();
     loadIcons();
 
-    // Connect the signals
-    connect( searchLineEdit_->lineEdit(), &QLineEdit::returnPressed, searchButton_,
-             &QToolButton::click );
-    connect( searchLineEdit_->lineEdit(), &QLineEdit::textEdited, this,
-             &CrawlerWidget::searchTextChangeHandler );
+    // Wire CrawlerWidget to the shared SearchToolbar's signals.
+    // searchRequested (Return / Search clicked, or auto-run from setSearchPattern)
+    // -> startNewSearch. Queued so a setSearchPattern-driven auto-run fires on the
+    // next event-loop pass (mirrors the original dispatchToMainThread deferral,
+    // letting callers like addToSearch/excludeFromSearch unwind first).
+    connect( searchToolbar_, &SearchToolbar::searchRequested, this, &CrawlerWidget::startNewSearch,
+             Qt::QueuedConnection );
+    // stopRequested (Stop clicked) -> stopSearch.
+    connect( searchToolbar_, &SearchToolbar::stopRequested, this, &CrawlerWidget::stopSearch );
+    // optionsChanged (match case / use regex / boolean toggle) ->
+    // resetStateOnSearchPatternChanges (replaces the per-button toggled handlers).
+    connect( searchToolbar_, &SearchToolbar::optionsChanged, this,
+             &CrawlerWidget::resetStateOnSearchPatternChanges );
+    // searchTextChanged (text edited / setSearchPattern) -> resetState + update
+    // predefined filters (replaces searchTextChangeHandler).
+    connect( searchToolbar_, &SearchToolbar::searchTextChanged, this, [ this ]( QString ) {
+        resetStateOnSearchPatternChanges();
+        updatePredefinedFiltersWidget();
+    } );
+    // predefinedFilterActivated (dropdown selection) -> update predefined filters
+    // ONLY (must not suspend auto-refresh tracking; restores the original
+    // currentIndexChanged -> updatePredefinedFiltersWidget-only split).
+    connect( searchToolbar_, &SearchToolbar::predefinedFilterActivated, this,
+             [ this ]( QString ) { updatePredefinedFiltersWidget(); } );
+    // matchCaseChanged: forwarded to MainWindow (maintains default config).
+    connect( searchToolbar_, &SearchToolbar::matchCaseChanged, this, &CrawlerWidget::matchCaseChanged );
+    // autoRefreshChanged: run searchRefreshChangedHandler AND forward to MainWindow.
+    connect( searchToolbar_, &SearchToolbar::autoRefreshChanged, this,
+             &CrawlerWidget::searchRefreshChangedHandler );
+    connect( searchToolbar_, &SearchToolbar::autoRefreshChanged, this,
+             &CrawlerWidget::searchRefreshChanged );
 
-    connect( searchLineEdit_, QOverload<int>::of( &QComboBox::currentIndexChanged ), this,
-             [ this ]( auto ) { updatePredefinedFiltersWidget(); } );
-
-    connect( predefinedFilters_, &PredefinedFiltersComboBox::filterChanged, this,
-             &CrawlerWidget::setSearchPatternFromPredefinedFilters );
-
-    connect( searchLineEdit_, &QWidget::customContextMenuRequested, this,
-             &CrawlerWidget::showSearchContextMenu );
-    connect( addFavoriteFilterAction, &QAction::triggered, this,
-             &CrawlerWidget::saveAsFavorite );
-    connect( clearSearchHistoryAction, &QAction::triggered, this,
+    // Context-menu / favorite actions (host owns the dialogs / persistence).
+    connect( searchToolbar_, &SearchToolbar::clearHistoryRequested, this,
              &CrawlerWidget::clearSearchHistory );
-    connect( editSearchHistoryAction, &QAction::triggered, this,
+    connect( searchToolbar_, &SearchToolbar::editHistoryRequested, this,
              &CrawlerWidget::editSearchHistory );
-    connect( searchButton_, &QToolButton::clicked, this, &CrawlerWidget::startNewSearch );
-    connect( favoriteFilterButton_, &QToolButton::clicked, this, &CrawlerWidget::saveAsFavorite );
-    connect( stopButton_, &QToolButton::clicked, this, &CrawlerWidget::stopSearch );
-    connect( clearButton_, &QToolButton::clicked, searchLineEdit_, &QComboBox::clearEditText );
+    connect( searchToolbar_, &SearchToolbar::saveFavoriteRequested, this,
+             &CrawlerWidget::saveAsFavorite );
+
+    // Predefined filters combo is owned by the toolbar; connect its filterChanged.
+    connect( searchToolbar_->predefinedFilters(), &PredefinedFiltersComboBox::filterChanged, this,
+             &CrawlerWidget::setSearchPatternFromPredefinedFilters );
 
     // Context lines combo box
     connect( contextLinesComboBox_, QOverload<int>::of( &QComboBox::currentIndexChanged ),
              this, &CrawlerWidget::contextLinesModeChanged );
-    
+
     // Also connect spinbox changes to update context lines if mode is active
     connect( contextLinesSpinBox_, QOverload<int>::of( &QSpinBox::valueChanged ),
              this, &CrawlerWidget::contextLinesValueChanged );
@@ -1618,24 +1444,10 @@ void CrawlerWidget::setup()
     connect( logData_.get(), &SearchableLogData::fileChanged, this,
              &CrawlerWidget::fileChangedHandler );
 
-    // Search auto-refresh
-    connect( searchRefreshButton_, &QPushButton::toggled, this,
-             &CrawlerWidget::searchRefreshChangedHandler );
-
-    connect( matchCaseButton_, &QPushButton::toggled, this,
-             &CrawlerWidget::matchCaseChangedHandler );
-
-    connect( useRegexpButton_, &QPushButton::toggled, this,
-             &CrawlerWidget::useRegexpChangeHandler );
-
-    connect( booleanButton_, &QPushButton::toggled, this,
-             &CrawlerWidget::booleanCombiningChangedHandler );
-
-    // Advise the parent the checkboxes have been changed
-    // (for maintaining default config)
-    connect( searchRefreshButton_, &QPushButton::toggled, this,
-             &CrawlerWidget::searchRefreshChanged );
-    connect( matchCaseButton_, &QPushButton::toggled, this, &CrawlerWidget::matchCaseChanged );
+    // The option-toggle button connections (search auto-refresh / match case /
+    // use regex / boolean) now live in SearchToolbar, which re-emits
+    // autoRefreshChanged / matchCaseChanged / optionsChanged. Those are wired
+    // above (searchToolbar_ -> handlers / MainWindow-facing signals).
 
     // Switch between views
     connect( logMainView_, &AbstractLogView::clearColorLabels, this,
@@ -1811,27 +1623,27 @@ void CrawlerWidget::registerShortcuts()
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableCaseMatching, [ this ]() { matchCaseButton_->toggle(); } );
+        ShortcutAction::CrawlerEnableCaseMatching, [ this ]() { searchToolbar_->matchCaseButton()->toggle(); } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableRegex, [ this ]() { useRegexpButton_->toggle(); } );
+        ShortcutAction::CrawlerEnableRegex, [ this ]() { searchToolbar_->useRegexpButton()->toggle(); } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableInverseMatching, [ this ]() { inverseButton_->toggle(); } );
+        ShortcutAction::CrawlerEnableInverseMatching, [ this ]() { searchToolbar_->inverseButton()->toggle(); } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableRegexCombining, [ this ]() { booleanButton_->toggle(); } );
+        ShortcutAction::CrawlerEnableRegexCombining, [ this ]() { searchToolbar_->booleanButton()->toggle(); } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableAutoRefresh, [ this ]() { searchRefreshButton_->toggle(); } );
+        ShortcutAction::CrawlerEnableAutoRefresh, [ this ]() { searchToolbar_->searchRefreshButton()->toggle(); } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerKeepResults, [ this ]() { keepSearchResultsButton_->toggle(); } );
+        ShortcutAction::CrawlerKeepResults, [ this ]() { searchToolbar_->keepSearchResultsButton()->toggle(); } );
 
     ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
                                       Qt::WidgetWithChildrenShortcut,
@@ -1916,17 +1728,9 @@ void CrawlerWidget::registerShortcuts()
 
 void CrawlerWidget::loadIcons()
 {
-    searchRefreshButton_->setIcon( iconLoader_.load( "icons8-search-refresh" ) );
-    useRegexpButton_->setIcon( iconLoader_.load( "regex" ) );
-    inverseButton_->setIcon( iconLoader_.load( "icons8-not-equal" ) );
-    booleanButton_->setIcon( iconLoader_.load( "icons8-venn-diagram" ) );
-    clearButton_->setIcon( iconLoader_.load( "icons8-delete" ) );
-    searchButton_->setIcon( iconLoader_.load( "icons8-search" ) );
-    keepSearchResultsButton_->setIcon( iconLoader_.load( "icons8-lock" ) );
-    matchCaseButton_->setIcon( iconLoader_.load( "icons8-font-size" ) );
-    stopButton_->setIcon( iconLoader_.load( "icons8-close-window" ) );
-    favoriteFilterButton_->setIcon( iconLoader_.load( "icons8-star" ) );
-
+    // All migrated button icons are owned by the SearchToolbar (which has its
+    // own IconLoader and reloads on StyleChange via its own changeEvent path).
+    searchToolbar_->loadIcons();
 }
 
 // Create a new search using the text passed, replace the currently
@@ -1972,20 +1776,16 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 
     if ( !searchText.isEmpty() ) {
 
-        // Constructs the regexp
-        auto regexpPattern = RegularExpressionPattern(
-            searchText, matchCaseButton_->isChecked(), inverseButton_->isChecked(),
-            booleanButton_->isChecked(), !useRegexpButton_->isChecked() );
+        // Constructs the regexp (verbatim construction now lives in
+        // SearchToolbar::currentRegularExpressionPattern()).
+        auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
 
         RegularExpression hsExpression{ regexpPattern };
         auto isValidExpression = hsExpression.isValid();
 
         if ( isValidExpression ) {
             // Activate the stop button
-            stopButton_->setEnabled( true );
-            stopButton_->show();
-            clearButton_->hide();
-            searchButton_->hide();
+            searchToolbar_->setSearchInProgress( true );
             // Start a new asynchronous search
             logFilteredData_->runSearch( regexpPattern, searchStartLine_, searchEndLine_ );
             // Accept auto-refresh of the search
@@ -2028,16 +1828,8 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 // called when the SavedSearch has been changed.
 void CrawlerWidget::updateSearchCombo()
 {
-    const QString text = searchLineEdit_->lineEdit()->text();
-    searchLineEdit_->clear();
-
     auto searchHistory = savedSearches_->recentSearches();
-
-    searchLineEdit_->addItems( searchHistory );
-    // In case we had something that wasn't added to the list (blank...):
-    searchLineEdit_->lineEdit()->setText( text );
-
-    searchLineCompleter_->setModel( new QStringListModel( searchHistory, searchLineCompleter_ ) );
+    searchToolbar_->setItems( searchHistory );
 }
 
 // Print the search info message.

@@ -203,8 +203,26 @@ void ProcessLiveSourceTransport::connectTransportAsync()
     // process_ before the timer fires cannot promote the wrong process to
     // Connected.
     auto* startedProcess = process_.get();
-    QTimer::singleShot( StartupFailureGracePeriodMs, this,
-                         [ this, self, startedProcess ]() {
+
+    // Cancel any stale grace timer from a previous connectTransportAsync()
+    // that was interrupted by disconnectTransport() before it fired.
+    cancelGraceTimer();
+
+    graceTimer_ = new QTimer( this );
+    graceTimer_->setSingleShot( true );
+    connect( graceTimer_, &QTimer::timeout, this,
+             [ this, self, startedProcess ]() {
+        // Single-shot timer fired: drop the handle and free the QTimer. The
+        // object was only stop()ed+null'd on cancel; on fire it would otherwise
+        // linger parented to this until destruction (cancelGraceTimer deletes
+        // it synchronously; here deleteLater is required since we are inside the
+        // timer's own timeout signal).
+        auto* const firedTimer = graceTimer_;
+        graceTimer_ = nullptr;
+        if ( firedTimer != nullptr ) {
+            firedTimer->deleteLater();
+        }
+
         if ( !self || destroyed_ || disconnectRequested_ ) {
             return;
         }
@@ -236,10 +254,16 @@ void ProcessLiveSourceTransport::connectTransportAsync()
             Q_EMIT errorOccurred( lastError_ );
         }
     } );
+    graceTimer_->start( StartupFailureGracePeriodMs );
 }
 
 void ProcessLiveSourceTransport::disconnectTransport()
 {
+    // Cancel any pending grace timer before tearing down the process.
+    // The timer captures process_ pointers that become stale after
+    // createProcess() replaces the instance.
+    cancelGraceTimer();
+
     if ( !process_ || process_->state() == QProcess::NotRunning ) {
         disconnectRequested_ = false;
         setState( State::Disconnected );
@@ -261,7 +285,11 @@ void ProcessLiveSourceTransport::disconnectTransport()
     if ( destroyed_ ) {
         // Destructor path: synchronous cleanup, no need to create a new process
         setState( State::Disconnected );
-        dying->terminate();
+        // Guard against pid == 0: if the child already exited and Qt cleared
+        // the pid, kill(0, SIGTERM) would send SIGTERM to our process group.
+        if ( dying->processId() > 0 ) {
+            dying->terminate();
+        }
         if ( !dying->waitForFinished( 1500 ) ) {
             dying->kill();
             dying->waitForFinished( 1500 );
@@ -273,8 +301,14 @@ void ProcessLiveSourceTransport::disconnectTransport()
         createProcess();
         setState( State::Disconnected );
 
-        // Async cleanup, non-blocking
-        dying->terminate();
+        // Async cleanup, non-blocking.
+        // On macOS, QProcess::terminate() followed by deleteLater can cause
+        // ~QProcess() to re-send SIGTERM with a stale PID if the child was
+        // already reaped and the OS reused the PID.  Use kill() (SIGKILL)
+        // which forces immediate exit and is safe against PID reuse because
+        // SIGKILL cannot be caught and the destructor's terminateProcess()
+        // will see processState == NotRunning.
+        dying->kill();
         QObject::connect( dying,
                           qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
                           dying, &QObject::deleteLater );
@@ -336,6 +370,15 @@ bool ProcessLiveSourceTransport::runBlockingCommand( const Command& command, QBy
     }
 
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+
+void ProcessLiveSourceTransport::cancelGraceTimer()
+{
+    if ( graceTimer_ ) {
+        graceTimer_->stop();
+        delete graceTimer_;
+        graceTimer_ = nullptr;
+    }
 }
 
 void ProcessLiveSourceTransport::setState( State state )

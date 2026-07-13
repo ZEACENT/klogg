@@ -93,6 +93,9 @@
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
+#include "foldercrawlerwidget.h"
+#include "abstractlogview.h"
+#include "folderenumeration.h"
 #include "dispatch_to.h"
 #include "downloader.h"
 #include "encodings.h"
@@ -104,6 +107,8 @@
 #include "klogg_version.h"
 #include "logger.h"
 #include "mainwindowtext.h"
+#include "mergefileorder.h"
+#include "droppathclassification.h"
 #include "openfilehelper.h"
 #include "optionsdialog.h"
 #include "predefinedfilters.h"
@@ -111,6 +116,7 @@
 #include "progress.h"
 #include "readablesize.h"
 #include "recentfiles.h"
+#include "recentfolders.h"
 #include "sessioninfo.h"
 #include "shortcuts.h"
 #include "styles.h"
@@ -245,6 +251,12 @@ MainWindow::MainWindow( WindowSession session )
     signalMux_.connect( SIGNAL( filteredViewChanged() ), this,
                         SLOT( handleFilteredViewChanged() ) );
 
+    // Reconnect countdown timer (fires every second to update the info line)
+    reconnectCountdownTimer_ = new QTimer( this );
+    reconnectCountdownTimer_->setInterval( 1000 );
+    connect( reconnectCountdownTimer_, &QTimer::timeout,
+             this, &MainWindow::updateReconnectCountdown );
+
     // Configure the main tabbed widget
     mainTabWidget_.setDocumentMode( true );
     mainTabWidget_.setMovable( true );
@@ -329,6 +341,19 @@ void MainWindow::reloadSession()
 
     for ( const auto& open_file : openedFiles ) {
         const auto& documentInfo = open_file.first;
+
+        if ( documentInfo.kind == DocumentKind::Folder ) {
+            // Folder tab: FolderCrawlerWidget already built by Session::openFolder
+            // during restore (view_factory is not used for folders). Add it to the
+            // tab bar with its display name; do NOT follow-file or register adb.
+            auto* folder_widget = static_cast<FolderCrawlerWidget*>( open_file.second );
+            if ( folder_widget != nullptr ) {
+                mainTabWidget_.addCrawler( folder_widget, documentInfo.documentId,
+                                           documentInfo.displayName, documentInfo.toolTip );
+            }
+            continue;
+        }
+
         auto* crawler_widget = static_cast<CrawlerWidget*>( open_file.second );
 
         if ( crawler_widget ) {
@@ -366,6 +391,14 @@ void MainWindow::loadInitialFile( QString fileName, bool followFile )
 
     // Is there a file passed as argument?
     if ( !fileName.isEmpty() ) {
+        // Explicit folder routing for the CLI entry point (klogg <folder>):
+        // makes the CLI intent self-documenting at its real entry point. The
+        // loadFile directory guard remains as the backstop for the other
+        // callers (loadFileNonInteractive/recent/favorites).
+        if ( isDirectoryPath( fileName ) ) {
+            openFolderByPath( fileName );
+            return;
+        }
         loadFile( fileName, followFile );
     }
 }
@@ -405,6 +438,7 @@ void MainWindow::reTranslateUI()
     openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
 
     recentFilesCleanup->setText( transAction( action::recentFilesCleanupText ) );
+    recentFoldersCleanup->setText( transAction( action::recentFoldersCleanupText ) );
 
     closeAction->setText( transAction( action::closeText ) );
     closeAction->setStatusTip( transAction( action::closeStatusTip ) );
@@ -572,6 +606,10 @@ void MainWindow::createActions()
     openAction->setStatusTip( tr( action::openStatusTip ) );
     connect( openAction, &QAction::triggered, [ this ]( auto ) { this->open(); } );
 
+    openFolderAction = new QAction( tr( "Open Folder..." ), this );
+    openFolderAction->setStatusTip( tr( "Search every file in a folder (like grep -EIrn)" ) );
+    connect( openFolderAction, &QAction::triggered, [ this ]( auto ) { this->openFolder(); } );
+
     openAdbLogcatAction = new QAction( tr( "Open ADB Logcat..." ), this );
     openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
     connect( openAdbLogcatAction, &QAction::triggered, this,
@@ -588,6 +626,10 @@ void MainWindow::createActions()
     recentFilesCleanup = new QAction( tr( action::recentFilesCleanupText ), this );
     connect( recentFilesCleanup, &QAction::triggered, this,
              [ this ]( auto ) { this->clearRecentFileActions(); } );
+
+    recentFoldersCleanup = new QAction( tr( action::recentFoldersCleanupText ), this );
+    connect( recentFoldersCleanup, &QAction::triggered, this,
+             [ this ]( auto ) { this->clearRecentFolderActions(); } );
 
     closeAction = new QAction( tr( action::closeText ), this );
     closeAction->setObjectName( QStringLiteral( "closeAction" ) );
@@ -609,6 +651,18 @@ void MainWindow::createActions()
         } );
         recentFileActions[ i ]->setVisible( false );
         recentFileActions[ i ]->setActionGroup( recentFilesGroup );
+    }
+
+    recentFoldersGroup = new QActionGroup( this );
+    connect( recentFoldersGroup, &QActionGroup::triggered, this, &MainWindow::openFolderFromRecent );
+    for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
+        recentFolderActions[ i ] = new QAction( this );
+        connect( recentFolderActions[ i ], &QAction::hovered,
+                 [ this, a = recentFolderActions[ i ] ]() {
+                     QToolTip::showText( QCursor::pos(), a->toolTip(), this );
+                 } );
+        recentFolderActions[ i ]->setVisible( false );
+        recentFolderActions[ i ]->setActionGroup( recentFoldersGroup );
     }
 
     exitAction = new QAction( tr( action::exitText ), this );
@@ -915,6 +969,7 @@ void MainWindow::createMenus()
     fileMenu->setToolTipsVisible( true );
     fileMenu->addAction( newWindowAction );
     fileMenu->addAction( openAction );
+    fileMenu->addAction( openFolderAction );
     fileMenu->addAction( openAdbLogcatAction );
     fileMenu->addAction( openIosLogStreamAction );
     fileMenu->addAction( openClipboardAction );
@@ -926,6 +981,15 @@ void MainWindow::createMenus()
     recentFilesMenu->addSeparator();
     recentFilesMenu->addAction( recentFilesCleanup );
     recentFilesMenu->setEnabled( false );
+
+    recentFoldersMenu = fileMenu->addMenu( tr( "Open Recent Fol&der" ) );
+    for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
+        recentFoldersMenu->addAction( recentFolderActions[ i ] );
+    }
+    recentFoldersMenu->addSeparator();
+    recentFoldersMenu->addAction( recentFoldersCleanup );
+    recentFoldersMenu->setEnabled( false );
+
     fileMenu->addSeparator();
 
     fileMenu->addAction( closeAction );
@@ -1136,6 +1200,50 @@ void MainWindow::open()
     }
 }
 
+void MainWindow::openFolder()
+{
+    QString defaultDir = ".";
+    if ( auto current = currentCrawlerWidget() ) {
+        const QString currentFile = session_.getAssociatedPath( current );
+        const QFileInfo fileInfo( currentFile );
+        if ( fileInfo.exists() ) {
+            defaultDir = fileInfo.path();
+        }
+    }
+
+    const QString folder
+        = QFileDialog::getExistingDirectory( this, tr( "Open folder" ), defaultDir );
+    if ( folder.isEmpty() ) {
+        return;
+    }
+
+    openFolderByPath( folder );
+}
+
+void MainWindow::openFolderByPath( const QString& folderPath )
+{
+    const auto filePaths = enumerateFolderFiles( folderPath );
+    if ( filePaths.empty() ) {
+        QMessageBox::information( this, tr( "Open folder" ),
+                                  tr( "No readable files found in %1" ).arg( folderPath ) );
+        return;
+    }
+
+    auto* view = session_.openFolder(
+        folderPath, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
+    if ( view == nullptr ) {
+        return;
+    }
+
+    const QString displayName = QFileInfo( folderPath ).fileName();
+    const auto index = mainTabWidget_.addCrawler( static_cast<FolderCrawlerWidget*>( view ),
+                                                  folderPath, displayName, folderPath );
+    mainTabWidget_.setCurrentIndex( index );
+    updateOpenedFilesMenu();
+    // Record the folder only on success (non-empty + tab added).
+    addRecentFolder( folderPath );
+}
+
 void MainWindow::openAdbLogcat()
 {
     AdbLogcatDialog dialog( this );
@@ -1238,6 +1346,31 @@ void MainWindow::openFileFromRecent( QAction* action )
     }
 }
 
+void MainWindow::openFolderFromRecent( QAction* action )
+{
+    if ( !action ) {
+        return;
+    }
+
+    const auto folderPath = action->data().toString();
+    if ( QFileInfo{ folderPath }.isDir() ) {
+        openFolderByPath( folderPath );
+    }
+    else {
+        const auto userAction = QMessageBox::question(
+            this, tr( "klogg - remove from recent folders" ),
+            tr( "Folder %1 does not exist. Remove it from recent folders?" ).arg( folderPath ),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
+
+        if ( userAction == QMessageBox::Yes ) {
+            auto& recentFolders = RecentFolders::get();
+            recentFolders.removeRecent( folderPath );
+            recentFolders.save();
+            updateRecentFolderActions();
+        }
+    }
+}
+
 void MainWindow::openFileFromFavorites( QAction* action )
 {
     if ( !action ) {
@@ -1287,7 +1420,7 @@ void MainWindow::selectAll()
     if ( infoLine->hasFocus() ) {
         infoLine->setSelection( 0, klogg::isize( infoLine->text() ) );
     }
-    else if ( auto current = currentCrawlerWidget(); current != nullptr ) {
+    else if ( auto current = currentDocument(); current != nullptr ) {
         current->selectAll();
     }
 }
@@ -1301,7 +1434,7 @@ void MainWindow::copy()
             return;
         }
 
-        if ( auto current = currentCrawlerWidget(); current != nullptr ) {
+        if ( auto current = currentDocument(); current != nullptr ) {
             auto text = current->getSelectedText();
             text.replace( QChar::Null, QChar::Space );
 
@@ -1417,6 +1550,8 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
 void MainWindow::disconnectCurrentSource()
 {
+    stopReconnectCountdown();
+
     auto* crawler = currentCrawlerWidget();
     if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
         return;
@@ -1445,25 +1580,28 @@ void MainWindow::reconnectCurrentSource()
 
 void MainWindow::copyFullPath()
 {
-    auto* crawler = currentCrawlerWidget();
-    if ( !crawler ) {
+    // Route via currentView() (not currentCrawlerWidget()) so folder tabs work
+    // too -- a folder tab's associated path is the folder path. Session
+    // accessors key on ViewInterface*, which both tab kinds implement.
+    auto* view = currentView();
+    if ( view == nullptr ) {
         return;
     }
 
-    const auto associatedPath = session_.getAssociatedPath( crawler );
-    const auto text
-        = associatedPath.isEmpty() ? session_.getDocumentId( crawler ) : associatedPath;
+    const auto associatedPath = session_.getAssociatedPath( view );
+    const auto text = associatedPath.isEmpty() ? session_.getDocumentId( view ) : associatedPath;
     sendTextToClipboard( QDir::toNativeSeparators( text ) );
 }
 
 void MainWindow::openContainingFolder()
 {
-    auto* crawler = currentCrawlerWidget();
-    if ( !crawler ) {
+    // Route via currentView() so folder tabs work too (reveals the folder).
+    auto* view = currentView();
+    if ( view == nullptr ) {
         return;
     }
 
-    const auto associatedPath = session_.getAssociatedPath( crawler );
+    const auto associatedPath = session_.getAssociatedPath( view );
     if ( !associatedPath.isEmpty() ) {
         showPathInFileExplorer( associatedPath );
     }
@@ -1592,6 +1730,7 @@ void MainWindow::options()
 
         updateShortcuts();
         updateRecentFileActions();
+        updateRecentFolderActions();
     } );
     dialog.exec();
 
@@ -1675,8 +1814,8 @@ void MainWindow::encodingChanged( QAction* action )
     }
 
     LOG_DEBUG << "encodingChanged, encoding " << mib.value_or( 0 );
-    if ( auto crawler = currentCrawlerWidget() ) {
-        crawler->setEncoding( mib );
+    if ( auto doc = currentDocument() ) {
+        doc->setEncoding( mib );
         updateInfoLine();
     }
 }
@@ -1733,7 +1872,20 @@ void MainWindow::lineNumberHandler( LineNumber startLine, LinesCount nLines, Lin
     uint64_t fileNbLine{};
     QDateTime lastModified;
 
-    session_.getFileInfo( currentCrawlerWidget(), &fileSize, &fileNbLine, &lastModified );
+    // Guarded: this slot is signalMux-routed so it only fires for a file
+    // current doc, but getFileInfo asserts on a null ViewInterface*
+    // (session.cpp:358). Skip the Session call for a folder/no-tab current;
+    // fileNbLine stays 0 and the line-number text is cleared below.
+    if ( auto* cw = currentCrawlerWidget() ) {
+        session_.getFileInfo( cw, &fileSize, &fileNbLine, &lastModified );
+    }
+    else if ( auto* doc = currentDocument() ) {
+        // Folder tab: line count of the file currently in the folder main view
+        // (0 when none is open -> lineNbField cleared below).
+        if ( const auto info = doc->currentMainViewInfo() ) {
+            fileNbLine = info->nbLines;
+        }
+    }
 
     if ( fileNbLine != 0 ) {
         QString lineText;
@@ -1778,9 +1930,30 @@ void MainWindow::refreshLineNumberField()
     lineNumberHandler( lastStartLine_, lastNLines_, lastStartCol_, lastNSymbols_ );
 }
 
+void MainWindow::onFolderMainViewNewSelection( LineNumber startLine, LinesCount nLines,
+                                               LineColumn startCol, LineLength nSymbols )
+{
+    // The folder main view's newSelection is wired per-folder-widget in
+    // currentTabChanged with Qt::UniqueConnection. Only act when a folder tab is
+    // current so a backgrounded folder's selection never overwrites the status
+    // bar of the active (e.g. single-file) tab. File tabs get the same broadcast
+    // via signalMux; the folder is intentionally not a mux document.
+    if ( currentCrawlerWidget() == nullptr ) {
+        lineNumberHandler( startLine, nLines, startCol, nSymbols );
+    }
+}
+
 void MainWindow::updateLoadingProgress( int progress )
 {
     LOG_DEBUG << "Loading progress: " << progress;
+
+    // Guarded: this slot is signalMux-routed (loadingProgressed) so it only
+    // fires for a file current doc, but getDisplayName asserts on a null
+    // ViewInterface* (session.cpp:358). Early-return for a folder/no-tab
+    // current -- the folder info line is owned by currentTabChanged.
+    if ( currentCrawlerWidget() == nullptr ) {
+        return;
+    }
 
     const auto currentFile
         = QDir::toNativeSeparators( session_.getDisplayName( currentCrawlerWidget() ) );
@@ -1825,7 +1998,12 @@ void MainWindow::handleLoadingFinished( LoadingStatus status )
         }
 
         // Now everything is ready, we can finally show the file!
-        currentCrawlerWidget()->show();
+        // Guarded: this slot is signalMux-routed (loadingFinished) so it only
+        // fires when a CrawlerWidget is the current document, but the deref was
+        // unguarded -- harden it so a folder/no-tab current can't crash.
+        if ( auto* cw = currentCrawlerWidget() ) {
+            cw->show();
+        }
     }
     else {
         if ( status == LoadingStatus::NoMemory ) {
@@ -1848,16 +2026,84 @@ void MainWindow::handleFilteredViewChanged()
 {
     int currentIndex = mainTabWidget_.currentIndex();
     if ( currentIndex >= 0 ) {
-        auto* crawler_widget = static_cast<CrawlerWidget*>( mainTabWidget_.widget( currentIndex ) );
-        quickFindMux_.registerSelector( crawler_widget );
+        // qobject_cast (NOT static_cast): a folder tab is a FolderCrawlerWidget,
+        // not a CrawlerWidget. registerSelector(nullptr) is the safe folder
+        // behavior (quickfindmux.cpp:51 early-returns); the folder's own
+        // SearchToolbar is unaffected.
+        auto* crawler_widget = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( currentIndex ) );
+        if ( crawler_widget != nullptr ) {
+            quickFindMux_.registerSelector( crawler_widget );
+        }
     }
 }
 
 void MainWindow::closeTab( int index, ActionInitiator initiator )
 {
+    // Folder tab close path. FolderCrawlerWidget is NOT a CrawlerWidget (it has
+    // no stopLoading / ADB source / file-index semantics), so it must be
+    // handled BEFORE the CrawlerWidget assert below, which would otherwise
+    // abort in debug and null-deref in release.
+    auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( mainTabWidget_.widget( index ) );
+    if ( folder_widget != nullptr ) {
+        const auto documentId = session_.getDocumentId( folder_widget );
+        const auto displayName = session_.getDisplayName( folder_widget );
+
+        if ( initiator == ActionInitiator::User ) {
+            auto& config = Configuration::get();
+            if ( config.confirmTabClose() ) {
+                QMessageBox msgBox( this );
+                msgBox.setWindowTitle( tr( "Confirm Close" ) );
+                msgBox.setText( tr( "Close \"%1\"?" ).arg( displayName ) );
+                msgBox.setStandardButtons( QMessageBox::Yes | QMessageBox::No );
+                msgBox.setDefaultButton( QMessageBox::Yes );
+
+                QCheckBox* dontAskCheckBox = new QCheckBox( tr( "Don't ask again" ) );
+                msgBox.setCheckBox( dontAskCheckBox );
+
+                if ( msgBox.exec() != QMessageBox::Yes ) {
+                    return;
+                }
+
+                if ( dontAskCheckBox->isChecked() ) {
+                    config.setConfirmTabClose( false );
+                    config.save();
+                }
+            }
+        }
+
+        // removeCrawler fires currentTabChanged for the NEW current tab
+        // (synchronously). That queries Session for the new tab, not this
+        // folder, so it is safe to run before session_.close below.
+        mainTabWidget_.removeCrawler( index );
+
+        if ( !shutdownInProgress_ ) {
+            auto& groupManager = TabGroupManager::get();
+            groupManager.removeTabFromGroup( documentId );
+            groupManager.save();
+        }
+
+        // session_.close removes the folder from openFiles_ (keyed on its
+        // ViewInterface*). Must run before deleteLater() resolves, otherwise a
+        // stale ViewInterface* key would linger in the Session map.
+        session_.close( folder_widget );
+
+        updateOpenedFilesMenu();
+        if ( !shutdownInProgress_ ) {
+            persistSessionState();
+        }
+
+        folder_widget->deleteLater();
+        return;
+    }
+
     auto widget = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
 
     assert( widget );
+
+    // Stop reconnect countdown if the closing tab is the countdown target
+    if ( widget == reconnectCountdownCrawler_ ) {
+        stopReconnectCountdown();
+    }
 
     const auto documentId = session_.getDocumentId( widget );
     const auto displayName = session_.getDisplayName( widget );
@@ -1926,18 +2172,107 @@ void MainWindow::currentTabChanged( int index )
     LOG_DEBUG << "currentTabChanged";
 
     if ( index >= 0 ) {
-        auto* crawler_widget = static_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
-        signalMux_.setCurrentDocument( crawler_widget );
-        quickFindMux_.registerSelector( crawler_widget );
+        auto* widget = mainTabWidget_.widget( index );
+        // qobject_cast (NOT static_cast): a folder tab is a FolderCrawlerWidget,
+        // not a CrawlerWidget. static_cast would produce a garbage pointer whose
+        // dereference crashes (the original EXC_BAD_ACCESS at this site).
+        auto* crawler_widget = qobject_cast<CrawlerWidget*>( widget );
 
-        // New tab is set up with fonts etc...
-        Q_EMIT optionsChanged();
+        if ( crawler_widget != nullptr ) {
+            // --- File / live-source tab ---
+            signalMux_.setCurrentDocument( crawler_widget );
+            quickFindMux_.registerSelector( crawler_widget );
 
-        updateMenuBarFromDocument( crawler_widget );
-        updateTitleBar( session_.getDisplayName( crawler_widget ) );
-        updateFavoritesMenu();
+            // New tab is set up with fonts etc...
+            Q_EMIT optionsChanged();
 
-        editMenu->setEnabled( true );
+            updateMenuBarFromDocument( crawler_widget );
+            updateTitleBar( session_.getDisplayName( crawler_widget ) );
+            updateFavoritesMenu();
+
+            // Update infoLine when switching to a tab that isn't the countdown target
+            if ( reconnectCountdownTimer_->isActive()
+                 && crawler_widget != reconnectCountdownCrawler_ ) {
+                updateInfoLine();
+            }
+
+            editMenu->setEnabled( true );
+        }
+        else {
+            // --- Folder tab (FolderCrawlerWidget) ---
+            // The folder is NOT registered as the signalMux document: the mux
+            // routes file/live-source slots (goToLine/reload/stopLoading/
+            // follow/textWrap relays) the folder does not implement, and
+            // registering it would emit "No such slot" warnings. config/view
+            // option changes (line numbers, font, overview, wrap) are delivered
+            // directly to applyConfiguration via the connection below.
+            signalMux_.setCurrentDocument( nullptr );
+
+            auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( widget );
+            // The folder implements QuickFindMuxSelectorInterface and its views
+            // were rebound to the session QuickFindPattern (doSetQuickFindPattern
+            // -> AbstractLogView::setQuickFindPattern), so the mux's pattern now
+            // drives them -- Ctrl+F QuickFind works on folder tabs.
+            quickFindMux_.registerSelector( folder_widget );
+
+            if ( folder_widget != nullptr ) {
+                // UniqueConnection: survives repeated tab switches without
+                // duplicating; redundant fires while a non-folder tab is current
+                // are harmless (applyConfiguration is idempotent and the folder
+                // views are hidden).
+                connect( this, &MainWindow::optionsChanged, folder_widget,
+                         &FolderCrawlerWidget::applyConfiguration, Qt::UniqueConnection );
+                // Refresh the info line (path/size/date/encoding) when the file
+                // shown in the folder main view changes.
+                connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
+                         &MainWindow::updateInfoLine, Qt::UniqueConnection );
+                // Forward the folder main view's Ln:col selection to the status
+                // bar (file tabs get this via signalMux). A real slot (not a
+                // lambda) so Qt::UniqueConnection can dedupe across tab switches
+                // (lambda+UniqueConnection warns and accumulates duplicates).
+                connect( folder_widget->mainView(), &AbstractLogView::newSelection, this,
+                         &MainWindow::onFolderMainViewNewSelection, Qt::UniqueConnection );
+            }
+
+            // Routes to the folder via the connection above.
+            Q_EMIT optionsChanged();
+
+            // Session accessors assert on a null ViewInterface*, so the folder
+            // display name must be fetched via the ViewInterface cross-cast
+            // (never nullptr for a real tab). dynamic_cast succeeds for both
+            // CrawlerWidget and FolderCrawlerWidget.
+            const auto* view = dynamic_cast<const ViewInterface*>( widget );
+            updateTitleBar( view != nullptr ? session_.getDisplayName( view ) : QString() );
+
+            disableFileSpecificActions();
+            // A folder tab has a valid filesystem path (the folder), so Copy
+            // Path and Open Containing Folder are meaningful (they operate on
+            // the folder path via currentView()). Re-enable them; the other
+            // actions disabled above (follow, live-log save, disconnect/
+            // reconnect, open-in-editor) remain folder-inapplicable.
+            copyPathToClipboardAction->setEnabled( true );
+            openContainingFolderAction->setEnabled( true );
+
+            infoLine->hideGauge();
+            // updateInfoLine now owns the folder info line: it shows the file
+            // currently in the main view (path/size/date/encoding), or the
+            // folder path when no file is open.
+            updateInfoLine();
+            // Restore "Ln: x/y" for the file already in the folder main view.
+            // Single-file tabs get this from signalMux's state broadcast; the
+            // folder is intentionally not a mux document, so re-derive the
+            // field from the widget's last announced line. Clear when no file.
+            if ( folder_widget != nullptr && folder_widget->currentMainViewInfo().has_value() ) {
+                lineNumberHandler( folder_widget->currentMainViewLine(), LinesCount( 1 ),
+                                   LineColumn( 0 ), LineLength( 0 ) );
+            }
+            else {
+                lineNbField->clear();
+            }
+
+            // Folder view supports select/copy.
+            editMenu->setEnabled( true );
+        }
     }
     else {
         // No tab left
@@ -1951,15 +2286,7 @@ void MainWindow::currentTabChanged( int index )
         updateTitleBar( QString() );
 
         editMenu->setEnabled( false );
-        followAction->setChecked( false );
-        followAction->setEnabled( Configuration::get().anyFileWatchEnabled() );
-        addToFavoritesAction->setEnabled( false );
-        addToFavoritesMenuAction->setEnabled( false );
-        saveCurrentLiveLogMenu->setEnabled( false );
-        disconnectSourceAction->setEnabled( false );
-        reconnectSourceAction->setEnabled( false );
-        openContainingFolderAction->setEnabled( false );
-        openInEditorAction->setEnabled( false );
+        disableFileSpecificActions();
     }
 
     persistSessionState();
@@ -2081,36 +2408,52 @@ void MainWindow::dropEvent( QDropEvent* event )
 {
     const QList<QUrl> urls = event->mimeData()->urls();
 
-    QStringList fileNames;
+    QStringList localPaths;
     for ( const auto& url : urls ) {
         auto fileName = url.toLocalFile();
         if ( !fileName.isEmpty() ) {
-            fileNames.append( fileName );
+            localPaths.append( fileName );
         }
     }
 
-    if ( fileNames.size() > 1 ) {
+    const auto classified = classifyLocalPaths( localPaths );
+
+    // Show the merge question over the dropped files BEFORE opening anything,
+    // so Cancel aborts the whole drop (no half-applied state with some tabs
+    // already opened). The prompt is only about files; directories are opened
+    // unconditionally as folder tabs.
+    bool mergeRequested = false;
+    if ( classified.files.size() > 1 ) {
         const auto userAction = QMessageBox::question(
             this, tr( "Multiple Files" ),
             tr( "You dropped %1 files. Do you want to merge them into a single view?" )
-                .arg( fileNames.size() ),
+                .arg( classified.files.size() ),
             QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes );
 
         if ( userAction == QMessageBox::Cancel ) {
             return;
         }
-
-        if ( userAction == QMessageBox::Yes ) {
-            auto filesToMerge = showMergeFilesDialog( fileNames );
-            if ( !filesToMerge.empty() ) {
-                executeMerge( filesToMerge );
-                return;
-            }
-            // User cancelled merge dialog -- fall through to open files separately
-        }
+        mergeRequested = ( userAction == QMessageBox::Yes );
     }
 
-    for ( const auto& fileName : fileNames ) {
+    // Open each dropped directory as its own folder crawler tab. This is the
+    // fix: previously a dropped directory fell through to loadFile and failed
+    // in Decompressor::action.
+    for ( const auto& dir : classified.dirs ) {
+        openFolderByPath( dir );
+    }
+
+    // Handle the dropped files via the existing merge / loadFile flow.
+    if ( mergeRequested ) {
+        auto filesToMerge = showMergeFilesDialog( classified.files );
+        if ( !filesToMerge.empty() ) {
+            executeMerge( filesToMerge );
+            return;
+        }
+        // User cancelled merge dialog -- fall through to open files separately
+    }
+
+    for ( const auto& fileName : classified.files ) {
         loadFile( fileName );
     }
 }
@@ -2245,8 +2588,24 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
 {
     LOG_DEBUG << "loadFile ( " << fileName.toStdString() << " )";
 
-    // First check if the file is already open...
-    auto* existing_crawler = static_cast<CrawlerWidget*>( session_.getViewIfOpen( fileName ) );
+    // Directory guard: any caller that hands loadFile a directory is routed to
+    // the folder-open flow instead of falling into Decompressor::action /
+    // session_.open (which fail on a directory). This single guard covers every
+    // caller (loadInitialFile/CLI, loadFileNonInteractive/IPC+FileOpenEvent,
+    // recent, favorites, open, openRemoteFile, extractAndLoadFile). Returns
+    // true to signal 'handled' -- matching loadFile's success contract; the
+    // boolean is ignored by loadInitialFile/loadFileNonInteractive.
+    if ( isDirectoryPath( fileName ) ) {
+        openFolderByPath( fileName );
+        return true;
+    }
+
+    // First check if the file is already open... (dynamic_cast, not static_cast:
+    // getViewIfOpen returns ViewInterface* and can match a folder entry whose
+    // fileName == folderPath; the isDirectoryPath guard above routes directories
+    // away, but dynamic_cast returns nullptr for a folder instead of a wrong-type
+    // pointer -- the same anti-pattern that crashed folder tabs.)
+    auto* existing_crawler = dynamic_cast<CrawlerWidget*>( session_.getViewIfOpen( fileName ) );
 
     if ( existing_crawler ) {
         auto* crawlerWindow = qobject_cast<MainWindow*>( existing_crawler->window() );
@@ -2375,6 +2734,48 @@ CrawlerWidget* MainWindow::currentCrawlerWidget() const
     return current;
 }
 
+// The AbstractCrawlerWidget* of the current tab (CrawlerWidget or
+// FolderCrawlerWidget) -- the polymorphic dispatch target. nullptr only when
+// there is no current tab.
+AbstractCrawlerWidget* MainWindow::currentDocument() const
+{
+    return dynamic_cast<AbstractCrawlerWidget*>( mainTabWidget_.currentWidget() );
+}
+
+// True if the tab at `index` is a FolderCrawlerWidget (folder mode), not a
+// CrawlerWidget. qobject_cast returns nullptr for non-matching types, so this
+// is the safe type test (static_cast would lie here -- the original crash).
+bool MainWindow::isFolderTab( int index ) const
+{
+    return qobject_cast<const FolderCrawlerWidget*>( mainTabWidget_.widget( index ) ) != nullptr;
+}
+
+// The ViewInterface cross-cast of the current tab widget. Succeeds for BOTH
+// CrawlerWidget and FolderCrawlerWidget (both multiply-inherit ViewInterface);
+// returns nullptr only when there is no current tab. Session accessors key on
+// this pointer and assert on nullptr, so folder display names must be fetched
+// via this cross-cast (mirrors the already-fixed writeSettings at L3165).
+const ViewInterface* MainWindow::currentView() const
+{
+    return dynamic_cast<const ViewInterface*>( mainTabWidget_.currentWidget() );
+}
+
+// Disable every file-specific menu action. Used for the folder-tab and no-tab
+// states so a user can't trigger a slot that would deref a null CrawlerWidget.
+void MainWindow::disableFileSpecificActions()
+{
+    followAction->setChecked( false );
+    followAction->setEnabled( Configuration::get().anyFileWatchEnabled() );
+    addToFavoritesAction->setEnabled( false );
+    addToFavoritesMenuAction->setEnabled( false );
+    saveCurrentLiveLogMenu->setEnabled( false );
+    disconnectSourceAction->setEnabled( false );
+    reconnectSourceAction->setEnabled( false );
+    openContainingFolderAction->setEnabled( false );
+    openInEditorAction->setEnabled( false );
+    copyPathToClipboardAction->setEnabled( false );
+}
+
 // Update the title bar.
 void MainWindow::updateTitleBar( const QString& file_name )
 {
@@ -2401,6 +2802,14 @@ void MainWindow::addRecentFile( const QString& fileName )
     recentFiles.addRecent( fileName );
     recentFiles.save();
     updateRecentFileActions();
+}
+
+void MainWindow::addRecentFolder( const QString& folderPath )
+{
+    auto& recentFolders = RecentFolders::getSynced();
+    recentFolders.addRecent( folderPath );
+    recentFolders.save();
+    updateRecentFolderActions();
 }
 
 void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
@@ -2463,9 +2872,12 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                                  sessionData.captureBackupCount );
 
     connect( adbSource, &AdbLogcatSource::stateChanged, this,
-             [ this, crawler ]( AdbLogcatSource::State ) {
+             [ this, crawler ]( AdbLogcatSource::State state ) {
                  if ( currentCrawlerWidget() == crawler ) {
                      updateMenuBarFromDocument( crawler );
+                     if ( state == AdbLogcatSource::State::Connected ) {
+                         stopReconnectCountdown();
+                     }
                      updateInfoLine();
                  }
                  updateOpenedFilesMenu();
@@ -2479,11 +2891,72 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
                  updateLiveTabAppearance( crawler );
              } );
     connect( adbSource, &AdbLogcatSource::reconnectAttemptStarted, this,
-             [ this, crawler ]( int ) { updateLiveTabAppearance( crawler ); } );
+             [ this, crawler ]( int ) {
+                 updateLiveTabAppearance( crawler );
+                 const auto* source = session_.getAdbLogcatSource( crawler );
+                 if ( source ) {
+                     startReconnectCountdown( crawler, source->reconnectRemainingMs() );
+                 }
+             } );
 
     // Sync tab appearance immediately in case the source is already
     // in Error or Disconnected state (e.g. during session restore).
     updateLiveTabAppearance( crawler );
+}
+
+void MainWindow::startReconnectCountdown( CrawlerWidget* crawler, int delayMs )
+{
+    reconnectCountdownCrawler_ = crawler;
+    reconnectCountdownTotalMs_ = delayMs;
+    reconnectCountdownEndMs_ = QDateTime::currentMSecsSinceEpoch() + delayMs;
+    reconnectCountdownTimer_->start();
+    updateReconnectCountdown(); // immediate first update
+}
+
+void MainWindow::stopReconnectCountdown()
+{
+    if ( !reconnectCountdownTimer_->isActive() ) {
+        return;
+    }
+    reconnectCountdownTimer_->stop();
+    reconnectCountdownCrawler_ = nullptr;
+    reconnectCountdownEndMs_ = 0;
+    reconnectCountdownTotalMs_ = 0;
+    infoLine->hideGauge();
+    // Restore normal infoLine if the current tab matches
+    if ( currentCrawlerWidget() ) {
+        updateInfoLine();
+    }
+}
+
+void MainWindow::updateReconnectCountdown()
+{
+    if ( !reconnectCountdownCrawler_
+         || currentCrawlerWidget() != reconnectCountdownCrawler_ ) {
+        return;
+    }
+
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    const auto remainingMs = static_cast<int>( reconnectCountdownEndMs_ - now );
+    const auto displayName = session_.getDisplayName( reconnectCountdownCrawler_ );
+
+    if ( remainingMs <= 0 ) {
+        // Timer expired — the reconnect attempt is about to fire.
+        // Keep showing "Reconnecting..." until state changes.
+        infoLine->setText( QDir::toNativeSeparators( displayName )
+                           + tr( " - Reconnecting..." ) );
+        infoLine->displayGauge( 100 );
+        return;
+    }
+
+    const auto remainingSec = ( remainingMs + 999 ) / 1000; // round up
+    infoLine->setText( QDir::toNativeSeparators( displayName )
+                       + tr( " - Reconnect in %1 seconds..." ).arg( remainingSec ) );
+
+    // Gauge: percentage of delay elapsed (fills left-to-right as time passes)
+    const auto elapsedMs = reconnectCountdownTotalMs_ - remainingMs;
+    const auto pct = static_cast<int>( elapsedMs * 100 / reconnectCountdownTotalMs_ );
+    infoLine->displayGauge( pct );
 }
 
 // Updates the actions for the recent files.
@@ -2527,10 +3000,58 @@ void MainWindow::clearRecentFileActions()
     recentFiles.save();
     updateRecentFileActions();
 }
+
+// Updates the actions for the recent folders.
+// Must be called after having added a new folder to the list.
+void MainWindow::updateRecentFolderActions()
+{
+    auto& recentFolders = RecentFolders::get();
+    QStringList recent_folders = recentFolders.recentFolders();
+    int recent_folders_max_items = recentFolders.getNumberItemsToShow();
+
+    if ( recentFolders.recentFolders().count() > 0 ) {
+        recentFoldersMenu->setEnabled( true );
+        for ( auto j = 0; j < MAX_RECENT_FILES; ++j ) {
+            const auto actionIndex = static_cast<size_t>( j );
+            if ( j < recent_folders_max_items ) {
+                int key = j + ( ( j < 9 ) ? 0x31 : ( 0x61 - 9 ) ); // shortcuts: 1..9 next a,b...
+                QString text = tr( "&%1 %2" )
+                                   .arg( QChar( key ) )
+                                   .arg( strippedName( recent_folders[ j ] ) );
+                recentFolderActions[ actionIndex ]->setText( text );
+                recentFolderActions[ actionIndex ]->setToolTip( recent_folders[ j ] );
+                recentFolderActions[ actionIndex ]->setData( recent_folders[ j ] );
+                recentFolderActions[ actionIndex ]->setVisible( true );
+            }
+            else {
+                recentFolderActions[ actionIndex ]->setVisible( false );
+            }
+        }
+    }
+    else {
+        recentFoldersMenu->setEnabled( false );
+    }
+}
+
+// Clear the list of the recent folders
+void MainWindow::clearRecentFolderActions()
+{
+    auto& recentFolders = RecentFolders::getSynced();
+    recentFolders.removeAll();
+    recentFolders.save();
+    updateRecentFolderActions();
+}
 // Update our menu bar to match the settings of the crawler
 // (used when the tab is changed)
 void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
 {
+    // Defensive: a folder tab or no-tab state must never reach the body (it
+    // derefs crawler->encodingMib() and queries Session). The folder/no-tab
+    // branches in currentTabChanged handle their own menu state.
+    if ( crawler == nullptr ) {
+        return;
+    }
+
     const auto encodingMib = crawler->encodingMib();
     const auto documentKind = session_.getDocumentKind( crawler );
     const auto associatedPath = session_.getAssociatedPath( crawler );
@@ -2572,11 +3093,51 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
 // Update the top info line from the session
 void MainWindow::updateInfoLine()
 {
+    // Don't overwrite the reconnect countdown display when on the countdown tab
+    if ( reconnectCountdownTimer_ && reconnectCountdownTimer_->isActive()
+         && currentCrawlerWidget() == reconnectCountdownCrawler_ ) {
+        return;
+    }
+
     QLocale defaultLocale;
 
-    // Following should always work as we will only receive enter
-    // this slot if there is a crawler connected.
     auto* crawler = currentCrawlerWidget();
+    if ( crawler == nullptr ) {
+        // Folder tab (or no tab): the info line reflects the file currently in
+        // the folder main view, falling back to the folder path when none.
+        auto* doc = currentDocument();
+        if ( doc == nullptr ) {
+            return;
+        }
+        const auto info = doc->currentMainViewInfo();
+        if ( info.has_value() ) {
+            const auto currentFile = QDir::toNativeSeparators( info->path );
+            infoLine->setText( currentFile );
+            infoLine->setPath( currentFile );
+            sizeField->setText( readableSize( info->size ) );
+            encodingField->setText( info->encodingText );
+            if ( info->lastModified.isValid() ) {
+                dateField->setText( tr( "modified on %1" )
+                                        .arg( defaultLocale.toString( info->lastModified, QLocale::NarrowFormat ) ) );
+                dateField->show();
+            }
+            else {
+                dateField->hide();
+            }
+        }
+        else {
+            // No file in the main view: show the folder path.
+            const auto folderPath = QDir::toNativeSeparators( session_.getAssociatedPath( doc ) );
+            const auto display = session_.getDisplayName( doc );
+            infoLine->setText( folderPath.isEmpty() ? display : folderPath );
+            infoLine->setPath( folderPath );
+            sizeField->clear();
+            encodingField->clear();
+            dateField->hide();
+        }
+        return;
+    }
+
     const auto associatedPath = session_.getAssociatedPath( crawler );
     const auto currentFile = QDir::toNativeSeparators(
         associatedPath.isEmpty() ? session_.getDisplayName( crawler ) : associatedPath );
@@ -2863,7 +3424,16 @@ void MainWindow::writeSettings()
         std::tuple<const ViewInterface*, uint64_t, std::shared_ptr<const ViewContextInterface>>>
         widget_list;
     for ( int i = 0; i < mainTabWidget_.count(); ++i ) {
-        auto view = qobject_cast<const CrawlerWidget*>( mainTabWidget_.widget( i ) );
+        // dynamic_cast (not qobject_cast<CrawlerWidget*>) so that BOTH
+        // CrawlerWidget and FolderCrawlerWidget tabs are captured: they
+        // multiply-inherit ViewInterface, so the cross-cast succeeds for
+        // both. qobject_cast<CrawlerWidget*> returned nullptr for folder
+        // tabs and view->context() then dereferenced null -> crash on
+        // persistSessionState (called from tab switch/close/periodic).
+        const auto view = dynamic_cast<const ViewInterface*>( mainTabWidget_.widget( i ) );
+        if ( view == nullptr ) {
+            continue;
+        }
         widget_list.emplace_back( view, 0UL, view->context() );
     }
     session_.save( widget_list, saveGeometry(), mainTabWidget_.currentIndex() );
@@ -2892,6 +3462,10 @@ void MainWindow::readSettings()
     // History of recent files
     RecentFiles::getSynced();
     updateRecentFileActions();
+
+    // History of recent folders
+    RecentFolders::getSynced();
+    updateRecentFolderActions();
 
     FavoriteFiles::getSynced();
     updateFavoritesMenu();
@@ -2948,6 +3522,11 @@ void MainWindow::generateDump()
 
 std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePaths )
 {
+    // Show files in dictionary order (case-insensitive natural sort); see
+    // mergefileorder.h. Display order is independent of the merge order, which
+    // the user sets by checking boxes below.
+    const std::vector<QString> sortedPaths = sortedMergeFilePaths( filePaths );
+
     QDialog dialog( this );
     dialog.setWindowTitle( tr( "Merge Files" ) );
     dialog.setMinimumWidth( 400 );
@@ -2959,7 +3538,7 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     // Qt::UserRole = file path, Qt::UserRole+1 = original display name, Qt::UserRole+2 = check order
     int checkCounter = 0;
 
-    for ( const auto& filePath : filePaths ) {
+    for ( const auto& filePath : sortedPaths ) {
         const auto displayName = QFileInfo( filePath ).fileName();
         auto* item = new QListWidgetItem( displayName );
         item->setData( Qt::UserRole, filePath );

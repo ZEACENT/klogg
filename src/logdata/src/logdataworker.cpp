@@ -55,6 +55,7 @@
 #include "containers.h"
 #include "dispatch_to.h"
 #include "encodingdetector.h"
+#include "encodingutils.h"
 #include "issuereporter.h"
 #include "linepositionarray.h"
 #include "linetypes.h"
@@ -343,57 +344,11 @@ void LogDataWorker::emitCheckFileFinishedOnOwnerThread( MonitoredFileStatus stat
 //
 namespace parse_data_block {
 
-std::string_view::size_type findNextMultiByteDelimeter( EncodingParameters encodingParams,
-                                                        std::string_view data, char delimeter )
-{
-    auto nextDelimeter = data.find( delimeter );
-
-    if ( nextDelimeter == std::string_view::npos ) {
-        return nextDelimeter;
-    }
-
-    const auto isNotDelimeter = [ &encodingParams, data ]( std::string_view::size_type checkPos ) {
-        const auto lineFeedWidth
-            = static_cast<std::string_view::size_type>( encodingParams.lineFeedWidth );
-
-        const auto isCheckForward = encodingParams.lineFeedIndex == 0;
-
-        if ( isCheckForward && checkPos + lineFeedWidth > data.size() ) {
-            return true;
-        }
-        else if ( !isCheckForward && checkPos < lineFeedWidth - 1 ) {
-            return true;
-        }
-
-        for ( auto i = 1u; i < lineFeedWidth; ++i ) {
-            const auto nextByte = isCheckForward ? data[ checkPos + i ] : data[ checkPos - i ];
-            if ( nextByte != '\0' ) {
-                return true;
-            }
-        }
-
-        return false;
-    };
-
-    while ( nextDelimeter != std::string_view::npos && isNotDelimeter( nextDelimeter ) ) {
-        nextDelimeter = data.find( delimeter, nextDelimeter + 1 );
-    }
-
-    return nextDelimeter;
-}
-
-std::string_view::size_type findNextSingleByteDelimeter( EncodingParameters, std::string_view data,
-                                                         char delimeter )
-{
-    return data.find( delimeter );
-}
-
-int charOffsetWithinBlock( const char* blockStart, const char* pointer,
-                           const EncodingParameters& encodingParams )
-{
-    return type_safe::narrow_cast<int>( std::distance( blockStart, pointer ) )
-           - encodingParams.getBeforeCrOffset();
-}
+// findNextSingleByteDelimeter / findNextMultiByteDelimeter / charOffsetWithinBlock
+// were extracted into the shared klogg::encoding namespace (encodingutils.h) so
+// folder search can reuse the exact same multi-byte newline handling. Bring
+// them into this namespace unqualified so the call sites below are unchanged.
+using namespace klogg::encoding;
 
 using FindDelimeter = std::string_view::size_type ( * )( EncodingParameters encodingParams,
                                                          std::string_view, char );

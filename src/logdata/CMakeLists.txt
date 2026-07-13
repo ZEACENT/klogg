@@ -6,6 +6,11 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/concatenatedlogdata.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/compressedlinestorage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingdetector.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/encodingutils.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchengine.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchresults.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/foldersearchtypes.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/linekind.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/linepositionarray.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/loadingstatus.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logdata.h
@@ -26,6 +31,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/concatenatedlogdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/compressedlinestorage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/encodingdetector.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/foldersearchengine.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/foldersearchresults.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdata.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdataoperation.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logdataworker.cpp
