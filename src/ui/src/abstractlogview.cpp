@@ -524,6 +524,13 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 if ( *line < logData_->getNbLine() ) {
                     selection_.selectLine( *line );
                     Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
+                    // Schedule a repaint so the new selection highlight is visible.
+                    // The Shift-click branch (above) and the drag path already do
+                    // this; having the base class self-repaint on every selection
+                    // change means hosts no longer need a compensating
+                    // connect(newSelection -> update()) -- which FolderCrawlerWidget
+                    // never had, leaving its filtered-view clicks unhighlighted.
+                    update();
                 }
 
                 // Remember the click in case we're starting a selection
