@@ -72,6 +72,36 @@ SCENARIO( "Pattern matcher in boolean mode", "[patternmatcher]" )
 
         REQUIRE_FALSE( expression.isValid() );
     }
+
+    WHEN( "Using an operand that ends in a backslash (escaped form)" )
+    {
+        // The wrapped/escaped form of operand C:\Users\ is "C:\\Users\\". The
+        // parser must count the backslash run before the closing quote: an even
+        // run means a real boundary, so this operand must parse and match the
+        // literal path. A naive single-char lookback would see the '\'
+        // immediately before the closer and reject it as unmatched.
+        RegularExpression expression(
+            RegularExpressionPattern( "\"C:\\\\Users\\\\\"", false, false, true, true ) );
+        REQUIRE( expression.isValid() );
+
+        const auto matcher = expression.createMatcher();
+        REQUIRE( matcher->hasMatch( "path C:\\Users\\" ) );
+        REQUIRE_FALSE( matcher->hasMatch( "path C:\\Users" ) );
+    }
+
+    WHEN( "Using a boolean OR where the first operand ends in a backslash" )
+    {
+        // Exercises boundary counting across operands: the parser must close the
+        // first operand at the even-run closer, then parse the second normally.
+        RegularExpression expression( RegularExpressionPattern(
+            "\"C:\\\\Users\\\\\" or \"error\"", false, false, true, true ) );
+        REQUIRE( expression.isValid() );
+
+        const auto matcher = expression.createMatcher();
+        REQUIRE( matcher->hasMatch( "path C:\\Users\\" ) );
+        REQUIRE( matcher->hasMatch( "an error here" ) );
+        REQUIRE_FALSE( matcher->hasMatch( "nothing relevant" ) );
+    }
 }
 
 TEST_CASE( "Block scan matches per-line scan results", "[patternmatcher]" )

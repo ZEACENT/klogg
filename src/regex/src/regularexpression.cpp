@@ -34,6 +34,46 @@
 #include "regularexpression.h"
 
 namespace {
+
+// Number of consecutive backslashes in `pattern` ending immediately before
+// position `pos` (the run that precedes a quote at `pos`). A quote is a real
+// boundary when this count is EVEN (0, 2, 4, ...); ODD means the quote is
+// escaped by the immediately preceding backslash. This replaces the naive
+// single-char lookback (`pattern[pos-1] == '\\'`), which could not represent a
+// boolean operand ending in a backslash: it always treated the closing quote as
+// escaped, throwing "unmatched quotes" for path-like operands that end in a
+// backslash (for example a Windows directory path).
+int precedingBackslashCount( const QString& pattern, int pos )
+{
+    int count = 0;
+    for ( int i = pos - 1; i >= 0 && pattern[ i ] == QChar( '\\' ); --i ) {
+        ++count;
+    }
+    return count;
+}
+
+// Inverse of SearchToolbar::wrapBooleanOperand's operand escaping: un-escape
+// C-style '\\' -> '\' and '\"' -> '"' in a single left-to-right pass. A lone
+// '\' not followed by '\' or '"' is left as-is (it has no escape meaning here).
+// Replaces the old `replace("\\\"", "\"")`, which only handled escaped quotes
+// and left doubled backslashes intact.
+QString unescapeBooleanOperand( const QString& operand )
+{
+    QString out;
+    out.reserve( operand.size() );
+    for ( int i = 0; i < operand.size(); ++i ) {
+        if ( operand[ i ] == QChar( '\\' ) && i + 1 < operand.size()
+             && ( operand[ i + 1 ] == QChar( '\\' ) || operand[ i + 1 ] == QChar( '"' ) ) ) {
+            out.append( operand[ i + 1 ] );
+            ++i; // consume the escaped char
+        }
+        else {
+            out.append( operand[ i ] );
+        }
+    }
+    return out;
+}
+
 klogg::vector<RegularExpressionPattern>
 parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainText )
 {
@@ -55,7 +95,7 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
         }
 
         currentIndex = leftQuote + 1;
-        if ( leftQuote > 0 && pattern[ leftQuote - 1 ] == QChar( '\\' ) ) {
+        if ( precedingBackslashCount( pattern, leftQuote ) % 2 != 0 ) {
             leftQuote = -1;
             continue;
         }
@@ -68,7 +108,7 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
             }
 
             currentIndex = rightQuote + 1;
-            if ( rightQuote > 0 && pattern[ rightQuote - 1 ] == QChar( '\\' ) ) {
+            if ( precedingBackslashCount( pattern, rightQuote ) % 2 != 0 ) {
                 rightQuote = -1;
                 continue;
             }
@@ -82,7 +122,7 @@ parseBooleanExpressions( QString& pattern, bool isCaseSensitive, bool isPlainTex
 
         const auto subPatternLength = rightQuote - leftQuote - 1;
         auto subPattern = pattern.mid( leftQuote + 1, subPatternLength );
-        subPattern.replace( "\\\"", "\"" );
+        subPattern = unescapeBooleanOperand( subPattern );
 
         subPatterns.emplace_back( subPattern, isCaseSensitive, false, false, isPlainText );
 

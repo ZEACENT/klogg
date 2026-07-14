@@ -33,6 +33,9 @@
 #include <QToolButton>
 #include <Qt>
 
+#include <string_view>
+
+#include "regularexpression.h"
 #include "regularexpressionpattern.h"
 #include "searchtoolbar.h"
 
@@ -214,6 +217,48 @@ TEST_CASE( "SearchToolbar wrapBooleanOperand quotes and escapes (excludeFromSear
     SECTION( "multiple embedded quotes are each escaped" )
     {
         REQUIRE( toolbar.wrapBooleanOperand( "\"quoted\"" ) == "\"\\\"quoted\\\"\"" );
+    }
+}
+
+TEST_CASE( "wrapBooleanOperand escapes backslashes so the operand stays parseable",
+           "[searchtoolbar]" )
+{
+    // Regression (CodeRabbit, searchtoolbar.cpp:284-295): a boolean operand
+    // ending in a backslash used to wrap as "C:\Users\" -- the trailing '\'
+    // makes the boolean quote parser treat the CLOSING quote as escaped, so the
+    // whole operand became "unmatched quotes" and the search failed. Escape
+    // backslashes first (C-style '\\'), then embedded quotes, so the closing
+    // quote sits after an even backslash run and the parser sees a real closer.
+    SearchToolbar toolbar( nullptr, nullptr );
+
+    SECTION( "trailing backslash is doubled before wrapping" )
+    {
+        // C:\Users\  ->  "C:\\Users\\"  (backslash run before the closer is even)
+        REQUIRE( toolbar.wrapBooleanOperand( "C:\\Users\\" ) == "\"C:\\\\Users\\\\\"" );
+    }
+
+    SECTION( "wrapped trailing-backslash operand parses and matches as boolean" )
+    {
+        const auto wrapped = toolbar.wrapBooleanOperand( "C:\\Users\\" );
+        RegularExpression expression(
+            RegularExpressionPattern( wrapped, false, false, true, true ) );
+        REQUIRE( expression.isValid() );
+        REQUIRE_FALSE( expression.errorString().contains( QLatin1String( "unmatched" ) ) );
+
+        const auto matcher = expression.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ "path is C:\\Users\\" } ) );
+        REQUIRE_FALSE( matcher->hasMatch( std::string_view{ "path is C:\\Users" } ) );
+    }
+
+    SECTION( "internal backslashes round-trip through the boolean parser" )
+    {
+        const auto wrapped = toolbar.wrapBooleanOperand( "C:\\Users\\admin" );
+        RegularExpression expression(
+            RegularExpressionPattern( wrapped, false, false, true, true ) );
+        REQUIRE( expression.isValid() );
+
+        const auto matcher = expression.createMatcher();
+        REQUIRE( matcher->hasMatch( std::string_view{ "hello C:\\Users\\admin world" } ) );
     }
 }
 
