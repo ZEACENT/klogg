@@ -159,6 +159,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // (nullopt when the map is empty). Lets headless tests verify the paint-free
     // rebuild without synthesizing a mouse event.
     OptionalLineNumber lineAtYForTest( int yPos ) const { return convertCoordToLine( yPos ); }
+    // Exposed for testing: how many times the paint-free map rebuild
+    // (buildVisibleLineMap, driven by ensureLineMapFresh) has run. Lets headless
+    // tests verify the signature cache skips redundant rebuilds across mouse
+    // events that share the same data/geometry.
+    int visibleLineMapBuildCount() const { return visibleLineMapBuildCount_; }
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
@@ -551,6 +556,40 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Test instrumentation: counts calls to getSelectedText() for perf verification
     mutable int getSelectedTextCallCount_ = 0;
+
+    // Signature of every input that determines wrappedLinesInfo_, captured each
+    // time buildVisibleLineMap runs. ensureLineMapFresh compares the current key
+    // against the last build's and skips the rebuild when they match: consecutive
+    // mouse events that share data/geometry reuse the map instead of re-reading
+    // and re-wrapping the rest of the file (the wrap-mode hover perf bug). If any
+    // input changes the key changes too, so the cache cannot go stale by
+    // construction -- there are no scattered dirty flags to keep in sync.
+    struct VisibleLineMapKey {
+        const AbstractLogData* logData = nullptr;
+        uint64_t totalLines = 0; // logData_->getNbLine().get()
+        uint64_t firstLine = 0; // firstLine_.get()
+        bool useTextWrap = false;
+        int viewportWidth = 0;
+        int viewportHeight = 0;
+        int charWidth = 0;
+        int charHeight = 0;
+        bool lineNumbersVisible = false;
+        // Manual compare (project is C++17; defaulted operator== is C++20).
+        bool operator==( const VisibleLineMapKey& other ) const
+        {
+            return logData == other.logData && totalLines == other.totalLines
+                && firstLine == other.firstLine && useTextWrap == other.useTextWrap
+                && viewportWidth == other.viewportWidth && viewportHeight == other.viewportHeight
+                && charWidth == other.charWidth && charHeight == other.charHeight
+                && lineNumbersVisible == other.lineNumbersVisible;
+        }
+        bool operator!=( const VisibleLineMapKey& other ) const { return !( *this == other ); }
+    };
+    VisibleLineMapKey currentVisibleLineMapKey() const;
+    VisibleLineMapKey lastVisibleLineMapKey_{};
+    bool visibleLineMapKeyValid_ = false;
+    // Test instrumentation: counts paint-free map rebuilds (buildVisibleLineMap).
+    int visibleLineMapBuildCount_ = 0;
 
     LinesCount getNbVisibleLines() const;
     LinesCount getNbBottomWrappedVisibleLines() const;

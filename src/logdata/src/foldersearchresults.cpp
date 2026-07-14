@@ -47,13 +47,52 @@ void FolderSearchResults::setResults( std::vector<klogg::folder::FileGroup> grou
                                    []( const klogg::folder::FileGroup& g ) { return g.matches.empty(); } ),
                    groups_.end() );
 
+    // NOTE: setResults resets collapse (it is a full result-set replacement, not
+    // the live re-search path -- startSearch uses beginSearch, which preserves
+    // collapse via snapshotCollapsedPaths/reapplyCollapseForLastGroup). Callers
+    // that need preservation here should snapshot filePaths the same way.
     collapsed_.clear();
     rebuildVisibleRows();
     Q_EMIT layoutChanged();
 }
 
+void FolderSearchResults::snapshotCollapsedPaths()
+{
+    // Only (re)snapshot while groups_ still holds the current result set. A
+    // follow-up beginSearch can fire before the previous one's scan has streamed
+    // any groups back (e.g. the context combobox and spinbox each trigger a
+    // re-scan); at that point groups_ is empty and re-snapshotting would clobber
+    // the snapshot just captured. Keep the existing pendingCollapsePaths_ so it
+    // survives until the groups actually stream back in.
+    if ( groups_.empty() ) {
+        return;
+    }
+    pendingCollapsePaths_.clear();
+    for ( const auto fid : collapsed_ ) {
+        if ( fid >= 0 && fid < static_cast<int>( groups_.size() ) ) {
+            pendingCollapsePaths_.insert( groups_[ static_cast<size_t>( fid ) ].filePath );
+        }
+    }
+}
+
+void FolderSearchResults::reapplyCollapseForLastGroup()
+{
+    if ( groups_.empty() ) {
+        return;
+    }
+    const auto& lastPath = groups_.back().filePath;
+    if ( pendingCollapsePaths_.contains( lastPath ) ) {
+        collapsed_.insert( static_cast<int>( groups_.size() ) - 1 );
+    }
+}
+
 void FolderSearchResults::beginSearch( const QStringList& expectedFileOrder )
 {
+    // Preserve collapse across this re-scan: snapshot which filePaths are collapsed
+    // BEFORE groups_ is rebuilt and FileIds are reassigned, then re-apply as groups
+    // stream back in (addFileGroup/flushPending). Without this, a context-line
+    // change (which re-scans via beginSearch) would expand every collapsed group.
+    snapshotCollapsedPaths();
     groups_.clear();
     openFiles_.clear();
     collapsed_.clear();
@@ -79,6 +118,7 @@ void FolderSearchResults::addFileGroup( int fileIndex, klogg::folder::FileGroup 
         auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
         if ( !opt->matches.empty() ) {
             groups_.push_back( std::move( *opt ) );
+            reapplyCollapseForLastGroup();
             // Keep file-handle slots aligned to fileId (== group index), matching
             // the setResults contract so fileForGroup() can index directly.
             openFiles_.resize( groups_.size() );
@@ -102,11 +142,14 @@ void FolderSearchResults::flushPending()
         auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
         if ( opt.has_value() && !opt->matches.empty() ) {
             groups_.push_back( std::move( *opt ) );
+            reapplyCollapseForLastGroup();
             openFiles_.resize( groups_.size() );
             appended = true;
         }
         ++nextExpectedIndex_;
     }
+
+    pendingCollapsePaths_.clear(); // the snapshot lives exactly one search cycle
 
     if ( appended ) {
         rebuildVisibleRows();

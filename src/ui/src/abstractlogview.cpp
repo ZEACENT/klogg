@@ -524,6 +524,13 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 if ( *line < logData_->getNbLine() ) {
                     selection_.selectLine( *line );
                     Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
+                    // Schedule a repaint so the new selection highlight is visible.
+                    // The Shift-click branch (above) and the drag path already do
+                    // this; having the base class self-repaint on every selection
+                    // change means hosts no longer need a compensating
+                    // connect(newSelection -> update()) -- which FolderCrawlerWidget
+                    // never had, leaving its filtered-view clicks unhighlighted.
+                    update();
                 }
 
                 // Remember the click in case we're starting a selection
@@ -2052,12 +2059,48 @@ void AbstractLogView::ensureLineMapFresh()
     // stale/empty map: a click on a freshly swapped folder main view was
     // swallowed (convertCoordToLine -> nullopt -> no selection). Rebuild the map
     // paint-free so hit-testing is correct at click time regardless of paint
-    // delivery. Cheap (visible lines only) and called only from mouse handlers.
+    // delivery. Called only from mouse handlers.
+
+    // Signature cache: this runs on every press/move/release, and in wrap mode
+    // buildVisibleLineMap re-reads and re-wraps every line from the viewport to
+    // EOF. Consecutive mouse events share data/geometry, so skip the rebuild when
+    // nothing that determines the map has changed since the last build -- turning
+    // a per-hover full re-wrap into a cheap key compare. Any real change (scroll,
+    // resize, data swap, wrap toggle, font change) changes the key, so the map
+    // cannot silently go stale. The !empty() guard covers out-of-band clears
+    // (setDataSource, setTextWrap) that empty wrappedLinesInfo_ without touching
+    // the key, so no scattered dirty flags are needed.
+    const auto key = currentVisibleLineMapKey();
+    if ( visibleLineMapKeyValid_ && !wrappedLinesInfo_.empty() && lastVisibleLineMapKey_ == key ) {
+        return;
+    }
     buildVisibleLineMap();
+    lastVisibleLineMapKey_ = key;
+    visibleLineMapKeyValid_ = true;
+}
+
+AbstractLogView::VisibleLineMapKey AbstractLogView::currentVisibleLineMapKey() const
+{
+    VisibleLineMapKey key;
+    key.logData = logData_;
+    key.totalLines = logData_ != nullptr ? logData_->getNbLine().get() : 0;
+    key.firstLine = firstLine_.get();
+    key.useTextWrap = useTextWrap_;
+    key.viewportWidth = viewport()->width();
+    key.viewportHeight = textViewportHeight();
+    key.charWidth = charWidth_;
+    key.charHeight = charHeight_;
+    key.lineNumbersVisible = lineNumbersVisible_;
+    return key;
 }
 
 void AbstractLogView::buildVisibleLineMap()
 {
+    // Test instrumentation: counts every entry into the paint-free rebuild so
+    // headless tests can assert the signature cache (in ensureLineMapFresh)
+    // suppresses redundant rebuilds across mouse events.
+    ++visibleLineMapBuildCount_;
+
     // Geometry-only subset of drawTextArea's per-line loop: reproduces the
     // viewport-y -> LineNumber map (wrappedLinesInfo_) WITHOUT a QPainter. The
     // wrap math MUST mirror drawTextArea (same leftMarginPx_, availableWidth and

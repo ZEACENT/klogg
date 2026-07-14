@@ -275,15 +275,26 @@ QString SearchToolbar::escapeSearchPattern( const QString& pattern, bool isRegex
                               : pattern;
 
     if ( booleanButton_->isChecked() ) {
-        // Escape embedded double-quotes (replace " with \") before wrapping in
-        // "...". The literal "\\\"" is the 2-char string backslash+quote; a bare
-        // "\""" would be a 1-char string (the backslash only escapes the quote)
-        // and the replace would be a no-op, leaving embedded quotes to break the
-        // boolean expression.
-        escapedPattern.replace( '"', "\\\"" ).prepend( '"' ).append( '"' );
+        escapedPattern = wrapBooleanOperand( escapedPattern );
     }
 
     return escapedPattern;
+}
+
+QString SearchToolbar::wrapBooleanOperand( const QString& pattern ) const
+{
+    // Escape the operand for inclusion in a "..." boolean operand, C-style:
+    // backslashes FIRST (so a trailing '\' does not escape the closing quote),
+    // then embedded double-quotes. The boolean parser
+    // (parseBooleanExpressions) counts the backslash run before a quote to
+    // decide real-vs-escaped and un-escapes both '\\' and '\\"', so this
+    // round-trips. Order matters: escaping '"' would insert backslashes, which
+    // is why backslashes must be doubled first.
+    QString wrapped = pattern;
+    wrapped.replace( '\\', "\\\\" );
+    wrapped.replace( '"', "\\\"" );
+    wrapped.prepend( '"' ).append( '"' );
+    return wrapped;
 }
 
 QString& SearchToolbar::combinePatterns( QString& currentPattern, const QString& newPattern ) const

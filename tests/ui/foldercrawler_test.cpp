@@ -25,6 +25,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <QBoxLayout>
 #include <QByteArray>
 #include <QComboBox>
 #include <QDir>
@@ -42,6 +43,7 @@
 #include <vector>
 
 #include "abstractcrawlerwidget.h"
+#include "abstractlogview.h"
 #include "configuration.h"
 #include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
@@ -165,6 +167,150 @@ struct PredefinedFiltersGuard {
     }
 };
 } // namespace
+
+// Distinct access tag: both crawlerwidget_test.cpp and foldercrawler_test.cpp
+// link into the same klogg_itests binary, so an explicit specialization of
+// AbstractLogView::access_by MUST use a different tag in each translation unit
+// (two definitions of access_by<AbstractLogViewPrivate> would be an ODR clash).
+struct FolderViewTestAccess {
+};
+
+template <>
+struct AbstractLogView::access_by<FolderViewTestAccess> {
+    static bool selectionChanged( const AbstractLogView* view )
+    {
+        return view->selectionChanged_;
+    }
+
+    static int charHeight( const AbstractLogView* view )
+    {
+        return view->charHeight_;
+    }
+
+    static int bulletZoneWidth( const AbstractLogView* view )
+    {
+        return view->bulletZoneWidthPx_;
+    }
+
+    static int drawingTopOffset( const AbstractLogView* view )
+    {
+        return view->drawingTopOffset_;
+    }
+};
+
+TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
+           "[folder][selection]" )
+{
+    // AbstractLogView::mousePressEvent's plain-click branch sets selection state
+    // + emits newSelection but historically did NOT call update() (unlike the
+    // Shift-click branch at abstractlogview.cpp:513). Single-file CrawlerWidget
+    // compensates with a host-side connect(FilteredView::newSelection ->
+    // view->update()) (crawlerwidget.cpp:1543); FolderCrawlerWidget does NOT.
+    // So a plain click on a folder result row changed selection_ state but never
+    // scheduled a repaint of the filtered view, so no highlight appeared.
+    // selectionChanged_ (set true in mousePressEvent, cleared only in paintEvent)
+    // is the discriminator: 'false' after the click proves a repaint ran.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR a\nline2\nERROR b\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // rows: [H0, D1(localLine 1 "ERROR a"), D2(localLine 3 "ERROR b")]
+
+    // Open a.log up front so the later real click takes the synchronous same-file
+    // branch of openFileInMainView (file cached): no async load, and the open
+    // path touches mainView_ only, never repainting the filtered view.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+
+    // Give the filtered view focus BEFORE the click so the click produces no
+    // focus-transfer repaint -- the incidental repaint that, in the real app,
+    // masked the bug on the first click. With focus already held, the ONLY thing
+    // that can repaint the view is an explicit update().
+    view->setFocus();
+    QTest::qWait( 100 );
+    // Baseline: pump pending paints so the cache is clean before the click.
+    REQUIRE_FALSE(
+        AbstractLogView::access_by<FolderViewTestAccess>::selectionChanged( view ) );
+
+    // Drive a REAL plain left-click on data row D2 (center of visible row index 2)
+    // at an x safely past the bullet/mark zone so mousePressEvent takes the SELECT
+    // branch, not the mark branch.
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const int charH = Access::charHeight( view );
+    REQUIRE( charH > 0 );
+    const int top = Access::drawingTopOffset( view );
+    const int bullet = Access::bulletZoneWidth( view );
+    const int xPos = bullet + ( view->viewport()->width() - bullet ) / 2;
+    const int yPos = top + charH * 2 + charH / 2; // center of row index 2
+    QTest::mouseClick( view->viewport(), Qt::LeftButton, {}, QPoint( xPos, yPos ) );
+    QTest::qWait( 100 ); // process the queued update() if the fix scheduled one
+
+    // selectionChanged_ is set true in mousePressEvent and cleared ONLY inside
+    // paintEvent. 'false' here proves a repaint ran and rebuilt the highlight
+    // pixmap from the freshly-selected line. RED before the base-class fix: no
+    // update() is scheduled, no paint runs, the flag stays true.
+    REQUIRE_FALSE( Access::selectionChanged( view ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget places the Marks-and-matches combo leftmost in the toolbar",
+           "[folder][parity]" )
+{
+    // The visibility filter combo (item 0 == "Marks and matches") is the literal
+    // control the user sees. Single-file adds it FIRST in the results toolbar
+    // (crawlerwidget.cpp:1287), left of the search bar; folder must match so the
+    // control sits in the same place on both tab kinds. RED today: folder adds
+    // searchToolbar_ + collapse/expand BEFORE the combo (foldercrawlerwidget.cpp
+    // :221-225), so it is the 4th control, not the leftmost.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+
+    QComboBox* visibilityBox = nullptr;
+    const auto target = QStringLiteral( "Marks and matches" );
+    for ( auto* box : widget.findChildren<QComboBox*>() ) {
+        if ( box->count() > 0 && box->itemText( 0 ) == target ) {
+            visibilityBox = box;
+            break;
+        }
+    }
+    REQUIRE( visibilityBox != nullptr );
+
+    // Locate the toolbar sub-layout (a QHBoxLayout nested in the bottom window's
+    // QVBoxLayout) that owns the combo, then assert the combo sits at index 0.
+    auto toolbarIndexOf = []( QComboBox* child ) -> int {
+        auto* parent = child->parentWidget();
+        if ( parent == nullptr ) {
+            return -1;
+        }
+        auto* outer = qobject_cast<QBoxLayout*>( parent->layout() );
+        if ( outer == nullptr ) {
+            return -1;
+        }
+        for ( int i = 0; i < outer->count(); ++i ) {
+            auto* sub = outer->itemAt( i )->layout();
+            if ( sub != nullptr && sub->indexOf( child ) != -1 ) {
+                return sub->indexOf( child );
+            }
+        }
+        return -1;
+    };
+    REQUIRE( toolbarIndexOf( visibilityBox ) == 0 );
+}
 
 TEST_CASE( "FolderCrawlerWidget search populates grouped results", "[folder]" )
 {
@@ -296,6 +442,59 @@ TEST_CASE( "FolderCrawlerWidget main view line map refreshes on demand after a d
     // The on-demand refresh the mouse handlers use rebuilds the map synchronously.
     widget.mainView()->ensureLineMapFresh();
     REQUIRE( widget.mainView()->isLineMapCurrent() );
+}
+
+TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged mouse events",
+           "[folder]" )
+{
+    // ensureLineMapFresh runs on every press/move/release. In wrap mode each call
+    // used to re-read and re-wrap every line from the viewport to EOF. When two
+    // consecutive mouse events share the same data/geometry (the common case --
+    // the user is just moving the mouse), the rebuild is pure waste. The signature
+    // cache must skip it, and must still rebuild when an input actually changes
+    // (here: a data swap via setDataSource).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR in b\nmore\nmore2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum ); // open a.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+
+    // First refresh builds the map.
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->isLineMapCurrent() );
+    const int buildsAfterFirst = mainView->visibleLineMapBuildCount();
+
+    // A second refresh with no data/geometry change must be a cache hit: it must
+    // NOT re-enter the paint-free rebuild. (RED before the cache: count rises.)
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterFirst );
+
+    // Swapping the underlying file changes the map's inputs (data ptr + line
+    // count), so the cache must invalidate and the next refresh must rebuild.
+    widget.selectResultRow( 3_lnum ); // open b.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 200 );
+
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() > buildsAfterFirst );
+
+    // ...and a follow-up refresh on the new file is again a cache hit.
+    const int buildsAfterSwap = mainView->visibleLineMapBuildCount();
+    mainView->ensureLineMapFresh();
+    REQUIRE( mainView->visibleLineMapBuildCount() == buildsAfterSwap );
 }
 
 TEST_CASE( "FolderCrawlerWidget search toolbar shares the results pane (sits between the views)",
@@ -1322,6 +1521,49 @@ TEST_CASE( "FolderCrawlerWidget -A search emits context rows that render plain",
     const auto ctx = widget.folderResults()->sourceForLine( 2_lnum );
     REQUIRE( ctx.filePath == a );
     REQUIRE( ctx.localLine == 2_lnum );
+}
+
+TEST_CASE( "FolderCrawlerWidget context-line change preserves collapsed groups",
+           "[folder][context]" )
+{
+    // Context (-A/-B/-C) is a scan-time property of folder search, so changing
+    // the context window re-scans via startSearch -> FolderSearchResults::beginSearch.
+    // beginSearch used to collapsed_.clear() (foldersearchresults.cpp:59), wiping
+    // the user's per-file collapse set, so any context tweak expanded every
+    // previously-collapsed group. The model must snapshot collapse state (keyed by
+    // the stable filePath, NOT the unstable FileId) across the re-scan.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\nctx1\nERROR two\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR three\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 200 ); // settle per CLAUDE.md
+    // rows: [H0(a), D1(a:0), D2(a:2), H3(b), D4(b:0)] = 5.
+    REQUIRE( widget.folderResults()->getNbLine() == 5_lcount );
+
+    // Collapse group a (fileId 0): only its header stays visible.
+    widget.clickHeaderRow( 0_lnum );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // a-header + b(header+match)
+
+    // Reproduce the gesture: switch to After(-A) and increment N from 0 to 1.
+    // Both fire onContextControlsChanged -> startSearch -> beginSearch (pattern
+    // present), the destructive re-scan path.
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // "After (-A)"
+    widget.contextLinesSpinBox()->setValue( 1 );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 200 ); // settle: re-scan + streaming commit + layoutChanged
+
+    // Group a must STAY collapsed across the re-scan. RED before the fix:
+    // isCollapsed(0) is false and getNbLine() is 6 (a fully expanded: header +
+    // ERROR one / ctx1(context) / ERROR two = 4, plus b header+match = 2).
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
 }
 
 TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new search",

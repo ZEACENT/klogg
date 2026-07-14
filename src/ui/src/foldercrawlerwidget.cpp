@@ -218,11 +218,15 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     contextLinesComboBox_->setCurrentIndex( 0 );
 
     auto* toolbar = new QHBoxLayout;
+    // visibilityBox_ ("Marks and matches") is added FIRST, matching single-file
+    // CrawlerWidget (crawlerwidget.cpp:1287) where it sits at the far left of the
+    // results toolbar, ahead of the search bar. The folder-only collapse/expand
+    // buttons follow the search bar so they no longer displace the shared combo.
+    toolbar->addWidget( visibilityBox_ );
     toolbar->addWidget( searchToolbar_, 1 );
     toolbar->addSpacing( 12 );
     toolbar->addWidget( collapseAllButton_ );
     toolbar->addWidget( expandAllButton_ );
-    toolbar->addWidget( visibilityBox_ );
     toolbar->addWidget( contextLinesSpinBox_ );
     toolbar->addWidget( contextLinesComboBox_ );
     toolbar->addSpacing( 12 );

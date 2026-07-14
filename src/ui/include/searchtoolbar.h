@@ -80,6 +80,15 @@ class SearchToolbar : public QWidget {
     QString escapeSearchPattern( const QString& pattern, bool isRegex = false ) const;
     QString& combinePatterns( QString& currentPattern, const QString& newPattern ) const;
 
+    // Wrap `pattern` as a single boolean operand: surround it with double-quotes
+    // and backslash-escape any embedded double-quote first. Does NOT regex-escape.
+    // Used by escapeSearchPattern (boolean branch) and by CrawlerWidget's
+    // excludeFromSearch, which previously inlined a no-op quote replace
+    // (replace('"',"\"") -- a 1-char literal -- leaving embedded quotes to break
+    // the boolean expression). Centralizing the escaping here keeps the two
+    // callers from drifting apart again.
+    QString wrapBooleanOperand( const QString& pattern ) const;
+
     // --- Option flag accessors ---
     bool isMatchCase() const;
     bool isUseRegexp() const;

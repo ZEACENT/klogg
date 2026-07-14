@@ -1105,7 +1105,10 @@ void CrawlerWidget::excludeFromSearch( const QString& searchString )
 
     const auto wasInBooleanCombinationMode = searchToolbar_->isBoolean();
     if ( !wasInBooleanCombinationMode ) {
-        currentPattern.replace( '"', "\"" ).prepend( '"' ).append( '"' );
+        // Wrap the existing pattern as one boolean operand. Must backslash-escape
+        // embedded double-quotes (not the no-op replace('"',"\"")); reuse the
+        // shared helper so this can't drift from escapeSearchPattern again.
+        currentPattern = searchToolbar_->wrapBooleanOperand( currentPattern );
     }
 
     searchToolbar_->setBoolean( true );
@@ -1378,9 +1381,9 @@ void CrawlerWidget::setup()
     connect( visibilityBox_, QOverload<int>::of( &QComboBox::currentIndexChanged ), this,
              &CrawlerWidget::changeFilteredViewVisibility );
 
-    connect( logMainView_, &LogMainView::newSelection,
-             [ this ]( auto ) { logMainView_->update(); } );
-
+    // AbstractLogView self-schedules its viewport repaint on every selection
+    // change (mousePressEvent + the keyboard displayLine paths), so the main
+    // view no longer needs a host-side connect(newSelection -> update()).
     connect( logMainView_, &LogMainView::newSelection, this,
              &CrawlerWidget::updateLineNumberHandler );
 
@@ -1537,8 +1540,9 @@ void CrawlerWidget::changeFontSize( bool increase )
 
 void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
 {
-    connect( view, &FilteredView::newSelection, view, [ view ]( auto ) { view->update(); } );
-
+    // AbstractLogView self-schedules its viewport repaint on selection change
+    // (mousePressEvent), so the filtered view no longer needs a host-side
+    // connect(newSelection -> view->update()).
     connect( view, &FilteredView::newSelection, this, &CrawlerWidget::jumpToMatchingLine );
 
     connect( view, &FilteredView::markLines, this, &CrawlerWidget::markLinesFromFiltered );

@@ -157,6 +157,12 @@ class FolderSearchResults : public AbstractLogData {
     };
 
     void rebuildVisibleRows();
+    // Snapshot the filePaths of currently-collapsed groups (called at the top of
+    // beginSearch, before groups_ is rebuilt) and re-apply collapse to a group as
+    // it streams back in (called after each push_back). Keyed by filePath because
+    // FileId is reassigned when groups_ is rebuilt (foldersearchtypes.h:33-36).
+    void snapshotCollapsedPaths();
+    void reapplyCollapseForLastGroup();
     bool isLineMarked( const QString& filePath, LineNumber localLine ) const;
     QString headerText( klogg::folder::FileId fileId ) const;
     QString readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const;
@@ -166,6 +172,10 @@ class FolderSearchResults : public AbstractLogData {
     std::vector<klogg::folder::FileGroup> groups_;
     std::vector<VisibleRow> visibleRows_;
     QSet<klogg::folder::FileId> collapsed_;
+    // Snapshot of collapsed groups' filePaths captured in beginSearch and
+    // re-applied as each group streams back in, so a re-scan (e.g. a context-line
+    // change) preserves the user's collapse state. Lives one search cycle.
+    QSet<QString> pendingCollapsePaths_;
 
     Visibility visibility_ = Visibility::MarksAndMatches;
     std::function<bool( const QString&, LineNumber )> isMarkedLine_;
