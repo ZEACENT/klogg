@@ -191,14 +191,14 @@ int main( int argc, char* argv[] )
         double bestSecs = 1e9;
         quint64 matches = 0;
     };
-    auto runTool = [ & ]( const QString& program, const QStringList& args ) -> ToolResult {
+    auto runTool = [ & ]( const QString& program, const QStringList& toolArgs ) -> ToolResult {
         ToolResult r;
         for ( int it = 0; it < iterations; ++it ) {
             QElapsedTimer t;
             t.start();
             QProcess proc;
             proc.setWorkingDirectory( root );
-            proc.start( program, args );
+            proc.start( program, toolArgs );
             if ( !proc.waitForStarted( 30000 ) ) {
                 out << program << " not available (" << proc.errorString() << ")\n";
                 r.found = false;
