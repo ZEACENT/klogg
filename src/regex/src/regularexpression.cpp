@@ -270,10 +270,15 @@ PatternMatcher::PatternMatcher( const RegularExpression& expression )
     }
 
 #ifdef KLOGG_HAS_VECTORSCAN
-    // Create buffer scanner for bulk scanning if available and not in
-    // prefilter mode (prefilter requires per-line Qt regex confirmation).
-    if ( useVectorscanEngine && !isBooleanCombination_ && !isInverse_
-         && config.useBlockScan() ) {
+    // Create the buffer scanner on PATTERN CAPABILITY (vectorscan + single +
+    // non-inverse), not a user toggle. The to-1 + upper_bound line attribution
+    // is validated against per-line hasMatch across complex patterns
+    // (patternmatcher_test "Block scan matches per-line scan for complex
+    // patterns"), so block scan is safe by default for the folder fast path;
+    // boolean/inverse and non-vectorscan patterns keep the per-line fallback
+    // (hasBufferScan() returns false). Decoupling from useBlockScan makes the
+    // shared scanBuffer primitive fast by default instead of dormant.
+    if ( useVectorscanEngine && !isBooleanCombination_ && !isInverse_ ) {
         bufferScanner_ = expression.hsExpression_.createBufferScanner();
     }
 #endif

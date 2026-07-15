@@ -18,12 +18,12 @@
  */
 
 // Folder-wide search benchmark: compares klogg's streaming folder search
-// (FolderSearchEngine, no byte-offset index) against `grep -EIrn` over the same
-// multi-file tree, and asserts match-count parity.
+// (FolderSearchEngine, no byte-offset index) against `grep -EIrn` and `rg`
+// (ripgrep) over the same multi-file tree, and asserts match-count parity.
 //
 // Build:  cmake --build build_root --target folder_search_benchmark
 // Run:    ./folder_search_benchmark --files 200 --lines-per-file 4000
-//           --pattern 'NEEDLE' --vs-grep
+//           --pattern 'NEEDLE' --vs-grep --vs-rg
 
 #include <chrono>
 #include <cstdint>
@@ -107,6 +107,9 @@ int main( int argc, char* argv[] )
 #else
     config.setRegexpEnging( RegexpEngine::QRegularExpression );
 #endif
+    // Block scan (PatternMatcher::scanBuffer) is now the default for eligible
+    // patterns (single/non-boolean/non-inverse), so the folder engine's
+    // whole-file fast path activates without any extra flag.
 
     const QStringList args = QCoreApplication::arguments();
     auto valueOf = [ &args ]( const QString& key, const QString& fallback ) -> QString {
@@ -125,6 +128,7 @@ int main( int argc, char* argv[] )
     const int iterations = valueOf( "--iterations", "3" ).toInt();
     const qint64 matchEvery = valueOf( "--match-every", "1000" ).toLongLong();
     const bool vsGrep = hasFlag( "--vs-grep" );
+    const bool vsRg = hasFlag( "--vs-rg" );
 
     if ( files <= 0 || linesPerFile <= 0 || iterations <= 0 || matchEvery <= 0 ) {
         std::fprintf( stderr,
@@ -180,36 +184,86 @@ int main( int argc, char* argv[] )
     out << "\nklogg best: " << kloggSecsBest << " s  (" << ( totalMiB / kloggSecsBest )
         << " MiB/s)\n";
 
-    // --- grep comparison ---
-    if ( vsGrep ) {
-        double grepSecsBest = 1e9;
-        quint64 grepMatches = 0;
+    // --- external grep-like tool comparison (grep / ripgrep) ---
+    struct ToolResult {
+        bool ran = false;
+        bool found = true; // false if the tool binary is not on PATH
+        double bestSecs = 1e9;
+        quint64 matches = 0;
+    };
+    auto runTool = [ & ]( const QString& program, const QStringList& args ) -> ToolResult {
+        ToolResult r;
         for ( int it = 0; it < iterations; ++it ) {
             QElapsedTimer t;
             t.start();
             QProcess proc;
             proc.setWorkingDirectory( root );
-            proc.start( "grep", QStringList{ "-EIrn", "--", pattern, "." } );
+            proc.start( program, args );
+            if ( !proc.waitForStarted( 30000 ) ) {
+                out << program << " not available (" << proc.errorString() << ")\n";
+                r.found = false;
+                return r;
+            }
             if ( !proc.waitForFinished( 10 * 60 * 1000 ) ) {
-                out << "grep timed out\n";
-                return 2;
+                out << program << " timed out\n";
+                return r;
             }
             const double secs = static_cast<double>( t.elapsed() ) / 1000.0;
             const QByteArray out0 = proc.readAllStandardOutput();
-            grepMatches = static_cast<quint64>( out0.count( '\n' ) );
-            grepSecsBest = std::min( grepSecsBest, secs );
-            out << "  grep  run " << ( it + 1 ) << ": " << secs << " s, " << grepMatches << " matches\n";
+            r.matches = static_cast<quint64>( out0.count( '\n' ) );
+            r.bestSecs = std::min( r.bestSecs, secs );
+            out << "  " << program << " run " << ( it + 1 ) << ": " << secs << " s, " << r.matches
+                << " matches\n";
         }
-        out << "\ngrep  best: " << grepSecsBest << " s  (" << ( totalMiB / grepSecsBest )
-            << " MiB/s)\n";
+        r.ran = true;
+        return r;
+    };
 
-        out << "\nSpeedup (klogg / grep): " << ( grepSecsBest / kloggSecsBest ) << "x\n";
-        if ( kloggMatches != grepMatches ) {
-            out << "\nMATCH COUNT MISMATCH: klogg=" << kloggMatches << " grep=" << grepMatches << "\n";
+    ToolResult grepRes;
+    if ( vsGrep ) {
+        out << "\n";
+        grepRes = runTool( QStringLiteral( "grep" ),
+                           QStringList{ "-EIrn", "--", pattern, "." } );
+        if ( grepRes.ran ) {
+            out << "grep  best: " << grepRes.bestSecs << " s  ("
+                << ( totalMiB / grepRes.bestSecs ) << " MiB/s)\n";
+        }
+    }
+
+    // ripgrep: recursive by default; --no-ignore/--hidden match grep's unconditional
+    // walk; --color never keeps stdout parseable. Each printed line is one match.
+    ToolResult rgRes;
+    if ( vsRg ) {
+        out << "\n";
+        rgRes = runTool( QStringLiteral( "rg" ),
+                         QStringList{ "--no-ignore", "--hidden", "--color", "never", "--", pattern,
+                                      "." } );
+        if ( rgRes.ran ) {
+            out << "rg    best: " << rgRes.bestSecs << " s  (" << ( totalMiB / rgRes.bestSecs )
+                << " MiB/s)\n";
+        }
+    }
+
+    // --- summary + parity ---
+    out << "\n--- summary ---\n";
+    out << "klogg: " << kloggSecsBest << " s  (" << ( totalMiB / kloggSecsBest ) << " MiB/s)\n";
+    if ( vsGrep && grepRes.ran ) {
+        out << "grep:  " << grepRes.bestSecs << " s  (" << ( totalMiB / grepRes.bestSecs )
+            << " MiB/s)   klogg/grep = " << ( grepRes.bestSecs / kloggSecsBest ) << "x\n";
+        if ( kloggMatches != grepRes.matches ) {
+            out << "MATCH MISMATCH: klogg=" << kloggMatches << " grep=" << grepRes.matches << "\n";
             return 3;
         }
-        out << "Match-count parity: OK (" << kloggMatches << ")\n";
     }
+    if ( vsRg && rgRes.ran ) {
+        out << "rg:    " << rgRes.bestSecs << " s  (" << ( totalMiB / rgRes.bestSecs )
+            << " MiB/s)   klogg/rg = " << ( rgRes.bestSecs / kloggSecsBest ) << "x\n";
+        if ( kloggMatches != rgRes.matches ) {
+            out << "MATCH MISMATCH: klogg=" << kloggMatches << " rg=" << rgRes.matches << "\n";
+            return 3;
+        }
+    }
+    out << "Match-count parity: OK (" << kloggMatches << ")\n";
 
     QDir( root ).removeRecursively();
     return 0;
