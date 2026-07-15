@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "configuration.h"
+#include "pathutils.h"
 #include "styles.h"
 #include "tabbedcrawlerwidget.h"
 #include "tabnamemapping.h"
@@ -98,6 +99,64 @@ class LiveStatusTranslator : public QTranslator {
         return {};
     }
 };
+
+TEST_CASE( "displayNameForPath is robust to trailing slashes and never blanks a label" )
+{
+    using klogg::displayNameForPath;
+    // Regression core: trailing separators made QFileInfo::fileName() return "".
+    REQUIRE( displayNameForPath( QStringLiteral( "/Library/Logs/" ) )
+             == QStringLiteral( "Logs" ) );
+    REQUIRE( displayNameForPath( QStringLiteral( "/Library/Logs" ) )
+             == QStringLiteral( "Logs" ) );
+    REQUIRE( displayNameForPath( QStringLiteral( "logs//" ) ) == QStringLiteral( "logs" ) );
+    REQUIRE( displayNameForPath( QStringLiteral( "11684370/" ) ) == QStringLiteral( "11684370" ) );
+
+    // A non-empty input must never yield an empty label: the filesystem root
+    // (and a bare Windows drive) clean down to nothing, so fall back to the
+    // path itself rather than render a blank tab/title.
+    REQUIRE_FALSE( displayNameForPath( QStringLiteral( "/" ) ).isEmpty() );
+    REQUIRE( displayNameForPath( QStringLiteral( "/" ) ) == QStringLiteral( "/" ) );
+    REQUIRE( displayNameForPath( QString{} ).isEmpty() );
+}
+
+TEST_CASE( "TabbedCrawlerWidget derives a non-empty tab label for trailing-slash paths" )
+{
+    // Regression: a folder path that carries a trailing slash (as some
+    // open-folder / drag-drop / session-restore code paths produce) made
+    // QFileInfo(path).fileName() return "" on Qt 6, which flowed through to
+    // an empty tab text -- a "blank" folder tab. The tab label must be the
+    // folder base name regardless of trailing slashes.
+    TabbedCrawlerWidget tabWidget;
+
+    SECTION( "single trailing slash yields the base name" )
+    {
+        auto* crawler = new DummyCrawlerWidget();
+        const auto index
+            = tabWidget.addCrawler( crawler, QStringLiteral( "/tmp/11684370/" ), QString{},
+                                    QString{} );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "11684370" ) );
+
+        tabWidget.onGroupsChanged();
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "11684370" ) );
+    }
+
+    SECTION( "double trailing slash yields the base name" )
+    {
+        auto* crawler = new DummyCrawlerWidget();
+        const auto index = tabWidget.addCrawler( crawler, QStringLiteral( "/var/log///" ),
+                                                 QString{}, QString{} );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "log" ) );
+    }
+
+    SECTION( "no trailing slash still works" )
+    {
+        auto* crawler = new DummyCrawlerWidget();
+        const auto index
+            = tabWidget.addCrawler( crawler, QStringLiteral( "/tmp/11684370" ), QString{},
+                                    QString{} );
+        REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "11684370" ) );
+    }
+}
 
 TEST_CASE( "TabbedCrawlerWidget keeps live tab title and tooltip across group refreshes" )
 {

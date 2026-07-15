@@ -110,6 +110,7 @@
 #include "mergefileorder.h"
 #include "droppathclassification.h"
 #include "openfilehelper.h"
+#include "pathutils.h"
 #include "optionsdialog.h"
 #include "predefinedfilters.h"
 #include "predefinedfiltersdialog.h"
@@ -1235,7 +1236,8 @@ void MainWindow::openFolderByPath( const QString& folderPath )
         return;
     }
 
-    const QString displayName = QFileInfo( folderPath ).fileName();
+    // Robust to trailing slashes (drag-dropped folders carry one).
+    const QString displayName = klogg::displayNameForPath( folderPath );
     const auto index = mainTabWidget_.addCrawler( static_cast<FolderCrawlerWidget*>( view ),
                                                   folderPath, displayName, folderPath );
     mainTabWidget_.setCurrentIndex( index );
@@ -2723,7 +2725,7 @@ bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, b
 // Strips the passed filename from its directory part.
 QString MainWindow::strippedName( const QString& fullFileName ) const
 {
-    return QFileInfo( fullFileName ).fileName();
+    return klogg::displayNameForPath( fullFileName );
 }
 
 // Return the currently active CrawlerWidget, or NULL if none
@@ -3539,7 +3541,7 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     int checkCounter = 0;
 
     for ( const auto& filePath : sortedPaths ) {
-        const auto displayName = QFileInfo( filePath ).fileName();
+        const auto displayName = klogg::displayNameForPath( filePath );
         auto* item = new QListWidgetItem( displayName );
         item->setData( Qt::UserRole, filePath );
         item->setData( Qt::UserRole + 1, displayName );
@@ -3688,7 +3690,7 @@ bool MainWindow::executeMerge( const std::vector<QString>& filesToMerge )
 
         QStringList shortNames;
         for ( const auto& fn : filesToMerge ) {
-            shortNames << QFileInfo( fn ).fileName();
+            shortNames << klogg::displayNameForPath( fn );
         }
         mainTabWidget_.setTabText( index,
                                    QString( "[Merged] %1" ).arg( shortNames.join( " + " ) ) );

@@ -48,6 +48,7 @@
 #include "iconloader.h"
 #include "log.h"
 #include "openfilehelper.h"
+#include "pathutils.h"
 #include "styles.h"
 #include "tabgroup.h"
 #include "tabgroupdropresolver.h"
@@ -411,7 +412,11 @@ void TabbedCrawlerWidget::changeEvent( QEvent* event )
 void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
                                          const QString& displayName, const QString& toolTip )
 {
-    const auto tabLabel = displayName.isEmpty() ? QFileInfo( documentId ).fileName() : displayName;
+    // Robust to trailing-slash document paths (drag-dropped folders): Qt's
+    // QFileInfo(path).fileName() returns "" for "/.../Logs/". The label must
+    // never be empty for a real document.
+    const auto tabLabel
+        = displayName.isEmpty() ? klogg::displayNameForPath( documentId ) : displayName;
     const auto tabName = TabNameMapping::getSynced().tabName( documentId );
     const auto nativeToolTip
         = toolTip.isEmpty() ? QDir::toNativeSeparators( documentId ) : QDir::toNativeSeparators( toolTip );
@@ -911,7 +916,7 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
 
             if ( newName.isEmpty() ) {
                 myTabBar_.setTabText( tab,
-                                      storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName()
+                                      storedTitle.isEmpty() ? klogg::displayNameForPath( tabPath )
                                                             : storedTitle );
             }
             else {
@@ -1292,7 +1297,7 @@ void TabbedCrawlerWidget::onGroupsChanged()
         const auto cleanCustomName = tabLabelWithoutLiveStatus( customName );
         const auto originalTabLabel
             = cleanCustomName.isEmpty()
-                  ? ( storedTitle.isEmpty() ? QFileInfo( tabPath ).fileName() : storedTitle )
+                  ? ( storedTitle.isEmpty() ? klogg::displayNameForPath( tabPath ) : storedTitle )
                   : cleanCustomName;
         const auto originalTooltip
             = storedToolTip.isEmpty() ? QDir::toNativeSeparators( tabPath ) : storedToolTip;

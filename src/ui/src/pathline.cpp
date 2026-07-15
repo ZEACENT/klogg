@@ -27,6 +27,7 @@
 
 #include "containers.h"
 #include "openfilehelper.h"
+#include "pathutils.h"
 #include "clipboard.h"
 
 void PathLine::setPath( const QString& path )
@@ -50,7 +51,7 @@ void PathLine::contextMenuEvent( QContextMenuEvent* event )
              [ this ]( auto ) { sendTextToClipboard( this->path_ ); } );
 
     connect( copyFileName, &QAction::triggered, this, [ this ]( auto ) {
-        sendTextToClipboard( QFileInfo( this->path_ ).fileName() );
+        sendTextToClipboard( klogg::displayNameForPath( this->path_ ) );
     } );
 
     connect( openContainingFolder, &QAction::triggered, this,
