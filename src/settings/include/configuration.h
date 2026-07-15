@@ -741,7 +741,12 @@ class Configuration final : public Persistable<Configuration> {
     bool useSearchResultsCache_ = true;
     unsigned searchResultsCacheLines_ = 1000000;
     bool useParallelSearch_ = true;
-    bool useBlockScan_ = false;
+    // Block-scan fast path: one vectorscan hs_scan over a whole buffer (chunk
+    // for single-file, whole file for folder) instead of a per-line hasMatch
+    // loop. Default ON -- roughly 5-10x faster matching on the UTF-8 fast path.
+    // Kept as a toggle so it can be turned off if a pathological pattern
+    // (e.g. one that can match across newlines) needs per-line semantics.
+    bool useBlockScan_ = true;
     int indexReadBufferSizeMb_ = 16;
     int searchReadBufferSizeLines_ = 10000;
     int searchThreadPoolSize_ = 0;

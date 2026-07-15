@@ -27,6 +27,7 @@
 #include <string_view>
 #include <utility>
 
+#include "configuration.h"
 #include "encodingdetector.h"
 #include "encodingutils.h"
 #include "foldersearchtypes.h"
@@ -302,7 +303,8 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
     // single-file parity -- competitive with / faster than ripgrep. The streaming
     // per-line scan below remains the fallback for multi-byte encodings,
     // boolean/inverse patterns, context capture, or files over the cap.
-    if ( matcher.hasBufferScan() && context.before == 0 && context.after == 0 ) {
+    if ( Configuration::get().useBlockScan() && matcher.hasBufferScan()
+         && context.before == 0 && context.after == 0 ) {
         const qint64 fastFileSize = file.size();
         if ( fastFileSize > 0 && fastFileSize <= FastPathMaxBytes ) {
             QByteArray whole = file.readAll();

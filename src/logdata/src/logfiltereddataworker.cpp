@@ -108,23 +108,51 @@ PartialSearchResults filterLines( const PatternMatcher& matcher,
     results.chunkStart = chunkStart;
     results.processedLines = LinesCount{ rawLines.endOfLines.size() };
 
-    // Block scan (one hs_scan over the whole buffer) saves per-line call
-    // overhead but pays callback + binary-search + dedup cost per match
-    // position.  Benchmarks show this is only beneficial for small chunks
-    // (<= ~5000 lines) where SIMD startup cost dominates.  For larger chunks
-    // the sequential per-line access pattern has better cache locality.
-    // Disabled for now: per-line is consistently faster at production scales.
-    //
-    // Known issue: block scan produces ~10% fewer matches for complex
-    // patterns (alternations, optional groups) due to the `to-1` byte
-    // offset in the callback not always landing inside the matching line
-    // for multi-position match reports.
-    //
-    // TODO: re-evaluate after fixing the callback offset logic and
-    //       optimizing the callback path (bitmap dedup, cached segment
-    //       lookup, or Vectorscan streaming mode).
+    const auto& config = Configuration::get();
 
-    // Per-line matching
+    // Block-scan fast path: one vectorscan hs_scan over the whole chunk buffer,
+    // mapping match byte offsets to line indices via upper_bound on endOfLines
+    // -- the SAME PatternMatcher::scanBuffer primitive folder search uses, so
+    // the two search paths share one matching engine instead of each running a
+    // per-line hasMatch loop. Gated on:
+    //  (a) the perf.useBlockScan toggle (default on -- a universal kill switch),
+    //  (b) pattern capability (vectorscan + single + non-boolean + non-inverse;
+    //      hasBufferScan() is false otherwise),
+    //  (c) the UTF-8 single-byte fast path where rawLines.buffer IS the bytes
+    //      that rawLines.endOfLines indexes (buildUtf8View's fast path), so the
+    //      scan offsets are valid.
+    // The per-line loop below remains the fallback for re-encoded/ANSI/prefiltered
+    // chunks, boolean/inverse/non-vectorscan patterns, and when the toggle is off.
+    // rawLines.endOfLines are relative one-past-LF offsets into buffer with the
+    // final entry == buffer.size() (the index's fake-LF sentinel for an
+    // unterminated last line), so scanBuffer attributes every line correctly.
+    const bool blockScanEligible = config.useBlockScan() && matcher.hasBufferScan()
+        && rawLines.ansiProcessingMode == AnsiProcessingMode::Plain
+        && rawLines.prefilterPattern.pattern().isEmpty()
+        && rawLines.textDecoder.encodingParams.isUtf8Compatible
+        && !rawLines.buffer.empty() && !rawLines.endOfLines.empty();
+
+    if ( blockScanEligible ) {
+        klogg::vector<uint64_t> matched;
+        matcher.scanBuffer( rawLines.buffer.data(),
+                            static_cast<unsigned int>( rawLines.buffer.size() ),
+                            rawLines.endOfLines, matched );
+
+        // Reuse buildUtf8View so getUntabifiedLength/maxLength are byte-identical
+        // to the per-line path (the line views come from the same buffer split).
+        const auto lines = rawLines.buildUtf8View();
+        for ( const auto matchedIdx : matched ) {
+            if ( matchedIdx < lines.size() ) {
+                results.maxLength
+                    = qMax( results.maxLength, getUntabifiedLength( lines[ matchedIdx ] ) );
+            }
+            const auto lineNumber = chunkStart + LinesCount{ matchedIdx };
+            results.matchingLines.add( lineNumber.get() );
+        }
+        return results;
+    }
+
+    // Per-line matching (fallback)
     const auto& lines = rawLines.buildUtf8View();
 
     for ( auto offset = 0u; offset < lines.size(); ++offset ) {

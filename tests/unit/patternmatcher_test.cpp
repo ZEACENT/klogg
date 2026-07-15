@@ -229,6 +229,14 @@ TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmat
         klogg::vector<uint64_t> blockMatches;
         REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
                                       endOfLines, blockMatches ) );
+        // Output contract: matched line indices are strictly ascending -- sorted
+        // and deduped by construction (guards the occupancy-vector dedup).
+        for ( size_t k = 1; k < blockMatches.size(); ++k ) {
+            INFO( "pattern: " << pattern.toStdString() << " | blockMatches[" << k
+                              << "]=" << blockMatches[ k ] << " <= [" << ( k - 1 )
+                              << "]=" << blockMatches[ k - 1 ] );
+            REQUIRE( blockMatches[ k ] > blockMatches[ k - 1 ] );
+        }
         std::set<size_t> blockMatchSet;
         for ( const auto idx : blockMatches ) {
             blockMatchSet.insert( static_cast<size_t>( idx ) );
@@ -236,6 +244,90 @@ TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmat
         INFO( "pattern: " << pattern.toStdString() << " | perLine=" << perLineMatches.size()
                           << " block=" << blockMatchSet.size() );
         REQUIRE( blockMatchSet == perLineMatches );
+    }
+}
+
+TEST_CASE( "Block scan dedups multi-match lines and attributes an unterminated final line",
+           "[patternmatcher]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+    config.setUseBlockScan( true );
+
+    SECTION( "multiple matches in one line collapse to a single line index" )
+    {
+        // "aaa" matches twice in line 0 -- both callbacks must map to line 0 and
+        // dedup to one entry; line 1 does not match.
+        const std::vector<std::string> lines = { "aaa bbb aaa", "ccc" };
+        std::string buffer;
+        klogg::vector<qint64> endOfLines;
+        for ( const auto& line : lines ) {
+            buffer += line;
+            buffer += '\n';
+            endOfLines.push_back( static_cast<qint64>( buffer.size() ) );
+        }
+
+        RegularExpression expression( RegularExpressionPattern( QStringLiteral( "aaa" ), true, false,
+                                                                false, false ) );
+        const auto matcher = expression.createMatcher();
+
+        std::set<size_t> perLine;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            if ( matcher->hasMatch( std::string_view{ lines[ i ] } ) ) {
+                perLine.insert( i );
+            }
+        }
+
+        klogg::vector<uint64_t> blockMatches;
+        REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
+                                      endOfLines, blockMatches ) );
+        REQUIRE( blockMatches.size() == 1 );
+        REQUIRE( blockMatches[ 0 ] == 0 );
+        std::set<size_t> blockSet;
+        for ( const auto idx : blockMatches ) {
+            blockSet.insert( static_cast<size_t>( idx ) );
+        }
+        REQUIRE( blockSet == perLine );
+    }
+
+    SECTION( "an unterminated final line is attributed via the size sentinel" )
+    {
+        // Last line has no trailing newline; endOfLines.back() == buffer.size()
+        // acts as the sentinel (mirrors single-file's fake-LF index entry and
+        // folder's appended sentinel), so the last line still maps correctly.
+        const std::vector<std::string> lines = { "error one", "error two", "error three no newline" };
+        std::string buffer;
+        klogg::vector<qint64> endOfLines;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            buffer += lines[ i ];
+            if ( i + 1 < lines.size() ) {
+                buffer += '\n';
+            }
+            endOfLines.push_back( static_cast<qint64>( buffer.size() ) );
+        }
+
+        RegularExpression expression( RegularExpressionPattern( QStringLiteral( "error" ), true, false,
+                                                                false, false ) );
+        const auto matcher = expression.createMatcher();
+
+        std::set<size_t> perLine;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            if ( matcher->hasMatch( std::string_view{ lines[ i ] } ) ) {
+                perLine.insert( i );
+            }
+        }
+        REQUIRE( perLine.size() == 3 );
+
+        klogg::vector<uint64_t> blockMatches;
+        REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
+                                      endOfLines, blockMatches ) );
+        REQUIRE( blockMatches.size() == 3 );
+        REQUIRE( blockMatches[ 2 ] == 2 ); // the unterminated final line
+        std::set<size_t> blockSet;
+        for ( const auto idx : blockMatches ) {
+            blockSet.insert( static_cast<size_t>( idx ) );
+        }
+        REQUIRE( blockSet == perLine );
     }
 }
 
