@@ -372,7 +372,16 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
             klogg::vector<unsigned> flags( expressions.size() );
             std::transform( expressions.cbegin(), expressions.cend(), flags.begin(),
                             []( const auto& expression ) {
-                                auto expressionFlags = HS_FLAG_UTF8 | HS_FLAG_UCP;
+                                // HS_FLAG_MULTILINE: ^ / $ match at each line
+                                // boundary (after/before every '\n') plus the buffer
+                                // edges, so a whole-buffer scan agrees with the
+                                // per-line scan for line-anchored patterns. Without
+                                // it, ^ERROR would match only at the buffer start and
+                                // silently undercount. (Does not affect '.' matching
+                                // '\n' -- that is HS_FLAG_DOTALL, intentionally off,
+                                // so .* still stops at line ends.)
+                                auto expressionFlags
+                                    = HS_FLAG_UTF8 | HS_FLAG_UCP | HS_FLAG_MULTILINE;
                                 if ( !expression.isCaseSensitive ) {
                                     expressionFlags |= HS_FLAG_CASELESS;
                                 }

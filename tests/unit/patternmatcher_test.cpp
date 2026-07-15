@@ -173,8 +173,10 @@ TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmat
 {
     auto& config = Configuration::getSynced();
     configureProductLikeRegexpEngine( config );
-    // Force the block-scan path on so the parity assertion below is actually
-    // exercised (hasBufferScan() is otherwise false with useBlockScan off).
+    // hasBufferScan() is true on PATTERN CAPABILITY (vectorscan + single +
+    // non-boolean + non-inverse), independent of the useBlockScan toggle, so the
+    // scanBuffer parity below is exercised for any eligible pattern. The toggle
+    // only gates the higher-level fast paths (filterLines / folder scanFile).
     config.setUseBlockScan( true );
 
     // A corpus with varied line shapes: field alternation, numbers, paths,
@@ -210,6 +212,11 @@ TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmat
         QStringLiteral( "req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?" ), // optional group
         QStringLiteral( "level=(ERROR|WARN).*msg=\\\"(timeout|failed|exception).*\\\""
                         ".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false" ),
+        // Line anchors: a whole-buffer scan must compile with HS_FLAG_MULTILINE so
+        // ^ / $ match each line boundary, otherwise block scan only matches at the
+        // buffer edges and silently undercounts vs per-line.
+        QStringLiteral( "^level=ERROR" ),
+        QStringLiteral( "retry=false$" ),
     };
 
     for ( const auto& pattern : patterns ) {

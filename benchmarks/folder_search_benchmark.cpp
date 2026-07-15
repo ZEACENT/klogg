@@ -206,6 +206,11 @@ int main( int argc, char* argv[] )
             }
             if ( !proc.waitForFinished( 10 * 60 * 1000 ) ) {
                 out << program << " timed out\n";
+                // Terminate the runaway child so it is not left running after
+                // the benchmark returns (waitForFinished timed out -> the
+                // QProcess destructor would otherwise kill it only on teardown).
+                proc.kill();
+                proc.waitForFinished( 5000 );
                 return r;
             }
             const double secs = static_cast<double>( t.elapsed() ) / 1000.0;
