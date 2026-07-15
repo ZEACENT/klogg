@@ -66,7 +66,6 @@ int matchMultiCallback( unsigned int id, unsigned long long from, unsigned long 
 // The context carries endOfLines offsets for binary-search mapping.
 struct BufferScanContext {
     const klogg::vector<qint64>* endOfLines;
-    klogg::vector<uint64_t>* matchedLineIndices;
     // For multi-pattern boolean mode:
     std::vector<MatchedPatterns>* perLinePatterns;
     // Occupancy bitset (one byte per line) for O(1) dedup with zero per-match
@@ -82,12 +81,14 @@ int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned
                                unsigned int flags, void* context )
 {
     Q_UNUSED( id );
-    Q_UNUSED( from );
     Q_UNUSED( flags );
 
     auto* ctx = static_cast<BufferScanContext*>( context );
-    // Binary search: find the line that contains byte offset 'to - 1'
-    const auto matchByte = static_cast<qint64>( to > 0 ? to - 1 : to );
+    // Attribute the match to the line containing its last byte (to - 1). For a
+    // ZERO-WIDTH match (from == to, e.g. ^, ^$, \b, a* matching empty) at a line
+    // boundary, to - 1 lands on the previous line's terminator and would
+    // mis-attribute; use `to` so the empty match maps to the line starting there.
+    const auto matchByte = static_cast<qint64>( ( from < to && to > 0 ) ? to - 1 : to );
     auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
     const auto lineIndex = static_cast<uint64_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
 
@@ -219,7 +220,6 @@ void HsBufferScanner::scan( const char* data, unsigned int size,
     std::vector<unsigned char> seenLines( endOfLines.size(), 0 );
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
-    ctx.matchedLineIndices = &matchedLineIndices;
     ctx.perLinePatterns = nullptr;
     ctx.seenLines = &seenLines;
 
@@ -247,7 +247,6 @@ void HsBufferScanner::scanMulti( const char* data, unsigned int size,
 
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
-    ctx.matchedLineIndices = nullptr;
     ctx.perLinePatterns = &perLinePatterns;
     ctx.seenLines = nullptr; // multi callback doesn't need dedup (idempotent set)
 

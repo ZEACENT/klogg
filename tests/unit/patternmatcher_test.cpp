@@ -178,6 +178,11 @@ TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmat
     // scanBuffer parity below is exercised for any eligible pattern. The toggle
     // only gates the higher-level fast paths (filterLines / folder scanFile).
     config.setUseBlockScan( true );
+    // Block scan requires vectorscan; on a KLOGG_USE_VECTORSCAN=OFF build there
+    // is nothing to parity-check, so pass vacuously instead of failing.
+    if ( config.regexpEngine() != RegexpEngine::Vectorscan ) {
+        return;
+    }
 
     // A corpus with varied line shapes: field alternation, numbers, paths,
     // quotes, an optional nested group, and a blank line.
@@ -260,6 +265,9 @@ TEST_CASE( "Block scan dedups multi-match lines and attributes an unterminated f
     auto& config = Configuration::getSynced();
     configureProductLikeRegexpEngine( config );
     config.setUseBlockScan( true );
+    if ( config.regexpEngine() != RegexpEngine::Vectorscan ) {
+        return; // block scan requires vectorscan
+    }
 
     SECTION( "multiple matches in one line collapse to a single line index" )
     {

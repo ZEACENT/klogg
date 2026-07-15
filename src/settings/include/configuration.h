@@ -743,9 +743,13 @@ class Configuration final : public Persistable<Configuration> {
     bool useParallelSearch_ = true;
     // Block-scan fast path: one vectorscan hs_scan over a whole buffer (chunk
     // for single-file, whole file for folder) instead of a per-line hasMatch
-    // loop. Default ON -- roughly 5-10x faster matching on the UTF-8 fast path.
-    // Kept as a toggle so it can be turned off if a pathological pattern
-    // (e.g. one that can match across newlines) needs per-line semantics.
+    // loop. Default ON -- substantially faster matching on the UTF-8 fast path.
+    // Semantic note: because the whole buffer (including '\n') is scanned as one
+    // subject, a pattern that can reach a newline via \s, \W, \D, [^x], [\s\S],
+    // or a literal \n can match ACROSS line boundaries, where the per-line path
+    // never would. '.' / '.*' do NOT cross lines (DOTALL is off), and ^ / $ are
+    // line-anchored (MULTILINE is on), so ordinary token/anchored searches are
+    // unaffected. Keep this toggle to opt back to per-line semantics if needed.
     bool useBlockScan_ = true;
     int indexReadBufferSizeMb_ = 16;
     int searchReadBufferSizeLines_ = 10000;

@@ -322,8 +322,9 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                 }
                 const bool utf8SingleByte
                     = fastParams.isUtf8Compatible && fastParams.lineFeedWidth == 1;
-                const bool binary
-                    = whole.left( static_cast<int>( detectLen ) ).contains( '\0' );
+                const bool binary = memchr( firstVec.data(), '\0',
+                                             static_cast<size_t>( firstVec.size() ) )
+                                    != nullptr;
                 if ( utf8SingleByte && !binary ) {
                     // Byte offset one past each LF; append a sentinel == file size
                     // when the final line has no trailing newline so every line
@@ -352,12 +353,9 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                     klogg::vector<uint64_t> matched;
                     matcher.scanBuffer( wdata, static_cast<unsigned int>( wbytes ), endOfLines,
                                         matched );
-
-                    // scanBuffer dedups via a std::set; sort+unique defensively so
-                    // the MatchRecord vector is localLine-ascending (the results
-                    // layer assumes a sorted, deduped matches vector).
-                    std::sort( matched.begin(), matched.end() );
-                    matched.erase( std::unique( matched.begin(), matched.end() ), matched.end() );
+                    // scanBuffer returns matched line indices ascending and
+                    // deduped (occupancy-vector collect), which is exactly the
+                    // localLine-ascending, deduped order the results layer expects.
 
                     group.matches.reserve( matched.size() );
                     for ( const uint64_t idx : matched ) {

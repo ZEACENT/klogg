@@ -20,6 +20,9 @@
 #include "displayfilepath.h"
 
 #include <QDir>
+#include <QFileInfo>
+
+#include "pathutils.h"
 
 constexpr const int MaxPathLength = 128;
 namespace {
@@ -31,7 +34,9 @@ QString shrinkPath( QString fullPath, int limit, QString delimiter = "…" )
     }
 
     const auto fileInfo = QFileInfo( fullPath );
-    const auto fileName = fileInfo.fileName();
+    // Robust to trailing slashes (QFileInfo("/x/Logs/").fileName() is ""): the
+    // favorites display must always end in the file/folder name.
+    const auto fileName = klogg::displayNameForPath( fullPath );
     const auto absoluteNativePath = QDir::toNativeSeparators( fileInfo.absolutePath() );
 
     const auto idealMinLength = fileName.size() + delimiter.size();
