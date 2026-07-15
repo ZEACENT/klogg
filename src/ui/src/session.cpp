@@ -35,6 +35,7 @@
 #include "logfiltereddata.h"
 #include "foldercrawlerwidget.h"
 #include "folderenumeration.h"
+#include "pathutils.h"
 #include "savedsearches.h"
 #include "sessioninfo.h"
 #include "streaminglogdata.h"
@@ -90,7 +91,7 @@ ViewInterface* Session::openMerged( const std::vector<QString>& fileNames,
     // Build display name from source file names
     QStringList shortNames;
     for ( const auto& fn : fileNames ) {
-        shortNames << QFileInfo( fn ).fileName();
+        shortNames << klogg::displayNameForPath( fn );
     }
     const QString mergedName = QString( "[Merged] %1" ).arg( shortNames.join( " + " ) );
 
@@ -153,7 +154,10 @@ ViewInterface* Session::openFolder( const QString& folderPath, const std::vector
     }
     view->setFolder( folderPath, paths );
 
-    const QString displayName = QFileInfo( folderPath ).fileName();
+    // Robust to trailing slashes (drag-dropped folders carry one): Qt's
+    // QFileInfo(path).fileName() returns "" for "/.../Logs/", which would
+    // produce a blank tab title. See klogg::displayNameForPath.
+    const QString displayName = klogg::displayNameForPath( folderPath );
 
     openFiles_.insert( { view,
                          OpenFile{ folderPath,  // fileName
@@ -297,7 +301,7 @@ ViewInterface* Session::openAlways( const QString& file_name,
     openFiles_.insert( { view,
                          { file_name,
                            file_name,
-                           QFileInfo( file_name ).fileName(),
+                           klogg::displayNameForPath( file_name ),
                            file_name,
                            DocumentKind::File,
                            log_data,

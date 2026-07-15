@@ -169,6 +169,183 @@ TEST_CASE( "Block scan matches per-line scan results", "[patternmatcher]" )
     }
 }
 
+TEST_CASE( "Block scan matches per-line scan for complex patterns", "[patternmatcher]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+    // hasBufferScan() is true on PATTERN CAPABILITY (vectorscan + single +
+    // non-boolean + non-inverse), independent of the useBlockScan toggle, so the
+    // scanBuffer parity below is exercised for any eligible pattern. The toggle
+    // only gates the higher-level fast paths (filterLines / folder scanFile).
+    config.setUseBlockScan( true );
+    // Block scan requires vectorscan; on a KLOGG_USE_VECTORSCAN=OFF build there
+    // is nothing to parity-check, so pass vacuously instead of failing.
+    if ( config.regexpEngine() != RegexpEngine::Vectorscan ) {
+        return;
+    }
+
+    // A corpus with varied line shapes: field alternation, numbers, paths,
+    // quotes, an optional nested group, and a blank line.
+    const std::vector<std::string> lines = {
+        "level=INFO component=auth msg=\"ok\" path=/api/v1/task/123 shard=4",
+        "level=ERROR component=auth msg=\"timeout\" path=/api/v1/job/7 shard=2 retry=false",
+        "level=WARN component=storage msg=\"failed\" path=/api/v1/task/999 shard=12",
+        "ordinary payload with no fields at all",
+        "level=ERROR component=scheduler msg=\"exception\" path=/api/v1/job/3 shard=0 retry=false",
+        "level=DEBUG component=parser msg=\"peer reset during remote link handover\" path=/api/v1/node/55 shard=9",
+        "level=INFO component=crawler req=AABBCCDDEEFF0011 session=11223344 msg=\"ok\"",
+        "short",
+        "level=WARN component=replication msg=\"timeout\" path=/api/v1/task/2 shard=15",
+        "",
+    };
+
+    // Contiguous buffer + endOfLines (byte offset one past each newline).
+    std::string buffer;
+    klogg::vector<qint64> endOfLines;
+    for ( const auto& line : lines ) {
+        buffer += line;
+        buffer += '\n';
+        endOfLines.push_back( static_cast<qint64>( buffer.size() ) );
+    }
+
+    const std::vector<QString> patterns = {
+        QStringLiteral( "ERROR" ), // baseline literal
+        QStringLiteral( "(ERROR|WARN)" ), // alternation
+        QStringLiteral( "level=(ERROR|WARN)" ), // anchored alternation
+        QStringLiteral( "component=(auth|scheduler|replication|storage|parser|crawler)" ),
+        QStringLiteral( "shard=[0-9]{1,2}" ), // bounded repetition
+        QStringLiteral( "req=[A-F0-9]{16}( session=([A-F0-9]{8}|[A-F0-9]{16}))?" ), // optional group
+        QStringLiteral( "level=(ERROR|WARN).*msg=\\\"(timeout|failed|exception).*\\\""
+                        ".*path=/api/v1/(task|job)/[0-9]{1,4}.*shard=[0-9]{1,2} retry=false" ),
+        // Line anchors: a whole-buffer scan must compile with HS_FLAG_MULTILINE so
+        // ^ / $ match each line boundary, otherwise block scan only matches at the
+        // buffer edges and silently undercounts vs per-line.
+        QStringLiteral( "^level=ERROR" ),
+        QStringLiteral( "retry=false$" ),
+    };
+
+    for ( const auto& pattern : patterns ) {
+        RegularExpression expression(
+            RegularExpressionPattern( pattern, true, false, false, false ) );
+        REQUIRE( expression.isValid() );
+        const auto matcher = expression.createMatcher();
+        REQUIRE( matcher->hasBufferScan() );
+
+        std::set<size_t> perLineMatches;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            if ( matcher->hasMatch( std::string_view{ lines[ i ] } ) ) {
+                perLineMatches.insert( i );
+            }
+        }
+
+        klogg::vector<uint64_t> blockMatches;
+        REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
+                                      endOfLines, blockMatches ) );
+        // Output contract: matched line indices are strictly ascending -- sorted
+        // and deduped by construction (guards the occupancy-vector dedup).
+        for ( size_t k = 1; k < blockMatches.size(); ++k ) {
+            INFO( "pattern: " << pattern.toStdString() << " | blockMatches[" << k
+                              << "]=" << blockMatches[ k ] << " <= [" << ( k - 1 )
+                              << "]=" << blockMatches[ k - 1 ] );
+            REQUIRE( blockMatches[ k ] > blockMatches[ k - 1 ] );
+        }
+        std::set<size_t> blockMatchSet;
+        for ( const auto idx : blockMatches ) {
+            blockMatchSet.insert( static_cast<size_t>( idx ) );
+        }
+        INFO( "pattern: " << pattern.toStdString() << " | perLine=" << perLineMatches.size()
+                          << " block=" << blockMatchSet.size() );
+        REQUIRE( blockMatchSet == perLineMatches );
+    }
+}
+
+TEST_CASE( "Block scan dedups multi-match lines and attributes an unterminated final line",
+           "[patternmatcher]" )
+{
+    auto& config = Configuration::getSynced();
+    configureProductLikeRegexpEngine( config );
+    config.setUseBlockScan( true );
+    if ( config.regexpEngine() != RegexpEngine::Vectorscan ) {
+        return; // block scan requires vectorscan
+    }
+
+    SECTION( "multiple matches in one line collapse to a single line index" )
+    {
+        // "aaa" matches twice in line 0 -- both callbacks must map to line 0 and
+        // dedup to one entry; line 1 does not match.
+        const std::vector<std::string> lines = { "aaa bbb aaa", "ccc" };
+        std::string buffer;
+        klogg::vector<qint64> endOfLines;
+        for ( const auto& line : lines ) {
+            buffer += line;
+            buffer += '\n';
+            endOfLines.push_back( static_cast<qint64>( buffer.size() ) );
+        }
+
+        RegularExpression expression( RegularExpressionPattern( QStringLiteral( "aaa" ), true, false,
+                                                                false, false ) );
+        const auto matcher = expression.createMatcher();
+
+        std::set<size_t> perLine;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            if ( matcher->hasMatch( std::string_view{ lines[ i ] } ) ) {
+                perLine.insert( i );
+            }
+        }
+
+        klogg::vector<uint64_t> blockMatches;
+        REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
+                                      endOfLines, blockMatches ) );
+        REQUIRE( blockMatches.size() == 1 );
+        REQUIRE( blockMatches[ 0 ] == 0 );
+        std::set<size_t> blockSet;
+        for ( const auto idx : blockMatches ) {
+            blockSet.insert( static_cast<size_t>( idx ) );
+        }
+        REQUIRE( blockSet == perLine );
+    }
+
+    SECTION( "an unterminated final line is attributed via the size sentinel" )
+    {
+        // Last line has no trailing newline; endOfLines.back() == buffer.size()
+        // acts as the sentinel (mirrors single-file's fake-LF index entry and
+        // folder's appended sentinel), so the last line still maps correctly.
+        const std::vector<std::string> lines = { "error one", "error two", "error three no newline" };
+        std::string buffer;
+        klogg::vector<qint64> endOfLines;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            buffer += lines[ i ];
+            if ( i + 1 < lines.size() ) {
+                buffer += '\n';
+            }
+            endOfLines.push_back( static_cast<qint64>( buffer.size() ) );
+        }
+
+        RegularExpression expression( RegularExpressionPattern( QStringLiteral( "error" ), true, false,
+                                                                false, false ) );
+        const auto matcher = expression.createMatcher();
+
+        std::set<size_t> perLine;
+        for ( size_t i = 0; i < lines.size(); ++i ) {
+            if ( matcher->hasMatch( std::string_view{ lines[ i ] } ) ) {
+                perLine.insert( i );
+            }
+        }
+        REQUIRE( perLine.size() == 3 );
+
+        klogg::vector<uint64_t> blockMatches;
+        REQUIRE( matcher->scanBuffer( buffer.data(), static_cast<unsigned int>( buffer.size() ),
+                                      endOfLines, blockMatches ) );
+        REQUIRE( blockMatches.size() == 3 );
+        REQUIRE( blockMatches[ 2 ] == 2 ); // the unterminated final line
+        std::set<size_t> blockSet;
+        for ( const auto idx : blockMatches ) {
+            blockSet.insert( static_cast<size_t>( idx ) );
+        }
+        REQUIRE( blockSet == perLine );
+    }
+}
+
 TEST_CASE( "Block scan falls back when Vectorscan is unavailable", "[patternmatcher]" )
 {
     // Force the Qt regex engine, which does not support block scanning.

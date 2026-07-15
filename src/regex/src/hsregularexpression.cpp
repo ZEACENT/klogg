@@ -23,7 +23,6 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
-#include <set>
 #include <qregularexpression.h>
 #include <string_view>
 
@@ -67,31 +66,37 @@ int matchMultiCallback( unsigned int id, unsigned long long from, unsigned long 
 // The context carries endOfLines offsets for binary-search mapping.
 struct BufferScanContext {
     const klogg::vector<qint64>* endOfLines;
-    klogg::vector<uint64_t>* matchedLineIndices;
     // For multi-pattern boolean mode:
     std::vector<MatchedPatterns>* perLinePatterns;
-    // Robust dedup: Vectorscan reports matches in byte-offset order for block
-    // mode, but we use a set to be safe against any future pattern type that
-    // could produce out-of-order callbacks.
-    std::set<uint64_t>* seenLines;
+    // Occupancy bitset (one byte per line) for O(1) dedup with zero per-match
+    // allocation: a line that matches in several positions triggers several
+    // callbacks, all mapping to the same line index; only the first sets the
+    // bit. The scanner collects set bits in ascending order after the scan, so
+    // the output is sorted and deduped by construction. Sized to
+    // endOfLines.size() by HsBufferScanner::scan.
+    std::vector<unsigned char>* seenLines;
 };
 
 int bufferScanSingleCallback( unsigned int id, unsigned long long from, unsigned long long to,
                                unsigned int flags, void* context )
 {
     Q_UNUSED( id );
-    Q_UNUSED( from );
     Q_UNUSED( flags );
 
     auto* ctx = static_cast<BufferScanContext*>( context );
-    // Binary search: find the line that contains byte offset 'to - 1'
-    const auto matchByte = static_cast<qint64>( to > 0 ? to - 1 : to );
+    // Attribute the match to the line containing its last byte (to - 1). For a
+    // ZERO-WIDTH match (from == to, e.g. ^, ^$, \b, a* matching empty) at a line
+    // boundary, to - 1 lands on the previous line's terminator and would
+    // mis-attribute; use `to` so the empty match maps to the line starting there.
+    const auto matchByte = static_cast<qint64>( ( from < to && to > 0 ) ? to - 1 : to );
     auto it = std::upper_bound( ctx->endOfLines->cbegin(), ctx->endOfLines->cend(), matchByte );
     const auto lineIndex = static_cast<uint64_t>( std::distance( ctx->endOfLines->cbegin(), it ) );
 
-    // Deduplicate: multiple matches in the same line produce multiple callbacks
-    if ( ctx->seenLines->insert( lineIndex ).second ) {
-        ctx->matchedLineIndices->push_back( lineIndex );
+    // Deduplicate (idempotent bit set) with a bounds guard: endOfLines must be
+    // sized so its back() >= scanned size (a sentinel for an unterminated final
+    // line), which keeps lineIndex < seenLines->size(); the guard is defensive.
+    if ( lineIndex < ctx->seenLines->size() ) {
+        ( *ctx->seenLines )[ lineIndex ] = 1;
     }
     return 0; // continue scanning
 }
@@ -208,15 +213,28 @@ void HsBufferScanner::scan( const char* data, unsigned int size,
         return;
     }
 
-    std::set<uint64_t> seenLines;
+    // One byte per line (not a packed bitset): direct indexing in the callback
+    // with no proxy/reference cost, at a negligible memory cost (chunk line
+    // count). This replaces a std::set dedup whose per-distinct-line node
+    // allocation was the dominant per-match overhead.
+    std::vector<unsigned char> seenLines( endOfLines.size(), 0 );
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
-    ctx.matchedLineIndices = &matchedLineIndices;
     ctx.perLinePatterns = nullptr;
     ctx.seenLines = &seenLines;
 
     hs_scan( database_.get(), data, size, 0, scratch_.get(), bufferScanSingleCallback,
              static_cast<void*>( &ctx ) );
+
+    // Collect matched line indices in ascending order: sorted and deduped by
+    // construction (one pass over the occupancy vector). Cheaper and simpler
+    // than the old std::set, and gives callers a guaranteed-ordered result.
+    matchedLineIndices.clear();
+    for ( size_t i = 0; i < seenLines.size(); ++i ) {
+        if ( seenLines[ i ] ) {
+            matchedLineIndices.push_back( static_cast<uint64_t>( i ) );
+        }
+    }
 }
 
 void HsBufferScanner::scanMulti( const char* data, unsigned int size,
@@ -229,7 +247,6 @@ void HsBufferScanner::scanMulti( const char* data, unsigned int size,
 
     BufferScanContext ctx{};
     ctx.endOfLines = &endOfLines;
-    ctx.matchedLineIndices = nullptr;
     ctx.perLinePatterns = &perLinePatterns;
     ctx.seenLines = nullptr; // multi callback doesn't need dedup (idempotent set)
 
@@ -354,7 +371,16 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
             klogg::vector<unsigned> flags( expressions.size() );
             std::transform( expressions.cbegin(), expressions.cend(), flags.begin(),
                             []( const auto& expression ) {
-                                auto expressionFlags = HS_FLAG_UTF8 | HS_FLAG_UCP;
+                                // HS_FLAG_MULTILINE: ^ / $ match at each line
+                                // boundary (after/before every '\n') plus the buffer
+                                // edges, so a whole-buffer scan agrees with the
+                                // per-line scan for line-anchored patterns. Without
+                                // it, ^ERROR would match only at the buffer start and
+                                // silently undercount. (Does not affect '.' matching
+                                // '\n' -- that is HS_FLAG_DOTALL, intentionally off,
+                                // so .* still stops at line ends.)
+                                auto expressionFlags
+                                    = HS_FLAG_UTF8 | HS_FLAG_UCP | HS_FLAG_MULTILINE;
                                 if ( !expression.isCaseSensitive ) {
                                     expressionFlags |= HS_FLAG_CASELESS;
                                 }

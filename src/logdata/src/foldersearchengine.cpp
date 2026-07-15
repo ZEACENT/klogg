@@ -23,9 +23,11 @@
 #include <QTextCodec>
 
 #include <algorithm>
+#include <cstring>
 #include <string_view>
 #include <utility>
 
+#include "configuration.h"
 #include "encodingdetector.h"
 #include "encodingutils.h"
 #include "foldersearchtypes.h"
@@ -34,6 +36,11 @@
 #include "regularexpression.h"
 
 namespace {
+
+// Whole-file vectorscan fast path is used only for files up to this size so a
+// folder of many large logs cannot blow up memory; bigger files stream through
+// the per-line path below.
+constexpr qint64 FastPathMaxBytes = 16LL * 1024 * 1024; // 16 MiB
 
 // True if `shouldStop` is set and reports stop. A null predicate never stops.
 bool stopped( const std::function<bool()>& shouldStop )
@@ -285,6 +292,96 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
     QFile file( path );
     if ( !file.open( QIODevice::ReadOnly | QIODevice::Unbuffered ) ) {
         return group; // unreadable -> no matches
+    }
+
+    // === Whole-file vectorscan fast path ===
+    // For a single (non-boolean/non-inverse) regex on a UTF-8 file that fits in
+    // memory and needs no context (-A/-B/-C) capture, scan the entire file with
+    // one vectorscan pass (PatternMatcher::scanBuffer) instead of a hasMatch
+    // call per line. This is the same block-scan technique the single-file
+    // (LogFilteredData) path uses, and lifts folder search throughput to
+    // single-file parity -- competitive with / faster than ripgrep. The streaming
+    // per-line scan below remains the fallback for multi-byte encodings,
+    // boolean/inverse patterns, context capture, or files over the cap.
+    if ( Configuration::get().useBlockScan() && matcher.hasBufferScan()
+         && context.before == 0 && context.after == 0 ) {
+        const qint64 fastFileSize = file.size();
+        if ( fastFileSize > 0 && fastFileSize <= FastPathMaxBytes ) {
+            QByteArray whole = file.readAll();
+            if ( whole.size() == static_cast<int>( fastFileSize ) ) {
+                const char* const wdata = whole.constData();
+                const qint64 wbytes = whole.size();
+                const qint64 detectLen = std::min<qint64>( wbytes, BinaryDetectionWindow );
+                const klogg::vector<char> firstVec( wdata, wdata + detectLen );
+                QTextCodec* fastCodec
+                    = EncodingDetector::getInstance().detectEncoding( firstVec );
+                EncodingParameters fastParams;
+                if ( fastCodec != nullptr ) {
+                    fastParams = EncodingParameters( fastCodec );
+                    group.sourceCodec = fastCodec;
+                }
+                const bool utf8SingleByte
+                    = fastParams.isUtf8Compatible && fastParams.lineFeedWidth == 1;
+                const bool binary = memchr( firstVec.data(), '\0',
+                                             static_cast<size_t>( firstVec.size() ) )
+                                    != nullptr;
+                if ( utf8SingleByte && !binary ) {
+                    // Byte offset one past each LF; append a sentinel == file size
+                    // when the final line has no trailing newline so every line
+                    // maps to exactly one endOfLines entry (scanBuffer attributes a
+                    // match's end byte to a line via upper_bound on this vector).
+                    klogg::vector<qint64> endOfLines;
+                    endOfLines.reserve( static_cast<size_t>( wbytes / 40 ) + 1 );
+                    // memchr (SIMD) locates newlines far faster than a per-byte
+                    // branch loop; this line-boundary precompute is the dominant
+                    // remaining gap to ripgrep (which attributes lines lazily).
+                    const char* np = wdata;
+                    const char* const nend = wdata + wbytes;
+                    while ( np < nend ) {
+                        np = static_cast<const char*>(
+                            memchr( np, '\n', static_cast<size_t>( nend - np ) ) );
+                        if ( np == nullptr ) {
+                            break;
+                        }
+                        endOfLines.push_back( static_cast<qint64>( np - wdata ) + 1 );
+                        ++np;
+                    }
+                    if ( endOfLines.empty() || endOfLines.back() != wbytes ) {
+                        endOfLines.push_back( wbytes ); // sentinel: unterminated last line
+                    }
+
+                    klogg::vector<uint64_t> matched;
+                    matcher.scanBuffer( wdata, static_cast<unsigned int>( wbytes ), endOfLines,
+                                        matched );
+                    // scanBuffer returns matched line indices ascending and
+                    // deduped (occupancy-vector collect), which is exactly the
+                    // localLine-ascending, deduped order the results layer expects.
+
+                    group.matches.reserve( matched.size() );
+                    for ( const uint64_t idx : matched ) {
+                        const qint64 end = endOfLines[ idx ];
+                        const qint64 start = ( idx == 0u ) ? 0 : endOfLines[ idx - 1u ];
+                        // Content excludes the trailing LF (it sits at end-1).
+                        const qint64 contentLen
+                            = ( end > start && wdata[ end - 1 ] == '\n' ) ? end - 1 - start
+                                                                          : end - start;
+                        const std::string_view lineView(
+                            wdata + start, static_cast<size_t>( std::max<qint64>( contentLen, 0 ) ) );
+                        klogg::folder::MatchRecord r;
+                        r.localLine = LineNumber( idx );
+                        r.lineStartByte = OffsetInFile( start );
+                        r.lineEndByte = OffsetInFile( end );
+                        r.lineLength = getUntabifiedLength( lineView );
+                        r.matchLen = 0_length;
+                        r.role = klogg::folder::RecordRole::Match;
+                        group.matches.push_back( std::move( r ) );
+                    }
+                    return group;
+                }
+            }
+            // Fast path not taken: rewind for the streaming per-line scan.
+            file.seek( 0 );
+        }
     }
 
     OffsetInFile fileOffset = 0_offset; // absolute byte offset of block[0]
