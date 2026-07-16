@@ -107,9 +107,10 @@ int main( int argc, char* argv[] )
 #else
     config.setRegexpEnging( RegexpEngine::QRegularExpression );
 #endif
-    // Block scan (PatternMatcher::scanBuffer) is now the default for eligible
-    // patterns (single/non-boolean/non-inverse), so the folder engine's
-    // whole-file fast path activates without any extra flag.
+    // Explicitly enable the block-scan fast path: this benchmark measures it, so
+    // do not let a persisted perf.useBlockScan=false (e.g. from the main app's
+    // QSettings, which getSynced() re-reads) silently switch to per-line.
+    config.setUseBlockScan( true );
 
     const QStringList args = QCoreApplication::arguments();
     auto valueOf = [ &args ]( const QString& key, const QString& fallback ) -> QString {
