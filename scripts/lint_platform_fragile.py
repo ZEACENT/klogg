@@ -352,6 +352,64 @@ def _check_qt5_arg_limit(text: str, path: Path) -> list[tuple[int, str]]:
     return findings
 
 
+def _check_vectorscan_capability_assertion(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag test assertions that unconditionally REQUIRE hasBufferScan().
+
+    PatternMatcher::hasBufferScan() is compiled to ``return false`` on
+    KLOGG_USE_VECTORSCAN=OFF builds -- e.g. the Windows x86-qt5 [QTRegex]
+    CI job -- so an unguarded REQUIRE passes on every vectorscan-enabled
+    dev machine (macOS / Linux / Windows x64) and fails only there.
+    PR #42 broke exactly that job with
+    ``REQUIRE( matcher->hasBufferScan() )`` in foldersearchengine_test.cpp.
+
+    Gate the test on the capability instead of asserting it: early-return
+    (vacuous pass) when the matcher has no buffer scanner, or guard on
+    ``config.regexpEngine() != RegexpEngine::Vectorscan`` -- the same
+    contract as patternmatcher_test's block-scan parity test. A REQUIRE
+    preceded by either guard inside the same TEST_CASE is accepted.
+    """
+    if "test" not in path.name or ALLOW_MARKER in text:
+        return []
+
+    findings: list[tuple[int, str]] = []
+
+    assertion_re = re.compile(r"\b(?:REQUIRE|CHECK)\s*\([^;]*hasBufferScan\s*\(")
+    # Guards that make the assertion reachable only when block scan exists:
+    #   if ( !matcher->hasBufferScan() ) { return; }
+    #   if ( config.regexpEngine() != RegexpEngine::Vectorscan ) { return; }
+    guard_re = re.compile(
+        r"!\s*\w+\s*->\s*hasBufferScan\s*\("
+        r"|regexpEngine\s*\(\s*\)\s*!=\s*RegexpEngine::Vectorscan"
+    )
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines, start=1):
+        if not assertion_re.search(line):
+            continue
+        # Find the start of the enclosing TEST_CASE (0 = file scope).
+        case_start = 0
+        for j in range(i - 1, 0, -1):
+            if "TEST_CASE(" in lines[j - 1]:
+                case_start = j
+                break
+        guarded = any(
+            guard_re.search(lines[k - 1]) for k in range(case_start, i)
+        )
+        if not guarded:
+            findings.append(
+                (
+                    i,
+                    "Do not REQUIRE/CHECK matcher->hasBufferScan() unconditionally: "
+                    "it is always false on KLOGG_USE_VECTORSCAN=OFF builds "
+                    "(Windows x86-qt5 [QTRegex] CI job). Early-return with a "
+                    "vacuous pass when the capability is absent instead "
+                    "(PR #42).",
+                )
+            )
+
+    return findings
+
+
 def _check_data_variable_shadowing(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag local variables named ``data`` inside QWidget subclass methods.
 
@@ -490,6 +548,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qt5-string-arg-limit",
         "check": _check_qt5_arg_limit,
+    },
+    {
+        "name": "vectorscan-capability-assertion",
+        "check": _check_vectorscan_capability_assertion,
     },
     {
         "name": "data-variable-shadowing",
