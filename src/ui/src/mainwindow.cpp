@@ -2234,6 +2234,13 @@ void MainWindow::currentTabChanged( int index )
                 // (lambda+UniqueConnection warns and accumulates duplicates).
                 connect( folder_widget->mainView(), &AbstractLogView::newSelection, this,
                          &MainWindow::onFolderMainViewNewSelection, Qt::UniqueConnection );
+                // Scratchpad forwarding: single-file tabs reach these slots via
+                // SignalMux (string slots); the folder is not a mux document,
+                // so its equivalent widget-level signals are direct-connected.
+                connect( folder_widget, &FolderCrawlerWidget::sendToScratchpad, this,
+                         &MainWindow::sendToScratchpad, Qt::UniqueConnection );
+                connect( folder_widget, &FolderCrawlerWidget::replaceDataInScratchpad, this,
+                         &MainWindow::replaceDataInScratchpad, Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.

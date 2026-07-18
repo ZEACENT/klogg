@@ -88,8 +88,9 @@ void LogMainView::doRegisterShortcuts()
 {
     LOG_INFO << "Registering shortcuts for main view";
     AbstractLogView::doRegisterShortcuts();
-    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] { selectNextMark(); } );
-    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] { selectPrevMark(); } );
+    // LogViewNextMark/LogViewPrevMark are registered by the base; this class
+    // only overrides selectNextMark/selectPrevMark below to use the
+    // LogFilteredData mark index instead of the default linear walk.
 }
 
 void LogMainView::selectNextMark()

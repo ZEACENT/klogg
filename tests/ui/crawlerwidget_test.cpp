@@ -256,6 +256,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return shortcut != view->shortcuts_.end() ? shortcut->second : nullptr;
     }
 
+    static OptionalLineNumber selectedLine( const AbstractLogView* view )
+    {
+        return view->selection_.selectedLine();
+    }
+
     static const std::vector<AbstractLogView::QuickHighlighters>&
     quickHighlighters( const AbstractLogView* view )
     {
@@ -486,6 +491,22 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         QTest::keyClick( crawler->filteredView_->viewport(), key );
         QTest::qWait( 20 );
+    }
+
+    void pressMainViewConfiguredShortcut( const std::string& action )
+    {
+        pressConfiguredShortcut( crawler->logMainView_->viewport(), action );
+    }
+
+    void pressFilteredViewConfiguredShortcut( const std::string& action )
+    {
+        pressConfiguredShortcut( crawler->filteredView_->viewport(), action );
+    }
+
+    OptionalLineNumber mainSelectedLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLine(
+            crawler->logMainView_ );
     }
 
     void activateMainViewShortcut( Qt::Key key )
@@ -857,6 +878,24 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         crawler->markLinesFromMain( lines );
         QTest::qWait( 20 );
+    }
+
+    void selectFilteredViewLine( LineNumber::UnderlyingType lineIndex )
+    {
+        crawler->filteredView_->selectAndDisplayLine( LineNumber( lineIndex ) );
+        QTest::qWait( 50 );
+    }
+
+    void addMarksInFilteredView( const klogg::vector<LineNumber>& lines )
+    {
+        crawler->markLinesFromFiltered( lines );
+        QTest::qWait( 20 );
+    }
+
+    OptionalLineNumber filteredSelectedLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLine(
+            crawler->filteredView_ );
     }
 
     void deleteMarksInMainView( const klogg::vector<LineNumber>& lines )
@@ -1242,6 +1281,67 @@ SCENARIO( "Crawler widget search", "[ui]" )
                 THEN( "all marks are removed" )
                 {
                     REQUIRE( crawlerVisitor.markedLinesCount() == 0 );
+                }
+            }
+        }
+
+        WHEN( "bracket mark navigation is used in the filtered view" )
+        {
+            crawlerVisitor.setSearchPattern( "this is line" );
+            crawlerVisitor.runSearch();
+            REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES );
+
+            // Mark filtered rows 0 and 2, then place the selection between
+            // them: "]" must jump DOWN to the next mark, "[" UP to the
+            // previous one.
+            crawlerVisitor.addMarksInFilteredView( { 0_lnum, 2_lnum } );
+            crawlerVisitor.selectFilteredViewLine( 1 );
+            crawlerVisitor.focusFilteredView();
+
+            THEN( "] jumps to the next marked row" )
+            {
+                crawlerVisitor.pressFilteredViewConfiguredShortcut(
+                    ShortcutAction::LogViewNextMark );
+                const auto selected = crawlerVisitor.filteredSelectedLine();
+                REQUIRE( selected.has_value() );
+                REQUIRE( *selected == 2_lnum );
+
+                AND_THEN( "[ jumps back to the previous marked row" )
+                {
+                    crawlerVisitor.pressFilteredViewConfiguredShortcut(
+                        ShortcutAction::LogViewPrevMark );
+                    const auto back = crawlerVisitor.filteredSelectedLine();
+                    REQUIRE( back.has_value() );
+                    REQUIRE( *back == 0_lnum );
+                }
+            }
+        }
+
+        WHEN( "bracket mark navigation is used in the main view" )
+        {
+            // LogMainView overrides the hoisted base navigation with the
+            // LogFilteredData mark index. The selection routinely sits on an
+            // UNMARKED line, where prev-mark must return the NEAREST mark
+            // above (rank() is inclusive, so an off-by-one here skips a mark).
+            crawlerVisitor.addMarksInMainView( { 10_lnum, 25_lnum } );
+            crawlerVisitor.selectMainViewLine( 20 );
+            crawlerVisitor.focusMainView();
+
+            THEN( "[ jumps to the nearest mark above an unmarked line" )
+            {
+                crawlerVisitor.pressMainViewConfiguredShortcut(
+                    ShortcutAction::LogViewPrevMark );
+                const auto selected = crawlerVisitor.mainSelectedLine();
+                REQUIRE( selected.has_value() );
+                REQUIRE( *selected == 10_lnum );
+
+                AND_THEN( "] jumps to the next mark below" )
+                {
+                    crawlerVisitor.pressMainViewConfiguredShortcut(
+                        ShortcutAction::LogViewNextMark );
+                    const auto next = crawlerVisitor.mainSelectedLine();
+                    REQUIRE( next.has_value() );
+                    REQUIRE( *next == 25_lnum );
                 }
             }
         }

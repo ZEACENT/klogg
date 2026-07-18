@@ -60,11 +60,11 @@ class LogMainView : public AbstractLogView
     // Should be NULL or the empty LFD if no filtering is used
     void useNewFiltering( LogFilteredData* filteredData );
 
-    // Jump the cursor to the next / previous marked line. No-op when the view
-    // has no LogFilteredData (folder mode never calls useNewFiltering) -- the
-    // LogViewNextMark/LogViewPrevMark shortcuts used to dereference it and crash.
-    void selectNextMark();
-    void selectPrevMark();
+    // Jump the cursor to the next / previous marked line. Overrides the
+    // AbstractLogView default (linear lineType walk) with the LogFilteredData
+    // mark index; falls back to the injected MarkProvider in folder mode.
+    void selectNextMark() override;
+    void selectPrevMark() override;
 
   protected:
     // Implements the virtual function

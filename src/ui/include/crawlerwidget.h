@@ -58,6 +58,7 @@
 
 #include "colorlabelscontroller.h"
 #include "filteredview.h"
+#include "viewsignalwiring.h"
 #include "iconloader.h"
 #include "linetypes.h"
 #include "loadingstatus.h"
@@ -242,25 +243,12 @@ class CrawlerWidget : public QSplitter,
     // Called when the user change the visibility combobox
     void changeFilteredViewVisibility( int index );
 
-    // Called when the user add the string to the search
-    void addToSearch( const QString& string );
-
-    // Called when the user replaces the search with the selection string
-    void replaceSearch( const QString& string );
-
-    // Called when the user excludes selection string from search
-    // works only in boolean combination mode
-    void excludeFromSearch( const QString& string );
-
     void clearSearchHistory();
     void editSearchHistory();
 
     // Save current search as a favorite filter
     void saveAsFavorite();
     void setSearchPatternFromPredefinedFilters( const QList<PredefinedFilter>& filters );
-
-    // Called when a match is hovered on in the filtered view
-    void mouseHoveredOverMatch( LineNumber line );
 
     // Called when there was activity in the views
     void activityDetected();
@@ -353,8 +341,6 @@ class CrawlerWidget : public QSplitter,
 
     void saveSplitterSizes() const;
 
-    void changeFontSize( bool increase );
-
     // Palette for error notification (yellow background)
     static const QPalette ErrorPalette;
 
@@ -434,6 +420,12 @@ class CrawlerWidget : public QSplitter,
     // highlighters in every view. Shared with FolderCrawlerWidget so both tab
     // kinds get identical color-label behavior by composition.
     ColorLabelsController colorLabelsController_;
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter /
+    // font zoom / exitView / highlightersChange / hover) -- unique_ptr because
+    // it needs searchToolbar_, created in setup(). Shared with
+    // FolderCrawlerWidget so both tab kinds get identical wiring.
+    std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
 
     qint64 searchPendingLines_ = 0;
 

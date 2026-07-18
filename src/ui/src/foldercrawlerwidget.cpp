@@ -32,6 +32,7 @@
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QShortcut>
 #include <QSplitter>
 #include <QToolButton>
 #include <QTabWidget>
@@ -41,6 +42,7 @@
 
 #include "abstractlogview.h"
 #include "configuration.h"
+#include "crawlershortcuts.h"
 #include "filterdiffdialog.h"
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
@@ -174,6 +176,39 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // toggles + Search/Stop buttons. Folder mode passes null SavedSearches
     // (no history). Collapse/expand + status label sit alongside it.
     searchToolbar_ = new SearchToolbar( this, nullptr );
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter
+    // save / font zoom / exitView / highlightersChange / hover-highlight) --
+    // the same component CrawlerWidget uses, so folder views cannot drift from
+    // single-file behavior again. Hooks adapt the host-specific parts.
+    {
+        ViewSignalWiring::Hooks hooks;
+        hooks.sendToScratchpad
+            = [ this ]( const QString& text ) { Q_EMIT sendToScratchpad( text ); };
+        hooks.replaceScratchpad
+            = [ this ]( const QString& text ) { Q_EMIT replaceDataInScratchpad( text ); };
+        hooks.saveSplitterSizes = [ this ]() {
+            auto& splitterConfig = Configuration::get();
+            splitterConfig.setSplitterSizes( splitter_->sizes() );
+            splitterConfig.save();
+        };
+        hooks.exitView = [ this ]( AbstractLogView* fromView ) {
+            if ( fromView == mainView_ ) {
+                if ( auto* const fv = activeFilteredView() ) {
+                    fv->setFocus();
+                }
+            }
+            else {
+                mainView_->setFocus();
+            }
+        };
+        hooks.applyConfiguration = [ this ]() { applyConfiguration(); };
+        hooks.hoveredOverLine
+            = [ this ]( AbstractLogView* view, LineNumber row ) { highlightOverviewForRow( view, row ); };
+        hooks.leftHoveringZone = [ this ]() { overviewWidget_->removeHighlight(); };
+        viewSignalWiring_
+            = std::make_unique<ViewSignalWiring>( this, searchToolbar_, std::move( hooks ) );
+    }
     // Folder search is a one-shot grep (no file watching) with no notion of
     // predefined filters, favorites, keep-results, or auto-refresh -- hide
     // those file-search-only controls so the toolbar is not littered with
@@ -243,12 +278,19 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     mainView_ = new LogMainView( placeholderData_.get(), quickFindPattern_.get(), &overview_,
                                  overviewWidget_, this );
     overviewWidget_->setParent( mainView_ );
-    overview_.setVisible( Configuration::getSynced().isOverviewVisible() );
+    overview_.setVisible( Configuration::get().isOverviewVisible() );
     mainView_->refreshOverview();
 
     // Color labels: route the view's context-menu signals to the shared
     // controller so labels highlight in every view (single-file parity).
     colorLabelsController_.watchView( mainView_ );
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter /
+    // font zoom / exitView / highlightersChange). Folder search cannot honor
+    // line-range limits, so those menu entries are hidden instead of
+    // misleadingly graying the view.
+    viewSignalWiring_->wireView( mainView_ );
+    mainView_->setControlsSearchLimits( false );
 
     // Folder-mode marks: inject a per-file MarkProvider so the main view's mark
     // bullet + Next/Prev-mark navigation work without LogFilteredData. The
@@ -294,8 +336,9 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     splitter_ = new QSplitter( Qt::Vertical, this );
     splitter_->addWidget( mainView_ );
     splitter_->addWidget( bottomWindow );
-    splitter_->setStretchFactor( 0, 3 );
-    splitter_->setStretchFactor( 1, 2 );
+    // Watched for its first Resize to seed the default proportions (see
+    // eventFilter): any earlier setSizes is discarded by the initial layout.
+    splitter_->installEventFilter( this );
 
     // Seed the first pane AFTER resultsTabs_ is laid out + mainView_ exists.
     // Block currentChanged so the seed addTab does not fire onActivePaneChanged
@@ -405,6 +448,23 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
 }
 
 FolderCrawlerWidget::~FolderCrawlerWidget() = default;
+
+bool FolderCrawlerWidget::eventFilter( QObject* obj, QEvent* event )
+{
+    // Splitter proportions, mirroring CrawlerWidget::setup: a session-restored
+    // per-tab context wins; NEW folder tabs seed from the saved global default
+    // ("Save splitter position" in any tab). Applied on the splitter's first
+    // Resize -- the first moment it has real geometry; setSizes any earlier
+    // (ctor / showEvent / zero-delay timer) is discarded by the splitter's
+    // initial layout, which clamps the bottom pane to its minimum size.
+    if ( obj == splitter_ && event->type() == QEvent::Resize && !splitterSeedApplied_ ) {
+        splitterSeedApplied_ = true;
+        splitter_->setSizes( !pendingSplitterSizes_.isEmpty()
+                                 ? pendingSplitterSizes_
+                                 : Configuration::get().splitterSizes() );
+    }
+    return QWidget::eventFilter( obj, event );
+}
 
 void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringList& filePaths )
 {
@@ -650,6 +710,12 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     // (seeded with any labels already set before the pane existed).
     colorLabelsController_.watchView( view );
 
+    // Shared view-signal wiring + hover -> minimap highlight for the results
+    // view (single-file wires hover on the filtered view only).
+    viewSignalWiring_->wireView( view );
+    viewSignalWiring_->wireHover( view );
+    view->setControlsSearchLimits( false );
+
     // Per-pane signal wiring (self-contained: switching tabs needs no re-wiring).
     connect( view, &FolderFilteredView::newSelection, this, &FolderCrawlerWidget::onResultSelected );
     connect( view, &FolderFilteredView::headerClicked, this, &FolderCrawlerWidget::onHeaderClicked );
@@ -887,6 +953,23 @@ void FolderCrawlerWidget::applyConfiguration()
 
 void FolderCrawlerWidget::registerShortcuts()
 {
+    for ( auto& shortcut : shortcuts_ ) {
+        shortcut.second->deleteLater();
+    }
+    shortcuts_.clear();
+
+    // Widget-level crawler family (visibility cycling, option toggles,
+    // keep-results, top-view resize, Esc refocus): shared with CrawlerWidget
+    // via klogg::registerCrawlerShortcuts. Auto-refresh is excluded because
+    // the folder toolbar hides that button.
+    klogg::CrawlerShortcutHooks hooks;
+    hooks.visibilityBox = [ this ]() { return visibilityBox_; };
+    hooks.searchToolbar = [ this ]() { return searchToolbar_; };
+    hooks.changeTopViewSize = [ this ]( int delta ) { changeTopViewSize( delta ); };
+    hooks.activeView = [ this ]() { return activeView(); };
+    hooks.includeAutoRefresh = false;
+    klogg::registerCrawlerShortcuts( this, shortcuts_, hooks );
+
     // Register view-level keyboard shortcuts on both views, mirroring
     // CrawlerWidget (crawlerwidget.cpp:1725-1726). Without this, arrow keys,
     // PgUp/PgDn, jump-to-top/bottom, and the other AbstractLogView shortcuts are
@@ -902,6 +985,27 @@ void FolderCrawlerWidget::registerShortcuts()
     // Cmd+Shift+0 clear) — the single-file CrawlerWidget registers these on
     // itself; the shared controller does the same for this tab.
     colorLabelsController_.registerShortcuts();
+}
+
+void FolderCrawlerWidget::changeTopViewSize( int delta )
+{
+    if ( splitter_ == nullptr ) {
+        return;
+    }
+
+    // CrawlerWidget uses QSplitter::moveSplitter (it IS the splitter); here the
+    // splitter is a child, so adjust sizes directly. QSplitter clamps to the
+    // children's minimum sizes, mirroring closestLegalPosition.
+    auto sizes = splitter_->sizes();
+    if ( sizes.size() != 2 ) {
+        return;
+    }
+
+    const int step = delta * 10;
+    const int total = sizes.at( 0 ) + sizes.at( 1 );
+    int newTop = sizes.at( 0 ) + step;
+    newTop = qBound( 0, newTop, total );
+    splitter_->setSizes( { newTop, total - newTop } );
 }
 
 AbstractLogView* FolderCrawlerWidget::activeView() const
@@ -1117,7 +1221,15 @@ void FolderCrawlerWidget::doSetViewContext( const QString& view_context )
     const FolderCrawlerContext context{ view_context };
 
     if ( splitter_ != nullptr && !context.sizes().isEmpty() ) {
-        splitter_->setSizes( context.sizes() );
+        // Per-tab session sizes beat the global default seeded on first
+        // geometry. Restore can run while the tab is still hidden (pre-layout
+        // setSizes is discarded), so the sizes are stashed and applied by the
+        // event filter on the splitter's first Resize; if the splitter already
+        // has real geometry, apply immediately.
+        pendingSplitterSizes_ = context.sizes();
+        if ( splitterSeedApplied_ ) {
+            splitter_->setSizes( pendingSplitterSizes_ );
+        }
     }
 
     // Restore toggles first (idempotent; optionsChanged is not wired to a
@@ -1288,7 +1400,8 @@ void FolderCrawlerWidget::onFileGroupReady( int fileIndex, quint64 generation )
     }
 }
 
-void FolderCrawlerWidget::onResultSelected( LineNumber line, LinesCount, LineColumn, LineLength )
+void FolderCrawlerWidget::onResultSelected( LineNumber line, LinesCount nLines,
+                                            LineColumn startCol, LineLength nSymbols )
 {
     auto* results = activeResults();
     if ( results == nullptr || line >= results->getNbLine() ) {
@@ -1298,7 +1411,51 @@ void FolderCrawlerWidget::onResultSelected( LineNumber line, LinesCount, LineCol
         return;
     }
     const auto source = results->sourceForLine( line );
-    openFileInMainView( source.filePath, source.localLine );
+
+    // Single-file parity (CrawlerWidget::jumpToMatchingLine): `line` is the
+    // drag's moving end; the range/portion payload is forwarded unchanged --
+    // the main view selects that source line and re-emits the payload for the
+    // status bar. Recomputing a span from neighboring rows would inflate the
+    // payload for non-contiguous matches (and mis-handle upward drags).
+    openFileInMainView( source.filePath, source.localLine, nLines, startCol, nSymbols );
+}
+
+void FolderCrawlerWidget::selectInMainView( LineNumber line, LinesCount nLines,
+                                            LineColumn startCol, LineLength nSymbols )
+{
+    if ( nSymbols.get() > 0 || nLines.get() > 1 ) {
+        mainView_->selectPortionAndDisplayLine( line, nLines, startCol, nSymbols );
+    }
+    else {
+        mainView_->selectAndDisplayLine( line );
+    }
+}
+
+void FolderCrawlerWidget::highlightOverviewForRow( const AbstractLogView* view, LineNumber row )
+{
+    // The hovered results row resolves to (file, localLine) via the pane that
+    // owns the view; highlight it in the overview only when that file is the
+    // one currently open in the main view (the overview is per-file). Any row
+    // that does not resolve to the open file CLEARS the previous highlight --
+    // otherwise a stale marker lingers while hovering header/foreign rows
+    // (single-file's hover hook re-targets or clears on every hover).
+    for ( const auto& pane : panes_ ) {
+        if ( pane == nullptr || pane->view != view || pane->results == nullptr ) {
+            continue;
+        }
+        if ( row < pane->results->getNbLine()
+             && pane->results->lineKind( row ) == LineKind::Data ) {
+            const auto source = pane->results->sourceForLine( row );
+            if ( source.filePath == currentMainFilePath_ && overviewWidget_ != nullptr ) {
+                overviewWidget_->highlightLine( source.localLine );
+                return;
+            }
+        }
+        if ( overviewWidget_ != nullptr ) {
+            overviewWidget_->removeHighlight();
+        }
+        return;
+    }
 }
 
 void FolderCrawlerWidget::onHeaderClicked( LineNumber line )
@@ -1328,7 +1485,9 @@ void FolderCrawlerWidget::expandAll()
     }
 }
 
-void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumber localLine )
+void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumber localLine,
+                                              LinesCount nLines, LineColumn startCol,
+                                              LineLength nSymbols )
 {
     if ( filePath.isEmpty() ) {
         return;
@@ -1340,7 +1499,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         // select+announce (not just scroll) so the Ln: field and the selection
         // highlight track the clicked result -- parity with single-file, whose
         // main view selects the line a filtered-view click jumps to.
-        mainView_->selectAndDisplayLine( localLine );
+        selectInMainView( localLine, nLines, startCol, nSymbols );
         return;
     }
 
@@ -1360,7 +1519,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         mainView_->setSearchPattern( currentSearchPattern_ );
         // A cached file already had its display codec synced on first load, so
         // no applyDetectedEncoding() here.
-        mainView_->selectAndDisplayLine( localLine );
+        selectInMainView( localLine, nLines, startCol, nSymbols );
         refreshFileOverview( filePath );
         Q_EMIT mainViewFileChanged();
         return;
@@ -1369,6 +1528,9 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     // Not loaded yet -> index the file asynchronously, then swap + jump.
     pendingMainFilePath_ = filePath;
     pendingJumpLine_ = localLine;
+    pendingJumpNLines_ = nLines;
+    pendingJumpCol_ = startCol;
+    pendingJumpLen_ = nSymbols;
     pendingMainData_ = std::make_shared<LogData>();
 
     connect( pendingMainData_.get(), &SearchableLogData::loadingFinished, this,
@@ -1395,7 +1557,8 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  // thread (loadingFinished is a queued signal), so threading is
                  // correct.
                  mainView_->setSearchPattern( currentSearchPattern_ );
-                 mainView_->selectAndDisplayLine( pendingJumpLine_ );
+                 selectInMainView( pendingJumpLine_, pendingJumpNLines_, pendingJumpCol_,
+                                   pendingJumpLen_ );
                  // getNbLine() is only valid now that indexing finished: the
                  // overview repoint MUST happen here, not at attachFile time.
                  refreshFileOverview( pendingMainFilePath_ );

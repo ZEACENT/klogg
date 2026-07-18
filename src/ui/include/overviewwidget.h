@@ -45,6 +45,13 @@ class OverviewWidget : public QWidget {
     void highlightLine( LineNumber line );
     void removeHighlight();
 
+  public:
+    // The line currently highlighted in the overview (hover feedback), if any.
+    OptionalLineNumber highlightedLine() const
+    {
+        return highlightedLine_;
+    }
+
   protected:
     void paintEvent( QPaintEvent* paintEvent ) override;
     void mousePressEvent( QMouseEvent* mouseEvent ) override;

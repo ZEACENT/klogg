@@ -71,8 +71,6 @@ class FilteredView : public AbstractLogView
     // so search range graying should never be applied
     bool shouldApplySearchRangeGraying() const override;
 
-    void doRegisterShortcuts() override;
-
   private:
     LogFilteredData* logFilteredData_;
 };
