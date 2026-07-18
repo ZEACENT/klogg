@@ -323,7 +323,36 @@ klogg::vector<QString> FolderSearchResults::doGetExpandedLines( LineNumber first
 
 LineNumber FolderSearchResults::doGetLineNumber( LineNumber index ) const
 {
-    return index;
+    // The results view is a cross-file listing: the "line number" of a row is
+    // the 0-based local line in its SOURCE file (single-file filtered views
+    // map to the underlying file's line, so copy-with-line-numbers and the
+    // other getLineNumber consumers see real source lines). Header rows have
+    // no source line; sourceForLine returns localLine 0 for them.
+    return sourceForLine( index ).localLine;
+}
+
+bool FolderSearchResults::doIsLineCopyable( LineNumber index ) const
+{
+    // Group headers are UI chrome (path + count), not source lines: exclude
+    // them from the clipboard / search-composition text.
+    return lineKind( index ) != LineKind::Header;
+}
+
+void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
+                                                      const QByteArray& encoding )
+{
+    if ( filePath.isEmpty() || encoding.isEmpty() ) {
+        return;
+    }
+    encodingOverrides_.insert( filePath, encoding );
+    Q_EMIT layoutChanged();
+}
+
+void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath )
+{
+    if ( encodingOverrides_.remove( filePath ) > 0 ) {
+        Q_EMIT layoutChanged();
+    }
 }
 
 LinesCount FolderSearchResults::doGetNbLine() const
@@ -545,12 +574,22 @@ QString FolderSearchResults::readMatchLine( klogg::folder::FileId fileId, size_t
     }
 
     const QByteArray bytes = file->read( end - start );
-    // Decode with the SOURCE file's codec (detected during the scan and stored
-    // on the FileGroup), not displayEncodingName_. This mirrors LogData, which
-    // reads raw line bytes and decodes with codec_.makeDecoder() (logdata.cpp)
-    // -- the source codec interprets the bytes. displayEncodingName_ stays for
-    // the view layer and must not override source interpretation.
-    auto* src = groups_[ static_cast<size_t>( fileId ) ].sourceCodec;
+    // Decode with the SOURCE file's codec: a per-file user override (the
+    // Encoding-menu pick for the file open in the main view) wins over the
+    // codec detected during the scan and stored on the FileGroup -- otherwise
+    // a misdetection would keep the results view in mojibake even after the
+    // user corrected the encoding (single-file setEncoding parity).
+    // displayEncodingName_ stays for the view layer and must not override
+    // source interpretation.
+    const auto& group = groups_[ static_cast<size_t>( fileId ) ];
+    QTextCodec* src = nullptr;
+    const auto overrideIt = encodingOverrides_.constFind( group.filePath );
+    if ( overrideIt != encodingOverrides_.cend() ) {
+        src = QTextCodec::codecForName( overrideIt.value() );
+    }
+    if ( src == nullptr ) {
+        src = group.sourceCodec;
+    }
     QString text = src != nullptr ? src->toUnicode( bytes ) : QString::fromUtf8( bytes );
 
     // Strip the trailing newline (and a preceding CR for CRLF files). For

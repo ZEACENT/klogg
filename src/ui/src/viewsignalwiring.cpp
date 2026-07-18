@@ -94,6 +94,12 @@ void ViewSignalWiring::wireHover( AbstractLogView* view )
 
 void ViewSignalWiring::addToSearch( const QString& searchString )
 {
+    // An empty selection (e.g. a folder group-header row, which is not
+    // copyable) composes nothing; appending it would corrupt the pattern
+    // ("X or " / "X|" match-all).
+    if ( searchString.isEmpty() ) {
+        return;
+    }
     const auto newPattern = searchToolbar_->escapeSearchPattern( searchString );
     QString currentPattern = searchToolbar_->currentSearchText();
     searchToolbar_->setSearchPattern(
@@ -102,6 +108,11 @@ void ViewSignalWiring::addToSearch( const QString& searchString )
 
 void ViewSignalWiring::excludeFromSearch( const QString& searchString )
 {
+    // See addToSearch: an empty exclusion would produce "X and not()" which
+    // matches nothing.
+    if ( searchString.isEmpty() ) {
+        return;
+    }
     QString currentPattern = searchToolbar_->currentSearchText();
 
     const auto wasInBooleanCombinationMode = searchToolbar_->isBoolean();
@@ -126,6 +137,11 @@ void ViewSignalWiring::excludeFromSearch( const QString& searchString )
 
 void ViewSignalWiring::replaceSearch( const QString& searchString )
 {
+    // See addToSearch: an empty replacement would clear the pattern (or
+    // compose a match-all quoted-empty operand in boolean mode).
+    if ( searchString.isEmpty() ) {
+        return;
+    }
     searchToolbar_->setSearchPattern( searchToolbar_->escapeSearchPattern( searchString ) );
 }
 

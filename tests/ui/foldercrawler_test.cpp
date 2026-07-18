@@ -27,6 +27,7 @@
 
 #include <QBoxLayout>
 #include <QByteArray>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
@@ -217,6 +218,11 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     static bool lineNumbersVisible( const AbstractLogView* view )
     {
         return view->lineNumbersVisible_;
+    }
+
+    static void copyWithLineNumbers( AbstractLogView* view )
+    {
+        view->copyWithLineNumbers();
     }
 };
 
@@ -2190,6 +2196,158 @@ TEST_CASE( "FolderCrawlerWidget keeps restored marks for files absent at restore
     QTest::qWait( 100 );
 
     REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget copy excludes group header rows", "[folder][clipboard]" )
+{
+    // Group headers are UI chrome (path + count), not source lines: copying a
+    // selection that spans them must not put the header text on the clipboard
+    // (cluster E of the 2026-07-18 audit).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    // gamma sits at the SAME local line as alpha (line 1) but in another file:
+    // every selected row must still be copied (no line-number dedup).
+    const QString b = writeFile( dir, "b.log", QByteArray( "line0\nERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->selectAll();
+    QTest::qWait( 20 );
+
+    const auto text = view->getSelectedText();
+    REQUIRE( text.contains( QStringLiteral( "ERROR alpha" ) ) );
+    REQUIRE( text.contains( QStringLiteral( "ERROR beta" ) ) );
+    REQUIRE( text.contains( QStringLiteral( "ERROR gamma" ) ) );
+    // The header row renders "<path> (<count>)": none of it may be copied.
+    REQUIRE_FALSE( text.contains( a ) );
+    REQUIRE_FALSE( text.contains( b ) );
+
+    // The copied text follows the VIEW's row order (alpha, beta, gamma), not
+    // sorted-by-source-line order (alpha, gamma, beta -- alpha and gamma share
+    // source line 1 in their files).
+    REQUIRE( text.indexOf( QStringLiteral( "ERROR alpha" ) )
+             < text.indexOf( QStringLiteral( "ERROR beta" ) ) );
+    REQUIRE( text.indexOf( QStringLiteral( "ERROR beta" ) )
+             < text.indexOf( QStringLiteral( "ERROR gamma" ) ) );
+
+    // Copy-with-line-numbers shows the SOURCE line numbers (doGetLineNumber
+    // maps rows to their file's local lines): alpha at a.log:1 -> "2:", beta
+    // at a.log:3 -> "4:", gamma at b.log:1 -> "2:".
+    AbstractLogView::access_by<FolderViewTestAccess>::copyWithLineNumbers( view );
+    const auto numbered = QApplication::clipboard()->text();
+    REQUIRE( numbered.contains( QStringLiteral( "2: ERROR alpha" ) ) );
+    REQUIRE( numbered.contains( QStringLiteral( "4: ERROR beta" ) ) );
+    REQUIRE( numbered.contains( QStringLiteral( "2: ERROR gamma" ) ) );
+    REQUIRE_FALSE( numbered.contains( a ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget row-encoding override dies with the cached file",
+           "[folder][encoding]" )
+{
+    // The row-level encoding override belongs to the file's cached LogData:
+    // when the LRU cache evicts the file, the override is dropped too, so a
+    // fresh re-open cannot leave the main view (re-detected codec) and the
+    // results rows (stale override) decoding with different encodings.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // UTF-16LE file: the scan detects UTF-16 correctly, so the baseline row
+    // decodes cleanly; overriding the row decode to Latin-1 garbles it.
+    const QByteArray utf16 = QTextCodec::codecForName( "UTF-16LE" )
+                                 ->fromUnicode( QStringLiteral( "ERROR x\n" ) );
+    const QString a = writeFile( dir, "a.log", utf16 );
+    QStringList files{ a };
+    for ( int i = 0; i < 9; ++i ) {
+        files << writeFile( dir, QStringLiteral( "f%1.log" ).arg( i ),
+                            QByteArray( "ERROR x\n" ) );
+    }
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), files );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Open a.log (row 1 = its match): the row decodes with the detected
+    // UTF-16 codec at baseline.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 == QStringLiteral( "ERROR x" ) );
+
+    // Override to Latin-1: the UTF-16LE bytes garble (NUL bytes become
+    // visible chars), proving the override drives the row decode.
+    constexpr int latin1Mib = 4;
+    widget.setEncoding( latin1Mib );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 != QStringLiteral( "ERROR x" ) );
+
+    // Open the 9 other files (odd rows = each file's match row): the 8-entry
+    // LRU cache evicts a.log, and its row override must die with the LogData.
+    for ( int i = 0; i < 9; ++i ) {
+        const auto row = LineNumber( static_cast<LineNumber::UnderlyingType>( 3 + i * 2 ) );
+        const auto path = files.at( i + 1 );
+        widget.selectResultRow( row );
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == path; } ) );
+    }
+    QTest::qWait( 100 );
+
+    // The override is gone: the row decodes with the detected UTF-16 codec
+    // again, matching what a fresh main-view open would show.
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 == QStringLiteral( "ERROR x" ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget search composition ignores a header selection",
+           "[folder][clipboard]" )
+{
+    // Group headers are not copyable, so composing a search from a header-row
+    // selection must be a no-op (an empty add would corrupt the pattern to
+    // "X or " / "X|", an empty exclusion to "X and not()").
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const toolbar = widget.searchToolbar();
+    REQUIRE( toolbar != nullptr );
+    const auto patternBefore = toolbar->currentSearchText();
+    REQUIRE( patternBefore == QStringLiteral( "ERROR" ) );
+
+    // Selecting ONLY the header row (0) yields no copyable text.
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->selectAndDisplayLine( 0_lnum );
+    QTest::qWait( 20 );
+    REQUIRE( view->getSelectedText().isEmpty() );
+
+    Q_EMIT view->addToSearch( view->getSelectedText() );
+    Q_EMIT view->excludeFromSearch( view->getSelectedText() );
+    Q_EMIT view->replaceSearch( view->getSelectedText() );
+    QTest::qWait( 50 );
+
+    REQUIRE( toolbar->currentSearchText() == patternBefore );
 }
 
 TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )

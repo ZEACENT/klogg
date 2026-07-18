@@ -1140,6 +1140,19 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
         codec = QTextCodec::codecForName( "UTF-8" );
     }
     currentMainData_->setDisplayEncoding( codec->name() );
+    // Apply the override to the RESULTS view too: rows of this file must
+    // decode with the same codec (single-file parity, where one codec drives
+    // both views). Clearing (auto-detect) drops the row-level override.
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->results != nullptr ) {
+            if ( mib.has_value() ) {
+                pane->results->setEncodingOverrideForFile( currentMainFilePath_, codec->name() );
+            }
+            else {
+                pane->results->clearEncodingOverrideForFile( currentMainFilePath_ );
+            }
+        }
+    }
     mainView_->forceRefresh();
     Q_EMIT mainViewFileChanged();
 }
@@ -1873,6 +1886,15 @@ void FolderCrawlerWidget::cacheMainViewData( const QString& filePath, std::share
     // Evict least-recently-used entries (back of the order list) to bound memory.
     while ( mainViewCache_.size() > static_cast<qsizetype>( MainViewCacheLimit ) ) {
         const auto lru = mainViewCacheOrder_.back();
+        // The evicted file's LogData (carrying its codec override) is
+        // destroyed: drop the results-side override with it, so a later
+        // re-open (fresh index, detected codec) cannot leave the two views
+        // decoding the same file with different encodings.
+        for ( auto& pane : panes_ ) {
+            if ( pane != nullptr && pane->results != nullptr ) {
+                pane->results->clearEncodingOverrideForFile( lru );
+            }
+        }
         mainViewCache_.remove( lru );
         mainViewCacheOrder_.pop_back();
     }

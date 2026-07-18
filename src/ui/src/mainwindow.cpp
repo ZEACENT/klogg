@@ -745,6 +745,7 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->openInEditor(); } );
 
     copyPathToClipboardAction = new QAction( tr( action::copyPathToClipboardText ), this );
+    copyPathToClipboardAction->setObjectName( QStringLiteral( "copyPathToClipboardAction" ) );
     copyPathToClipboardAction->setStatusTip( tr( action::copyPathToClipboardStatusTip ) );
     connect( copyPathToClipboardAction, &QAction::triggered, this,
              [ this ]( auto ) { this->copyFullPath(); } );
@@ -1617,6 +1618,17 @@ void MainWindow::copyFullPath()
     auto* view = currentView();
     if ( view == nullptr ) {
         return;
+    }
+
+    // Agree with the info line: on a folder tab with a file open in the main
+    // view, the info line shows THAT file, so Copy Path copies it too (the
+    // folder path is the fallback when nothing is open).
+    if ( auto* document = currentDocument() ) {
+        if ( const auto info = document->currentMainViewInfo();
+             info.has_value() && !info->path.isEmpty() ) {
+            sendTextToClipboard( QDir::toNativeSeparators( info->path ) );
+            return;
+        }
     }
 
     const auto associatedPath = session_.getAssociatedPath( view );

@@ -27,6 +27,7 @@
 
 #include <QMenu>
 #include <QMenuBar>
+#include <QClipboard>
 #include <QLineEdit>
 #include <QSignalSpy>
 #include <QTabBar>
@@ -1109,6 +1110,37 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
             // Follow stays file/live-source-only.
             REQUIRE( follow != nullptr );
             REQUIRE_FALSE( follow->isChecked() );
+        }
+    }
+
+    WHEN( "a result file is open and Copy Path is triggered" )
+    {
+        // The info line shows the file in the folder main view; Copy Path must
+        // agree with it (not blindly copy the folder path).
+        auto* copyPath = mainWindow->findChild<QAction*>(
+            QStringLiteral( "copyPathToClipboardAction" ) );
+        REQUIRE( copyPath != nullptr );
+
+        runInUiThread( [ folderWidget ] {
+            folderWidget->searchFor( "ERROR" );
+        } );
+        REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+
+        const auto expectedPath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
+        runInUiThread( [ folderWidget ] {
+            folderWidget->selectResultRow( 1_lnum );
+        } );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
+
+        THEN( "the clipboard holds the main-view file path" )
+        {
+            runInUiThread( [ copyPath ] {
+                copyPath->trigger();
+            } );
+            REQUIRE( waitUiState( [ & ] {
+                return QApplication::clipboard()->text() == QDir::toNativeSeparators( expectedPath );
+            } ) );
         }
     }
 }
