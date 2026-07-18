@@ -1994,6 +1994,200 @@ TEST_CASE( "FolderCrawlerWidget session splitter sizes beat the saved default",
     REQUIRE( ratio < 0.65 );
 }
 
+TEST_CASE( "FolderCrawlerWidget search history and status guards",
+           "[folder][history]" )
+{
+    // Single-file parity (cluster F of the 2026-07-18 audit): folder searches
+    // were never persisted to the shared SavedSearches (in-memory only, wiped
+    // on restart), an invalid regex silently scanned to zero matches, an empty
+    // Enter left stale results, a new search kept a marks-only visibility, and
+    // an option toggle replaced the match count with a bare hint.
+    struct RegexpTypeGuard {
+        Configuration& cfg;
+        SearchRegexpType previous;
+        RegexpTypeGuard()
+            : cfg( Configuration::get() )
+            , previous( cfg.mainRegexpType() )
+        {
+            cfg.setMainRegexpType( SearchRegexpType::ExtendedRegexp );
+        }
+        ~RegexpTypeGuard()
+        {
+            cfg.setMainRegexpType( previous );
+        }
+    } regexpGuard;
+
+    // Snapshot/restore the shared SavedSearches singleton (Persistable ->
+    // session settings on disk). A failed REQUIRE throws, so the restore must
+    // run on stack unwinding; otherwise the test pattern leaks into sibling
+    // tests and into the portable session file.
+    struct SavedSearchesGuard {
+        SavedSearches& searches;
+        QStringList previous;
+        SavedSearchesGuard()
+            : searches( SavedSearches::getSynced() )
+            , previous( searches.recentSearches() )
+        {
+        }
+        ~SavedSearchesGuard()
+        {
+            searches.clear();
+            for ( auto it = previous.crbegin(); it != previous.crend(); ++it ) {
+                searches.addRecent( *it );
+            }
+            searches.save();
+        }
+    };
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+
+    SECTION( "folder searches persist to the shared history" )
+    {
+        // In production MainWindow injects the SavedSearches singleton; inject
+        // it here and verify the pattern survives a disk reload (getSynced
+        // re-reads the storage, so an in-memory-only addRecent would vanish).
+        SavedSearchesGuard searchesGuard;
+        auto& searches = SavedSearches::getSynced();
+        searches.clear();
+        searches.save();
+        widget.setSavedSearches( &searches );
+
+        widget.searchFor( "UNIQ_F4_HISTORY_PATTERN" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        const auto reloaded = SavedSearches::getSynced().recentSearches();
+        REQUIRE( reloaded.contains( QStringLiteral( "UNIQ_F4_HISTORY_PATTERN" ) ) );
+    }
+
+    SECTION( "invalid regex surfaces an error and does not scan" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 100 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+    }
+
+    SECTION( "empty search clears the results pane" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+        widget.searchFor( "" );
+        QTest::qWait( 50 );
+
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().startsWith( QStringLiteral( "Ready" ) ) );
+    }
+
+    SECTION( "new search resets a marks-only visibility" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        auto* const combo = widget.visibilityCombo();
+        REQUIRE( combo != nullptr );
+        combo->setCurrentIndex( 1 ); // "Marks"
+        QTest::qWait( 20 );
+        REQUIRE( combo->currentIndex() == 1 );
+
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( combo->currentIndex() == 0 );
+    }
+
+    SECTION( "invalid regex supersedes an in-flight search" )
+    {
+        // No waitFor between the two searches: the first scan's queued
+        // progress/finish signals arrive AFTER the invalid pattern was
+        // rejected, and must be treated as stale (generation bumped) instead
+        // of streaming results back into the cleared pane and overwriting the
+        // error. Back-to-back searchFor calls are deterministic here: the
+        // queued signals need an event-loop turn the synchronous calls do not
+        // give them.
+        widget.searchFor( "ERROR" );
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 200 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+    }
+
+    SECTION( "empty search supersedes an in-flight search" )
+    {
+        widget.searchFor( "ERROR" );
+        widget.searchFor( "" );
+        QTest::qWait( 200 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().startsWith( QStringLiteral( "Ready" ) ) );
+    }
+
+    SECTION( "option toggle before any search shows the bare hint" )
+    {
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Options changed" ) ) );
+        REQUIRE_FALSE( widget.statusText().contains( QStringLiteral( "match" ) ) );
+    }
+
+    SECTION( "option toggle after an invalid pattern shows no stale count" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 50 );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Options changed" ) ) );
+        REQUIRE_FALSE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+    }
+
+    SECTION( "option toggle preserves the match count" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        // The stale-result hint may appear, but the count from the last
+        // finished search must not be wiped by it.
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "re-run" ) ) );
+    }
+}
+
 TEST_CASE( "FolderCrawlerWidget registers the crawler widget shortcut family",
            "[folder][shortcuts]" )
 {

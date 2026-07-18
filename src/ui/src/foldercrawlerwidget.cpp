@@ -56,6 +56,7 @@
 #include "predefinedfilterscombobox.h"
 #include "savefavoritedialog.h"
 #include "quickfindpattern.h"
+#include "regularexpression.h"
 #include "regularexpressionpattern.h"
 #include "savedsearches.h"
 #include "searchablelogdata.h"
@@ -224,6 +225,7 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     expandAllButton_ = new QToolButton( this );
     expandAllButton_->setText( tr( "Expand all" ) );
     statusLabel_ = new QLabel( this );
+    statusLabelDefaultPalette_ = statusLabel_->palette();
     // Results-view visibility filter (parity with CrawlerWidget). Index order
     // maps to FolderSearchResults::Visibility in changeFilteredViewVisibility.
     visibilityBox_ = new QComboBox( this );
@@ -360,9 +362,21 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
         // An option that affects the search changed (case/regex/inverse/
         // boolean); the existing result is stale until the user re-runs. Surface
         // it so the toggle is not silently ignored (the search only re-runs on
-        // Enter / Search).
+        // Enter / Search) -- but keep the last match count visible alongside
+        // the hint instead of wiping it. Also clears the invalid-pattern error
+        // styling: the hint replaces the error text.
         if ( statusLabel_ != nullptr ) {
-            statusLabel_->setText( tr( "Options changed - press Enter to re-run" ) );
+            statusErrorActive_ = false;
+            statusLabel_->setPalette( statusLabelDefaultPalette_ );
+            statusLabel_->setAutoFillBackground( false );
+            if ( !lastResultStatusText_.isEmpty() ) {
+                statusLabel_->setText(
+                    tr( "%1 - options changed, press Enter to re-run" )
+                        .arg( lastResultStatusText_ ) );
+            }
+            else {
+                statusLabel_->setText( tr( "Options changed - press Enter to re-run" ) );
+            }
         }
     } );
     // Filter favorites + predefined filters mirror CrawlerWidget: the host owns
@@ -466,10 +480,29 @@ bool FolderCrawlerWidget::eventFilter( QObject* obj, QEvent* event )
     return QWidget::eventFilter( obj, event );
 }
 
+void FolderCrawlerWidget::changeEvent( QEvent* event )
+{
+    if ( event->type() == QEvent::StyleChange && !statusErrorActive_
+         && statusLabel_ != nullptr ) {
+        // Track runtime theme/style switches (mirrors CrawlerWidget's
+        // changeEvent) so the error-state restore does not re-apply a stale
+        // palette. Skipped while the error highlight is up: the label's
+        // current palette IS the error palette then.
+        statusLabelDefaultPalette_ = statusLabel_->palette();
+    }
+    QWidget::changeEvent( event );
+}
+
 void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringList& filePaths )
 {
     folderPath_ = folderPath;
     filePaths_ = filePaths;
+    lastResultStatusText_.clear();
+    updateReadyStatus();
+}
+
+void FolderCrawlerWidget::updateReadyStatus()
+{
     // The folder path itself is shown in MainWindow's info line (status bar);
     // the toolbar status surfaces only the file count.
     statusLabel_->setText( tr( "Ready  (%n file(s))", "", static_cast<int>( filePaths_.size() ) ) );
@@ -1277,16 +1310,51 @@ void FolderCrawlerWidget::startSearch()
     if ( filePaths_.isEmpty() ) {
         return;
     }
+
+    // A new search clears a previous invalid-pattern error state.
+    statusErrorActive_ = false;
+    statusLabel_->setPalette( statusLabelDefaultPalette_ );
+    statusLabel_->setAutoFillBackground( false );
+
+    // Parity with CrawlerWidget::replaceCurrentSearch: a new search returns a
+    // marks-only view to "Marks and matches" so the fresh matches are visible.
+    if ( visibilityBox_->currentIndex() == 1 ) {
+        visibilityBox_->setCurrentIndex( 0 );
+    }
+
     const auto pattern = searchToolbar_->currentSearchText();
     if ( pattern.isEmpty() ) {
+        // Supersede any in-flight scan BEFORE mutating state: interrupt it and
+        // bump the generation so its queued progress/finish signals are
+        // treated as stale (parity with CrawlerWidget::replaceCurrentSearch,
+        // crawlerwidget.cpp:1566-1567). The pane is detached so no late group
+        // can re-append to it after the clear.
+        engine_->interrupt();
+        currentSearchGeneration_ = engine_->bumpGeneration();
+        searchTargetResults_ = nullptr;
+
+        // Parity with CrawlerWidget::replaceCurrentSearch(""): an empty search
+        // clears the results pane instead of leaving stale results behind.
+        // (Single-file additionally honors showAllInFilteredViewWhenSearchEmpty
+        // by dumping the open file unfiltered; that preference is specific to
+        // the single-file lens view and is intentionally not mirrored into the
+        // cross-file grep results pane.)
+        searchToolbar_->setSearchInProgress( false );
+        searchActive_ = false;
+        currentSearchPattern_ = {};
+        lastResultStatusText_.clear();
+        if ( auto* const results = activeResults() ) {
+            results->beginSearch( filePaths_ );
+        }
+        updateReadyStatus();
         return;
     }
-    // Record the search into the shared history (if injected) so the dropdown
-    // shows recent grep patterns -- parity with single-file search.
-    if ( savedSearches_ != nullptr ) {
-        savedSearches_->addRecent( pattern );
-        searchToolbar_->setItems( savedSearches_->recentSearches() );
-    }
+
+    // Record the search into the shared history (persisted to disk, parity
+    // with single-file search; the toolbar no-ops without an injected
+    // SavedSearches).
+    searchToolbar_->recordSearch();
+
     searchToolbar_->setSearchInProgress( true );
     searchActive_ = true;
 
@@ -1322,6 +1390,36 @@ void FolderCrawlerWidget::startSearch()
     // / boolean). This UPGRADES folder search from the former plain-text
     // RegularExpressionPattern{ pattern } to honor the toggles for free.
     const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
+
+    // Parity with CrawlerWidget::replaceCurrentSearch: an invalid pattern
+    // clears stale results (beginSearch above) and surfaces the error instead
+    // of silently scanning to zero matches.
+    const RegularExpression validation{ regexpPattern };
+    if ( !validation.isValid() ) {
+        // Supersede any in-flight scan (see the empty-pattern path above).
+        engine_->interrupt();
+        currentSearchGeneration_ = engine_->bumpGeneration();
+        searchTargetResults_ = nullptr;
+
+        searchToolbar_->setSearchInProgress( false );
+        searchActive_ = false;
+        currentSearchPattern_ = {};
+        lastResultStatusText_.clear();
+        // Parity with CrawlerWidget: clear the stale highlight in both views.
+        if ( activeFilteredView() != nullptr ) {
+            activeFilteredView()->setSearchPattern( {} );
+        }
+        if ( mainView_ != nullptr ) {
+            mainView_->setSearchPattern( {} );
+        }
+        statusErrorActive_ = true;
+        // Same error styling as CrawlerWidget's searchInfoLine_ (dark yellow).
+        statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
+        statusLabel_->setAutoFillBackground( true );
+        statusLabel_->setText( tr( "Error in expression: %1" ).arg( validation.errorString() ) );
+        return;
+    }
+
     // Context is a scan-time property: resolve the current -A/-B/-C window from
     // the toolbar so programmatic startSearch (searchFor, session restore) also
     // honors it, not just direct control edits.
@@ -1351,13 +1449,19 @@ void FolderCrawlerWidget::stopSearch()
     engine_->interrupt();
 }
 
-void FolderCrawlerWidget::onSearchStarted( quint64 )
+void FolderCrawlerWidget::onSearchStarted( quint64 generation )
 {
+    if ( generation != currentSearchGeneration_ ) {
+        return; // stale: a superseded scan (empty/invalid pattern replaced it)
+    }
     statusLabel_->setText( tr( "Searching..." ) );
 }
 
-void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, quint64 )
+void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, quint64 generation )
 {
+    if ( generation != currentSearchGeneration_ ) {
+        return; // stale: a superseded scan (empty/invalid pattern replaced it)
+    }
     statusLabel_->setText( tr( "%1 match(es)  %2%" ).arg( static_cast<qulonglong>( nbMatches ) ).arg( percent ) );
 }
 
@@ -1382,11 +1486,12 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
 
     const quint64 total = engine_->matchCount();
     if ( total == 0 ) {
-        statusLabel_->setText( tr( "No matches" ) );
+        lastResultStatusText_ = tr( "No matches" );
     }
     else {
-        statusLabel_->setText( tr( "%1 match(es)" ).arg( static_cast<qulonglong>( total ) ) );
+        lastResultStatusText_ = tr( "%1 match(es)" ).arg( static_cast<qulonglong>( total ) );
     }
+    statusLabel_->setText( lastResultStatusText_ );
 }
 
 void FolderCrawlerWidget::onFileGroupReady( int fileIndex, quint64 generation )

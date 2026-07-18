@@ -116,6 +116,12 @@ class SearchToolbar : public QWidget {
     void setItems( const QStringList& items );
     void setSearchHistory( SavedSearches* savedSearches );
 
+    // Records the current pattern into the shared history: reloads from disk
+    // first (another klogg instance may have changed it), saves, and refreshes
+    // the dropdown. Shared by CrawlerWidget and FolderCrawlerWidget so folder
+    // searches persist across restarts exactly like single-file ones.
+    void recordSearch();
+
     // Loads icons for the owned buttons via its own IconLoader.
     void loadIcons();
 

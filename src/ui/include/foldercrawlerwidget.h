@@ -149,6 +149,9 @@ class FolderCrawlerWidget : public QWidget,
     // top-view-size shortcuts resize.
     QComboBox* visibilityCombo() const { return visibilityBox_; }
     QSplitter* viewsSplitter() const { return splitter_; }
+
+    // Restores the status label to the pre-search "Ready (N file(s))" text.
+    void updateReadyStatus();
     // Set the pattern and kick off a search (async; results land via the
     // searchFinished signal).
     void searchFor( const QString& pattern );
@@ -222,6 +225,11 @@ class FolderCrawlerWidget : public QWidget,
     // (ctor / showEvent / zero-delay timer) is discarded by the splitter's
     // initial layout, which clamps the bottom pane to its minimum size.
     bool eventFilter( QObject* obj, QEvent* event ) override;
+
+    // Re-captures the status label's default palette on StyleChange (mirrors
+    // CrawlerWidget's changeEvent) so the invalid-pattern error restore tracks
+    // runtime theme switches.
+    void changeEvent( QEvent* event ) override;
 
   private Q_SLOTS:
     void startSearch();
@@ -365,6 +373,16 @@ class FolderCrawlerWidget : public QWidget,
     // dropdown. Null if the host never injects one.
     SavedSearches* savedSearches_ = nullptr;
     QLabel* statusLabel_ = nullptr;
+    // Palette captured right after statusLabel_ is created; restored on every
+    // new search to clear the invalid-pattern error highlight.
+    QPalette statusLabelDefaultPalette_;
+    // True while the status label shows an invalid-pattern error (dark-yellow
+    // highlight); guards the StyleChange palette re-capture so the error
+    // palette is never snapshotted as the "default".
+    bool statusErrorActive_ = false;
+    // Last finished search's result text ("No matches" / "N match(es)");
+    // re-shown with the stale hint when an option toggle invalidates it.
+    QString lastResultStatusText_;
     QToolButton* collapseAllButton_ = nullptr;
     QToolButton* expandAllButton_ = nullptr;
     // Results-view visibility filter (Marks / Marks and matches / Matches),

@@ -446,14 +446,11 @@ void CrawlerWidget::startNewSearch()
     tabbedFilteredView_->setTabText( tabbedFilteredView_->currentIndex(),
                                      "Find \"" + searchToolbar_->currentSearchText() + "\"" );
 
-    // Record the search line in the recent list
-    // (reload the list first in case another glogg changed it)
-    const auto& searches = SavedSearches::getSynced();
-    savedSearches_->addRecent( searchToolbar_->currentSearchText() );
-    searches.save();
+    // Record the search line in the recent list (shared with folder mode:
+    // reloads first in case another klogg changed it, saves, refreshes the
+    // dropdown).
+    searchToolbar_->recordSearch();
 
-    // Update the SearchLine (history)
-    updateSearchCombo();
     // Call the private function to do the search
     replaceCurrentSearch( searchToolbar_->currentSearchText() );
 }
