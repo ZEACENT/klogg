@@ -1994,6 +1994,114 @@ TEST_CASE( "FolderCrawlerWidget session splitter sizes beat the saved default",
     REQUIRE( ratio < 0.65 );
 }
 
+TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )
+{
+    // F5: MainWindow dispatches these through AbstractCrawlerWidget for every
+    // tab kind (focus-search shortcut, View->Wrap, QuickFind focus save /
+    // restore, encoding override). On folder tabs they were dead because
+    // MainWindow routed them via currentCrawlerWidget() / the SignalMux.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    SECTION( "focusSearchEdit focuses the search input" )
+    {
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+        widget.focusSearchEdit();
+        QTest::qWait( 20 );
+        REQUIRE( widget.searchToolbar()->searchLineEdit()->lineEdit()->hasFocus() );
+    }
+
+    SECTION( "textWrapSet wraps every view and reports its state" )
+    {
+        widget.textWrapSet( true );
+        QTest::qWait( 20 );
+        REQUIRE( widget.isTextWrapEnabled() );
+        REQUIRE( widget.mainView()->isTextWrapEnabled() );
+        REQUIRE( widget.filteredView()->isTextWrapEnabled() );
+
+        widget.textWrapSet( false );
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( widget.isTextWrapEnabled() );
+        REQUIRE_FALSE( widget.mainView()->isTextWrapEnabled() );
+        REQUIRE_FALSE( widget.filteredView()->isTextWrapEnabled() );
+    }
+
+    SECTION( "quickfind entry and exit save and restore the view focus" )
+    {
+        widget.filteredView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+        widget.enteringQuickFind();
+
+        // The QuickFind bar grabs the focus; simulate by moving it elsewhere.
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+
+        widget.exitingQuickFind();
+        QTest::qWait( 20 );
+        REQUIRE( widget.filteredView()->viewport()->hasFocus() );
+    }
+
+    SECTION( "quickfind exit does not yank focus from a non-view widget" )
+    {
+        // Focus is in the search box (common when Ctrl+F is pressed): nothing
+        // is saved, so exiting must NOT move the focus anywhere.
+        widget.searchToolbar()->searchLineEdit()->lineEdit()->setFocus();
+        QTest::qWait( 20 );
+        widget.enteringQuickFind();
+
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+
+        widget.exitingQuickFind();
+        QTest::qWait( 20 );
+        // No restore happened: the focus is still where the QF bar left it.
+        REQUIRE( widget.mainView()->viewport()->hasFocus() );
+    }
+
+    SECTION( "encodingMib reflects the encoding override" )
+    {
+        // ISO 8859-1 (Latin-1).
+        constexpr int latin1Mib = 4;
+
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+        widget.setEncoding( latin1Mib );
+        REQUIRE( widget.encodingMib().has_value() );
+        REQUIRE( *widget.encodingMib() == latin1Mib );
+        widget.setEncoding( std::nullopt );
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+    }
+
+    SECTION( "encodingMib resets when the main-view file changes" )
+    {
+        constexpr int latin1Mib = 4;
+
+        widget.setEncoding( latin1Mib );
+        REQUIRE( widget.encodingMib().has_value() );
+
+        // Rows: 0 = header(a), 1 = ERROR alpha, 2 = ERROR beta, 3 = header(b),
+        // 4 = ERROR gamma. Selecting a b.log row swaps the main-view file.
+        widget.selectResultRow( 4_lnum );
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+        QTest::qWait( 100 );
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+    }
+}
+
 TEST_CASE( "FolderCrawlerWidget search history and status guards",
            "[folder][history]" )
 {

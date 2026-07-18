@@ -1098,6 +1098,7 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
     if ( currentMainData_ == nullptr || currentMainData_ == placeholderData_ ) {
         return;
     }
+    encodingMibOverride_ = mib;
     QTextCodec* codec = nullptr;
     if ( mib.has_value() ) {
         codec = QTextCodec::codecForMib( *mib );
@@ -1111,6 +1112,75 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
     currentMainData_->setDisplayEncoding( codec->name() );
     mainView_->forceRefresh();
     Q_EMIT mainViewFileChanged();
+}
+
+std::optional<int> FolderCrawlerWidget::encodingMib() const
+{
+    return encodingMibOverride_;
+}
+
+void FolderCrawlerWidget::focusSearchEdit()
+{
+    // Mirrors CrawlerWidget::focusSearchEdit.
+    searchToolbar_->searchLineEdit()->lineEdit()->setFocus( Qt::ShortcutFocusReason );
+}
+
+void FolderCrawlerWidget::goToLine()
+{
+    // Mirrors CrawlerWidget::goToLine, main view only: the results view is a
+    // cross-file grep listing whose rows do not map to source line numbers.
+    bool isLineSelected = true;
+    const auto newLine = QInputDialog::getText( this, "Jump to line", "Line number" )
+                             .toULongLong( &isLineSelected );
+
+    if ( isLineSelected ) {
+        const auto selectedLine = LineNumber(
+            static_cast<LineNumber::UnderlyingType>( newLine > 0 ? newLine - 1 : 0 ) );
+        mainView_->trySelectLine( selectedLine );
+    }
+}
+
+void FolderCrawlerWidget::textWrapSet( bool checked )
+{
+    // Fan out to the main view and every results pane (including frozen
+    // keep-results panes), mirroring CrawlerWidget's signal relay to its views.
+    mainView_->textWrapSet( checked );
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->view != nullptr ) {
+            pane->view->textWrapSet( checked );
+        }
+    }
+}
+
+bool FolderCrawlerWidget::isTextWrapEnabled() const
+{
+    return mainView_->isTextWrapEnabled();
+}
+
+void FolderCrawlerWidget::enteringQuickFind()
+{
+    // Remember who had the focus (only if it is one of our views), mirroring
+    // CrawlerWidget::enteringQuickFind.
+    QWidget* const focusWidget = QApplication::focusWidget();
+    if ( focusWidget == mainView_ ) {
+        qfSavedFocus_ = mainView_;
+        return;
+    }
+    qfSavedFocus_ = nullptr;
+    for ( const auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->view == focusWidget ) {
+            qfSavedFocus_ = pane->view;
+            break;
+        }
+    }
+}
+
+void FolderCrawlerWidget::exitingQuickFind()
+{
+    // Restore the focus once the QFBar has been hidden.
+    if ( qfSavedFocus_ != nullptr ) {
+        qfSavedFocus_->setFocus();
+    }
 }
 
 void FolderCrawlerWidget::applyDetectedEncoding()
@@ -1608,6 +1678,12 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         return;
     }
 
+    // A different file is about to be shown: the encoding override belongs to
+    // the previously displayed file, so it resets to auto-detect (the new
+    // file's detected codec). Mirrors single-file, where the override lives
+    // and dies with the one document in the tab.
+    encodingMibOverride_.reset();
+
     // Cached (recently opened) -> swap instantly. Promote to most-recently-used
     // so the LRU eviction policy keeps it resident.
     const auto it = mainViewCache_.find( filePath );
@@ -1655,6 +1731,11 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                  // single-file calls from its own loadingFinished). Idempotent
                  // for UTF-8 (detected == default codec -> no reload).
                  applyDetectedEncoding();
+                 // Any override the user picked while this load was in flight
+                 // belonged to the previously displayed file: drop it so the
+                 // encoding menu does not check a codec the new file does not
+                 // actually use.
+                 encodingMibOverride_.reset();
 
                  mainView_->setDataSource( currentMainData_.get() );
                  // Re-apply the current search pattern so the freshly-indexed

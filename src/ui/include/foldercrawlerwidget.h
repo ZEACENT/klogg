@@ -21,6 +21,7 @@
 #define FOLDERCRAWLERWIDGET_H
 
 #include <QHash>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <cstdint>
@@ -187,9 +188,21 @@ class FolderCrawlerWidget : public QWidget,
     // Apply the chosen encoding to the file currently open in the main view
     // (no-op until a file is opened). Overrides AbstractCrawlerWidget.
     void setEncoding( std::optional<int> mib ) override;
+    // The encoding override applied via setEncoding (nullopt = auto-detect).
+    // Reset when the main-view file changes.
+    std::optional<int> encodingMib() const override;
     // Snapshot of the file currently in the main view, for MainWindow's info
     // line (path/size/date/encoding/line-count). Nullopt when no file is open.
     std::optional<MainViewInfo> currentMainViewInfo() const override;
+
+    // Document-level actions MainWindow dispatches polymorphically to every
+    // tab kind (single-file tabs are reached via the same virtuals).
+    void focusSearchEdit() override;
+    void goToLine() override;
+    void textWrapSet( bool checked ) override;
+    bool isTextWrapEnabled() const override;
+    void enteringQuickFind() override;
+    void exitingQuickFind() override;
 
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
@@ -233,7 +246,7 @@ class FolderCrawlerWidget : public QWidget,
 
   private Q_SLOTS:
     void startSearch();
-    void stopSearch();
+    void stopSearch() override;
     void onSearchStarted( quint64 generation );
     void onSearchProgressed( quint64 nbMatches, int percent, quint64 generation );
     void onSearchFinished( quint64 generation );
@@ -380,6 +393,12 @@ class FolderCrawlerWidget : public QWidget,
     // highlight); guards the StyleChange palette re-capture so the error
     // palette is never snapshotted as the "default".
     bool statusErrorActive_ = false;
+    // Encoding override applied via setEncoding (nullopt = auto-detect);
+    // reset when the main-view file changes (the override is per shown file).
+    std::optional<int> encodingMibOverride_;
+    // View that had focus when the QuickFind bar opened (enteringQuickFind);
+    // restored on exitingQuickFind. Mirrors CrawlerWidget::qfSavedFocus_.
+    QPointer<QWidget> qfSavedFocus_;
     // Last finished search's result text ("No matches" / "N match(es)");
     // re-shown with the stale hint when an option toggle invalidates it.
     QString lastResultStatusText_;

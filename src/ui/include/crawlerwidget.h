@@ -104,7 +104,7 @@ class CrawlerWidget : public QSplitter,
     // is interacting with
     void selectAll() override;
 
-    std::optional<int> encodingMib() const;
+    std::optional<int> encodingMib() const override;
 
     // Get the text description of the encoding effectively used,
     // suitable to display to the user.
@@ -116,7 +116,7 @@ class CrawlerWidget : public QSplitter,
     // Returns whether the initial file load has completed
     bool isFirstLoadDone() const;
 
-    bool isTextWrapEnabled() const;
+    bool isTextWrapEnabled() const override;
 
     qint64 searchPendingLines() const { return searchPendingLines_; }
 
@@ -131,8 +131,8 @@ class CrawlerWidget : public QSplitter,
     // Set the encoding
     void setEncoding( std::optional<int> mib ) override;
 
-    void focusSearchEdit();
-    void goToLine();
+    void focusSearchEdit() override;
+    void goToLine() override;
     void jumpToTop();
 
     // Instructs the widget to reconfigure itself because Config() has changed.
@@ -172,7 +172,7 @@ class CrawlerWidget : public QSplitter,
     // Sent when follow mode is enabled/disabled
     void followSet( bool checked );
     // Sent when text wrap mode is enabled/disabled
-    void textWrapSet( bool checked );
+    void textWrapSet( bool checked ) override;
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool follow );
     // Sent up when the current line number is updated
@@ -200,12 +200,12 @@ class CrawlerWidget : public QSplitter,
     // Instructs the widget to start a search using the current search line.
     void startNewSearch();
     // Stop the currently ongoing search (if one exists)
-    void stopSearch();
+    void stopSearch() override;
     void loadIcons();
     // QuickFind is being entered, save the focus for incremental qf.
-    void enteringQuickFind();
+    void enteringQuickFind() override;
     // QuickFind is being closed.
-    void exitingQuickFind();
+    void exitingQuickFind() override;
     // Called when new data must be displayed in the filtered window.
     // The generation matches the LogFilteredData::currentSearchGeneration() at
     // the time the underlying SearchOperation started -- stale signals from a

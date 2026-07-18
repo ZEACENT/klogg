@@ -27,6 +27,7 @@
 
 #include <QMenu>
 #include <QMenuBar>
+#include <QLineEdit>
 #include <QSignalSpy>
 #include <QTabBar>
 #include <QTemporaryDir>
@@ -1005,6 +1006,109 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
                 REQUIRE( waitUiState( [&] { return tabArea->count() == 0; } ) );
                 QTest::qWait( 200 );
             }
+        }
+    }
+}
+
+// F5: MainWindow dispatches focus-search / wrap / go-to-line / QuickFind
+// lifecycle through AbstractCrawlerWidget so they work on folder tabs too.
+SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-dispatch-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    const auto tempDirPath = makeTestDir( "folderdispatch" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    {
+        QFile f( QDir{ tempDirPath }.filePath( "a.log" ) );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" );
+    }
+
+    runInUiThread( [ &mainWindow, tempDirPath ] {
+        mainWindow->openFolderByPath( tempDirPath );
+    } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    QTest::qWait( 200 );
+    auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
+    REQUIRE( folderWidget != nullptr );
+
+    WHEN( "the wrap action is toggled" )
+    {
+        auto* wrapAction = mainWindow->findChild<QAction*>( QStringLiteral( "textWrapAction" ) );
+        REQUIRE( wrapAction != nullptr );
+
+        // State-agnostic: the default wrap state comes from the machine's
+        // saved Configuration, so drive both directions.
+        runInUiThread( [ wrapAction ] {
+            wrapAction->setChecked( true );
+        } );
+
+        THEN( "the folder views wrap and unwrap" )
+        {
+            REQUIRE( waitUiState( [ & ] { return folderWidget->isTextWrapEnabled(); } ) );
+            REQUIRE( folderWidget->mainView()->isTextWrapEnabled() );
+
+            runInUiThread( [ wrapAction ] {
+                wrapAction->setChecked( false );
+            } );
+            REQUIRE( waitUiState( [ & ] { return !folderWidget->isTextWrapEnabled(); } ) );
+            REQUIRE_FALSE( folderWidget->mainView()->isTextWrapEnabled() );
+        }
+    }
+
+    WHEN( "the focus-search shortcut is pressed" )
+    {
+        THEN( "the folder search input gains focus" )
+        {
+            pressConfiguredShortcut( mainWindow.get(),
+                                     ShortcutAction::MainWindowFocusSearchInput );
+            REQUIRE( waitUiState( [ & ] {
+                return folderWidget->searchToolbar()->searchLineEdit()->lineEdit()->hasFocus();
+            } ) );
+        }
+    }
+
+    WHEN( "menu state is inspected on the folder tab" )
+    {
+        auto* goToLine = mainWindow->findChild<QAction*>( QStringLiteral( "goToLineAction" ) );
+        auto* follow = mainWindow->findChild<QAction*>( QStringLiteral( "followAction" ) );
+        auto* wrap = mainWindow->findChild<QAction*>( QStringLiteral( "textWrapAction" ) );
+
+        THEN( "document actions are enabled, file-only actions are not" )
+        {
+            // The folder branch of currentTabChanged explicitly re-enables the
+            // wrap toggle and syncs its checked state from the folder views.
+            REQUIRE( wrap != nullptr );
+            REQUIRE( wrap->isEnabled() );
+            REQUIRE( wrap->isChecked() == folderWidget->isTextWrapEnabled() );
+            // Go-to-line is routed polymorphically and stays available.
+            REQUIRE( goToLine != nullptr );
+            REQUIRE( goToLine->isEnabled() );
+            // Follow stays file/live-source-only.
+            REQUIRE( follow != nullptr );
+            REQUIRE_FALSE( follow->isChecked() );
         }
     }
 }
