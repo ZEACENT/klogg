@@ -258,6 +258,9 @@ class MainWindow : public QMainWindow {
     // Re-checks the encoding menu from the current document's override. Called
     // when the folder main-view file changes (the override resets on switch).
     void syncEncodingMenuFromDocument();
+    // Re-registers the folder tab's QuickFind selector with the mux when the
+    // folder's searchable set changes (pane create/switch/close).
+    void onFolderSearchablesChanged();
     // Disable every file-specific menu action (used for folder / no-tab states).
     void disableFileSpecificActions();
     void showInfoLabels( bool show );

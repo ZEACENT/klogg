@@ -222,6 +222,10 @@ class FolderCrawlerWidget : public QWidget,
     // (single-file tabs reach them via SignalMux).
     void sendToScratchpad( QString text );
     void replaceDataInScratchpad( QString text );
+    // Emitted when the set of QuickFind-searchable views changes (a results
+    // pane is created, switched, or closed) so MainWindow re-registers the
+    // selector with the QuickFindMux instead of driving a stale/freed pane.
+    void searchablesChanged();
 
   protected:
     // ViewInterface (single-file APIs are no-ops in folder mode).

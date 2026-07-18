@@ -804,6 +804,9 @@ void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
     if ( visibilityBox_ != nullptr ) {
         changeFilteredViewVisibility( visibilityBox_->currentIndex() );
     }
+    // The active QuickFind-searchable changed (pane create/switch): MainWindow
+    // re-registers the mux (also fires on createPane's setCurrentIndex).
+    Q_EMIT searchablesChanged();
 }
 
 void FolderCrawlerWidget::onClosePane( int tabIndex )
@@ -836,6 +839,9 @@ void FolderCrawlerWidget::onClosePane( int tabIndex )
         }
         searchTargetResults_ = nullptr;
     }
+    // The destroyed view may still sit in the QuickFindMux registry
+    // (QPointer-guarded): MainWindow re-registers the surviving panes.
+    Q_EMIT searchablesChanged();
 }
 
 bool FolderCrawlerWidget::isMainViewLineMarked( LineNumber line ) const

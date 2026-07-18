@@ -2275,6 +2275,11 @@ void MainWindow::currentTabChanged( int index )
                 // re-check the encoding menu alongside the info line.
                 connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
                          &MainWindow::syncEncodingMenuFromDocument, Qt::UniqueConnection );
+                // Re-register the QuickFind selector when the folder's pane set
+                // changes (create/switch/close) so the mux never drives a
+                // stale or freed pane view.
+                connect( folder_widget, &FolderCrawlerWidget::searchablesChanged, this,
+                         &MainWindow::onFolderSearchablesChanged, Qt::UniqueConnection );
                 // Forward the folder main view's Ln:col selection to the status
                 // bar (file tabs get this via signalMux). A real slot (not a
                 // lambda) so Qt::UniqueConnection can dedupe across tab switches
@@ -3167,6 +3172,19 @@ void MainWindow::syncEncodingMenuFromDocument()
 {
     const auto* document = currentDocument();
     syncEncodingMenuCheck( document != nullptr ? document->encodingMib() : std::nullopt );
+}
+
+void MainWindow::onFolderSearchablesChanged()
+{
+    auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( sender() );
+    // Only the CURRENT tab owns the mux: a background folder's pane change
+    // must not steal it from whatever document is showing.
+    if ( folderWidget == nullptr
+         || dynamic_cast<AbstractCrawlerWidget*>( folderWidget ) != currentDocument() ) {
+        return;
+    }
+    // Rebuild the mux's searchable registry from the folder's live panes.
+    quickFindMux_.registerSelector( folderWidget );
 }
 
 // Update the top info line from the session

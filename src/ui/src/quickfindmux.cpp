@@ -191,8 +191,13 @@ void QuickFindMux::registerSearchable( QObject* searchable )
 
 void QuickFindMux::unregisterAllSearchables()
 {
-    for ( auto searchable : registeredSearchables_ )
-        disconnect( searchable, nullptr, this, nullptr );
+    for ( const auto& searchable : registeredSearchables_ ) {
+        // Entries may have been destroyed with their owning document (e.g. a
+        // closed folder results pane); disconnect only live ones.
+        if ( searchable != nullptr ) {
+            disconnect( searchable, nullptr, this, nullptr );
+        }
+    }
 
     registeredSearchables_.clear();
 }

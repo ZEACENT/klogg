@@ -44,6 +44,7 @@
 #include "capturestore.h"
 #include "crawlerwidget.h"
 #include "foldercrawlerwidget.h"
+#include "folderfilteredview.h"
 #include "log.h"
 #include "mainwindow.h"
 #include "persistentinfo.h"
@@ -1113,8 +1114,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         }
     }
 
-    WHEN( "a result file is open and Copy Path is triggered" )
-    {
+    WHEN( "a result file is open and Copy Path is triggered" )    {
         // The info line shows the file in the folder main view; Copy Path must
         // agree with it (not blindly copy the folder path).
         auto* copyPath = mainWindow->findChild<QAction*>(
@@ -1140,6 +1140,146 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
             } );
             REQUIRE( waitUiState( [ & ] {
                 return QApplication::clipboard()->text() == QDir::toNativeSeparators( expectedPath );
+            } ) );
+        }
+    }
+}
+
+// F8: the QuickFindMux snapshots the folder's active pane view at tab
+// activation; panes created/switched afterwards must be re-registered or
+// QuickFind drives a stale (or freed) view.
+SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-qf-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    const auto tempDirPath = makeTestDir( "folderqf" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    {
+        QFile f( QDir{ tempDirPath }.filePath( "a.log" ) );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" );
+    }
+
+    runInUiThread( [ &mainWindow, tempDirPath ] {
+        mainWindow->openFolderByPath( tempDirPath );
+    } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    QTest::qWait( 200 );
+    auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
+    REQUIRE( folderWidget != nullptr );
+
+    // Search, snapshot pane 0 (keep-results) and search again in a fresh pane.
+    runInUiThread( [ folderWidget ] {
+        folderWidget->searchFor( "ERROR" );
+    } );
+    REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+    runInUiThread( [ folderWidget ] {
+        folderWidget->searchToolbar()->setKeepResultsChecked( true );
+        folderWidget->searchFor( "beta" );
+    } );
+    REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+    REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 2; } ) );
+
+    WHEN( "the new active pane's view initiates a QuickFind change" )
+    {
+        THEN( "the session QuickFind pattern follows" )
+        {
+            // The pane-1 view was never registered at tab activation (only the
+            // original pane-0 view was); its changeQuickFind signal must reach
+            // the mux after the pane lifecycle re-registration.
+            Q_EMIT folderWidget->filteredView()->changeQuickFind(
+                QStringLiteral( "beta" ), QuickFindMux::Forward );
+            REQUIRE( waitUiState( [ & ] {
+                return appSession->quickFindPattern()->getPattern()
+                       == QStringLiteral( "beta" );
+            } ) );
+        }
+    }
+
+    WHEN( "the original (mux-registered) pane is closed" )
+    {
+        // Closing pane 0 destroys the view the mux registered at activation.
+        // The re-registration disconnects the dead view (QPointer guard in
+        // QuickFindMux::unregisterAllSearchables) and registers the surviving
+        // pane. NOTE: the guard is EXERCISED here (a probe shows the nulled
+        // entry at re-registration) but not VERIFIED -- with the guard broken
+        // the disconnect on the freed view is benign-in-practice in this run,
+        // so only an ASAN build would catch it. The functional assertions
+        // below verify QuickFind follows the surviving pane.
+        runInUiThread( [ folderWidget ] {
+            Q_EMIT folderWidget->resultsTabs()->tabCloseRequested( 0 );
+        } );
+        REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 1; } ) );
+
+        THEN( "QuickFind still follows the surviving pane" )
+        {
+            Q_EMIT folderWidget->filteredView()->changeQuickFind(
+                QStringLiteral( "gamma" ), QuickFindMux::Forward );
+            REQUIRE( waitUiState( [ & ] {
+                return appSession->quickFindPattern()->getPattern()
+                       == QStringLiteral( "gamma" );
+            } ) );
+        }
+    }
+
+    WHEN( "a background folder tab's panes change" )
+    {
+        // A second folder tab (now current): the first folder goes to the
+        // background. Its pane changes must NOT steal the mux from the
+        // foreground document (MainWindow::onFolderSearchablesChanged guards
+        // on the sender being the current document).
+        const auto tempDirPath2 = makeTestDir( "folderqf2" );
+        REQUIRE( QDir{ tempDirPath2 }.exists() );
+        {
+            QFile f( QDir{ tempDirPath2 }.filePath( "c.log" ) );
+            REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+            f.write( "line0\nERROR delta\n" );
+        }
+        runInUiThread( [ &mainWindow, tempDirPath2 ] {
+            mainWindow->openFolderByPath( tempDirPath2 );
+        } );
+        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+        QTest::qWait( 200 );
+        auto* foreground = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
+        REQUIRE( foreground != nullptr );
+        REQUIRE( foreground != folderWidget );
+
+        // Drive the BACKGROUND folder's pane lifecycle: pane 1 is active from
+        // the keep-results setup, so switching to 0 emits searchablesChanged.
+        runInUiThread( [ folderWidget ] {
+            folderWidget->resultsTabs()->setCurrentIndex( 0 );
+        } );
+        QTest::qWait( 200 );
+
+        THEN( "the mux stays with the foreground document" )
+        {
+            Q_EMIT foreground->filteredView()->changeQuickFind(
+                QStringLiteral( "delta" ), QuickFindMux::Forward );
+            REQUIRE( waitUiState( [ & ] {
+                return appSession->quickFindPattern()->getPattern()
+                       == QStringLiteral( "delta" );
             } ) );
         }
     }

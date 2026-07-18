@@ -2198,6 +2198,66 @@ TEST_CASE( "FolderCrawlerWidget keeps restored marks for files absent at restore
     REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
 }
 
+TEST_CASE( "FolderCrawlerWidget announces searchable changes on pane lifecycle",
+           "[folder][quickfind]" )
+{
+    // The QuickFindMux snapshots the active pane's view when the folder tab is
+    // activated; panes created/switched/closed afterwards must re-announce so
+    // MainWindow re-registers (cluster C of the 2026-07-18 audit). The FINAL
+    // announcement at each step must name the correct active pane: a close
+    // also produces an intermediate emission while the closing pane is still
+    // active, so only the last one is authoritative.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Record the ACTIVE pane view at every emission.
+    std::vector<QObject*> emissions;
+    QObject::connect( &widget, &FolderCrawlerWidget::searchablesChanged, &widget,
+                      [ & ]() { emissions.push_back( widget.filteredView() ); } );
+
+    // Pane create (keep-results snapshot + fresh pane): the last emission
+    // must report the NEW active pane.
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "beta" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 2 );
+    auto* const pane1View = widget.filteredView();
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane1View );
+
+    // Pane switch back to tab 0: the last emission must report tab 0's view.
+    emissions.clear();
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    QTest::qWait( 100 );
+    auto* const pane0View = widget.filteredView();
+    REQUIRE( pane0View != pane1View );
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane0View );
+
+    // Pane close (the current tab): the FINAL emission must report the
+    // surviving pane, never the destroyed view (an intermediate emission
+    // while the closing pane is still active is expected and harmless --
+    // MainWindow's synchronous re-registration ends with the survivor).
+    emissions.clear();
+    Q_EMIT widget.resultsTabs()->tabCloseRequested( 0 );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 1 );
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane1View );
+    REQUIRE( emissions.back() != pane0View );
+}
+
 TEST_CASE( "FolderCrawlerWidget copy excludes group header rows", "[folder][clipboard]" )
 {
     // Group headers are UI chrome (path + count), not source lines: copying a
