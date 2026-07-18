@@ -277,6 +277,49 @@ SCENARIO( "marks in filtered log data", "[logdata]" )
                 }
             }
 
+            AND_WHEN( "Get mark before from an unmarked line below both marks" )
+            {
+                // The cursor is routinely unmarked while mark-hopping; the
+                // nearest mark strictly above must be returned (rank() is
+                // inclusive, so the implementation must not treat the line as
+                // marked).
+                const auto markBefore = filtered_data->getMarkBefore( 30_lnum );
+                THEN( "Return the nearest mark above" )
+                {
+                    REQUIRE( markBefore.has_value() );
+                    REQUIRE( *markBefore == 25_lnum );
+                }
+            }
+
+            AND_WHEN( "Get mark before from an unmarked line between the marks" )
+            {
+                const auto markBefore = filtered_data->getMarkBefore( 20_lnum );
+                THEN( "Return the mark below" )
+                {
+                    REQUIRE( markBefore.has_value() );
+                    REQUIRE( *markBefore == 10_lnum );
+                }
+            }
+
+            AND_WHEN( "Get mark before from an unmarked line above both marks" )
+            {
+                const auto markBefore = filtered_data->getMarkBefore( 9_lnum );
+                THEN( "Return no mark" )
+                {
+                    REQUIRE_FALSE( markBefore.has_value() );
+                }
+            }
+
+            AND_WHEN( "Get mark after from an unmarked line between the marks" )
+            {
+                const auto markAfter = filtered_data->getMarkAfter( 11_lnum );
+                THEN( "Return the mark below" )
+                {
+                    REQUIRE( markAfter.has_value() );
+                    REQUIRE( *markAfter == 25_lnum );
+                }
+            }
+
             AND_WHEN( "Get mark after has mark" )
             {
                 const auto markAfter = filtered_data->getMarkAfter( 10_lnum );

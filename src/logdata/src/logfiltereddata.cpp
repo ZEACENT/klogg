@@ -394,13 +394,19 @@ OptionalLineNumber LogFilteredData::getMarkBefore( LineNumber line ) const
     OptionalLineNumber marked_line;
 
     const LineNumber::UnderlyingType rank = marks_.rank( line.get() );
+    // rank() is inclusive (counts elements <= line): when line is itself
+    // marked it includes that mark, otherwise it counts exactly the marks
+    // strictly before line. Either way `before` is the number of marks
+    // strictly before line, so the nearest one sits at index before - 1.
+    const LineNumber::UnderlyingType before
+        = marks_.contains( line.get() ) ? rank - 1 : rank;
 
-    if ( rank < 2 ) {
+    if ( before == 0 ) {
         return marked_line;
     }
 
     LineNumber::UnderlyingType nextMark;
-    if ( marks_.select( rank - 2, &nextMark ) ) {
+    if ( marks_.select( before - 1, &nextMark ) ) {
         marked_line = LineNumber( nextMark );
     }
 
