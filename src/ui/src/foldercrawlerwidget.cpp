@@ -22,6 +22,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDir>
 #include <QFontMetrics>
 #include <QInputDialog>
 #include <QMessageBox>
@@ -78,13 +79,14 @@ class FolderCrawlerContext : public ViewContextInterface {
 
     // Construct from the live widget state (used by doGetViewContext).
     FolderCrawlerContext( QString pattern, bool ignoreCase, bool useRegexp, bool inverse,
-                          bool boolean, QList<int> sizes )
+                          bool boolean, QList<int> sizes, QVariantMap marks )
         : pattern_{ std::move( pattern ) }
         , ignoreCase_{ ignoreCase }
         , useRegexp_{ useRegexp }
         , inverse_{ inverse }
         , boolean_{ boolean }
         , sizes_{ std::move( sizes ) }
+        , marks_{ std::move( marks ) }
     {
     }
 
@@ -102,6 +104,13 @@ class FolderCrawlerContext : public ViewContextInterface {
             sizeVariants.append( s );
         }
         properties[ "S" ] = sizeVariants;
+
+        // Marks: { relativeFilePath: [line, ...] } -- relative so a moved
+        // folder still restores (single-file CrawlerWidgetContext persists
+        // marks too; folder mode has one list per file).
+        if ( !marks_.isEmpty() ) {
+            properties[ "M" ] = marks_;
+        }
 
         return QJsonDocument::fromVariant( properties ).toJson( QJsonDocument::Compact );
     }
@@ -130,6 +139,10 @@ class FolderCrawlerContext : public ViewContextInterface {
     {
         return sizes_;
     }
+    const QVariantMap& marks() const
+    {
+        return marks_;
+    }
 
   private:
     void loadFromJson( const QString& json )
@@ -148,6 +161,8 @@ class FolderCrawlerContext : public ViewContextInterface {
                 sizes_.append( s.toInt() );
             }
         }
+
+        marks_ = properties.value( "M" ).toMap();
     }
 
     QString pattern_;
@@ -156,6 +171,7 @@ class FolderCrawlerContext : public ViewContextInterface {
     bool inverse_ = false;
     bool boolean_ = false;
     QList<int> sizes_;
+    QVariantMap marks_;
 };
 
 // Defined out-of-line so the unique_ptr<FolderFilteredMarkProvider> member
@@ -693,6 +709,9 @@ void FolderCrawlerWidget::refreshAllPanesForMarks()
     if ( mainView_ != nullptr ) {
         mainView_->forceRefresh();
     }
+    // Refresh the minimap too: it renders the current file's match + mark
+    // ticks (no-op while the overview is hidden or no file is open).
+    refreshFileOverview( currentMainFilePath_ );
 }
 
 FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString& title )
@@ -824,6 +843,12 @@ bool FolderCrawlerWidget::isMainViewLineMarked( LineNumber line ) const
     return mainViewMarkProvider_.isMarked( line );
 }
 
+bool FolderCrawlerWidget::isLineMarkedInFile( const QString& filePath, LineNumber line ) const
+{
+    const auto it = folderMarks_.find( filePath );
+    return it != folderMarks_.end() && it->count( line.get() ) > 0;
+}
+
 bool FolderCrawlerWidget::isFilteredResultRowMarked( LineNumber row ) const
 {
     // Resolves a filtered-view row to (file, localLine) and checks the shared
@@ -841,13 +866,14 @@ bool FolderCrawlerWidget::isFilteredResultRowMarked( LineNumber row ) const
 void FolderCrawlerWidget::markMainViewLine( LineNumber line )
 {
     addMark( currentMainFilePath_, line );
-    mainView_->forceRefresh();
+    // Same refresh path as the production markLines signal handler.
+    refreshAllPanesForMarks();
 }
 
 void FolderCrawlerWidget::unmarkMainViewLine( LineNumber line )
 {
     removeMark( currentMainFilePath_, line );
-    mainView_->forceRefresh();
+    refreshAllPanesForMarks();
 }
 
 void FolderCrawlerWidget::saveAsFavorite()
@@ -965,6 +991,10 @@ void FolderCrawlerWidget::applyConfiguration()
     mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
     overview_.setVisible( config.isOverviewVisible() );
     mainView_->refreshOverview();
+    // Re-feed the minimap when it just became visible: marks/matches changed
+    // while it was hidden never reached the Overview model (refreshFileOverview
+    // no-ops while hidden), so a re-shown overview would draw stale ticks.
+    refreshFileOverview( currentMainFilePath_ );
     mainView_->updateFont( font );
     // Apply font + line-numbers to EVERY pane (Keep-results snapshots included),
     // mirroring CrawlerWidget looping over all result tabs.
@@ -1323,6 +1353,24 @@ void FolderCrawlerWidget::doSetViewContext( const QString& view_context )
     // startSearch() call, and CrawlerWidget::doSetViewContext's toggle restore.
     const FolderCrawlerContext context{ view_context };
 
+    // Restore the per-file mark store (paths serialized relative to the folder
+    // root, resolved against the current root) and repaint every view that
+    // renders marks -- the mark providers and the results views read this
+    // store live. Independent of whether a search is restored. Marks whose
+    // file is currently absent from the folder are KEPT (not pruned): folder
+    // contents change over time, and the marks re-render if the file returns
+    // (single-file sessions restore marks just as blindly).
+    folderMarks_.clear();
+    const QDir root( folderPath_ );
+    const auto& contextMarks = context.marks();
+    for ( auto it = contextMarks.begin(); it != contextMarks.end(); ++it ) {
+        const auto absolutePath = root.absoluteFilePath( it.key() );
+        for ( const auto& lineVariant : it.value().toList() ) {
+            folderMarks_[ absolutePath ].insert( lineVariant.toULongLong() );
+        }
+    }
+    refreshAllPanesForMarks();
+
     if ( splitter_ != nullptr && !context.sizes().isEmpty() ) {
         // Per-tab session sizes beat the global default seeded on first
         // geometry. Restore can run while the tab is still hidden (pre-layout
@@ -1365,12 +1413,26 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
     // searchToolbar_ is constructed unconditionally in the ctor and never
     // reset, so it is always non-null here -- no null-guard needed (mirrors
     // CrawlerWidget, which derefs searchToolbar_ unconditionally throughout).
+    // Marks are serialized per file, keyed RELATIVE to the folder root so a
+    // moved folder still restores them.
+    QVariantMap marks;
+    const QDir root( folderPath_ );
+    for ( auto it = folderMarks_.cbegin(); it != folderMarks_.cend(); ++it ) {
+        QVariantList lines;
+        for ( const auto l : it.value() ) {
+            lines.append( static_cast<qulonglong>( l ) );
+        }
+        if ( !lines.isEmpty() ) {
+            marks.insert( root.relativeFilePath( it.key() ), lines );
+        }
+    }
+
     auto context = std::make_shared<const FolderCrawlerContext>(
         searchToolbar_->currentSearchText(),
         !searchToolbar_->isMatchCase(),
         searchToolbar_->isUseRegexp(),
         searchToolbar_->isInverse(),
-        searchToolbar_->isBoolean(), sizes );
+        searchToolbar_->isBoolean(), sizes, marks );
 
     return static_cast<std::shared_ptr<const ViewContextInterface>>( context );
 }
@@ -1768,7 +1830,28 @@ void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
     if ( !overview_.isVisible() || currentMainData_ == nullptr || results == nullptr ) {
         return;
     }
-    overview_.setMatchLines( results->matchLinesForFile( filePath ) );
+    const auto matchLines = results->matchLinesForFile( filePath );
+    overview_.setMatchLines( matchLines );
+    // Marks for the same file from the shared per-file store, so the minimap
+    // shows mark ticks exactly like single-file (Overview::getMarkLines).
+    // Single-file precedence: a line that is BOTH a match and a mark is drawn
+    // as a match (Overview classifies by lineType, Match first), so marked
+    // lines that are also matches are excluded from the mark list.
+    std::vector<LineNumber> marks;
+    const auto marksIt = folderMarks_.constFind( filePath );
+    if ( marksIt != folderMarks_.cend() ) {
+        std::set<uint64_t> matchSet;
+        for ( const auto& matchLine : matchLines ) {
+            matchSet.insert( matchLine.get() );
+        }
+        marks.reserve( marksIt->size() );
+        for ( const auto l : marksIt.value() ) {
+            if ( matchSet.count( l ) == 0 ) {
+                marks.emplace_back( LineNumber( static_cast<LineNumber::UnderlyingType>( l ) ) );
+            }
+        }
+    }
+    overview_.setMarkLines( marks );
     overview_.updateData( currentMainData_->getNbLine() );
     mainView_->refreshOverview();
 }

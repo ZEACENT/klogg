@@ -79,6 +79,10 @@ class Overview {
     // (folder mode: per-file matches from FolderSearchResults). Marks are not
     // represented. Pass an empty list (or call setFilteredData) to clear.
     void setMatchLines( const std::vector<LineNumber>& matchLines );
+    // Inject an explicit mark-line list (folder mode: per-file marks from the
+    // folder's shared mark store), symmetric with setMatchLines. Pass an empty
+    // list to clear.
+    void setMarkLines( const std::vector<LineNumber>& markLines );
     // Signal the overview its attached LogFilteredData has been changed and
     // the overview must be updated with the provided total number
     // of line of the file.
@@ -126,6 +130,8 @@ class Overview {
     // null). Populated by setMatchLines; consumed by the else-if branch in
     // recalculatesLines.
     std::vector<LineNumber> explicitMatchLines_;
+    // Folder-mode explicit mark-line list (same lifecycle as the match list).
+    std::vector<LineNumber> explicitMarkLines_;
     // Total number of lines in the file.
     LinesCount linesInFile_;
     // Whether the overview is visible.

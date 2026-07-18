@@ -1994,6 +1994,204 @@ TEST_CASE( "FolderCrawlerWidget session splitter sizes beat the saved default",
     REQUIRE( ratio < 0.65 );
 }
 
+TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overview]" )
+{
+    // Single-file parity: marks show as ticks in the minimap. Folder mode fed
+    // the overview only the match list, so marks never appeared (cluster D of
+    // the 2026-07-18 audit). The ticks belong to the file currently shown and
+    // follow result-row switches.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\nline1\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const overview = widget.overviewModel();
+    REQUIRE( overview != nullptr );
+    // The overview refresh path no-ops while hidden; visibility follows the
+    // machine's Configuration, so force it (single-file tests do the same).
+    overview->setVisible( true );
+
+    // Mark a NON-match line: it must appear as a mark tick.
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( !overview->getMarkLines()->empty() );
+
+    widget.unmarkMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    // Re-fetch after every update*() call: the returned pointer is documented
+    // valid only until the next update (overview.h).
+    REQUIRE( overview->getMarkLines()->empty() );
+
+    // Single-file precedence: a line that is BOTH a match and a mark is drawn
+    // as a match (red), so it must NOT be duplicated into the mark list.
+    widget.markMainViewLine( 1_lnum ); // "ERROR alpha" is a match
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( overview->getMarkLines()->empty() );
+    REQUIRE( !overview->getMatchLines()->empty() );
+    widget.unmarkMainViewLine( 1_lnum );
+    QTest::qWait( 50 );
+
+    // Rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma.
+    // Mark a non-match line in b, then switch between the files: the minimap
+    // ticks must track the file currently shown in the main view.
+    widget.selectResultRow( 4_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 100 );
+    widget.markMainViewLine( 1_lnum ); // b.log:1 is "line1", not a match
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( !overview->getMarkLines()->empty() );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 100 );
+    overview->updateView( 100 );
+    // a.log has no marks anymore (unmarked above) -> no stale ticks from b.
+    REQUIRE( overview->getMarkLines()->empty() );
+}
+
+TEST_CASE( "FolderCrawlerWidget marks survive a view-context round-trip",
+           "[folder][session]" )
+{
+    // Single-file parity: marks persist in the session (CrawlerWidgetContext
+    // serializes them). Folder mode dropped them: the per-file mark store
+    // lived only in memory (cluster D of the 2026-07-18 audit). Marks are
+    // serialized RELATIVE to the folder root so a moved folder restores.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // Mark a main-view line in a.log and a results row from b.log
+    // (rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma).
+    widget.markMainViewLine( 1_lnum );
+    Q_EMIT widget.filteredView()->markLines( { 4_lnum } );
+    QTest::qWait( 50 );
+    REQUIRE( widget.isLineMarkedInFile( a, 1_lnum ) );
+    REQUIRE( widget.isLineMarkedInFile( b, 0_lnum ) );
+
+    const auto json = widget.context()->toString();
+    // The serialized context carries the marks under a dedicated key, with
+    // paths RELATIVE to the folder root (so a moved folder restores) -- it
+    // must not embed the (machine-specific) absolute folder path.
+    REQUIRE( json.contains( QStringLiteral( "\"M\"" ) ) );
+    REQUIRE( json.contains( QStringLiteral( "a.log" ) ) );
+    REQUIRE_FALSE( json.contains( dir.path() ) );
+
+    FolderCrawlerWidget restored;
+    restored.setFolder( dir.path(), QStringList{ a, b } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( a, 1_lnum ) );
+    REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget restores marks into a moved folder",
+           "[folder][session]" )
+{
+    // The mark keys are relative to the folder root precisely so that a folder
+    // MOVED between save and restore still gets its marks: the same relative
+    // paths must resolve against the NEW root.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    widget.markMainViewLine( 1_lnum );
+    QTest::qWait( 20 );
+
+    const auto json = widget.context()->toString();
+
+    // Same folder content at a NEW location (the "moved" folder).
+    QTemporaryDir movedDir;
+    REQUIRE( movedDir.isValid() );
+    const QString movedA = writeFile( movedDir, "a.log",
+                                      QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    FolderCrawlerWidget restored;
+    restored.setFolder( movedDir.path(), QStringList{ movedA } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( movedA, 1_lnum ) );
+    // And not keyed to the original (now-gone) location.
+    REQUIRE_FALSE( restored.isLineMarkedInFile( a, 1_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget keeps restored marks for files absent at restore",
+           "[folder][session]" )
+{
+    // Contract (pinned, mirrors single-file's blind mark restore): a session
+    // carrying marks for a file the folder no longer lists restores them
+    // anyway; they re-render if the file returns. Restore does not prune.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    Q_EMIT widget.filteredView()->markLines( { 4_lnum } ); // b.log row
+    QTest::qWait( 50 );
+    REQUIRE( widget.isLineMarkedInFile( b, 0_lnum ) );
+
+    const auto json = widget.context()->toString();
+
+    // Restore with b.log absent from the folder's file list.
+    FolderCrawlerWidget restored;
+    restored.setFolder( dir.path(), QStringList{ a } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+}
+
 TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )
 {
     // F5: MainWindow dispatches these through AbstractCrawlerWidget for every

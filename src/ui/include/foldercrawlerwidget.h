@@ -126,6 +126,11 @@ class FolderCrawlerWidget : public QWidget,
     // True if `line` is marked in the file currently shown in the main view.
     // (Test accessor for folder-mode marks, which live in the per-file store.)
     bool isMainViewLineMarked( LineNumber line ) const;
+    // True if `line` is marked in `filePath` (the shared per-file mark store).
+    // Test accessor for session-persistence coverage.
+    bool isLineMarkedInFile( const QString& filePath, LineNumber line ) const;
+    // The overview model feeding the minimap (test seam for mark/match ticks).
+    Overview* overviewModel() { return &overview_; }
     // True if the result row (a filtered-view line index) is marked -- resolves
     // the row to (file, localLine) via the results model and checks the shared
     // per-file mark store. Test accessor for filtered-view marks.
