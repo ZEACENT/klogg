@@ -162,6 +162,7 @@ FolderCrawlerWidget::ResultPane::~ResultPane() = default;
 
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
+    , colorLabelsController_( this, [ this ]() { return activeView(); } )
 {
     placeholderData_ = std::make_shared<LogData>();
     currentMainData_ = placeholderData_;
@@ -244,6 +245,10 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     overviewWidget_->setParent( mainView_ );
     overview_.setVisible( Configuration::getSynced().isOverviewVisible() );
     mainView_->refreshOverview();
+
+    // Color labels: route the view's context-menu signals to the shared
+    // controller so labels highlight in every view (single-file parity).
+    colorLabelsController_.watchView( mainView_ );
 
     // Folder-mode marks: inject a per-file MarkProvider so the main view's mark
     // bullet + Next/Prev-mark navigation work without LogFilteredData. The
@@ -641,6 +646,10 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     }
     view->setSearchPattern( currentSearchPattern_ );
 
+    // Color labels: every pane's results view joins the tab's shared label set
+    // (seeded with any labels already set before the pane existed).
+    colorLabelsController_.watchView( view );
+
     // Per-pane signal wiring (self-contained: switching tabs needs no re-wiring).
     connect( view, &FolderFilteredView::newSelection, this, &FolderCrawlerWidget::onResultSelected );
     connect( view, &FolderFilteredView::headerClicked, this, &FolderCrawlerWidget::onHeaderClicked );
@@ -888,6 +897,11 @@ void FolderCrawlerWidget::registerShortcuts()
             pane->view->registerShortcuts();
         }
     }
+
+    // Widget-level color-label shortcuts (1..9 add, 0 remove, Cmd+D next,
+    // Cmd+Shift+0 clear) — the single-file CrawlerWidget registers these on
+    // itself; the shared controller does the same for this tab.
+    colorLabelsController_.registerShortcuts();
 }
 
 AbstractLogView* FolderCrawlerWidget::activeView() const

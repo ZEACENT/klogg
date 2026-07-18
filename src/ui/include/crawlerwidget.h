@@ -56,7 +56,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
-#include "colorlabelsmanager.h"
+#include "colorlabelscontroller.h"
 #include "filteredview.h"
 #include "iconloader.h"
 #include "linetypes.h"
@@ -268,12 +268,6 @@ class CrawlerWidget : public QSplitter,
     void setSearchLimits( LineNumber startLine, LineNumber endLine );
     void clearSearchLimits();
 
-    void addColorLabelToSelection( size_t label );
-    void addNextColorLabelToSelection();
-    void removeColorLabelFromSelection();
-    void clearColorLabels();
-    void setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord );
-
     void changeFilteredView(int tabIndex);
     void closeFilteredView(int tabIndex);
     void filteredViewDestroyed(QObject* view);
@@ -354,8 +348,6 @@ class CrawlerWidget : public QSplitter,
     void reloadPredefinedFilters() const;
 
     void resetStateOnSearchPatternChanges();
-
-    void updateColorLabels( const ColorLabelsManager::QuickHighlightersCollection& labels );
 
     void connectAllFilteredViewSlots( FilteredView* view);
 
@@ -438,7 +430,10 @@ class CrawlerWidget : public QSplitter,
     std::optional<int> encodingMib_;
     QString encodingText_;
 
-    ColorLabelsManager colorLabelsManager_;
+    // Per-tab color labels: context-menu signals + digit shortcuts -> quick
+    // highlighters in every view. Shared with FolderCrawlerWidget so both tab
+    // kinds get identical color-label behavior by composition.
+    ColorLabelsController colorLabelsController_;
 
     qint64 searchPendingLines_ = 0;
 

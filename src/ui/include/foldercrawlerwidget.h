@@ -33,6 +33,7 @@
 
 #include "linetypes.h"
 #include "markprovider.h"
+#include "colorlabelscontroller.h"
 #include "foldersearchresults.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
@@ -242,6 +243,12 @@ class FolderCrawlerWidget : public QWidget,
     QString folderPath_;
     QStringList filePaths_;
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
+
+    // Per-tab color labels (context menu + 1..9/0 shortcuts -> quick
+    // highlighters in every view). Shared component with CrawlerWidget;
+    // constructed early so the main view and every results pane can be
+    // watchView()'d as they are created.
+    ColorLabelsController colorLabelsController_;
 
     FolderSearchEngine* engine_ = nullptr;
     LogMainView* mainView_ = nullptr;

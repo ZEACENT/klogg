@@ -196,6 +196,12 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     {
         return view->drawingTopOffset_;
     }
+
+    static const std::vector<AbstractLogView::QuickHighlighters>&
+    quickHighlighters( const AbstractLogView* view )
+    {
+        return view->quickHighlighters_;
+    }
 };
 
 TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
@@ -1609,4 +1615,100 @@ TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new s
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     QTest::qWait( 100 );
     REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
+}
+
+TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every view",
+           "[folder][colorlabels]" )
+{
+    // Single-file parity: CrawlerWidget wires the views' color-label signals to
+    // a ColorLabelsManager and pushes the resulting quick highlighters into BOTH
+    // views (crawlerwidget.cpp:1456-1464, :1586-1602), and registers the
+    // widget-level label shortcuts 1..9 (add) / 0 (remove) / Cmd+D (next) /
+    // Cmd+Shift+0 (clear) (crawlerwidget.cpp:1704-1727). The AbstractLogView base
+    // builds the "Color labels" context menu for folder views too, so picking a
+    // label (or pressing a digit shortcut) in a folder tab must highlight the
+    // selected text in the main view AND in the results view.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Open a.log in the main view and select the "ERROR" portion of line 1.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+    auto* const filteredView = widget.filteredView();
+    REQUIRE( mainView != nullptr );
+    REQUIRE( filteredView != nullptr );
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const auto hasLabelledText = []( const AbstractLogView* view, size_t label,
+                                     const QString& text ) {
+        const auto& labels = Access::quickHighlighters( view );
+        return label < labels.size()
+               && std::any_of( labels[ label ].cbegin(), labels[ label ].cend(),
+                               [ & ]( const QuickLabelEntry& e ) { return e.text == text; } );
+    };
+    const auto hasAnyLabelledText = []( const AbstractLogView* view ) {
+        const auto& labels = Access::quickHighlighters( view );
+        return std::any_of( labels.cbegin(), labels.cend(),
+                            []( const auto& entries ) { return !entries.isEmpty(); } );
+    };
+
+    // selectPortionAndDisplayLine selects the whole line (selection_.selectLine),
+    // so the labelled text is the full line content.
+    mainView->selectPortionAndDisplayLine( 1_lnum, LinesCount( 1 ), LineColumn( 0 ),
+                                           LineLength( 5 ) );
+    const QString selectedText = QStringLiteral( "ERROR alpha" );
+    REQUIRE( mainView->getSelectedText() == selectedText );
+
+    SECTION( "context-menu signal applies and removes the label in every view" )
+    {
+        Q_EMIT mainView->addColorLabel( 0 );
+        QTest::qWait( 20 );
+        REQUIRE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE( hasLabelledText( filteredView, 0, selectedText ) );
+
+        // The "None" menu action emits removeColorLabel.
+        Q_EMIT mainView->removeColorLabel();
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE_FALSE( hasLabelledText( filteredView, 0, selectedText ) );
+    }
+
+    SECTION( "digit shortcut applies and removes the label" )
+    {
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        QTest::keyClick( mainView->viewport(), Qt::Key_1 );
+        QTest::qWait( 20 );
+        REQUIRE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE( hasLabelledText( filteredView, 0, selectedText ) );
+
+        QTest::keyClick( mainView->viewport(), Qt::Key_0 );
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasLabelledText( mainView, 0, selectedText ) );
+    }
+
+    SECTION( "clear removes every label from every view" )
+    {
+        Q_EMIT mainView->addColorLabel( 0 );
+        QTest::qWait( 20 );
+        REQUIRE( hasAnyLabelledText( mainView ) );
+
+        Q_EMIT mainView->clearColorLabels();
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasAnyLabelledText( mainView ) );
+        REQUIRE_FALSE( hasAnyLabelledText( filteredView ) );
+    }
 }

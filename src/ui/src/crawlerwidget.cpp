@@ -174,6 +174,7 @@ private:
 CrawlerWidget::CrawlerWidget( QWidget* parent )
     : QSplitter( parent )
     , iconLoader_{ this }
+    , colorLabelsController_( this, [ this ]() { return activeView(); } )
 {
 }
 
@@ -1453,15 +1454,10 @@ void CrawlerWidget::setup()
     // above (searchToolbar_ -> handlers / MainWindow-facing signals).
 
     // Switch between views
-    connect( logMainView_, &AbstractLogView::clearColorLabels, this,
-             &CrawlerWidget::clearColorLabels );
-
-    connect( logMainView_, &AbstractLogView::addColorLabel, this,
-             &CrawlerWidget::addColorLabelToSelection );
-    connect( logMainView_, &AbstractLogView::removeColorLabel, this,
-             &CrawlerWidget::removeColorLabelFromSelection );
-    connect( logMainView_, &AbstractLogView::quickColorLabelDefaultsChanged, this,
-             &CrawlerWidget::setQuickColorLabelDefaults );
+    // Color labels: the shared controller owns the manager and keeps every
+    // watched view's quick highlighters in sync (context-menu signals +
+    // digit shortcuts registered in registerShortcuts).
+    colorLabelsController_.watchView( logMainView_ );
 
     connect( logMainView_, &AbstractLogView::sendSelectionToScratchpad, this,
              [ this ]() { Q_EMIT sendToScratchpad( logMainView_->getSelectedText() ); } );
@@ -1583,12 +1579,9 @@ void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
 
     connect( view, &FilteredView::clearSearchLimits, this, &CrawlerWidget::clearSearchLimits );
 
-    connect( view, &AbstractLogView::addColorLabel, this,
-             &CrawlerWidget::addColorLabelToSelection );
-    connect( view, &AbstractLogView::removeColorLabel, this,
-             &CrawlerWidget::removeColorLabelFromSelection );
-    connect( view, &AbstractLogView::quickColorLabelDefaultsChanged, this,
-             &CrawlerWidget::setQuickColorLabelDefaults );
+    // Color labels for this (possibly keep-results) filtered view: shared
+    // controller, seeded with any labels already set on the other views.
+    colorLabelsController_.watchView( view );
 
     connect( view, &AbstractLogView::sendSelectionToScratchpad, this,
              [ view, this ]() { Q_EMIT sendToScratchpad( view->getSelectedText() ); } );
@@ -1598,8 +1591,6 @@ void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
 
     connect( view, &FilteredView::exitView, logMainView_,
              QOverload<>::of( &LogMainView::setFocus ) );
-
-    connect( view, &AbstractLogView::clearColorLabels, this, &CrawlerWidget::clearColorLabels );
 
     connect( logMainView_, &LogMainView::exitView, view,
              QOverload<>::of( &FilteredView::setFocus ) );
@@ -1700,31 +1691,10 @@ void CrawlerWidget::registerShortcuts()
                                           }
                                       } );
 
-    std::array<std::string, 9> colorLables = {
-        ShortcutAction::LogViewAddColorLabel1, ShortcutAction::LogViewAddColorLabel2,
-        ShortcutAction::LogViewAddColorLabel3, ShortcutAction::LogViewAddColorLabel4,
-        ShortcutAction::LogViewAddColorLabel5, ShortcutAction::LogViewAddColorLabel6,
-        ShortcutAction::LogViewAddColorLabel7, ShortcutAction::LogViewAddColorLabel8,
-        ShortcutAction::LogViewAddColorLabel9,
-    };
-
-    for ( auto label = 0u; label < colorLables.size(); ++label ) {
-        ShortcutAction::registerShortcut(
-            configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-            colorLables[ label ], [ this, label ]() { addColorLabelToSelection( label ); } );
-    }
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewAddNextColorLabel, [ this ]() { addNextColorLabelToSelection(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewRemoveColorLabel, [ this ]() { removeColorLabelFromSelection(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewClearColorLabels, [ this ]() { clearColorLabels(); } );
+    // Color-label shortcuts (1..9 add, 0 remove, Cmd+D next, Cmd+Shift+0 clear)
+    // are owned by the shared controller (same actions, same widget-level
+    // context as before; also used by FolderCrawlerWidget).
+    colorLabelsController_.registerShortcuts();
 
     logMainView_->registerShortcuts();
     filteredView_->registerShortcuts();
@@ -1916,43 +1886,6 @@ void CrawlerWidget::changeTopViewSize( int32_t delta )
     LOG_DEBUG << "CrawlerWidget::changeTopViewSize " << sizes().at( 0 ) << " " << min << " " << max;
     moveSplitter( closestLegalPosition( sizes().at( 0 ) + ( delta * 10 ), 1 ), 1 );
     LOG_DEBUG << "CrawlerWidget::changeTopViewSize " << sizes().at( 0 );
-}
-
-void CrawlerWidget::addColorLabelToSelection( size_t label )
-{
-    updateColorLabels( colorLabelsManager_.setColorLabel(
-        label, getSelectedText(), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
-}
-
-void CrawlerWidget::addNextColorLabelToSelection()
-{
-    updateColorLabels( colorLabelsManager_.setNextColorLabel(
-        getSelectedText(), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
-}
-
-void CrawlerWidget::removeColorLabelFromSelection()
-{
-    updateColorLabels( colorLabelsManager_.removeColorLabel( getSelectedText() ) );
-}
-
-void CrawlerWidget::clearColorLabels()
-{
-    updateColorLabels( colorLabelsManager_.clear() );
-}
-
-void CrawlerWidget::setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord )
-{
-    auto& highlighterSetCollection = HighlighterSetCollection::get();
-    highlighterSetCollection.setQuickHighlighterDefaults(
-        QuickHighlighterDefaults{ ignoreCase, wholeWord } );
-    highlighterSetCollection.save();
-}
-
-void CrawlerWidget::updateColorLabels(
-    const ColorLabelsManager::QuickHighlightersCollection& labels )
-{
-    logMainView_->setQuickHighlighters( labels );
-    filteredView_->setQuickHighlighters( labels );
 }
 
 //

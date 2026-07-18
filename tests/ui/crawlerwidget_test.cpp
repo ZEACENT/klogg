@@ -36,6 +36,8 @@
 #include <QCoreApplication>
 #include <QUuid>
 
+#include <algorithm>
+
 #include "savedsearches.h"
 #include "session.h"
 #include "test_utils.h"
@@ -253,6 +255,12 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         const auto shortcut = view->shortcuts_.find( key );
         return shortcut != view->shortcuts_.end() ? shortcut->second : nullptr;
     }
+
+    static const std::vector<AbstractLogView::QuickHighlighters>&
+    quickHighlighters( const AbstractLogView* view )
+    {
+        return view->quickHighlighters_;
+    }
 };
 
 template <>
@@ -302,6 +310,37 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     QString filteredViewSelectedText()
     {
         return crawler->filteredView_->getSelectedText();
+    }
+
+    void addColorLabelInFilteredView( size_t label )
+    {
+        Q_EMIT crawler->filteredView_->addColorLabel( label );
+        QTest::qWait( 20 );
+    }
+
+    void removeColorLabelInFilteredView()
+    {
+        Q_EMIT crawler->filteredView_->removeColorLabel();
+        QTest::qWait( 20 );
+    }
+
+    bool hasLabelledText( const AbstractLogView* view, size_t label, const QString& text )
+    {
+        const auto& labels
+            = AbstractLogView::access_by<AbstractLogViewPrivate>::quickHighlighters( view );
+        return label < labels.size()
+               && std::any_of( labels[ label ].cbegin(), labels[ label ].cend(),
+                               [ & ]( const QuickLabelEntry& e ) { return e.text == text; } );
+    }
+
+    bool mainViewHasLabelledText( size_t label, const QString& text )
+    {
+        return hasLabelledText( crawler->logMainView_, label, text );
+    }
+
+    bool filteredViewHasLabelledText( size_t label, const QString& text )
+    {
+        return hasLabelledText( crawler->filteredView_, label, text );
     }
 
     void setSearchPattern( const QString& pattern )
@@ -2451,6 +2490,61 @@ SCENARIO( "Go to top moves main view to absolute top with active search",
         {
             REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
             REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
+        }
+    }
+}
+
+SCENARIO( "Crawler widget color labels apply to the selection in all views",
+          "[ui][colorlabels]" )
+{
+    // Characterization guard for the single-file color-label path: the views'
+    // color-label context-menu signals and the widget-level digit shortcuts
+    // drive a ColorLabelsManager whose quick highlighters are pushed into BOTH
+    // views (crawlerwidget.cpp:1456-1464, :1704-1727, :1951-1958). This pins
+    // the contract before the wiring is extracted into a component shared with
+    // FolderCrawlerWidget (folder-mode color labels were dead: the same signals
+    // were connected to nothing there).
+    QTemporaryFile file{ "crawler_colorlabels_test_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } );
+    waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } );
+
+    GIVEN( "a single-line selection in the filtered view" )
+    {
+        constexpr auto SelectedLine = 10;
+        crawlerVisitor.focusFilteredView();
+        crawlerVisitor.clickFilteredViewLine( SelectedLine );
+        const auto selectedText = crawlerVisitor.filteredViewSelectedText();
+        REQUIRE_FALSE( selectedText.isEmpty() );
+
+        THEN( "the context-menu signal applies and removes a label in both views" )
+        {
+            crawlerVisitor.addColorLabelInFilteredView( 0 );
+            REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+
+            crawlerVisitor.removeColorLabelInFilteredView();
+            REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+        }
+
+        THEN( "the digit shortcut applies and removes a label in both views" )
+        {
+            crawlerVisitor.pressFilteredViewKey( Qt::Key_1 );
+            REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+
+            crawlerVisitor.pressFilteredViewKey( Qt::Key_0 );
+            REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
         }
     }
 }
