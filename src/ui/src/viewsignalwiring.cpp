@@ -149,47 +149,42 @@ void ViewSignalWiring::changeFontSize( bool increase )
 {
     auto& fontConfig = Configuration::get();
 
-    const auto fontInfo = QFontInfo( fontConfig.mainFont() );
-    const auto availableSizes = FontUtils::availableFontSizes( fontInfo.family() );
+    // Step the user's *configured* point size (Configuration::mainFont()),
+    // not QFontInfo's matched size: on Windows x86 the default family is a
+    // discrete/bitmap font, so QFontInfo clamps the configured 12pt down to
+    // ~7pt, and a Ctrl++ that landed on the next size above 7 (e.g. 8) would
+    // read back BELOW the configured 12 -- the zoom would shrink the font.
+    // Stepping against the configured value keeps Ctrl++ monotonic.
+    const auto family = QFontInfo( fontConfig.mainFont() ).family();
+    const auto availableSizes = FontUtils::availableFontSizes( family );
+    // availableFontSizes() always returns at least the standard sizes plus
+    // 10..19, so it is never empty; upper/lower_bound therefore never read a
+    // past-the-end iterator without the guards below.
+    const auto configuredSize = fontConfig.mainFont().pointSize();
 
-    auto currentSize
-        = std::find( availableSizes.cbegin(), availableSizes.cend(), fontInfo.pointSize() );
-    if ( currentSize == availableSizes.cend() ) {
-        // The configured size is not in the family's list (bitmap font with
-        // discrete sizes, or a hand-edited/legacy config): stepping from a
-        // past-the-end iterator is UB. Clamp to the nearest listed size
-        // before stepping. availableFontSizes() always returns at least the
-        // standard sizes plus 10..19, so it is never empty.
-        const auto nearest
-            = std::lower_bound( availableSizes.cbegin(), availableSizes.cend(),
-                                fontInfo.pointSize() );
-        if ( nearest == availableSizes.cend() ) {
-            // Configured size is above the whole range -> clamp to largest.
-            currentSize = std::prev( nearest );
-        }
-        else if ( nearest == availableSizes.cbegin() ) {
-            // At or below the whole range -> clamp to smallest.
-            currentSize = nearest;
-        }
-        else {
-            currentSize = ( *nearest - fontInfo.pointSize()
-                            < fontInfo.pointSize() - *std::prev( nearest ) )
-                              ? nearest
-                              : std::prev( nearest );
+    int newSize = -1;
+    if ( increase ) {
+        // First listed size strictly greater than the configured size.
+        const auto larger = std::upper_bound(
+            availableSizes.cbegin(), availableSizes.cend(), configuredSize );
+        if ( larger != availableSizes.cend() ) {
+            newSize = *larger;
         }
     }
-    if ( increase && currentSize != std::prev( availableSizes.cend() ) ) {
-        currentSize = std::next( currentSize );
-    }
-    else if ( !increase && currentSize != availableSizes.begin() ) {
-        currentSize = std::prev( currentSize );
+    else {
+        // Last listed size strictly less than the configured size.
+        const auto firstAtOrAbove = std::lower_bound(
+            availableSizes.cbegin(), availableSizes.cend(), configuredSize );
+        if ( firstAtOrAbove != availableSizes.cbegin() ) {
+            newSize = *std::prev( firstAtOrAbove );
+        }
     }
 
-    if ( currentSize != availableSizes.cend() ) {
+    if ( newSize >= 0 ) {
         // Start from the configured font so weight/italic/family hints are
         // preserved; only the point size changes.
         QFont newFont = fontConfig.mainFont();
-        newFont.setPointSize( *currentSize );
+        newFont.setPointSize( newSize );
 
         fontConfig.setMainFont( newFont );
         // Fan out to every registered view (main + all filtered/results views,

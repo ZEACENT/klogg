@@ -350,7 +350,11 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
 
 void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath )
 {
-    if ( encodingOverrides_.remove( filePath ) > 0 ) {
+    // QHash::remove() returns a bool on Qt 6.9 / MSVC, and `bool > 0` trips
+    // C4804 ("unsafe use of type 'bool'") which /WX turns into a hard error
+    // on the Windows x64-qt6 build. `!= 0` is unambiguous for both bool and
+    // integral return types.
+    if ( encodingOverrides_.remove( filePath ) != 0 ) {
         Q_EMIT layoutChanged();
     }
 }
