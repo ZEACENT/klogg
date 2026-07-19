@@ -2038,7 +2038,7 @@ SCENARIO( "Wrapped line paints every visual row of its slot (no trailing blank b
     REQUIRE( file.open() );
     // One logical line, long enough to wrap into several visual segments, but
     // whose whole wrapped slot still fits inside the viewport.
-    file.write( ( QString( 400, QLatin1Char( 'x' ) ) + "\n" ).toUtf8() );
+    file.write( ( QString( 250, QLatin1Char( 'x' ) ) + "\n" ).toUtf8() );
     file.flush();
 
     // Exaggerate line spacing so the pitch mismatch produces a full blank row.
@@ -2054,7 +2054,7 @@ SCENARIO( "Wrapped line paints every visual row of its slot (no trailing blank b
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
 
     crawlerVisitor.setTextWrap( true );
-    crawlerVisitor.resizeViews( 320, 1000 );
+    crawlerVisitor.resizeViews( 320, 600 );
     crawlerVisitor.render();
 
     const int segments = crawlerVisitor.mainWrappedLineMapSize();
