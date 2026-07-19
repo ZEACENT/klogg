@@ -294,7 +294,7 @@ SCENARIO( "marks in filtered log data", "[logdata]" )
             AND_WHEN( "Get mark before from an unmarked line between the marks" )
             {
                 const auto markBefore = filtered_data->getMarkBefore( 20_lnum );
-                THEN( "Return the mark below" )
+                THEN( "Return the nearest mark above" )
                 {
                     REQUIRE( markBefore.has_value() );
                     REQUIRE( *markBefore == 10_lnum );

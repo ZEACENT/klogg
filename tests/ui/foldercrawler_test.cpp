@@ -1660,6 +1660,11 @@ struct WiringConfigGuard {
         cfg.setMainFont( font );
         cfg.setMainLineNumbersVisible( mainLines );
         cfg.setSplitterSizes( splitterSizes );
+        // Persist the restoration: the wiring tests trigger hooks that call
+        // Configuration::save() with mutated splitter sizes, so restoring
+        // in-memory alone would leave those dimensions in the on-disk
+        // settings and pollute later test runs / the developer's app config.
+        cfg.save();
     }
 };
 
@@ -2969,6 +2974,7 @@ TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every vie
         QTest::keyClick( mainView->viewport(), Qt::Key_0 );
         QTest::qWait( 20 );
         REQUIRE_FALSE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE_FALSE( hasLabelledText( filteredView, 0, selectedText ) );
     }
 
     SECTION( "clear removes every label from every view" )

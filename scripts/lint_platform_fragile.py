@@ -36,6 +36,37 @@ from typing import Iterable
 
 ALLOW_MARKER = "lint-allow: platform-fragile"
 
+
+def _strip_line_comment(line: str) -> str:
+    """Return the code portion of a C++ line: everything before an
+    unquoted ``//`` comment.
+
+    The substring-matching checks below must not flag documentation that
+    merely mentions a banned token (e.g. ``// routed via
+    currentCrawlerWidget() historically``). A naive ``//`` split would
+    mis-handle ``//`` inside a string literal, so this walks the line
+    tracking whether we are inside a double-quoted string. Block comments
+    (``/* */``) are intentionally not handled: the klogg tree does not use
+    them on the lines these checks scan, and partial single-line handling
+    would be less correct than leaving them to the (rare) multi-line case.
+    """
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            in_string = not in_string
+        elif not in_string and ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+            return line[:i]
+        i += 1
+    return line
+
+
 PATTERNS: list[dict] = [
     {
         "name": "leading-slash absolute-path test",
@@ -224,7 +255,9 @@ def _check_test_private_current_crawler(text: str, path: Path) -> list[tuple[int
 
     findings: list[tuple[int, str]] = []
     for i, line in enumerate(text.splitlines(), start=1):
-        if "currentCrawlerWidget()" in line:
+        # Skip comments so doc text mentioning the private API does not
+        # false-positive (e.g. "// routed via currentCrawlerWidget() ...").
+        if "currentCrawlerWidget()" in _strip_line_comment(line):
             findings.append(
                 (
                     i,
@@ -384,16 +417,19 @@ def _check_vectorscan_capability_assertion(text: str, path: Path) -> list[tuple[
 
     lines = text.splitlines()
     for i, line in enumerate(lines, start=1):
-        if not assertion_re.search(line):
+        # Skip comments so doc text mentioning the macro does not
+        # false-positive (e.g. "// do not REQUIRE( hasBufferScan() ) ...").
+        if not assertion_re.search(_strip_line_comment(line)):
             continue
-        # Find the start of the enclosing TEST_CASE (0 = file scope).
-        case_start = 0
+        # Find the start of the enclosing TEST_CASE (1 = file scope, so the
+        # backward scan starts at line 1 and never indexes lines[-1]).
+        case_start = 1
         for j in range(i - 1, 0, -1):
             if "TEST_CASE(" in lines[j - 1]:
                 case_start = j
                 break
         guarded = any(
-            guard_re.search(lines[k - 1]) for k in range(case_start, i)
+            guard_re.search(_strip_line_comment(lines[k - 1])) for k in range(case_start, i)
         )
         if not guarded:
             findings.append(

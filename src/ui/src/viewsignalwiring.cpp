@@ -158,16 +158,25 @@ void ViewSignalWiring::changeFontSize( bool increase )
         // The configured size is not in the family's list (bitmap font with
         // discrete sizes, or a hand-edited/legacy config): stepping from a
         // past-the-end iterator is UB. Clamp to the nearest listed size
-        // before stepping.
+        // before stepping. availableFontSizes() always returns at least the
+        // standard sizes plus 10..19, so it is never empty.
         const auto nearest
             = std::lower_bound( availableSizes.cbegin(), availableSizes.cend(),
                                 fontInfo.pointSize() );
-        currentSize = nearest == availableSizes.cend() || nearest == availableSizes.cbegin()
-                          ? nearest
-                          : ( *nearest - fontInfo.pointSize()
-                                      < fontInfo.pointSize() - *std::prev( nearest )
-                                  ? nearest
-                                  : std::prev( nearest ) );
+        if ( nearest == availableSizes.cend() ) {
+            // Configured size is above the whole range -> clamp to largest.
+            currentSize = std::prev( nearest );
+        }
+        else if ( nearest == availableSizes.cbegin() ) {
+            // At or below the whole range -> clamp to smallest.
+            currentSize = nearest;
+        }
+        else {
+            currentSize = ( *nearest - fontInfo.pointSize()
+                            < fontInfo.pointSize() - *std::prev( nearest ) )
+                              ? nearest
+                              : std::prev( nearest );
+        }
     }
     if ( increase && currentSize != std::prev( availableSizes.cend() ) ) {
         currentSize = std::next( currentSize );
@@ -177,7 +186,10 @@ void ViewSignalWiring::changeFontSize( bool increase )
     }
 
     if ( currentSize != availableSizes.cend() ) {
-        QFont newFont{ fontInfo.family(), *currentSize };
+        // Start from the configured font so weight/italic/family hints are
+        // preserved; only the point size changes.
+        QFont newFont = fontConfig.mainFont();
+        newFont.setPointSize( *currentSize );
 
         fontConfig.setMainFont( newFont );
         // Fan out to every registered view (main + all filtered/results views,
