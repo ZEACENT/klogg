@@ -123,6 +123,19 @@ PATTERNS: list[dict] = [
             "to the class instead."
         ),
     },
+    {
+        "name": "very-coarse-timer-in-test",
+        # Qt::VeryCoarseTimer in a test file creates non-deterministic dispatch
+        # delays on Qt 5.12 (Ubuntu 20.04).  Use PreciseTimer or direct calls.
+        "regex": re.compile(r"\bQt::VeryCoarseTimer\b"),
+        "fix": (
+            "Qt::VeryCoarseTimer rounds up to ~1 s granularity on Qt 5.12 "
+            "(Ubuntu 20.04), making UI dispatch non-deterministic. Use "
+            "Qt::PreciseTimer in tests so qWait reliably processes the "
+            "scheduled callback. (PR #43 master CI failure: flaky "
+            "mainwindow_test.cpp folder-dispatch test.)"
+        ),
+    },
 ]
 
 # Multi-line patterns: checked separately via whole-file analysis.

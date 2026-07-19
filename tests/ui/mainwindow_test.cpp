@@ -173,7 +173,7 @@ SCENARIO( "Main window tests", "[ui]" )
     REQUIRE( activateSpy->safeWait() );
 
     auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -317,7 +317,7 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
     QTest::qWait( 100 );
 
     auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -354,12 +354,12 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
         groupManager.save();
     } );
 
-    // runInUiThread's internal QTest::qWait(100) is not always enough on
-    // slow runners (Ubuntu 20.04 docker has missed the 100 ms budget,
-    // leaving groupId empty before this REQUIRE).  waitUiState polls
-    // up to 10 s, so the assertion either succeeds quickly on a healthy
-    // runner or fails with a clear timeout instead of a misleading
-    // "groupId is empty" diagnostic.
+    // runInUiThread dispatches synchronously (PreciseTimer → qWait flushes
+    // the event queue), but GroupManager::save() inside the dispatched lambda
+    // may write via QSettings which syncs asynchronously on some platforms.
+    // waitUiState polls up to 10 s, so the assertion either succeeds quickly
+    // or fails with a clear timeout instead of a misleading empty-groupid
+    // diagnostic.
     REQUIRE( waitUiState( [ & ] { return !groupId.isEmpty(); } ) );
 
     auto verifyGroupChipName = [ tabBar ]( const QString& expectedName ) -> int {
@@ -613,7 +613,7 @@ SCENARIO( "MainWindow close keeps persisted open files for session restore", "[u
     QTest::qWait( 100 );
 
     auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -707,7 +707,7 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -774,7 +774,7 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -852,7 +852,7 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
     QTest::qWait( 100 );
 
     auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -1032,7 +1032,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -1130,11 +1130,6 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         runInUiThread( [ folderWidget ] {
             folderWidget->selectResultRow( 1_lnum );
         } );
-        // Qt 5.12 VeryCoarseTimer (ubuntu-20.04 AppImage) may delay the
-        // single-shot dispatch, shrinking the 10s waitUiState budget.
-        // Give the timer a generous settle window so the async file-open
-        // gets a full budget on slower CI runners.
-        QTest::qWait( 5000 );
         REQUIRE( waitUiState(
             [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
 
@@ -1171,7 +1166,7 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
@@ -1205,10 +1200,6 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
         folderWidget->searchFor( "beta" );
     } );
     REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
-    // Qt 5.12 VeryCoarseTimer: the pane creation after keep-results search is
-    // dispatched through a timer chain (~1s-per-tick on ubuntu-20.04), so give
-    // it a settle window before polling.
-    QTest::qWait( 2000 );
     REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 2; } ) );
 
     WHEN( "the new active pane's view initiates a QuickFind change" )
@@ -1317,7 +1308,7 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write",
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
                             std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
