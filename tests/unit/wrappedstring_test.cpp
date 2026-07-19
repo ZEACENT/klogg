@@ -185,3 +185,32 @@ TEST_CASE( "WrappedString pixel wrapping no wrapped line exceeds available width
         REQUIRE( linePx <= 55 );
     }
 }
+
+// ---------- Whitespace-only trailing parts (blank-row artifact) ----------
+
+TEST_CASE( "WrappedString pixel wrapping drops a whitespace-only trailing part" )
+{
+    // Word-boundary splits can leave a whitespace-only remainder ("aa bb    "
+    // at 55px: "aa " + "bb   " + " "). The tail renders as a spurious blank
+    // visual row at the end of the wrapped line.
+    WrappedString ws( QStringLiteral( "aa bb    " ), 55, fixedWidthFn );
+    REQUIRE( ws.wrappedLinesCount() == 2 );
+    REQUIRE( ws.wrappedLine( 0 ).toString() == QStringLiteral( "aa " ) );
+    REQUIRE( ws.wrappedLine( 1 ).toString() == QStringLiteral( "bb   " ) );
+}
+
+TEST_CASE( "WrappedString character-based wrapping drops a whitespace-only trailing part" )
+{
+    WrappedString ws( QStringLiteral( "aa bb    " ), LineLength{ 5 } );
+    REQUIRE( ws.wrappedLinesCount() == 2 );
+    REQUIRE( ws.wrappedLine( 0 ).toString() == QStringLiteral( "aa " ) );
+    REQUIRE( ws.wrappedLine( 1 ).toString() == QStringLiteral( "bb   " ) );
+}
+
+TEST_CASE( "WrappedString keeps a whitespace-only line as a single blank part" )
+{
+    // A line that IS entirely whitespace is one blank visual row, not zero.
+    WrappedString ws( QStringLiteral( "   " ), 100, fixedWidthFn );
+    REQUIRE( ws.wrappedLinesCount() == 1 );
+    REQUIRE( ws.wrappedLine( 0 ).toString() == QStringLiteral( "   " ) );
+}

@@ -163,6 +163,26 @@ class ScopedShowAllEmptyFilterSetting {
     bool previousShowAll_;
 };
 
+// Forces Configuration::lineSpacingPercent for the duration of a test (the
+// blank-band regression only shows with spacing > 100%). Restores the previous
+// value on destruction, including when a REQUIRE aborts mid-test.
+class ScopedLineSpacingPercent {
+  public:
+    explicit ScopedLineSpacingPercent( int percent )
+        : previousPercent_( Configuration::get().lineSpacingPercent() )
+    {
+        Configuration::get().setLineSpacingPercent( percent );
+    }
+
+    ~ScopedLineSpacingPercent()
+    {
+        Configuration::get().setLineSpacingPercent( previousPercent_ );
+    }
+
+  private:
+    int previousPercent_;
+};
+
 template <>
 struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static int drawingTopOffset( const AbstractLogView* view )
@@ -265,6 +285,16 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     quickHighlighters( const AbstractLogView* view )
     {
         return view->quickHighlighters_;
+    }
+
+    static int wrappedLineMapSize( const AbstractLogView* view )
+    {
+        return static_cast<int>( view->wrappedLinesInfo_.size() );
+    }
+
+    static void rebuildLineMap( AbstractLogView* view )
+    {
+        view->buildVisibleLineMap();
     }
 };
 
@@ -521,6 +551,18 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     bool mainTextAreaCacheInvalid() const
     {
         return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCacheInvalid(
+            crawler->logMainView_ );
+    }
+
+    int mainWrappedLineMapSize() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::wrappedLineMapSize(
+            crawler->logMainView_ );
+    }
+
+    void rebuildMainLineMap()
+    {
+        AbstractLogView::access_by<AbstractLogViewPrivate>::rebuildLineMap(
             crawler->logMainView_ );
     }
 
@@ -1981,6 +2023,113 @@ SCENARIO( "Wrapped single-line content keeps EOF anchored when scrollbar range i
     REQUIRE( crawlerVisitor.mainTextAreaCacheActualHeight()
              > crawlerVisitor.mainTextViewportHeight() );
     REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
+}
+
+SCENARIO( "Wrapped line paints every visual row of its slot (no trailing blank band)",
+          "[ui][textwrap][regression]" )
+{
+    // Regression test for "extra blank line at the end of wrapped lines":
+    // drawTextArea lays out a logical line's slot as wrappedCount * charHeight_
+    // (charHeight_ includes the configured line spacing), so the segments must
+    // be PAINTED at the same charHeight_ pitch. Painting them at raw
+    // QFontMetrics::height() packs the text at the top of the slot and leaves
+    // a blank band at the end of every wrapped line.
+    QTemporaryFile file{ "crawler_wrap_band_XXXXXX" };
+    REQUIRE( file.open() );
+    // One logical line, long enough to wrap into several visual segments, but
+    // whose whole wrapped slot still fits inside the viewport.
+    file.write( ( QString( 400, QLatin1Char( 'x' ) ) + "\n" ).toUtf8() );
+    file.flush();
+
+    // Exaggerate line spacing so the pitch mismatch produces a full blank row.
+    ScopedLineSpacingPercent lineSpacing{ 150 };
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 1; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( true );
+    crawlerVisitor.resizeViews( 320, 600 );
+    crawlerVisitor.render();
+
+    const int segments = crawlerVisitor.mainWrappedLineMapSize();
+    const int charHeight = crawlerVisitor.mainCharHeight();
+    INFO( "segments=" << segments << " charHeight=" << charHeight );
+    REQUIRE( segments >= 4 );
+    REQUIRE( charHeight > 0 );
+    REQUIRE( segments * charHeight < crawlerVisitor.mainTextViewportHeight() );
+
+    // The logical line's slot spans [0, segments*charHeight). The LAST visual
+    // segment's glyphs must land in the final charHeight band of the slot; a
+    // blank band there means the paint pitch is smaller than the layout pitch.
+    const auto image = crawlerVisitor.grabMainViewport();
+    const auto baseColor = crawlerVisitor.mainBaseColor();
+    const int x0 = crawlerVisitor.mainLeftMargin() + 4;
+    const int bandStart = ( segments - 1 ) * charHeight + 1;
+    const int bandEnd = qMin( segments * charHeight, image.height() );
+
+    bool inkInLastBand = false;
+    for ( int y = bandStart; y < bandEnd && !inkInLastBand; ++y ) {
+        for ( int x = x0; x < image.width(); ++x ) {
+            if ( image.pixelColor( x, y ) != baseColor ) {
+                inkInLastBand = true;
+                break;
+            }
+        }
+    }
+    INFO( "bandStart=" << bandStart << " bandEnd=" << bandEnd
+                       << " imageWidth=" << image.width() );
+    REQUIRE( inkInLastBand );
+}
+
+SCENARIO( "Wrap-mode line map rebuild stays bounded to the viewport",
+          "[ui][textwrap][regression]" )
+{
+    // Regression test for the wrap-to-EOF defect: buildVisibleLineMap (the
+    // paint-free rebuild behind mouse press/move/release hit-testing) wrapped
+    // and mapped EVERY line from firstLine_ to EOF. On a large document each
+    // hover/click re-wrapped the whole tail (CPU + memory, and per-row disk
+    // reads on folder results); a single multi-MB line turned the per-segment
+    // copies into a bad_alloc that escaped the event loop (SIGABRT). The map
+    // only serves viewport hit-testing, so it must stop once the viewport is
+    // covered (always completing the current logical line's slot).
+    QTemporaryFile file{ "crawler_wrap_bounded_XXXXXX" };
+    REQUIRE( file.open() );
+    for ( int i = 0; i < 4000; ++i ) {
+        file.write( QStringLiteral( "bounded map line %1 with some payload text\n" )
+                        .arg( i, 6, 10, QChar( '0' ) )
+                        .toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 4000; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( true );
+    crawlerVisitor.resizeViews( 320, 400 );
+    crawlerVisitor.render();
+
+    // Directly exercise the paint-free rebuild (what a mouse press/move does).
+    crawlerVisitor.rebuildMainLineMap();
+
+    // The viewport shows ~400/23 + 1 rows; the map may extend to complete the
+    // last partially visible line's slot, but must never reach EOF.
+    const int mapSize = crawlerVisitor.mainWrappedLineMapSize();
+    INFO( "mapSize=" << mapSize << " viewportHeight=" << crawlerVisitor.mainTextViewportHeight()
+                     << " charHeight=" << crawlerVisitor.mainCharHeight() );
+    REQUIRE( mapSize > 0 );
+    REQUIRE( mapSize < 500 );
 }
 
 SCENARIO( "Log view reserves space for transient horizontal scrollbars",
