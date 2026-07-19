@@ -1130,6 +1130,11 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         runInUiThread( [ folderWidget ] {
             folderWidget->selectResultRow( 1_lnum );
         } );
+        // Qt 5.12 VeryCoarseTimer (ubuntu-20.04 AppImage) may delay the
+        // single-shot dispatch, shrinking the 10s waitUiState budget.
+        // Give the timer a generous settle window so the async file-open
+        // gets a full budget on slower CI runners.
+        QTest::qWait( 2000 );
         REQUIRE( waitUiState(
             [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
 
