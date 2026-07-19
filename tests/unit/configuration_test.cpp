@@ -268,3 +268,39 @@ TEST_CASE( "Configuration live-capture rolling size MB view does not truncate su
     config.setLiveCaptureRollingMaxFileSize( 0 );
     REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 0 );
 }
+
+TEST_CASE( "Configuration migrates stale perf.useBlockScan=false from pre-#41 installs" )
+{
+    const auto dirPath = makeTestDir( "configuration_blockscan" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration.ini" );
+
+    {
+        // Simulate a pre-#41 install: the flag was persisted as false while the
+        // compiled default at the time was also false. Since #41 the compiled
+        // default is ON, but the persisted key silently wins forever (no UI
+        // toggle exists), keeping the slow per-line search path.
+        QSettings settings( settingsPath, QSettings::IniFormat );
+        settings.setValue( "perf.useBlockScan", false );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings migratedSettings( settingsPath, QSettings::IniFormat );
+    Configuration config;
+    config.retrieveFromStorage( migratedSettings );
+
+    // One-shot migration: the stale key is removed so the compiled default
+    // applies; a marker suppresses re-migration.
+    REQUIRE( Configuration{}.useBlockScan() );
+    REQUIRE( config.useBlockScan() );
+    REQUIRE( !migratedSettings.contains( "perf.useBlockScan" ) );
+    REQUIRE( migratedSettings.value( "perf.useBlockScanMigrated", false ).toBool() );
+
+    // A deliberate post-migration choice sticks (marker suppresses the sweep).
+    migratedSettings.setValue( "perf.useBlockScan", false );
+    migratedSettings.sync();
+    Configuration config2;
+    config2.retrieveFromStorage( migratedSettings );
+    REQUIRE_FALSE( config2.useBlockScan() );
+}

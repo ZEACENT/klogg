@@ -247,6 +247,17 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     useParallelSearch_
         = settings.value( "perf.useParallelSearch", DefaultConfiguration.useParallelSearch_ )
               .toBool();
+    // One-shot migration (pre-#41 installs): perf.useBlockScan defaulted to
+    // false back then and was persisted by routine config saves, so the slow
+    // per-line search path silently stuck forever (no UI toggle exposes it).
+    // Since #41 the compiled default is ON and the block-scan fast path is the
+    // reference implementation; drop the stale key once so the new default
+    // applies. A deliberate post-migration choice sticks because the marker
+    // suppresses re-migration.
+    if ( !settings.value( "perf.useBlockScanMigrated", false ).toBool() ) {
+        settings.remove( "perf.useBlockScan" );
+        settings.setValue( "perf.useBlockScanMigrated", true );
+    }
     useBlockScan_
         = settings.value( "perf.useBlockScan", DefaultConfiguration.useBlockScan_ ).toBool();
     useSearchResultsCache_
