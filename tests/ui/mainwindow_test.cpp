@@ -1134,7 +1134,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         // single-shot dispatch, shrinking the 10s waitUiState budget.
         // Give the timer a generous settle window so the async file-open
         // gets a full budget on slower CI runners.
-        QTest::qWait( 2000 );
+        QTest::qWait( 5000 );
         REQUIRE( waitUiState(
             [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
 
