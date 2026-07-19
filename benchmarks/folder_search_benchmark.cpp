@@ -143,7 +143,7 @@ int main( int argc, char* argv[] )
         while ( it.hasNext() ) {
             const QString path = it.next();
             filePathsQt << path;
-            totalBytes += QFileInfo( path ).size();
+            totalBytes += it.fileInfo().size();
         }
         const double totalMiB = static_cast<double>( totalBytes ) / ( 1024.0 * 1024.0 );
 

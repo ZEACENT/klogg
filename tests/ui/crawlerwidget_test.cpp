@@ -2054,7 +2054,7 @@ SCENARIO( "Wrapped line paints every visual row of its slot (no trailing blank b
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
 
     crawlerVisitor.setTextWrap( true );
-    crawlerVisitor.resizeViews( 320, 600 );
+    crawlerVisitor.resizeViews( 320, 1000 );
     crawlerVisitor.render();
 
     const int segments = crawlerVisitor.mainWrappedLineMapSize();

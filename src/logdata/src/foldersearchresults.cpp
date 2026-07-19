@@ -362,7 +362,9 @@ klogg::vector<QString> FolderSearchResults::doGetExpandedLines( LineNumber first
 
 LineNumber FolderSearchResults::doGetLineNumber( LineNumber index ) const
 {
-    SharedLock lock( dataMutex_ );
+    // sourceForLine takes the shared lock itself; do not double-lock here --
+    // recursive shared_lock on std::shared_mutex is UB and deadlocks on Linux
+    // when a mutation thread is waiting between the two acquisitions.
     // The results view is a cross-file listing: the "line number" of a row is
     // the 0-based local line in its SOURCE file (single-file filtered views
     // map to the underlying file's line, so copy-with-line-numbers and the
@@ -373,7 +375,7 @@ LineNumber FolderSearchResults::doGetLineNumber( LineNumber index ) const
 
 bool FolderSearchResults::doIsLineCopyable( LineNumber index ) const
 {
-    SharedLock lock( dataMutex_ );
+    // lineKind takes the shared lock itself; do not double-lock here.
     // Group headers are UI chrome (path + count), not source lines: exclude
     // them from the clipboard / search-composition text.
     return lineKind( index ) != LineKind::Header;
