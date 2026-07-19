@@ -99,6 +99,13 @@ class FolderSearchResults : public AbstractLogData {
     // Reads groups_ (not visibleRows_), so it is unaffected by collapse state.
     std::vector<LineNumber> matchLinesForFile( const QString& filePath ) const;
 
+    // Per-file display-encoding override (the user's Encoding-menu pick for the
+    // file open in the main view): rows of that file decode with it instead of
+    // the scan-time detected codec (single-file setEncoding parity). Emits
+    // layoutChanged so the view re-renders.
+    void setEncodingOverrideForFile( const QString& filePath, const QByteArray& encoding );
+    void clearEncodingOverrideForFile( const QString& filePath );
+
     // The total number of matches in a group (always shown on the header, even
     // when collapsed). Returns 0 for an out-of-range fileId.
     klogg::folder::FileId groupCount() const;
@@ -141,6 +148,7 @@ class FolderSearchResults : public AbstractLogData {
     klogg::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
     klogg::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
     LineNumber doGetLineNumber( LineNumber index ) const override;
+    bool doIsLineCopyable( LineNumber index ) const override;
     LinesCount doGetNbLine() const override;
     LineLength doGetMaxLength() const override;
     LineLength doGetLineLength( LineNumber line ) const override;
@@ -179,6 +187,9 @@ class FolderSearchResults : public AbstractLogData {
 
     Visibility visibility_ = Visibility::MarksAndMatches;
     std::function<bool( const QString&, LineNumber )> isMarkedLine_;
+    // Per-file display-encoding overrides (Encoding-menu picks), consulted by
+    // readMatchLine before the scan-time detected sourceCodec.
+    QHash<QString, QByteArray> encodingOverrides_;
 
     // Streaming commit state. pendingByIndex_ buffers out-of-order groups keyed
     // by file enumeration index; nextExpectedIndex_ is the in-order commit

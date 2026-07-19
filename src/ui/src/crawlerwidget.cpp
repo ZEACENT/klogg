@@ -74,6 +74,7 @@
 #include "crawlerwidget.h"
 
 #include "configuration.h"
+#include "crawlershortcuts.h"
 #include "dispatch_to.h"
 #include "filewatcher.h"
 #include "filterdiffdialog.h"
@@ -174,6 +175,7 @@ private:
 CrawlerWidget::CrawlerWidget( QWidget* parent )
     : QSplitter( parent )
     , iconLoader_{ this }
+    , colorLabelsController_( this, [ this ]() { return activeView(); } )
 {
 }
 
@@ -444,14 +446,11 @@ void CrawlerWidget::startNewSearch()
     tabbedFilteredView_->setTabText( tabbedFilteredView_->currentIndex(),
                                      "Find \"" + searchToolbar_->currentSearchText() + "\"" );
 
-    // Record the search line in the recent list
-    // (reload the list first in case another glogg changed it)
-    const auto& searches = SavedSearches::getSynced();
-    savedSearches_->addRecent( searchToolbar_->currentSearchText() );
-    searches.save();
+    // Record the search line in the recent list (shared with folder mode:
+    // reloads first in case another klogg changed it, saves, refreshes the
+    // dropdown).
+    searchToolbar_->recordSearch();
 
-    // Update the SearchLine (history)
-    updateSearchCombo();
     // Call the private function to do the search
     replaceCurrentSearch( searchToolbar_->currentSearchText() );
 }
@@ -1091,50 +1090,6 @@ void CrawlerWidget::setSearchPatternFromPredefinedFilters( const QList<Predefine
         searchToolbar_->escapeSearchPattern( filter.pattern, filter.useRegex ) );
 }
 
-void CrawlerWidget::addToSearch( const QString& searchString )
-{
-    const auto newPattern = searchToolbar_->escapeSearchPattern( searchString );
-    QString currentPattern = searchToolbar_->currentSearchText();
-    searchToolbar_->setSearchPattern(
-        searchToolbar_->combinePatterns( currentPattern, newPattern ) );
-}
-
-void CrawlerWidget::excludeFromSearch( const QString& searchString )
-{
-    QString currentPattern = searchToolbar_->currentSearchText();
-
-    const auto wasInBooleanCombinationMode = searchToolbar_->isBoolean();
-    if ( !wasInBooleanCombinationMode ) {
-        // Wrap the existing pattern as one boolean operand. Must backslash-escape
-        // embedded double-quotes (not the no-op replace('"',"\"")); reuse the
-        // shared helper so this can't drift from escapeSearchPattern again.
-        currentPattern = searchToolbar_->wrapBooleanOperand( currentPattern );
-    }
-
-    searchToolbar_->setBoolean( true );
-
-    const auto newPattern = searchToolbar_->escapeSearchPattern( searchString );
-
-    if ( !currentPattern.isEmpty() ) {
-        currentPattern.append( " and " );
-    }
-
-    currentPattern.append( "not(" ).append( newPattern ).append( ')' );
-    searchToolbar_->setSearchPattern( currentPattern );
-}
-
-void CrawlerWidget::replaceSearch( const QString& searchString )
-{
-    searchToolbar_->setSearchPattern( searchToolbar_->escapeSearchPattern( searchString ) );
-}
-
-void CrawlerWidget::mouseHoveredOverMatch( LineNumber line )
-{
-    const auto line_in_mainview = logFilteredData_->getMatchingLineNumber( line );
-
-    overviewWidget_->highlightLine( line_in_mainview );
-}
-
 void CrawlerWidget::activityDetected()
 {
     changeDataStatus( DataStatus::OLD_DATA );
@@ -1254,6 +1209,35 @@ void CrawlerWidget::setup()
     // construction. CrawlerWidget wires itself to the toolbar's signals below.
     searchToolbar_ = new SearchToolbar( this, savedSearches_ );
     setFocusProxy( searchToolbar_ );
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter /
+    // font zoom / exitView / highlightersChange / hover) -- the same component
+    // FolderCrawlerWidget uses. Hooks adapt the host-specific parts.
+    {
+        ViewSignalWiring::Hooks hooks;
+        hooks.sendToScratchpad
+            = [ this ]( const QString& text ) { Q_EMIT sendToScratchpad( text ); };
+        hooks.replaceScratchpad
+            = [ this ]( const QString& text ) { Q_EMIT replaceDataInScratchpad( text ); };
+        hooks.saveSplitterSizes = [ this ]() { saveSplitterSizes(); };
+        hooks.exitView = [ this ]( AbstractLogView* fromView ) {
+            if ( fromView == logMainView_ ) {
+                if ( filteredView_ != nullptr ) {
+                    filteredView_->setFocus();
+                }
+            }
+            else {
+                logMainView_->setFocus();
+            }
+        };
+        hooks.applyConfiguration = [ this ]() { applyConfiguration(); };
+        hooks.hoveredOverLine = [ this ]( AbstractLogView*, LineNumber line ) {
+            overviewWidget_->highlightLine( logFilteredData_->getMatchingLineNumber( line ) );
+        };
+        hooks.leftHoveringZone = [ this ]() { overviewWidget_->removeHighlight(); };
+        viewSignalWiring_
+            = std::make_unique<ViewSignalWiring>( this, searchToolbar_, std::move( hooks ) );
+    }
 
     // Context lines controls
     contextLinesSpinBox_ = new QSpinBox();
@@ -1391,17 +1375,9 @@ void CrawlerWidget::setup()
     connect( logMainView_, &LogMainView::deleteMarkLines, this,
              &CrawlerWidget::deleteMarkLinesFromMain );
 
-    connect( logMainView_, &LogMainView::highlightersChange, this,
-             &CrawlerWidget::applyConfiguration );
-
-    connect( logMainView_, QOverload<const QString&>::of( &LogMainView::addToSearch ), this,
-             &CrawlerWidget::addToSearch );
-
-    connect( logMainView_, QOverload<const QString&>::of( &LogMainView::excludeFromSearch ), this,
-             &CrawlerWidget::excludeFromSearch );
-
-    connect( logMainView_, QOverload<const QString&>::of( &LogMainView::replaceSearch ), this,
-             &CrawlerWidget::replaceSearch );
+    // Shared view-signal wiring: highlightersChange, add/exclude/replace-search,
+    // saveDefaultSplitterSizes, changeFontSize, scratchpad, exitView.
+    viewSignalWiring_->wireView( logMainView_ );
 
     // Follow option (up and down)
     connect( this, &CrawlerWidget::followSet, logMainView_, &LogMainView::followSet );
@@ -1424,11 +1400,6 @@ void CrawlerWidget::setup()
 
     connect( tabbedFilteredView_, &QTabWidget::tabCloseRequested, this,
              &CrawlerWidget::closeFilteredView );
-
-    connect( logMainView_, &LogMainView::saveDefaultSplitterSizes, this,
-             &CrawlerWidget::saveSplitterSizes );
-
-    connect( logMainView_, &LogMainView::changeFontSize, this, &CrawlerWidget::changeFontSize );
 
     connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
              &CrawlerWidget::updateFilteredView,
@@ -1453,21 +1424,10 @@ void CrawlerWidget::setup()
     // above (searchToolbar_ -> handlers / MainWindow-facing signals).
 
     // Switch between views
-    connect( logMainView_, &AbstractLogView::clearColorLabels, this,
-             &CrawlerWidget::clearColorLabels );
-
-    connect( logMainView_, &AbstractLogView::addColorLabel, this,
-             &CrawlerWidget::addColorLabelToSelection );
-    connect( logMainView_, &AbstractLogView::removeColorLabel, this,
-             &CrawlerWidget::removeColorLabelFromSelection );
-    connect( logMainView_, &AbstractLogView::quickColorLabelDefaultsChanged, this,
-             &CrawlerWidget::setQuickColorLabelDefaults );
-
-    connect( logMainView_, &AbstractLogView::sendSelectionToScratchpad, this,
-             [ this ]() { Q_EMIT sendToScratchpad( logMainView_->getSelectedText() ); } );
-
-    connect( logMainView_, &AbstractLogView::replaceScratchpadWithSelection, this,
-             [ this ]() { Q_EMIT replaceDataInScratchpad( logMainView_->getSelectedText() ); } );
+    // Color labels: the shared controller owns the manager and keeps every
+    // watched view's quick highlighters in sync (context-menu signals +
+    // digit shortcuts registered in registerShortcuts).
+    colorLabelsController_.watchView( logMainView_ );
 
     connectAllFilteredViewSlots( filteredView_ );
 
@@ -1513,31 +1473,6 @@ void CrawlerWidget::saveSplitterSizes() const
     splitterConfig.save();
 }
 
-void CrawlerWidget::changeFontSize( bool increase )
-{
-    auto& fontConfig = Configuration::get();
-
-    auto fontInfo = QFontInfo( fontConfig.mainFont() );
-    const auto availableSizes = FontUtils::availableFontSizes( fontInfo.family() );
-
-    auto currentSize
-        = std::find( availableSizes.cbegin(), availableSizes.cend(), fontInfo.pointSize() );
-    if ( increase && currentSize != std::prev( availableSizes.cend() ) ) {
-        currentSize = std::next( currentSize );
-    }
-    else if ( !increase && currentSize != availableSizes.begin() ) {
-        currentSize = std::prev( currentSize );
-    }
-
-    if ( currentSize != availableSizes.cend() ) {
-        QFont newFont{ fontInfo.family(), *currentSize };
-
-        fontConfig.setMainFont( newFont );
-        logMainView_->updateFont( newFont );
-        filteredView_->updateFont( newFont );
-    }
-}
-
 void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
 {
     // AbstractLogView self-schedules its viewport repaint on selection change
@@ -1549,23 +1484,6 @@ void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
     connect( view, &FilteredView::deleteMarkLines, this,
              &CrawlerWidget::deleteMarkLinesFromFiltered );
 
-    connect( view, &FilteredView::highlightersChange, this, &CrawlerWidget::applyConfiguration );
-
-    connect( view, QOverload<const QString&>::of( &FilteredView::addToSearch ), this,
-             &CrawlerWidget::addToSearch );
-
-    connect( view, QOverload<const QString&>::of( &FilteredView::excludeFromSearch ), this,
-             &CrawlerWidget::excludeFromSearch );
-
-    connect( view, QOverload<const QString&>::of( &FilteredView::replaceSearch ), this,
-             &CrawlerWidget::replaceSearch );
-
-    connect( view, &FilteredView::mouseHoveredOverLine, this,
-             &CrawlerWidget::mouseHoveredOverMatch );
-
-    connect( view, &FilteredView::mouseLeftHoveringZone, overviewWidget_,
-             &OverviewWidget::removeHighlight );
-
     connect( this, &CrawlerWidget::followSet, view, &FilteredView::followSet );
 
     connect( view, &FilteredView::followModeChanged, this, &CrawlerWidget::followModeChanged );
@@ -1576,33 +1494,17 @@ void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
 
     connect( view, &FilteredView::changeSearchLimits, this, &CrawlerWidget::setSearchLimits );
 
-    connect( view, &FilteredView::saveDefaultSplitterSizes, this,
-             &CrawlerWidget::saveSplitterSizes );
-
-    connect( view, &FilteredView::changeFontSize, this, &CrawlerWidget::changeFontSize );
-
     connect( view, &FilteredView::clearSearchLimits, this, &CrawlerWidget::clearSearchLimits );
 
-    connect( view, &AbstractLogView::addColorLabel, this,
-             &CrawlerWidget::addColorLabelToSelection );
-    connect( view, &AbstractLogView::removeColorLabel, this,
-             &CrawlerWidget::removeColorLabelFromSelection );
-    connect( view, &AbstractLogView::quickColorLabelDefaultsChanged, this,
-             &CrawlerWidget::setQuickColorLabelDefaults );
+    // Color labels for this (possibly keep-results) filtered view: shared
+    // controller, seeded with any labels already set on the other views.
+    colorLabelsController_.watchView( view );
 
-    connect( view, &AbstractLogView::sendSelectionToScratchpad, this,
-             [ view, this ]() { Q_EMIT sendToScratchpad( view->getSelectedText() ); } );
-
-    connect( view, &AbstractLogView::replaceScratchpadWithSelection, this,
-             [ view, this ]() { Q_EMIT replaceDataInScratchpad( view->getSelectedText() ); } );
-
-    connect( view, &FilteredView::exitView, logMainView_,
-             QOverload<>::of( &LogMainView::setFocus ) );
-
-    connect( view, &AbstractLogView::clearColorLabels, this, &CrawlerWidget::clearColorLabels );
-
-    connect( logMainView_, &LogMainView::exitView, view,
-             QOverload<>::of( &FilteredView::setFocus ) );
+    // Shared view-signal wiring (highlightersChange / search composition /
+    // splitter / font zoom / scratchpad / exitView) + hover -> minimap
+    // highlight (single-file wires hover on the filtered view only).
+    viewSignalWiring_->wireView( view );
+    viewSignalWiring_->wireHover( view );
 }
 
 void CrawlerWidget::registerShortcuts()
@@ -1615,116 +1517,20 @@ void CrawlerWidget::registerShortcuts()
 
     shortcuts_.clear();
 
-    const auto& config = Configuration::get();
-    const auto& configuredShortcuts = config.shortcuts();
+    // Widget-level crawler family (visibility cycling, option toggles,
+    // keep-results, auto-refresh, top-view resize, Esc refocus): shared with
+    // FolderCrawlerWidget via klogg::registerCrawlerShortcuts.
+    klogg::CrawlerShortcutHooks hooks;
+    hooks.visibilityBox = [ this ]() { return visibilityBox_; };
+    hooks.searchToolbar = [ this ]() { return searchToolbar_; };
+    hooks.changeTopViewSize = [ this ]( int delta ) { changeTopViewSize( delta ); };
+    hooks.activeView = [ this ]() { return activeView(); };
+    klogg::registerCrawlerShortcuts( this, shortcuts_, hooks );
 
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerChangeVisibilityForward, [ this ]() {
-            visibilityBox_->setCurrentIndex( ( visibilityBox_->currentIndex() + 1 )
-                                             % visibilityBox_->count() );
-        } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableCaseMatching, [ this ]() { searchToolbar_->matchCaseButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableRegex, [ this ]() { searchToolbar_->useRegexpButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableInverseMatching, [ this ]() { searchToolbar_->inverseButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableRegexCombining, [ this ]() { searchToolbar_->booleanButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerEnableAutoRefresh, [ this ]() { searchToolbar_->searchRefreshButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerKeepResults, [ this ]() { searchToolbar_->keepSearchResultsButton()->toggle(); } );
-
-    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
-                                      Qt::WidgetWithChildrenShortcut,
-                                      ShortcutAction::CrawlerChangeVisibilityBackward, [ this ]() {
-                                          int nextIndex = visibilityBox_->currentIndex() - 1;
-                                          if ( nextIndex < 0 ) {
-                                              nextIndex = visibilityBox_->count() - 1;
-                                          }
-                                          visibilityBox_->setCurrentIndex( nextIndex );
-                                      } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerChangeVisibilityToMarksAndMatches, [ this ]() {
-            if ( visibilityBox_->count() > 0 ) {
-                visibilityBox_->setCurrentIndex( 0 );
-            }
-        } );
-
-    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
-                                      Qt::WidgetWithChildrenShortcut,
-                                      ShortcutAction::CrawlerChangeVisibilityToMarks, [ this ]() {
-                                          if ( visibilityBox_->count() > 1 ) {
-                                              visibilityBox_->setCurrentIndex( 1 );
-                                          }
-                                      } );
-
-    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
-                                      Qt::WidgetWithChildrenShortcut,
-                                      ShortcutAction::CrawlerChangeVisibilityToMatches, [ this ]() {
-                                          if ( visibilityBox_->count() > 2 ) {
-                                              visibilityBox_->setCurrentIndex( 2 );
-                                          }
-                                      } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerIncreseTopViewSize, [ this ]() { changeTopViewSize( 1 ); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerDecreaseTopViewSize, [ this ]() { changeTopViewSize( -1 ); } );
-
-    const auto exitSearchKeySequence = QKeySequence( QKeySequence::Cancel );
-    ShortcutAction::registerShortcut( exitSearchKeySequence.toString(), shortcuts_, this,
-                                      Qt::WidgetWithChildrenShortcut, [ this ]() {
-                                          const auto activeView = this->activeView();
-                                          if ( activeView ) {
-                                              activeView->setFocus();
-                                          }
-                                      } );
-
-    std::array<std::string, 9> colorLables = {
-        ShortcutAction::LogViewAddColorLabel1, ShortcutAction::LogViewAddColorLabel2,
-        ShortcutAction::LogViewAddColorLabel3, ShortcutAction::LogViewAddColorLabel4,
-        ShortcutAction::LogViewAddColorLabel5, ShortcutAction::LogViewAddColorLabel6,
-        ShortcutAction::LogViewAddColorLabel7, ShortcutAction::LogViewAddColorLabel8,
-        ShortcutAction::LogViewAddColorLabel9,
-    };
-
-    for ( auto label = 0u; label < colorLables.size(); ++label ) {
-        ShortcutAction::registerShortcut(
-            configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-            colorLables[ label ], [ this, label ]() { addColorLabelToSelection( label ); } );
-    }
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewAddNextColorLabel, [ this ]() { addNextColorLabelToSelection(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewRemoveColorLabel, [ this ]() { removeColorLabelFromSelection(); } );
-
-    ShortcutAction::registerShortcut(
-        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::LogViewClearColorLabels, [ this ]() { clearColorLabels(); } );
+    // Color-label shortcuts (1..9 add, 0 remove, Cmd+D next, Cmd+Shift+0 clear)
+    // are owned by the shared controller (same actions, same widget-level
+    // context as before; also used by FolderCrawlerWidget).
+    colorLabelsController_.registerShortcuts();
 
     logMainView_->registerShortcuts();
     filteredView_->registerShortcuts();
@@ -1916,43 +1722,6 @@ void CrawlerWidget::changeTopViewSize( int32_t delta )
     LOG_DEBUG << "CrawlerWidget::changeTopViewSize " << sizes().at( 0 ) << " " << min << " " << max;
     moveSplitter( closestLegalPosition( sizes().at( 0 ) + ( delta * 10 ), 1 ), 1 );
     LOG_DEBUG << "CrawlerWidget::changeTopViewSize " << sizes().at( 0 );
-}
-
-void CrawlerWidget::addColorLabelToSelection( size_t label )
-{
-    updateColorLabels( colorLabelsManager_.setColorLabel(
-        label, getSelectedText(), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
-}
-
-void CrawlerWidget::addNextColorLabelToSelection()
-{
-    updateColorLabels( colorLabelsManager_.setNextColorLabel(
-        getSelectedText(), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
-}
-
-void CrawlerWidget::removeColorLabelFromSelection()
-{
-    updateColorLabels( colorLabelsManager_.removeColorLabel( getSelectedText() ) );
-}
-
-void CrawlerWidget::clearColorLabels()
-{
-    updateColorLabels( colorLabelsManager_.clear() );
-}
-
-void CrawlerWidget::setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord )
-{
-    auto& highlighterSetCollection = HighlighterSetCollection::get();
-    highlighterSetCollection.setQuickHighlighterDefaults(
-        QuickHighlighterDefaults{ ignoreCase, wholeWord } );
-    highlighterSetCollection.save();
-}
-
-void CrawlerWidget::updateColorLabels(
-    const ColorLabelsManager::QuickHighlightersCollection& labels )
-{
-    logMainView_->setQuickHighlighters( labels );
-    filteredView_->setQuickHighlighters( labels );
 }
 
 //

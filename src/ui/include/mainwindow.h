@@ -201,13 +201,6 @@ class MainWindow : public QMainWindow {
     void optionsChanged();
     // Is emitted when the 'follow' option is enabled/disabled
     void followSet( bool checked );
-    // Is emitted when the 'text wrap' option is enabled/disabled
-    void textWrapSet( bool checked );
-    // Is emitted before the QuickFind box is activated,
-    // to allow crawlers to get search in the right view.
-    void enteringQuickFind();
-    // Emitted when the quickfind bar is closed.
-    void exitingQuickFind();
 
     void newWindow();
     void windowActivated();
@@ -258,6 +251,16 @@ class MainWindow : public QMainWindow {
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
     void updateMenuBarFromDocument( const CrawlerWidget* crawler );
     void updateInfoLine();
+    // Checks the encoding-menu action matching the given override (nullopt =
+    // auto-detect, the action with invalid QVariant data). Shared by the file
+    // and folder menu-state sync paths.
+    void syncEncodingMenuCheck( const std::optional<int>& encodingMib );
+    // Re-checks the encoding menu from the current document's override. Called
+    // when the folder main-view file changes (the override resets on switch).
+    void syncEncodingMenuFromDocument();
+    // Re-registers the folder tab's QuickFind selector with the mux when the
+    // folder's searchable set changes (pane create/switch/close).
+    void onFolderSearchablesChanged();
     // Disable every file-specific menu action (used for folder / no-tab states).
     void disableFileSpecificActions();
     void showInfoLabels( bool show );

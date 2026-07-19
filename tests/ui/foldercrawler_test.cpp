@@ -27,12 +27,17 @@
 
 #include <QBoxLayout>
 #include <QByteArray>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QLineEdit>
+#include <QMenu>
+#include <QShortcut>
 #include <QSignalSpy>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
@@ -59,6 +64,8 @@
 #include "regularexpressionpattern.h"
 #include "savedsearches.h"
 #include "searchtoolbar.h"
+#include "shortcuts.h"
+#include "test_utils.h"
 #include "viewinterface.h"
 
 namespace {
@@ -195,6 +202,27 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     static int drawingTopOffset( const AbstractLogView* view )
     {
         return view->drawingTopOffset_;
+    }
+
+    static const std::vector<AbstractLogView::QuickHighlighters>&
+    quickHighlighters( const AbstractLogView* view )
+    {
+        return view->quickHighlighters_;
+    }
+
+    static QMenu* popupMenu( const AbstractLogView* view )
+    {
+        return view->popupMenu_;
+    }
+
+    static bool lineNumbersVisible( const AbstractLogView* view )
+    {
+        return view->lineNumbersVisible_;
+    }
+
+    static void copyWithLineNumbers( AbstractLogView* view )
+    {
+        view->copyWithLineNumbers();
     }
 };
 
@@ -1609,4 +1637,1367 @@ TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new s
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     QTest::qWait( 100 );
     REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
+}
+
+// RAII save/restore for the Configuration fields the F2 wiring tests mutate
+// (font size zoom, line-number toggle, splitter sizes). Restores on unwind so
+// a failed REQUIRE cannot leak state into sibling tests.
+struct WiringConfigGuard {
+    Configuration& cfg;
+    QFont font;
+    bool mainLines;
+    QList<int> splitterSizes;
+
+    WiringConfigGuard()
+        : cfg( Configuration::get() )
+        , font( cfg.mainFont() )
+        , mainLines( cfg.mainLineNumbersVisible() )
+        , splitterSizes( cfg.splitterSizes() )
+    {
+    }
+    ~WiringConfigGuard()
+    {
+        cfg.setMainFont( font );
+        cfg.setMainLineNumbersVisible( mainLines );
+        cfg.setSplitterSizes( splitterSizes );
+        // Persist the restoration: the wiring tests trigger hooks that call
+        // Configuration::save() with mutated splitter sizes, so restoring
+        // in-memory alone would leave those dimensions in the on-disk
+        // settings and pollute later test runs / the developer's app config.
+        cfg.save();
+    }
+};
+
+TEST_CASE( "FolderCrawlerWidget shared view-signal wiring", "[folder][wiring]" )
+{
+    // Single-file parity (cluster A of the 2026-07-18 audit): CrawlerWidget
+    // wires every view's scratchpad / search-composition / splitter / font /
+    // exitView / highlightersChange signals (crawlerwidget.cpp:1390-1600), but
+    // FolderCrawlerWidget wired none of them, so those context-menu actions and
+    // shortcuts were dead in folder mode. The fix routes both hosts through a
+    // shared ViewSignalWiring component.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+    auto* const filteredView = widget.filteredView();
+    REQUIRE( mainView != nullptr );
+    REQUIRE( filteredView != nullptr );
+
+    mainView->selectPortionAndDisplayLine( 1_lnum, LinesCount( 1 ), LineColumn( 0 ),
+                                           LineLength( 5 ) );
+    REQUIRE( mainView->getSelectedText() == QStringLiteral( "ERROR alpha" ) );
+
+    SECTION( "scratchpad actions forward the selection" )
+    {
+        QSignalSpy sendSpy( &widget, &FolderCrawlerWidget::sendToScratchpad );
+        QSignalSpy replaceSpy( &widget, &FolderCrawlerWidget::replaceDataInScratchpad );
+
+        Q_EMIT mainView->sendSelectionToScratchpad();
+        QTest::qWait( 20 );
+        REQUIRE( sendSpy.count() == 1 );
+        REQUIRE( sendSpy.first().first().toString() == QStringLiteral( "ERROR alpha" ) );
+
+        Q_EMIT mainView->replaceScratchpadWithSelection();
+        QTest::qWait( 20 );
+        REQUIRE( replaceSpy.count() == 1 );
+        REQUIRE( replaceSpy.first().first().toString() == QStringLiteral( "ERROR alpha" ) );
+    }
+
+    SECTION( "search composition actions update the folder search pattern" )
+    {
+        auto* toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+
+        Q_EMIT mainView->replaceSearch( QStringLiteral( "beta" ) );
+        QTest::qWait( 20 );
+        REQUIRE( toolbar->currentSearchText() == QStringLiteral( "beta" ) );
+
+        Q_EMIT mainView->addToSearch( QStringLiteral( "gamma" ) );
+        QTest::qWait( 20 );
+        REQUIRE( toolbar->currentSearchText().contains( QStringLiteral( "gamma" ) ) );
+
+        Q_EMIT mainView->excludeFromSearch( QStringLiteral( "delta" ) );
+        QTest::qWait( 20 );
+        REQUIRE( toolbar->isBoolean() );
+        REQUIRE( toolbar->currentSearchText().contains(
+            QStringLiteral( "not(" ) ) );
+    }
+
+    SECTION( "font zoom steps the configured font and re-renders the views" )
+    {
+        const WiringConfigGuard guard;
+        const int before = Configuration::get().mainFont().pointSize();
+
+        Q_EMIT mainView->changeFontSize( true );
+        QTest::qWait( 20 );
+        REQUIRE( Configuration::get().mainFont().pointSize() > before );
+
+        Q_EMIT mainView->changeFontSize( false );
+        QTest::qWait( 20 );
+        REQUIRE( Configuration::get().mainFont().pointSize() == before );
+    }
+
+    SECTION( "exitView swaps focus between the main and results views" )
+    {
+        filteredView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        Q_EMIT filteredView->exitView();
+        QTest::qWait( 20 );
+        REQUIRE( mainView->hasFocus() );
+
+        Q_EMIT mainView->exitView();
+        QTest::qWait( 20 );
+        REQUIRE( filteredView->hasFocus() );
+    }
+
+    SECTION( "highlightersChange re-applies the configuration" )
+    {
+        const WiringConfigGuard guard;
+        const bool before = Configuration::get().mainLineNumbersVisible();
+        Configuration::get().setMainLineNumbersVisible( !before );
+
+        using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+        Q_EMIT mainView->highlightersChange();
+        QTest::qWait( 20 );
+        REQUIRE( Access::lineNumbersVisible( mainView ) == !before );
+    }
+
+    SECTION( "save splitter sizes persists the folder splitter" )
+    {
+        const WiringConfigGuard guard;
+        Configuration::get().setSplitterSizes( QList<int>{ 3, 7 } );
+
+        Q_EMIT mainView->saveDefaultSplitterSizes();
+        QTest::qWait( 20 );
+        const auto sizes = Configuration::get().splitterSizes();
+        REQUIRE( sizes.size() == 2 );
+        REQUIRE( sizes != QList<int>( { 3, 7 } ) );
+        REQUIRE( sizes.first() > 0 );
+    }
+}
+
+TEST_CASE( "FolderCrawlerWidget hides search-limit actions its search cannot honor",
+           "[folder][wiring]" )
+{
+    // "Set search start/end" + "Clear search limits" limit a LogFilteredData
+    // search. Folder search is a streaming engine scan with no range support,
+    // so leaving the entries enabled grays the views without limiting anything
+    // (audit: "Set search start/end and Clear search limits mislead in folder
+    // views"). Folder views must not offer them.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR a\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    QTest::qWait( 100 );
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const auto searchLimitsActionsVisible = []( const AbstractLogView* view ) {
+        const auto* menu = Access::popupMenu( view );
+        if ( menu == nullptr ) {
+            return false;
+        }
+        bool anyVisible = false;
+        const auto actions = menu->actions();
+        for ( const auto* action : actions ) {
+            if ( action->text().startsWith( QStringLiteral( "Set search st" ) )
+                 || action->text().startsWith( QStringLiteral( "Clear search limits" ) ) ) {
+                anyVisible = anyVisible || action->isVisible();
+            }
+        }
+        return anyVisible;
+    };
+
+    REQUIRE( widget.mainView() != nullptr );
+    REQUIRE( widget.filteredView() != nullptr );
+    REQUIRE_FALSE( searchLimitsActionsVisible( widget.mainView() ) );
+    REQUIRE_FALSE( searchLimitsActionsVisible( widget.filteredView() ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget mirrors a portion selection into the main view",
+           "[folder][wiring]" )
+{
+    // Single-file: a portion selection in the filtered view is mirrored to the
+    // main view via CrawlerWidget::jumpToMatchingLine -> selectPortionAndDisplayLine,
+    // which selects the whole line but forwards startCol/nSymbols in the
+    // re-emitted newSelection. Folder's onResultSelected used to drop the
+    // portion entirely.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // Row 1 = a.log local line 1 ("ERROR alpha"). Single-file parity: the main
+    // view selects the whole line (selectPortionAndDisplayLine keeps selection_
+    // line-based) while the portion rides along in the re-emitted newSelection
+    // payload (startCol/nSymbols) for the status bar and incremental search.
+    QSignalSpy mainSelectionSpy( widget.mainView(), &AbstractLogView::newSelection );
+    Q_EMIT widget.filteredView()->newSelection( 1_lnum, LinesCount( 1 ), LineColumn( 2 ),
+                                                LineLength( 3 ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.mainView()->getSelectedText() == QStringLiteral( "ERROR alpha" ) );
+    REQUIRE( mainSelectionSpy.count() >= 1 );
+    const auto payload = mainSelectionSpy.last();
+    REQUIRE( payload.at( 0 ).value<LineNumber>() == 1_lnum );
+    REQUIRE( payload.at( 2 ).value<LineColumn>() == LineColumn( 2 ) );
+    REQUIRE( payload.at( 3 ).value<LineLength>() == LineLength( 3 ) );
+
+    // A multi-row drag emits its MOVING-END row with nLines>1 (downward drag
+    // ends on the bottom row, upward drag on the top row). Parity with
+    // single-file: the payload is forwarded unchanged -- NOT recomputed from
+    // neighboring result rows (which would inflate the span for non-contiguous
+    // matches and invert upward drags).
+    Q_EMIT widget.filteredView()->newSelection( 2_lnum, LinesCount( 2 ), LineColumn( 0 ),
+                                                LineLength( 0 ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.mainView()->getSelectedText() == QStringLiteral( "ERROR beta" ) );
+    const auto rangePayload = mainSelectionSpy.last();
+    REQUIRE( rangePayload.at( 0 ).value<LineNumber>() == 3_lnum ); // a.log local line 3
+    REQUIRE( rangePayload.at( 1 ).value<LinesCount>() == LinesCount( 2 ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget highlights the hovered result line in the minimap",
+           "[folder][wiring]" )
+{
+    // Single-file: hovering a filtered view's line-number margin highlights the
+    // corresponding line in the overview (CrawlerWidget::mouseHoveredOverMatch).
+    // Folder mode resolves the hovered row to (file, localLine) and highlights
+    // it when that file is open in the main view.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const overviewWidget = widget.mainView()->findChild<OverviewWidget*>();
+    REQUIRE( overviewWidget != nullptr );
+
+    // Result rows: 0 = group header, 1 = "ERROR alpha" (local line 1),
+    // 2 = "ERROR beta" (local line 3). Hover row 2: the row-to-line mapping
+    // is NOT identity here, so a resolution that confused rows with source
+    // lines would highlight the wrong line.
+    Q_EMIT widget.filteredView()->mouseHoveredOverLine( 2_lnum );
+    QTest::qWait( 20 );
+    REQUIRE( overviewWidget->highlightedLine().has_value() );
+    REQUIRE( overviewWidget->highlightedLine()->get() == 3 );
+
+    // Hovering a group-header row (or any row that does not resolve to the
+    // open file) clears the highlight instead of leaving a stale marker.
+    Q_EMIT widget.filteredView()->mouseHoveredOverLine( 0_lnum );
+    QTest::qWait( 20 );
+    REQUIRE_FALSE( overviewWidget->highlightedLine().has_value() );
+
+    Q_EMIT widget.filteredView()->mouseHoveredOverLine( 2_lnum );
+    QTest::qWait( 20 );
+    REQUIRE( overviewWidget->highlightedLine().has_value() );
+    REQUIRE( overviewWidget->highlightedLine()->get() == 3 );
+
+    Q_EMIT widget.filteredView()->mouseLeftHoveringZone();
+    QTest::qWait( 20 );
+    REQUIRE_FALSE( overviewWidget->highlightedLine().has_value() );
+}
+
+TEST_CASE( "FolderCrawlerWidget seeds the splitter from the saved default",
+           "[folder][wiring]" )
+{
+    // Parity with CrawlerWidget::setup (setSizes(config.splitterSizes())):
+    // "Save splitter position" writes the global default; NEW folder tabs must
+    // open with those proportions too (a session-restored per-tab context
+    // still overrides per tab).
+    WiringConfigGuard guard;
+    guard.cfg.setSplitterSizes( { 420, 180 } );
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR alpha\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    // Resize BEFORE the first show: the seed is applied by the event filter on
+    // the splitter's first Resize (its first real geometry); a post-show
+    // resize would redistribute the sizes (bottom pane clamps at its minimum),
+    // masking the seeded ratio.
+    widget.resize( 800, 600 );
+    widget.show();
+    QTest::qWait( 100 );
+
+    const auto sizes = widget.viewsSplitter()->sizes();
+    REQUIRE( sizes.size() == 2 );
+    REQUIRE( sizes.at( 0 ) > 0 );
+    REQUIRE( sizes.at( 1 ) > 0 );
+    // The splitter scales the seeded sizes to the laid-out height, so compare
+    // ratios: 420:180 ~= 2.33 vs the 3:2 (1.5) ctor default.
+    const double ratio = static_cast<double>( sizes.at( 0 ) ) / sizes.at( 1 );
+    REQUIRE( ratio > 2.0 );
+    REQUIRE( ratio < 2.7 );
+}
+
+TEST_CASE( "FolderCrawlerWidget session splitter sizes beat the saved default",
+           "[folder][wiring]" )
+{
+    // Session restore delivers per-tab sizes via setViewContext while the tab
+    // is still hidden. Those sizes must win over the saved global default --
+    // and pre-layout setSizes must not silently drop them (the sizes are
+    // stashed and applied on the splitter's first real geometry).
+    WiringConfigGuard guard;
+    guard.cfg.setSplitterSizes( { 420, 180 } );
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR alpha\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.setViewContext( QStringLiteral(
+        R"({"P":"","IC":false,"RE":false,"IR":false,"BC":false,"S":[200,400]})" ) );
+    widget.resize( 800, 600 );
+    widget.show();
+    QTest::qWait( 100 );
+
+    const auto sizes = widget.viewsSplitter()->sizes();
+    REQUIRE( sizes.size() == 2 );
+    REQUIRE( sizes.at( 0 ) > 0 );
+    REQUIRE( sizes.at( 1 ) > 0 );
+    // 200:400 = 0.5 -- clearly distinct from the 420:180 global default (2.33)
+    // and from the unseeded minimum-clamped layout (~3.4).
+    const double ratio = static_cast<double>( sizes.at( 0 ) ) / sizes.at( 1 );
+    REQUIRE( ratio > 0.4 );
+    REQUIRE( ratio < 0.65 );
+}
+
+TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overview]" )
+{
+    // Single-file parity: marks show as ticks in the minimap. Folder mode fed
+    // the overview only the match list, so marks never appeared (cluster D of
+    // the 2026-07-18 audit). The ticks belong to the file currently shown and
+    // follow result-row switches.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\nline1\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const overview = widget.overviewModel();
+    REQUIRE( overview != nullptr );
+    // The overview refresh path no-ops while hidden; visibility follows the
+    // machine's Configuration, so force it (single-file tests do the same).
+    overview->setVisible( true );
+
+    // Mark a NON-match line: it must appear as a mark tick.
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( !overview->getMarkLines()->empty() );
+
+    widget.unmarkMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    // Re-fetch after every update*() call: the returned pointer is documented
+    // valid only until the next update (overview.h).
+    REQUIRE( overview->getMarkLines()->empty() );
+
+    // Single-file precedence: a line that is BOTH a match and a mark is drawn
+    // as a match (red), so it must NOT be duplicated into the mark list.
+    widget.markMainViewLine( 1_lnum ); // "ERROR alpha" is a match
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( overview->getMarkLines()->empty() );
+    REQUIRE( !overview->getMatchLines()->empty() );
+    widget.unmarkMainViewLine( 1_lnum );
+    QTest::qWait( 50 );
+
+    // Rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma.
+    // Mark a non-match line in b, then switch between the files: the minimap
+    // ticks must track the file currently shown in the main view.
+    widget.selectResultRow( 4_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    QTest::qWait( 100 );
+    widget.markMainViewLine( 1_lnum ); // b.log:1 is "line1", not a match
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+    REQUIRE( !overview->getMarkLines()->empty() );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 100 );
+    overview->updateView( 100 );
+    // a.log has no marks anymore (unmarked above) -> no stale ticks from b.
+    REQUIRE( overview->getMarkLines()->empty() );
+}
+
+TEST_CASE( "FolderCrawlerWidget marks survive a view-context round-trip",
+           "[folder][session]" )
+{
+    // Single-file parity: marks persist in the session (CrawlerWidgetContext
+    // serializes them). Folder mode dropped them: the per-file mark store
+    // lived only in memory (cluster D of the 2026-07-18 audit). Marks are
+    // serialized RELATIVE to the folder root so a moved folder restores.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // Mark a main-view line in a.log and a results row from b.log
+    // (rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma).
+    widget.markMainViewLine( 1_lnum );
+    Q_EMIT widget.filteredView()->markLines( { 4_lnum } );
+    QTest::qWait( 50 );
+    REQUIRE( widget.isLineMarkedInFile( a, 1_lnum ) );
+    REQUIRE( widget.isLineMarkedInFile( b, 0_lnum ) );
+
+    const auto json = widget.context()->toString();
+    // The serialized context carries the marks under a dedicated key, with
+    // paths RELATIVE to the folder root (so a moved folder restores) -- it
+    // must not embed the (machine-specific) absolute folder path.
+    REQUIRE( json.contains( QStringLiteral( "\"M\"" ) ) );
+    REQUIRE( json.contains( QStringLiteral( "a.log" ) ) );
+    REQUIRE_FALSE( json.contains( dir.path() ) );
+
+    FolderCrawlerWidget restored;
+    restored.setFolder( dir.path(), QStringList{ a, b } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( a, 1_lnum ) );
+    REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget restores marks into a moved folder",
+           "[folder][session]" )
+{
+    // The mark keys are relative to the folder root precisely so that a folder
+    // MOVED between save and restore still gets its marks: the same relative
+    // paths must resolve against the NEW root.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    widget.markMainViewLine( 1_lnum );
+    QTest::qWait( 20 );
+
+    const auto json = widget.context()->toString();
+
+    // Same folder content at a NEW location (the "moved" folder).
+    QTemporaryDir movedDir;
+    REQUIRE( movedDir.isValid() );
+    const QString movedA = writeFile( movedDir, "a.log",
+                                      QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    FolderCrawlerWidget restored;
+    restored.setFolder( movedDir.path(), QStringList{ movedA } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( movedA, 1_lnum ) );
+    // And not keyed to the original (now-gone) location.
+    REQUIRE_FALSE( restored.isLineMarkedInFile( a, 1_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget keeps restored marks for files absent at restore",
+           "[folder][session]" )
+{
+    // Contract (pinned, mirrors single-file's blind mark restore): a session
+    // carrying marks for a file the folder no longer lists restores them
+    // anyway; they re-render if the file returns. Restore does not prune.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    Q_EMIT widget.filteredView()->markLines( { 4_lnum } ); // b.log row
+    QTest::qWait( 50 );
+    REQUIRE( widget.isLineMarkedInFile( b, 0_lnum ) );
+
+    const auto json = widget.context()->toString();
+
+    // Restore with b.log absent from the folder's file list.
+    FolderCrawlerWidget restored;
+    restored.setFolder( dir.path(), QStringList{ a } );
+    restored.setViewContext( json );
+    restored.show();
+    QTest::qWait( 100 );
+
+    REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget announces searchable changes on pane lifecycle",
+           "[folder][quickfind]" )
+{
+    // The QuickFindMux snapshots the active pane's view when the folder tab is
+    // activated; panes created/switched/closed afterwards must re-announce so
+    // MainWindow re-registers (cluster C of the 2026-07-18 audit). The FINAL
+    // announcement at each step must name the correct active pane: a close
+    // also produces an intermediate emission while the closing pane is still
+    // active, so only the last one is authoritative.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Record the ACTIVE pane view at every emission.
+    std::vector<QObject*> emissions;
+    QObject::connect( &widget, &FolderCrawlerWidget::searchablesChanged, &widget,
+                      [ & ]() { emissions.push_back( widget.filteredView() ); } );
+
+    // Pane create (keep-results snapshot + fresh pane): the last emission
+    // must report the NEW active pane.
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "beta" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 2 );
+    auto* const pane1View = widget.filteredView();
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane1View );
+
+    // Pane switch back to tab 0: the last emission must report tab 0's view.
+    emissions.clear();
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    QTest::qWait( 100 );
+    auto* const pane0View = widget.filteredView();
+    REQUIRE( pane0View != pane1View );
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane0View );
+
+    // Pane close (the current tab): the FINAL emission must report the
+    // surviving pane, never the destroyed view (an intermediate emission
+    // while the closing pane is still active is expected and harmless --
+    // MainWindow's synchronous re-registration ends with the survivor).
+    emissions.clear();
+    Q_EMIT widget.resultsTabs()->tabCloseRequested( 0 );
+    QTest::qWait( 100 );
+    REQUIRE( widget.paneCount() == 1 );
+    REQUIRE( !emissions.empty() );
+    REQUIRE( emissions.back() == pane1View );
+    REQUIRE( emissions.back() != pane0View );
+}
+
+TEST_CASE( "FolderCrawlerWidget copy excludes group header rows", "[folder][clipboard]" )
+{
+    // Group headers are UI chrome (path + count), not source lines: copying a
+    // selection that spans them must not put the header text on the clipboard
+    // (cluster E of the 2026-07-18 audit).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    // gamma sits at the SAME local line as alpha (line 1) but in another file:
+    // every selected row must still be copied (no line-number dedup).
+    const QString b = writeFile( dir, "b.log", QByteArray( "line0\nERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->selectAll();
+    QTest::qWait( 20 );
+
+    const auto text = view->getSelectedText();
+    REQUIRE( text.contains( QStringLiteral( "ERROR alpha" ) ) );
+    REQUIRE( text.contains( QStringLiteral( "ERROR beta" ) ) );
+    REQUIRE( text.contains( QStringLiteral( "ERROR gamma" ) ) );
+    // The header row renders "<path> (<count>)": none of it may be copied.
+    REQUIRE_FALSE( text.contains( a ) );
+    REQUIRE_FALSE( text.contains( b ) );
+
+    // The copied text follows the VIEW's row order (alpha, beta, gamma), not
+    // sorted-by-source-line order (alpha, gamma, beta -- alpha and gamma share
+    // source line 1 in their files).
+    REQUIRE( text.indexOf( QStringLiteral( "ERROR alpha" ) )
+             < text.indexOf( QStringLiteral( "ERROR beta" ) ) );
+    REQUIRE( text.indexOf( QStringLiteral( "ERROR beta" ) )
+             < text.indexOf( QStringLiteral( "ERROR gamma" ) ) );
+
+    // Copy-with-line-numbers shows the SOURCE line numbers (doGetLineNumber
+    // maps rows to their file's local lines): alpha at a.log:1 -> "2:", beta
+    // at a.log:3 -> "4:", gamma at b.log:1 -> "2:".
+    AbstractLogView::access_by<FolderViewTestAccess>::copyWithLineNumbers( view );
+    const auto numbered = QApplication::clipboard()->text();
+    REQUIRE( numbered.contains( QStringLiteral( "2: ERROR alpha" ) ) );
+    REQUIRE( numbered.contains( QStringLiteral( "4: ERROR beta" ) ) );
+    REQUIRE( numbered.contains( QStringLiteral( "2: ERROR gamma" ) ) );
+    REQUIRE_FALSE( numbered.contains( a ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget row-encoding override dies with the cached file",
+           "[folder][encoding]" )
+{
+    // The row-level encoding override belongs to the file's cached LogData:
+    // when the LRU cache evicts the file, the override is dropped too, so a
+    // fresh re-open cannot leave the main view (re-detected codec) and the
+    // results rows (stale override) decoding with different encodings.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // UTF-16LE file: the scan detects UTF-16 correctly, so the baseline row
+    // decodes cleanly; overriding the row decode to Latin-1 garbles it.
+    const QByteArray utf16 = QTextCodec::codecForName( "UTF-16LE" )
+                                 ->fromUnicode( QStringLiteral( "ERROR x\n" ) );
+    const QString a = writeFile( dir, "a.log", utf16 );
+    QStringList files{ a };
+    for ( int i = 0; i < 9; ++i ) {
+        files << writeFile( dir, QStringLiteral( "f%1.log" ).arg( i ),
+                            QByteArray( "ERROR x\n" ) );
+    }
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), files );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // The test's subject is the encoding-override lifecycle, which needs a.log
+    // (BOM-less UTF-16LE) to be detected as UTF-16 so it appears as a result.
+    // uchardet detects UTF-16 via the BOM, so on runners whose toolchain does
+    // not surface the BOM-less form (ubuntu-24.04's newer Qt/uchardet), a.log
+    // has no matches and the row layout this test assumes does not exist --
+    // skip rather than assert a platform-dependent detection contract.
+    if ( widget.folderResults()->matchLinesForFile( a ).empty() ) {
+        WARN( "a.log (UTF-16LE, no BOM) was not detected on this platform; "
+              "skipping the row-encoding-override test" );
+        return;
+    }
+
+    // Open a.log (row 1 = its match): the row decodes with the detected
+    // UTF-16 codec at baseline.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; }, 15000 ) );
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 == QStringLiteral( "ERROR x" ) );
+
+    // Override to Latin-1: the UTF-16LE bytes garble (NUL bytes become
+    // visible chars), proving the override drives the row decode.
+    constexpr int latin1Mib = 4;
+    widget.setEncoding( latin1Mib );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 != QStringLiteral( "ERROR x" ) );
+
+    // Open the 9 other files (odd rows = each file's match row): the 8-entry
+    // LRU cache evicts a.log, and its row override must die with the LogData.
+    for ( int i = 0; i < 9; ++i ) {
+        const auto row = LineNumber( static_cast<LineNumber::UnderlyingType>( 3 + i * 2 ) );
+        const auto path = files.at( i + 1 );
+        widget.selectResultRow( row );
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == path; }, 15000 ) );
+    }
+    QTest::qWait( 100 );
+
+    // The override is gone: the row decodes with the detected UTF-16 codec
+    // again, matching what a fresh main-view open would show.
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+                 == QStringLiteral( "ERROR x" ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget search composition ignores a header selection",
+           "[folder][clipboard]" )
+{
+    // Group headers are not copyable, so composing a search from a header-row
+    // selection must be a no-op (an empty add would corrupt the pattern to
+    // "X or " / "X|", an empty exclusion to "X and not()").
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const toolbar = widget.searchToolbar();
+    REQUIRE( toolbar != nullptr );
+    const auto patternBefore = toolbar->currentSearchText();
+    REQUIRE( patternBefore == QStringLiteral( "ERROR" ) );
+
+    // Selecting ONLY the header row (0) yields no copyable text.
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->selectAndDisplayLine( 0_lnum );
+    QTest::qWait( 20 );
+    REQUIRE( view->getSelectedText().isEmpty() );
+
+    Q_EMIT view->addToSearch( view->getSelectedText() );
+    Q_EMIT view->excludeFromSearch( view->getSelectedText() );
+    Q_EMIT view->replaceSearch( view->getSelectedText() );
+    QTest::qWait( 50 );
+
+    REQUIRE( toolbar->currentSearchText() == patternBefore );
+}
+
+TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )
+{
+    // F5: MainWindow dispatches these through AbstractCrawlerWidget for every
+    // tab kind (focus-search shortcut, View->Wrap, QuickFind focus save /
+    // restore, encoding override). On folder tabs they were dead because
+    // MainWindow routed them via currentCrawlerWidget() / the SignalMux.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR gamma\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    SECTION( "focusSearchEdit focuses the search input" )
+    {
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+        widget.focusSearchEdit();
+        QTest::qWait( 20 );
+        REQUIRE( widget.searchToolbar()->searchLineEdit()->lineEdit()->hasFocus() );
+    }
+
+    SECTION( "textWrapSet wraps every view and reports its state" )
+    {
+        widget.textWrapSet( true );
+        QTest::qWait( 20 );
+        REQUIRE( widget.isTextWrapEnabled() );
+        REQUIRE( widget.mainView()->isTextWrapEnabled() );
+        REQUIRE( widget.filteredView()->isTextWrapEnabled() );
+
+        widget.textWrapSet( false );
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( widget.isTextWrapEnabled() );
+        REQUIRE_FALSE( widget.mainView()->isTextWrapEnabled() );
+        REQUIRE_FALSE( widget.filteredView()->isTextWrapEnabled() );
+    }
+
+    SECTION( "quickfind entry and exit save and restore the view focus" )
+    {
+        widget.filteredView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+        widget.enteringQuickFind();
+
+        // The QuickFind bar grabs the focus; simulate by moving it elsewhere.
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+
+        widget.exitingQuickFind();
+        QTest::qWait( 20 );
+        REQUIRE( widget.filteredView()->viewport()->hasFocus() );
+    }
+
+    SECTION( "quickfind exit does not yank focus from a non-view widget" )
+    {
+        // Focus is in the search box (common when Ctrl+F is pressed): nothing
+        // is saved, so exiting must NOT move the focus anywhere.
+        widget.searchToolbar()->searchLineEdit()->lineEdit()->setFocus();
+        QTest::qWait( 20 );
+        widget.enteringQuickFind();
+
+        widget.mainView()->viewport()->setFocus();
+        QTest::qWait( 20 );
+
+        widget.exitingQuickFind();
+        QTest::qWait( 20 );
+        // No restore happened: the focus is still where the QF bar left it.
+        REQUIRE( widget.mainView()->viewport()->hasFocus() );
+    }
+
+    SECTION( "encodingMib reflects the encoding override" )
+    {
+        // ISO 8859-1 (Latin-1).
+        constexpr int latin1Mib = 4;
+
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+        widget.setEncoding( latin1Mib );
+        REQUIRE( widget.encodingMib().has_value() );
+        REQUIRE( *widget.encodingMib() == latin1Mib );
+        widget.setEncoding( std::nullopt );
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+    }
+
+    SECTION( "encodingMib resets when the main-view file changes" )
+    {
+        constexpr int latin1Mib = 4;
+
+        widget.setEncoding( latin1Mib );
+        REQUIRE( widget.encodingMib().has_value() );
+
+        // Rows: 0 = header(a), 1 = ERROR alpha, 2 = ERROR beta, 3 = header(b),
+        // 4 = ERROR gamma. Selecting a b.log row swaps the main-view file.
+        widget.selectResultRow( 4_lnum );
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+        QTest::qWait( 100 );
+        REQUIRE_FALSE( widget.encodingMib().has_value() );
+    }
+}
+
+TEST_CASE( "FolderCrawlerWidget search history and status guards",
+           "[folder][history]" )
+{
+    // Single-file parity (cluster F of the 2026-07-18 audit): folder searches
+    // were never persisted to the shared SavedSearches (in-memory only, wiped
+    // on restart), an invalid regex silently scanned to zero matches, an empty
+    // Enter left stale results, a new search kept a marks-only visibility, and
+    // an option toggle replaced the match count with a bare hint.
+    struct RegexpTypeGuard {
+        Configuration& cfg;
+        SearchRegexpType previous;
+        RegexpTypeGuard()
+            : cfg( Configuration::get() )
+            , previous( cfg.mainRegexpType() )
+        {
+            cfg.setMainRegexpType( SearchRegexpType::ExtendedRegexp );
+        }
+        ~RegexpTypeGuard()
+        {
+            cfg.setMainRegexpType( previous );
+        }
+    } regexpGuard;
+
+    // Snapshot/restore the shared SavedSearches singleton (Persistable ->
+    // session settings on disk). A failed REQUIRE throws, so the restore must
+    // run on stack unwinding; otherwise the test pattern leaks into sibling
+    // tests and into the portable session file.
+    struct SavedSearchesGuard {
+        SavedSearches& searches;
+        QStringList previous;
+        SavedSearchesGuard()
+            : searches( SavedSearches::getSynced() )
+            , previous( searches.recentSearches() )
+        {
+        }
+        ~SavedSearchesGuard()
+        {
+            searches.clear();
+            for ( auto it = previous.crbegin(); it != previous.crend(); ++it ) {
+                searches.addRecent( *it );
+            }
+            searches.save();
+        }
+    };
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+
+    SECTION( "folder searches persist to the shared history" )
+    {
+        // In production MainWindow injects the SavedSearches singleton; inject
+        // it here and verify the pattern survives a disk reload (getSynced
+        // re-reads the storage, so an in-memory-only addRecent would vanish).
+        SavedSearchesGuard searchesGuard;
+        auto& searches = SavedSearches::getSynced();
+        searches.clear();
+        searches.save();
+        widget.setSavedSearches( &searches );
+
+        widget.searchFor( "UNIQ_F4_HISTORY_PATTERN" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        const auto reloaded = SavedSearches::getSynced().recentSearches();
+        REQUIRE( reloaded.contains( QStringLiteral( "UNIQ_F4_HISTORY_PATTERN" ) ) );
+    }
+
+    SECTION( "invalid regex surfaces an error and does not scan" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 100 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+    }
+
+    SECTION( "empty search clears the results pane" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+        widget.searchFor( "" );
+        QTest::qWait( 50 );
+
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().startsWith( QStringLiteral( "Ready" ) ) );
+    }
+
+    SECTION( "new search resets a marks-only visibility" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        auto* const combo = widget.visibilityCombo();
+        REQUIRE( combo != nullptr );
+        combo->setCurrentIndex( 1 ); // "Marks"
+        QTest::qWait( 20 );
+        REQUIRE( combo->currentIndex() == 1 );
+
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( combo->currentIndex() == 0 );
+    }
+
+    SECTION( "invalid regex supersedes an in-flight search" )
+    {
+        // No waitFor between the two searches: the first scan's queued
+        // progress/finish signals arrive AFTER the invalid pattern was
+        // rejected, and must be treated as stale (generation bumped) instead
+        // of streaming results back into the cleared pane and overwriting the
+        // error. Back-to-back searchFor calls are deterministic here: the
+        // queued signals need an event-loop turn the synchronous calls do not
+        // give them.
+        widget.searchFor( "ERROR" );
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 200 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+    }
+
+    SECTION( "empty search supersedes an in-flight search" )
+    {
+        widget.searchFor( "ERROR" );
+        widget.searchFor( "" );
+        QTest::qWait( 200 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.statusText().startsWith( QStringLiteral( "Ready" ) ) );
+    }
+
+    SECTION( "option toggle before any search shows the bare hint" )
+    {
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Options changed" ) ) );
+        REQUIRE_FALSE( widget.statusText().contains( QStringLiteral( "match" ) ) );
+    }
+
+    SECTION( "option toggle after an invalid pattern shows no stale count" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 50 );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        REQUIRE( widget.statusText().contains( QStringLiteral( "Options changed" ) ) );
+        REQUIRE_FALSE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+    }
+
+    SECTION( "option toggle preserves the match count" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        toolbar->matchCaseButton()->toggle();
+        QTest::qWait( 20 );
+
+        // The stale-result hint may appear, but the count from the last
+        // finished search must not be wiped by it.
+        REQUIRE( widget.statusText().contains( QStringLiteral( "2 match" ) ) );
+        REQUIRE( widget.statusText().contains( QStringLiteral( "re-run" ) ) );
+    }
+}
+
+TEST_CASE( "FolderCrawlerWidget registers the crawler widget shortcut family",
+           "[folder][shortcuts]" )
+{
+    // Single-file: CrawlerWidget::registerShortcuts binds the crawler family
+    // (visibility cycling, option toggles, keep-results, top-view resize, Esc
+    // refocus) with WidgetWithChildrenShortcut. Folder mode registered none of
+    // them -- every key below was dead on a folder tab.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+    REQUIRE( mainView != nullptr );
+
+    SECTION( "V / Shift+V cycle the visibility combo" )
+    {
+        auto* const combo = widget.visibilityCombo();
+        REQUIRE( combo != nullptr );
+        REQUIRE( combo->currentIndex() == 0 );
+
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        pressConfiguredShortcut( mainView->viewport(),
+                                 ShortcutAction::CrawlerChangeVisibilityForward );
+        REQUIRE( combo->currentIndex() == 1 );
+
+        pressConfiguredShortcut( mainView->viewport(),
+                                 ShortcutAction::CrawlerChangeVisibilityBackward );
+        REQUIRE( combo->currentIndex() == 0 );
+    }
+
+    SECTION( "option toggle shortcuts flip the toolbar buttons" )
+    {
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+
+        // Assert each keypress FLIPS the button rather than landing on a fixed
+        // state: the toolbar restores its toggles from the machine's saved
+        // Configuration, so the initial checked state is not portable (e.g. a
+        // non-plain default regexp type starts the regex button checked).
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+
+        const bool caseBefore = toolbar->matchCaseButton()->isChecked();
+        pressConfiguredShortcut( mainView->viewport(), ShortcutAction::CrawlerEnableCaseMatching );
+        REQUIRE( toolbar->matchCaseButton()->isChecked() == !caseBefore );
+
+        const bool regexBefore = toolbar->useRegexpButton()->isChecked();
+        pressConfiguredShortcut( mainView->viewport(), ShortcutAction::CrawlerEnableRegex );
+        REQUIRE( toolbar->useRegexpButton()->isChecked() == !regexBefore );
+
+        const bool inverseBefore = toolbar->inverseButton()->isChecked();
+        pressConfiguredShortcut( mainView->viewport(), ShortcutAction::CrawlerEnableInverseMatching );
+        REQUIRE( toolbar->inverseButton()->isChecked() == !inverseBefore );
+
+        // Toggling case again restores the initial state (round-trip).
+        pressConfiguredShortcut( mainView->viewport(), ShortcutAction::CrawlerEnableCaseMatching );
+        REQUIRE( toolbar->matchCaseButton()->isChecked() == caseBefore );
+    }
+
+    SECTION( "keep-results shortcut toggles the toolbar button" )
+    {
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        REQUIRE( toolbar->keepSearchResultsButton()->isVisible() );
+
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        const bool keepBefore = toolbar->keepSearchResultsButton()->isChecked();
+        pressConfiguredShortcut( mainView->viewport(), ShortcutAction::CrawlerKeepResults );
+        REQUIRE( toolbar->keepSearchResultsButton()->isChecked() == !keepBefore );
+    }
+
+    SECTION( "Esc moves focus from the search input back to the active view" )
+    {
+        auto* const toolbar = widget.searchToolbar();
+        REQUIRE( toolbar != nullptr );
+        auto* const edit = toolbar->searchLineEdit()->lineEdit();
+        REQUIRE( edit != nullptr );
+
+        edit->setFocus();
+        QTest::qWait( 20 );
+        REQUIRE( edit->hasFocus() );
+
+        QTest::keyClick( edit, Qt::Key_Escape );
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( edit->hasFocus() );
+        // Folder's active view defaults to the active results pane (the view
+        // itself takes focus, as in single-file).
+        REQUIRE( widget.filteredView()->hasFocus() );
+    }
+
+    SECTION( "+/- resize the top view through the splitter" )
+    {
+        auto* const splitter = widget.viewsSplitter();
+        REQUIRE( splitter != nullptr );
+        // Give the bottom pane slack above its minimum height (~130px) so the
+        // top can actually grow.
+        widget.resize( 800, 1000 );
+        QTest::qWait( 50 );
+        const auto before = splitter->sizes();
+        REQUIRE( before.size() == 2 );
+        REQUIRE( before.at( 1 ) > 150 );
+
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        pressConfiguredShortcut( mainView->viewport(),
+                                 ShortcutAction::CrawlerIncreseTopViewSize );
+        const auto grown = splitter->sizes();
+        REQUIRE( grown.at( 0 ) > before.at( 0 ) );
+
+        pressConfiguredShortcut( mainView->viewport(),
+                                 ShortcutAction::CrawlerDecreaseTopViewSize );
+        REQUIRE( splitter->sizes().at( 0 ) <= before.at( 0 ) );
+    }
+}
+
+TEST_CASE( "Folder results view navigates marks with bracket shortcuts",
+           "[folder][shortcuts]" )
+{
+    // Single-file: FilteredView registers LogViewNextMark/LogViewPrevMark ([ /
+    // ]). FolderFilteredView derives straight from AbstractLogView, which never
+    // registered them, so bracket navigation was dead in folder result panes.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+
+    // Rows: 0 = group header, 1 = "ERROR alpha" (a.log:1), 2 = "ERROR beta"
+    // (a.log:3). Mark both match rows and select the first one.
+    Q_EMIT view->markLines( { 1_lnum, 2_lnum } );
+    QTest::qWait( 20 );
+    REQUIRE( widget.isFilteredResultRowMarked( 1_lnum ) );
+    REQUIRE( widget.isFilteredResultRowMarked( 2_lnum ) );
+
+    QSignalSpy selectionSpy( view, &AbstractLogView::newSelection );
+    view->selectAndDisplayLine( 1_lnum );
+    QTest::qWait( 20 );
+
+    view->viewport()->setFocus();
+    QTest::qWait( 20 );
+
+    auto spyCount = selectionSpy.count();
+    pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewNextMark );
+    REQUIRE( selectionSpy.count() == spyCount + 1 );
+    REQUIRE( selectionSpy.last().at( 0 ).value<LineNumber>() == 2_lnum );
+
+    spyCount = selectionSpy.count();
+    pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewPrevMark );
+    REQUIRE( selectionSpy.count() == spyCount + 1 );
+    REQUIRE( selectionSpy.last().at( 0 ).value<LineNumber>() == 1_lnum );
+}
+
+TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every view",
+           "[folder][colorlabels]" )
+{
+    // Single-file parity: CrawlerWidget wires the views' color-label signals to
+    // a ColorLabelsManager and pushes the resulting quick highlighters into BOTH
+    // views (crawlerwidget.cpp:1456-1464, :1586-1602), and registers the
+    // widget-level label shortcuts 1..9 (add) / 0 (remove) / Cmd+D (next) /
+    // Cmd+Shift+0 (clear) (crawlerwidget.cpp:1704-1727). The AbstractLogView base
+    // builds the "Color labels" context menu for folder views too, so picking a
+    // label (or pressing a digit shortcut) in a folder tab must highlight the
+    // selected text in the main view AND in the results view.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Open a.log in the main view and select the "ERROR" portion of line 1.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+    auto* const filteredView = widget.filteredView();
+    REQUIRE( mainView != nullptr );
+    REQUIRE( filteredView != nullptr );
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const auto hasLabelledText = []( const AbstractLogView* view, size_t label,
+                                     const QString& text ) {
+        const auto& labels = Access::quickHighlighters( view );
+        return label < labels.size()
+               && std::any_of( labels[ label ].cbegin(), labels[ label ].cend(),
+                               [ & ]( const QuickLabelEntry& e ) { return e.text == text; } );
+    };
+    const auto hasAnyLabelledText = []( const AbstractLogView* view ) {
+        const auto& labels = Access::quickHighlighters( view );
+        return std::any_of( labels.cbegin(), labels.cend(),
+                            []( const auto& entries ) { return !entries.isEmpty(); } );
+    };
+
+    // selectPortionAndDisplayLine selects the whole line (selection_.selectLine),
+    // so the labelled text is the full line content.
+    mainView->selectPortionAndDisplayLine( 1_lnum, LinesCount( 1 ), LineColumn( 0 ),
+                                           LineLength( 5 ) );
+    const QString selectedText = QStringLiteral( "ERROR alpha" );
+    REQUIRE( mainView->getSelectedText() == selectedText );
+
+    SECTION( "context-menu signal applies and removes the label in every view" )
+    {
+        Q_EMIT mainView->addColorLabel( 0 );
+        QTest::qWait( 20 );
+        REQUIRE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE( hasLabelledText( filteredView, 0, selectedText ) );
+
+        // The "None" menu action emits removeColorLabel.
+        Q_EMIT mainView->removeColorLabel();
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE_FALSE( hasLabelledText( filteredView, 0, selectedText ) );
+    }
+
+    SECTION( "digit shortcut applies and removes the label" )
+    {
+        mainView->viewport()->setFocus();
+        QTest::qWait( 20 );
+        QTest::keyClick( mainView->viewport(), Qt::Key_1 );
+        QTest::qWait( 20 );
+        REQUIRE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE( hasLabelledText( filteredView, 0, selectedText ) );
+
+        QTest::keyClick( mainView->viewport(), Qt::Key_0 );
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasLabelledText( mainView, 0, selectedText ) );
+        REQUIRE_FALSE( hasLabelledText( filteredView, 0, selectedText ) );
+    }
+
+    SECTION( "clear removes every label from every view" )
+    {
+        Q_EMIT mainView->addColorLabel( 0 );
+        QTest::qWait( 20 );
+        REQUIRE( hasAnyLabelledText( mainView ) );
+
+        Q_EMIT mainView->clearColorLabels();
+        QTest::qWait( 20 );
+        REQUIRE_FALSE( hasAnyLabelledText( mainView ) );
+        REQUIRE_FALSE( hasAnyLabelledText( filteredView ) );
+    }
 }

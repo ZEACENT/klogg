@@ -56,8 +56,9 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
-#include "colorlabelsmanager.h"
+#include "colorlabelscontroller.h"
 #include "filteredview.h"
+#include "viewsignalwiring.h"
 #include "iconloader.h"
 #include "linetypes.h"
 #include "loadingstatus.h"
@@ -103,7 +104,7 @@ class CrawlerWidget : public QSplitter,
     // is interacting with
     void selectAll() override;
 
-    std::optional<int> encodingMib() const;
+    std::optional<int> encodingMib() const override;
 
     // Get the text description of the encoding effectively used,
     // suitable to display to the user.
@@ -115,7 +116,7 @@ class CrawlerWidget : public QSplitter,
     // Returns whether the initial file load has completed
     bool isFirstLoadDone() const;
 
-    bool isTextWrapEnabled() const;
+    bool isTextWrapEnabled() const override;
 
     qint64 searchPendingLines() const { return searchPendingLines_; }
 
@@ -130,8 +131,8 @@ class CrawlerWidget : public QSplitter,
     // Set the encoding
     void setEncoding( std::optional<int> mib ) override;
 
-    void focusSearchEdit();
-    void goToLine();
+    void focusSearchEdit() override;
+    void goToLine() override;
     void jumpToTop();
 
     // Instructs the widget to reconfigure itself because Config() has changed.
@@ -171,7 +172,7 @@ class CrawlerWidget : public QSplitter,
     // Sent when follow mode is enabled/disabled
     void followSet( bool checked );
     // Sent when text wrap mode is enabled/disabled
-    void textWrapSet( bool checked );
+    void textWrapSet( bool checked ) override;
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool follow );
     // Sent up when the current line number is updated
@@ -199,12 +200,12 @@ class CrawlerWidget : public QSplitter,
     // Instructs the widget to start a search using the current search line.
     void startNewSearch();
     // Stop the currently ongoing search (if one exists)
-    void stopSearch();
+    void stopSearch() override;
     void loadIcons();
     // QuickFind is being entered, save the focus for incremental qf.
-    void enteringQuickFind();
+    void enteringQuickFind() override;
     // QuickFind is being closed.
-    void exitingQuickFind();
+    void exitingQuickFind() override;
     // Called when new data must be displayed in the filtered window.
     // The generation matches the LogFilteredData::currentSearchGeneration() at
     // the time the underlying SearchOperation started -- stale signals from a
@@ -242,16 +243,6 @@ class CrawlerWidget : public QSplitter,
     // Called when the user change the visibility combobox
     void changeFilteredViewVisibility( int index );
 
-    // Called when the user add the string to the search
-    void addToSearch( const QString& string );
-
-    // Called when the user replaces the search with the selection string
-    void replaceSearch( const QString& string );
-
-    // Called when the user excludes selection string from search
-    // works only in boolean combination mode
-    void excludeFromSearch( const QString& string );
-
     void clearSearchHistory();
     void editSearchHistory();
 
@@ -259,20 +250,11 @@ class CrawlerWidget : public QSplitter,
     void saveAsFavorite();
     void setSearchPatternFromPredefinedFilters( const QList<PredefinedFilter>& filters );
 
-    // Called when a match is hovered on in the filtered view
-    void mouseHoveredOverMatch( LineNumber line );
-
     // Called when there was activity in the views
     void activityDetected();
 
     void setSearchLimits( LineNumber startLine, LineNumber endLine );
     void clearSearchLimits();
-
-    void addColorLabelToSelection( size_t label );
-    void addNextColorLabelToSelection();
-    void removeColorLabelFromSelection();
-    void clearColorLabels();
-    void setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord );
 
     void changeFilteredView(int tabIndex);
     void closeFilteredView(int tabIndex);
@@ -355,13 +337,9 @@ class CrawlerWidget : public QSplitter,
 
     void resetStateOnSearchPatternChanges();
 
-    void updateColorLabels( const ColorLabelsManager::QuickHighlightersCollection& labels );
-
     void connectAllFilteredViewSlots( FilteredView* view);
 
     void saveSplitterSizes() const;
-
-    void changeFontSize( bool increase );
 
     // Palette for error notification (yellow background)
     static const QPalette ErrorPalette;
@@ -438,7 +416,16 @@ class CrawlerWidget : public QSplitter,
     std::optional<int> encodingMib_;
     QString encodingText_;
 
-    ColorLabelsManager colorLabelsManager_;
+    // Per-tab color labels: context-menu signals + digit shortcuts -> quick
+    // highlighters in every view. Shared with FolderCrawlerWidget so both tab
+    // kinds get identical color-label behavior by composition.
+    ColorLabelsController colorLabelsController_;
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter /
+    // font zoom / exitView / highlightersChange / hover) -- unique_ptr because
+    // it needs searchToolbar_, created in setup(). Shared with
+    // FolderCrawlerWidget so both tab kinds get identical wiring.
+    std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
 
     qint64 searchPendingLines_ = 0;
 

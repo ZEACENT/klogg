@@ -307,6 +307,16 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
          && context.before == 0 && context.after == 0 ) {
         const qint64 fastFileSize = file.size();
         if ( fastFileSize > 0 && fastFileSize <= FastPathMaxBytes ) {
+            // Honor a mid-scan stop request BEFORE the readAll + memchr + scan
+            // pass (which is byte-bounded by FastPathMaxBytes but wall-time-
+            // unbounded on slow/network mounts). The streaming per-line path and
+            // runSearch's between-file loop already check stopped(); without this
+            // gate the fast path would still scan the whole file. Returning the
+            // empty per-file group drops this file; the caller's between-file
+            // check then halts the loop.
+            if ( stopped( shouldStop ) ) {
+                return group;
+            }
             QByteArray whole = file.readAll();
             if ( whole.size() == static_cast<int>( fastFileSize ) ) {
                 const char* const wdata = whole.constData();

@@ -25,6 +25,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTextCodec>
 
@@ -339,4 +340,81 @@ TEST_CASE( "FolderSearchResults matchLinesForFile ignores collapse state", "[fol
 
     r.toggleCollapse( 0 );
     REQUIRE( r.matchLinesForFile( "/a.log" ).size() == 3 );
+}
+
+TEST_CASE( "FolderSearchResults getLineNumber maps rows to source lines", "[folder]" )
+{
+    // Single-file parity: copying with line numbers (or any getLineNumber
+    // consumer) must see the SOURCE line numbers, not the result-row indices
+    // (cluster E of the 2026-07-18 audit).
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = "/tmp/a.log";
+    g.matches.push_back( match( 4, 0, 10, 10, 5 ) );
+    g.matches.push_back( match( 9, 0, 10, 10, 5 ) );
+    r.setResults( { g } );
+
+    // Row 0 is the group header; rows 1/2 map to source lines 4/9 (0-based).
+    // getLineNumber is 1-based, so the source line numbers are 5 and 10.
+    REQUIRE( r.getLineNumber( 1_lnum ) == 5_lnum );
+    REQUIRE( r.getLineNumber( 2_lnum ) == 10_lnum );
+}
+
+TEST_CASE( "FolderSearchResults header rows are not copyable", "[folder]" )
+{
+    // Group headers are UI chrome, not source lines: the copy / search-
+    // composition path skips them via the AbstractLogData copyable hook.
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = "/tmp/a.log";
+    g.matches.push_back( match( 4, 0, 10, 10, 5 ) );
+    r.setResults( { g } );
+
+    REQUIRE_FALSE( r.isLineCopyable( 0_lnum ) );
+    REQUIRE( r.isLineCopyable( 1_lnum ) );
+}
+
+TEST_CASE( "FolderSearchResults decodes with the per-file encoding override", "[folder]" )
+{
+    // Parity with single-file setEncoding: overriding the display encoding of
+    // a file must also apply to its RESULT rows (they otherwise decode with
+    // the codec detected at scan time, and a misdetection stays mojibake).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // "caf\xE9" (e-acute in Latin-1) -- invalid as UTF-8.
+    const QString path = QDir( dir.path() ).absoluteFilePath( "latin1.log" );
+    {
+        QFile f( path );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( QByteArray( "caf\xE9\n" ) );
+        f.close();
+    }
+
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = path;
+    // Simulate a scan-time misdetection as UTF-8.
+    g.sourceCodec = QTextCodec::codecForName( "UTF-8" );
+    g.matches.push_back( match( 0, 0, 4, 4, 3 ) );
+    r.setResults( { g } );
+
+    // Without an override the row decodes with the (wrong) detected codec.
+    REQUIRE( r.getLineString( 1_lnum ) != QStringLiteral( "café" ) );
+
+    // The override takes precedence over the detected codec, and notifies the
+    // view (documented in the header: the view re-renders on layoutChanged).
+    QSignalSpy layoutSpy( &r, &FolderSearchResults::layoutChanged );
+    r.setEncodingOverrideForFile( path, "ISO 8859-1" );
+    REQUIRE( r.getLineString( 1_lnum ) == QStringLiteral( "café" ) );
+    REQUIRE( layoutSpy.count() == 1 );
+
+    // Clearing the override returns to the detected codec (and notifies once,
+    // only because an entry was actually removed).
+    r.clearEncodingOverrideForFile( path );
+    REQUIRE( r.getLineString( 1_lnum ) != QStringLiteral( "café" ) );
+    REQUIRE( layoutSpy.count() == 2 );
+
+    // No-op clear (nothing to remove) does not notify.
+    r.clearEncodingOverrideForFile( path );
+    REQUIRE( layoutSpy.count() == 2 );
 }

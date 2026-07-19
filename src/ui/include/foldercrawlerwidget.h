@@ -21,10 +21,12 @@
 #define FOLDERCRAWLERWIDGET_H
 
 #include <QHash>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <cstdint>
 #include <list>
+#include <map>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -33,9 +35,11 @@
 
 #include "linetypes.h"
 #include "markprovider.h"
+#include "colorlabelscontroller.h"
 #include "foldersearchresults.h"
 #include "quickfindmux.h"
 #include "regularexpressionpattern.h"
+#include "viewsignalwiring.h"
 #include "abstractcrawlerwidget.h"
 
 #include <QWidget>
@@ -51,6 +55,7 @@ class LogData;
 class OverviewWidget;
 class QuickFindPattern;
 class QSplitter;
+class QShortcut;
 class QLabel;
 class QToolButton;
 class QComboBox;
@@ -121,6 +126,11 @@ class FolderCrawlerWidget : public QWidget,
     // True if `line` is marked in the file currently shown in the main view.
     // (Test accessor for folder-mode marks, which live in the per-file store.)
     bool isMainViewLineMarked( LineNumber line ) const;
+    // True if `line` is marked in `filePath` (the shared per-file mark store).
+    // Test accessor for session-persistence coverage.
+    bool isLineMarkedInFile( const QString& filePath, LineNumber line ) const;
+    // The overview model feeding the minimap (test seam for mark/match ticks).
+    Overview* overviewModel() { return &overview_; }
     // True if the result row (a filtered-view line index) is marked -- resolves
     // the row to (file, localLine) via the results model and checks the shared
     // per-file mark store. Test accessor for filtered-view marks.
@@ -140,6 +150,14 @@ class FolderCrawlerWidget : public QWidget,
     QComboBox* contextLinesComboBox() const { return contextLinesComboBox_; }
     QSpinBox* contextLinesSpinBox() const { return contextLinesSpinBox_; }
     std::pair<int, int> currentContext() const { return { contextBefore_, contextAfter_ }; }
+    // Test seams for the widget-level shortcut family (F3): the visibility
+    // combo the CrawlerChangeVisibility* shortcuts drive, and the splitter the
+    // top-view-size shortcuts resize.
+    QComboBox* visibilityCombo() const { return visibilityBox_; }
+    QSplitter* viewsSplitter() const { return splitter_; }
+
+    // Restores the status label to the pre-search "Ready (N file(s))" text.
+    void updateReadyStatus();
     // Set the pattern and kick off a search (async; results land via the
     // searchFinished signal).
     void searchFor( const QString& pattern );
@@ -159,8 +177,12 @@ class FolderCrawlerWidget : public QWidget,
     // AbstractCrawlerWidget.
     void applyConfiguration() override;
     // Register view-level keyboard shortcuts on both views (arrow keys, PgUp/
-    // PgDn, jump-to-top/bottom, ...). Overrides AbstractCrawlerWidget.
+    // PgDn, jump-to-top/bottom, ...) plus the shared widget-level crawler
+    // family. Overrides AbstractCrawlerWidget.
     void registerShortcuts() override;
+    // Grow/shrink the main view within splitter_ (the CrawlerIncreseTopViewSize/
+    // CrawlerDecreaseTopViewSize shortcuts drive this).
+    void changeTopViewSize( int delta );
 
     // Edit-menu dispatch (AbstractCrawlerWidget): copy/selectAll delegate to the
     // focused view, so MainWindow::copy/selectAll work on folder tabs instead of
@@ -171,9 +193,21 @@ class FolderCrawlerWidget : public QWidget,
     // Apply the chosen encoding to the file currently open in the main view
     // (no-op until a file is opened). Overrides AbstractCrawlerWidget.
     void setEncoding( std::optional<int> mib ) override;
+    // The encoding override applied via setEncoding (nullopt = auto-detect).
+    // Reset when the main-view file changes.
+    std::optional<int> encodingMib() const override;
     // Snapshot of the file currently in the main view, for MainWindow's info
     // line (path/size/date/encoding/line-count). Nullopt when no file is open.
     std::optional<MainViewInfo> currentMainViewInfo() const override;
+
+    // Document-level actions MainWindow dispatches polymorphically to every
+    // tab kind (single-file tabs are reached via the same virtuals).
+    void focusSearchEdit() override;
+    void goToLine() override;
+    void textWrapSet( bool checked ) override;
+    bool isTextWrapEnabled() const override;
+    void enteringQuickFind() override;
+    void exitingQuickFind() override;
 
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
@@ -182,6 +216,16 @@ class FolderCrawlerWidget : public QWidget,
     // Emitted when the file shown in the main view changes (a result is opened
     // or the encoding is changed) so MainWindow refreshes the info line.
     void mainViewFileChanged();
+    // Scratchpad forwarding (single-file parity): emitted from the views'
+    // context-menu scratchpad actions via the shared ViewSignalWiring;
+    // MainWindow direct-connects these to its scratchpad slots for folder tabs
+    // (single-file tabs reach them via SignalMux).
+    void sendToScratchpad( QString text );
+    void replaceDataInScratchpad( QString text );
+    // Emitted when the set of QuickFind-searchable views changes (a results
+    // pane is created, switched, or closed) so MainWindow re-registers the
+    // selector with the QuickFindMux instead of driving a stale/freed pane.
+    void searchablesChanged();
 
   protected:
     // ViewInterface (single-file APIs are no-ops in folder mode).
@@ -198,9 +242,20 @@ class FolderCrawlerWidget : public QWidget,
     SearchableWidgetInterface* doGetActiveSearchable() const override;
     std::vector<QObject*> doGetAllSearchables() const override;
 
+    // Seeds the splitter from the saved global default the moment the splitter
+    // first gets real geometry (its first Resize event). setSizes any earlier
+    // (ctor / showEvent / zero-delay timer) is discarded by the splitter's
+    // initial layout, which clamps the bottom pane to its minimum size.
+    bool eventFilter( QObject* obj, QEvent* event ) override;
+
+    // Re-captures the status label's default palette on StyleChange (mirrors
+    // CrawlerWidget's changeEvent) so the invalid-pattern error restore tracks
+    // runtime theme switches.
+    void changeEvent( QEvent* event ) override;
+
   private Q_SLOTS:
     void startSearch();
-    void stopSearch();
+    void stopSearch() override;
     void onSearchStarted( quint64 generation );
     void onSearchProgressed( quint64 nbMatches, int percent, quint64 generation );
     void onSearchFinished( quint64 generation );
@@ -214,7 +269,19 @@ class FolderCrawlerWidget : public QWidget,
     // one of ours has focus, else the results view (the primary folder surface).
     // Mirrors CrawlerWidget::activeView (crawlerwidget.cpp:1017).
     AbstractLogView* activeView() const;
-    void openFileInMainView( const QString& filePath, LineNumber localLine );
+    void openFileInMainView( const QString& filePath, LineNumber localLine,
+                             LinesCount nLines = LinesCount( 1 ),
+                             LineColumn startCol = LineColumn( 0 ),
+                             LineLength nSymbols = LineLength( 0 ) );
+    // Select (and display) a line or portion in the main view: whole-line jump
+    // for plain row clicks, portion mirror for drag selections (parity with
+    // single-file jumpToMatchingLine).
+    void selectInMainView( LineNumber line, LinesCount nLines, LineColumn startCol,
+                           LineLength nSymbols );
+    // Resolve a hovered results row to (file, localLine) via the pane owning
+    // the view and highlight it in the overview when that file is open
+    // (single-file mouseHoveredOverMatch parity).
+    void highlightOverviewForRow( const AbstractLogView* view, LineNumber row );
     void cacheMainViewData( const QString& filePath, std::shared_ptr<LogData> data );
     // Re-point the per-file overview at the opened file: that file's folder-search
     // matches become the Overview marks, and linesInFile_ is sized to the file so
@@ -243,9 +310,33 @@ class FolderCrawlerWidget : public QWidget,
     QStringList filePaths_;
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
+    // Per-tab color labels (context menu + 1..9/0 shortcuts -> quick
+    // highlighters in every view). Shared component with CrawlerWidget;
+    // constructed early so the main view and every results pane can be
+    // watchView()'d as they are created.
+    ColorLabelsController colorLabelsController_;
+
+    // Shared view-signal wiring (scratchpad / search composition / splitter /
+    // font zoom / exitView / highlightersChange / hover) -- unique_ptr because
+    // it needs searchToolbar_, created in the ctor body. Same component
+    // CrawlerWidget uses (single-file parity by construction).
+    std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
+
     FolderSearchEngine* engine_ = nullptr;
     LogMainView* mainView_ = nullptr;
     QSplitter* splitter_ = nullptr;
+
+    // Widget-level shortcuts (crawler family from klogg::registerCrawlerShortcuts).
+    std::map<QString, QShortcut*> shortcuts_;
+
+    // Splitter seed state: on the splitter's first Resize (its first real
+    // geometry) the proportions are seeded once -- from the session-restored
+    // per-tab sizes when setViewContext provided them, else from the saved
+    // global default. setSizes any earlier (ctor / showEvent / zero-delay
+    // timer) is discarded by the splitter's initial layout, which clamps the
+    // bottom pane to its minimum size.
+    bool splitterSeedApplied_ = false;
+    QList<int> pendingSplitterSizes_;
 
     // Results are shown in a tabbed set of panes (Keep results in a new window).
     // Each pane owns its own FolderSearchResults + FolderFilteredView + mark
@@ -304,6 +395,22 @@ class FolderCrawlerWidget : public QWidget,
     // dropdown. Null if the host never injects one.
     SavedSearches* savedSearches_ = nullptr;
     QLabel* statusLabel_ = nullptr;
+    // Palette captured right after statusLabel_ is created; restored on every
+    // new search to clear the invalid-pattern error highlight.
+    QPalette statusLabelDefaultPalette_;
+    // True while the status label shows an invalid-pattern error (dark-yellow
+    // highlight); guards the StyleChange palette re-capture so the error
+    // palette is never snapshotted as the "default".
+    bool statusErrorActive_ = false;
+    // Encoding override applied via setEncoding (nullopt = auto-detect);
+    // reset when the main-view file changes (the override is per shown file).
+    std::optional<int> encodingMibOverride_;
+    // View that had focus when the QuickFind bar opened (enteringQuickFind);
+    // restored on exitingQuickFind. Mirrors CrawlerWidget::qfSavedFocus_.
+    QPointer<QWidget> qfSavedFocus_;
+    // Last finished search's result text ("No matches" / "N match(es)");
+    // re-shown with the stale hint when an option toggle invalidates it.
+    QString lastResultStatusText_;
     QToolButton* collapseAllButton_ = nullptr;
     QToolButton* expandAllButton_ = nullptr;
     // Results-view visibility filter (Marks / Marks and matches / Matches),
@@ -339,6 +446,11 @@ class FolderCrawlerWidget : public QWidget,
     std::shared_ptr<LogData> pendingMainData_;
     QString pendingMainFilePath_;
     LineNumber pendingJumpLine_ = 0_lnum;
+    // Portion to mirror into the main view once the pending file is open
+    // (plain row clicks use the defaults -> whole-line selection).
+    LinesCount pendingJumpNLines_ = LinesCount( 1 );
+    LineColumn pendingJumpCol_ = LineColumn( 0 );
+    LineLength pendingJumpLen_ = LineLength( 0 );
 
     // Current search generation: streaming fileGroupReady/searchFinished signals
     // whose generation differs are dropped (superseded by a newer search).

@@ -407,6 +407,22 @@ void SearchToolbar::setSearchHistory( SavedSearches* savedSearches )
     savedSearches_ = savedSearches;
 }
 
+void SearchToolbar::recordSearch()
+{
+    if ( savedSearches_ == nullptr ) {
+        return;
+    }
+    const auto pattern = currentSearchText();
+    if ( pattern.isEmpty() ) {
+        return;
+    }
+    // Reload first in case another klogg instance changed the history.
+    const auto& searches = SavedSearches::getSynced();
+    savedSearches_->addRecent( pattern );
+    searches.save();
+    setItems( savedSearches_->recentSearches() );
+}
+
 void SearchToolbar::loadIcons()
 {
     // Ports crawlerwidget.cpp:1919-1928 (toolbar owns its own IconLoader).

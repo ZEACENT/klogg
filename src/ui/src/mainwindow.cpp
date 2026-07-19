@@ -224,10 +224,15 @@ MainWindow::MainWindow( WindowSession session )
 
     // Send actions to the crawlerwidget
     signalMux_.connect( this, SIGNAL( followSet( bool ) ), SIGNAL( followSet( bool ) ) );
-    signalMux_.connect( this, SIGNAL( textWrapSet( bool ) ), SIGNAL( textWrapSet( bool ) ) );
     signalMux_.connect( this, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-    signalMux_.connect( this, SIGNAL( enteringQuickFind() ), SLOT( enteringQuickFind() ) );
-    signalMux_.connect( &quickFindWidget_, SIGNAL( close() ), SLOT( exitingQuickFind() ) );
+    // textWrapSet / goToLine / enteringQuickFind / exitingQuickFind are NOT
+    // mux-routed: they are dispatched polymorphically via currentDocument()
+    // (AbstractCrawlerWidget virtuals) so folder tabs receive them too.
+    connect( &quickFindWidget_, &QuickFindWidget::close, this, [ this ] {
+        if ( auto* document = currentDocument() ) {
+            document->exitingQuickFind();
+        }
+    } );
 
     // Actions from the CrawlerWidget
     signalMux_.connect( SIGNAL( followModeChanged( bool ) ), this,
@@ -679,8 +684,15 @@ void MainWindow::createActions()
     connect( selectAllAction, &QAction::triggered, this, [ this ]( auto ) { this->selectAll(); } );
 
     goToLineAction = new QAction( tr( action::goToLineText ), this );
+    goToLineAction->setObjectName( QStringLiteral( "goToLineAction" ) );
     goToLineAction->setStatusTip( tr( action::goToLineStatusTip ) );
-    signalMux_.connect( goToLineAction, SIGNAL( triggered() ), SLOT( goToLine() ) );
+    // Dispatched polymorphically so folder tabs jump in their main view too
+    // (single-file: CrawlerWidget::goToLine override).
+    connect( goToLineAction, &QAction::triggered, this, [ this ] {
+        if ( auto* document = currentDocument() ) {
+            document->goToLine();
+        }
+    } );
 
     findAction = new QAction( tr( action::findText ), this );
     findAction->setStatusTip( tr( action::findStatusTip ) );
@@ -733,6 +745,7 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->openInEditor(); } );
 
     copyPathToClipboardAction = new QAction( tr( action::copyPathToClipboardText ), this );
+    copyPathToClipboardAction->setObjectName( QStringLiteral( "copyPathToClipboardAction" ) );
     copyPathToClipboardAction->setStatusTip( tr( action::copyPathToClipboardStatusTip ) );
     connect( copyPathToClipboardAction, &QAction::triggered, this,
              [ this ]( auto ) { this->copyFullPath(); } );
@@ -767,6 +780,7 @@ void MainWindow::createActions()
              &MainWindow::toggleFilteredLineNumbersVisibility );
 
     followAction = new QAction( tr( action::followText ), this );
+    followAction->setObjectName( QStringLiteral( "followAction" ) );
     followAction->setCheckable( true );
     followAction->setEnabled( config.anyFileWatchEnabled() );
     connect( followAction, &QAction::toggled, this, &MainWindow::followSet );
@@ -775,16 +789,32 @@ void MainWindow::createActions()
     signalMux_.connect( goToTopAction, SIGNAL( triggered() ), SLOT( jumpToTop() ) );
 
     textWrapAction = new QAction( tr( action::wrapText ), this );
+    textWrapAction->setObjectName( QStringLiteral( "textWrapAction" ) );
     textWrapAction->setCheckable( true );
     textWrapAction->setEnabled( true );
-    connect( textWrapAction, &QAction::toggled, this, &MainWindow::textWrapSet );
+    // Dispatched polymorphically so folder tabs wrap their views too
+    // (single-file: CrawlerWidget::textWrapSet override emits its signal).
+    connect( textWrapAction, &QAction::toggled, this, [ this ]( bool checked ) {
+        if ( auto* document = currentDocument() ) {
+            document->textWrapSet( checked );
+        }
+    } );
 
     reloadAction = new QAction( tr( action::reloadText ), this );
     signalMux_.connect( reloadAction, SIGNAL( triggered() ), SLOT( reload() ) );
 
     stopAction = new QAction( tr( action::stopText ), this );
     stopAction->setEnabled( true );
-    signalMux_.connect( stopAction, SIGNAL( triggered() ), SLOT( stopLoading() ) );
+    // Single-file tabs stop the file load; a folder tab's long-running
+    // operation is the grep search, stopped through the polymorphic dispatch.
+    connect( stopAction, &QAction::triggered, this, [ this ] {
+        if ( auto* crawler = currentCrawlerWidget() ) {
+            crawler->stopLoading();
+        }
+        else if ( auto* document = currentDocument() ) {
+            document->stopSearch();
+        }
+    } );
 
     optionsAction = new QAction( tr( action::optionsText ), this );
     optionsAction->setMenuRole( QAction::PreferencesRole );
@@ -897,8 +927,8 @@ void MainWindow::updateShortcuts()
                                       [ this ] { displayQuickFindBar( QuickFindMux::Backward ); } );
     ShortcutAction::registerShortcut( shortcuts, shortcuts_, this, Qt::WindowShortcut,
                                       ShortcutAction::MainWindowFocusSearchInput, [ this ] {
-                                          if ( auto crawler = currentCrawlerWidget() ) {
-                                              crawler->focusSearchEdit();
+                                          if ( auto* document = currentDocument() ) {
+                                              document->focusSearchEdit();
                                           }
                                       } );
     ShortcutAction::registerShortcut( shortcuts, shortcuts_, this, Qt::WindowShortcut,
@@ -1590,6 +1620,17 @@ void MainWindow::copyFullPath()
         return;
     }
 
+    // Agree with the info line: on a folder tab with a file open in the main
+    // view, the info line shows THAT file, so Copy Path copies it too (the
+    // folder path is the fallback when nothing is open).
+    if ( auto* document = currentDocument() ) {
+        if ( const auto info = document->currentMainViewInfo();
+             info.has_value() && !info->path.isEmpty() ) {
+            sendTextToClipboard( QDir::toNativeSeparators( info->path ) );
+            return;
+        }
+    }
+
     const auto associatedPath = session_.getAssociatedPath( view );
     const auto text = associatedPath.isEmpty() ? session_.getDocumentId( view ) : associatedPath;
     sendTextToClipboard( QDir::toNativeSeparators( text ) );
@@ -2203,11 +2244,13 @@ void MainWindow::currentTabChanged( int index )
         else {
             // --- Folder tab (FolderCrawlerWidget) ---
             // The folder is NOT registered as the signalMux document: the mux
-            // routes file/live-source slots (goToLine/reload/stopLoading/
-            // follow/textWrap relays) the folder does not implement, and
-            // registering it would emit "No such slot" warnings. config/view
-            // option changes (line numbers, font, overview, wrap) are delivered
-            // directly to applyConfiguration via the connection below.
+            // routes file/live-source slots (reload/stopLoading/follow) the
+            // folder does not implement, and registering it would emit "No
+            // such slot" warnings. Document-level actions (goToLine, wrap,
+            // focus-search, quickfind lifecycle) reach the folder via
+            // currentDocument() virtual dispatch instead; config/view option
+            // changes (line numbers, font, overview) are delivered directly
+            // to applyConfiguration via the connection below.
             signalMux_.setCurrentDocument( nullptr );
 
             auto* folder_widget = qobject_cast<FolderCrawlerWidget*>( widget );
@@ -2228,12 +2271,28 @@ void MainWindow::currentTabChanged( int index )
                 // shown in the folder main view changes.
                 connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
                          &MainWindow::updateInfoLine, Qt::UniqueConnection );
+                // The encoding override resets on a main-view file switch, so
+                // re-check the encoding menu alongside the info line.
+                connect( folder_widget, &FolderCrawlerWidget::mainViewFileChanged, this,
+                         &MainWindow::syncEncodingMenuFromDocument, Qt::UniqueConnection );
+                // Re-register the QuickFind selector when the folder's pane set
+                // changes (create/switch/close) so the mux never drives a
+                // stale or freed pane view.
+                connect( folder_widget, &FolderCrawlerWidget::searchablesChanged, this,
+                         &MainWindow::onFolderSearchablesChanged, Qt::UniqueConnection );
                 // Forward the folder main view's Ln:col selection to the status
                 // bar (file tabs get this via signalMux). A real slot (not a
                 // lambda) so Qt::UniqueConnection can dedupe across tab switches
                 // (lambda+UniqueConnection warns and accumulates duplicates).
                 connect( folder_widget->mainView(), &AbstractLogView::newSelection, this,
                          &MainWindow::onFolderMainViewNewSelection, Qt::UniqueConnection );
+                // Scratchpad forwarding: single-file tabs reach these slots via
+                // SignalMux (string slots); the folder is not a mux document,
+                // so its equivalent widget-level signals are direct-connected.
+                connect( folder_widget, &FolderCrawlerWidget::sendToScratchpad, this,
+                         &MainWindow::sendToScratchpad, Qt::UniqueConnection );
+                connect( folder_widget, &FolderCrawlerWidget::replaceDataInScratchpad, this,
+                         &MainWindow::replaceDataInScratchpad, Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.
@@ -2274,6 +2333,15 @@ void MainWindow::currentTabChanged( int index )
 
             // Folder view supports select/copy.
             editMenu->setEnabled( true );
+
+            // Document-level menu state (parity with updateMenuBarFromDocument
+            // for file tabs): the wrap toggle reflects the folder views, and
+            // the encoding menu checks the folder's current override.
+            if ( folder_widget != nullptr ) {
+                textWrapAction->setEnabled( true );
+                textWrapAction->setChecked( folder_widget->isTextWrapEnabled() );
+                syncEncodingMenuCheck( folder_widget->encodingMib() );
+            }
         }
     }
     else {
@@ -3061,17 +3129,7 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
     const auto isFileDocument = documentKind == DocumentKind::File;
     const auto isLiveDocument = documentKind == DocumentKind::AdbLogcat;
 
-    auto encodingActions = encodingGroup->actions();
-    auto encodingItem = std::find_if( encodingActions.begin(), encodingActions.end(),
-                                      [ &encodingMib ]( const auto& action ) {
-                                          return ( !encodingMib && !action->data().isValid() )
-                                                 || ( encodingMib && action->data().isValid()
-                                                      && *encodingMib == action->data().toInt() );
-                                      } );
-
-    if ( encodingItem != encodingActions.end() ) {
-        ( *encodingItem )->setChecked( true );
-    }
+    syncEncodingMenuCheck( encodingMib );
 
     followAction->setChecked( crawler->isFollowEnabled() );
     textWrapAction->setChecked( crawler->isTextWrapEnabled() );
@@ -3090,6 +3148,43 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
                                         && sourceState != AdbLogcatSource::State::Disconnected );
     reconnectSourceAction->setEnabled( isLiveDocument
                                        && sourceState != AdbLogcatSource::State::Connected );
+}
+
+void MainWindow::syncEncodingMenuCheck( const std::optional<int>& encodingMib )
+{
+    // The auto-detect action is the only one with an invalid QVariant data
+    // (encodings.h); every specific encoding action carries its mib.
+    auto encodingActions = encodingGroup->actions();
+    const auto encodingItem = std::find_if(
+        encodingActions.begin(), encodingActions.end(),
+        [ &encodingMib ]( const auto& encodingAction ) {
+            return ( !encodingMib && !encodingAction->data().isValid() )
+                   || ( encodingMib && encodingAction->data().isValid()
+                        && *encodingMib == encodingAction->data().toInt() );
+        } );
+
+    if ( encodingItem != encodingActions.end() ) {
+        ( *encodingItem )->setChecked( true );
+    }
+}
+
+void MainWindow::syncEncodingMenuFromDocument()
+{
+    const auto* document = currentDocument();
+    syncEncodingMenuCheck( document != nullptr ? document->encodingMib() : std::nullopt );
+}
+
+void MainWindow::onFolderSearchablesChanged()
+{
+    auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( sender() );
+    // Only the CURRENT tab owns the mux: a background folder's pane change
+    // must not steal it from whatever document is showing.
+    if ( folderWidget == nullptr
+         || dynamic_cast<AbstractCrawlerWidget*>( folderWidget ) != currentDocument() ) {
+        return;
+    }
+    // Rebuild the mux's searchable registry from the folder's live panes.
+    quickFindMux_.registerSelector( folderWidget );
 }
 
 // Update the top info line from the session
@@ -3480,13 +3575,16 @@ void MainWindow::displayQuickFindBar( QuickFindMux::QFDirection direction )
 {
     LOG_DEBUG << "MainWindow::displayQuickFindBar";
 
-    // Warn crawlers so they can save the position of the focus in order
-    // to do incremental search in the right view.
-    Q_EMIT enteringQuickFind();
+    // Warn the current document so it can save the position of the focus in
+    // order to do incremental search in the right view (polymorphic: folder
+    // tabs save/restore their view focus through the same virtuals).
+    if ( auto* document = currentDocument() ) {
+        document->enteringQuickFind();
+    }
 
-    const auto crawler = currentCrawlerWidget();
-    if ( crawler != nullptr && crawler->isPartialSelection() ) {
-        auto selection = crawler->getSelectedText();
+    const auto* document = currentDocument();
+    if ( document != nullptr && document->isPartialSelection() ) {
+        const auto selection = document->getSelectedText();
         if ( !selection.isEmpty() ) {
             quickFindWidget_.changeDisplayedPattern( selection, Configuration::get().qfIgnoreCase(), false, false );
         }

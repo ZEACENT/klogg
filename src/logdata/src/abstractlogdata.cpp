@@ -87,6 +87,11 @@ LineNumber AbstractLogData::getLineNumber( LineNumber index ) const
     return ln;
 }
 
+bool AbstractLogData::isLineCopyable( LineNumber index ) const
+{
+    return doIsLineCopyable( index );
+}
+
 // Simple wrapper in order to use a clean Template Method
 LinesCount AbstractLogData::getNbLine() const
 {

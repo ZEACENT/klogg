@@ -73,6 +73,32 @@ class AbstractCrawlerWidget : public ViewInterface {
     virtual void setEncoding( std::optional<int> /*mib*/ )
     {
     }
+    // The encoding override currently applied to the displayed document
+    // (nullopt = auto-detect). MainWindow checks the matching Encoding-menu
+    // action from this. Default nullopt.
+    virtual std::optional<int> encodingMib() const
+    {
+        return std::nullopt;
+    }
+
+    // Focus this tab's search input (the focus-search shortcut). Default no-op.
+    virtual void focusSearchEdit() {}
+    // Open the jump-to-line dialog for the main view (Edit -> Go to line).
+    // Default no-op.
+    virtual void goToLine() {}
+    // Toggle text wrapping in this tab's views (View -> Wrap). Default no-op.
+    virtual void textWrapSet( bool /*checked*/ ) {}
+    // True if text wrapping is on (drives the Wrap action's checked state).
+    virtual bool isTextWrapEnabled() const
+    {
+        return false;
+    }
+    // QuickFind bar lifecycle: save (entering) and restore (exiting) the view
+    // focus. Default no-op.
+    virtual void enteringQuickFind() {}
+    virtual void exitingQuickFind() {}
+    // Interrupt the tab's current long-running search. Default no-op.
+    virtual void stopSearch() {}
 
     // Snapshot of the file currently displayed in this tab's main view (folder
     // mode: the main view shows one selected result file at a time, distinct

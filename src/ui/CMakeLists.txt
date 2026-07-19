@@ -71,6 +71,9 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/decompressor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/fontutils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelsmanager.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelscontroller.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlershortcuts.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/viewsignalwiring.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/newversiondialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighteredit.ui
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersetedit.ui
@@ -136,6 +139,9 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iconloader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/displayfilepath.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/downloader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/colorlabelscontroller.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlershortcuts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/viewsignalwiring.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/decompressor.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/colorlabelsmanager.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/droppathclassification.cpp

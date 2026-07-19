@@ -65,6 +65,10 @@ class AbstractLogData : public QObject {
     klogg::vector<QString> getExpandedLines( LineNumber first_line, LinesCount number ) const;
     // Returns the line numer
     LineNumber getLineNumber( LineNumber index ) const;
+    // True if the line should be included when a selection is copied out
+    // (clipboard text, search composition). FolderSearchResults excludes group
+    // header rows (UI chrome, not source lines). Default true.
+    bool isLineCopyable( LineNumber index ) const;
     // Returns the total number of lines
     LinesCount getNbLine() const;
     // Returns the visible length of the longest line
@@ -108,6 +112,11 @@ class AbstractLogData : public QObject {
 
     // Internal function called to get the index of given line
     virtual LineNumber doGetLineNumber( LineNumber index ) const = 0;
+    // See isLineCopyable; default: every line is copyable.
+    virtual bool doIsLineCopyable( LineNumber /*index*/ ) const
+    {
+        return true;
+    }
     // Internal function called to get the number of lines
     virtual LinesCount doGetNbLine() const = 0;
     // Internal function called to get the maximum length

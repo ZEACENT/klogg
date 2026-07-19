@@ -11,6 +11,37 @@
 #include <catch2/catch.hpp>
 
 #include <configuration.h>
+#include <shortcuts.h>
+
+// Simulate pressing the key CURRENTLY configured for `action` (defaults merged
+// with the machine's saved overrides). Hardcoding the default key is brittle:
+// a developer machine that rebound the action would make the keyClick miss the
+// registered shortcut even though the wiring is correct.
+inline void pressConfiguredShortcut( QWidget* target, const std::string& action )
+{
+    const auto& configured = Configuration::get().shortcuts();
+    const auto keys = ShortcutAction::shortcutKeys( action, configured );
+    REQUIRE( !keys.isEmpty() );
+    const auto sequence = QKeySequence( keys.front() );
+    REQUIRE( !sequence.isEmpty() );
+    // A QKeySequence can hold multiple chords (e.g. "Ctrl+K, Ctrl+X"); send
+    // every chord so multi-chord bindings actually fire. Single-chord
+    // sequences (the common case) loop exactly once.
+    for ( int chord = 0; chord < sequence.count(); ++chord ) {
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+        const auto combined = sequence[ chord ].toCombined();
+#else
+        // Qt 5: QKeySequence::operator[] returns the int key+modifiers directly.
+        const int combined = sequence[ chord ];
+#endif
+        const auto key = static_cast<Qt::Key>(
+            combined & ~static_cast<int>( Qt::KeyboardModifierMask ) );
+        const auto modifiers = static_cast<Qt::KeyboardModifiers>(
+            combined & static_cast<int>( Qt::KeyboardModifierMask ) );
+        QTest::keyClick( target, key, modifiers );
+        QTest::qWait( 20 );
+    }
+}
 
 // Soft precondition for environment-dependent tests.  Use in place of REQUIRE
 // when the predicate is checking something the test environment is supposed

@@ -102,37 +102,3 @@ bool FilteredView::shouldApplySearchRangeGraying() const
     // so search range graying should never be applied
     return false;
 }
-
-void FilteredView::doRegisterShortcuts()
-{
-    LOG_INFO << "Registering shortcuts for filtered view";
-    AbstractLogView::doRegisterShortcuts();
-    registerShortcut( ShortcutAction::LogViewNextMark, [ this ] {
-        using LineTypeFlags = LogFilteredData::LineTypeFlags;
-        auto i = getViewPosition() - 1_lcount;
-        bool foundMark = false;
-        for ( ; i != 0_lnum; --i ) {
-            if ( lineType( i ).testFlag( LineTypeFlags::Mark ) ) {
-                foundMark = true;
-                break;
-            }
-        }
-
-        if ( !foundMark ) {
-            foundMark = lineType( i ).testFlag( LineTypeFlags::Mark );
-        }
-
-        if ( foundMark ) {
-            selectAndDisplayLine( i );
-        }
-    } );
-    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ] {
-        const auto nbLines = logFilteredData_->getNbLine();
-        for ( auto i = getViewPosition() + 1_lcount; i < nbLines; ++i ) {
-            if ( lineType( i ).testFlag( LogFilteredData::LineTypeFlags::Mark ) ) {
-                selectAndDisplayLine( i );
-                break;
-            }
-        }
-    } );
-}

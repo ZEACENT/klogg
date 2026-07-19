@@ -577,6 +577,12 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             setSelectionEndAction_->setEnabled( false );
         }
 
+        // Views whose search model cannot honor range limits (folder mode)
+        // never offer the search-limits actions at all.
+        setSearchStartAction_->setVisible( controlsSearchLimits_ );
+        setSearchEndAction_->setVisible( controlsSearchLimits_ );
+        clearSearchLimitAction_->setVisible( controlsSearchLimits_ );
+
         bool hasUnmarkedLines = false;
         bool hasMarkedLines = false;
         auto lines = selection_.getLines();
@@ -939,6 +945,13 @@ void AbstractLogView::doRegisterShortcuts()
     registerShortcut( ShortcutAction::LogViewDeleteMark,
                       [ this ]() { deleteMarksSelected(); } );
 
+    // Next/previous-mark navigation lives here (not in subclasses) so every
+    // view kind gets it: LogMainView overrides selectNextMark/selectPrevMark
+    // with its LogFilteredData index; the default covers FilteredView (lineType
+    // walk) and folder views (injected MarkProvider).
+    registerShortcut( ShortcutAction::LogViewNextMark, [ this ]() { selectNextMark(); } );
+    registerShortcut( ShortcutAction::LogViewPrevMark, [ this ]() { selectPrevMark(); } );
+
     registerShortcut( ShortcutAction::LogViewJumpToLineNumber, [ this ]() {
         const auto newLine = qMax( 0ull, digitsBuffer_.content() - 1ull );
         trySelectLine( LineNumber( newLine ) );
@@ -978,6 +991,47 @@ void AbstractLogView::doRegisterShortcuts()
                                     selectionCurrentEndPos_.column() );
         selectAndDisplayRange( newPosition );
     } );
+}
+
+void AbstractLogView::selectNextMark()
+{
+    const auto line = markProvider_ != nullptr ? markProvider_->markAfter( getViewPosition() )
+                                               : findMarkedLine( getViewPosition(), true );
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
+}
+
+void AbstractLogView::selectPrevMark()
+{
+    const auto line = markProvider_ != nullptr ? markProvider_->markBefore( getViewPosition() )
+                                               : findMarkedLine( getViewPosition(), false );
+    if ( line.has_value() ) {
+        selectAndDisplayLine( *line );
+    }
+}
+
+std::optional<LineNumber> AbstractLogView::findMarkedLine( LineNumber from, bool forward ) const
+{
+    using LineTypeFlags = AbstractLogData::LineTypeFlags;
+    if ( forward ) {
+        const auto total = maxDisplayLineNumber();
+        for ( auto i = from + 1_lcount; i < total; ++i ) {
+            if ( lineType( i ).testFlag( LineTypeFlags::Mark ) ) {
+                return i;
+            }
+        }
+    }
+    else {
+        // Pre-decrement so the loop reaches line 0 without unsigned underflow.
+        for ( auto i = from; i > 0_lnum; ) {
+            --i;
+            if ( lineType( i ).testFlag( LineTypeFlags::Mark ) ) {
+                return i;
+            }
+        }
+    }
+    return {};
 }
 
 void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
@@ -1989,6 +2043,20 @@ void AbstractLogView::setLineNumbersVisible( bool lineNumbersVisible )
     // Invalidate cached column count - line number visibility affects leftMarginPx_
     cachedVisibleColsValid_ = false;
 }
+
+void AbstractLogView::setControlsSearchLimits( bool controlsSearchLimits )
+{
+    controlsSearchLimits_ = controlsSearchLimits;
+    // The menu is built once at construction, so re-assert visibility here for
+    // hosts that set the flag after construction (folder mode), and again in
+    // the right-click prepare block.
+    if ( popupMenu_ != nullptr ) {
+        setSearchStartAction_->setVisible( controlsSearchLimits_ );
+        setSearchEndAction_->setVisible( controlsSearchLimits_ );
+        clearSearchLimitAction_->setVisible( controlsSearchLimits_ );
+    }
+}
+
 
 void AbstractLogView::setQuickFindPattern( const QuickFindPattern* qfp )
 {

@@ -36,6 +36,8 @@
 #include <QCoreApplication>
 #include <QUuid>
 
+#include <algorithm>
+
 #include "savedsearches.h"
 #include "session.h"
 #include "test_utils.h"
@@ -253,6 +255,17 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         const auto shortcut = view->shortcuts_.find( key );
         return shortcut != view->shortcuts_.end() ? shortcut->second : nullptr;
     }
+
+    static OptionalLineNumber selectedLine( const AbstractLogView* view )
+    {
+        return view->selection_.selectedLine();
+    }
+
+    static const std::vector<AbstractLogView::QuickHighlighters>&
+    quickHighlighters( const AbstractLogView* view )
+    {
+        return view->quickHighlighters_;
+    }
 };
 
 template <>
@@ -302,6 +315,37 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     QString filteredViewSelectedText()
     {
         return crawler->filteredView_->getSelectedText();
+    }
+
+    void addColorLabelInFilteredView( size_t label )
+    {
+        Q_EMIT crawler->filteredView_->addColorLabel( label );
+        QTest::qWait( 20 );
+    }
+
+    void removeColorLabelInFilteredView()
+    {
+        Q_EMIT crawler->filteredView_->removeColorLabel();
+        QTest::qWait( 20 );
+    }
+
+    bool hasLabelledText( const AbstractLogView* view, size_t label, const QString& text )
+    {
+        const auto& labels
+            = AbstractLogView::access_by<AbstractLogViewPrivate>::quickHighlighters( view );
+        return label < labels.size()
+               && std::any_of( labels[ label ].cbegin(), labels[ label ].cend(),
+                               [ & ]( const QuickLabelEntry& e ) { return e.text == text; } );
+    }
+
+    bool mainViewHasLabelledText( size_t label, const QString& text )
+    {
+        return hasLabelledText( crawler->logMainView_, label, text );
+    }
+
+    bool filteredViewHasLabelledText( size_t label, const QString& text )
+    {
+        return hasLabelledText( crawler->filteredView_, label, text );
     }
 
     void setSearchPattern( const QString& pattern )
@@ -447,6 +491,22 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         QTest::keyClick( crawler->filteredView_->viewport(), key );
         QTest::qWait( 20 );
+    }
+
+    void pressMainViewConfiguredShortcut( const std::string& action )
+    {
+        pressConfiguredShortcut( crawler->logMainView_->viewport(), action );
+    }
+
+    void pressFilteredViewConfiguredShortcut( const std::string& action )
+    {
+        pressConfiguredShortcut( crawler->filteredView_->viewport(), action );
+    }
+
+    OptionalLineNumber mainSelectedLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLine(
+            crawler->logMainView_ );
     }
 
     void activateMainViewShortcut( Qt::Key key )
@@ -818,6 +878,24 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     {
         crawler->markLinesFromMain( lines );
         QTest::qWait( 20 );
+    }
+
+    void selectFilteredViewLine( LineNumber::UnderlyingType lineIndex )
+    {
+        crawler->filteredView_->selectAndDisplayLine( LineNumber( lineIndex ) );
+        QTest::qWait( 50 );
+    }
+
+    void addMarksInFilteredView( const klogg::vector<LineNumber>& lines )
+    {
+        crawler->markLinesFromFiltered( lines );
+        QTest::qWait( 20 );
+    }
+
+    OptionalLineNumber filteredSelectedLine() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::selectedLine(
+            crawler->filteredView_ );
     }
 
     void deleteMarksInMainView( const klogg::vector<LineNumber>& lines )
@@ -1203,6 +1281,67 @@ SCENARIO( "Crawler widget search", "[ui]" )
                 THEN( "all marks are removed" )
                 {
                     REQUIRE( crawlerVisitor.markedLinesCount() == 0 );
+                }
+            }
+        }
+
+        WHEN( "bracket mark navigation is used in the filtered view" )
+        {
+            crawlerVisitor.setSearchPattern( "this is line" );
+            crawlerVisitor.runSearch();
+            REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES );
+
+            // Mark filtered rows 0 and 2, then place the selection between
+            // them: "]" must jump DOWN to the next mark, "[" UP to the
+            // previous one.
+            crawlerVisitor.addMarksInFilteredView( { 0_lnum, 2_lnum } );
+            crawlerVisitor.selectFilteredViewLine( 1 );
+            crawlerVisitor.focusFilteredView();
+
+            THEN( "] jumps to the next marked row" )
+            {
+                crawlerVisitor.pressFilteredViewConfiguredShortcut(
+                    ShortcutAction::LogViewNextMark );
+                const auto selected = crawlerVisitor.filteredSelectedLine();
+                REQUIRE( selected.has_value() );
+                REQUIRE( *selected == 2_lnum );
+
+                AND_THEN( "[ jumps back to the previous marked row" )
+                {
+                    crawlerVisitor.pressFilteredViewConfiguredShortcut(
+                        ShortcutAction::LogViewPrevMark );
+                    const auto back = crawlerVisitor.filteredSelectedLine();
+                    REQUIRE( back.has_value() );
+                    REQUIRE( *back == 0_lnum );
+                }
+            }
+        }
+
+        WHEN( "bracket mark navigation is used in the main view" )
+        {
+            // LogMainView overrides the hoisted base navigation with the
+            // LogFilteredData mark index. The selection routinely sits on an
+            // UNMARKED line, where prev-mark must return the NEAREST mark
+            // above (rank() is inclusive, so an off-by-one here skips a mark).
+            crawlerVisitor.addMarksInMainView( { 10_lnum, 25_lnum } );
+            crawlerVisitor.selectMainViewLine( 20 );
+            crawlerVisitor.focusMainView();
+
+            THEN( "[ jumps to the nearest mark above an unmarked line" )
+            {
+                crawlerVisitor.pressMainViewConfiguredShortcut(
+                    ShortcutAction::LogViewPrevMark );
+                const auto selected = crawlerVisitor.mainSelectedLine();
+                REQUIRE( selected.has_value() );
+                REQUIRE( *selected == 10_lnum );
+
+                AND_THEN( "] jumps to the next mark below" )
+                {
+                    crawlerVisitor.pressMainViewConfiguredShortcut(
+                        ShortcutAction::LogViewNextMark );
+                    const auto next = crawlerVisitor.mainSelectedLine();
+                    REQUIRE( next.has_value() );
+                    REQUIRE( *next == 25_lnum );
                 }
             }
         }
@@ -2451,6 +2590,61 @@ SCENARIO( "Go to top moves main view to absolute top with active search",
         {
             REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
             REQUIRE( crawlerVisitor.mainTopLine().get() == 0 );
+        }
+    }
+}
+
+SCENARIO( "Crawler widget color labels apply to the selection in all views",
+          "[ui][colorlabels]" )
+{
+    // Characterization guard for the single-file color-label path: the views'
+    // color-label context-menu signals and the widget-level digit shortcuts
+    // drive a ColorLabelsManager whose quick highlighters are pushed into BOTH
+    // views (crawlerwidget.cpp:1456-1464, :1704-1727, :1951-1958). This pins
+    // the contract before the wiring is extracted into a component shared with
+    // FolderCrawlerWidget (folder-mode color labels were dead: the same signals
+    // were connected to nothing there).
+    QTemporaryFile file{ "crawler_colorlabels_test_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } );
+    waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } );
+
+    GIVEN( "a single-line selection in the filtered view" )
+    {
+        constexpr auto SelectedLine = 10;
+        crawlerVisitor.focusFilteredView();
+        crawlerVisitor.clickFilteredViewLine( SelectedLine );
+        const auto selectedText = crawlerVisitor.filteredViewSelectedText();
+        REQUIRE_FALSE( selectedText.isEmpty() );
+
+        THEN( "the context-menu signal applies and removes a label in both views" )
+        {
+            crawlerVisitor.addColorLabelInFilteredView( 0 );
+            REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+
+            crawlerVisitor.removeColorLabelInFilteredView();
+            REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+        }
+
+        THEN( "the digit shortcut applies and removes a label in both views" )
+        {
+            crawlerVisitor.pressFilteredViewKey( Qt::Key_1 );
+            REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
+
+            crawlerVisitor.pressFilteredViewKey( Qt::Key_0 );
+            REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
+            REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
         }
     }
 }

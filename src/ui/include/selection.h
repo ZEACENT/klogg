@@ -23,6 +23,8 @@
 #include <QList>
 #include <QString>
 #include <cstddef>
+#include <utility>
+#include <vector>
 
 #include "linetypes.h"
 
@@ -162,7 +164,11 @@ class Selection {
     FilePosition getPreviousPosition() const;
 
   private:
-    std::map<LineNumber, QString>
+    // Row-ordered (lineNumber, text) pairs -- NOT a map: folder results can
+    // legitimately select the same source line number from DIFFERENT files
+    // (each row maps to its own file's local line), and the copied text must
+    // follow the view's row order, not sorted-by-line order.
+    std::vector<std::pair<LineNumber, QString>>
     getSelectionWithLineNumbers( const AbstractLogData* logData ) const;
 
   private:

@@ -19,6 +19,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "configuration.h"
 #include "foldersearchengine.h"
 #include "foldersearchtypes.h"
 #include "regularexpression.h"
@@ -48,6 +49,39 @@ std::unique_ptr<PatternMatcher> matcherFor( const QString& pattern )
     REQUIRE( re.isValid() );
     return re.createMatcher();
 }
+
+// Forces the folder fast path's config preconditions (block scan on + vectorscan
+// engine) for the duration of a test and restores the host's saved settings on
+// destruction -- including when a REQUIRE aborts the test mid-way (Catch2
+// throws), where a manual restore at the end of the test body would be skipped
+// and leak into subsequent tests.
+class ScopedFastPathConfig {
+  public:
+    ScopedFastPathConfig()
+        : config_( Configuration::get() )
+        , savedBlockScan_( config_.useBlockScan() )
+        , savedEngine_( config_.regexpEngine() )
+    {
+        config_.setUseBlockScan( true );
+        config_.setRegexpEnging( RegexpEngine::Vectorscan );
+    }
+
+    ~ScopedFastPathConfig()
+    {
+        config_.setUseBlockScan( savedBlockScan_ );
+        config_.setRegexpEnging( savedEngine_ );
+    }
+
+    ScopedFastPathConfig( const ScopedFastPathConfig& ) = delete;
+    ScopedFastPathConfig& operator=( const ScopedFastPathConfig& ) = delete;
+    ScopedFastPathConfig( ScopedFastPathConfig&& ) = delete;
+    ScopedFastPathConfig& operator=( ScopedFastPathConfig&& ) = delete;
+
+  private:
+    Configuration& config_;
+    bool savedBlockScan_;
+    RegexpEngine savedEngine_;
+};
 
 // Encodes an ASCII QString into UTF-16 little-endian bytes, optionally with a
 // BOM (FF FE). For ASCII text every code unit's high byte is 0x00, which is
@@ -166,6 +200,81 @@ TEST_CASE( "scanFile handles a final line without trailing newline", "[folder]" 
     REQUIRE( group.matches[ 0 ].localLine == 1_lnum );
     REQUIRE( group.matches[ 0 ].lineStartByte == OffsetInFile( 4 ) );
     REQUIRE( group.matches[ 0 ].lineEndByte == OffsetInFile( 9 ) ); // EOF
+}
+
+TEST_CASE( "scanFile fast path honors shouldStop before scanning", "[folder]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // A UTF-8 file with a real match, well under the 16 MiB fast-path cap and
+    // with no context capture so the whole-file vectorscan fast path is taken.
+    const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
+
+    // The fast path only runs when block scan is enabled AND the vectorscan
+    // engine is selected. Both are defaults, but either can be flipped by the
+    // host's saved QSettings (e.g. perf.useBlockScan=0). Force them on
+    // (restored on scope exit) so this test is a deterministic RED/GREEN for
+    // the fast-path cancellation gate regardless of the local configuration.
+    const ScopedFastPathConfig scopedConfig;
+
+    // Build the matcher AFTER setting the engine: hasBufferScan() (and the
+    // cached vectorscan buffer scanner) is decided at construction time.
+    auto matcher = matcherFor( "MATCH" );
+    if ( !matcher->hasBufferScan() ) {
+        // No buffer scanner in this build (KLOGG_USE_VECTORSCAN=OFF, e.g. the
+        // Windows x86-qt5 [QTRegex] CI job): the fast path cannot run, so pass
+        // vacuously -- same contract as patternmatcher_test's block-scan tests.
+        return;
+    }
+
+    // Sanity: without a stop request the match IS found (proves the file matches
+    // and the fast path runs, so the stopped case below is genuinely RED without
+    // the fix rather than passing for the wrong reason).
+    const auto foundGroup
+        = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                        [] { return false; } );
+    REQUIRE( foundGroup.matches.size() == 1 );
+
+    // With stop already requested, the fast path must bail out BEFORE readAll +
+    // scanBuffer and return an empty group for this file.
+    const auto stoppedGroup
+        = FolderSearchEngine::scanFile( path, *matcher, FolderSearchEngine::DefaultBlockSize,
+                                        [] { return true; } );
+    REQUIRE( stoppedGroup.filePath == path );
+    REQUIRE( stoppedGroup.matches.empty() );
+}
+
+TEST_CASE( "scanFile block scan can match across a newline (documented divergence)",
+           "[folder]" )
+{
+    // Known, accepted behavior: block scan searches the whole buffer INCLUDING
+    // '\n', so a pattern that can reach a newline via \s/\W/\D/[^x]/[\s\S] or a
+    // literal \n may match ACROSS line boundaries, where the per-line path never
+    // could. "foo\s+bar" on "foo\nbar" matches across the newline and is
+    // attributed to the "bar" line. This is the inherent cost of the fast path's
+    // speed; '.' and anchor patterns are unaffected (DOTALL off, MULTILINE on),
+    // and useBlockScan=false reverts to strict per-line semantics. Making block
+    // scan a strict subset of per-line was explored and rejected: a per-line
+    // hasMatch post-filter re-runs vectorscan per hit and erases the win, and a
+    // callback span-check needs SOM (HS_MODE_SOM_HORIZON_LARGE) which fails to
+    // compile for some patterns. This test locks the documented behavior in.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "foo\nbar\n" ) );
+
+    const ScopedFastPathConfig scopedConfig;
+
+    auto matcher = matcherFor( "foo\\s+bar" );
+    if ( !matcher->hasBufferScan() ) {
+        // No buffer scanner in this build (KLOGG_USE_VECTORSCAN=OFF): there is
+        // no block-scan divergence to lock in, so pass vacuously.
+        return;
+    }
+
+    const auto group = FolderSearchEngine::scanFile( path, *matcher );
+    REQUIRE( group.filePath == path );
+    REQUIRE( group.matches.size() == 1 );
+    REQUIRE( group.matches.front().localLine == LineNumber( 1 ) ); // attributed to "bar"
 }
 
 TEST_CASE( "FolderSearchEngine aggregates multiple files by file then line", "[folder]" )

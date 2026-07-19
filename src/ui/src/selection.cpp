@@ -189,28 +189,36 @@ QString Selection::getSelectedText( const AbstractLogData* logData, bool lineNum
     return text;
 }
 
-std::map<LineNumber, QString>
+std::vector<std::pair<LineNumber, QString>>
 Selection::getSelectionWithLineNumbers( const AbstractLogData* logData ) const
 {
-    std::map<LineNumber, QString> selectionData;
+    std::vector<std::pair<LineNumber, QString>> selectionData;
 
     if ( selectedLine_.has_value() ) {
-        selectionData.emplace( logData->getLineNumber( selectedLine_.value() ),
-                               logData->getLineString( *selectedLine_ ) );
+        if ( logData->isLineCopyable( selectedLine_.value() ) ) {
+            selectionData.emplace_back( logData->getLineNumber( selectedLine_.value() ),
+                                        logData->getLineString( *selectedLine_ ) );
+        }
     }
     else if ( selectedPartial_.line.has_value() ) {
-        selectionData.emplace(
-            logData->getLineNumber( selectedPartial_.line.value() ),
-            logData->getExpandedLineString( *selectedPartial_.line )
-                .mid( selectedPartial_.startColumn.get(),
-                      selectedPartial_.size().get() ) );
+        if ( logData->isLineCopyable( selectedPartial_.line.value() ) ) {
+            selectionData.emplace_back(
+                logData->getLineNumber( selectedPartial_.line.value() ),
+                logData->getExpandedLineString( *selectedPartial_.line )
+                    .mid( selectedPartial_.startColumn.get(),
+                          selectedPartial_.size().get() ) );
+        }
     }
     else if ( selectedRange_.startLine.has_value() ) {
         const auto list = logData->getLines( *selectedRange_.startLine, selectedRange_.size() );
         LineNumber ln = *selectedRange_.startLine;
 
         for ( const auto& line : list ) {
-            selectionData.emplace( logData->getLineNumber( ln ), line );
+            // Folder group headers (and any other non-copyable rows the data
+            // layer marks) never reach the clipboard / search composition.
+            if ( logData->isLineCopyable( ln ) ) {
+                selectionData.emplace_back( logData->getLineNumber( ln ), line );
+            }
             ln++;
         }
     }

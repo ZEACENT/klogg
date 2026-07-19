@@ -46,6 +46,7 @@ void Overview::setFilteredData( const LogFilteredData* logFilteredData )
     // Drop any folder-mode explicit list so a later single-file attach takes
     // precedence (symmetric with setMatchLines clearing the LogFilteredData ptr).
     explicitMatchLines_.clear();
+    explicitMarkLines_.clear();
     dirty_ = true;
 }
 
@@ -53,6 +54,15 @@ void Overview::setMatchLines( const std::vector<LineNumber>& matchLines )
 {
     explicitMatchLines_ = matchLines;
     // Folder mode owns its match list; decouple from any LogFilteredData.
+    logFilteredData_ = nullptr;
+    dirty_ = true;
+}
+
+void Overview::setMarkLines( const std::vector<LineNumber>& markLines )
+{
+    explicitMarkLines_ = markLines;
+    // Folder mode owns its mark list; decouple from any LogFilteredData
+    // (symmetric with setMatchLines).
     logFilteredData_ = nullptr;
     dirty_ = true;
 }
@@ -155,10 +165,13 @@ void Overview::recalculatesLines()
             } );
         }
     }
-    else if ( !explicitMatchLines_.empty() && linesInFile_.get() > 0 ) {
-        // Folder mode: an explicit per-file match-line list (no marks). Cost is
-        // O(matches in file), identical to the single-file iterateOverLines path
-        // (which also walks only the match/mark result set, not every file line).
+    else if ( linesInFile_.get() > 0
+              && ( !explicitMatchLines_.empty() || !explicitMarkLines_.empty() ) ) {
+        // Folder mode: explicit per-file match/mark lists. Cost is O(marks +
+        // matches in file), identical to the single-file iterateOverLines path
+        // (which also walks only the match/mark result set, not every file
+        // line). Both lists are sorted, so same-y neighbours collapse via
+        // back().
         for ( const auto& line : explicitMatchLines_ ) {
             const auto position = yFromFileLine( line );
             if ( ( !matchLines_.empty() ) && matchLines_.back().position() == position ) {
@@ -167,6 +180,15 @@ void Overview::recalculatesLines()
             }
             else {
                 matchLines_.emplace_back( position );
+            }
+        }
+        for ( const auto& line : explicitMarkLines_ ) {
+            const auto position = yFromFileLine( line );
+            if ( ( !markLines_.empty() ) && markLines_.back().position() == position ) {
+                markLines_.back().load();
+            }
+            else {
+                markLines_.emplace_back( position );
             }
         }
     }

@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 
 #include "quickfindpattern.h"
@@ -135,7 +136,10 @@ class QuickFindMux : public QObject
 
     QFDirection currentDirection_;
 
-    std::vector<QObject*> registeredSearchables_;
+    // Guarded pointers: searchables are owned by their documents (a folder
+    // results pane view is destroyed when its tab closes), so the registry
+    // must tolerate entries dying between registration and unregister.
+    std::vector<QPointer<QObject>> registeredSearchables_;
 
     SearchableWidgetInterface* getSearchableWidget() const;
     void registerSearchable( QObject* searchable );

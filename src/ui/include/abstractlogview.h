@@ -43,6 +43,7 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <qchar.h>
 #include <string_view>
 #include <utility>
@@ -262,6 +263,14 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     virtual void doRegisterShortcuts();
     void registerShortcut( const std::string& action, std::function<void()> func );
 
+    // Next/previous-mark navigation backing the LogViewNextMark/LogViewPrevMark
+    // shortcuts (registered once here in doRegisterShortcuts). The default
+    // consults the injected MarkProvider when present and otherwise walks rows
+    // via the virtual lineType(); LogMainView overrides to use its
+    // LogFilteredData mark index (O(log n) on huge files).
+    virtual void selectNextMark();
+    virtual void selectPrevMark();
+
   Q_SIGNALS:
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool enabled );
@@ -359,6 +368,19 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Configure the setting of whether to show line number margin
     void setLineNumbersVisible( bool lineNumbersVisible );
 
+    // Whether this view offers the "Set search start/end" + "Clear search
+    // limits" context-menu actions. Those limit a LogFilteredData-driven
+    // search; views backed by a search model with no range support (folder
+    // mode: the streaming engine ignores limits) must hide them instead of
+    // graying the view without limiting anything. Default true (single-file
+    // behavior). Setting it also updates the menu actions' visibility
+    // immediately.
+    void setControlsSearchLimits( bool controlsSearchLimits );
+    bool controlsSearchLimits() const
+    {
+        return controlsSearchLimits_;
+    }
+
     // Whether the line-number margin is currently shown. Mirrors
     // setLineNumbersVisible; used to re-apply Configuration after a data-source
     // swap and by tests.
@@ -403,6 +425,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void setColorLabel( QAction* action );
 
   private:
+    // Linear fallback for selectNextMark/selectPrevMark when no MarkProvider is
+    // injected: walk rows from `from` (exclusive) in the given direction and
+    // return the first whose lineType carries Mark.
+    std::optional<LineNumber> findMarkedLine( LineNumber from, bool forward ) const;
+
     // Graphic parameters
     static constexpr int OverviewWidth = 27;
     static constexpr int HookThreshold = 300;
@@ -425,6 +452,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Whether to show line numbers or not
     bool lineNumbersVisible_ = false;
+    // Whether the search-limits context-menu actions are offered (see
+    // setControlsSearchLimits). True by default (single-file behavior).
+    bool controlsSearchLimits_ = true;
 
     // Pointer to the CrawlerWidget's data set
     const AbstractLogData* logData_;
