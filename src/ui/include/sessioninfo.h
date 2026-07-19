@@ -45,6 +45,8 @@
 #include <QByteArray>
 #include <QString>
 
+#include <atomic>
+
 #include "persistable.h"
 
 // Simple component class containing information related to the session
@@ -54,6 +56,14 @@ class SessionInfo : public Persistable<SessionInfo, session_settings> {
     static const char* persistableName()
     {
         return "SessionInfo";
+    }
+
+    // Test instrumentation: how many full session writes ran. A tab switch
+    // must not synchronously rewrite the session (debounced in MainWindow).
+    static std::atomic<uint64_t>& saveCountForTesting()
+    {
+        static std::atomic<uint64_t> counter{ 0 };
+        return counter;
     }
 
     struct OpenFile {

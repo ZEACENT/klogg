@@ -270,6 +270,12 @@ class MainWindow : public QMainWindow {
     void tryOpenClipboard( int tryTimes );
     void updateShortcuts();
     void persistSessionState();
+    // Coalescing variant: frequent triggers (tab switches, tab reorder, group
+    // changes) restart a short debounce timer instead of synchronously
+    // rewriting the session + syncing QSettings on the spot (each sync is a
+    // CFPreferencesSynchronize XPC on macOS and can stall the UI for hundreds
+    // of ms under daemon contention). closeEvent still flushes synchronously.
+    void scheduleSessionPersistence();
     void registerAdbLogcatSource( CrawlerWidget* crawler );
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
@@ -402,6 +408,9 @@ class MainWindow : public QMainWindow {
 
     // Reconnect countdown state
     QTimer* reconnectCountdownTimer_ = nullptr;
+
+    // Debounce timer for session persistence (see scheduleSessionPersistence).
+    QTimer sessionPersistenceTimer_;
     CrawlerWidget* reconnectCountdownCrawler_ = nullptr;
     qint64 reconnectCountdownEndMs_ = 0;
     qint64 reconnectCountdownTotalMs_ = 0;
