@@ -106,6 +106,7 @@ void SessionInfo::retrieveFromStorage( QSettings& settings )
 void SessionInfo::saveToStorage( QSettings& settings ) const
 {
     LOG_DEBUG << "SessionInfo::saveToStorage";
+    ++saveCountForTesting();
 
     settings.beginGroup( "Window" );
     settings.setValue( "version", SESSION_VERSION );

@@ -306,11 +306,16 @@ public:
     // leftExtraBackgroundPx is the an extra margin to start drawing
     // the coloured // background, going all the way to the element
     // left of the line looks better.
+    // linePitchPx is the vertical pitch between wrapped segments: it MUST match
+    // the pitch the layout uses for the logical line's slot (the view's
+    // charHeight_, which includes the configured line spacing). Stepping at raw
+    // fm.height() instead packs the segments at the top of the slot and leaves
+    // a blank band at the end of every wrapped line.
     void draw( QPainter* painter, int initialXPos, int initialYPos, int lineWidth,
-               const WrappedString& wrappedLines, int leftExtraBackgroundPx )
+               const WrappedString& wrappedLines, int leftExtraBackgroundPx, int linePitchPx )
     {
         QFontMetrics fm = painter->fontMetrics();
-        const int fontHeight = fm.height();
+        const int fontHeight = linePitchPx > 0 ? linePitchPx : fm.height();
         const int fontAscent = fm.ascent();
 
         int xPos = initialXPos;
@@ -2209,18 +2214,37 @@ void AbstractLogView::buildVisibleLineMap()
     leftMarginPx_ = contentStartPosX + SeparatorWidth;
     cachedVisibleColsValid_ = false;
 
-    const auto maxLinesToFetch = useTextWrap_
-        ? ( linesInFile - LinesCount( firstLine_.get() ) )
-        : qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
+    const auto linesAvailable = linesInFile - LinesCount( firstLine_.get() );
+    const auto maxLinesToFetch
+        = useTextWrap_ ? linesAvailable : qMin( getNbVisibleLines(), linesAvailable );
 
-    const auto logLines = logData_->getLines( firstLine_, maxLinesToFetch );
+    // Wrap mode fetches lazily (batches) and stops as soon as the viewport is
+    // covered: wrapping to EOF made every mouse press/hover re-wrap (and, on
+    // folder results, re-read from disk) the whole tail of the document, and
+    // turned one multi-MB line into a bad_alloc. Non-wrap mode keeps the
+    // single bounded fetch.
+    klogg::vector<QString> logLines;
+    if ( !useTextWrap_ ) {
+        logLines = logData_->getLines( firstLine_, maxLinesToFetch );
+    }
+    LinesCount fetchedLines = 0_lcount;
 
+    int yPos = 0;
     for ( auto currentLine = 0_lcount; currentLine < maxLinesToFetch; ++currentLine ) {
+        if ( useTextWrap_ && currentLine >= fetchedLines ) {
+            const LinesCount fetchBatch = getNbVisibleLines() + 1_lcount;
+            const auto batch
+                = qMin( fetchBatch, LinesCount( maxLinesToFetch.get() - currentLine.get() ) );
+            auto more = logData_->getLines( firstLine_ + fetchedLines, batch );
+            logLines.insert( logLines.end(), std::make_move_iterator( more.begin() ),
+                             std::make_move_iterator( more.end() ) );
+            fetchedLines = fetchedLines + batch;
+        }
         const auto lineNumber = firstLine_ + currentLine;
         QString logLine = logLines[ currentLine.get() ];
         const QString expandedLine = untabify( std::move( logLine ) );
 
-        const WrappedString wrappedLineView = [ &, this ] {
+        WrappedString wrappedLineView = [ &, this ] {
             if ( useTextWrap_ ) {
                 const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
                 auto twFn = [ this ]( QStringView s ) -> int {
@@ -2232,8 +2256,22 @@ void AbstractLogView::buildVisibleLineMap()
                                   LineLength{ klogg::isize( expandedLine ) + 1 } };
         }();
 
-        for ( size_t i = 0u; i < wrappedLineView.wrappedLinesCount(); ++i ) {
-            wrappedLinesInfo_.emplace_back( WrappedLineData{ lineNumber, i, wrappedLineView } );
+        // One shared WrappedString per logical line (was: a full copy per
+        // visual segment -- O(segments^2) memory per line).
+        const auto sharedWrappedLine
+            = std::make_shared<const WrappedString>( std::move( wrappedLineView ) );
+        for ( size_t i = 0u; i < sharedWrappedLine->wrappedLinesCount(); ++i ) {
+            wrappedLinesInfo_.emplace_back(
+                WrappedLineData{ lineNumber, i, sharedWrappedLine } );
+        }
+
+        if ( useTextWrap_ ) {
+            yPos += charHeight_ * static_cast<int>( sharedWrappedLine->wrappedLinesCount() );
+            // Mirrors drawTextArea's stop rule (complete the current line's
+            // slot, then stop once the viewport is covered).
+            if ( yPos > viewport()->height() ) {
+                break;
+            }
         }
     }
 }
@@ -2329,14 +2367,14 @@ FilePosition AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
         clampedLineIndex = LineNumber( logData_->getNbLine().get() ) - 1_lcount;
     }
 
-    const WrappedString::WrappedStringPart lineText = wrappedString.unwrappedLine();
+    const WrappedString::WrappedStringPart lineText = wrappedString->unwrappedLine();
 
     if ( lineText.size() <= 1 ) {
         return FilePosition{ clampedLineIndex, 0_lcol };
     }
 
     const WrappedString::WrappedStringPart visibleText
-        = useTextWrap_ ? wrappedString.wrappedLine( wrappedLineIndex )
+        = useTextWrap_ ? wrappedString->wrappedLine( wrappedLineIndex )
                        : lineText.mid( firstCol_.get(), getNbVisibleCols().get() );
 
     klogg::vector<LineColumn> possibleColumns( static_cast<size_t>( visibleText.size() ) );
@@ -2362,7 +2400,7 @@ FilePosition AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
     if ( useTextWrap_ ) {
         for ( auto i = 0u; i < wrappedLineIndex; ++i ) {
             column += LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                wrappedString.wrappedLine( i ).size() ) };
+                wrappedString->wrappedLine( i ).size() ) };
         }
     }
     else {
@@ -3138,8 +3176,16 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         return index;
     }();
 
-    // Lines to write
-    const auto logLines = logData_->getLines( firstLine_, nbLines );
+    // Lines to write. Wrap mode fetches lazily in batches: the paint loop
+    // below stops as soon as the viewport is filled, so an eager fetch of
+    // every line to EOF wasted work -- and, on folder results where each row
+    // is a disk read, made every paint O(document). Non-wrap mode keeps the
+    // single bounded fetch.
+    klogg::vector<QString> logLines;
+    if ( !useTextWrap_ ) {
+        logLines = logData_->getLines( firstLine_, nbLines );
+    }
+    LinesCount fetchedLines = 0_lcount;
 
     const auto highlightPatternMatches = Configuration::get().mainSearchHighlight();
     const auto variateHighlightPatternMatches = Configuration::get().variateMainSearchHighlight();
@@ -3185,6 +3231,15 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     wrappedLinesInfo_.clear();
     klogg::vector<std::pair<QColor, QColor>> highlightColors;
     for ( auto currentLine = 0_lcount; currentLine < nbLines; ++currentLine ) {
+        if ( useTextWrap_ && currentLine >= fetchedLines ) {
+            const LinesCount fetchBatch = getNbVisibleLines() + 1_lcount;
+            const auto batch
+                = qMin( fetchBatch, LinesCount( nbLines.get() - currentLine.get() ) );
+            auto more = logData_->getLines( firstLine_ + fetchedLines, batch );
+            logLines.insert( logLines.end(), std::make_move_iterator( more.begin() ),
+                             std::make_move_iterator( more.end() ) );
+            fetchedLines = fetchedLines + batch;
+        }
         const auto lineNumber = firstLine_ + currentLine;
         QString logLine = logLines[ currentLine.get() ];
 
@@ -3294,7 +3349,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                                                       palette.color( QPalette::Highlight ) } );
         }
 
-        const WrappedString wrappedLineView = [&, this] {
+        WrappedString wrappedLineView = [&, this] {
             if ( useTextWrap_ ) {
                 const int availableWidth = viewport()->width() - leftMarginPx_ - ContentMarginWidth;
                 auto twFn = [this]( QStringView s ) -> int {
@@ -3369,7 +3424,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             }
         }
         lineDrawer.draw( painter.get(), xPos, yPos, viewport()->width(), wrappedLineView,
-                         ContentMarginWidth );
+                         ContentMarginWidth, fontHeight );
 
         if ( isWholeLineSelected || selection_.getPortionForLine( lineNumber ).isValid() ) {
             auto selectionPen = QPen( palette.color( QPalette::Highlight ) );
@@ -3428,8 +3483,14 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             painter->drawText( lineNumberAreaStartX + LineNumberPadding, yPos + fontAscent,
                                lineNumberStr );
         }
-        for ( size_t i = 0u; i < wrappedLineView.wrappedLinesCount(); ++i ) {
-            wrappedLinesInfo_.emplace_back( WrappedLineData{ lineNumber, i, wrappedLineView } );
+        // One shared WrappedString per logical line (was: a full copy per
+        // visual segment -- O(segments^2) memory per line, a bad_alloc bomb
+        // for multi-MB lines).
+        const auto sharedWrappedLine
+            = std::make_shared<const WrappedString>( std::move( wrappedLineView ) );
+        for ( size_t i = 0u; i < sharedWrappedLine->wrappedLinesCount(); ++i ) {
+            wrappedLinesInfo_.emplace_back(
+                WrappedLineData{ lineNumber, i, sharedWrappedLine } );
         }
 
         yPos += finalLineHeight;

@@ -25,11 +25,13 @@
 #include <QTextCodec>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
 #include "abstractlogdata.h"
 #include "foldersearchtypes.h"
+#include "synchronization.h"
 
 class QFile;
 
@@ -47,6 +49,16 @@ class QFile;
 // Line text for match rows is fetched on demand by seeking the source file to
 // the recorded byte offset (see MatchRecord); it is never stored. Result sets
 // are therefore cheap regardless of how many lines matched.
+//
+// THREAD SAFETY: all mutation still happens on the main thread (streaming
+// commits, collapse, visibility), but READERS also run on the QuickFind
+// worker (quickfind.cpp searches this model via QtConcurrent). Every public
+// entry point therefore locks: mutators take the unique lock and emit
+// layoutChanged only AFTER releasing it (receivers may re-enter getters),
+// getters take the shared lock, and readMatchLine additionally serializes the
+// shared per-group QFile cursors on fileIoMutex_ (lock order: dataMutex_ ->
+// fileIoMutex_, never the reverse). Private helpers are lock-free; callers
+// must already hold the appropriate lock.
 class FolderSearchResults : public AbstractLogData {
     Q_OBJECT
 
@@ -176,6 +188,15 @@ class FolderSearchResults : public AbstractLogData {
     QString readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const;
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
     const VisibleRow* visibleRowAt( LineNumber line ) const;
+
+    // Guards every data member below EXCEPT openFiles_ (see fileIoMutex_):
+    // unique for mutation (streaming commits, collapse, visibility, encoding
+    // overrides), shared for all getters incl. the QuickFind worker's reads.
+    mutable SharedMutex dataMutex_;
+    // Guards openFiles_ and every seek/read on the shared per-group QFile
+    // handles (two concurrent readMatchLine callers would otherwise tear the
+    // file cursor). Always taken AFTER dataMutex_, never the reverse.
+    mutable std::mutex fileIoMutex_;
 
     std::vector<klogg::folder::FileGroup> groups_;
     std::vector<VisibleRow> visibleRows_;

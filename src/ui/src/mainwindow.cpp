@@ -131,6 +131,9 @@ void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
     dispatchToMainThread( [ crawler_widget ]() { crawler_widget->followSet( true ); } );
 }
 
+// Debounce window for session persistence (see scheduleSessionPersistence).
+constexpr int SessionPersistenceDebounceMs = 750;
+
 static constexpr auto ClipboardMaxTry = 5;
 
 class ScopedMainWindowShortcutSuspender {
@@ -277,10 +280,19 @@ MainWindow::MainWindow( WindowSession session )
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsReordered, this,
-             &MainWindow::persistSessionState );
+             &MainWindow::scheduleSessionPersistence );
 
     auto& groupManager = TabGroupManager::getSynced();
     connect( &groupManager, &TabGroupManager::groupsChanged, this,
+             &MainWindow::scheduleSessionPersistence );
+
+    // Session persistence debounce: frequent triggers (every tab switch used
+    // to synchronously rewrite the session + sync QSettings -- a stall of
+    // hundreds of ms when the preferences daemon is contended) now coalesce
+    // into a single write once activity settles. closeEvent flushes directly.
+    sessionPersistenceTimer_.setSingleShot( true );
+    sessionPersistenceTimer_.setInterval( SessionPersistenceDebounceMs );
+    connect( &sessionPersistenceTimer_, &QTimer::timeout, this,
              &MainWindow::persistSessionState );
 
     // Establish the QuickFindWidget and mux ( to send requests from the
@@ -388,7 +400,7 @@ void MainWindow::reloadSession()
 
     updateOpenedFilesMenu();
     suspendSessionPersistence_ = false;
-    persistSessionState();
+    scheduleSessionPersistence();
 }
 
 void MainWindow::loadInitialFile( QString fileName, bool followFile )
@@ -1577,7 +1589,7 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
     updateMenuBarFromDocument( crawler );
     updateOpenedFilesMenu();
     updateInfoLine();
-    persistSessionState();
+    scheduleSessionPersistence();
 }
 
 void MainWindow::disconnectCurrentSource()
@@ -2132,7 +2144,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
         updateOpenedFilesMenu();
         if ( !shutdownInProgress_ ) {
-            persistSessionState();
+            scheduleSessionPersistence();
         }
 
         folder_widget->deleteLater();
@@ -2204,7 +2216,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
     updateOpenedFilesMenu();
     if ( !shutdownInProgress_ ) {
-        persistSessionState();
+        scheduleSessionPersistence();
     }
 
     widget->deleteLater();
@@ -2359,7 +2371,7 @@ void MainWindow::currentTabChanged( int index )
         disableFileSpecificActions();
     }
 
-    persistSessionState();
+    scheduleSessionPersistence();
 }
 
 void MainWindow::changeQFPattern( const QString& newPattern, bool ignoreCase, bool isRegex, bool isWholeWord )
@@ -2747,7 +2759,7 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
         }
 
         LOG_DEBUG << "Success loading file " << fileName.toStdString();
-        persistSessionState();
+        scheduleSessionPersistence();
         return true;
     }
     else {
@@ -2779,7 +2791,7 @@ bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, b
     followAction->setChecked( true );
 
     updateOpenedFilesMenu();
-    persistSessionState();
+    scheduleSessionPersistence();
 
     if ( auto* adbSource = session_.getAdbLogcatSource( crawlerWidget );
          adbSource != nullptr && adbSource->state() == AdbLogcatSource::State::Error
@@ -3538,12 +3550,23 @@ void MainWindow::writeSettings()
 
 void MainWindow::persistSessionState()
 {
+    sessionPersistenceTimer_.stop();
     if ( suspendSessionPersistence_ || shutdownInProgress_ ) {
         return;
     }
 
     writeSettings();
     TabGroupManager::get().save();
+}
+
+void MainWindow::scheduleSessionPersistence()
+{
+    if ( suspendSessionPersistence_ || shutdownInProgress_ ) {
+        return;
+    }
+    // (Re)start the debounce: bursts of triggers (e.g. rapid tab switches)
+    // coalesce into a single persistSessionState once activity settles.
+    sessionPersistenceTimer_.start();
 }
 
 // Read settings from permanent storage

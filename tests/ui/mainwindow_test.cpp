@@ -1134,7 +1134,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         // single-shot dispatch, shrinking the 10s waitUiState budget.
         // Give the timer a generous settle window so the async file-open
         // gets a full budget on slower CI runners.
-        QTest::qWait( 2000 );
+        QTest::qWait( 5000 );
         REQUIRE( waitUiState(
             [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
 
@@ -1205,6 +1205,10 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
         folderWidget->searchFor( "beta" );
     } );
     REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+    // Qt 5.12 VeryCoarseTimer: the pane creation after keep-results search is
+    // dispatched through a timer chain (~1s-per-tick on ubuntu-20.04), so give
+    // it a settle window before polling.
+    QTest::qWait( 2000 );
     REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 2; } ) );
 
     WHEN( "the new active pane's view initiates a QuickFind change" )
@@ -1288,4 +1292,75 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
             } ) );
         }
     }
+}
+
+SCENARIO( "Tab switches coalesce session persistence into a debounced write",
+          "[ui][session]" )
+{
+    // Regression test for the tab-switch stall: currentTabChanged used to end
+    // with an unconditional persistSessionState() -- a full session rewrite +
+    // QSettings sync (CFPreferencesSynchronize XPC on macOS) per switch, plus
+    // a getSynced() re-read. Under preferences-daemon contention each sync can
+    // spike to hundreds of ms, which is the "occasional long stall on tab
+    // switch". Persistence is now debounced: frequent triggers coalesce into a
+    // single write; closeEvent still flushes synchronously.
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "tab-debounce-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::VeryCoarseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    const auto tempDirPath = makeTestDir( "tabdebounce" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    for ( const auto& name : { "a.log", "b.log" } ) {
+        QFile f( QDir{ tempDirPath }.filePath( name ) );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        f.write( "debounce line\n" );
+    }
+
+    runInUiThread( [ &mainWindow, tempDirPath ] {
+        mainWindow->loadInitialFile( QDir{ tempDirPath }.filePath( "a.log" ), false );
+    } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow, tempDirPath ] {
+        mainWindow->loadInitialFile( QDir{ tempDirPath }.filePath( "b.log" ), false );
+    } );
+    REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+
+    // Let any setup-triggered persistence fire and settle (the debounce
+    // interval is sub-second), then start counting from a quiet baseline.
+    QTest::qWait( 1200 );
+    auto& saveCount = SessionInfo::saveCountForTesting();
+    saveCount.store( 0 );
+
+    runInUiThread( [ tabArea ] { tabArea->setCurrentIndex( 0 ); } );
+    runInUiThread( [ tabArea ] { tabArea->setCurrentIndex( 1 ); } );
+
+    // No synchronous session rewrite on the switch path...
+    REQUIRE( saveCount.load() == 0 );
+
+    // ...both switches coalesce into exactly one debounced write...
+    REQUIRE( waitUiState( [&] { return saveCount.load() == 1; } ) );
+
+    // ...and there is no write storm behind it.
+    QTest::qWait( 400 );
+    REQUIRE( saveCount.load() == 1 );
+
+    runInUiThread( [ &mainWindow ] { mainWindow->close(); } );
+    REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
 }

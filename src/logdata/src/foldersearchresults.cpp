@@ -36,23 +36,27 @@ FolderSearchResults::~FolderSearchResults() = default;
 
 void FolderSearchResults::setResults( std::vector<klogg::folder::FileGroup> groups )
 {
-    groups_ = std::move( groups );
-    // A new result set invalidates any cached file handles; size to the new
-    // group count so fileForGroup() can index by fileId directly.
-    openFiles_.clear();
-    openFiles_.resize( groups_.size() );
-    // Defensive: drop groups with no matches (the engine/caller already filters
-    // them, but FolderSearchResults must never emit an empty group's header).
-    groups_.erase( std::remove_if( groups_.begin(), groups_.end(),
-                                   []( const klogg::folder::FileGroup& g ) { return g.matches.empty(); } ),
-                   groups_.end() );
+    {
+        UniqueLock lock( dataMutex_ );
+        groups_ = std::move( groups );
+        // A new result set invalidates any cached file handles; size to the new
+        // group count so fileForGroup() can index by fileId directly.
+        openFiles_.clear();
+        openFiles_.resize( groups_.size() );
+        // Defensive: drop groups with no matches (the engine/caller already filters
+        // them, but FolderSearchResults must never emit an empty group's header).
+        groups_.erase( std::remove_if( groups_.begin(), groups_.end(),
+                                       []( const klogg::folder::FileGroup& g ) { return g.matches.empty(); } ),
+                       groups_.end() );
 
-    // NOTE: setResults resets collapse (it is a full result-set replacement, not
-    // the live re-search path -- startSearch uses beginSearch, which preserves
-    // collapse via snapshotCollapsedPaths/reapplyCollapseForLastGroup). Callers
-    // that need preservation here should snapshot filePaths the same way.
-    collapsed_.clear();
-    rebuildVisibleRows();
+        // NOTE: setResults resets collapse (it is a full result-set replacement, not
+        // the live re-search path -- startSearch uses beginSearch, which preserves
+        // collapse via snapshotCollapsedPaths/reapplyCollapseForLastGroup). Callers
+        // that need preservation here should snapshot filePaths the same way.
+        collapsed_.clear();
+        rebuildVisibleRows();
+    }
+    // Emitted after the lock is released: receivers re-enter the getters.
     Q_EMIT layoutChanged();
 }
 
@@ -88,47 +92,55 @@ void FolderSearchResults::reapplyCollapseForLastGroup()
 
 void FolderSearchResults::beginSearch( const QStringList& expectedFileOrder )
 {
-    // Preserve collapse across this re-scan: snapshot which filePaths are collapsed
-    // BEFORE groups_ is rebuilt and FileIds are reassigned, then re-apply as groups
-    // stream back in (addFileGroup/flushPending). Without this, a context-line
-    // change (which re-scans via beginSearch) would expand every collapsed group.
-    snapshotCollapsedPaths();
-    groups_.clear();
-    openFiles_.clear();
-    collapsed_.clear();
-    pendingByIndex_.assign( static_cast<size_t>( expectedFileOrder.size() ), std::nullopt );
-    nextExpectedIndex_ = 0;
-    rebuildVisibleRows();
+    {
+        UniqueLock lock( dataMutex_ );
+        // Preserve collapse across this re-scan: snapshot which filePaths are collapsed
+        // BEFORE groups_ is rebuilt and FileIds are reassigned, then re-apply as groups
+        // stream back in (addFileGroup/flushPending). Without this, a context-line
+        // change (which re-scans via beginSearch) would expand every collapsed group.
+        snapshotCollapsedPaths();
+        groups_.clear();
+        openFiles_.clear();
+        collapsed_.clear();
+        pendingByIndex_.assign( static_cast<size_t>( expectedFileOrder.size() ),
+                                std::nullopt );
+        nextExpectedIndex_ = 0;
+        rebuildVisibleRows();
+    }
     Q_EMIT layoutChanged();
 }
 
 void FolderSearchResults::addFileGroup( int fileIndex, klogg::folder::FileGroup group )
 {
-    if ( fileIndex < 0 || static_cast<size_t>( fileIndex ) >= pendingByIndex_.size() ) {
-        return;
-    }
-    pendingByIndex_[ static_cast<size_t>( fileIndex ) ] = std::move( group );
-
     bool appended = false;
-    // Drain every consecutive completed predecessor from the cursor. This makes
-    // the display order always match enumeration order, no matter which file
-    // finished first: file[5] cannot appear until file[0..4] are all committed.
-    while ( nextExpectedIndex_ < pendingByIndex_.size()
-            && pendingByIndex_[ nextExpectedIndex_ ].has_value() ) {
-        auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
-        if ( !opt->matches.empty() ) {
-            groups_.push_back( std::move( *opt ) );
-            reapplyCollapseForLastGroup();
-            // Keep file-handle slots aligned to fileId (== group index), matching
-            // the setResults contract so fileForGroup() can index directly.
-            openFiles_.resize( groups_.size() );
-            appended = true;
+    {
+        UniqueLock lock( dataMutex_ );
+        if ( fileIndex < 0 || static_cast<size_t>( fileIndex ) >= pendingByIndex_.size() ) {
+            return;
         }
-        ++nextExpectedIndex_;
-    }
+        pendingByIndex_[ static_cast<size_t>( fileIndex ) ] = std::move( group );
 
+        // Drain every consecutive completed predecessor from the cursor. This makes
+        // the display order always match enumeration order, no matter which file
+        // finished first: file[5] cannot appear until file[0..4] are all committed.
+        while ( nextExpectedIndex_ < pendingByIndex_.size()
+                && pendingByIndex_[ nextExpectedIndex_ ].has_value() ) {
+            auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
+            if ( !opt->matches.empty() ) {
+                groups_.push_back( std::move( *opt ) );
+                reapplyCollapseForLastGroup();
+                // Keep file-handle slots aligned to fileId (== group index), matching
+                // the setResults contract so fileForGroup() can index directly.
+                openFiles_.resize( groups_.size() );
+                appended = true;
+            }
+            ++nextExpectedIndex_;
+        }
+        if ( appended ) {
+            rebuildVisibleRows();
+        }
+    }
     if ( appended ) {
-        rebuildVisibleRows();
         Q_EMIT layoutChanged();
     }
 }
@@ -136,35 +148,42 @@ void FolderSearchResults::addFileGroup( int fileIndex, klogg::folder::FileGroup 
 void FolderSearchResults::flushPending()
 {
     bool appended = false;
-    // Commit every remaining present group, skipping missing/empty slots (an
-    // interrupted scan may leave a predecessor that will never arrive).
-    while ( nextExpectedIndex_ < pendingByIndex_.size() ) {
-        auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
-        if ( opt.has_value() && !opt->matches.empty() ) {
-            groups_.push_back( std::move( *opt ) );
-            reapplyCollapseForLastGroup();
-            openFiles_.resize( groups_.size() );
-            appended = true;
+    {
+        UniqueLock lock( dataMutex_ );
+        // Commit every remaining present group, skipping missing/empty slots (an
+        // interrupted scan may leave a predecessor that will never arrive).
+        while ( nextExpectedIndex_ < pendingByIndex_.size() ) {
+            auto& opt = pendingByIndex_[ nextExpectedIndex_ ];
+            if ( opt.has_value() && !opt->matches.empty() ) {
+                groups_.push_back( std::move( *opt ) );
+                reapplyCollapseForLastGroup();
+                openFiles_.resize( groups_.size() );
+                appended = true;
+            }
+            ++nextExpectedIndex_;
         }
-        ++nextExpectedIndex_;
+
+        pendingCollapsePaths_.clear(); // the snapshot lives exactly one search cycle
+
+        if ( appended ) {
+            rebuildVisibleRows();
+        }
     }
-
-    pendingCollapsePaths_.clear(); // the snapshot lives exactly one search cycle
-
     if ( appended ) {
-        rebuildVisibleRows();
         Q_EMIT layoutChanged();
     }
 }
 
 LineKind FolderSearchResults::lineKind( LineNumber visibleIndex ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
     return row ? row->kind : LineKind::Data;
 }
 
 bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
     if ( row == nullptr || row->kind != LineKind::Data ) {
         return false;
@@ -175,12 +194,14 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
 
 klogg::folder::FileId FolderSearchResults::fileIdForLine( LineNumber visibleIndex ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
     return row ? row->fileId : klogg::folder::FileId{ -1 };
 }
 
 klogg::folder::SourceRef FolderSearchResults::sourceForLine( LineNumber visibleIndex ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
     if ( row == nullptr || row->fileId < 0 || row->fileId >= static_cast<int>( groups_.size() ) ) {
         return {};
@@ -199,6 +220,7 @@ klogg::folder::SourceRef FolderSearchResults::sourceForLine( LineNumber visibleI
 
 std::vector<LineNumber> FolderSearchResults::matchLinesForFile( const QString& filePath ) const
 {
+    SharedLock lock( dataMutex_ );
     std::vector<LineNumber> out;
     // Linear scan of groups_ (small: number of files with matches). groups are
     // unique per file, so we stop at the first match. Reads groups_, not
@@ -221,63 +243,78 @@ std::vector<LineNumber> FolderSearchResults::matchLinesForFile( const QString& f
 
 klogg::folder::FileId FolderSearchResults::groupCount() const
 {
+    SharedLock lock( dataMutex_ );
     return static_cast<klogg::folder::FileId>( groups_.size() );
 }
 
 LineNumber FolderSearchResults::maxLocalLine() const
 {
+    SharedLock lock( dataMutex_ );
     return maxLocalLine_;
 }
 
 void FolderSearchResults::toggleCollapse( klogg::folder::FileId fileId )
 {
-    if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
-        return;
+    {
+        UniqueLock lock( dataMutex_ );
+        if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
+            return;
+        }
+        if ( collapsed_.contains( fileId ) ) {
+            collapsed_.remove( fileId );
+        }
+        else {
+            collapsed_.insert( fileId );
+        }
+        rebuildVisibleRows();
     }
-    if ( collapsed_.contains( fileId ) ) {
-        collapsed_.remove( fileId );
-    }
-    else {
-        collapsed_.insert( fileId );
-    }
-    rebuildVisibleRows();
     Q_EMIT layoutChanged();
 }
 
 void FolderSearchResults::setCollapsed( klogg::folder::FileId fileId, bool collapsed )
 {
-    if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
-        return;
+    {
+        UniqueLock lock( dataMutex_ );
+        if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
+            return;
+        }
+        if ( collapsed ) {
+            collapsed_.insert( fileId );
+        }
+        else {
+            collapsed_.remove( fileId );
+        }
+        rebuildVisibleRows();
     }
-    if ( collapsed ) {
-        collapsed_.insert( fileId );
-    }
-    else {
-        collapsed_.remove( fileId );
-    }
-    rebuildVisibleRows();
     Q_EMIT layoutChanged();
 }
 
 void FolderSearchResults::collapseAll()
 {
-    collapsed_.clear();
-    for ( klogg::folder::FileId i = 0; i < static_cast<int>( groups_.size() ); ++i ) {
-        collapsed_.insert( i );
+    {
+        UniqueLock lock( dataMutex_ );
+        collapsed_.clear();
+        for ( klogg::folder::FileId i = 0; i < static_cast<int>( groups_.size() ); ++i ) {
+            collapsed_.insert( i );
+        }
+        rebuildVisibleRows();
     }
-    rebuildVisibleRows();
     Q_EMIT layoutChanged();
 }
 
 void FolderSearchResults::expandAll()
 {
-    collapsed_.clear();
-    rebuildVisibleRows();
+    {
+        UniqueLock lock( dataMutex_ );
+        collapsed_.clear();
+        rebuildVisibleRows();
+    }
     Q_EMIT layoutChanged();
 }
 
 bool FolderSearchResults::isCollapsed( klogg::folder::FileId fileId ) const
 {
+    SharedLock lock( dataMutex_ );
     return collapsed_.contains( fileId );
 }
 
@@ -285,6 +322,7 @@ bool FolderSearchResults::isCollapsed( klogg::folder::FileId fileId ) const
 
 QString FolderSearchResults::doGetLineString( LineNumber line ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( line );
     if ( row == nullptr ) {
         return {};
@@ -297,6 +335,7 @@ QString FolderSearchResults::doGetLineString( LineNumber line ) const
 
 QString FolderSearchResults::doGetExpandedLineString( LineNumber line ) const
 {
+    // doGetLineString takes the shared lock itself.
     return untabify( doGetLineString( line ) );
 }
 
@@ -323,6 +362,9 @@ klogg::vector<QString> FolderSearchResults::doGetExpandedLines( LineNumber first
 
 LineNumber FolderSearchResults::doGetLineNumber( LineNumber index ) const
 {
+    // sourceForLine takes the shared lock itself; do not double-lock here --
+    // recursive shared_lock on std::shared_mutex is UB and deadlocks on Linux
+    // when a mutation thread is waiting between the two acquisitions.
     // The results view is a cross-file listing: the "line number" of a row is
     // the 0-based local line in its SOURCE file (single-file filtered views
     // map to the underlying file's line, so copy-with-line-numbers and the
@@ -333,6 +375,7 @@ LineNumber FolderSearchResults::doGetLineNumber( LineNumber index ) const
 
 bool FolderSearchResults::doIsLineCopyable( LineNumber index ) const
 {
+    // lineKind takes the shared lock itself; do not double-lock here.
     // Group headers are UI chrome (path + count), not source lines: exclude
     // them from the clipboard / search-composition text.
     return lineKind( index ) != LineKind::Header;
@@ -344,7 +387,10 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
     if ( filePath.isEmpty() || encoding.isEmpty() ) {
         return;
     }
-    encodingOverrides_.insert( filePath, encoding );
+    {
+        UniqueLock lock( dataMutex_ );
+        encodingOverrides_.insert( filePath, encoding );
+    }
     Q_EMIT layoutChanged();
 }
 
@@ -354,23 +400,31 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
     // C4804 ("unsafe use of type 'bool'") which /WX turns into a hard error
     // on the Windows x64-qt6 build. `!= 0` is unambiguous for both bool and
     // integral return types.
-    if ( encodingOverrides_.remove( filePath ) != 0 ) {
+    bool removed = false;
+    {
+        UniqueLock lock( dataMutex_ );
+        removed = encodingOverrides_.remove( filePath ) != 0;
+    }
+    if ( removed ) {
         Q_EMIT layoutChanged();
     }
 }
 
 LinesCount FolderSearchResults::doGetNbLine() const
 {
+    SharedLock lock( dataMutex_ );
     return LinesCount( visibleRows_.size() );
 }
 
 LineLength FolderSearchResults::doGetMaxLength() const
 {
+    SharedLock lock( dataMutex_ );
     return maxLength_;
 }
 
 LineLength FolderSearchResults::doGetLineLength( LineNumber line ) const
 {
+    SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( line );
     if ( row == nullptr ) {
         return 0_length;
@@ -390,12 +444,14 @@ LineLength FolderSearchResults::doGetLineLength( LineNumber line ) const
 void FolderSearchResults::doSetDisplayEncoding( const char* encoding )
 {
     if ( encoding != nullptr ) {
+        UniqueLock lock( dataMutex_ );
         displayEncodingName_ = encoding;
     }
 }
 
 QTextCodec* FolderSearchResults::doGetDisplayEncoding() const
 {
+    SharedLock lock( dataMutex_ );
     return QTextCodec::codecForName( displayEncodingName_ );
 }
 
@@ -407,6 +463,8 @@ void FolderSearchResults::doAttachReader() const
 void FolderSearchResults::doDetachReader() const
 {
     // Release cached file handles; they are re-opened lazily if needed again.
+    UniqueLock lock( dataMutex_ );
+    std::lock_guard<std::mutex> io( fileIoMutex_ );
     for ( auto& slot : openFiles_ ) {
         if ( slot ) {
             slot->close();
@@ -498,16 +556,26 @@ bool FolderSearchResults::isLineMarked( const QString& filePath, LineNumber loca
 
 void FolderSearchResults::setVisibility( Visibility visibility )
 {
-    visibility_ = visibility;
-    rebuildVisibleRows();
+    {
+        UniqueLock lock( dataMutex_ );
+        visibility_ = visibility;
+        rebuildVisibleRows();
+    }
     Q_EMIT layoutChanged();
 }
 
 void FolderSearchResults::setMarkedLineQuery( std::function<bool( const QString&, LineNumber )> query )
 {
-    isMarkedLine_ = std::move( query );
-    if ( visibility_ == Visibility::Marks ) {
-        rebuildVisibleRows();
+    bool rebuilt = false;
+    {
+        UniqueLock lock( dataMutex_ );
+        isMarkedLine_ = std::move( query );
+        if ( visibility_ == Visibility::Marks ) {
+            rebuildVisibleRows();
+            rebuilt = true;
+        }
+    }
+    if ( rebuilt ) {
         Q_EMIT layoutChanged();
     }
 }
@@ -515,8 +583,15 @@ void FolderSearchResults::setMarkedLineQuery( std::function<bool( const QString&
 void FolderSearchResults::refreshForMarksChange()
 {
     // The visible set depends on marks only under the Marks filter.
-    if ( visibility_ == Visibility::Marks ) {
-        rebuildVisibleRows();
+    bool rebuilt = false;
+    {
+        UniqueLock lock( dataMutex_ );
+        if ( visibility_ == Visibility::Marks ) {
+            rebuildVisibleRows();
+            rebuilt = true;
+        }
+    }
+    if ( rebuilt ) {
         Q_EMIT layoutChanged();
     }
 }
@@ -553,6 +628,10 @@ QString FolderSearchResults::headerText( klogg::folder::FileId fileId ) const
 
 QString FolderSearchResults::readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const
 {
+    // Caller (a public getter) already holds dataMutex_ shared; the container
+    // references below are stable for the whole call. Only the shared per-group
+    // QFile cursors need extra serialization (a second reader, e.g. QuickFind
+    // on its worker, would otherwise interleave seek/read with the painter).
     if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
         return {};
     }
@@ -562,22 +641,25 @@ QString FolderSearchResults::readMatchLine( klogg::folder::FileId fileId, size_t
     }
     const auto& record = matches[ matchIndex ];
 
-    QFile* file = fileForGroup( fileId );
-    if ( file == nullptr ) {
-        return {};
-    }
-
     const auto start = record.lineStartByte.get();
     const auto end = record.lineEndByte.get();
     if ( end <= start ) {
         return {};
     }
-    if ( !file->seek( start ) ) {
-        LOG_WARNING << "FolderSearchResults: seek failed on" << groups_[ static_cast<size_t>( fileId ) ].filePath;
-        return {};
-    }
 
-    const QByteArray bytes = file->read( end - start );
+    QByteArray bytes;
+    {
+        std::lock_guard<std::mutex> io( fileIoMutex_ );
+        QFile* file = fileForGroup( fileId );
+        if ( file == nullptr ) {
+            return {};
+        }
+        if ( !file->seek( start ) ) {
+            LOG_WARNING << "FolderSearchResults: seek failed on" << groups_[ static_cast<size_t>( fileId ) ].filePath;
+            return {};
+        }
+        bytes = file->read( end - start );
+    }
     // Decode with the SOURCE file's codec: a per-file user override (the
     // Encoding-menu pick for the file open in the main view) wins over the
     // codec detected during the scan and stored on the FileGroup -- otherwise

@@ -18,6 +18,7 @@
  */
 
 #include <QString>
+#include <algorithm>
 #include <cstddef>
 #include <qchar.h>
 #include <qglobal.h>
@@ -65,6 +66,7 @@ public:
                 wrappedLines_.push_back( lineToWrap );
             }
         }
+        trimWhitespaceOnlyTail();
     }
 
     // Pixel-based wrapping: uses actual text width measurement for accurate wrapping
@@ -125,6 +127,7 @@ public:
                 }
             }
         }
+        trimWhitespaceOnlyTail();
     }
 
     size_t wrappedLinesCount() const
@@ -193,6 +196,26 @@ public:
     }
 
 private:
+    // Word-boundary splits can leave a whitespace-only remainder at the very
+    // end of the wrap ("aa bb    " -> "aa " + "bb   " + " "). Such a part
+    // renders as a spurious blank visual row at the end of the wrapped line;
+    // drop it. A single all-whitespace part is kept: a line that IS entirely
+    // whitespace is one blank row, not zero.
+    void trimWhitespaceOnlyTail()
+    {
+        while ( wrappedLines_.size() > 1 ) {
+            const auto& last = wrappedLines_.back();
+            const bool allSpaces
+                = !last.isEmpty()
+                  && std::all_of( last.begin(), last.end(),
+                                  []( QChar c ) { return c.isSpace(); } );
+            if ( !allSpaces ) {
+                break;
+            }
+            wrappedLines_.pop_back();
+        }
+    }
+
     klogg::vector<WrappedStringPart> wrappedLines_;
     QString unwrappedLine_;
 };

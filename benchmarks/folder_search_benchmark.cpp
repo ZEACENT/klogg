@@ -32,6 +32,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -110,8 +111,7 @@ int main( int argc, char* argv[] )
     // Explicitly enable the block-scan fast path: this benchmark measures it, so
     // do not let a persisted perf.useBlockScan=false (e.g. from the main app's
     // QSettings, which getSynced() re-reads) silently switch to per-line.
-    config.setUseBlockScan( true );
-
+    // --block-scan off reproduces that persisted-off state for comparison.
     const QStringList args = QCoreApplication::arguments();
     auto valueOf = [ &args ]( const QString& key, const QString& fallback ) -> QString {
         const int idx = static_cast<int>( args.indexOf( key ) );
@@ -126,10 +126,53 @@ int main( int argc, char* argv[] )
     const qint64 linesPerFile = valueOf( "--lines-per-file", "4000" ).toLongLong();
     const QString pattern = valueOf( "--pattern", "NEEDLE" );
     const QString tmpDir = valueOf( "--tmp-dir", QDir::tempPath() );
+    const QString scanRoot = valueOf( "--root", QString{} );
+    const bool ignoreCase = hasFlag( "--ignore-case" );
     const int iterations = valueOf( "--iterations", "3" ).toInt();
     const qint64 matchEvery = valueOf( "--match-every", "1000" ).toLongLong();
     const bool vsGrep = hasFlag( "--vs-grep" );
     const bool vsRg = hasFlag( "--vs-rg" );
+    config.setUseBlockScan( valueOf( "--block-scan", "on" ) != QLatin1String( "off" ) );
+
+    // --root <dir>: scan an existing tree recursively (grep -r semantics: all
+    // regular files, no symlink following) instead of generating a fixture.
+    if ( !scanRoot.isEmpty() ) {
+        QStringList filePathsQt;
+        qint64 totalBytes = 0;
+        QDirIterator it( scanRoot, QDir::Files, QDirIterator::Subdirectories );
+        while ( it.hasNext() ) {
+            const QString path = it.next();
+            filePathsQt << path;
+            totalBytes += it.fileInfo().size();
+        }
+        const double totalMiB = static_cast<double>( totalBytes ) / ( 1024.0 * 1024.0 );
+
+        QTextStream out( stdout );
+        out << "Folder benchmark (real tree): " << filePathsQt.size() << " files = " << totalMiB
+            << " MiB, pattern '" << pattern << "'"
+            << ( ignoreCase ? " [ignore-case]" : "" )
+            << ( config.useBlockScan() ? " [block-scan]" : " [per-line]" ) << "\n";
+
+        quint64 kloggMatches = 0;
+        double kloggSecsBest = 1e9;
+        for ( int it2 = 0; it2 < iterations; ++it2 ) {
+            FolderSearchEngine engine;
+            QElapsedTimer t;
+            t.start();
+            engine.scanSynchronously(
+                filePathsQt,
+                RegularExpressionPattern{ pattern, !ignoreCase, false, false, false } );
+            const double secs = static_cast<double>( t.elapsed() ) / 1000.0;
+            const auto groups = engine.takeResults();
+            kloggMatches = countMatches( groups );
+            kloggSecsBest = std::min( kloggSecsBest, secs );
+            out << "  klogg run " << ( it2 + 1 ) << ": " << secs << " s, " << kloggMatches
+                << " matches\n";
+        }
+        out << "\nklogg best: " << kloggSecsBest << " s  (" << ( totalMiB / kloggSecsBest )
+            << " MiB/s)\n";
+        return 0;
+    }
 
     if ( files <= 0 || linesPerFile <= 0 || iterations <= 0 || matchEvery <= 0 ) {
         std::fprintf( stderr,

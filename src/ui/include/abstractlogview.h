@@ -43,6 +43,7 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <qchar.h>
 #include <string_view>
@@ -499,7 +500,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     struct WrappedLineData {
       LineNumber lineNumber;
       size_t wrappedLineIndex;
-      WrappedString wrappedString;
+      // One WrappedString per LOGICAL line, shared by every visual segment of
+      // that line (a line wrapping to N segments used to store N full copies
+      // of its N-segment vector -- 16*N^2 bytes -- which turned a multi-MB
+      // line into a bad_alloc escaping the event loop).
+      std::shared_ptr<const WrappedString> wrappedString;
     };
     klogg::vector<WrappedLineData> wrappedLinesInfo_;
 

@@ -8,6 +8,7 @@ add_executable(klogg_tests
     cli_test.cpp
     colorlabelsmanager_test.cpp
     configuration_test.cpp
+    encodingdetector_test.cpp
     droppathclassification_test.cpp
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
