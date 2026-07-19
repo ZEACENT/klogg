@@ -1205,6 +1205,10 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
         folderWidget->searchFor( "beta" );
     } );
     REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+    // Qt 5.12 VeryCoarseTimer: the pane creation after keep-results search is
+    // dispatched through a timer chain (~1s-per-tick on ubuntu-20.04), so give
+    // it a settle window before polling.
+    QTest::qWait( 2000 );
     REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 2; } ) );
 
     WHEN( "the new active pane's view initiates a QuickFind change" )
