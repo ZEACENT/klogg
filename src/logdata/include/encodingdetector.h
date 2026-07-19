@@ -24,6 +24,7 @@
 #include "synchronization.h"
 
 #include <QByteArray>
+#include <atomic>
 #include <memory>
 
 class QTextCodec;
@@ -75,11 +76,18 @@ class EncodingDetector {
 
     QTextCodec* detectEncoding( const klogg::vector<char>& block ) const;
 
+    // Test instrumentation: how many times the expensive uchardet fallback ran.
+    // The clear-UTF-8 fast path must not increment this; legacy/BOM/NUL samples
+    // must. Tests reset the baseline with load() before their probe.
+    static std::atomic<uint64_t>& uchardetInvocationsForTesting()
+    {
+        static std::atomic<uint64_t> counter{ 0 };
+        return counter;
+    }
+
   private:
     EncodingDetector() = default;
     ~EncodingDetector() = default;
-
-    mutable SharedMutex mutex_;
 };
 
 struct TextDecoder {

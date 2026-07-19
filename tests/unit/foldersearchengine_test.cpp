@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include "configuration.h"
+#include "encodingdetector.h"
 #include "foldersearchengine.h"
 #include "foldersearchtypes.h"
 #include "regularexpression.h"
@@ -646,4 +647,42 @@ TEST_CASE( "scanFile context window larger than the file", "[folder][context]" )
     REQUIRE( group.matches[ 1 ].localLine == 1_lnum );
     REQUIRE( group.matches[ 2 ].role == klogg::folder::RecordRole::Context );
     REQUIRE( group.matches[ 2 ].localLine == 2_lnum );
+}
+
+TEST_CASE( "binary files are skipped without invoking the encoding detector", "[folder]" )
+{
+    // Perf regression guard for many-small-binary trees (e.g. /Library/Logs
+    // WiFi CoreCapture .gz/.bin): detecting the encoding of a binary file is
+    // wasted uchardet work (~ms per file). The BOM-less-NUL binary check must
+    // run BEFORE detection, not after. BOM-bearing UTF-16/32 still detects.
+    ScopedFastPathConfig fastPath;
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    QByteArray binaryBytes;
+    for ( int i = 0; i < 4096; ++i ) {
+        binaryBytes.append( static_cast<char>( i & 0xFF ) ); // includes NULs, no BOM prefix
+    }
+    QStringList paths;
+    for ( int f = 0; f < 4; ++f ) {
+        paths << writeFile( dir, QString( "bin_%1.bin" ).arg( f ), binaryBytes );
+    }
+    // One plain-text file with a match, proving the scan itself still works.
+    paths << writeFile( dir, "text.log", QByteArray( "nothing here\nneedle here\n" ) );
+
+    auto& uchardetCalls = EncodingDetector::uchardetInvocationsForTesting();
+    const auto before = uchardetCalls.load();
+
+    FolderSearchEngine engine;
+    engine.scanSynchronously( paths, RegularExpressionPattern{ "needle" } );
+    const auto groups = engine.takeResults();
+
+    quint64 matches = 0;
+    for ( const auto& g : groups ) {
+        matches += static_cast<quint64>( g.matches.size() );
+    }
+    REQUIRE( matches == 1 );
+    // Binaries: skipped pre-detection; the ASCII text file: UTF-8 fast path.
+    // Neither may reach uchardet.
+    REQUIRE( uchardetCalls.load() == before );
 }

@@ -21,12 +21,19 @@
 
 #include <QTextCodec>
 
+#include <string_view>
+
 #include "configuration.h"
 #include "containers.h"
+#include "encodingutils.h"
 #include "log.h"
 #include <uchardet.h>
 
 namespace {
+
+// MibEnum of the UTF-8 codec returned by the fast path (same value
+// EncodingParameters uses; duplicated here to keep it file-local).
+constexpr int Utf8Mib = 106;
 
 class UchardetHolder {
   public:
@@ -69,7 +76,6 @@ class UchardetHolder {
 EncodingParameters::EncodingParameters( const QTextCodec* codec )
 {
     static constexpr QChar LineFeed( QChar::LineFeed );
-    static constexpr int Utf8Mib = 106;
     static constexpr int Utf16LEMib = 1014;
     static constexpr int UsAsciiMib = 3;
 
@@ -86,10 +92,29 @@ EncodingParameters::EncodingParameters( const QTextCodec* codec )
 
 QTextCodec* EncodingDetector::detectEncoding( const klogg::vector<char>& block ) const
 {
-    UniqueLock lock( mutex_ );
+    // Fast path: BOM-less, NUL-free, well-formed UTF-8 (pure ASCII included) is
+    // by far the common case for log files. Recognizing it here skips the
+    // uchardet run entirely — that run is milliseconds per file and used to sit
+    // under a process-global unique lock, which serialized folder search's
+    // thread pool on many-small-files trees (~1.1s for 208 files / 31 MiB).
+    // Anything with a BOM, NUL bytes (UTF-16/32, binary) or invalid UTF-8
+    // (candidate legacy encodings) still takes the full pipeline below.
+    //
+    // The result matches the legacy pipeline for these samples: uchardet names
+    // UTF-8/ASCII and codecForUtfText (no NUL pattern to trigger its UTF-16
+    // heuristic) returns that same UTF-8-family codec.
+    const std::string_view blockView{ block.data(), block.size() };
+    if ( !blockView.empty() && !klogg::encoding::startsWithUnicodeBom( blockView )
+         && klogg::encoding::isLikelyUtf8( blockView ) ) {
+        return QTextCodec::codecForMib( Utf8Mib );
+    }
 
+    // Full detection below uses only per-call state (a local uchardet handle
+    // plus thread-safe QTextCodec registry lookups), so no global lock is
+    // held: concurrent folder-search workers may detect in parallel.
     UchardetHolder ud;
 
+    ++uchardetInvocationsForTesting();
     auto rc = ud.handle_data( block.data(), block.size() );
     if ( rc == 0 ) {
         ud.data_end();

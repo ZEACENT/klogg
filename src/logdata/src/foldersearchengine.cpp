@@ -322,6 +322,16 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
                 const char* const wdata = whole.constData();
                 const qint64 wbytes = whole.size();
                 const qint64 detectLen = std::min<qint64>( wbytes, BinaryDetectionWindow );
+                // Binary short-circuit BEFORE any detection work (grep -I): a
+                // BOM-less sample containing NULs is binary -- skip it without
+                // paying for uchardet. BOM-bearing UTF-16/32 files still take
+                // the full detection path below (their NULs are legitimate).
+                const std::string_view sampleView( wdata,
+                                                   static_cast<size_t>( detectLen ) );
+                if ( !klogg::encoding::startsWithUnicodeBom( sampleView )
+                     && sampleView.find( '\0' ) != std::string_view::npos ) {
+                    return group;
+                }
                 const klogg::vector<char> firstVec( wdata, wdata + detectLen );
                 QTextCodec* fastCodec
                     = EncodingDetector::getInstance().detectEncoding( firstVec );
@@ -505,11 +515,21 @@ klogg::folder::FileGroup FolderSearchEngine::scanFile( const QString& path,
     while ( !block.isEmpty() ) {
         if ( firstBlock ) {
             firstBlock = false;
+            // Same binary short-circuit as the fast path, before detection:
+            // BOM-less + NUL in the window -> binary, skip without uchardet.
+            const auto* blockData = block.constData();
+            const auto blockBytes = block.size();
+            const int binaryWindow
+                = std::min<int>( static_cast<int>( block.size() ), BinaryDetectionWindow );
+            const std::string_view blockSample( blockData,
+                                                static_cast<size_t>( binaryWindow ) );
+            if ( !klogg::encoding::startsWithUnicodeBom( blockSample )
+                 && blockSample.find( '\0' ) != std::string_view::npos ) {
+                return group;
+            }
             // Detect-on-first-block: one copy of the first block into a
             // klogg::vector<char> for uchardet + QTextCodec::codecForUtfText,
             // exactly as the indexer does.
-            const auto* blockData = block.constData();
-            const auto blockBytes = block.size();
             klogg::vector<char> firstBlockVec( blockData, blockData + blockBytes );
             codec = EncodingDetector::getInstance().detectEncoding( firstBlockVec );
             if ( codec != nullptr ) {
