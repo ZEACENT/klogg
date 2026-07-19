@@ -29,6 +29,9 @@
 #include <QTemporaryDir>
 #include <QTextCodec>
 
+#include <atomic>
+#include <thread>
+
 namespace {
 klogg::folder::MatchRecord match( uint64_t localLine, int64_t start, int64_t end,
                                   int expandedLen, int matchLen )
@@ -417,4 +420,100 @@ TEST_CASE( "FolderSearchResults decodes with the per-file encoding override", "[
     // No-op clear (nothing to remove) does not notify.
     r.clearEncodingOverrideForFile( path );
     REQUIRE( layoutSpy.count() == 2 );
+}
+
+TEST_CASE( "FolderSearchResults getters are race-free against streaming and concurrent readers",
+           "[folder]" )
+{
+    // QuickFind runs on a QtConcurrent worker reading the results model while
+    // the main thread streams groups in, and the view's paints hit the same
+    // getters (quickfind.cpp:211+). Before the model was internally
+    // synchronized, concurrent reads tore the row/group containers and shared
+    // per-group QFile cursors (garbage text, OOB access, crash).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    constexpr int fileCount = 8;
+    constexpr int groupsPerFile = 8; // 64 groups -> 3264 visible rows
+    constexpr int matchesPerGroup = 50;
+
+    QStringList paths;
+    std::vector<std::vector<int64_t>> lineOffsets;
+    for ( int f = 0; f < fileCount; ++f ) {
+        QStringList lines;
+        std::vector<int64_t> offsets;
+        int64_t running = 0;
+        for ( int l = 0; l < 200; ++l ) {
+            const auto line = QString( "file%1 line %2" ).arg( f ).arg( l );
+            offsets.push_back( running );
+            running += line.size() + 1;
+            lines << line;
+        }
+        paths << writeFile( dir, QString( "f%1.log" ).arg( f ), lines );
+        lineOffsets.push_back( std::move( offsets ) );
+    }
+
+    FolderSearchResults results;
+    QStringList order;
+    for ( int g = 0; g < fileCount * groupsPerFile; ++g ) {
+        order << paths[ g % static_cast<int>( paths.size() ) ];
+    }
+    results.beginSearch( order );
+
+    std::atomic<bool> stop{ false };
+    std::atomic<int> failures{ 0 };
+
+    auto reader = [ & ] {
+        while ( !stop.load( std::memory_order_relaxed ) ) {
+            try {
+                const auto nb = results.getNbLine().get();
+                for ( LinesCount::UnderlyingType i = 0; i < nb; ++i ) {
+                    const auto row = LineNumber( i );
+                    if ( results.lineKind( row ) != LineKind::Data ) {
+                        continue;
+                    }
+                    const auto src = results.sourceForLine( row );
+                    const auto text = results.getExpandedLineString( row );
+                    if ( src.filePath.isEmpty() || text.isEmpty() ) {
+                        continue;
+                    }
+                    // The row's text must come from ITS file; a torn read on a
+                    // shared QFile handle returns another file's content.
+                    const auto expectedPrefix = QLatin1String( "file" )
+                                                + src.filePath.at( src.filePath.size() - 5 );
+                    if ( !text.startsWith( expectedPrefix ) ) {
+                        ++failures;
+                    }
+                }
+            }
+            catch ( ... ) {
+                ++failures;
+            }
+        }
+    };
+
+    std::thread readerA( reader );
+    std::thread readerB( reader );
+
+    for ( int g = 0; g < fileCount * groupsPerFile; ++g ) {
+        const int f = g % fileCount;
+        klogg::folder::FileGroup group;
+        group.filePath = paths[ f ];
+        for ( int m = 0; m < matchesPerGroup; ++m ) {
+            const auto start = lineOffsets[ static_cast<size_t>( f ) ][ static_cast<size_t>( m ) ];
+            const auto lineText = QString( "file%1 line %2" ).arg( f ).arg( m );
+            const auto textLen = static_cast<int64_t>( lineText.size() );
+            group.matches.push_back( match( static_cast<uint64_t>( m ), start, start + textLen,
+                                            static_cast<int>( textLen ), 4 ) );
+        }
+        results.addFileGroup( g, std::move( group ) );
+    }
+
+    stop.store( true );
+    readerA.join();
+    readerB.join();
+
+    REQUIRE( failures.load() == 0 );
+    REQUIRE( results.getNbLine().get()
+             == static_cast<uint64_t>( fileCount * groupsPerFile * ( 1 + matchesPerGroup ) ) );
 }
