@@ -173,6 +173,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     LineNumber getTopLine() const;
     // Return the text of the current selection.
     QString getSelectedText() const;
+    // Return the selected text as one entry per selected line, in row order
+    // (a portion selection yields a single entry). This is the per-line dual
+    // of getSelectedText(): consumers that match text per log line (color
+    // labels) must use it, as a label entry containing a line feed can never
+    // match a single line.
+    QStringList getSelectedLinesText() const;
     // True for partial selection
     bool isPartialSelection() const;
     // Instructs the widget to select the whole text.

@@ -224,6 +224,11 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     {
         view->copyWithLineNumbers();
     }
+
+    static klogg::vector<LineNumber> selectedLines( const AbstractLogView* view )
+    {
+        return view->selection_.getLines();
+    }
 };
 
 TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
@@ -3000,4 +3005,89 @@ TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every vie
         REQUIRE_FALSE( hasAnyLabelledText( mainView ) );
         REQUIRE_FALSE( hasAnyLabelledText( filteredView ) );
     }
+}
+
+TEST_CASE( "FolderCrawlerWidget color labels apply per line to multi-row selections",
+           "[folder][colorlabels][regression]" )
+{
+    // Regression (single-file parity): with several result rows selected, a
+    // digit key stored the whole LF-joined selection as ONE quick-label entry
+    // that can never match a single log line -- nothing was highlighted and
+    // Key_0 could not remove the stale entry. Each selected row must become
+    // its own entry. The folder twist: group-header rows are not copyable and
+    // must never produce an entry.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 200 );
+
+    auto* const mainView = widget.mainView();
+    auto* const filteredView = widget.filteredView();
+    REQUIRE( mainView != nullptr );
+    REQUIRE( filteredView != nullptr );
+
+    // Results rows: 0 = group header (a.log), 1 = "ERROR alpha", 2 = "ERROR beta".
+    // Anchor at row 2 and extend upwards so the range spans the header row.
+    filteredView->selectAndDisplayLine( 2_lnum );
+    QTest::qWait( 50 );
+    filteredView->viewport()->setFocus();
+    QTest::qWait( 20 );
+    QTest::keyClick( filteredView->viewport(), Qt::Key_Up, Qt::ShiftModifier );
+    QTest::qWait( 20 );
+    QTest::keyClick( filteredView->viewport(), Qt::Key_Up, Qt::ShiftModifier );
+    QTest::qWait( 20 );
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+
+    // The range covers all three rows (header included)...
+    const auto selectedRows = Access::selectedLines( filteredView );
+    INFO( "selection must cover rows 0..2, got " << selectedRows.size() << " rows" );
+    REQUIRE( selectedRows.size() == 3 );
+    REQUIRE( selectedRows.front() == 0_lnum );
+
+    // ...but the selection TEXT holds only the two copyable data rows.
+    const auto selectedText = filteredView->getSelectedText();
+    INFO( "selection text: " << selectedText.toStdString() );
+    REQUIRE( selectedText.count( QChar::LineFeed ) == 1 );
+    const auto labelEntries = []( const AbstractLogView* view, size_t label ) {
+        const auto& labels = Access::quickHighlighters( view );
+        return label < labels.size() ? labels[ label ] : AbstractLogView::QuickHighlighters{};
+    };
+
+    QTest::keyClick( filteredView->viewport(), Qt::Key_1 );
+    QTest::qWait( 20 );
+
+    const auto containsText = []( const auto& entries, const QString& text ) {
+        return std::any_of( entries.cbegin(), entries.cend(),
+                            [ & ]( const QuickLabelEntry& e ) { return e.text == text; } );
+    };
+
+    // Exactly the two data rows get entries -- in every view of the tab.
+    // The header row is not copyable, and no entry may be a multi-line blob.
+    const auto filteredEntries = labelEntries( filteredView, 0 );
+    REQUIRE( filteredEntries.size() == 2 );
+    CHECK( containsText( filteredEntries, QStringLiteral( "ERROR alpha" ) ) );
+    CHECK( containsText( filteredEntries, QStringLiteral( "ERROR beta" ) ) );
+    CHECK( std::none_of( filteredEntries.cbegin(), filteredEntries.cend(),
+                         []( const QuickLabelEntry& e ) { return e.text.contains( QChar::LineFeed ); } ) );
+
+    const auto mainEntries = labelEntries( mainView, 0 );
+    REQUIRE( mainEntries.size() == 2 );
+    CHECK( containsText( mainEntries, QStringLiteral( "ERROR alpha" ) ) );
+    CHECK( containsText( mainEntries, QStringLiteral( "ERROR beta" ) ) );
+
+    // Key_0 removes every selected line's entry again.
+    QTest::keyClick( filteredView->viewport(), Qt::Key_0 );
+    QTest::qWait( 20 );
+    CHECK( labelEntries( filteredView, 0 ).isEmpty() );
+    CHECK( labelEntries( mainView, 0 ).isEmpty() );
 }

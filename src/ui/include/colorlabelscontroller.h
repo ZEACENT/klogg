@@ -27,6 +27,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 
 #include "colorlabelsmanager.h"
 
@@ -80,9 +81,12 @@ class ColorLabelsController : public QObject {
     void clearColorLabels();
     void setQuickColorLabelDefaults( bool ignoreCase, bool wholeWord );
     void applyToViews( const ColorLabelsManager::QuickHighlightersCollection& labels );
-    // The text to (un)label: the emitting view's selection when known, else the
-    // host-active view's selection. Empty when there is nothing to do.
-    QString selectedText( const AbstractLogView* sourceView ) const;
+    // The texts to (un)label: one entry per selected line of the emitting view
+    // when known, else of the host-active view. Multi-line selections yield
+    // per-line entries so every selected line gets labelled (an entry holding
+    // the joined multi-line blob could never match a single log line). Empty
+    // when there is nothing to do.
+    QStringList selectedTexts( const AbstractLogView* sourceView ) const;
 
     ColorLabelsManager manager_;
     QWidget* shortcutsParent_;

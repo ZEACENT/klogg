@@ -42,3 +42,16 @@ TEST_CASE( "Whole-word quick label still matches plain word tokens",
     CHECK( hasMatch( plainWord, QStringLiteral( "warn disk pressure high" ) ) );
     CHECK_FALSE( hasMatch( plainWord, QStringLiteral( "prewarning from daemon" ) ) );
 }
+
+TEST_CASE( "A quick label entry never matches across line boundaries",
+           "[colorlabels][quicklabel]" )
+{
+    // Highlighters match one log line at a time, so an entry whose text
+    // contains a line feed can never match anything. This pins why multi-line
+    // selections must be split into per-line entries by the controller/manager
+    // (storing the LF-joined blob was the multi-line color-label defect).
+    const QuickLabelEntry multiLineBlob{ QStringLiteral( "line a\nline b" ), false, false };
+    CHECK_FALSE( hasMatch( multiLineBlob, QStringLiteral( "line a" ) ) );
+    CHECK_FALSE( hasMatch( multiLineBlob, QStringLiteral( "line b" ) ) );
+    CHECK_FALSE( hasMatch( multiLineBlob, QStringLiteral( "x line a" ) ) );
+}

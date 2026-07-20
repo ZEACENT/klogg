@@ -523,6 +523,17 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::qWait( 20 );
     }
 
+    void pressFilteredViewKey( Qt::Key key, Qt::KeyboardModifiers modifiers )
+    {
+        QTest::keyClick( crawler->filteredView_->viewport(), key, modifiers );
+        QTest::qWait( 20 );
+    }
+
+    QString filteredLineText( LineNumber::UnderlyingType lineIndex ) const
+    {
+        return crawler->logFilteredData_->getLineString( LineNumber( lineIndex ) );
+    }
+
     void pressMainViewConfiguredShortcut( const std::string& action )
     {
         pressConfiguredShortcut( crawler->logMainView_->viewport(), action );
@@ -2802,5 +2813,63 @@ SCENARIO( "Crawler widget color labels apply to the selection in all views",
             REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, selectedText ) );
             REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, selectedText ) );
         }
+    }
+}
+
+SCENARIO( "Crawler widget color labels apply to every line of a multi-line selection",
+          "[ui][colorlabels][regression]" )
+{
+    // Regression: with several whole lines selected, M marks them all, but a
+    // digit key stored the whole LF-joined selection as ONE quick-label entry
+    // whose pattern can never match a single log line (highlighters match per
+    // line) -- nothing was highlighted, and Key_0 could not remove the stale
+    // entry either. Each selected line must become its own label entry, the
+    // same per-line semantics marking already has.
+    QTemporaryFile file{ "crawler_colorlabels_multiline_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
+
+    crawlerVisitor.focusFilteredView();
+    crawlerVisitor.clickFilteredViewLine( 10 );
+    crawlerVisitor.pressFilteredViewKey( Qt::Key_Down, Qt::ShiftModifier );
+    crawlerVisitor.pressFilteredViewKey( Qt::Key_Down, Qt::ShiftModifier );
+
+    const auto selectedText = crawlerVisitor.filteredViewSelectedText();
+    INFO( "selection must span three lines: " << selectedText.toStdString() );
+    REQUIRE( selectedText.count( QChar::LineFeed ) == 2 );
+
+    const QString line10 = crawlerVisitor.filteredLineText( 10 );
+    const QString line11 = crawlerVisitor.filteredLineText( 11 );
+    const QString line12 = crawlerVisitor.filteredLineText( 12 );
+
+    THEN( "the digit shortcut labels and unlabels every selected line in both views" )
+    {
+        crawlerVisitor.pressFilteredViewKey( Qt::Key_1 );
+
+        REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, line10 ) );
+        REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, line11 ) );
+        REQUIRE( crawlerVisitor.filteredViewHasLabelledText( 0, line12 ) );
+        REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, line10 ) );
+        REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, line11 ) );
+        REQUIRE( crawlerVisitor.mainViewHasLabelledText( 0, line12 ) );
+
+        crawlerVisitor.pressFilteredViewKey( Qt::Key_0 );
+
+        REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, line10 ) );
+        REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, line11 ) );
+        REQUIRE_FALSE( crawlerVisitor.filteredViewHasLabelledText( 0, line12 ) );
+        REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, line10 ) );
+        REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, line11 ) );
+        REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, line12 ) );
     }
 }

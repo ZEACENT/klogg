@@ -22,6 +22,7 @@
 
 #include <QList>
 #include <QString>
+#include <QStringList>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -154,6 +155,14 @@ class Selection {
 
     // Returns the text selected from the passed AbstractLogData
     QString getSelectedText( const AbstractLogData* logData, bool lineNumbers = false ) const;
+
+    // Returns the selected text as one string per selected line, in row order
+    // (non-copyable rows, e.g. folder group headers, are skipped). A portion
+    // selection yields a single entry. Unlike getSelectedText() nothing is
+    // joined with platform line separators: consumers that match text per log
+    // line (e.g. color labels) must use this, as an entry containing a line
+    // feed can never match a single line.
+    QStringList getSelectedLinesText( const AbstractLogData* logData ) const;
 
     // Return the position immediately after the current selection
     // (used for searches).

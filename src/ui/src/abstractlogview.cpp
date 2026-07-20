@@ -1972,6 +1972,11 @@ QString AbstractLogView::getSelectedText() const
     return selection_.getSelectedText( logData_ );
 }
 
+QStringList AbstractLogView::getSelectedLinesText() const
+{
+    return selection_.getSelectedLinesText( logData_ );
+}
+
 bool AbstractLogView::isPartialSelection() const
 {
     return selection_.isPortion();
