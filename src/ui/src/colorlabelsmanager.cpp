@@ -19,6 +19,8 @@
 
 #include "colorlabelsmanager.h"
 #include "highlighterset.h"
+#include "log.h"
+#include <QSet>
 #include <algorithm>
 #include <vector>
 
@@ -67,11 +69,54 @@ ColorLabelsManager::QuickHighlightersCollection
 ColorLabelsManager::setColorLabel( size_t label, const QString& text,
                                    QuickHighlighterDefaults defaults )
 {
-    return updateColorLabel( label, text, defaults );
+    return setColorLabel( label, QStringList{ text }, defaults );
+}
+
+ColorLabelsManager::QuickHighlightersCollection
+ColorLabelsManager::setColorLabel( size_t label, const QStringList& texts,
+                                   QuickHighlighterDefaults defaults )
+{
+    const auto sanitized = sanitizeBulkTexts( texts );
+    for ( const auto& text : sanitized ) {
+        updateColorLabel( label, text, defaults );
+    }
+
+    return quickHighlighters_;
 }
 
 ColorLabelsManager::QuickHighlightersCollection
 ColorLabelsManager::setNextColorLabel( const QString& text, QuickHighlighterDefaults defaults )
+{
+    return setNextColorLabel( QStringList{ text }, defaults );
+}
+
+ColorLabelsManager::QuickHighlightersCollection
+ColorLabelsManager::setNextColorLabel( const QStringList& texts,
+                                       QuickHighlighterDefaults defaults )
+{
+    const auto sanitized = sanitizeBulkTexts( texts );
+    if ( sanitized.isEmpty() ) {
+        return quickHighlighters_;
+    }
+
+    // Resolve the cycle ONCE for the whole selection (from the cycle position
+    // or the first text's current label), then apply that single label to
+    // every text.
+    const auto nextLabel = nextCycleLabel( sanitized.front() );
+    if ( !nextLabel.has_value() ) {
+        return quickHighlighters_;
+    }
+
+    currentLabel_ = *nextLabel;
+
+    for ( const auto& text : sanitized ) {
+        updateColorLabel( *nextLabel, text, defaults );
+    }
+
+    return quickHighlighters_;
+}
+
+std::optional<size_t> ColorLabelsManager::nextCycleLabel( const QString& referenceText ) const
 {
     const auto& quickHighlightersConfiguration
         = HighlighterSetCollection::get().quickHighlighters();
@@ -86,14 +131,14 @@ ColorLabelsManager::setNextColorLabel( const QString& text, QuickHighlighterDefa
     }
 
     if ( cycle.empty() ) {
-        return quickHighlighters_;
+        return {};
     }
 
     auto nextLabel = cycle.front();
 
     auto currentLabel = currentLabel_;
     if ( !currentLabel ) {
-        currentLabel = currentColorLabelForText( text );
+        currentLabel = currentColorLabelForText( referenceText );
     }
 
     if ( currentLabel.has_value() ) {
@@ -103,23 +148,32 @@ ColorLabelsManager::setNextColorLabel( const QString& text, QuickHighlighterDefa
         }
     }
 
-    currentLabel_ = nextLabel;
-
-    return updateColorLabel( nextLabel, text, defaults );
+    return nextLabel;
 }
 
 ColorLabelsManager::QuickHighlightersCollection
 ColorLabelsManager::removeColorLabel( const QString& text )
 {
-    if ( text.isEmpty() ) {
+    return removeColorLabel( QStringList{ text } );
+}
+
+ColorLabelsManager::QuickHighlightersCollection
+ColorLabelsManager::removeColorLabel( const QStringList& texts )
+{
+    const auto sanitized = sanitizeBulkTexts( texts );
+    if ( sanitized.isEmpty() ) {
         return quickHighlighters_;
     }
 
     for ( auto& quickHighlighter : quickHighlighters_ ) {
         quickHighlighter.erase(
             std::remove_if( quickHighlighter.begin(), quickHighlighter.end(),
-                            [ &text ]( const auto& entry ) {
-                                return quickLabelMatchesText( entry, text );
+                            [ &sanitized ]( const auto& entry ) {
+                                return std::any_of(
+                                    sanitized.cbegin(), sanitized.cend(),
+                                    [ &entry ]( const auto& text ) {
+                                        return quickLabelMatchesText( entry, text );
+                                    } );
                             } ),
             quickHighlighter.end() );
     }
@@ -127,6 +181,32 @@ ColorLabelsManager::removeColorLabel( const QString& text )
     currentLabel_.reset();
 
     return quickHighlighters_;
+}
+
+QStringList ColorLabelsManager::sanitizeBulkTexts( const QStringList& texts )
+{
+    QStringList result;
+    QSet<QString> seen;
+    bool truncated = false;
+
+    for ( const auto& text : texts ) {
+        if ( text.isEmpty() || seen.contains( text ) ) {
+            continue;
+        }
+        if ( static_cast<size_t>( result.size() ) >= MaxBulkLabelTexts ) {
+            truncated = true;
+            break;
+        }
+        seen.insert( text );
+        result.append( text );
+    }
+
+    if ( truncated ) {
+        LOG_WARNING << "Color label selection truncated to " << MaxBulkLabelTexts
+                    << " distinct texts";
+    }
+
+    return result;
 }
 
 std::optional<size_t> ColorLabelsManager::currentColorLabelForText( const QString& text ) const

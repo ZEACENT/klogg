@@ -1198,14 +1198,17 @@ void AbstractLogView::scrollContentsBy( int dx, int /*dy*/ )
     const auto scrollPosition = verticalScrollToLineNumber( scrollValue );
 
     // Determine if we're at the bottom by checking if scroll value >= maximum.
-    // This avoids the expensive getNbBottomWrappedVisibleLines() call on every scroll.
+    // This avoids the expensive getWrappedBottomFrame() call on every scroll.
     // The scroll range is already calculated correctly by updateScrollBars().
     const bool atBottom = scrollMax > 0 && scrollValue >= scrollMax;
 
     if ( atBottom ) {
         // We're at or past the bottom, lock the last line at the bottom
         // For text wrap mode, use the scroll maximum as the firstLine anchor.
-        // scrollMax represents the last valid top line (totalLines - unwrappedLinesAtBottom).
+        // scrollMax is derived from the bottom-frame composition: the logical
+        // lines above the frame (plus one step when the whole document fits
+        // the frame count but the wrapped content still overflows), so at max
+        // the frame shows the tail fully.
         firstLine_ = verticalScrollToLineNumber( scrollMax );
         lastLineAligned_ = true;
     }
@@ -1972,6 +1975,11 @@ QString AbstractLogView::getSelectedText() const
     return selection_.getSelectedText( logData_ );
 }
 
+QStringList AbstractLogView::getSelectedLinesText() const
+{
+    return selection_.getSelectedLinesText( logData_ );
+}
+
 bool AbstractLogView::isPartialSelection() const
 {
     return selection_.isPortion();
@@ -2730,39 +2738,33 @@ void AbstractLogView::considerMouseHovering( int xPos, int yPos )
     }
 }
 
-LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
+AbstractLogView::WrappedBottomFrame AbstractLogView::getWrappedBottomFrame() const
 {
     const LinesCount visibleLines = getNbVisibleLines();
-    
-    if ( !useTextWrap_ ) {
-        return visibleLines;
+
+    // "Unknown, assume fits" fallbacks for callers that run before the wrap
+    // layout is available (pre-first-paint) or without wrap enabled.
+    if ( !useTextWrap_ || leftMarginPx_ == 0 ) {
+        return { visibleLines, false };
     }
-    
-    // Early return if leftMarginPx_ hasn't been initialized yet
-    // This prevents using incorrect column count during initialization before drawTextArea() runs
-    // leftMarginPx_ is set in drawTextArea() at line 2541, but this function may be called
-    // earlier (e.g., from updateScrollBars() during initialization)
-    if ( leftMarginPx_ == 0 ) {
-        return visibleLines;
-    }
-    
+
     const LineLength visibleColumns = getNbVisibleCols();
-    
+
     const auto totalLines = logData_->getNbLine();
     if ( totalLines.get() == 0 ) {
-        LOG_DEBUG << "[TextWrap:Calc] getNbBottomWrappedVisibleLines: no lines";
-        return LinesCount{ 0 };
+        return { LinesCount{ 0 }, false };
     }
-    
+
     // Ensure we have valid column count (can happen during initialization)
     if ( visibleColumns.get() <= 0 ) {
-        LOG_DEBUG << "[TextWrap:Calc] getNbBottomWrappedVisibleLines: invalid visibleColumns="
+        LOG_DEBUG << "[TextWrap:Calc] getWrappedBottomFrame: invalid visibleColumns="
                   << visibleColumns.get() << ", returning visibleLines";
-        return visibleLines;
+        return { visibleLines, false };
     }
 
     LinesCount wrappedLinesCount{ 0 };
-    LinesCount unwrappedLinesCount{ 0 };
+    LinesCount frameLines{ 0 };
+    bool contentOverflows = false;
     LineNumber unwrappedLineNumber{ totalLines.get() - 1 };
 
     // Pixel-accurate wrapping width for the text content area
@@ -2772,151 +2774,135 @@ LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
         return textWidth( pixmapFontMetrics_, s );
     };
 
-    // Count from bottom: how many unwrapped lines fit when viewport is filled with wrapped lines
+    // Count from bottom: how many unwrapped lines the bottom frame holds when
+    // the viewport is filled with wrapped lines. The frame's top line is
+    // counted even when it only partially fits, so the frame stays filled.
     while ( wrappedLinesCount < visibleLines ) {
         QString expandedLine = logData_->getExpandedLineString( unwrappedLineNumber );
         WrappedString wrapped{ expandedLine, availableWidth, twFn };
         const auto thisLineWrappedCount = LinesCount(
             type_safe::narrow_cast<LinesCount::UnderlyingType>( wrapped.wrappedLinesCount() ) );
-        
-        // Check if adding this line would overshoot the viewport
+
         if ( wrappedLinesCount + thisLineWrappedCount > visibleLines ) {
-            // Line causes overshoot - still count it as the last visible line
-            // (it will be partially visible at the bottom)
-            unwrappedLinesCount++;
-            wrappedLinesCount += thisLineWrappedCount;
+            // The frame's top line does not fully fit: the wrapped document is
+            // taller than the viewport even if every logical line ended up
+            // inside the frame count.
+            frameLines++;
+            contentOverflows = true;
             break;
         }
-        
+
         wrappedLinesCount += thisLineWrappedCount;
-        unwrappedLinesCount++;
+        frameLines++;
 
         if ( unwrappedLineNumber.get() == 0 ) {
-            break;
+            // Every logical line fully inside the frame: content fits.
+            return { frameLines, false };
         }
         unwrappedLineNumber--;
     }
 
-    LOG_DEBUG << "[TextWrap:Calc] getNbBottomWrappedVisibleLines:"
+    // Stopped before reaching the first line: lines above the frame remain.
+    contentOverflows = true;
+
+    LOG_DEBUG << "[TextWrap:Calc] getWrappedBottomFrame:"
               << " totalLines=" << totalLines.get()
               << " visibleLines=" << visibleLines.get()
               << " visibleColumns=" << visibleColumns.get()
-              << " unwrappedCount=" << unwrappedLinesCount.get()
-              << " wrappedCount=" << wrappedLinesCount.get();
-    
-    // Ensure we return at least 1 if there are lines to show
-    if ( unwrappedLinesCount.get() == 0 && totalLines.get() > 0 ) {
-        return LinesCount{ 1 };
-    }
-    
-    return unwrappedLinesCount;
+              << " frameLines=" << frameLines.get()
+              << " contentOverflows=" << contentOverflows;
+
+    return { frameLines, contentOverflows };
 }
 
 void AbstractLogView::updateScrollBars()
 {
     const LinesCount visibleLines = getNbVisibleLines();
     const auto totalLines = logData_->getNbLine();
-    
+
     // Store scrollbar visibility before any calculations to detect changes
     const bool scrollBarWasVisible = verticalScrollBar()->isVisible();
-    
+
     // Track if scrollbar visibility changed during calculation
     // This is needed because visibility can change multiple times (e.g., visible -> hidden -> visible)
     // and we need to invalidate cache even if final state matches initial state
     bool scrollBarVisibilityChanged = false;
-    
-    // Pre-calculate scrollMax to determine if scrollbar will be visible after setRange()
-    // This is needed because getNbBottomWrappedVisibleLines() calls getNbVisibleCols()
-    // which depends on scrollbar visibility, creating a circular dependency
-    int scrollMax = 0;
-    if ( totalLines >= visibleLines ) {
-        if ( useTextWrap_ ) {
-            // For text wrap mode, we need column count to calculate unwrapped lines.
-            // However, column count depends on scrollbar visibility, which depends on scrollMax.
-            // To break the circular dependency:
-            // 1. First, estimate scrollMax assuming current scrollbar visibility
-            // 2. Temporarily set range to determine actual scrollbar visibility
-            // 3. Recalculate with correct visibility if it changed
-            
-            // Special case: if leftMarginPx_ hasn't been initialized yet (e.g., during
-            // initialization before drawTextArea() runs), getNbBottomWrappedVisibleLines()
-            // will return visibleLines early. In this case, we can't perform accurate
-            // wrapped line calculation, so we use a simple fallback calculation.
-            if ( leftMarginPx_ == 0 ) {
-                // leftMarginPx_ not initialized - use simple calculation as fallback
-                // This happens during initialization before drawTextArea() sets leftMarginPx_
-                scrollMax = static_cast<int>( std::min(
-                    ( totalLines - visibleLines ).get(),
-                    maxValue<LinesCount>().get() ) );
-                verticalScrollBar()->setRange( 0, scrollMax );
-                // Check if visibility changed after setting range
-                if ( scrollBarWasVisible != verticalScrollBar()->isVisible() ) {
-                    scrollBarVisibilityChanged = true;
-                }
-            }
-            else {
-                // Estimate scrollMax using current scrollbar visibility
-                // If scrollbar is currently visible, assume it will remain visible
-                // If scrollbar is currently hidden, we need to check if it will appear
-                // We'll use an iterative approach: keep recalculating until visibility stabilizes
-                // This handles cases where visibility changes multiple times due to the circular
-                // dependency between scrollbar visibility and column count calculations
-                
-                // First pass: calculate with current scrollbar visibility
-                auto unwrappedLinesAtBottom = getNbBottomWrappedVisibleLines();
-                if ( totalLines > unwrappedLinesAtBottom ) {
-                    scrollMax = static_cast<int>( std::min(
-                        ( totalLines - unwrappedLinesAtBottom ).get(),
-                        maxValue<LinesCount>().get() ) );
-                }
-                
-                // Iteratively recalculate until scrollbar visibility stabilizes
-                // Maximum iterations to prevent infinite loops (should rarely exceed 2-3 iterations)
-                constexpr int maxIterations = 10;
-                bool previousVisibility = scrollBarWasVisible;
-                
-                for ( int iteration = 0; iteration < maxIterations; ++iteration ) {
-                    // Set range to determine actual scrollbar visibility
-                    verticalScrollBar()->setRange( 0, scrollMax );
-                    
-                    // Check if visibility changed
-                    const bool currentVisibility = verticalScrollBar()->isVisible();
-                    if ( currentVisibility == previousVisibility ) {
-                        // Visibility stabilized - we're done
-                        break;
-                    }
-                    
-                    // Visibility changed - invalidate cache and recalculate
-                    scrollBarVisibilityChanged = true;
-                    cachedVisibleColsValid_ = false;
-                    
-                    // Recalculate unwrappedLinesAtBottom with correct scrollbar visibility
-                    // Note: leftMarginPx_ should be initialized by now, so this should work
-                    unwrappedLinesAtBottom = getNbBottomWrappedVisibleLines();
-                    if ( totalLines > unwrappedLinesAtBottom ) {
-                        scrollMax = static_cast<int>( std::min(
-                            ( totalLines - unwrappedLinesAtBottom ).get(),
-                            maxValue<LinesCount>().get() ) );
-                    }
-                    else {
-                        scrollMax = 0;
-                    }
-                    
-                    // Update previous visibility for next iteration
-                    previousVisibility = currentVisibility;
-                    
-                }
-            }
+
+    // Derive the wrap-mode range from the bottom-frame composition: every
+    // logical line above the frame gets one scroll step, plus one extra step
+    // when the whole document fits the frame count but the wrapped content
+    // still overflows (the frame's top line is clipped -- without the extra
+    // step an empty range would leave the clipped rows unreachable).
+    const auto wrapScrollMax = [totalLines]( const WrappedBottomFrame& frame ) {
+        uint64_t scrollMax = 0;
+        if ( totalLines > frame.frameLines ) {
+            scrollMax = ( totalLines - frame.frameLines ).get();
         }
-        else {
-            scrollMax = static_cast<int>( std::min(
-                ( totalLines - visibleLines ).get(),
-                maxValue<LinesCount>().get() ) );
+        else if ( frame.contentOverflows ) {
+            scrollMax = 1;
+        }
+        return static_cast<int>( std::min( scrollMax, maxValue<LinesCount>().get() ) );
+    };
+
+    int scrollMax = 0;
+    if ( useTextWrap_ && leftMarginPx_ > 0 ) {
+        // Wrap mode: the range reflects the WRAPPED document height, not the
+        // logical line count -- a few long lines can overflow the viewport
+        // without ever reaching it in count, so no totalLines >= visibleLines
+        // gate applies here. The iterative loop resolves the circular
+        // dependency between scrollbar visibility and the visible-column count
+        // (a appearing scrollbar shrinks the text area, rewrapping taller).
+        // Maximum iterations to prevent infinite loops (should rarely exceed 2-3).
+        constexpr int maxIterations = 10;
+        bool previousVisibility = scrollBarWasVisible;
+
+        scrollMax = wrapScrollMax( getWrappedBottomFrame() );
+
+        for ( int iteration = 0; iteration < maxIterations; ++iteration ) {
+            // Set range to determine actual scrollbar visibility
             verticalScrollBar()->setRange( 0, scrollMax );
-            // Check if visibility changed after setting range
-            if ( scrollBarWasVisible != verticalScrollBar()->isVisible() ) {
-                scrollBarVisibilityChanged = true;
+
+            // Check if visibility changed
+            const bool currentVisibility = verticalScrollBar()->isVisible();
+            if ( currentVisibility == previousVisibility ) {
+                // Visibility stabilized - we're done
+                break;
             }
+
+            // Visibility changed - invalidate cache and recalculate
+            scrollBarVisibilityChanged = true;
+            cachedVisibleColsValid_ = false;
+
+            // Recalculate the bottom frame with correct scrollbar visibility
+            scrollMax = wrapScrollMax( getWrappedBottomFrame() );
+            previousVisibility = currentVisibility;
+        }
+    }
+    else if ( useTextWrap_ ) {
+        // leftMarginPx_ not initialized - use simple logical calculation as
+        // fallback. This happens during initialization before drawTextArea()
+        // sets leftMarginPx_; the deferred pendingScrollBarUpdate_ path
+        // recomputes the real wrapped range after the first paint. The
+        // subtraction must be done in SIGNED math: LinesCount is uint64_t, so
+        // totalLines < visibleLines would underflow to a huge range.
+        const auto logicalMax
+            = static_cast<int64_t>( totalLines.get() ) - static_cast<int64_t>( visibleLines.get() );
+        scrollMax = static_cast<int>(
+            std::min( static_cast<uint64_t>( std::max<int64_t>( logicalMax, 0 ) ),
+                      maxValue<LinesCount>().get() ) );
+        verticalScrollBar()->setRange( 0, scrollMax );
+        // Check if visibility changed after setting range
+        if ( scrollBarWasVisible != verticalScrollBar()->isVisible() ) {
+            scrollBarVisibilityChanged = true;
+        }
+    }
+    else if ( totalLines >= visibleLines ) {
+        scrollMax = static_cast<int>(
+            std::min( ( totalLines - visibleLines ).get(), maxValue<LinesCount>().get() ) );
+        verticalScrollBar()->setRange( 0, scrollMax );
+        // Check if visibility changed after setting range
+        if ( scrollBarWasVisible != verticalScrollBar()->isVisible() ) {
+            scrollBarVisibilityChanged = true;
         }
     }
     else {

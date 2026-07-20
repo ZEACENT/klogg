@@ -105,19 +105,19 @@ void ColorLabelsController::addColorLabelToSelection( size_t label,
                                                       const AbstractLogView* sourceView )
 {
     applyToViews( manager_.setColorLabel(
-        label, selectedText( sourceView ),
+        label, selectedTexts( sourceView ),
         HighlighterSetCollection::get().quickHighlighterDefaults() ) );
 }
 
 void ColorLabelsController::addNextColorLabelToSelection( const AbstractLogView* sourceView )
 {
     applyToViews( manager_.setNextColorLabel(
-        selectedText( sourceView ), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
+        selectedTexts( sourceView ), HighlighterSetCollection::get().quickHighlighterDefaults() ) );
 }
 
 void ColorLabelsController::removeColorLabelFromSelection( const AbstractLogView* sourceView )
 {
-    applyToViews( manager_.removeColorLabel( selectedText( sourceView ) ) );
+    applyToViews( manager_.removeColorLabel( selectedTexts( sourceView ) ) );
 }
 
 void ColorLabelsController::clearColorLabels()
@@ -143,14 +143,14 @@ void ColorLabelsController::applyToViews(
     }
 }
 
-QString ColorLabelsController::selectedText( const AbstractLogView* sourceView ) const
+QStringList ColorLabelsController::selectedTexts( const AbstractLogView* sourceView ) const
 {
     if ( sourceView != nullptr ) {
-        return sourceView->getSelectedText();
+        return sourceView->getSelectedLinesText();
     }
     if ( activeViewProvider_ != nullptr ) {
         if ( auto* const view = activeViewProvider_() ) {
-            return view->getSelectedText();
+            return view->getSelectedLinesText();
         }
     }
     return {};

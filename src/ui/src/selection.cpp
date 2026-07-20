@@ -189,6 +189,19 @@ QString Selection::getSelectedText( const AbstractLogData* logData, bool lineNum
     return text;
 }
 
+QStringList Selection::getSelectedLinesText( const AbstractLogData* logData ) const
+{
+    const auto selectionData = getSelectionWithLineNumbers( logData );
+
+    QStringList texts;
+    texts.reserve( static_cast<QStringList::size_type>( selectionData.size() ) );
+    for ( const auto& [ lineNumber, line ] : selectionData ) {
+        texts.append( line );
+    }
+
+    return texts;
+}
+
 std::vector<std::pair<LineNumber, QString>>
 Selection::getSelectionWithLineNumbers( const AbstractLogData* logData ) const
 {
