@@ -589,6 +589,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             crawler->logMainView_ );
     }
 
+    int filteredTextAreaCacheActualHeight() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::textAreaCacheActualHeight(
+            crawler->filteredView_ );
+    }
+
     qreal mainTextAreaCachePixmapDevicePixelRatio() const
     {
         return AbstractLogView::access_by<
@@ -702,6 +708,26 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
 
             const auto charHeight = filteredCharHeight();
             if ( charHeight > 0 && filteredTextViewportHeight() > charHeight * minimumRows ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Converge the views to a size where the main viewport shows exactly
+    // `rowFloor` FULL text rows (so getNbVisibleLines() == rowFloor + 1).
+    // Font metrics vary per platform, so sweep instead of hardcoding a height.
+    bool resizeViewsToMainTextRowFloor( int width, int rowFloor )
+    {
+        for ( int height = 80; height <= 720; height += 4 ) {
+            crawler->logMainView_->setFixedSize( width, height );
+            crawler->filteredView_->setFixedSize( width, height );
+            QTest::qWait( 10 );
+            render();
+
+            const auto charHeight = mainCharHeight();
+            if ( charHeight > 0 && mainTextViewportHeight() / charHeight == rowFloor ) {
                 return true;
             }
         }
@@ -2006,7 +2032,7 @@ SCENARIO( "Filtered view keeps sparse results top-aligned when follow mode is en
     REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
 }
 
-SCENARIO( "Wrapped single-line content keeps EOF anchored when scrollbar range is empty",
+SCENARIO( "Wrapped single-line overflow keeps EOF anchored with a scrollable range",
           "[ui][scrollbar][regression]" )
 {
     QTemporaryFile file{ "crawler_wrapped_single_line_XXXXXX" };
@@ -2023,17 +2049,33 @@ SCENARIO( "Wrapped single-line content keeps EOF anchored when scrollbar range i
 
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 1; } ) );
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
 
     crawlerVisitor.setTextWrap( true );
     crawlerVisitor.resizeViews( 220, 100 );
     crawlerVisitor.enableFollowMode( true );
     crawlerVisitor.render();
+    // Flush the deferred updateScrollBars (queued from the first paint once
+    // leftMarginPx_ exists) so the wrapped range is settled deterministically.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
 
-    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() == 0 );
+    // The range must now OPEN for a single over-tall wrapped line (previously
+    // pinned at 0, which made either the head or the tail unreachable):
+    // follow mode keeps EOF anchored at the bottom...
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
     REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
     REQUIRE( crawlerVisitor.mainTextAreaCacheActualHeight()
              > crawlerVisitor.mainTextViewportHeight() );
     REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
+
+    // ...and with follow released, scrolling to the top reveals the head.
+    crawlerVisitor.enableFollowMode( false );
+    crawlerVisitor.mainView()->verticalScrollBar()->setValue( 0 );
+    QTest::qWait( 50 );
+    crawlerVisitor.render();
+    REQUIRE_FALSE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset() == 0 );
 }
 
 SCENARIO( "Wrapped line paints every visual row of its slot (no trailing blank band)",
@@ -2148,6 +2190,159 @@ SCENARIO( "Wrap-mode line map rebuild stays bounded to the viewport",
                      << " charHeight=" << crawlerVisitor.mainCharHeight() );
     REQUIRE( mapSize > 0 );
     REQUIRE( mapSize < 500 );
+}
+
+SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
+          "[ui][textwrap][scrollbar][regression]" )
+{
+    // Regression: updateScrollBars gated the whole vertical range on LOGICAL
+    // line count >= viewport rows. With fewer logical lines than rows (the
+    // filtered-window report: a handful of long matches), enabling wrap left
+    // the range at (0,0): wrapped rows spilled past the viewport bottom with
+    // no way to scroll to them. The main view shared the same gate.
+    QTemporaryFile file{ "crawler_wrap_few_lines_XXXXXX" };
+    REQUIRE( file.open() );
+    for ( int i = 0; i < 4; ++i ) {
+        file.write( QStringLiteral( "wrap overflow line %1 %2\n" )
+                        .arg( i )
+                        .arg( QString( 800, QLatin1Char( 'x' ) ) )
+                        .toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 4; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    // Search first so the (possibly recreated) filtered view gets wrap applied.
+    crawlerVisitor.setSearchPattern( "wrap overflow line" );
+    crawlerVisitor.runSearch();
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 4; } ) );
+
+    crawlerVisitor.setTextWrap( true );
+    crawlerVisitor.resizeViews( 320, 400 );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    // Sanity: the viewport really is taller than 4 logical rows, and wrapping
+    // really overflows it (preconditions of the reported defect).
+    REQUIRE( crawlerVisitor.mainTextViewportHeight() > 4 * crawlerVisitor.mainCharHeight() );
+    REQUIRE( crawlerVisitor.mainTextAreaCacheActualHeight()
+             > crawlerVisitor.mainTextViewportHeight() );
+    REQUIRE( crawlerVisitor.filteredTextAreaCacheActualHeight()
+             > crawlerVisitor.filteredTextViewportHeight() );
+
+    THEN( "the main view offers a scrollable range and its tail is reachable" )
+    {
+        REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+
+        crawlerVisitor.scrollMainVerticallyToBottom();
+        crawlerVisitor.render();
+
+        REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+        REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
+    }
+
+    THEN( "the filtered view offers a scrollable range and its tail is reachable" )
+    {
+        REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+
+        crawlerVisitor.scrollFilteredVerticallyToBottom();
+        crawlerVisitor.render();
+
+        REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
+        REQUIRE( crawlerVisitor.filteredDrawingTopOffset() < 0 );
+    }
+}
+
+SCENARIO( "Wrap mode keeps an empty scroll range when content fits",
+          "[ui][textwrap][scrollbar]" )
+{
+    // Companion guard to the overflow regression: a few SHORT lines in a tall
+    // viewport genuinely fit when wrapped -- the range must stay (0,0) and the
+    // frame top-anchored with nothing clipped.
+    QTemporaryFile file{ "crawler_wrap_fits_XXXXXX" };
+    REQUIRE( file.open() );
+    for ( int i = 0; i < 4; ++i ) {
+        file.write( QStringLiteral( "short line %1\n" ).arg( i ).toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 4; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( true );
+    crawlerVisitor.resizeViews( 320, 400 );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.mainTextViewportHeight() > 4 * crawlerVisitor.mainCharHeight() );
+    REQUIRE( crawlerVisitor.mainTextAreaCacheActualHeight()
+             <= crawlerVisitor.mainTextViewportHeight() );
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() == 0 );
+    REQUIRE( crawlerVisitor.mainDrawingTopOffset() == 0 );
+}
+
+SCENARIO( "Wrap mode range opens when the bottom frame overflows by a partial line",
+          "[ui][textwrap][scrollbar][regression]" )
+{
+    // Regression for the equality-with-overshoot hole: 11 logical lines where
+    // line 0 wraps to 2 rows and lines 1..10 to 1 row each (12 wrapped rows).
+    // With an 11-row viewport the old bottom-up count included line 0 as
+    // (partially) visible, so count == totalLines kept the range at (0,0)
+    // even though one wrapped row could never be shown. The range must open
+    // so every line becomes fully reachable.
+    QTemporaryFile file{ "crawler_wrap_partial_overshoot_XXXXXX" };
+    REQUIRE( file.open() );
+    file.write( QStringLiteral( "line zero wraps to two rows xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" )
+                    .toUtf8() );
+    for ( int i = 1; i <= 10; ++i ) {
+        file.write( QStringLiteral( "short %1\n" ).arg( i ).toUtf8() );
+    }
+    file.flush();
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 11; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.setTextWrap( true );
+
+    // Size the viewport to exactly 11 text rows (font metrics vary per
+    // platform, so converge adaptively instead of hardcoding a height).
+    REQUIRE( crawlerVisitor.resizeViewsToMainTextRowFloor( 320, 10 ) );
+    crawlerVisitor.render();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    crawlerVisitor.render();
+
+    // 11 logical lines == 11 viewport rows: the old gate let this through and
+    // the partial-line count then produced an empty range.
+    REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
+
+    crawlerVisitor.scrollMainVerticallyToBottom();
+    crawlerVisitor.render();
+
+    // Bottom frame: line 0's head is clipped (reachable from the top frame),
+    // every other line fully visible.
+    REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
+    REQUIRE( crawlerVisitor.mainTopLine().get() == 1 );
 }
 
 SCENARIO( "Log view reserves space for transient horizontal scrollbars",

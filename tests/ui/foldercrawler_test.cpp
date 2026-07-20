@@ -34,6 +34,7 @@
 #include <QFile>
 #include <QLineEdit>
 #include <QMenu>
+#include <QScrollBar>
 #include <QShortcut>
 #include <QSignalSpy>
 #include <QSpinBox>
@@ -3090,4 +3091,54 @@ TEST_CASE( "FolderCrawlerWidget color labels apply per line to multi-row selecti
     QTest::qWait( 20 );
     CHECK( labelEntries( filteredView, 0 ).isEmpty() );
     CHECK( labelEntries( mainView, 0 ).isEmpty() );
+}
+
+
+TEST_CASE( "FolderCrawlerWidget results view scrolls wrapped overflow beyond the viewport",
+           "[folder][textwrap][scrollbar][regression]" )
+{
+    // Regression (single-file parity): the results pane shares
+    // AbstractLogView::updateScrollBars, whose logical-count gate left the
+    // range at (0,0) when few result rows wrapped past the viewport bottom,
+    // making the tail rows unreachable. Few long matches in a small pane must
+    // open a scrollable range.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    QByteArray payload;
+    for ( int i = 0; i < 3; ++i ) {
+        payload.append( QByteArrayLiteral( "ERROR folder wrap line " )
+                        + QByteArray::number( i ) + " " + QByteArray( 800, 'x' ) + "\n" );
+    }
+    const QString a = writeFile( dir, "a.log", payload );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    QTest::qWait( 200 );
+
+    auto* const filteredView = widget.filteredView();
+    REQUIRE( filteredView != nullptr );
+
+    // Rows: 1 group header + 3 data rows. Pin the pane geometry so it is
+    // taller than the 4 logical rows (the gate condition) while each data row
+    // wraps to many visual rows (the overflow condition).
+    filteredView->setFixedSize( 360, 400 );
+    filteredView->textWrapSet( true );
+    QTest::qWait( 50 );
+    widget.grab();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    widget.grab();
+
+    REQUIRE( filteredView->verticalScrollBar()->maximum() > 0 );
+
+    // The tail of the last row is reachable at the bottom of the range.
+    filteredView->verticalScrollBar()->setValue( filteredView->verticalScrollBar()->maximum() );
+    QTest::qWait( 50 );
+    widget.grab();
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    REQUIRE( Access::drawingTopOffset( filteredView ) < 0 );
 }

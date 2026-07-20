@@ -633,7 +633,17 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     int visibleLineMapBuildCount_ = 0;
 
     LinesCount getNbVisibleLines() const;
-    LinesCount getNbBottomWrappedVisibleLines() const;
+    // Composition of the bottom frame in wrap mode: how many logical lines the
+    // frame holds (its top line counted even when only partially visible, so
+    // the frame stays filled) and whether the wrapped document overflows the
+    // viewport. The scroll range must be derived from BOTH: a document whose
+    // lines all fit the frame count can still overflow (clipped top line), in
+    // which case the range must open for the tail to be reachable.
+    struct WrappedBottomFrame {
+        LinesCount frameLines;
+        bool contentOverflows;
+    };
+    WrappedBottomFrame getWrappedBottomFrame() const;
     LineLength getNbVisibleCols() const;
     int textViewportHeight() const;
     int horizontalScrollBarOverlayHeight() const;
