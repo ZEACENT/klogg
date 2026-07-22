@@ -1486,10 +1486,11 @@ void FolderCrawlerWidget::startSearch()
 
         // Parity with CrawlerWidget::replaceCurrentSearch(""): an empty search
         // clears the results pane instead of leaving stale results behind.
-        // (Single-file additionally honors showAllInFilteredViewWhenSearchEmpty
-        // by dumping the open file unfiltered; that preference is specific to
-        // the single-file lens view and is intentionally not mirrored into the
-        // cross-file grep results pane.)
+        // Folder results panes always use EmptyFilterPolicy::ClearResults --
+        // the showAllInFilteredViewWhenSearchEmpty preference (mirror mode)
+        // only applies to single-document lens views; "every line of every
+        // file" is not a meaningful cross-file result set.
+        // See emptyfilterpolicy.h for the per-pane-kind policy split.
         searchToolbar_->setSearchInProgress( false );
         searchActive_ = false;
         currentSearchPattern_ = {};

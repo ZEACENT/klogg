@@ -991,6 +991,11 @@ SCENARIO( "Crawler widget search", "[ui]" )
     QTemporaryFile file{ "crawler_test_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
 
+    // This scenario exercises the populated filtered view (incl. the
+    // empty-filter mirror branch); pin the mirror-mode preference so it does
+    // not depend on the compiled default (issue #46 flipped it to off).
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
     Session session;
     session.savedSearches().clear();
 
@@ -1685,6 +1690,40 @@ SCENARIO( "Filtered window can stay empty while the filter is empty",
 
 }
 
+SCENARIO( "Empty search shows only marked lines with default settings (marks navigation)",
+          "[ui][filter][regression]" )
+{
+    QTemporaryFile file{ "crawler_empty_filter_marks_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    // Pin the UI behavior to the COMPILED default (issue #46, upstream parity:
+    // an empty filter must not flood the filtered window).  Seeding the guard
+    // from a default-constructed Configuration keeps the test deterministic
+    // regardless of any persisted user setting.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{
+        Configuration{}.showAllInFilteredViewWhenSearchEmpty()
+    };
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.addMarksInMainView( { 10_lnum, 25_lnum } );
+    REQUIRE( crawlerVisitor.markedLinesCount() == 2 );
+
+    // "Search" with an empty search box: matches are cleared and the filtered
+    // window shows exactly the marked lines (upstream behavior; the reporter's
+    // marks-navigation workflow from issue #46).
+    crawlerVisitor.runSearch();
+
+    REQUIRE( crawlerVisitor.getLogFilteredNbLines() == 2_lcount );
+
+}
+
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
 {
     // Use production-like search buffer so each search chunk takes noticeable time.
@@ -1835,6 +1874,10 @@ SCENARIO( "Log views keep the bottom line anchored when non-wrapped height chang
     QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
     REQUIRE( generateLongLineDataFile( file ) );
 
+    // Geometry assertions need a populated filtered view: pin mirror mode so
+    // the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
     Session session;
 
     CrawlerWidgetVisitor crawlerVisitor;
@@ -1880,6 +1923,10 @@ SCENARIO( "Log views remain at bottom when viewport height decreases",
 {
     QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
     REQUIRE( generateLongLineDataFile( file ) );
+
+    // Geometry assertions need a populated filtered view: pin mirror mode so
+    // the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
 
     Session session;
 
@@ -1940,6 +1987,10 @@ SCENARIO( "Log views do not clip text rows at top or bottom in bottom alignment"
 {
     QTemporaryFile file{ "crawler_long_lines_XXXXXX" };
     REQUIRE( generateLongLineDataFile( file ) );
+
+    // Geometry assertions need a populated filtered view: pin mirror mode so
+    // the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
 
     Session session;
 
@@ -2839,6 +2890,10 @@ SCENARIO( "Go to top (T) scrolls both views regardless of focus", "[ui][shortcut
     QTemporaryFile file{ "crawler_gototop_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
 
+    // Scroll assertions need a populated filtered view: pin mirror mode so
+    // the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
     Session session;
 
     CrawlerWidgetVisitor crawlerVisitor;
@@ -2969,6 +3024,10 @@ SCENARIO( "Crawler widget color labels apply to the selection in all views",
     QTemporaryFile file{ "crawler_colorlabels_test_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
 
+    // The filtered-view selection needs a populated filtered view: pin mirror
+    // mode so the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
     Session session;
     session.savedSearches().clear();
 
@@ -3022,6 +3081,10 @@ SCENARIO( "Crawler widget color labels apply to every line of a multi-line selec
     // same per-line semantics marking already has.
     QTemporaryFile file{ "crawler_colorlabels_multiline_XXXXXX" };
     REQUIRE( generateDataFiles( file ) );
+
+    // The filtered-view selection needs a populated filtered view: pin mirror
+    // mode so the scenario does not depend on the compiled empty-filter default.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
 
     Session session;
     session.savedSearches().clear();

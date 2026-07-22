@@ -73,6 +73,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelsmanager.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/colorlabelscontroller.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlershortcuts.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/emptyfilterpolicy.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewsignalwiring.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/newversiondialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighteredit.ui
