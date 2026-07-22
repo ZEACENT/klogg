@@ -43,6 +43,7 @@
 
 #include "abstractlogview.h"
 #include "active_screen.h"
+#include "emptyfilterpolicy.h"
 #include "linetypes.h"
 #include "log.h"
 #include "searchgeneration.h"
@@ -872,9 +873,11 @@ void CrawlerWidget::applyEmptyFilterBehavior()
         return;
     }
 
-    const bool showAll = searchToolbar_->currentSearchText().isEmpty()
-        && Configuration::get().showAllInFilteredViewWhenSearchEmpty();
-    logFilteredData_->setAllLinesVisible( showAll );
+    const auto emptyFilterPolicy
+        = klogg::emptyLensFilterPolicy( searchToolbar_->currentSearchText().isEmpty(),
+                                        Configuration::get().showAllInFilteredViewWhenSearchEmpty() );
+    logFilteredData_->setAllLinesVisible( emptyFilterPolicy
+                                          == klogg::EmptyFilterPolicy::MirrorAllLines );
     if ( searchToolbar_->currentSearchText().isEmpty() ) {
         filteredView_->updateData();
     }
@@ -1576,7 +1579,10 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 
     // Clear and recompute the content of the filtered window.
     logFilteredData_->clearSearch();
-    if ( searchText.isEmpty() && Configuration::get().showAllInFilteredViewWhenSearchEmpty() ) {
+    if ( klogg::emptyLensFilterPolicy(
+             searchText.isEmpty(),
+             Configuration::get().showAllInFilteredViewWhenSearchEmpty() )
+         == klogg::EmptyFilterPolicy::MirrorAllLines ) {
         logFilteredData_->setAllLinesVisible( true );
     }
     filteredView_->updateData();

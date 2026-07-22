@@ -809,7 +809,9 @@ class Configuration final : public Persistable<Configuration> {
 
     bool allowFollowOnScroll_ = true;
     bool autoRunSearchOnPatternChange_ = false;
-    bool showAllInFilteredViewWhenSearchEmpty_ = true;
+    // Upstream parity (issue #46): an empty filter leaves only marked lines
+    // unless the user opts into the unfiltered mirror mode.
+    bool showAllInFilteredViewWhenSearchEmpty_ = false;
 
     bool optimizeForNotLatinEncodings_ = false;
 

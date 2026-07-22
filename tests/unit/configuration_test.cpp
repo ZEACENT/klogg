@@ -214,11 +214,13 @@ TEST_CASE( "Configuration stores and restores capture rolling settings" )
     REQUIRE( restoredConfig.liveCaptureRollingBackupCount() == 3 );
 }
 
-TEST_CASE( "Configuration defaults empty filters to show all lines in filtered view" )
+TEST_CASE( "Configuration defaults empty filters to an empty filtered view" )
 {
     Configuration config;
 
-    REQUIRE( config.showAllInFilteredViewWhenSearchEmpty() );
+    // Upstream parity (issue #46): an empty filter must NOT flood the
+    // filtered window with every line; users opt into the mirror mode.
+    REQUIRE_FALSE( config.showAllInFilteredViewWhenSearchEmpty() );
 }
 
 TEST_CASE( "Configuration stores and restores empty-filter filtered-view behavior" )
@@ -230,8 +232,10 @@ TEST_CASE( "Configuration stores and restores empty-filter filtered-view behavio
     {
         QSettings settings( settingsPath, QSettings::IniFormat );
 
+        // Store the non-default value so the round-trip stays discriminating
+        // (the compiled default is false since issue #46).
         Configuration config;
-        config.setShowAllInFilteredViewWhenSearchEmpty( false );
+        config.setShowAllInFilteredViewWhenSearchEmpty( true );
         config.saveToStorage( settings );
         settings.sync();
         REQUIRE( settings.status() == QSettings::NoError );
@@ -241,7 +245,7 @@ TEST_CASE( "Configuration stores and restores empty-filter filtered-view behavio
     Configuration restoredConfig;
     restoredConfig.retrieveFromStorage( restoredSettings );
 
-    REQUIRE_FALSE( restoredConfig.showAllInFilteredViewWhenSearchEmpty() );
+    REQUIRE( restoredConfig.showAllInFilteredViewWhenSearchEmpty() );
 }
 
 TEST_CASE( "Configuration live-capture rolling size MB view does not truncate sub-MB values",
