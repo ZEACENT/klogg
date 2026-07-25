@@ -257,8 +257,9 @@ _QSIZETYPE_DECL_RE = re.compile(r"\b(?:const\s+)?qsizetype\s+(\w+)\b")
 _QSTRINGVIEW_ALIAS_RE = re.compile(r"\busing\s+(\w+)\s*=\s*QStringView\s*;")
 # A #if whose condition is Qt-6-only (so qsizetype code inside it is safe).
 _QT6_IF_RE = re.compile(
-    r"#\s*if\b.*\bQT_VERSION(?:_MAJOR)?\b.*"
-    r"(?:QT_VERSION_CHECK\s*\(\s*6\b|0x0*6[0-9A-Fa-f]{4,}|>=\s*6\b|>\s*5\b)"
+    r"#\s*if\b.*\bQT_VERSION(?:_MAJOR)?\b\s*"
+    r"(?:>=\s*(?:QT_VERSION_CHECK\s*\(\s*6\b|0x0*6[0-9A-Fa-f]{4,}|6\b)"
+    r"|>\s*(?:QT_VERSION_CHECK\s*\(\s*5\b|0x0*5[0-9A-Fa-f]{4,}|5\b))"
 )
 
 
@@ -406,7 +407,7 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
     # `<Type> <ident>(...)` constructions. Receivers matching these are safe.
     qstrview_vars: set[str] = set()
     type_alt = "|".join(re.escape(t) for t in qstrview_types)
-    var_decl_re = re.compile(rf"\b(?:const\s+)?({type_alt})\s+(\w+)\b")
+    var_decl_re = re.compile(rf"\b(?:const\s+)?({type_alt})\s*[&*]?\s*(\w+)\b")
     for line in lines:
         code = _strip_line_comment(line)
         for m in var_decl_re.finditer(code):

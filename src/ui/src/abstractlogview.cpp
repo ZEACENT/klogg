@@ -3228,53 +3228,55 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         // the two are blended instead of one masking the other.
         klogg::vector<HighlightSource> highlightSources;
 
+        const auto toColor = []( quint32 rgb ) {
+            return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
+                           static_cast<int>( ( rgb >> 8 ) & 0xff ),
+                           static_cast<int>( rgb & 0xff ) );
+        };
+        // Map a logLine-space match into the expanded (untabified) column
+        // space. logLine is still alive here: it is moved into expandedLine
+        // only after every logLine-space source has been gathered.
+        const auto untabifyMatch = [ &logLine ]( const HighlightedMatch& match ) {
+            const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
+            const auto matchPart
+                = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
+            const auto expandedPrefixLength = untabify( prefix.toString() ).size();
+            const LineLength startDelta
+                = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                    expandedPrefixLength - prefix.size() ) };
+
+            const LineLength expandedMatchLength = LineLength{
+                untabify( matchPart.toString(),
+                          LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
+                              expandedPrefixLength ) } )
+                    .size()
+            };
+
+            const auto lengthDelta
+                = expandedMatchLength
+                  - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                      matchPart.size() ) };
+
+            return HighlightedMatch{ match.startColumn() + startDelta,
+                                     match.size() + lengthDelta, match.foreColor(),
+                                     match.backColor() };
+        };
+
+        // ANSI color spans (lowest layer). Unset channels inherit the base.
+        // ANSI spans come from the raw log content and are file-intrinsic —
+        // apply them even to grayed-out lines outside the search range.
+        klogg::vector<HighlightedMatch> ansiMatches;
+        for ( const auto& span : logData_->getLineAnsiColors( lineNumber ) ) {
+            ansiMatches.push_back( HighlightedMatch{
+                span.startColumn, span.length,
+                span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
+                span.background.has_value() ? toColor( *span.background ) : backColor } );
+        }
+        std::transform( ansiMatches.begin(), ansiMatches.end(), ansiMatches.begin(),
+                        untabifyMatch );
+        highlightSources.push_back( { HighlightLayer::Ansi, std::move( ansiMatches ) } );
+
         if ( !isOutsideSearchRange ) {
-            const auto toColor = []( quint32 rgb ) {
-                return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
-                               static_cast<int>( ( rgb >> 8 ) & 0xff ),
-                               static_cast<int>( rgb & 0xff ) );
-            };
-            // Map a logLine-space match into the expanded (untabified) column
-            // space. logLine is still alive here: it is moved into expandedLine
-            // only after every logLine-space source has been gathered.
-            const auto untabifyMatch = [ &logLine ]( const HighlightedMatch& match ) {
-                const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
-                const auto matchPart
-                    = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
-                const auto expandedPrefixLength = untabify( prefix.toString() ).size();
-                const LineLength startDelta
-                    = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                        expandedPrefixLength - prefix.size() ) };
-
-                const LineLength expandedMatchLength = LineLength{
-                    untabify( matchPart.toString(),
-                              LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
-                                  expandedPrefixLength ) } )
-                        .size()
-                };
-
-                const auto lengthDelta
-                    = expandedMatchLength
-                      - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                          matchPart.size() ) };
-
-                return HighlightedMatch{ match.startColumn() + startDelta,
-                                         match.size() + lengthDelta, match.foreColor(),
-                                         match.backColor() };
-            };
-
-            // ANSI color spans (lowest layer). Unset channels inherit the base.
-            klogg::vector<HighlightedMatch> ansiMatches;
-            for ( const auto& span : logData_->getLineAnsiColors( lineNumber ) ) {
-                ansiMatches.push_back( HighlightedMatch{
-                    span.startColumn, span.length,
-                    span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
-                    span.background.has_value() ? toColor( *span.background ) : backColor } );
-            }
-            std::transform( ansiMatches.begin(), ansiMatches.end(), ansiMatches.begin(),
-                            untabifyMatch );
-            highlightSources.push_back( { HighlightLayer::Ansi, std::move( ansiMatches ) } );
-
             // Search-match gray. Sits BELOW configured highlighters so it no
             // longer masks them; on overlap the two are blended.
             if ( patternHighlight ) {

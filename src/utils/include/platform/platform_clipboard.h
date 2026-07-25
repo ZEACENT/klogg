@@ -24,13 +24,12 @@
 
 namespace klogg::platform {
 
-// On Windows, Qt handles CRLF conversion natively for clipboard text.
-// On other platforms, bare LF is the norm and we emit it directly.
-// Returns the line-ending sequence to append when building clipboard text.
+// On Windows, Qt inserts CR before LF in clipboard text natively, so we do not
+// prepend one ourselves. On other platforms we emit it explicitly.
 #ifdef Q_OS_WIN
-constexpr auto clipboardLineEnding = QChar::LineFeed;
+constexpr bool clipboardNewlineBeforeLf = false;
 #else
-constexpr auto clipboardNewlineBeforeLf = true;
+constexpr bool clipboardNewlineBeforeLf = true;
 #endif
 
 } // namespace klogg::platform

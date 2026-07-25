@@ -28,6 +28,7 @@
 #include <QStyleHints>
 #include <QTabBar>
 #include <QWidget>
+#include <QWindow>
 
 // Qt API compat wrappers.  Each function encapsulates a Qt-version branch;
 // call sites include this header and use the wrapper instead of writing an
@@ -150,7 +151,11 @@ inline bool isTabVisible( const QTabBar* bar, int index )
 
 // --- QString::split ---------------------------------------------------------
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 14, 0 )
 inline Qt::SplitBehaviorFlags skipEmptyParts()
+#else
+inline QString::SplitBehavior skipEmptyParts()
+#endif
 {
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
     return Qt::SkipEmptyParts;

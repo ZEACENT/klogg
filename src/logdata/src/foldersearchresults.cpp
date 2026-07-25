@@ -24,6 +24,21 @@
 
 #include <algorithm>
 
+namespace {
+
+// Composite cache key: filePath + null separator + codec name. The codec for a
+// marks-only file (nullptr / "UTF-8" default) differs from the scanned codec of
+// a later match group (e.g. "Shift-JIS"). Without the codec suffix, a cached
+// UTF-8 decode for a marks-only file is reused for a match group that has a
+// different actual encoding — producing mojibake for the marked lines.
+QString markCacheKey( const QString& filePath, QTextCodec* codec )
+{
+    return filePath + QChar::Null
+           + QString::fromLatin1( codec != nullptr ? codec->name() : "UTF-8" );
+}
+
+} // namespace
+
 #include "linetypes.h"
 #include "log.h"
 
@@ -85,8 +100,17 @@ void FolderSearchResults::reapplyCollapseForLastGroup()
         return;
     }
     const auto& lastPath = groups_.back().filePath;
+    const auto fid = static_cast<int>( groups_.size() ) - 1;
     if ( pendingCollapsePaths_.contains( lastPath ) ) {
-        collapsed_.insert( static_cast<int>( groups_.size() ) - 1 );
+        collapsed_.insert( fid );
+    }
+    else {
+        // The group just added was NOT in the collapse snapshot. Remove any
+        // stale collapsed_ entry a marks-only group may have set at this FileId
+        // before the real group arrived (marks-group FileIds shift when later
+        // match groups stream in). Without the removal the stale entry leaks
+        // to the real group now occupying this index.
+        collapsed_.remove( fid );
     }
 }
 
@@ -922,7 +946,8 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
     // larger than kMarkLineCacheCap skip (empty cache -> empty mark text) to
     // avoid a main-thread stall on huge files. Caller does NOT hold fileIoMutex_.
     std::lock_guard<std::mutex> io( fileIoMutex_ );
-    if ( markLineCache_.contains( filePath ) ) {
+    const QString cacheKey = markCacheKey( filePath, codec );
+    if ( markLineCache_.contains( cacheKey ) ) {
         return;
     }
 
@@ -962,7 +987,7 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
             start = idx + 1;
         }
     }
-    markLineCache_.insert( filePath, std::move( lines ) );
+    markLineCache_.insert( cacheKey, std::move( lines ) );
 }
 
 QString FolderSearchResults::readMarkLine( const QString& filePath, LineNumber localLine,
@@ -973,7 +998,7 @@ QString FolderSearchResults::readMarkLine( const QString& filePath, LineNumber l
     // dataMutex_; only fileIoMutex_ is taken here.
     ensureMarkLines( filePath, codec );
     std::lock_guard<std::mutex> io( fileIoMutex_ );
-    const auto it = markLineCache_.constFind( filePath );
+    const auto it = markLineCache_.constFind( markCacheKey( filePath, codec ) );
     const auto lineIdx = static_cast<size_t>( localLine.get() );
     if ( it != markLineCache_.cend() && lineIdx < it->size() ) {
         return it->at( lineIdx );

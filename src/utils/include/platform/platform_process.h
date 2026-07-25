@@ -20,6 +20,7 @@
 #ifndef KLOGG_PLATFORM_PROCESS_H
 #define KLOGG_PLATFORM_PROCESS_H
 
+#include <QtGlobal>
 #include <chrono>
 
 namespace klogg::platform {

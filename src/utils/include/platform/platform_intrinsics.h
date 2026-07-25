@@ -31,9 +31,13 @@
 namespace klogg::platform {
 
 // Count leading zero bits. Uses MSVC intrinsics on Windows, GCC/Clang
-// builtins elsewhere.
+// builtins elsewhere.  __builtin_clzll(0) is UB on GCC/Clang, so guard zero
+// before the platform branches.
 inline int countLeadingZeroes( uint64_t value )
 {
+    if ( value == 0 ) {
+        return 64;
+    }
 #ifdef Q_OS_WIN
 #if _WIN64
     unsigned long leading_zero = 0;

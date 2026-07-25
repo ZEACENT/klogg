@@ -244,9 +244,12 @@ class FolderSearchResults : public AbstractLogData {
     // Per-file decoded line text for on-demand marked-line fetch (marked
     // non-match lines have no MatchRecord offset). Built lazily by reading the
     // whole file, decoding with codecForFile and splitting on '\n' (correct for
-    // all encodings incl. UTF-16), cached. kMarkLineCacheCap is a PER-FILE cap
-    // (huge files skip -> empty mark text, no main-thread stall); there is no
-    // cache-wide memory budget. Persists across searches (file-intrinsic);
+    // all encodings incl. UTF-16), cached. Key is filePath + null + codec name;
+    // a marks-only file (nullptr codec / UTF-8 default) and a later match-group
+    // file (scanned codec, e.g. Shift-JIS) get separate cache entries to avoid
+    // mojibake from a stale encoding mismatch. kMarkLineCacheCap is a PER-FILE
+    // cap (huge files skip -> empty mark text, no main-thread stall); there is
+    // no cache-wide memory budget. Persists across searches (file-intrinsic);
     // invalidated on encoding-override change. A transient open failure is NOT
     // cached so a later fetch can retry. Guarded by fileIoMutex_.
     mutable QHash<QString, std::vector<QString>> markLineCache_;
