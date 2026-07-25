@@ -56,10 +56,6 @@
 #include <QEvent>
 #include <QFontMetrics>
 
-#ifdef GLOGG_PERF_MEASURE_FPS
-#include "perfcounter.h"
-#endif
-
 #include "abstractlogdata.h"
 #include "linekind.h"
 #include "highlighterset.h"
@@ -157,6 +153,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // async paint -- or on a viewport Qt never painted (hidden/unrealized) --
     // resolves to the current row instead of a stale/empty map.
     void ensureLineMapFresh();
+#ifdef KLOGG_TESTS
     // Exposed for testing: resolve a viewport y to a line using the current map
     // (nullopt when the map is empty). Lets headless tests verify the paint-free
     // rebuild without synthesizing a mouse event.
@@ -166,6 +163,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // tests verify the signature cache skips redundant rebuilds across mouse
     // events that share the same data/geometry.
     int visibleLineMapBuildCount() const { return visibleLineMapBuildCount_; }
+#endif
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();
@@ -569,11 +567,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     const QuickFindPattern* quickFindPattern_;
     // Our own QuickFind object
     QuickFind* quickFind_;
-
-#ifdef GLOGG_PERF_MEASURE_FPS
-    // Performance measurement
-    PerfCounter perfCounter_;
-#endif
 
     // Vertical offset (in pixels) at which the first line of text is written
     int drawingTopOffset_ = 0;

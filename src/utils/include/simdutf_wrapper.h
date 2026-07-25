@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 Anton Filimonov
+ * Copyright (C) 2024 Anton Filimonov and other contributors
  *
  * This file is part of klogg.
  *
@@ -17,19 +17,21 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef KLOGG_ACTIVE_SCREEN_H
+#ifndef KLOGG_SIMDUTF_WRAPPER_H
+#define KLOGG_SIMDUTF_WRAPPER_H
 
-#include <QWidget>
-#include <QWindow>
-#include <QScreen>
-
-#include "qtcompat/qtcompat.h"
-
-static inline QScreen* activeScreen(QWidget* widget) {
-    if (widget == nullptr) return nullptr;
-    
-    QScreen* screen = klogg::qtcompat::widgetScreen( widget );
-    return screen;
-}
-
+// simdutf has sign-conversion warnings under -Werror / -Wsign-conversion.
+// This wrapper centralises the suppression so call sites do not need to
+// replicate the pragma block.
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wsign-conversion"
 #endif
+
+#include <simdutf.h>
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+#endif // KLOGG_SIMDUTF_WRAPPER_H

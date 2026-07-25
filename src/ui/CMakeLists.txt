@@ -19,6 +19,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlighterset.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightersmenu.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightedmatch.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/highlightcompose.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/markprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfilters.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfilterscombobox.h
@@ -82,6 +83,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/predefinedfiltersdialog.ui
   ${CMAKE_CURRENT_SOURCE_DIR}/include/optionsdialog.ui
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightcompose.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbprocesstransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbdevicelistprovider.cpp

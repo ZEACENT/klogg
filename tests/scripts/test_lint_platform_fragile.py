@@ -182,5 +182,81 @@ class TestPrivateCurrentCrawlerTest(unittest.TestCase):
             )
 
 
+class Qt6IfReTest(unittest.TestCase):
+    """_QT6_IF_RE must match Qt-6-only guards (>= 6, > 5) but NOT Qt-5
+    guards (e.g. < QT_VERSION_CHECK(6, 0, 0))."""
+
+    def test_qt6_ge_6_matches(self):
+        cases = [
+            "#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)",
+            "#if QT_VERSION >= 6",
+            "#if QT_VERSION >= 0x060000",
+            "#if QT_VERSION > QT_VERSION_CHECK(5, 15, 0)",
+            "#if QT_VERSION > 5",
+            "#if QT_VERSION > 0x050f00",
+            "#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)",
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIsNotNone(lint._QT6_IF_RE.search(case),
+                                     f"Should match: {case}")
+
+    def test_qt5_lt_6_does_not_match(self):
+        cases = [
+            "#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)",
+            "#if QT_VERSION <= QT_VERSION_CHECK(5, 15, 0)",
+            "#if QT_VERSION_CHECK(6, 0, 0)",  # no comparison
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIsNone(lint._QT6_IF_RE.search(case),
+                                  f"Should NOT match: {case}")
+
+    def test_qt_version_major_variant(self):
+        # QT_VERSION_MAJOR guards also need to be recognized.
+        self.assertIsNotNone(
+            lint._QT6_IF_RE.search("#if QT_VERSION_MAJOR >= 6"))
+
+    def test_qt6_ge_6_with_comment(self):
+        self.assertIsNotNone(
+            lint._QT6_IF_RE.search(
+                "#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)  // Qt 6 only"))
+
+
+class QsizetypeConversionQStringViewDeclTest(unittest.TestCase):
+    """var_decl_re in the qsizetype check must recognise QStringView
+    reference and pointer parameters."""
+
+    def _do_check(self, text: str) -> list:
+        return lint._check_qsizetype_to_int_conversion(
+            text, Path("test.cpp"))
+
+    def test_qstringview_ref_var_is_recognised(self):
+        # const QStringView& sv should be added to qstrview_vars.
+        text = (
+            "void f(const QStringView& sv) {\n"
+            "    qsizetype n = sv.indexOf('x');\n"
+            "}\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+    def test_qstringview_ptr_var_is_recognised(self):
+        text = (
+            "void f(QStringView* sv) {\n"
+            "    qsizetype n = sv->indexOf('x');\n"
+            "}\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+    def test_qstringview_value_var_still_recognised(self):
+        text = (
+            "void f() {\n"
+            "    QStringView sv = getView();\n"
+            "    qsizetype n = sv.indexOf('x');\n"
+            "}\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+
 if __name__ == "__main__":
     unittest.main()

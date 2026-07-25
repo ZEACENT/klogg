@@ -42,6 +42,7 @@
 #include <qabstractitemview.h>
 
 #include "log.h"
+#include "qtcompat/qtcompat.h"
 
 constexpr int PatternRole = Qt::UserRole + 1;
 constexpr int RegexRole = PatternRole + 1;
@@ -63,9 +64,7 @@ PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     view()->setTextElideMode( Qt::ElideNone );
     setSizeAdjustPolicy( QComboBox::AdjustToContents );
 
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    setPlaceholderText( tr( "Filter favorites" ) );
-#endif
+klogg::qtcompat::setPlaceholderText( this, tr( "Filter favorites" ) );
 }
 
 void PredefinedFiltersComboBox::populatePredefinedFilters()

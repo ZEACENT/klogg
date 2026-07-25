@@ -1724,6 +1724,55 @@ SCENARIO( "Empty search shows only marked lines with default settings (marks nav
 
 }
 
+SCENARIO( "Marks persist across a filter change and stay visible (single-file parity)",
+          "[ui][filter][marks]" )
+{
+    // Reference behavior for the folder mark-persistence bug: in single-file
+    // mode marks live in LogFilteredData::marks_, which clearSearch() preserves
+    // (marks_and_matches_ = marks_), so a mark made under filter1 that does NOT
+    // match filter2 still appears in the filtered view under the default
+    // "Marks and matches" visibility. The folder results model must match this.
+    QTemporaryFile file{ "crawler_marks_filter_change_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{
+        Configuration{}.showAllInFilteredViewWhenSearchEmpty()
+    };
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    // filter1 = "glogg": matches every line (the data template contains glogg).
+    crawlerVisitor.setSearchPattern( "glogg" );
+    crawlerVisitor.runSearch();
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get()
+                                            == SL_NB_LINES; } ) );
+
+    // Mark line 5 -- a line that matches filter1 but NOT the upcoming filter2.
+    crawlerVisitor.addMarksInMainView( { 5_lnum } );
+    REQUIRE( crawlerVisitor.markedLinesCount() == 1 );
+
+    // filter2 = "000010": matches only line 10. Line 5 (marked) does not match.
+    crawlerVisitor.replaceSearchPattern( "000010" );
+    crawlerVisitor.runSearch();
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 2; } ) );
+
+    // The mark survives the filter change...
+    REQUIRE( crawlerVisitor.markedLinesCount() == 1 );
+    // ...and stays visible in the filtered view under "Marks and matches"
+    // (marked line 5 + matched line 10), even though line 5 does not match
+    // filter2. Assert the ROW IDENTITY, not just the count: the filtered view
+    // preserves source order, so row 0 is marked line 5 (000005) and row 1 is
+    // the filter2 match on line 10 (000010).
+    REQUIRE( crawlerVisitor.filteredLineText( 0 ).contains( "000005" ) );
+    REQUIRE( crawlerVisitor.filteredLineText( 1 ).contains( "000010" ) );
+}
+
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
 {
     // Use production-like search buffer so each search chunk takes noticeable time.

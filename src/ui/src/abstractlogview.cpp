@@ -84,6 +84,7 @@
 #include "abstractlogview.h"
 #include "containers.h"
 #include "highlightedmatch.h"
+#include "highlightcompose.h"
 #include "linetypes.h"
 
 #include "active_screen.h"
@@ -96,8 +97,11 @@
 #include "quickfind.h"
 #include "quickfindpattern.h"
 #include "quicklabelpattern.h"
+#include "platform/platform_intrinsics.h"
+#include "platform/platform_clipboard.h"
 #include "regularexpressionpattern.h"
 #include "shortcuts.h"
+#include "platform/platform_input.h"
 
 namespace {
 
@@ -109,52 +113,13 @@ bool quickLabelMatchesText( const QuickLabelEntry& entry, const QString& text )
 }
 } // namespace
 
-#ifdef Q_OS_WIN
-
-#pragma warning( disable : 4244 )
-
-#include <intrin.h>
-
-#if _WIN64
-inline int countLeadingZeroes( uint64_t value )
-{
-    unsigned long leading_zero = 0;
-
-    if ( _BitScanReverse64( &leading_zero, value ) ) {
-        return 63ul - leading_zero;
-    }
-    else {
-        return 64;
-    }
-}
-#else
-inline int countLeadingZeroes( uint64_t value )
-{
-    unsigned long leading_zero = 0;
-
-    if ( _BitScanReverse( &leading_zero, static_cast<uint32_t>( value ) ) ) {
-        return 63ul - leading_zero;
-    }
-    else {
-        return 64;
-    }
-}
-#endif
-
-#else
-inline int countLeadingZeroes( uint64_t value )
-{
-    return __builtin_clzll( value );
-}
-#endif
-
 namespace {
 
 int mapPullToFollowLength( int length );
 
 int intLog2( uint64_t x )
 {
-    return 63 - countLeadingZeroes( x | 1 );
+    return 63 - klogg::platform::countLeadingZeroes( x | 1 );
 }
 
 // see https://lemire.me/blog/2021/05/28/computing-the-number-of-digits-of-an-integer-quickly/
@@ -1095,11 +1060,7 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         return;
     }
 
-#ifdef Q_OS_MACOS
-    constexpr auto FontSizeMod = Qt::MetaModifier;
-#else
-    constexpr auto FontSizeMod = Qt::ControlModifier;
-#endif
+    constexpr auto FontSizeMod = klogg::platform::FontSizeMod;
     if ( wheelEvent->modifiers().testFlag( FontSizeMod ) ) {
         Q_EMIT changeFontSize( yDelta > 0 );
         return;
@@ -1238,16 +1199,6 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     const QRect invalidRect = paintEvent->rect();
     if ( ( invalidRect.isEmpty() ) || ( logData_ == nullptr ) )
         return;
-
-#ifdef GLOGG_PERF_MEASURE_FPS
-    static uint32_t maxline = logData_->getNbLine();
-    if ( !perfCounter_.addEvent() && logData_->getNbLine() > maxline ) {
-        LOG_WARNING << "Redraw per second: " << perfCounter_.readAndReset()
-                    << " lines: " << logData_->getNbLine();
-        perfCounter_.addEvent();
-        maxline = logData_->getNbLine();
-    }
-#endif
 
     auto start = std::chrono::system_clock::now();
 
@@ -1740,9 +1691,9 @@ void AbstractLogView::saveLinesToFile( LineNumber begin, LineNumber end )
                 const auto& offset = offsets.at( offsetIndex );
                 LinesData lines{ logData_->getLines( offset.first, offset.second ), true };
                 for ( auto& l : lines.first ) {
-#if !defined( Q_OS_WIN )
+if constexpr ( klogg::platform::clipboardNewlineBeforeLf ) {
                     l.append( QChar::CarriageReturn );
-#endif
+                }
                     l.append( QChar::LineFeed );
                 }
 
@@ -2340,18 +2291,33 @@ LineLength AbstractLogView::getNbVisibleCols() const
 // Converts the mouse x, y coordinates to the line number in the file
 OptionalLineNumber AbstractLogView::convertCoordToLine( int yPos ) const
 {
-    // Use signed math (no abs) then clamp to valid range.
-    // This fixes clicks near the bottom returning "no line" due to an out-of-range index.
-    if ( wrappedLinesInfo_.empty() ) {
+    // Report the row under the cursor, or nullopt if the click falls outside the
+    // rendered rows (above the first row or below the last row's bottom).
+    //
+    // This used to CLAMP out-of-range clicks to the last visible row. That made
+    // a blank-space click below the content resolve to the last row -- in folder
+    // mode (after Collapse All) the last row is a group Header, so the click
+    // fired headerClicked and expanded the last file's group. It also caused a
+    // latent phantom last-line selection on single-file/live-log blank-space
+    // clicks. Returning nullopt makes blank space a no-op for every view.
+    //
+    // Integer division keeps in-row clicks correct: a click within the last row
+    // (y in [top+(n-1)*charH, top+n*charH)) yields offsetLines == n-1 (returned);
+    // only a click strictly below the last row's bottom yields offsetLines == n
+    // (nullopt). Drag/auto-scroll use convertCoordToFilePos (independent clamp),
+    // so they are unaffected.
+    if ( wrappedLinesInfo_.empty() || charHeight_ <= 0 ) {
         return OptionalLineNumber{};
     }
 
     const int offsetPx = yPos - drawingTopOffset_;
     const int offsetLines = offsetPx / charHeight_;
-    const auto wrappedLineInfoIndex = static_cast<size_t>( std::clamp(
-        offsetLines, 0, static_cast<int>( wrappedLinesInfo_.size() ) - 1 ) );
-    
-    return wrappedLinesInfo_[ wrappedLineInfoIndex ].lineNumber;
+    if ( offsetLines < 0
+         || offsetLines >= static_cast<int>( wrappedLinesInfo_.size() ) ) {
+        return OptionalLineNumber{};
+    }
+
+    return wrappedLinesInfo_[ static_cast<size_t>( offsetLines ) ].lineNumber;
 }
 
 // Converts the mouse x, y coordinates to the char coordinates (in the file)
@@ -3231,8 +3197,6 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
         const int xPos = contentStartPosX + ContentMarginWidth;
 
-        HighlightedMatchRanges highlighterMatches;
-
         const auto isWholeLineSelected = selection_.isLineSelected( lineNumber );
 
         // Set base colors
@@ -3252,42 +3216,27 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         if ( !isWholeLineSelected && isOutsideSearchRange ) {
             foreColor = palette.brush( QPalette::Disabled, QPalette::Text ).color();
         }
-        else if ( !isOutsideSearchRange ) {
-            const auto ansiColorSpans = logData_->getLineAnsiColors( lineNumber );
-            for ( const auto& span : ansiColorSpans ) {
-                const auto toColor = []( quint32 rgb ) {
-                    return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
-                                   static_cast<int>( ( rgb >> 8 ) & 0xff ),
-                                   static_cast<int>( rgb & 0xff ) );
-                };
-                highlighterMatches.addMatch( HighlightedMatch{
-                    span.startColumn, span.length,
-                    span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
-                    span.background.has_value() ? toColor( *span.background ) : backColor } );
-            }
 
-            const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
+        // Gather per-source highlight matches and compose them through a single
+        // explicit priority + blend contract (see highlightcompose.h). logLine-
+        // space sources (ANSI, HighlighterSet, search-match gray, quick
+        // highlighters) are mapped to the expanded (untabified) column space;
+        // QuickFind and Selection are already in that space. composeLineHighlights
+        // is now the ONLY owner of the z-order -- it replaces the scattered
+        // addMatches() calls whose implicit order let the gray search match mask
+        // configured HighlighterSet colors. On a search-match/highlighter overlap
+        // the two are blended instead of one masking the other.
+        klogg::vector<HighlightSource> highlightSources;
 
-            // LineMatch whole-line coloring only applies when not selected
-            if ( highlightType == HighlighterMatchType::LineMatch && !isWholeLineSelected ) {
-                foreColor = highlighterMatches.front().foreColor();
-                backColor = highlighterMatches.front().backColor();
-            }
-
-            if ( patternHighlight ) {
-                klogg::vector<HighlightedMatch> patternMatches;
-                patternHighlight->matchLine( logLine, patternMatches );
-                highlighterMatches.addMatches( patternMatches );
-            }
-
-            for ( const auto& highlighter : additionalHighlighters ) {
-                klogg::vector<HighlightedMatch> patternMatches;
-                highlighter.matchLine( logLine, patternMatches );
-                highlighterMatches.addMatches( patternMatches );
-            }
-        }
-
-        const auto untabifyHighlight = [ &logLine ]( const auto& match ) {
+        const auto toColor = []( quint32 rgb ) {
+            return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
+                           static_cast<int>( ( rgb >> 8 ) & 0xff ),
+                           static_cast<int>( rgb & 0xff ) );
+        };
+        // Map a logLine-space match into the expanded (untabified) column
+        // space. logLine is still alive here: it is moved into expandedLine
+        // only after every logLine-space source has been gathered.
+        const auto untabifyMatch = [ &logLine ]( const HighlightedMatch& match ) {
             const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
             const auto matchPart
                 = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
@@ -3308,32 +3257,85 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                   - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
                       matchPart.size() ) };
 
-            return HighlightedMatch{ match.startColumn() + startDelta, match.size() + lengthDelta,
-                                     match.foreColor(), match.backColor() };
+            return HighlightedMatch{ match.startColumn() + startDelta,
+                                     match.size() + lengthDelta, match.foreColor(),
+                                     match.backColor() };
         };
 
-        klogg::vector<HighlightedMatch> sortedHighlights = highlighterMatches.matches();
-        std::transform( sortedHighlights.begin(), sortedHighlights.end(), sortedHighlights.begin(),
-                        untabifyHighlight );
+        // ANSI color spans (lowest layer). Unset channels inherit the base.
+        // ANSI spans come from the raw log content and are file-intrinsic —
+        // apply them even to grayed-out lines outside the search range.
+        klogg::vector<HighlightedMatch> ansiMatches;
+        for ( const auto& span : logData_->getLineAnsiColors( lineNumber ) ) {
+            ansiMatches.push_back( HighlightedMatch{
+                span.startColumn, span.length,
+                span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
+                span.background.has_value() ? toColor( *span.background ) : backColor } );
+        }
+        std::transform( ansiMatches.begin(), ansiMatches.end(), ansiMatches.begin(),
+                        untabifyMatch );
+        highlightSources.push_back( { HighlightLayer::Ansi, std::move( ansiMatches ) } );
 
-        HighlightedMatchRanges allHighlights{ std::move( sortedHighlights ) };
+        if ( !isOutsideSearchRange ) {
+            // Search-match gray. Sits BELOW configured highlighters so it no
+            // longer masks them; on overlap the two are blended.
+            if ( patternHighlight ) {
+                klogg::vector<HighlightedMatch> patternMatches;
+                patternHighlight->matchLine( logLine, patternMatches );
+                std::transform( patternMatches.begin(), patternMatches.end(),
+                                patternMatches.begin(), untabifyMatch );
+                highlightSources.push_back(
+                    { HighlightLayer::SearchMatch, std::move( patternMatches ) } );
+            }
+
+            // Configured HighlighterSet rules. matchLine fills a
+            // HighlightedMatchRanges; extract its matches for composition.
+            HighlightedMatchRanges highlighterMatches;
+            const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
+            // LineMatch whole-line coloring sets the line's base color (used by
+            // the fill rect and any gaps); capture it before extracting matches.
+            if ( highlightType == HighlighterMatchType::LineMatch && !isWholeLineSelected ) {
+                foreColor = highlighterMatches.front().foreColor();
+                backColor = highlighterMatches.front().backColor();
+            }
+            klogg::vector<HighlightedMatch> highlighterMatchesVec = highlighterMatches.matches();
+            std::transform( highlighterMatchesVec.begin(), highlighterMatchesVec.end(),
+                            highlighterMatchesVec.begin(), untabifyMatch );
+            highlightSources.push_back(
+                { HighlightLayer::Highlighter, std::move( highlighterMatchesVec ) } );
+
+            // Quick highlighters / color labels.
+            for ( const auto& highlighter : additionalHighlighters ) {
+                klogg::vector<HighlightedMatch> patternMatches;
+                highlighter.matchLine( logLine, patternMatches );
+                std::transform( patternMatches.begin(), patternMatches.end(),
+                                patternMatches.begin(), untabifyMatch );
+                highlightSources.push_back(
+                    { HighlightLayer::QuickHighlighter, std::move( patternMatches ) } );
+            }
+        }
 
         // string to print, cut to fit the length and position of the view
         const QString& expandedLine = untabify( std::move( logLine ) );
 
-        // Has the line got elements to be highlighted
+        // QuickFind (already in the expanded column space).
         klogg::vector<HighlightedMatch> quickFindMatches;
         quickFindPattern_->matchLine( expandedLine, quickFindMatches );
-        allHighlights.addMatches( quickFindMatches );
+        highlightSources.push_back(
+            { HighlightLayer::QuickFind, std::move( quickFindMatches ) } );
 
-        // Is there something selected in the line?
+        // Selection (already in the expanded column space).
         const auto selectionPortion = selection_.getPortionForLine( lineNumber );
         if ( selectionPortion.isValid() ) {
-            allHighlights.addMatch( HighlightedMatch{ selectionPortion.startColumn(),
-                                                      selectionPortion.size(),
-                                                      palette.color( QPalette::HighlightedText ),
-                                                      palette.color( QPalette::Highlight ) } );
+            highlightSources.push_back(
+                { HighlightLayer::Selection,
+                  { HighlightedMatch{ selectionPortion.startColumn(), selectionPortion.size(),
+                                      palette.color( QPalette::HighlightedText ),
+                                      palette.color( QPalette::Highlight ) } } } );
         }
+
+        HighlightedMatchRanges allHighlights = composeLineHighlights( highlightSources );
+
 
         WrappedString wrappedLineView = [&, this] {
             if ( useTextWrap_ ) {

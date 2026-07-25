@@ -10,6 +10,7 @@ add_library(
 set_target_properties(klogg_crash_handler PROPERTIES AUTOMOC ON)
 
 target_include_directories(klogg_crash_handler PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_definitions(klogg_crash_handler PUBLIC "KLOGG_BUILD_TYPE=$<CONFIG>")
 target_link_libraries(
   klogg_crash_handler
   PUBLIC project_options

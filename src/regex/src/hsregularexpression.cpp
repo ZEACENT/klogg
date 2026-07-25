@@ -31,8 +31,18 @@
 
 #include "cpu_info.h"
 #include "log.h"
+#include <mimalloc.h>
 
 namespace {
+
+// Wire Vectorscan to use mimalloc for internal allocations (once per process).
+struct HsAllocatorInit {
+    HsAllocatorInit()
+    {
+        hs_set_allocator( mi_malloc, mi_free );
+    }
+};
+static HsAllocatorInit hsAllocatorInit;
 
 int matchSingleCallback( unsigned int id, unsigned long long from, unsigned long long to,
                          unsigned int flags, void* context )

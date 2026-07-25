@@ -24,6 +24,21 @@
 
 #include <algorithm>
 
+namespace {
+
+// Composite cache key: filePath + null separator + codec name. The codec for a
+// marks-only file (nullptr / "UTF-8" default) differs from the scanned codec of
+// a later match group (e.g. "Shift-JIS"). Without the codec suffix, a cached
+// UTF-8 decode for a marks-only file is reused for a match group that has a
+// different actual encoding — producing mojibake for the marked lines.
+QString markCacheKey( const QString& filePath, QTextCodec* codec )
+{
+    return filePath + QChar::Null
+           + QString::fromLatin1( codec != nullptr ? codec->name() : QByteArrayLiteral( "UTF-8" ) );
+}
+
+} // namespace
+
 #include "linetypes.h"
 #include "log.h"
 
@@ -85,8 +100,17 @@ void FolderSearchResults::reapplyCollapseForLastGroup()
         return;
     }
     const auto& lastPath = groups_.back().filePath;
+    const auto fid = static_cast<int>( groups_.size() ) - 1;
     if ( pendingCollapsePaths_.contains( lastPath ) ) {
-        collapsed_.insert( static_cast<int>( groups_.size() ) - 1 );
+        collapsed_.insert( fid );
+    }
+    else {
+        // The group just added was NOT in the collapse snapshot. Remove any
+        // stale collapsed_ entry a marks-only group may have set at this FileId
+        // before the real group arrived (marks-group FileIds shift when later
+        // match groups stream in). Without the removal the stale entry leaks
+        // to the real group now occupying this index.
+        collapsed_.remove( fid );
     }
 }
 
@@ -185,7 +209,7 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
 {
     SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
-    if ( row == nullptr || row->kind != LineKind::Data ) {
+    if ( row == nullptr || row->kind != LineKind::Data || row->isMarkRow ) {
         return false;
     }
     const auto& group = groups_[ static_cast<size_t>( row->fileId ) ];
@@ -203,7 +227,15 @@ klogg::folder::SourceRef FolderSearchResults::sourceForLine( LineNumber visibleI
 {
     SharedLock lock( dataMutex_ );
     const auto* row = visibleRowAt( visibleIndex );
-    if ( row == nullptr || row->fileId < 0 || row->fileId >= static_cast<int>( groups_.size() ) ) {
+    if ( row == nullptr ) {
+        return {};
+    }
+    // Mark rows carry their own (filePath, localLine) -- they may belong to a
+    // marks-only file with no entry in groups_.
+    if ( row->isMarkRow ) {
+        return klogg::folder::SourceRef{ row->markFilePath, row->markLocalLine };
+    }
+    if ( row->fileId < 0 || row->fileId >= static_cast<int>( groups_.size() ) ) {
         return {};
     }
 
@@ -257,7 +289,10 @@ void FolderSearchResults::toggleCollapse( klogg::folder::FileId fileId )
 {
     {
         UniqueLock lock( dataMutex_ );
-        if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
+        // Marks-only groups use FileId = groups_.size() + idx, so the valid range
+        // covers both real and marks-only groups.
+        const int totalGroups = static_cast<int>( groups_.size() + marksGroups_.size() );
+        if ( fileId < 0 || fileId >= totalGroups ) {
             return;
         }
         if ( collapsed_.contains( fileId ) ) {
@@ -275,7 +310,8 @@ void FolderSearchResults::setCollapsed( klogg::folder::FileId fileId, bool colla
 {
     {
         UniqueLock lock( dataMutex_ );
-        if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
+        const int totalGroups = static_cast<int>( groups_.size() + marksGroups_.size() );
+        if ( fileId < 0 || fileId >= totalGroups ) {
             return;
         }
         if ( collapsed ) {
@@ -294,7 +330,8 @@ void FolderSearchResults::collapseAll()
     {
         UniqueLock lock( dataMutex_ );
         collapsed_.clear();
-        for ( klogg::folder::FileId i = 0; i < static_cast<int>( groups_.size() ); ++i ) {
+        const int totalGroups = static_cast<int>( groups_.size() + marksGroups_.size() );
+        for ( klogg::folder::FileId i = 0; i < totalGroups; ++i ) {
             collapsed_.insert( i );
         }
         rebuildVisibleRows();
@@ -327,8 +364,26 @@ QString FolderSearchResults::doGetLineString( LineNumber line ) const
     if ( row == nullptr ) {
         return {};
     }
+    if ( row->isMarkRow ) {
+        // Release dataMutex_ before the (capped) file read+decode so mutators
+        // (streaming search commits) are not blocked; codec is resolved under
+        // the lock. readMarkLine takes only fileIoMutex_.
+        const QString filePath = row->markFilePath;
+        const LineNumber localLine = row->markLocalLine;
+        QTextCodec* const codec = codecForFile( filePath );
+        lock.unlock();
+        return readMarkLine( filePath, localLine, codec );
+    }
     if ( row->kind == LineKind::Header ) {
-        return headerText( row->fileId );
+        if ( row->fileId >= 0 && row->fileId < static_cast<int>( groups_.size() ) ) {
+            return headerText( row->fileId );
+        }
+        // Marks-only group header (fileId = groups_.size() + marksGroupIndex).
+        const auto mgi = static_cast<size_t>( row->fileId - static_cast<int>( groups_.size() ) );
+        if ( mgi < marksGroups_.size() ) {
+            return marksGroupHeader( mgi );
+        }
+        return {};
     }
     return readMatchLine( row->fileId, row->matchIndex );
 }
@@ -390,6 +445,10 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
     {
         UniqueLock lock( dataMutex_ );
         encodingOverrides_.insert( filePath, encoding );
+        // Cached mark-line text was decoded with the old codec; drop it so the
+        // next fetch re-decodes with the override. Lock order dataMutex_ -> fileIoMutex_.
+        std::lock_guard<std::mutex> io( fileIoMutex_ );
+        markLineCache_.remove( filePath );
     }
     Q_EMIT layoutChanged();
 }
@@ -404,6 +463,10 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
     {
         UniqueLock lock( dataMutex_ );
         removed = encodingOverrides_.remove( filePath ) != 0;
+        if ( removed ) {
+            std::lock_guard<std::mutex> io( fileIoMutex_ );
+            markLineCache_.remove( filePath );
+        }
     }
     if ( removed ) {
         Q_EMIT layoutChanged();
@@ -429,8 +492,22 @@ LineLength FolderSearchResults::doGetLineLength( LineNumber line ) const
     if ( row == nullptr ) {
         return 0_length;
     }
+    if ( row->isMarkRow ) {
+        const QString filePath = row->markFilePath;
+        const LineNumber localLine = row->markLocalLine;
+        QTextCodec* const codec = codecForFile( filePath );
+        lock.unlock();
+        return LineLength( untabify( readMarkLine( filePath, localLine, codec ) ).size() );
+    }
     if ( row->kind == LineKind::Header ) {
-        return LineLength( headerText( row->fileId ).size() );
+        if ( row->fileId >= 0 && row->fileId < static_cast<int>( groups_.size() ) ) {
+            return LineLength( headerText( row->fileId ).size() );
+        }
+        const auto mgi = static_cast<size_t>( row->fileId - static_cast<int>( groups_.size() ) );
+        if ( mgi < marksGroups_.size() ) {
+            return LineLength( marksGroupHeader( mgi ).size() );
+        }
+        return 0_length;
     }
     if ( row->fileId >= 0 && row->fileId < static_cast<int>( groups_.size() ) ) {
         const auto& matches = groups_[ static_cast<size_t>( row->fileId ) ].matches;
@@ -498,60 +575,169 @@ void FolderSearchResults::rebuildVisibleRows()
     }
 
     const bool marksOnly = ( visibility_ == Visibility::Marks );
+    // Mark rows (marked non-match lines) are injected under Marks and
+    // Marks-and-matches -- the single-file marks_ parity: a bookmark on a source
+    // line stays visible across filter changes. Matches stays grep-pure (no marks).
+    const bool injectMarks
+        = ( visibility_ == Visibility::Marks || visibility_ == Visibility::MarksAndMatches )
+        && marksStore_ != nullptr;
 
+    // Build marks-only groups: files with marks that have no real match group.
+    marksGroups_.clear();
+    if ( injectMarks ) {
+        QSet<QString> groupFiles;
+        groupFiles.reserve( static_cast<int>( groups_.size() ) );
+        for ( const auto& g : groups_ ) {
+            groupFiles.insert( g.filePath );
+        }
+        for ( auto it = marksStore_->constBegin(); it != marksStore_->constEnd(); ++it ) {
+            if ( it.value().empty() || groupFiles.contains( it.key() ) ) {
+                continue;
+            }
+            MarksGroup mg;
+            mg.filePath = it.key();
+            mg.localLines.reserve( it.value().size() );
+            for ( const auto& ln : it.value() ) {
+                mg.localLines.push_back( LineNumber( ln ) );
+            }
+            // std::set iterates ascending, so localLines is already sorted.
+            marksGroups_.push_back( std::move( mg ) );
+        }
+        // marksStore_ is a QHash (unspecified, per-process-salted iteration
+        // order); sort so marks-only groups -- and their derived FileIds / row
+        // indices -- appear in a stable, natural order across rebuilds and runs.
+        std::sort( marksGroups_.begin(), marksGroups_.end(),
+                   []( const MarksGroup& l, const MarksGroup& r ) {
+                       return l.filePath < r.filePath;
+                   } );
+    }
+
+    // Real groups: header + match rows + injected Mark rows.
     for ( klogg::folder::FileId fid = 0; fid < static_cast<int>( groups_.size() ); ++fid ) {
         const auto& group = groups_[ static_cast<size_t>( fid ) ];
 
-        if ( marksOnly ) {
-            // Under the Marks filter a group with no marked MATCH rows is hidden
-            // entirely (context rows are never marks). Matches single-file Marks
-            // view omitting unmarked lines.
-            bool anyMarked = false;
-            for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
-                const auto& rec = group.matches[ mi ];
-                if ( rec.role == klogg::folder::RecordRole::Match
-                     && isLineMarked( group.filePath, rec.localLine ) ) {
-                    anyMarked = true;
-                    break;
+        std::vector<LineNumber> markRows;
+        if ( injectMarks ) {
+            const auto mIt = marksStore_->constFind( group.filePath );
+            if ( mIt != marksStore_->cend() ) {
+                // Lines already shown as a visible record (don't inject as a mark
+                // row -> avoids duplicates). Under Marks, context records and
+                // unmarked matches are hidden, so only marked Match records are
+                // visible -- a marked context line is therefore NOT excluded and
+                // is injected as a mark row (its context record is hidden).
+                QSet<uint64_t> visibleRecordLines;
+                visibleRecordLines.reserve( static_cast<int>( group.matches.size() ) );
+                for ( const auto& rec : group.matches ) {
+                    if ( marksOnly ) {
+                        if ( rec.role != klogg::folder::RecordRole::Match ) {
+                            continue;
+                        }
+                        if ( !isLineMarked( group.filePath, rec.localLine ) ) {
+                            continue;
+                        }
+                    }
+                    visibleRecordLines.insert( rec.localLine.get() );
                 }
-            }
-            if ( !anyMarked ) {
-                continue;
+                for ( const auto& ln : mIt.value() ) {
+                    if ( !visibleRecordLines.contains( ln ) ) {
+                        markRows.push_back( LineNumber( ln ) );
+                    }
+                }
             }
         }
 
-        // Every shown group always shows its header (collapsed or not).
-        visibleRows_.push_back( VisibleRow{ LineKind::Header, fid, 0 } );
+        // Does this group have any visible match row?
+        bool hasVisibleMatch = false;
+        for ( const auto& rec : group.matches ) {
+            if ( rec.role != klogg::folder::RecordRole::Match ) {
+                continue;
+            }
+            if ( marksOnly && !isLineMarked( group.filePath, rec.localLine ) ) {
+                continue;
+            }
+            hasVisibleMatch = true;
+            break;
+        }
+        if ( !hasVisibleMatch && markRows.empty() ) {
+            continue;
+        }
+
+        // Header (always shown for a visible group).
+        visibleRows_.push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
         maxLength_ = std::max( maxLength_, LineLength( headerText( fid ).size() ) );
 
         if ( collapsed_.contains( fid ) ) {
             continue;
         }
-        // group.matches holds Match AND Context records (grep -A/-B/-C), already
-        // sorted by localLine ascending and deduplicated by the engine, so the
-        // linear walk produces grep grouping (context interleaved with matches)
-        // for free. Under Marks, context rows are hidden (not marks) and unmarked
-        // matches are hidden.
-        for ( size_t mi = 0; mi < group.matches.size(); ++mi ) {
-            const auto& rec = group.matches[ mi ];
-            if ( marksOnly ) {
-                if ( rec.role != klogg::folder::RecordRole::Match ) {
-                    continue;
+
+        // Merge match rows (sorted, include context) with mark rows (sorted) by
+        // localLine so the listing reads in source order. Under Marks, context
+        // rows and unmarked matches are hidden (only marked rows remain).
+        size_t mi = 0;
+        size_t mri = 0;
+        while ( mi < group.matches.size() || mri < markRows.size() ) {
+            const bool canMatch = mi < group.matches.size();
+            const bool canMark = mri < markRows.size();
+            const bool takeMatch = !canMatch
+                ? false
+                : ( !canMark || group.matches[ mi ].localLine < markRows[ mri ] );
+
+            if ( takeMatch ) {
+                const auto& rec = group.matches[ mi ];
+                const auto useIndex = mi;
+                ++mi;
+                if ( marksOnly ) {
+                    if ( rec.role != klogg::folder::RecordRole::Match ) {
+                        continue; // hide context under Marks
+                    }
+                    if ( !isLineMarked( group.filePath, rec.localLine ) ) {
+                        continue; // hide unmarked matches under Marks
+                    }
                 }
-                if ( !isLineMarked( group.filePath, rec.localLine ) ) {
-                    continue;
-                }
+                visibleRows_.push_back(
+                    VisibleRow{ LineKind::Data, false, fid, useIndex, 0_lnum, {} } );
+                maxLength_ = std::max( maxLength_, rec.lineLength );
+                maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
             }
-            visibleRows_.push_back( VisibleRow{ LineKind::Data, fid, mi } );
-            maxLength_ = std::max( maxLength_, rec.lineLength );
-            maxLocalLine_ = std::max( maxLocalLine_, rec.localLine );
+            else {
+                const auto ln = markRows[ mri ];
+                ++mri;
+                visibleRows_.push_back(
+                    VisibleRow{ LineKind::Data, true, fid, 0, ln, group.filePath } );
+                maxLocalLine_ = std::max( maxLocalLine_, ln );
+                // maxLength_ for a mark row needs the fetched text; deferred (the
+                // horizontal scrollbar may be slightly narrow for long marked
+                // lines -- acceptable; doGetLineLength fetches the exact value).
+            }
+        }
+    }
+
+    // Marks-only groups (files with marks but no match group).
+    if ( injectMarks ) {
+        for ( size_t mgi = 0; mgi < marksGroups_.size(); ++mgi ) {
+            const auto fid = static_cast<klogg::folder::FileId>( groups_.size() + mgi );
+            const auto& mg = marksGroups_[ mgi ];
+            visibleRows_.push_back( VisibleRow{ LineKind::Header, false, fid, 0, 0_lnum, {} } );
+            maxLength_ = std::max( maxLength_, LineLength( marksGroupHeader( mgi ).size() ) );
+            if ( collapsed_.contains( fid ) ) {
+                continue;
+            }
+            for ( const auto& ln : mg.localLines ) {
+                visibleRows_.push_back(
+                    VisibleRow{ LineKind::Data, true, fid, 0, ln, mg.filePath } );
+                maxLocalLine_ = std::max( maxLocalLine_, ln );
+            }
         }
     }
 }
 
 bool FolderSearchResults::isLineMarked( const QString& filePath, LineNumber localLine ) const
 {
-    return isMarkedLine_ != nullptr && isMarkedLine_( filePath, localLine );
+    if ( marksStore_ == nullptr ) {
+        return false;
+    }
+    const auto it = marksStore_->constFind( filePath );
+    return it != marksStore_->cend() && it->count( localLine.get() ) > 0;
 }
 
 void FolderSearchResults::setVisibility( Visibility visibility )
@@ -564,13 +750,16 @@ void FolderSearchResults::setVisibility( Visibility visibility )
     Q_EMIT layoutChanged();
 }
 
-void FolderSearchResults::setMarkedLineQuery( std::function<bool( const QString&, LineNumber )> query )
+void FolderSearchResults::setMarksStore( const QHash<QString, std::set<uint64_t>>* store )
 {
     bool rebuilt = false;
     {
         UniqueLock lock( dataMutex_ );
-        isMarkedLine_ = std::move( query );
-        if ( visibility_ == Visibility::Marks ) {
+        marksStore_ = store;
+        // The visible set depends on marks under Marks AND Marks-and-matches now
+        // (marked non-match rows are injected under both); rebuild there. Under
+        // Matches no marks are shown, so a rebuild is unnecessary.
+        if ( visibility_ == Visibility::Marks || visibility_ == Visibility::MarksAndMatches ) {
             rebuildVisibleRows();
             rebuilt = true;
         }
@@ -582,11 +771,12 @@ void FolderSearchResults::setMarkedLineQuery( std::function<bool( const QString&
 
 void FolderSearchResults::refreshForMarksChange()
 {
-    // The visible set depends on marks only under the Marks filter.
+    // The visible set depends on marks under Marks AND Marks-and-matches (both
+    // inject marked non-match rows); Matches shows no marks.
     bool rebuilt = false;
     {
         UniqueLock lock( dataMutex_ );
-        if ( visibility_ == Visibility::Marks ) {
+        if ( visibility_ == Visibility::Marks || visibility_ == Visibility::MarksAndMatches ) {
             rebuildVisibleRows();
             rebuilt = true;
         }
@@ -707,4 +897,111 @@ QFile* FolderSearchResults::fileForGroup( klogg::folder::FileId fileId ) const
     auto* raw = file.get();
     slot = std::move( file );
     return raw;
+}
+
+QString FolderSearchResults::marksGroupHeader( size_t marksGroupIndex ) const
+{
+    if ( marksGroupIndex >= marksGroups_.size() ) {
+        return {};
+    }
+    const auto& mg = marksGroups_[ marksGroupIndex ];
+    const auto fid = static_cast<klogg::folder::FileId>( groups_.size() + marksGroupIndex );
+    const QChar arrow = collapsed_.contains( fid ) ? QChar( 0x25B8 ) : QChar( 0x25BE );
+    QString text;
+    text.reserve( mg.filePath.size() + 24 );
+    text += arrow;
+    text += QLatin1Char( ' ' );
+    text += mg.filePath;
+    text += QLatin1Char( ' ' );
+    text += QChar( 0x2014 ); // em dash
+    text += QLatin1Char( ' ' );
+    text += QString::number( static_cast<int>( mg.localLines.size() ) );
+    text += QLatin1String( " marks" );
+    return text;
+}
+
+QTextCodec* FolderSearchResults::codecForFile( const QString& filePath ) const
+{
+    // Caller holds dataMutex_ shared; reads encodingOverrides_ + groups_.
+    const auto overrideIt = encodingOverrides_.constFind( filePath );
+    if ( overrideIt != encodingOverrides_.cend() ) {
+        QTextCodec* const c = QTextCodec::codecForName( overrideIt.value() );
+        if ( c != nullptr ) {
+            return c;
+        }
+    }
+    for ( const auto& g : groups_ ) {
+        if ( g.filePath == filePath ) {
+            return g.sourceCodec;
+        }
+    }
+    return nullptr; // UTF-8 default for marks-only files (no scanned codec)
+}
+
+void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* codec ) const
+{
+    // Build the per-file decoded line cache: read the whole file, decode with
+    // `codec`, split on '\n'. Decoding BEFORE splitting makes this correct for
+    // all encodings (incl. UTF-16/UTF-32), unlike a raw byte scan. Capped: files
+    // larger than kMarkLineCacheCap skip (empty cache -> empty mark text) to
+    // avoid a main-thread stall on huge files. Caller does NOT hold fileIoMutex_.
+    std::lock_guard<std::mutex> io( fileIoMutex_ );
+    const QString cacheKey = markCacheKey( filePath, codec );
+    if ( markLineCache_.contains( cacheKey ) ) {
+        return;
+    }
+
+    std::vector<QString> lines;
+    QFile file( filePath );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        // Transient open failure: don't cache an empty entry so a later fetch
+        // (e.g. after the file becomes readable again) can retry instead of
+        // being permanently recorded as "no mark text".
+        return;
+    }
+    constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
+    if ( file.size() <= kMarkLineCacheCap ) {
+        const QByteArray bytes = file.readAll();
+        const QString text
+            = codec != nullptr ? codec->toUnicode( bytes ) : QString::fromUtf8( bytes );
+        // File size is capped at kMarkLineCacheCap (16 MiB) above, so all line
+        // indices fit in int. Use int + explicit casts for Qt 5 / Qt 6
+        // portability: Qt 5's QString::indexOf/mid take int, Qt 6's take
+        // qsizetype, and a raw qsizetype here triggers -Werror=conversion on
+        // the Qt 5 Linux CI builds.
+        const int n = static_cast<int>( text.size() );
+        int start = 0;
+        while ( start <= n ) {
+            int idx = static_cast<int>( text.indexOf( QLatin1Char( '\n' ), start ) );
+            if ( idx < 0 ) {
+                idx = n;
+            }
+            QString line = text.mid( start, idx - start );
+            if ( line.endsWith( QLatin1Char( '\r' ) ) ) {
+                line.chop( 1 );
+            }
+            lines.push_back( std::move( line ) );
+            if ( idx >= n ) {
+                break;
+            }
+            start = idx + 1;
+        }
+    }
+    markLineCache_.insert( cacheKey, std::move( lines ) );
+}
+
+QString FolderSearchResults::readMarkLine( const QString& filePath, LineNumber localLine,
+                                           QTextCodec* codec ) const
+{
+    // Fetch the marked source line by line number from the cached decoded lines
+    // (marked non-match lines have no MatchRecord offset). Caller has released
+    // dataMutex_; only fileIoMutex_ is taken here.
+    ensureMarkLines( filePath, codec );
+    std::lock_guard<std::mutex> io( fileIoMutex_ );
+    const auto it = markLineCache_.constFind( markCacheKey( filePath, codec ) );
+    const auto lineIdx = static_cast<size_t>( localLine.get() );
+    if ( it != markLineCache_.cend() && lineIdx < it->size() ) {
+        return it->at( lineIdx );
+    }
+    return {};
 }

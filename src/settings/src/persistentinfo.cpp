@@ -48,6 +48,8 @@
 #include "log.h"
 #include "uuid.h"
 
+#include "platform/platform_paths.h"
+
 #include "persistentinfo.h"
 
 constexpr uint8_t AppSettingsVersion = 1;
@@ -150,11 +152,7 @@ void PersistentInfo::PreparePortableSettings( const QString& portableConfigPath 
 
 void PersistentInfo::PrepareOsSettings()
 {
-#ifdef Q_OS_WIN
-    const auto format = QSettings::IniFormat;
-#else
-    const auto format = QSettings::NativeFormat;
-#endif
+    const auto format = klogg::platform::settingsFormat;
 
     appSettings_ = std::make_unique<QSettings>( format, QSettings::UserScope, "klogg",
                                                 ApplicationSessionFile );

@@ -29,6 +29,10 @@
 #include <QSettings>
 #include <qcolor.h>
 
+#include "platform/platform_style.h"
+
+#include "qtcompat/qtcompat.h"
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -613,13 +617,7 @@ QStringList StyleManager::availableStyles()
 
 QString StyleManager::defaultPlatformStyle()
 {
-#if defined( Q_OS_WIN )
-    return VistaKey;
-#elif defined( Q_OS_MACOS )
-    return MacintoshKey;
-#else
-    return FusionKey;
-#endif
+    return klogg::platform::defaultStyleKey();
 }
 
 QString StyleManager::defaultStyle()
@@ -718,11 +716,7 @@ void StyleManager::applyStyle( const QString& style )
 
     if ( mode == ThemeMode::Auto ) {
         if ( systemDark ) {
-#ifdef Q_OS_WIN
-            actualStyle = DarkWindowsStyleKey;
-#else
-            actualStyle = DarkStyleKey;
-#endif
+            actualStyle = klogg::platform::darkStyleKey();
         }
         else {
             actualStyle = defaultPlatformStyle();
@@ -731,11 +725,7 @@ void StyleManager::applyStyle( const QString& style )
                  << ", using style " << actualStyle;
     }
     else if ( mode == ThemeMode::Dark ) {
-#ifdef Q_OS_WIN
-        actualStyle = DarkWindowsStyleKey;
-#else
-        actualStyle = DarkStyleKey;
-#endif
+        actualStyle = klogg::platform::darkStyleKey();
         LOG_INFO << "Dark theme mode: forcing dark style " << actualStyle;
     }
     else {

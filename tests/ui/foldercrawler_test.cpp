@@ -645,16 +645,212 @@ TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps",
     widget.markMainViewLine( 1_lnum );
     REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
 
-    widget.selectResultRow( 3_lnum ); // b.log match
+    // A non-match mark is now injected as a results row under Marks-and-matches,
+    // so b.log's match row index shifts; resolve it dynamically by source file.
+    const auto matchRowForFile = [ & ]( const QString& path ) -> LineNumber {
+        const auto total = widget.folderResults()->getNbLine().get();
+        for ( uint64_t i = 0; i < total; ++i ) {
+            const LineNumber row{ i };
+            if ( widget.folderResults()->lineKind( row ) == LineKind::Data
+                 && widget.folderResults()->sourceForLine( row ).filePath == path ) {
+                return row;
+            }
+        }
+        // 0_lnum is a valid header row, so a silent miss would select an
+        // unrelated row and surface later as a confusing waitFor timeout. Fail
+        // at the lookup site instead.
+        FAIL( "matchRowForFile: no matching result row found for the requested file" );
+        return 0_lnum; // unreachable; FAIL aborts the test case
+    };
+    widget.selectResultRow( matchRowForFile( b ) ); // b.log match
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
     QTest::qWait( 200 );
     REQUIRE_FALSE( widget.isMainViewLineMarked( 1_lnum ) );
 
     // ...and must reappear when A is reopened (cached swap).
-    widget.selectResultRow( 1_lnum );
+    widget.selectResultRow( matchRowForFile( a ) ); // a.log match
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
     QTest::qWait( 200 );
     REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget marks survive a filter change and show under Marks",
+           "[folder][marks][regression]" )
+{
+    // Regression for issue: marking lines under filter1, then switching to
+    // filter2, hides the marks that don't match filter2 from the results pane
+    // (under both "Marks" and "Marks and matches" visibility). Marks are
+    // conceptually tied to a SOURCE LINE (file+localLine), not to a transient
+    // search result, so they must persist across filter changes and remain
+    // visible under the "Marks" filter -- single-file parity
+    // (LogFilteredData::marks_ is preserved by clearSearch and unioned into
+    // marks_and_matches_, so marked non-matching lines DO appear there).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // a.log: line 1 = "ERROR alpha" (matches both ERROR and alpha),
+    //        line 3 = "ERROR beta"  (matches ERROR only).
+    const QString a = writeFile( dir, "a.log",
+                                 QByteArray( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+
+    // filter1 = ERROR: matches a.log lines 1 and 3.
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // header + 2 matches
+
+    // Open a.log and mark line 3 (ERROR beta): a mark that matches filter1 but
+    // NOT the upcoming filter2 (alpha).
+    widget.selectResultRow( 1_lnum ); // ERROR alpha -> opens a.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    widget.markMainViewLine( 3_lnum );
+    REQUIRE( widget.isLineMarkedInFile( a, 3_lnum ) );
+
+    // filter2 = alpha: matches only a.log line 1. The marked line 3 (ERROR beta)
+    // does NOT match alpha, but under "Marks and matches" (the default) it must
+    // still appear as an injected mark row -- single-file marks_and_matches_
+    // parity (matches | marks), so the bookmark survives the filter change.
+    widget.searchFor( "alpha" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // header + 1 match + 1 mark row
+
+    // The marked line 3 must be present as a row that resolves to its source.
+    bool sawMarkedLine3 = false;
+    const auto totalRows = widget.folderResults()->getNbLine();
+    for ( LinesCount::UnderlyingType i = 0; i < totalRows.get(); ++i ) {
+        const auto src = widget.folderResults()->sourceForLine( LineNumber( i ) );
+        if ( src.filePath == a && src.localLine == 3_lnum ) {
+            sawMarkedLine3 = true;
+            break;
+        }
+    }
+    REQUIRE( sawMarkedLine3 );
+
+    // The mark itself must persist in the per-file store (not cleared by a new
+    // search).
+    REQUIRE( widget.isLineMarkedInFile( a, 3_lnum ) );
+
+    // Under the "Marks" visibility filter the marked line 3 (ERROR beta) must
+    // still be visible in the results pane -- it is a bookmark on a source
+    // line, independent of the current search. RED before the fix: the folder
+    // results model is match-centric (FolderSearchResults only stores match
+    // rows), so a marked line that does not match the current filter has no
+    // row and the "Marks" filter hides it (getNbLine() == 0).
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->getNbLine() > 0_lcount );
+}
+
+TEST_CASE( "FolderCrawlerWidget a marked grep-context line stays visible under Marks",
+           "[folder][marks][context]" )
+{
+    // A marked line that is a grep -A/-B/-C CONTEXT row (not a Match) must still
+    // appear under the Marks filter: under Marks the context record is hidden,
+    // so the mark is injected as a mark row (its context record does not render
+    // it). RED before the fix: rebuildVisibleRows excluded ALL record lines from
+    // mark-row injection, so a marked context line vanished under Marks.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // match on line 1 (HIT); -A2 -> context lines 2 and 3 follow it.
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nHIT\nline2\nline3\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.contextLinesComboBox()->setCurrentIndex( 2 ); // After -A
+    widget.contextLinesSpinBox()->setValue( 2 );
+    widget.searchFor( "HIT" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // rows: [H0, D1(Match HIT line1), D2(Context line2), D3(Context line3)].
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+
+    // Open a.log and mark line 2 (a context line).
+    widget.selectResultRow( 1_lnum ); // HIT -> opens a.log
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+    widget.markMainViewLine( 2_lnum );
+    REQUIRE( widget.isLineMarkedInFile( a, 2_lnum ) );
+
+    // Under Marks: the match (line1) is unmarked -> hidden; context rows hidden;
+    // the marked context line2 is injected as a mark row.
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // header + mark row
+
+    // The mark row resolves to the marked context line.
+    const auto src = widget.folderResults()->sourceForLine( 1_lnum );
+    REQUIRE( src.filePath == a );
+    REQUIRE( src.localLine == 2_lnum );
+}
+
+TEST_CASE( "FolderCrawlerWidget clicking blank space below collapsed results does not expand the last group",
+           "[folder][blank-space]" )
+{
+    // After Collapse All every group is reduced to its Header row, so the LAST
+    // rendered row is the last file's Header. AbstractLogView::convertCoordToLine
+    // used to CLAMP a below-content click to the last visible row, so a click in
+    // the blank space below the results resolved to that last Header and fired
+    // headerClicked -> toggleCollapse, expanding the last file's group.
+    // Expected: a click that hits no row is a no-op.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    // Expanded rows: [H0, D1, H2, D3] (2 groups, 1 match each).
+
+    widget.collapseAll();
+    QTest::qWait( 100 );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // only the 2 headers
+    REQUIRE( widget.folderResults()->lineKind( 0_lnum ) == LineKind::Header );
+    REQUIRE( widget.folderResults()->lineKind( 1_lnum ) == LineKind::Header );
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->setFocus();
+    QTest::qWait( 100 );
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const int charH = Access::charHeight( view );
+    REQUIRE( charH > 0 );
+    const int top = Access::drawingTopOffset( view );
+    const int bullet = Access::bulletZoneWidth( view );
+    const int xPos = bullet + ( view->viewport()->width() - bullet ) / 2;
+
+    // Positive control: a click within the first row resolves to a real line,
+    // proving wrappedLinesInfo_ is populated (so the nullopt below is meaningful
+    // and not just an empty map).
+    REQUIRE( view->lineAtYForTest( top + charH / 2 ).has_value() );
+
+    // A click clearly BELOW the last rendered row (2 headers span top..top+2*charH).
+    const int yBelow = top + charH * 2 + charH / 2;
+
+    // The resolver itself must report "no row" for a below-content click.
+    // RED before fix: clamp -> returns the last Header line; GREEN: nullopt.
+    REQUIRE_FALSE( view->lineAtYForTest( yBelow ).has_value() );
+
+    QTest::mouseClick( view->viewport(), Qt::LeftButton, {}, QPoint( xPos, yBelow ) );
+    QTest::qWait( 100 );
+
+    // The last group must stay collapsed: no phantom headerClicked.
+    // RED before fix: clamp -> headerClicked(last Header) -> isCollapsed(1)==false.
+    REQUIRE( widget.folderResults()->isCollapsed( 1 ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+    // First group untouched (sanity).
+    REQUIRE( widget.folderResults()->isCollapsed( 0 ) );
 }
 
 TEST_CASE( "FolderCrawlerWidget exposes predefined filters and favorites in the toolbar", "[folder]" )

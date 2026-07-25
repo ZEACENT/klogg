@@ -39,6 +39,8 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include "qtcompat/qtcompat.h"
+
 #include <algorithm>
 
 #include "abstractlogview.h"
@@ -733,13 +735,12 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     pane->markProvider->results = pane->results.get();
     view->setMarkProvider( pane->markProvider.get() );
 
-    // The Marks visibility filter consults this query (filePath, localLine) ->
-    // marked, reading the shared per-file store live (same lambda every pane
-    // uses; it captures this, valid for the widget's lifetime).
-    pane->results->setMarkedLineQuery( [ this ]( const QString& file, LineNumber line ) {
-        const auto it = folderMarks_.find( file );
-        return it != folderMarks_.end() && it->count( line.get() ) > 0;
-    } );
+    // Inject the shared per-file marks store (widget-owned, read LIVE during
+    // rebuild) so the Marks / Marks-and-matches filter can ENUMERATE marked lines
+    // and inject marked non-match rows -- single-file LogFilteredData::marks_
+    // parity (a bookmark on a source line stays visible across filter changes).
+    // Same store for every pane; folderMarks_ outlives the pane (widget-owned).
+    pane->results->setMarksStore( &folderMarks_ );
 
     // Seed config so a pane created mid-session (Keep) matches the others.
     const auto& config = Configuration::get();
@@ -1280,11 +1281,7 @@ void FolderCrawlerWidget::editSearchHistory()
 
     if ( ok ) {
         savedSearches_->clear();
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-        const auto items = newHistory.split( QChar::LineFeed, Qt::SkipEmptyParts );
-#else
-        const auto items = newHistory.split( QChar::LineFeed, QString::SkipEmptyParts );
-#endif
+        const auto items = newHistory.split( QChar::LineFeed, klogg::qtcompat::skipEmptyParts() );
         std::for_each( items.rbegin(), items.rend(), [ this ]( const auto& item ) {
             savedSearches_->addRecent( item );
         } );

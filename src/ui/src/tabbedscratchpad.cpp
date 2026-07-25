@@ -27,6 +27,8 @@
 
 #include <memory>
 
+#include "platform/platform_input.h"
+
 TabbedScratchPad::TabbedScratchPad( QWidget* parent )
     : QWidget( parent )
 {
@@ -80,11 +82,7 @@ void TabbedScratchPad::keyPressEvent( QKeyEvent* event )
 
     event->accept();
 
-#ifdef Q_OS_MACOS
-    constexpr auto PrimaryMod = Qt::MetaModifier;
-#else
-    constexpr auto PrimaryMod = Qt::ControlModifier;
-#endif
+    constexpr auto PrimaryMod = klogg::platform::PrimaryMod;
 
     // Ctrl + tab (tab cycling keeps Ctrl on all platforms —
     // Cmd+Tab is reserved for the system app switcher on macOS)

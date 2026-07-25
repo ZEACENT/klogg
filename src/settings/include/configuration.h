@@ -48,6 +48,8 @@
 #include <string_view>
 
 #include "persistable.h"
+#include "platform/platform_files.h"
+#include "platform/platform_style.h"
 
 // Type of regexp to use for searches
 enum class SearchRegexpType {
@@ -694,14 +696,7 @@ class Configuration final : public Persistable<Configuration> {
 
   private:
     // Configuration settings
-#ifdef Q_OS_MACOS
-    // macOS uses 72 DPI as its reference, so 13 pt is the right visual size.
-    mutable QFont mainFont_ = { "DejaVu Sans Mono", 13 };
-#else
-    // Windows and Linux default to 96 DPI, making the same point size appear
-    // ~33% larger than on macOS. Use a smaller default for visual parity.
-    mutable QFont mainFont_ = { "DejaVu Sans Mono", 10 };
-#endif
+    mutable QFont mainFont_ = klogg::platform::defaultMainFont();
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
     SearchRegexpType quickfindRegexpType_ = SearchRegexpType::ExtendedRegexp;
     bool quickfindIncremental_ = true;
@@ -709,11 +704,7 @@ class Configuration final : public Persistable<Configuration> {
     QString language_{ "en" };
 
     bool nativeFileWatchEnabled_ = true;
-#ifdef Q_OS_WIN
-    bool pollingEnabled_ = true;
-#else
-    bool pollingEnabled_ = false;
-#endif
+    bool pollingEnabled_ = klogg::platform::pollingEnabledDefault;
 
     int pollIntervalMs_ = 2000;
 

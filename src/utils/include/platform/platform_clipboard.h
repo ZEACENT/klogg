@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 Anton Filimonov
+ * Copyright (C) 2024 Anton Filimonov and other contributors
  *
  * This file is part of klogg.
  *
@@ -17,19 +17,21 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef KLOGG_ACTIVE_SCREEN_H
+#ifndef KLOGG_PLATFORM_CLIPBOARD_H
+#define KLOGG_PLATFORM_CLIPBOARD_H
 
-#include <QWidget>
-#include <QWindow>
-#include <QScreen>
+#include <QChar>
 
-#include "qtcompat/qtcompat.h"
+namespace klogg::platform {
 
-static inline QScreen* activeScreen(QWidget* widget) {
-    if (widget == nullptr) return nullptr;
-    
-    QScreen* screen = klogg::qtcompat::widgetScreen( widget );
-    return screen;
-}
-
+// On Windows, Qt inserts CR before LF in clipboard text natively, so we do not
+// prepend one ourselves. On other platforms we emit it explicitly.
+#ifdef Q_OS_WIN
+constexpr bool clipboardNewlineBeforeLf = false;
+#else
+constexpr bool clipboardNewlineBeforeLf = true;
 #endif
+
+} // namespace klogg::platform
+
+#endif // KLOGG_PLATFORM_CLIPBOARD_H

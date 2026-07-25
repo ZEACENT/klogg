@@ -48,7 +48,9 @@
 #include "iconloader.h"
 #include "log.h"
 #include "openfilehelper.h"
+#include "platform/platform_input.h"
 #include "pathutils.h"
+#include "qtcompat/qtcompat.h"
 #include "styles.h"
 #include "tabgroup.h"
 #include "tabgroupdropresolver.h"
@@ -361,6 +363,9 @@ void TabbedCrawlerWidget::updateTabBarStyle()
         backgroundHoverImage = ":/images/icons8-close-window-hover_inverse.svg";
     }
 
+// Platform-specific tab close icon workarounds.
+// This is tightly coupled to the renderer (QStyle, Fusion vs. native) and
+// Qt bug QTBUG-61092 on macOS — not a good candidate for abstraction.
 #if defined( Q_OS_MAC )
     // work around Qt MacOSX bug missing tab close icons
     // see: https://bugreports.qt.io/browse/QTBUG-61092
@@ -372,6 +377,7 @@ void TabbedCrawlerWidget::updateTabBarStyle()
             = ":/qt-project.org/styles/commonstyle/images/standardbutton-closetab-hover-16.png";
     }
 #elif defined( Q_OS_WIN )
+    // Fusion style on Windows uses different close icons than the native style
     if ( !useDarkIcons && config.style() == StyleManager::FusionKey ) {
         backgroundImage = ":/images/icons8-close-window.svg";
         backgroundHoverImage = ":/images/icons8-close-window-hover.svg";
@@ -537,12 +543,7 @@ int TabbedCrawlerWidget::tabIndexForPath( const QString& tabPath ) const
 
 void TabbedCrawlerWidget::setTabVisibleCompat( int index, bool visible )
 {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    myTabBar_.setTabVisible( index, visible );
-#else
-    Q_UNUSED( visible );
-    myTabBar_.setTabEnabled( index, visible );
-#endif
+    klogg::qtcompat::setTabVisible( &myTabBar_, index, visible );
 }
 
 void TabbedCrawlerWidget::handleTabMoved( int from, int to )
@@ -733,11 +734,9 @@ void CrawlerTabBar::paintEvent( QPaintEvent* event )
     painter.setRenderHint( QPainter::Antialiasing, true );
 
     for ( int i = 0; i < count(); ++i ) {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-        if ( !isTabVisible( i ) ) {
+        if ( !klogg::qtcompat::isTabVisible( this, i ) ) {
             continue;
         }
-#endif
         const auto tabInfo = tabData( i ).toMap();
         if ( !tabInfo.contains( GroupColorKey ) ) {
             continue;
@@ -940,11 +939,7 @@ void TabbedCrawlerWidget::keyPressEvent( QKeyEvent* event )
 
     LOG_DEBUG << "TabbedCrawlerWidget::keyPressEvent";
 
-#ifdef Q_OS_MACOS
-    constexpr auto PrimaryMod = Qt::MetaModifier;
-#else
-    constexpr auto PrimaryMod = Qt::ControlModifier;
-#endif
+    constexpr auto PrimaryMod = klogg::platform::PrimaryMod;
 
     // Ctrl + page down (tab cycling keeps Ctrl on all platforms —
     // Cmd+Tab is reserved for the system app switcher on macOS)

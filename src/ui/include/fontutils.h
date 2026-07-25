@@ -22,6 +22,7 @@
 #define KLOGG_FONTUTILS
 
 #include "log.h"
+#include "qtcompat/qtcompat.h"
 #include <numeric>
 
 #include <QFontDatabase>
@@ -35,31 +36,18 @@ class FontUtils {
         // We only show the fixed fonts
         QStringList fixedFamilies;
 
-#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
-        QFontDatabase database;
-        const auto families = database.families();
+        const auto families = klogg::qtcompat::fontFamilies();
         for ( const auto& family : families ) {
-            if ( database.isFixedPitch( family ) )
+            if ( klogg::qtcompat::isFixedPitch( family ) )
                 fixedFamilies << family;
         }
-#else
-        const auto families = QFontDatabase::families();
-        for ( const auto& family : families ) {
-            if ( QFontDatabase::isFixedPitch( family ) )
-                fixedFamilies << family;
-        }
-#endif
 
         return fixedFamilies;
     }
 
     static QList<int> availableFontSizes( const QString& family )
     {
-#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
-        auto sizes = QFontDatabase().pointSizes( family, "" );
-#else
-        auto sizes = QFontDatabase::pointSizes( family, "" );
-#endif
+        auto sizes = klogg::qtcompat::pointSizes( family );
 
         if ( sizes.empty() ) {
             sizes = QFontDatabase::standardSizes();

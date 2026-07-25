@@ -14,6 +14,8 @@ target_link_libraries(
 )
 klogg_configure_test_target(klogg_vectorscan_tests)
 
+target_compile_definitions(klogg_vectorscan_tests PUBLIC -DKLOGG_TESTS)
+
 add_dependencies(ci_build klogg_vectorscan_tests)
 
 klogg_add_runtime_test(klogg_vectorscan_tests klogg_vectorscan_tests)

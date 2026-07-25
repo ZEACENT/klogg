@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 Anton Filimonov
+ * Copyright (C) 2024 Anton Filimonov and other contributors
  *
  * This file is part of klogg.
  *
@@ -17,19 +17,25 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef KLOGG_ACTIVE_SCREEN_H
+#ifndef KLOGG_PLATFORM_PROCESS_H
+#define KLOGG_PLATFORM_PROCESS_H
 
-#include <QWidget>
-#include <QWindow>
-#include <QScreen>
+#include <QtGlobal>
+#include <chrono>
 
-#include "qtcompat/qtcompat.h"
+namespace klogg::platform {
 
-static inline QScreen* activeScreen(QWidget* widget) {
-    if (widget == nullptr) return nullptr;
-    
-    QScreen* screen = klogg::qtcompat::widgetScreen( widget );
-    return screen;
+// Startup failure grace period: Windows processes need longer to start.
+// Returns the interval in milliseconds before retrying after a failed start.
+constexpr std::chrono::milliseconds startupFailureGracePeriod()
+{
+#ifdef Q_OS_WIN
+    return std::chrono::milliseconds{ 1000 };
+#else
+    return std::chrono::milliseconds{ 250 };
+#endif
 }
 
-#endif
+} // namespace klogg::platform
+
+#endif // KLOGG_PLATFORM_PROCESS_H

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 Anton Filimonov
+ * Copyright (C) 2024 Anton Filimonov and other contributors
  *
  * This file is part of klogg.
  *
@@ -17,19 +17,23 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef KLOGG_ACTIVE_SCREEN_H
+#ifndef KLOGG_PLATFORM_PATHS_H
+#define KLOGG_PLATFORM_PATHS_H
 
-#include <QWidget>
-#include <QWindow>
-#include <QScreen>
+#include <QSettings>
 
-#include "qtcompat/qtcompat.h"
+namespace klogg::platform {
 
-static inline QScreen* activeScreen(QWidget* widget) {
-    if (widget == nullptr) return nullptr;
-    
-    QScreen* screen = klogg::qtcompat::widgetScreen( widget );
-    return screen;
-}
-
+// The preferred QSettings format for each platform.
+// Windows: IniFormat (registry not used for application settings).
+// macOS: NativeFormat (plist, HIG-conformant).
+// Linux: NativeFormat (ini/conf).
+#ifdef Q_OS_WIN
+constexpr auto settingsFormat = QSettings::IniFormat;
+#else
+constexpr auto settingsFormat = QSettings::NativeFormat;
 #endif
+
+} // namespace klogg::platform
+
+#endif // KLOGG_PLATFORM_PATHS_H
