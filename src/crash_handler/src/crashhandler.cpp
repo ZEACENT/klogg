@@ -40,9 +40,7 @@
 #include <qthreadpool.h>
 #include <string_view>
 
-#ifdef KLOGG_USE_MIMALLOC
 #include <mimalloc.h>
-#endif
 
 #include "client/crash_report_database.h"
 #include "sentry.h"
@@ -298,7 +296,6 @@ CrashHandler::CrashHandler()
         const auto vmUsed = usedMemory();
         addExtra( "vm_used", vmUsed );
 
-#ifdef KLOGG_USE_MIMALLOC
         size_t elapsedMsecs, userMsecs, systemMsecs, currentRss, peakRss, currentCommit, peakCommit,
             pageFaults;
 
@@ -313,7 +310,6 @@ CrashHandler::CrashHandler()
         addExtra( "current_commit", currentCommit );
         addExtra( "peak_commit", peakCommit );
         addExtra( "page_faults", pageFaults );
-#endif
     } );
     memoryUsageTimer_->start( 60000 );
 

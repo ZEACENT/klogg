@@ -239,9 +239,7 @@ int main( int argc, char* argv[] )
     NSSetUncaughtExceptionHandler( &kloggUncaughtNSExceptionHandler );
 #endif
 
-#ifdef KLOGG_USE_MIMALLOC
     mi_process_init();
-#endif
 
     const auto& config = Configuration::getSynced();
     setApplicationAttributes( config.enableQtHighDpi(), config.scaleFactorRounding() );
