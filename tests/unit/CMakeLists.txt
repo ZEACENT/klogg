@@ -12,6 +12,7 @@ add_executable(klogg_tests
     droppathclassification_test.cpp
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
+    linehighlight_compose_test.cpp
     linepositionarray_test.cpp
     mergefileorder_test.cpp
     overview_test.cpp

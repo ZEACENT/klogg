@@ -84,6 +84,7 @@
 #include "abstractlogview.h"
 #include "containers.h"
 #include "highlightedmatch.h"
+#include "highlightcompose.h"
 #include "linetypes.h"
 
 #include "active_screen.h"
@@ -2340,18 +2341,33 @@ LineLength AbstractLogView::getNbVisibleCols() const
 // Converts the mouse x, y coordinates to the line number in the file
 OptionalLineNumber AbstractLogView::convertCoordToLine( int yPos ) const
 {
-    // Use signed math (no abs) then clamp to valid range.
-    // This fixes clicks near the bottom returning "no line" due to an out-of-range index.
-    if ( wrappedLinesInfo_.empty() ) {
+    // Report the row under the cursor, or nullopt if the click falls outside the
+    // rendered rows (above the first row or below the last row's bottom).
+    //
+    // This used to CLAMP out-of-range clicks to the last visible row. That made
+    // a blank-space click below the content resolve to the last row -- in folder
+    // mode (after Collapse All) the last row is a group Header, so the click
+    // fired headerClicked and expanded the last file's group. It also caused a
+    // latent phantom last-line selection on single-file/live-log blank-space
+    // clicks. Returning nullopt makes blank space a no-op for every view.
+    //
+    // Integer division keeps in-row clicks correct: a click within the last row
+    // (y in [top+(n-1)*charH, top+n*charH)) yields offsetLines == n-1 (returned);
+    // only a click strictly below the last row's bottom yields offsetLines == n
+    // (nullopt). Drag/auto-scroll use convertCoordToFilePos (independent clamp),
+    // so they are unaffected.
+    if ( wrappedLinesInfo_.empty() || charHeight_ <= 0 ) {
         return OptionalLineNumber{};
     }
 
     const int offsetPx = yPos - drawingTopOffset_;
     const int offsetLines = offsetPx / charHeight_;
-    const auto wrappedLineInfoIndex = static_cast<size_t>( std::clamp(
-        offsetLines, 0, static_cast<int>( wrappedLinesInfo_.size() ) - 1 ) );
-    
-    return wrappedLinesInfo_[ wrappedLineInfoIndex ].lineNumber;
+    if ( offsetLines < 0
+         || offsetLines >= static_cast<int>( wrappedLinesInfo_.size() ) ) {
+        return OptionalLineNumber{};
+    }
+
+    return wrappedLinesInfo_[ static_cast<size_t>( offsetLines ) ].lineNumber;
 }
 
 // Converts the mouse x, y coordinates to the char coordinates (in the file)
@@ -3231,8 +3247,6 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
         const int xPos = contentStartPosX + ContentMarginWidth;
 
-        HighlightedMatchRanges highlighterMatches;
-
         const auto isWholeLineSelected = selection_.isLineSelected( lineNumber );
 
         // Set base colors
@@ -3252,88 +3266,124 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         if ( !isWholeLineSelected && isOutsideSearchRange ) {
             foreColor = palette.brush( QPalette::Disabled, QPalette::Text ).color();
         }
-        else if ( !isOutsideSearchRange ) {
-            const auto ansiColorSpans = logData_->getLineAnsiColors( lineNumber );
-            for ( const auto& span : ansiColorSpans ) {
-                const auto toColor = []( quint32 rgb ) {
-                    return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
-                                   static_cast<int>( ( rgb >> 8 ) & 0xff ),
-                                   static_cast<int>( rgb & 0xff ) );
+
+        // Gather per-source highlight matches and compose them through a single
+        // explicit priority + blend contract (see highlightcompose.h). logLine-
+        // space sources (ANSI, HighlighterSet, search-match gray, quick
+        // highlighters) are mapped to the expanded (untabified) column space;
+        // QuickFind and Selection are already in that space. composeLineHighlights
+        // is now the ONLY owner of the z-order -- it replaces the scattered
+        // addMatches() calls whose implicit order let the gray search match mask
+        // configured HighlighterSet colors. On a search-match/highlighter overlap
+        // the two are blended instead of one masking the other.
+        klogg::vector<HighlightSource> highlightSources;
+
+        if ( !isOutsideSearchRange ) {
+            const auto toColor = []( quint32 rgb ) {
+                return QColor( static_cast<int>( ( rgb >> 16 ) & 0xff ),
+                               static_cast<int>( ( rgb >> 8 ) & 0xff ),
+                               static_cast<int>( rgb & 0xff ) );
+            };
+            // Map a logLine-space match into the expanded (untabified) column
+            // space. logLine is still alive here: it is moved into expandedLine
+            // only after every logLine-space source has been gathered.
+            const auto untabifyMatch = [ &logLine ]( const HighlightedMatch& match ) {
+                const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
+                const auto matchPart
+                    = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
+                const auto expandedPrefixLength = untabify( prefix.toString() ).size();
+                const LineLength startDelta
+                    = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                        expandedPrefixLength - prefix.size() ) };
+
+                const LineLength expandedMatchLength = LineLength{
+                    untabify( matchPart.toString(),
+                              LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
+                                  expandedPrefixLength ) } )
+                        .size()
                 };
-                highlighterMatches.addMatch( HighlightedMatch{
+
+                const auto lengthDelta
+                    = expandedMatchLength
+                      - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                          matchPart.size() ) };
+
+                return HighlightedMatch{ match.startColumn() + startDelta,
+                                         match.size() + lengthDelta, match.foreColor(),
+                                         match.backColor() };
+            };
+
+            // ANSI color spans (lowest layer). Unset channels inherit the base.
+            klogg::vector<HighlightedMatch> ansiMatches;
+            for ( const auto& span : logData_->getLineAnsiColors( lineNumber ) ) {
+                ansiMatches.push_back( HighlightedMatch{
                     span.startColumn, span.length,
                     span.foreground.has_value() ? toColor( *span.foreground ) : foreColor,
                     span.background.has_value() ? toColor( *span.background ) : backColor } );
             }
+            std::transform( ansiMatches.begin(), ansiMatches.end(), ansiMatches.begin(),
+                            untabifyMatch );
+            highlightSources.push_back( { HighlightLayer::Ansi, std::move( ansiMatches ) } );
 
+            // Search-match gray. Sits BELOW configured highlighters so it no
+            // longer masks them; on overlap the two are blended.
+            if ( patternHighlight ) {
+                klogg::vector<HighlightedMatch> patternMatches;
+                patternHighlight->matchLine( logLine, patternMatches );
+                std::transform( patternMatches.begin(), patternMatches.end(),
+                                patternMatches.begin(), untabifyMatch );
+                highlightSources.push_back(
+                    { HighlightLayer::SearchMatch, std::move( patternMatches ) } );
+            }
+
+            // Configured HighlighterSet rules. matchLine fills a
+            // HighlightedMatchRanges; extract its matches for composition.
+            HighlightedMatchRanges highlighterMatches;
             const auto highlightType = highlighterSet.matchLine( logLine, highlighterMatches );
-
-            // LineMatch whole-line coloring only applies when not selected
+            // LineMatch whole-line coloring sets the line's base color (used by
+            // the fill rect and any gaps); capture it before extracting matches.
             if ( highlightType == HighlighterMatchType::LineMatch && !isWholeLineSelected ) {
                 foreColor = highlighterMatches.front().foreColor();
                 backColor = highlighterMatches.front().backColor();
             }
+            klogg::vector<HighlightedMatch> highlighterMatchesVec = highlighterMatches.matches();
+            std::transform( highlighterMatchesVec.begin(), highlighterMatchesVec.end(),
+                            highlighterMatchesVec.begin(), untabifyMatch );
+            highlightSources.push_back(
+                { HighlightLayer::Highlighter, std::move( highlighterMatchesVec ) } );
 
-            if ( patternHighlight ) {
-                klogg::vector<HighlightedMatch> patternMatches;
-                patternHighlight->matchLine( logLine, patternMatches );
-                highlighterMatches.addMatches( patternMatches );
-            }
-
+            // Quick highlighters / color labels.
             for ( const auto& highlighter : additionalHighlighters ) {
                 klogg::vector<HighlightedMatch> patternMatches;
                 highlighter.matchLine( logLine, patternMatches );
-                highlighterMatches.addMatches( patternMatches );
+                std::transform( patternMatches.begin(), patternMatches.end(),
+                                patternMatches.begin(), untabifyMatch );
+                highlightSources.push_back(
+                    { HighlightLayer::QuickHighlighter, std::move( patternMatches ) } );
             }
         }
-
-        const auto untabifyHighlight = [ &logLine ]( const auto& match ) {
-            const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
-            const auto matchPart
-                = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
-            const auto expandedPrefixLength = untabify( prefix.toString() ).size();
-            const LineLength startDelta
-                = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                    expandedPrefixLength - prefix.size() ) };
-
-            const LineLength expandedMatchLength = LineLength{
-                untabify( matchPart.toString(),
-                          LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
-                              expandedPrefixLength ) } )
-                    .size()
-            };
-
-            const auto lengthDelta
-                = expandedMatchLength
-                  - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
-                      matchPart.size() ) };
-
-            return HighlightedMatch{ match.startColumn() + startDelta, match.size() + lengthDelta,
-                                     match.foreColor(), match.backColor() };
-        };
-
-        klogg::vector<HighlightedMatch> sortedHighlights = highlighterMatches.matches();
-        std::transform( sortedHighlights.begin(), sortedHighlights.end(), sortedHighlights.begin(),
-                        untabifyHighlight );
-
-        HighlightedMatchRanges allHighlights{ std::move( sortedHighlights ) };
 
         // string to print, cut to fit the length and position of the view
         const QString& expandedLine = untabify( std::move( logLine ) );
 
-        // Has the line got elements to be highlighted
+        // QuickFind (already in the expanded column space).
         klogg::vector<HighlightedMatch> quickFindMatches;
         quickFindPattern_->matchLine( expandedLine, quickFindMatches );
-        allHighlights.addMatches( quickFindMatches );
+        highlightSources.push_back(
+            { HighlightLayer::QuickFind, std::move( quickFindMatches ) } );
 
-        // Is there something selected in the line?
+        // Selection (already in the expanded column space).
         const auto selectionPortion = selection_.getPortionForLine( lineNumber );
         if ( selectionPortion.isValid() ) {
-            allHighlights.addMatch( HighlightedMatch{ selectionPortion.startColumn(),
-                                                      selectionPortion.size(),
-                                                      palette.color( QPalette::HighlightedText ),
-                                                      palette.color( QPalette::Highlight ) } );
+            highlightSources.push_back(
+                { HighlightLayer::Selection,
+                  { HighlightedMatch{ selectionPortion.startColumn(), selectionPortion.size(),
+                                      palette.color( QPalette::HighlightedText ),
+                                      palette.color( QPalette::Highlight ) } } } );
         }
+
+        HighlightedMatchRanges allHighlights = composeLineHighlights( highlightSources );
+
 
         WrappedString wrappedLineView = [&, this] {
             if ( useTextWrap_ ) {

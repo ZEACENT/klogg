@@ -20,6 +20,7 @@
 #ifndef FOLDERSEARCHRESULTS_H
 #define FOLDERSEARCHRESULTS_H
 
+#include <QHash>
 #include <QSet>
 #include <QString>
 #include <QTextCodec>
@@ -27,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include "abstractlogdata.h"
@@ -140,10 +142,14 @@ class FolderSearchResults : public AbstractLogData {
     enum class Visibility { MarksAndMatches, Marks, Matches };
     void setVisibility( Visibility visibility );
     Visibility visibility() const { return visibility_; }
-    // Inject the mark query the Marks filter consults (filePath, localLine) ->
-    // marked. The widget owns the mark store; this keeps FolderSearchResults free
-    // of UI-side mark ownership. Call before/with setVisibility(Marks).
-    void setMarkedLineQuery( std::function<bool( const QString&, LineNumber )> query );
+    // Inject the per-file marks store (widget-owned, read LIVE during rebuild)
+    // so the Marks / Marks-and-matches visibility can show marked lines that do
+    // NOT match the current filter -- single-file LogFilteredData::marks_ parity.
+    // Marks are (filePath, localLine) bookmarks independent of the transient
+    // match set; the store is ENUMERATED (not just predicate-tested) so marked
+    // non-match rows can be injected alongside match rows. The widget must
+    // outlive the results object. Call before/with setVisibility(Marks).
+    void setMarksStore( const QHash<QString, std::set<uint64_t>>* store );
     // Rebuild + emit layoutChanged. Called by the widget when marks change while
     // the Marks filter is active (the visible set depends on marks).
     void refreshForMarksChange();
@@ -171,9 +177,23 @@ class FolderSearchResults : public AbstractLogData {
 
   private:
     struct VisibleRow {
-        LineKind kind;
-        klogg::folder::FileId fileId = 0;   // index into groups_
-        size_t matchIndex = 0;              // index into groups_[fileId].matches (Match rows)
+        LineKind kind = LineKind::Data;
+        // Injected marked non-match row: a bookmark on a source line that does
+        // not match the current filter. Renders as a normal Data row but is not
+        // a match (isMatchRow == false) and fetches text by (filePath, localLine).
+        bool isMarkRow = false;
+        klogg::folder::FileId fileId = 0;   // Header/Match: index into groups_; Mark: real group or marks-only (groups_.size() + idx)
+        size_t matchIndex = 0;              // Match rows: index into groups_[fileId].matches
+        LineNumber markLocalLine = 0_lnum;  // Mark rows: marked source line
+        QString markFilePath;               // Mark rows: source file path
+    };
+
+    // A file that has marks but no match group (marks-only). Rebuilt each
+    // rebuildVisibleRows from the injected marks store; shown under Marks /
+    // Marks-and-matches so marked lines stay visible across filter changes.
+    struct MarksGroup {
+        QString filePath;
+        std::vector<LineNumber> localLines; // sorted ascending
     };
 
     void rebuildVisibleRows();
@@ -185,7 +205,14 @@ class FolderSearchResults : public AbstractLogData {
     void reapplyCollapseForLastGroup();
     bool isLineMarked( const QString& filePath, LineNumber localLine ) const;
     QString headerText( klogg::folder::FileId fileId ) const;
+    QString marksGroupHeader( size_t marksGroupIndex ) const;
     QString readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const;
+    // Fetch the text of a marked source line by (filePath, localLine) using a
+    // cached per-file line-offset index (marked non-match lines have no
+    // MatchRecord offset). Results are cached per (filePath, localLine).
+    QString readMarkLine( const QString& filePath, LineNumber localLine, QTextCodec* codec ) const;
+    void ensureMarkLines( const QString& filePath, QTextCodec* codec ) const;
+    QTextCodec* codecForFile( const QString& filePath ) const;
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
     const VisibleRow* visibleRowAt( LineNumber line ) const;
 
@@ -207,7 +234,21 @@ class FolderSearchResults : public AbstractLogData {
     QSet<QString> pendingCollapsePaths_;
 
     Visibility visibility_ = Visibility::MarksAndMatches;
-    std::function<bool( const QString&, LineNumber )> isMarkedLine_;
+    // Widget-owned per-file marks store, read LIVE during rebuildVisibleRows
+    // (main thread). Lets the Marks / Marks-and-matches filter enumerate marked
+    // lines and inject marked non-match rows (single-file marks_ parity).
+    const QHash<QString, std::set<uint64_t>>* marksStore_ = nullptr;
+    // Marks-only groups (files with marks but no match group), rebuilt each
+    // rebuildVisibleRows. Indexed by FileId = groups_.size() + index.
+    std::vector<MarksGroup> marksGroups_;
+    // Per-file decoded line text for on-demand marked-line fetch (marked
+    // non-match lines have no MatchRecord offset). Built lazily by reading the
+    // whole file, decoding with codecForFile and splitting on '\n' (correct for
+    // all encodings incl. UTF-16), cached, capped at kMarkLineCacheCap bytes
+    // (huge files skip -> empty mark text, no main-thread stall). Persists across
+    // searches (file-intrinsic); invalidated on encoding-override change.
+    // Guarded by fileIoMutex_.
+    mutable QHash<QString, std::vector<QString>> markLineCache_;
     // Per-file display-encoding overrides (Encoding-menu picks), consulted by
     // readMatchLine before the scan-time detected sourceCodec.
     QHash<QString, QByteArray> encodingOverrides_;
