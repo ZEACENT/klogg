@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 Anton Filimonov
+ * Copyright (C) 2024 Anton Filimonov and other contributors
  *
  * This file is part of klogg.
  *
@@ -17,19 +17,10 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef KLOGG_ACTIVE_SCREEN_H
+#ifndef KLOGG_QTCOMPAT_H
+#define KLOGG_QTCOMPAT_H
 
-#include <QWidget>
-#include <QWindow>
-#include <QScreen>
+#include "qtcompat_concurrent.h"
+#include "qtcompat_properties.h"
 
-#include "qtcompat/qtcompat.h"
-
-static inline QScreen* activeScreen(QWidget* widget) {
-    if (widget == nullptr) return nullptr;
-    
-    QScreen* screen = klogg::qtcompat::widgetScreen( widget );
-    return screen;
-}
-
-#endif
+#endif // KLOGG_QTCOMPAT_H

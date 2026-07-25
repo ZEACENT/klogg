@@ -39,6 +39,8 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include "qtcompat/qtcompat.h"
+
 #include <algorithm>
 
 #include "abstractlogview.h"
@@ -1279,11 +1281,7 @@ void FolderCrawlerWidget::editSearchHistory()
 
     if ( ok ) {
         savedSearches_->clear();
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-        const auto items = newHistory.split( QChar::LineFeed, Qt::SkipEmptyParts );
-#else
-        const auto items = newHistory.split( QChar::LineFeed, QString::SkipEmptyParts );
-#endif
+        const auto items = newHistory.split( QChar::LineFeed, klogg::qtcompat::skipEmptyParts() );
         std::for_each( items.rbegin(), items.rend(), [ this ]( const auto& item ) {
             savedSearches_->addRecent( item );
         } );

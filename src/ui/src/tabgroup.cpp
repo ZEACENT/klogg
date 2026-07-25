@@ -24,6 +24,8 @@
 
 #include "log.h"
 
+#include "qtcompat/qtcompat.h"
+
 QList<TabGroup> TabGroupManager::groups() const
 {
     return groups_;
@@ -174,12 +176,7 @@ void TabGroupManager::retrieveFromStorage( QSettings& settings )
         if ( group.tabPaths.isEmpty() ) {
             const auto tabPathsText = settings.value( "tabPathsText" ).toString();
             if ( !tabPathsText.isEmpty() ) {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-                group.tabPaths = tabPathsText.split( QLatin1Char( '\n' ), Qt::SkipEmptyParts );
-#else
-                group.tabPaths =
-                    tabPathsText.split( QLatin1Char( '\n' ), QString::SkipEmptyParts );
-#endif
+                group.tabPaths = tabPathsText.split( QLatin1Char( '\n' ), klogg::qtcompat::skipEmptyParts() );
             }
         }
 

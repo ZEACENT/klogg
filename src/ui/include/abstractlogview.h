@@ -56,10 +56,6 @@
 #include <QEvent>
 #include <QFontMetrics>
 
-#ifdef GLOGG_PERF_MEASURE_FPS
-#include "perfcounter.h"
-#endif
-
 #include "abstractlogdata.h"
 #include "linekind.h"
 #include "highlighterset.h"
@@ -569,11 +565,6 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     const QuickFindPattern* quickFindPattern_;
     // Our own QuickFind object
     QuickFind* quickFind_;
-
-#ifdef GLOGG_PERF_MEASURE_FPS
-    // Performance measurement
-    PerfCounter perfCounter_;
-#endif
 
     // Vertical offset (in pixels) at which the first line of text is written
     int drawingTopOffset_ = 0;

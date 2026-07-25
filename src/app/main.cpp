@@ -41,6 +41,8 @@
 #include <qapplication.h>
 #include <qthreadpool.h>
 
+#include "qtcompat/qtcompat.h"
+
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

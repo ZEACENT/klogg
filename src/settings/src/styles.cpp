@@ -29,6 +29,8 @@
 #include <QSettings>
 #include <qcolor.h>
 
+#include "qtcompat/qtcompat.h"
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif

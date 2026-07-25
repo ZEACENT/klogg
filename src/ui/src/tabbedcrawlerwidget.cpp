@@ -49,6 +49,7 @@
 #include "log.h"
 #include "openfilehelper.h"
 #include "pathutils.h"
+#include "qtcompat/qtcompat.h"
 #include "styles.h"
 #include "tabgroup.h"
 #include "tabgroupdropresolver.h"
@@ -537,12 +538,7 @@ int TabbedCrawlerWidget::tabIndexForPath( const QString& tabPath ) const
 
 void TabbedCrawlerWidget::setTabVisibleCompat( int index, bool visible )
 {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    myTabBar_.setTabVisible( index, visible );
-#else
-    Q_UNUSED( visible );
-    myTabBar_.setTabEnabled( index, visible );
-#endif
+    klogg::qtcompat::setTabVisible( &myTabBar_, index, visible );
 }
 
 void TabbedCrawlerWidget::handleTabMoved( int from, int to )
@@ -733,11 +729,9 @@ void CrawlerTabBar::paintEvent( QPaintEvent* event )
     painter.setRenderHint( QPainter::Antialiasing, true );
 
     for ( int i = 0; i < count(); ++i ) {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-        if ( !isTabVisible( i ) ) {
+        if ( !klogg::qtcompat::isTabVisible( this, i ) ) {
             continue;
         }
-#endif
         const auto tabInfo = tabData( i ).toMap();
         if ( !tabInfo.contains( GroupColorKey ) ) {
             continue;

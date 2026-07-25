@@ -1240,16 +1240,6 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     if ( ( invalidRect.isEmpty() ) || ( logData_ == nullptr ) )
         return;
 
-#ifdef GLOGG_PERF_MEASURE_FPS
-    static uint32_t maxline = logData_->getNbLine();
-    if ( !perfCounter_.addEvent() && logData_->getNbLine() > maxline ) {
-        LOG_WARNING << "Redraw per second: " << perfCounter_.readAndReset()
-                    << " lines: " << logData_->getNbLine();
-        perfCounter_.addEvent();
-        maxline = logData_->getNbLine();
-    }
-#endif
-
     auto start = std::chrono::system_clock::now();
 
     // Can we use our cache?
