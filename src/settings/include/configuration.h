@@ -48,6 +48,7 @@
 #include <string_view>
 
 #include "persistable.h"
+#include "platform/platform_files.h"
 #include "platform/platform_style.h"
 
 // Type of regexp to use for searches
@@ -703,11 +704,7 @@ class Configuration final : public Persistable<Configuration> {
     QString language_{ "en" };
 
     bool nativeFileWatchEnabled_ = true;
-#ifdef Q_OS_WIN
-    bool pollingEnabled_ = true;
-#else
-    bool pollingEnabled_ = false;
-#endif
+    bool pollingEnabled_ = klogg::platform::pollingEnabledDefault;
 
     int pollIntervalMs_ = 2000;
 

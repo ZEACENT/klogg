@@ -153,6 +153,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // async paint -- or on a viewport Qt never painted (hidden/unrealized) --
     // resolves to the current row instead of a stale/empty map.
     void ensureLineMapFresh();
+#ifdef KLOGG_TESTS
     // Exposed for testing: resolve a viewport y to a line using the current map
     // (nullopt when the map is empty). Lets headless tests verify the paint-free
     // rebuild without synthesizing a mouse event.
@@ -162,6 +163,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // tests verify the signature cache skips redundant rebuilds across mouse
     // events that share the same data/geometry.
     int visibleLineMapBuildCount() const { return visibleLineMapBuildCount_; }
+#endif
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
     void updateDisplaySize();

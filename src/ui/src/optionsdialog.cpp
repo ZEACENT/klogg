@@ -61,6 +61,8 @@
 #include "shortcuts.h"
 #include "styles.h"
 
+#include "platform/platform_files.h"
+
 #include "optionsdialog.h"
 
 static constexpr int PollIntervalMin = 10;
@@ -154,9 +156,9 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 // Setups the tabs depending on the configuration
 void OptionsDialog::setupTabs()
 {
-#ifndef Q_OS_WIN
+if ( !klogg::platform::hasExclusiveFileLocks ) {
     keepFileClosedCheckBox->setVisible( false );
-#endif
+}
 
 #ifdef Q_OS_MAC
     minimizeToTrayCheckBox->setVisible( false );
