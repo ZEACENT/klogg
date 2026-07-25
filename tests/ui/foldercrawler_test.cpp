@@ -656,7 +656,11 @@ TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps",
                 return row;
             }
         }
-        return 0_lnum;
+        // 0_lnum is a valid header row, so a silent miss would select an
+        // unrelated row and surface later as a confusing waitFor timeout. Fail
+        // at the lookup site instead.
+        FAIL( "matchRowForFile: no matching result row found for the requested file" );
+        return 0_lnum; // unreachable; FAIL aborts the test case
     };
     widget.selectResultRow( matchRowForFile( b ) ); // b.log match
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );

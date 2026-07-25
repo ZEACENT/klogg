@@ -223,6 +223,229 @@ def _check_unguarded_platform_helper(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+def _extract_call_args(code: str, open_paren_pos: int) -> str:
+    """Return the substring inside the parentheses starting at
+    ``open_paren_pos``, balancing nested ``()``. Returns '' if unbalanced.
+
+    Used by the qsizetype check so that ``.indexOf( QLatin1Char( '\\n' ), start )``
+    is recognised as passing ``start`` (the nested QLatin1Char call would defeat
+    a naive ``[^)]*`` capture).
+    """
+    depth = 0
+    start = open_paren_pos + 1
+    for i in range(start, len(code)):
+        ch = code[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return code[start:i]
+            depth -= 1
+    return ""
+
+
+# Qt string/container APIs that take `int` on Qt 5 and `qsizetype` on Qt 6.
+# Passing a raw qsizetype value narrows to int on Qt 5 -> -Werror=conversion.
+# (QStringView is the exception: it has been qsizetype-native since Qt 5.8, so
+# its indexOf/mid/left/right never narrow. QStringRef, like QString, takes int
+# on Qt 5 and IS flagged.)
+_QT_INT_API_RE = re.compile(
+    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove)\s*\("
+)
+_QSIZETYPE_DECL_RE = re.compile(r"\b(?:const\s+)?qsizetype\s+(\w+)\b")
+# `using <Alias> = QStringView;` -- the wrappedstring.h code uses this idiom.
+_QSTRINGVIEW_ALIAS_RE = re.compile(r"\busing\s+(\w+)\s*=\s*QStringView\s*;")
+# A #if whose condition is Qt-6-only (so qsizetype code inside it is safe).
+_QT6_IF_RE = re.compile(
+    r"#\s*if\b.*\bQT_VERSION(?:_MAJOR)?\b.*"
+    r"(?:QT_VERSION_CHECK\s*\(\s*6\b|0x0*6[0-9A-Fa-f]{4,}|>=\s*6\b|>\s*5\b)"
+)
+
+
+def _qt6_guarded_lines(lines: list[str]) -> set[int]:
+    """Return 1-based line numbers inside a Qt-6-only ``#if QT_VERSION >= 6``
+    (or ``> 5``) branch, *excluding* its ``#else`` branch (which is Qt 5).
+
+    qsizetype code behind such a guard only compiles on Qt 6, where these APIs
+    take qsizetype, so it is not a -Werror=conversion risk. The Qt 5 ``#else``
+    branch IS checked.
+    """
+    qt6: set[int] = set()
+    # Each stack frame: {"qt6": bool, "in_else": bool}
+    stack: list[dict] = []
+    for i, line in enumerate(lines, start=1):
+        if re.match(r"#\s*if(n?def)?\b", line):
+            stack.append({"qt6": bool(_QT6_IF_RE.search(line)), "in_else": False})
+        elif re.match(r"#\s*elif\b", line):
+            # Conservatively treat the #elif branch as not the qt6 branch.
+            if stack:
+                stack[-1]["in_else"] = True
+        elif re.match(r"#\s*else\b", line):
+            if stack:
+                stack[-1]["in_else"] = True
+        elif re.match(r"#\s*endif\b", line):
+            if stack:
+                stack.pop()
+        if any(s["qt6"] and not s["in_else"] for s in stack):
+            qt6.add(i)
+    return qt6
+
+
+def _extract_receiver(code: str, dot_pos: int) -> str:
+    """Return the receiver expression immediately before the '.' at dot_pos.
+
+    For ``text.mid`` -> "text"; for ``QStringView{ line }.mid`` -> "QStringView";
+    for ``QStringView(line).mid`` -> "QStringView". Used to tell QStringView
+    receivers (qsizetype-native on Qt 5) from QString/QByteArray ones.
+    """
+    j = dot_pos - 1
+    while j >= 0 and code[j].isspace():
+        j -= 1
+    if j < 0:
+        return ""
+
+    def _ident_before(pos: int) -> str:
+        t = pos
+        while t >= 0 and (code[t].isalnum() or code[t] == "_"):
+            t -= 1
+        return code[t + 1 : pos + 1]
+
+    if code[j] in "})]":
+        open_ch = {"}": "{", ")": "(", "]": "["}[code[j]]
+        depth = 1
+        k = j - 1
+        while k >= 0 and depth > 0:
+            if code[k] == code[j]:
+                depth += 1
+            elif code[k] == open_ch:
+                depth -= 1
+            k -= 1
+        # k+1 is the matching opener; read the type identifier before it.
+        t = k
+        while t >= 0 and code[t].isspace():
+            t -= 1
+        return _ident_before(t) if t >= 0 else ""
+    return _ident_before(j)
+
+
+def _strip_literals(s: str) -> str:
+    """Return ``s`` with char/string literal *contents* blanked so that an
+    identifier search cannot match text inside them (e.g. the ``n`` in
+    ``'\\n'`` must not be confused with a variable named ``n``).
+    """
+    out: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "'" or ch == '"':
+            quote = ch
+            out.append(quote)
+            j = i + 1
+            while j < n:
+                if s[j] == "\\" and j + 1 < n:
+                    j += 2
+                elif s[j] == quote:
+                    out.append(quote)
+                    j += 1
+                    break
+                else:
+                    j += 1
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag a `qsizetype`-typed variable passed as an argument to a Qt
+    string/container API that takes `int` on Qt 5.
+
+    On Qt 5 (Ubuntu 20.04 / 22.04 CI), QString/QStringRef/QByteArray::indexOf,
+    mid, left, right, truncate, chop, ... take `int`; on Qt 6 they take
+    `qsizetype`. A value held in a raw `qsizetype` variable therefore narrows to
+    `int` on Qt 5 and trips -Werror=conversion -- but the narrowing is invisible
+    on the macOS / Ubuntu-24.04 Qt 6 builds developers run locally, so it only
+    surfaces in the Linux CI matrix. PR #48 failed CI this way in
+    FolderSearchResults::ensureMarkLines (qsizetype loop indices passed to
+    QString::indexOf / QString::mid).
+
+    QStringView is excluded: it has been qsizetype-native since Qt 5.8, so its
+    indexOf/mid/left/right do not narrow on Qt 5. Code behind a Qt-6-only
+    ``#if QT_VERSION >= 6`` guard is also excluded. The adaptive klogg types
+    (LineLength / LineColumn, whose UnderlyingType is decltype(QString::size()))
+    and an explicit static_cast<int>(...) with a documented size bound are the
+    portable alternatives -- both are already used in-tree. `auto` deduced from
+    QString::size()/indexOf() is also safe (it tracks the Qt version), so only
+    explicit `qsizetype` declarations are flags.
+    """
+    findings: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    qt6_lines = _qt6_guarded_lines(lines)
+
+    # Collect every identifier declared `qsizetype` OUTSIDE Qt-6-only guards
+    # (inside the guard, qsizetype only compiles on Qt 6 where it is safe).
+    declared: set[str] = set()
+    for i, line in enumerate(lines, start=1):
+        if i in qt6_lines:
+            continue
+        for m in _QSIZETYPE_DECL_RE.finditer(_strip_line_comment(line)):
+            declared.add(m.group(1))
+    if not declared:
+        return findings
+
+    # QStringView type names: the real one plus `using X = QStringView;` aliases
+    # (wrappedstring.h uses `using WrappedStringPart = QStringView;`).
+    qstrview_types: set[str] = {"QStringView"}
+    for line in lines:
+        m = _QSTRINGVIEW_ALIAS_RE.search(line)
+        if m:
+            qstrview_types.add(m.group(1))
+    # Variables of a QStringView type (incl. aliases): `<Type> <ident>` or
+    # `<Type> <ident>(...)` constructions. Receivers matching these are safe.
+    qstrview_vars: set[str] = set()
+    type_alt = "|".join(re.escape(t) for t in qstrview_types)
+    var_decl_re = re.compile(rf"\b(?:const\s+)?({type_alt})\s+(\w+)\b")
+    for line in lines:
+        code = _strip_line_comment(line)
+        for m in var_decl_re.finditer(code):
+            qstrview_vars.add(m.group(2))
+
+    for i, line in enumerate(lines, start=1):
+        if i in qt6_lines or ALLOW_MARKER in line:
+            continue
+        code = _strip_line_comment(line)
+        for m in _QT_INT_API_RE.finditer(code):
+            args = _extract_call_args(code, m.end() - 1)
+            if not args:
+                continue
+            receiver = _extract_receiver(code, m.start())
+            # QStringView receiver: qsizetype-native on Qt 5, no narrowing.
+            if receiver in qstrview_types or receiver in qstrview_vars:
+                continue
+            for name in declared:
+                if re.search(r"\b" + re.escape(name) + r"\b", _strip_literals(args)):
+                    findings.append(
+                        (
+                            i,
+                            f"qsizetype variable '{name}' is passed to a Qt "
+                            f"string API (.indexOf/.mid/.left/...) that takes "
+                            f"`int` on Qt 5 (receiver '{receiver}' is not a "
+                            f"QStringView). This narrows qsizetype->int and "
+                            f"trips -Werror=conversion on the Qt 5 Linux CI "
+                            f"builds (invisible on Qt 6 / macOS). Use the "
+                            f"adaptive LineLength/LineColumn types, or "
+                            f"static_cast<int>(...) with a documented size "
+                            f"bound. (PR #48 CI failure: ensureMarkLines.)",
+                        )
+                    )
+                    break  # one report per call is enough
+            if findings and findings[-1][0] == i:
+                break  # one report per line is enough
+    return findings
+
+
 def _check_main_view_text_pixel_probe(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag main-view text pixel probes that assert on viewport grabs.
 
@@ -605,6 +828,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "data-variable-shadowing",
         "check": _check_data_variable_shadowing,
+    },
+    {
+        "name": "qsizetype-to-qt-int-api",
+        "check": _check_qsizetype_to_int_conversion,
     },
 ]
 

@@ -1766,8 +1766,11 @@ SCENARIO( "Marks persist across a filter change and stay visible (single-file pa
     REQUIRE( crawlerVisitor.markedLinesCount() == 1 );
     // ...and stays visible in the filtered view under "Marks and matches"
     // (marked line 5 + matched line 10), even though line 5 does not match
-    // filter2.
-    REQUIRE( crawlerVisitor.getLogFilteredNbLines() == 2_lcount );
+    // filter2. Assert the ROW IDENTITY, not just the count: the filtered view
+    // preserves source order, so row 0 is marked line 5 (000005) and row 1 is
+    // the filter2 match on line 10 (000010).
+    REQUIRE( crawlerVisitor.filteredLineText( 0 ).contains( "000005" ) );
+    REQUIRE( crawlerVisitor.filteredLineText( 1 ).contains( "000010" ) );
 }
 
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )

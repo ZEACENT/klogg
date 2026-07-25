@@ -579,6 +579,13 @@ void FolderSearchResults::rebuildVisibleRows()
             // std::set iterates ascending, so localLines is already sorted.
             marksGroups_.push_back( std::move( mg ) );
         }
+        // marksStore_ is a QHash (unspecified, per-process-salted iteration
+        // order); sort so marks-only groups -- and their derived FileIds / row
+        // indices -- appear in a stable, natural order across rebuilds and runs.
+        std::sort( marksGroups_.begin(), marksGroups_.end(),
+                   []( const MarksGroup& l, const MarksGroup& r ) {
+                       return l.filePath < r.filePath;
+                   } );
     }
 
     // Real groups: header + match rows + injected Mark rows.
@@ -921,29 +928,38 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
 
     std::vector<QString> lines;
     QFile file( filePath );
-    if ( file.open( QIODevice::ReadOnly ) ) {
-        constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
-        if ( file.size() <= kMarkLineCacheCap ) {
-            const QByteArray bytes = file.readAll();
-            const QString text
-                = codec != nullptr ? codec->toUnicode( bytes ) : QString::fromUtf8( bytes );
-            const qsizetype n = text.size();
-            qsizetype start = 0;
-            while ( start <= n ) {
-                qsizetype idx = text.indexOf( QLatin1Char( '\n' ), start );
-                if ( idx < 0 ) {
-                    idx = n;
-                }
-                QString line = text.mid( start, idx - start );
-                if ( line.endsWith( QLatin1Char( '\r' ) ) ) {
-                    line.chop( 1 );
-                }
-                lines.push_back( std::move( line ) );
-                if ( idx >= n ) {
-                    break;
-                }
-                start = idx + 1;
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        // Transient open failure: don't cache an empty entry so a later fetch
+        // (e.g. after the file becomes readable again) can retry instead of
+        // being permanently recorded as "no mark text".
+        return;
+    }
+    constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
+    if ( file.size() <= kMarkLineCacheCap ) {
+        const QByteArray bytes = file.readAll();
+        const QString text
+            = codec != nullptr ? codec->toUnicode( bytes ) : QString::fromUtf8( bytes );
+        // File size is capped at kMarkLineCacheCap (16 MiB) above, so all line
+        // indices fit in int. Use int + explicit casts for Qt 5 / Qt 6
+        // portability: Qt 5's QString::indexOf/mid take int, Qt 6's take
+        // qsizetype, and a raw qsizetype here triggers -Werror=conversion on
+        // the Qt 5 Linux CI builds.
+        const int n = static_cast<int>( text.size() );
+        int start = 0;
+        while ( start <= n ) {
+            int idx = static_cast<int>( text.indexOf( QLatin1Char( '\n' ), start ) );
+            if ( idx < 0 ) {
+                idx = n;
             }
+            QString line = text.mid( start, idx - start );
+            if ( line.endsWith( QLatin1Char( '\r' ) ) ) {
+                line.chop( 1 );
+            }
+            lines.push_back( std::move( line ) );
+            if ( idx >= n ) {
+                break;
+            }
+            start = idx + 1;
         }
     }
     markLineCache_.insert( filePath, std::move( lines ) );
