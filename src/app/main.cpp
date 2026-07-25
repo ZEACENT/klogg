@@ -141,9 +141,6 @@ void kloggUncaughtNSExceptionHandler( NSException* exception )
 #include <mimalloc.h>
 #include <roaring.hh>
 
-#ifdef KLOGG_HAS_VECTORSCAN
-#include <hs.h>
-#endif
 
 #include "tbb/global_control.h"
 
@@ -279,9 +276,6 @@ int main( int argc, char* argv[] )
     roaring_memory_allocators.aligned_free = mi_free;
     roaring_init_memory_hook(roaring_memory_allocators);
 
-#ifdef KLOGG_HAS_VECTORSCAN
-    hs_set_allocator(mi_malloc, mi_free);
-#endif
 
     if ( maxConcurrency < 2 ) {
         maxConcurrency = 2;
