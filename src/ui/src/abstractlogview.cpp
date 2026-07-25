@@ -97,8 +97,11 @@
 #include "quickfind.h"
 #include "quickfindpattern.h"
 #include "quicklabelpattern.h"
+#include "platform/platform_intrinsics.h"
+#include "platform/platform_clipboard.h"
 #include "regularexpressionpattern.h"
 #include "shortcuts.h"
+#include "platform/platform_input.h"
 
 namespace {
 
@@ -110,52 +113,13 @@ bool quickLabelMatchesText( const QuickLabelEntry& entry, const QString& text )
 }
 } // namespace
 
-#ifdef Q_OS_WIN
-
-#pragma warning( disable : 4244 )
-
-#include <intrin.h>
-
-#if _WIN64
-inline int countLeadingZeroes( uint64_t value )
-{
-    unsigned long leading_zero = 0;
-
-    if ( _BitScanReverse64( &leading_zero, value ) ) {
-        return 63ul - leading_zero;
-    }
-    else {
-        return 64;
-    }
-}
-#else
-inline int countLeadingZeroes( uint64_t value )
-{
-    unsigned long leading_zero = 0;
-
-    if ( _BitScanReverse( &leading_zero, static_cast<uint32_t>( value ) ) ) {
-        return 63ul - leading_zero;
-    }
-    else {
-        return 64;
-    }
-}
-#endif
-
-#else
-inline int countLeadingZeroes( uint64_t value )
-{
-    return __builtin_clzll( value );
-}
-#endif
-
 namespace {
 
 int mapPullToFollowLength( int length );
 
 int intLog2( uint64_t x )
 {
-    return 63 - countLeadingZeroes( x | 1 );
+    return 63 - klogg::platform::countLeadingZeroes( x | 1 );
 }
 
 // see https://lemire.me/blog/2021/05/28/computing-the-number-of-digits-of-an-integer-quickly/
@@ -1096,11 +1060,7 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         return;
     }
 
-#ifdef Q_OS_MACOS
-    constexpr auto FontSizeMod = Qt::MetaModifier;
-#else
-    constexpr auto FontSizeMod = Qt::ControlModifier;
-#endif
+    constexpr auto FontSizeMod = klogg::platform::FontSizeMod;
     if ( wheelEvent->modifiers().testFlag( FontSizeMod ) ) {
         Q_EMIT changeFontSize( yDelta > 0 );
         return;
@@ -1731,9 +1691,9 @@ void AbstractLogView::saveLinesToFile( LineNumber begin, LineNumber end )
                 const auto& offset = offsets.at( offsetIndex );
                 LinesData lines{ logData_->getLines( offset.first, offset.second ), true };
                 for ( auto& l : lines.first ) {
-#if !defined( Q_OS_WIN )
+if constexpr ( klogg::platform::clipboardNewlineBeforeLf ) {
                     l.append( QChar::CarriageReturn );
-#endif
+                }
                     l.append( QChar::LineFeed );
                 }
 

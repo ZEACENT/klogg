@@ -9,6 +9,10 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/synchronization.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/overload_visitor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/resourcewrapper.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/platform/platform_intrinsics.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/platform/platform_input.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/platform/platform_style.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/platform/platform_clipboard.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/simdutf_wrapper.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crc32.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathutils.h

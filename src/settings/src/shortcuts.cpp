@@ -25,13 +25,11 @@
 
 #include "shortcuts.h"
 
+#include "platform/platform_input.h"
+
 QString commandShortcutModifier()
 {
-#ifdef Q_OS_MACOS
-    return QStringLiteral( "Meta" );
-#else
-    return QStringLiteral( "Ctrl" );
-#endif
+    return klogg::platform::shortcutModifierName;
 }
 
 QStringList getKeyBindings( QKeySequence::StandardKey standardKey )
