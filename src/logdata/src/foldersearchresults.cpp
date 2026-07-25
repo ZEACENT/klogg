@@ -34,7 +34,7 @@ namespace {
 QString markCacheKey( const QString& filePath, QTextCodec* codec )
 {
     return filePath + QChar::Null
-           + QString::fromLatin1( codec != nullptr ? codec->name() : "UTF-8" );
+           + QString::fromLatin1( codec != nullptr ? codec->name() : QByteArrayLiteral( "UTF-8" ) );
 }
 
 } // namespace
