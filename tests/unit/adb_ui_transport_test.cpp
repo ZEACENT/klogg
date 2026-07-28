@@ -2292,3 +2292,28 @@ TEST_CASE( "DeviceListProvider async enumeration is safe against provider destru
     REQUIRE( future.result().isEmpty() );
 #endif
 }
+
+TEST_CASE( "AdbLogcatSessionData round-trips the bound output file and ANSI save mode",
+           "[live-save-restore]" )
+{
+    AdbLogcatSessionData data;
+    data.captureId = QStringLiteral( "cap-1234" );
+    data.boundOutputFile = QStringLiteral( "/tmp/saved.log" );
+    data.outputAnsiMode = LiveLogSaveAnsiMode::Preserve;
+
+    const auto json = QString::fromUtf8(
+        QJsonDocument( data.toJson() ).toJson( QJsonDocument::Compact ) );
+    const auto restored = AdbLogcatSessionData::fromJson( json );
+
+    REQUIRE( restored.captureId == QStringLiteral( "cap-1234" ) );
+    REQUIRE( restored.boundOutputFile == QStringLiteral( "/tmp/saved.log" ) );
+    REQUIRE( restored.outputAnsiMode == LiveLogSaveAnsiMode::Preserve );
+
+    // A session serialized by an older klogg (before the mode was persisted)
+    // must default to Strip so restore reopens in the historical default mode.
+    const auto legacyJson
+        = QStringLiteral( R"({"captureId":"cap-old","boundOutputFile":"/tmp/old.log"})" );
+    const auto legacy = AdbLogcatSessionData::fromJson( legacyJson );
+    REQUIRE( legacy.boundOutputFile == QStringLiteral( "/tmp/old.log" ) );
+    REQUIRE( legacy.outputAnsiMode == LiveLogSaveAnsiMode::Strip );
+}

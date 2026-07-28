@@ -195,10 +195,16 @@ void StreamingLogData::setCaptureLimits( CaptureStore::Limits limits )
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
 {
-    return bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip );
+    return bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip, OutputBindMode::FreshSave );
 }
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
+{
+    return bindOutputFile( outputPath, ansiMode, OutputBindMode::FreshSave );
+}
+
+bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode,
+                                       OutputBindMode mode )
 {
     stopOutputFlushTimer();
     outputSaveAnsiMode_ = ansiMode;
@@ -209,15 +215,23 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
         return true;
     }
 
+    // FreshSave truncates the destination and replays the current capture
+    // (user-initiated "Save As" — overwrite was already confirmed by the
+    // dialog). Restore opens the destination append-only and never replays, so
+    // content already streamed to the file survives a restart even when the
+    // volatile capture (OS temp dir) has been cleared and would otherwise
+    // rewrite the file empty.
+    const bool preserveExisting = ( mode == OutputBindMode::Restore );
+
     bool result = false;
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
         closeDisplayOutputFile();
-        result = captureStore_.bindOutputFile( outputPath );
+        result = captureStore_.bindOutputFile( outputPath, preserveExisting );
         boundOutputFile_ = result ? outputPath : QString{};
     }
     else {
         captureStore_.bindOutputFile( QString{} );
-        result = openDisplayOutputFile( outputPath );
+        result = openDisplayOutputFile( outputPath, preserveExisting );
     }
 
     if ( !outputPath.isEmpty() && result ) {
@@ -446,7 +460,7 @@ void StreamingLogData::stopOutputFlushTimer()
     outputFlushTimer_.stop();
 }
 
-bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
+bool StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserveExisting )
 {
     const auto outputPathCopy = outputPath;
     closeDisplayOutputFile();
@@ -461,12 +475,15 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath )
     // Use CaptureStore's rolling settings for the display file
     rollingDisplayOutput_ = RollingFileManager( boundOutputFile_, rollingMaxFileSize_,
                                                  rollingBackupCount_ );
-    if ( !rollingDisplayOutput_.open( true ) ) {
+    // FreshSave truncates and dumps the current capture; Restore opens
+    // append-only so existing on-disk content is preserved.
+    if ( !rollingDisplayOutput_.open( /*truncate=*/!preserveExisting ) ) {
         boundOutputFile_.clear();
         return false;
     }
 
-    if ( !writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount() ) ) {
+    if ( !preserveExisting
+         && !writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount() ) ) {
         closeDisplayOutputFile();
         return false;
     }

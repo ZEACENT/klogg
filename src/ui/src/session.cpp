@@ -322,7 +322,9 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
     auto restoredSessionData = sessionData;
     auto logData = std::make_shared<StreamingLogData>( restoredSessionData.captureId );
     if ( !restoredSessionData.boundOutputFile.isEmpty()
-         && !logData->bindOutputFile( restoredSessionData.boundOutputFile ) ) {
+         && !logData->bindOutputFile( restoredSessionData.boundOutputFile,
+                                      restoredSessionData.outputAnsiMode,
+                                      OutputBindMode::Restore ) ) {
         LOG_WARNING << "Failed to restore ADB output file binding "
                     << restoredSessionData.boundOutputFile;
         restoredSessionData.boundOutputFile.clear();

@@ -30,6 +30,11 @@ struct AdbLogcatSessionData {
     int maxReconnectAttempts = 0; // 0 = unlimited
     qint64 captureMaxFileSize = 0; // bytes, 0 = unlimited
     int captureBackupCount = 0; // 0 = keep all rotated files
+    // Mode used when the bound output file was last saved / rebound. Persisted
+    // so a session restore reopens the file in the same mode and appends
+    // format-consistent data (Strip-stripped vs Preserve-raw bytes). Kept last
+    // so existing positional aggregate initializers keep mapping correctly.
+    LiveLogSaveAnsiMode outputAnsiMode = LiveLogSaveAnsiMode::Strip;
 
     QString displayName() const;
     QString documentId() const;
