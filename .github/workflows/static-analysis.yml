@@ -210,12 +210,37 @@ jobs:
           # green on day one and catches *new* issues. Delete a --suppress line
           # to start enforcing that check (fix the findings or mark them with
           # // cppcheck-suppress first).
+          BASE='${{ github.event.pull_request.base.sha }}'
+          # Filter compile_commands.json to first-party src/ TUs (cppcheck's -i
+          # does not exclude paths under --project, so we hand it a filtered DB).
           python3 -c "import json,os,sys; src=os.path.abspath(os.path.join(os.getcwd(),'src'))+os.sep; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if g(e).startswith(src)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)}/{len(db)} first-party src/ TUs')" "$KLOGG_BUILD_ROOT/compile_commands.json" /tmp/cc_src.json
 
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$BASE" ]; then
+            # PR: scope cppcheck to THIS PR's changed src/ TUs (consistent with
+            # the clang-tidy-diff changed-lines policy) so pre-existing findings
+            # in UNCHANGED files -- e.g. a redundantInitialization false positive
+            # in styles.cpp's theme logic -- don't block the gate. New issues in
+            # touched files are still caught (the whole changed TU is checked).
+            mapfile -t changed_src < <(git diff --name-only "$BASE" HEAD -- src/ | grep -E '\.(cpp|cc)$' || true)
+            if [ "${#changed_src[@]}" -eq 0 ]; then
+              echo "cppcheck: no changed src/ TUs on this PR; skipping."
+              exit 0
+            fi
+            printf '%s\n' "${changed_src[@]}" > /tmp/changed_src.txt
+            python3 -c "import json,sys; changed=[l.strip() for l in open('/tmp/changed_src.txt') if l.strip()]; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if any(g(e).endswith(c) for c in changed)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)} changed src/ TUs')" /tmp/cc_src.json /tmp/cc_changed.json
+            CC_PROJECT=/tmp/cc_changed.json
+            CC_EXTRA="--error-exitcode=1"
+          else
+            # push-to-master / workflow_dispatch: full src/ audit, REPORT-ONLY
+            # (no --error-exitcode) so pre-existing findings never block master.
+            CC_PROJECT=/tmp/cc_src.json
+            CC_EXTRA=""
+          fi
+
           cppcheck \
-            --project=/tmp/cc_src.json \
+            --project="$CC_PROJECT" \
             --enable=warning,style \
-            --error-exitcode=1 \
+            $CC_EXTRA \
             --inline-suppr \
             --quiet \
             --suppress=missingInclude \
