@@ -1005,3 +1005,43 @@ TEST_CASE( "StreamingLogData Restore appends new data without duplicating existi
     REQUIRE( after.open( QIODevice::ReadOnly ) );
     CHECK( after.readAll() == QByteArrayLiteral( "line1\nline2\nline3\nline4\nline5\n" ) );
 }
+
+TEST_CASE( "StreamingLogData Restore replays the capture when the saved file is missing",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+
+    // First session streams content and saves it; both the file and the
+    // volatile capture hold the three lines.
+    const auto captureId = makeCaptureId();
+    {
+        StreamingLogData logDataA( captureId, tempDir.path() );
+        SafeQSignalSpy loadingSpy( &logDataA, SIGNAL( loadingFinished( LoadingStatus ) ) );
+        REQUIRE( loadingSpy.safeWait() );
+
+        logDataA.appendUtf8( QByteArrayLiteral( "line1\nline2\nline3\n" ) );
+        REQUIRE( loadingSpy.safeWait() );
+        REQUIRE( logDataA.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    }
+
+    // The saved file was moved or deleted while klogg was closed, but a graceful
+    // restart (same captureId, temp intact) still reloads the capture.
+    REQUIRE( QFile::remove( outputPath ) );
+
+    StreamingLogData logDataB( captureId, tempDir.path() );
+    SafeQSignalSpy loadingSpyB( &logDataB, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpyB.safeWait() );
+    REQUIRE( logDataB.getNbLine().get() == 3 );
+
+    // Restoring the binding must rebuild the missing file from the reloaded
+    // capture instead of leaving it empty and dropping all history.
+    REQUIRE( logDataB.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip,
+                                      OutputBindMode::Restore ) );
+
+    QFile after( outputPath );
+    REQUIRE( after.open( QIODevice::ReadOnly ) );
+    CHECK( after.readAll() == QByteArrayLiteral( "line1\nline2\nline3\n" ) );
+}
