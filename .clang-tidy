@@ -23,6 +23,7 @@ Checks: >
   readability-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
+  -bugprone-chained-comparison,
   -cert-err58-cpp,
   -cert-err60-cpp,
   -cppcoreguidelines-avoid-c-arrays,

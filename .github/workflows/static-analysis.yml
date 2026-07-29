@@ -86,6 +86,7 @@ jobs:
             cpm_cache/**
             3rdparty/**
             website/**
+            tests/**
 
       - name: Configure (generate compile_commands.json)
         shell: bash
