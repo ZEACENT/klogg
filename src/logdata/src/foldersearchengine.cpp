@@ -229,7 +229,7 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
     // to one worker, preserving the "each worker owns its matcher" design.
     std::vector<std::unique_ptr<PatternMatcher>> workerMatchers;
     workerMatchers.reserve( static_cast<size_t>( poolSize ) );
-    for ( int t = 0; t < poolSize; ++t ) {
+    for ( int wi = 0; wi < poolSize; ++wi ) {
         workerMatchers.push_back( expression.createMatcher() );
     }
 
