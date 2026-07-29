@@ -1377,6 +1377,53 @@ TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPatter
     REQUIRE( widget.mainView()->quickFindPattern() == sessionQfp.get() );
 }
 
+TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker before freeing results",
+           "[folder][quickfind]" )
+{
+    // Regression for a destruction-order use-after-free. A FolderFilteredView's
+    // QuickFind worker is a QtConcurrent task iterating the pane's
+    // FolderSearchResults (visibleRows_ / markLineCache_) through the
+    // `const AbstractLogData&` QuickFind holds. ~FolderCrawlerWidget must join
+    // that worker BEFORE the panes_ members (which own the FolderSearchResults)
+    // are released; otherwise the worker reads already-freed memory and corrupts
+    // the heap -- a damage that surfaces later as a flaky SIGSEGV deep in an
+    // unrelated worker's free() (the Windows-x86 CI crash that passed on the PR
+    // run and failed on merged master). onClosePane already orders this right
+    // (delete view, then erase pane); the destructor previously did not.
+    //
+    // Built large + a non-matching QuickFind pattern so the worker scans every
+    // result row (instead of stopping at the first hit) and is reliably still
+    // iterating when the widget is torn down. Under ASan the unfixed destructor
+    // reports a heap-use-after-free in doGetLineString here.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    std::vector<int> matches;
+    constexpr int kRows = 50000;
+    matches.reserve( kRows );
+    for ( int i = 0; i < kRows; ++i ) {
+        matches.push_back( i );
+    }
+    const QString a = makeFile( dir, "big.log", kRows, matches );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // A QuickFind pattern that matches nothing -> the forward search scans every
+    // result row to the end, keeping the worker resident long enough to overlap
+    // the teardown below.
+    auto qfp = std::make_shared<QuickFindPattern>();
+    qfp->changeSearchPattern( QStringLiteral( "ZZZ_NO_SUCH_TOKEN" ) );
+    widget.setQuickFindPattern( qfp );
+
+    REQUIRE( widget.filteredView() != nullptr );
+    widget.filteredView()->searchForward(); // spawns the QtConcurrent reader
+    QTest::qWait( 10 );                     // let the worker enter its scan loop
+    // ~FolderCrawlerWidget runs here; it must join the worker before panes_ is freed.
+}
+
 TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folder]" )
 {
     // setEncoding (Edit -> Encoding) must route to the folder and apply to the

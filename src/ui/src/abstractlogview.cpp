@@ -423,17 +423,25 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     } );
 }
 
-AbstractLogView::~AbstractLogView()
+void AbstractLogView::stopSearchAndWait()
 {
+    // Interrupt and join the QuickFind QThreadPool worker (stopSearch ->
+    // interruptAndWait -> waitForFinished). Public so a host can join the worker
+    // before the view's AbstractLogData source is destroyed, when the view
+    // (deleted later as a Qt child) would otherwise outlive its data.
     try {
         if ( quickFind_ ) {
             quickFind_->stopSearch();
-            delete quickFind_;
         }
     } catch ( const std::exception& e ) {
         LOG_ERROR << "Failed to stop search: " << e.what();
-        delete quickFind_;
     }
+}
+
+AbstractLogView::~AbstractLogView()
+{
+    stopSearchAndWait();
+    delete quickFind_;
 }
 
 //

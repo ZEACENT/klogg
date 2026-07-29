@@ -356,6 +356,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void incrementalSearchStop() override;
     // Abort the current incremental search (typically when user press esc)
     void incrementalSearchAbort() override;
+    // Synchronously interrupt the QuickFind search and block until its
+    // QThreadPool worker has finished. The worker holds a `const
+    // AbstractLogData&` and reads it off the UI thread; a host whose
+    // data-source members are destroyed before its Qt-child views (so
+    // ~AbstractLogView, which joins the worker, runs after the data is freed)
+    // must call this on each view BEFORE releasing the data, else the worker
+    // reads freed memory (the FolderCrawlerWidget teardown use-after-free that
+    // surfaced as the flaky Windows-x86 CI crash).
+    void stopSearchAndWait();
 
     // Signals the follow mode has been enabled.
     void followSet( bool checked );

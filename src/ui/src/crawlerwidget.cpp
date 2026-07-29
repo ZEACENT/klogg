@@ -174,6 +174,31 @@ private:
 
 // Constructor only does trivial construction. The real work is done once
 // the data is attached.
+CrawlerWidget::~CrawlerWidget()
+{
+    // Join each view's in-flight QuickFind worker BEFORE the data-source members
+    // (logData_ / logFilteredData_ / filteredViewsData_) are released. Same
+    // destruction-order hazard as ~FolderCrawlerWidget: a view's QuickFind worker
+    // is a QThreadPool task that holds a `const AbstractLogData&` into the
+    // LogData/LogFilteredData it was constructed over; the default
+    // member-destruction order frees those shared_ptrs before ~QObject deletes
+    // the child views (whose ~AbstractLogView joins the worker), so the worker
+    // would read already-freed memory. stopSearchAndWait only joins the worker
+    // (no view deletion / reparent / signals), so it cannot trigger Qt's
+    // child-removal cascade. The views themselves are deleted later by ~QObject.
+    if ( logMainView_ != nullptr ) {
+        logMainView_->stopSearchAndWait();
+    }
+    if ( filteredView_ != nullptr ) {
+        filteredView_->stopSearchAndWait();
+    }
+    for ( const auto& entry : filteredViewsData_ ) {
+        if ( entry.first != nullptr ) {
+            entry.first->stopSearchAndWait();
+        }
+    }
+}
+
 CrawlerWidget::CrawlerWidget( QWidget* parent )
     : QSplitter( parent )
     , iconLoader_{ this }

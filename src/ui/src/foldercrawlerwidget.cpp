@@ -479,7 +479,32 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     reloadPredefinedFilters();
 }
 
-FolderCrawlerWidget::~FolderCrawlerWidget() = default;
+FolderCrawlerWidget::~FolderCrawlerWidget()
+{
+    // Join every view's in-flight QuickFind worker BEFORE the data-source members
+    // are released. A FolderFilteredView's QuickFind worker is a QThreadPool task
+    // that holds a `const AbstractLogData&` into the pane's FolderSearchResults
+    // (and mainView_'s worker reads the LogData members); the default
+    // member-destruction order frees panes_ / currentMainData_ / placeholderData_
+    // before ~QObject deletes the child views, whose ~AbstractLogView is the only
+    // place that joins the worker. Without joining here the worker reads
+    // already-freed memory (AddressSanitizer: heap-use-after-free in
+    // FolderSearchResults::doGetLineString, read by QuickFind::doSearchForward on
+    // a QThreadPool thread, freed by ~FolderCrawlerWidget) -> heap corruption that
+    // surfaces later as a flaky SIGSEGV (the Windows-x86 CI crash that passed on
+    // the PR run and failed on merged master). stopSearchAndWait only joins the
+    // worker; it must NOT delete or reparent the views, which would trigger Qt's
+    // tab/child-removal signal cascade and re-enter the half-destroyed widget.
+    // The views themselves are deleted later by ~QObject, with the workers idle.
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->view != nullptr ) {
+            pane->view->stopSearchAndWait();
+        }
+    }
+    if ( mainView_ != nullptr ) {
+        mainView_->stopSearchAndWait();
+    }
+}
 
 bool FolderCrawlerWidget::eventFilter( QObject* obj, QEvent* event )
 {
