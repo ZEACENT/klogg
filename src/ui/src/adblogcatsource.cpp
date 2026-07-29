@@ -112,6 +112,8 @@ QJsonObject AdbLogcatSessionData::toJson() const
         { QStringLiteral( "extraArgs" ), extraArgs },
         { QStringLiteral( "captureId" ), captureId },
         { QStringLiteral( "boundOutputFile" ), boundOutputFile },
+        { QStringLiteral( "outputPreserveAnsi" ),
+          outputAnsiMode == LiveLogSaveAnsiMode::Preserve },
         { QStringLiteral( "ansiOutputEnabled" ), ansiOutputEnabled },
         { QStringLiteral( "autoReconnectEnabled" ), autoReconnectEnabled },
         { QStringLiteral( "maxReconnectAttempts" ), maxReconnectAttempts },
@@ -130,6 +132,9 @@ AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
     data.extraArgs = jsonObject.value( QStringLiteral( "extraArgs" ) ).toString();
     data.captureId = jsonObject.value( QStringLiteral( "captureId" ) ).toString();
     data.boundOutputFile = jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString();
+    data.outputAnsiMode = jsonObject.value( QStringLiteral( "outputPreserveAnsi" ) ).toBool( false )
+                              ? LiveLogSaveAnsiMode::Preserve
+                              : LiveLogSaveAnsiMode::Strip;
     data.sourceType
         = sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() );
     data.ansiOutputEnabled
@@ -295,6 +300,7 @@ bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsi
     }
 
     sessionData_.boundOutputFile = outputPath;
+    sessionData_.outputAnsiMode = ansiMode;
     return true;
 }
 

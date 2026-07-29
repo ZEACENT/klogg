@@ -20,6 +20,20 @@ enum class LiveLogSaveAnsiMode {
     Preserve,
 };
 
+// How bindOutputFile treats an existing destination file.
+enum class OutputBindMode {
+    // User-initiated "Save Live Log As": truncate the destination and rewrite
+    // it from the current capture. The Save dialog has already confirmed any
+    // overwrite, so destroying prior content is the user's explicit intent.
+    FreshSave,
+    // Session restore: the destination already holds previously streamed
+    // content. Preserve it and only append data that arrives after the
+    // restore. The capture store is volatile (it lives in the OS temp dir),
+    // so rewriting from it on restart can silently empty the file when the
+    // temp dir has been cleared (computer restart, logout, crash, cleanup).
+    Restore,
+};
+
 class StreamingLogData : public SearchableLogData {
     Q_OBJECT
 
@@ -33,6 +47,7 @@ class StreamingLogData : public SearchableLogData {
     void setCaptureLimits( CaptureStore::Limits limits );
     bool bindOutputFile( const QString& outputPath );
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
+    bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode, OutputBindMode mode );
     QString boundOutputFile() const;
     QString captureId() const;
     QString capturePath() const;
@@ -81,7 +96,7 @@ class StreamingLogData : public SearchableLogData {
     CaptureStore::TrimResult consumeTrimResult();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
-    bool openDisplayOutputFile( const QString& outputPath );
+    bool openDisplayOutputFile( const QString& outputPath, bool preserveExisting = false );
     void closeDisplayOutputFile();
     bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
     // Writes the lines appended in `appendResult` to the Strip-mode display

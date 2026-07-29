@@ -476,7 +476,7 @@ void CaptureStore::clearTrimResult()
     lastTrimResult_ = {};
 }
 
-bool CaptureStore::bindOutputFile( const QString& outputPath )
+bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExisting )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     rollingOutput_.close();
@@ -490,17 +490,23 @@ bool CaptureStore::bindOutputFile( const QString& outputPath )
 
     rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
                                          limits_.rollingBackupCount );
-    if ( !rollingOutput_.open( true ) ) {
+    // FreshSave truncates and replays the capture; Restore opens append-only so
+    // previously streamed content already on disk is never destroyed (the
+    // capture is volatile — it lives in the OS temp dir and may be empty on
+    // restart, which would otherwise empty the file).
+    if ( !rollingOutput_.open( /*truncate=*/!preserveExisting ) ) {
         boundOutputFile_.clear();
         return false;
     }
 
-    // Write existing segments to the rolling file
-    for ( const auto& segment : segments_ ) {
-        if ( !writeSegmentToDevice( segment, rollingOutput_.currentFile() ) ) {
-            boundOutputFile_.clear();
-            rollingOutput_.close();
-            return false;
+    if ( !preserveExisting ) {
+        // Write existing segments to the rolling file
+        for ( const auto& segment : segments_ ) {
+            if ( !writeSegmentToDevice( segment, rollingOutput_.currentFile() ) ) {
+                boundOutputFile_.clear();
+                rollingOutput_.close();
+                return false;
+            }
         }
     }
     // Replay writes directly to QFile, bypassing RollingFileManager::write().

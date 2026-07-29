@@ -79,7 +79,10 @@ class CaptureStore {
     TrimResult trimToLimits();
     TrimResult lastTrimResult() const;
     void clearTrimResult();
-    bool bindOutputFile( const QString& outputPath );
+    // Reopen the bound output file. When preserveExisting is true the file is
+    // opened append-only and the current capture is NOT replayed into it, so
+    // previously streamed content already on disk is kept (session restore).
+    bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
     void setOutputFlushedCallback( std::function<void()> callback );
     void setLimits( Limits limits );
     QString boundOutputFile() const;

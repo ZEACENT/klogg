@@ -843,3 +843,125 @@ TEST_CASE( "StreamingLogData finishInput emits Truncated on single-line rotation
     const auto tailLine = logData.getLinesRaw( LineNumber( tail ), 1_lcount );
     REQUIRE( tailLine.endOfLines.size() == 1 );
 }
+
+TEST_CASE( "StreamingLogData Restore preserves a Strip-saved file when capture is empty",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+    const QByteArray savedBytes = QByteArrayLiteral( "line1\nline2\nline3\n" );
+
+    // A prior session streamed content and saved it (FreshSave, Strip mode).
+    {
+        StreamingLogData logDataA( makeCaptureId(), tempDir.path() );
+        SafeQSignalSpy loadingSpy( &logDataA, SIGNAL( loadingFinished( LoadingStatus ) ) );
+        REQUIRE( loadingSpy.safeWait() );
+
+        logDataA.appendUtf8( QByteArrayLiteral( "line1\nline2\nline3\n" ) );
+        REQUIRE( loadingSpy.safeWait() );
+        REQUIRE( logDataA.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    }
+
+    QFile before( outputPath );
+    REQUIRE( before.open( QIODevice::ReadOnly ) );
+    REQUIRE( before.readAll() == savedBytes );
+    before.close();
+
+    // Simulate a restart where the temp capture was wiped (computer restart,
+    // OS temp cleanup, or a crash before segments spilled to disk). A fresh
+    // captureId loads nothing, so the in-memory capture is empty.
+    StreamingLogData logDataB( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpyB( &logDataB, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpyB.safeWait() );
+    REQUIRE( logDataB.getNbLine().get() == 0 );
+
+    // Restoring the binding must NOT clear the previously saved file.
+    REQUIRE( logDataB.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip,
+                                      OutputBindMode::Restore ) );
+
+    QFile after( outputPath );
+    REQUIRE( after.open( QIODevice::ReadOnly ) );
+    CHECK( after.readAll() == savedBytes );
+}
+
+TEST_CASE( "StreamingLogData Restore preserves a Preserve-saved file when capture is empty",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+    const QByteArray savedBytes
+        = QByteArrayLiteral( "\x1b[32mI/App\x1b[0m line1\n\x1b[31mE/App\x1b[0m line2\n" );
+
+    {
+        StreamingLogData logDataA( makeCaptureId(), tempDir.path() );
+        SafeQSignalSpy loadingSpy( &logDataA, SIGNAL( loadingFinished( LoadingStatus ) ) );
+        REQUIRE( loadingSpy.safeWait() );
+
+        logDataA.appendUtf8( QByteArrayLiteral( "\x1b[32mI/App\x1b[0m line1\n"
+                                                "\x1b[31mE/App\x1b[0m line2\n" ) );
+        REQUIRE( loadingSpy.safeWait() );
+        REQUIRE( logDataA.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+    }
+
+    QFile before( outputPath );
+    REQUIRE( before.open( QIODevice::ReadOnly ) );
+    REQUIRE( before.readAll() == savedBytes );
+    before.close();
+
+    // Restart with a wiped temp capture.
+    StreamingLogData logDataB( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpyB( &logDataB, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpyB.safeWait() );
+    REQUIRE( logDataB.getNbLine().get() == 0 );
+
+    REQUIRE( logDataB.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve,
+                                      OutputBindMode::Restore ) );
+
+    QFile after( outputPath );
+    REQUIRE( after.open( QIODevice::ReadOnly ) );
+    CHECK( after.readAll() == savedBytes );
+}
+
+TEST_CASE( "StreamingLogData Restore appends new data without duplicating existing content",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+
+    // First session saves three lines.
+    const auto captureId = makeCaptureId();
+    {
+        StreamingLogData logDataA( captureId, tempDir.path() );
+        SafeQSignalSpy loadingSpy( &logDataA, SIGNAL( loadingFinished( LoadingStatus ) ) );
+        REQUIRE( loadingSpy.safeWait() );
+
+        logDataA.appendUtf8( QByteArrayLiteral( "line1\nline2\nline3\n" ) );
+        REQUIRE( loadingSpy.safeWait() );
+        REQUIRE( logDataA.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    }
+
+    // Graceful restart: same captureId, temp intact, so the capture reloads.
+    StreamingLogData logDataB( captureId, tempDir.path() );
+    SafeQSignalSpy loadingSpyB( &logDataB, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpyB.safeWait() );
+    REQUIRE( logDataB.getNbLine().get() == 3 );
+
+    REQUIRE( logDataB.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip,
+                                      OutputBindMode::Restore ) );
+
+    // New data after restore must be appended exactly once — the reloaded
+    // capture content must not be rewritten/duplicated.
+    loadingSpyB.clear();
+    logDataB.appendUtf8( QByteArrayLiteral( "line4\nline5\n" ) );
+    REQUIRE( loadingSpyB.safeWait() );
+
+    QFile after( outputPath );
+    REQUIRE( after.open( QIODevice::ReadOnly ) );
+    CHECK( after.readAll() == QByteArrayLiteral( "line1\nline2\nline3\nline4\nline5\n" ) );
+}
