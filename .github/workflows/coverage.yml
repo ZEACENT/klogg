@@ -74,7 +74,9 @@ jobs:
         shell: bash
         run: |
           cd "$KLOGG_BUILD_ROOT"
-          ctest --output-on-failure
+          # Only klogg_tests + klogg_itests are built above (coverage-relevant);
+          # klogg_smoke needs the full klogg app binary and is excluded.
+          ctest --output-on-failure -E klogg_smoke
 
       - name: Generate coverage report
         shell: bash

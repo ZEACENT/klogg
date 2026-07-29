@@ -86,7 +86,12 @@ jobs:
             # style findings elsewhere in touched files (and in transitively-
             # included headers, which never appear in the line-filter) that make
             # whole-file --warnings-as-errors unworkable on this legacy codebase.
-            git diff -U0 origin/master...HEAD -- src/ > tidy_patch.diff
+            # Use the PR's exact base SHA, not the `origin/master` ref (which is
+            # not reliably populated for pull_request checkouts and can let
+            # pre-existing findings from earlier master commits leak in). This
+            # scopes clang-tidy strictly to THIS PR's changed src/ lines.
+            BASE='${{ github.event.pull_request.base.sha }}'
+            git diff -U0 "$BASE" HEAD -- src/ > tidy_patch.diff
             # Skip the gate when no compilation unit (only headers / nothing) in
             # src/ changed; headers are still linted transitively when their TU
             # is in the diff, and always by the cppcheck step below.
