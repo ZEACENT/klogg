@@ -21,6 +21,13 @@ on:
       - .gitignore
   workflow_dispatch:
 
+concurrency:
+  # One in-flight run per workflow+ref: a new push cancels the superseded run
+  # instead of piling up (keeps the runner pool clear and the PR check list
+  # to a single, latest result per gate).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   SaveVersion:
     needs: [PrefetchDeps, PrefetchWindowsTools]

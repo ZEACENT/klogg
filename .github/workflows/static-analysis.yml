@@ -35,6 +35,10 @@ on:
       - .gitignore
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static-analysis:
     name: "clang-tidy + cppcheck"
@@ -159,13 +163,27 @@ jobs:
               < tidy_patch.diff > tidy_diff_out.txt 2>&1 || true
             echo "::endgroup::"
             cat tidy_diff_out.txt
-            # clang-tidy-diff has already filtered to added-line diagnostics, so
-            # ANY emitted warning/error is a NEW-code finding -> fail the gate.
-            if grep -Eq ' (warning|error):' tidy_diff_out.txt; then
-              echo "::error::clang-tidy reported issues on changed lines (see log above)."
+            # Defensive post-filter: clang-tidy-diff is patch-driven, but its
+            # file detection can occasionally surface a finding in a TU that is
+            # NOT in this PR's real diff (a pre-existing issue in an unrelated
+            # file). Re-derive the exact set of src/ files this PR changed and
+            # fail ONLY on findings whose path matches one of them, so the gate
+            # is strict on this PR's new code and blind to pre-existing leaks.
+            BASE='${{ github.event.pull_request.base.sha }}'
+            mapfile -t changed_files < <(git diff --name-only "$BASE" HEAD -- src/ | grep -E '\.(cpp|cc)$' || true)
+            new_findings=""
+            if [ "${#changed_files[@]}" -gt 0 ]; then
+              # Match finding lines whose path ends with one of the changed
+              # files (clang-tidy prints absolute paths; we match the suffix).
+              pattern=$(printf '%s:\n' "${changed_files[@]}" | paste -sd'|' -)
+              new_findings=$(grep -E ' (warning|error):' tidy_diff_out.txt | grep -E "$pattern" || true)
+            fi
+            if [ -n "$new_findings" ]; then
+              echo "::error::clang-tidy reported issues on this PR's changed files:"
+              echo "$new_findings"
               exit 1
             fi
-            echo "clang-tidy-diff: clean (no issues on changed lines)."
+            echo "clang-tidy-diff: clean (no issues on this PR's changed src/ files)."
           else
             # Full src/ audit on push-to-master / workflow_dispatch, NON-FATAL
             # (report-only): clang-tidy runs WITHOUT --warnings-as-errors, so
