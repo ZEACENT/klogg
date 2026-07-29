@@ -59,7 +59,7 @@ jobs:
       - name: Install gcc-13, clang-tidy and cppcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck
+          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Prepare compiler env
         run: |
@@ -95,7 +95,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DKLOGG_BUILD_TESTS=ON \
-            -DKLOGG_USE_VECTORSCAN=ON \
+            -DKLOGG_USE_VECTORSCAN=OFF \
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_USE_SENTRY=OFF \
             -DKLOGG_GENERIC_CPU=ON \

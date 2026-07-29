@@ -39,7 +39,7 @@ jobs:
       - name: Install gcc-13 and gcovr
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-13 g++-13 gcovr
+          sudo apt-get install -y gcc-13 g++-13 gcovr libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Prepare compiler env
         run: |
@@ -58,7 +58,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DKLOGG_BUILD_TESTS=ON \
             -DENABLE_COVERAGE=ON \
-            -DKLOGG_USE_VECTORSCAN=ON \
+            -DKLOGG_USE_VECTORSCAN=OFF \
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_OVERRIDE_MALLOC=OFF \
             -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
