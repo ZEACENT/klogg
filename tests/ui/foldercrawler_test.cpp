@@ -1380,10 +1380,18 @@ TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPatter
 // This regression test deliberately triggers a real use-after-free that only
 // AddressSanitizer catches deterministically. In a non-ASan build the freed
 // read can crash or corrupt the heap (and cascade into later tests in the same
-// binary), so it is compiled ONLY when ASan is active: clang __has_feature, or
-// gcc/MSVC __SANITIZE_ADDRESS__. The ASan CI legs run it; the normal/coverage/
-// packaging builds omit it entirely (the bug is silent there by design).
-#if ( defined( __has_feature ) && __has_feature( address_sanitizer ) ) || defined( __SANITIZE_ADDRESS__ )
+// binary), so it is compiled ONLY when ASan is active. The detection uses a
+// NESTED #if because gcc does not treat __has_feature as an operator inside a
+// single #if expression (it would error "missing binary operator before '(').
+#if defined( __has_feature )
+#  if __has_feature( address_sanitizer )
+#    define KLOGG_TEST_ASAN 1
+#  endif
+#elif defined( __SANITIZE_ADDRESS__ )
+#  define KLOGG_TEST_ASAN 1
+#endif
+
+#ifdef KLOGG_TEST_ASAN
 TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker before freeing results",
            "[folder][quickfind]" )
 {
@@ -1430,7 +1438,7 @@ TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker bef
     QTest::qWait( 10 );                     // let the worker enter its scan loop
     // ~FolderCrawlerWidget runs here; it must join the worker before panes_ is freed.
 }
-#endif // AddressSanitizer-only regression test
+#endif // KLOGG_TEST_ASAN
 
 TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folder]" )
 {

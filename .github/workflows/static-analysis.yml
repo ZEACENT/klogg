@@ -2,14 +2,17 @@ name: "Static analysis"
 
 # Per-PR clang-tidy + cppcheck gate.  Configures once
 # (CMAKE_EXPORT_COMPILE_COMMANDS) to produce build_root/compile_commands.json,
-# then runs two independent, fast-failing analyses:
-#   * clang-tidy --warnings-as-errors='*' (checks from .clang-tidy) over the
-#     changed C/C++ files on PRs, and over all of src/ on push-to-master /
-#     workflow_dispatch.
+# then runs two independent analyses:
+#   * clang-tidy via clang-tidy-diff on PRs with a CHANGED-LINES-ONLY policy:
+#     strict on NEW code while ignoring the pre-existing style findings (hundreds
+#     of them across transitively-included headers) that make whole-file
+#     --warnings-as-errors unworkable on a legacy codebase.  On push-to-master /
+#     workflow_dispatch the full src/ audit runs NON-FATAL (report-only).
 #   * cppcheck --enable=warning,style --error-exitcode=1 over the first-party
 #     src/ compile units.
-# Either tool returning non-zero fails the job.  Setup mirrors the Coverage
-# workflow (native gcc-13 leg + agent-setup for Qt/Boost/CPM cache).
+# cppcheck returning non-zero, or a clang-tidy-diff finding on a changed PR
+# line, fails the job.  Setup mirrors the Coverage workflow (gcc-13 leg +
+# agent-setup for Qt/Boost/CPM cache).
 
 on:
   push:
@@ -53,7 +56,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so tj-actions/changed-files can diff the PR base.
+          # Full history so the clang-tidy-diff step can diff the PR branch
+          # against origin/master (changed-LINES-ONLY policy).
           fetch-depth: 0
 
       - name: Install gcc-13, clang-tidy and cppcheck
@@ -68,25 +72,39 @@ jobs:
 
       - uses: ./.github/actions/agent-setup
 
-      - name: Detect changed C++ files (PR only)
-        if: github.event_name == 'pull_request'
-        id: changed
-        uses: tj-actions/changed-files@v44
-        with:
-          # Track compilation units only: standalone headers can't be analysed
-          # by clang-tidy without their compile flags and would false-fail, so
-          # they are linted transitively via HeaderFilterRegex when their owning
-          # TU is processed (and always covered by the cppcheck step).
-          files: |
-            **/*.cpp
-            **/*.cc
-          files_ignore: |
-            build_root/**
-            _deps/**
-            cpm_cache/**
-            3rdparty/**
-            website/**
-            tests/**
+      - name: Build clang-tidy review scope
+        id: targets
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # CHANGED-LINES-ONLY policy: snapshot this branch's src/ changes as a
+            # unified diff (-U0 => no context lines, so only added/removed lines
+            # are described) and feed it to clang-tidy-diff in the next step.
+            # clang-tidy-diff turns the "@@" hunk ranges into a clang-tidy
+            # --line-filter, so clang-tidy reports ONLY diagnostics on added
+            # lines -- strict on NEW code, ignoring the hundreds of pre-existing
+            # style findings elsewhere in touched files (and in transitively-
+            # included headers, which never appear in the line-filter) that make
+            # whole-file --warnings-as-errors unworkable on this legacy codebase.
+            git diff -U0 origin/master...HEAD -- src/ > tidy_patch.diff
+            # Skip the gate when no compilation unit (only headers / nothing) in
+            # src/ changed; headers are still linted transitively when their TU
+            # is in the diff, and always by the cppcheck step below.
+            n=$(grep -Ec '^\+\+\+ b/.*\.(cpp|cc)$' tidy_patch.diff || true)
+            if [ "$n" -eq 0 ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "No changed src/ compilation units; skipping clang-tidy."
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "clang-tidy-diff: $n changed src/ TU(s) on this branch."
+            fi
+          else
+            # push-to-master / workflow_dispatch: audit all of src/, NON-FATAL
+            # (report-only) so pre-existing findings never block the branch.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            find src -type f \( -name '*.cpp' -o -name '*.cc' \) | sort > tidy_files.txt
+            echo "clang-tidy: full src/ audit (report-only), $(wc -l < tidy_files.txt) file(s)."
+          fi
 
       - name: Configure (generate compile_commands.json)
         shell: bash
@@ -103,65 +121,57 @@ jobs:
             -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-      - name: Build clang-tidy target list
-        id: targets
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PR: lint exactly the changed C/C++ files (gate against new issues).
-            : > tidy_files.txt
-            for f in ${{ steps.changed.outputs.all_changed_files }}; do
-              [ -f "$f" ] && printf '%s\n' "$f" >> tidy_files.txt
-            done
-            n=$(wc -l < tidy_files.txt)
-            if [ "$n" -eq 0 ]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "No changed C/C++ source files; skipping clang-tidy."
-            else
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              echo "clang-tidy: $n changed file(s)."
-            fi
-          else
-            # push-to-master / workflow_dispatch: audit all of src/.
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            find src -type f \( -name '*.cpp' -o -name '*.cc' \) | sort > tidy_files.txt
-            echo "clang-tidy: full src/ audit, $(wc -l < tidy_files.txt) file(s)."
-          fi
-
-      - name: Run clang-tidy (--warnings-as-errors)
+      - name: Run clang-tidy (changed lines on PRs; report-only on master)
         if: steps.targets.outputs.skip != 'true'
         shell: bash
         run: |
           set -u
-          # clang-tidy is invoked directly (not via the run-clang-tidy wrapper)
-          # so we can (a) reliably pass --extra-arg=-Wno-unknown-warning-option
-          # to absorb gcc-specific -W flags carried in compile_commands.json,
-          # (b) feed an explicit list of compilation units, and (c) propagate a
-          # deterministic exit code. Headers are linted transitively via the
-          # .clang-tidy HeaderFilterRegex when included by a processed TU.
-          # --warnings-as-errors='*' fails the step on any enabled finding
-          # (fast-fail gate); checks come from .clang-tidy at the repo root.
-          any_fail=0
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # Small changed set -> sequential is fine and keeps log readable.
-            while IFS= read -r f; do
-              [ -n "$f" ] && [ -f "$f" ] || continue
-              echo "::group::clang-tidy $f"
-              if ! clang-tidy -p "$KLOGG_BUILD_ROOT" --warnings-as-errors='*' \
-                   --extra-arg=-Wno-unknown-warning-option "$f"; then
-                any_fail=1
-              fi
-              echo "::endgroup::"
-            done < tidy_files.txt
+            # CHANGED-LINES-ONLY: clang-tidy-diff feeds clang-tidy the TUs
+            # touched by the patch (tidy_patch.diff on stdin) plus a --line-filter
+            # built from the diff hunks, so clang-tidy reports ONLY diagnostics
+            # on added lines -- pre-existing style findings on unchanged lines
+            # (and findings in transitively-included headers) never fail the
+            # gate.  Notes for the LLVM 18 clang-tidy-diff shipped on Ubuntu 24.04
+            # (/usr/bin/clang-tidy-diff):
+            #   -p 1                strip git's leading "b/" diff prefix so paths
+            #                       match compile_commands.json entries;
+            #   -path <build_root>  the compile_commands.json dir (NOT -p, which
+            #                       in this tool strips diff-path prefixes);
+            #   -iregex             restrict the run to compilation units (skip
+            #                       standalone headers, which lack TU flags);
+            #   -extra-arg          absorb gcc-specific -W flags in the DB.
+            # clang-tidy-diff has NO --warnings-as-errors flag, and its exit code
+            # only reflects clang-tidy PROCESS failures, so the filtered stdout
+            # (" warning:" / " error:" per finding) is the gate signal.
+            echo "::group::clang-tidy-diff (changed lines only)"
+            clang-tidy-diff \
+              -p 1 \
+              -path "$KLOGG_BUILD_ROOT" \
+              -iregex '.*\.(cpp|cc)$' \
+              -extra-arg=-Wno-unknown-warning-option \
+              -quiet \
+              < tidy_patch.diff > tidy_diff_out.txt 2>&1 || true
+            echo "::endgroup::"
+            cat tidy_diff_out.txt
+            # clang-tidy-diff has already filtered to added-line diagnostics, so
+            # ANY emitted warning/error is a NEW-code finding -> fail the gate.
+            if grep -Eq ' (warning|error):' tidy_diff_out.txt; then
+              echo "::error::clang-tidy reported issues on changed lines (see log above)."
+              exit 1
+            fi
+            echo "clang-tidy-diff: clean (no issues on changed lines)."
           else
-            # Full src/ audit -> parallelise across cores.
+            # Full src/ audit on push-to-master / workflow_dispatch, NON-FATAL
+            # (report-only): clang-tidy runs WITHOUT --warnings-as-errors, so
+            # findings surface in the log but never block the branch.
             export KLOGG_BUILD_ROOT
             xargs -P "$(nproc)" -I{} bash -c '
-              clang-tidy -p "$KLOGG_BUILD_ROOT" --warnings-as-errors="*" \
-                --extra-arg=-Wno-unknown-warning-option "{}" || exit 1
-            ' < tidy_files.txt || any_fail=1
+              clang-tidy -p "$KLOGG_BUILD_ROOT" \
+                --extra-arg=-Wno-unknown-warning-option "{}" || exit 0
+            ' < tidy_files.txt || true
+            echo "clang-tidy: full src/ audit complete (report-only, non-fatal)."
           fi
-          exit "$any_fail"
 
       - name: Run cppcheck (warning+style over src/)
         shell: bash

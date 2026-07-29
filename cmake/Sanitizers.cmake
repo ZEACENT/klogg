@@ -60,8 +60,22 @@ function(enable_sanitizers project_name)
     # ENABLE_SANITIZER_* options are intentionally ignored here.
     # /INCREMENTAL:NO is required by the ASan linker instrumentation.
     if(ENABLE_SANITIZER_ADDRESS)
-      target_compile_options(${project_name} INTERFACE /fsanitize=address)
-      target_link_options(${project_name} INTERFACE /INCREMENTAL:NO)
+      # MSVC ASan stamps every TU compiled with /fsanitize=address with
+      # container-annotation metadata (annotate_vector / annotate_string).
+      # The linker raises LNK2038 when objects with mismatched values are
+      # mixed: instrumented klogg TUs (value 1) cannot link with
+      # uninstrumented vendored static libs such as efsw/kdtoolbox/simdutf
+      # (value 0). Every object in the binary must therefore carry the
+      # flag, not just the klogg targets. target_compile_options on
+      # project_options only reaches targets that link that INTERFACE
+      # library, so the flag is applied GLOBALLY (current directory and
+      # below) so the vendored deps inherit it. This works because
+      # enable_sanitizers() is called from the top-level CMakeLists.txt
+      # before add_subdirectory(3rdparty) pulls in those dependencies.
+      # add_compile_options covers both C and CXX, which is required since
+      # some deps (whereami.c, uchardet) are C.
+      add_compile_options(/fsanitize=address)
+      add_link_options(/INCREMENTAL:NO)
     endif()
   endif()
 

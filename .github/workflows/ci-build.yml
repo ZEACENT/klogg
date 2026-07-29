@@ -857,6 +857,38 @@ jobs:
           reg add "$regPath" /v DumpCount /t REG_DWORD /d 10 /f
           reg add "$regPath" /v DumpType /t REG_DWORD /d 2 /f
 
+      - name: Stage MSVC AddressSanitizer runtime next to test binaries
+        if: ${{ matrix.config.sanitizer == 'address' }}
+        shell: pwsh
+        run: |
+          # VS 2022 (17.7+) ASan links a single ASan DLL into the
+          # executable for every CRT config, so Windows must resolve it at
+          # runtime. msvc-dev-cmd already places it on PATH; also copy it
+          # next to the built binaries so Windows finds it from the EXE
+          # directory regardless of PATH propagation through the MSYS2 sh
+          # shell used to run ctest.
+          $outDir = Join-Path $env:KLOGG_BUILD_ROOT "output"
+          if (-not (Test-Path $outDir)) {
+            Write-Warning "Build output directory not found: $outDir; skipping ASan DLL staging."
+            exit 0
+          }
+          $hostArch = $env:VSCMD_ARG_HOST_ARCH; if (-not $hostArch) { $hostArch = 'x64' }
+          $tgtArch  = $env:VSCMD_ARG_TGT_ARCH;  if (-not $tgtArch)  { $tgtArch  = 'x64' }
+          $asanDir  = Join-Path $env:VCToolsInstallDir "bin\Host$hostArch\$tgtArch"
+          $dllNames = @('clang_rt.asan_dynamic-x86_64.dll', 'cl_asan_x64.dll')
+          $staged = $false
+          foreach ($name in $dllNames) {
+            $src = Join-Path $asanDir $name
+            if (Test-Path $src) {
+              Copy-Item $src -Destination $outDir -Force
+              Write-Host "Staged $src -> $outDir"
+              $staged = $true
+            }
+          }
+          if (-not $staged) {
+            Write-Warning "No MSVC ASan DLL found under $asanDir; relying on PATH (msvc-dev-cmd) to provide it at runtime."
+          }
+
       - uses: ./.github/actions/agent-run-tests
         id: run-tests
         continue-on-error: true

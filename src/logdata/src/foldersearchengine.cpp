@@ -133,12 +133,14 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
         return;
     }
 
-    // The compiled expression is constructed ONCE on this thread and shared by
-    // const reference across all pool workers. createMatcher() is read-only on
-    // the RegularExpression (it reads the shared, immutable HsDatabase and
-    // clones a private HsScratch via hs_clone_scratch), so concurrent
-    // createMatcher() calls on a shared const RegularExpression are the
-    // supported vectorscan multi-thread model.
+    // The compiled expression is constructed ONCE on this thread. Its
+    // createMatcher() clones the shared HsDatabase (shared_ptr refcount, safe)
+    // but also prototypes a private HsScratch via hs_clone_scratch, whose read
+    // of the shared scratch prototype races under TSan when run concurrently.
+    // The per-worker matchers are therefore built SERIALLY on this thread
+    // before the pool is spawned (workerMatchers below) and each worker is
+    // handed its own pre-built matcher. Concurrent hasMatch() on distinct
+    // matchers is safe.
     RegularExpression expression( pattern );
     if ( !expression.isValid() ) {
         LOG_WARNING << "FolderSearchEngine: invalid pattern" << pattern.pattern;
@@ -169,13 +171,12 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
                || interruptRequested_.load( std::memory_order_relaxed );
     };
 
-    auto worker = [ this, &expression, &filePaths, total, gen, context, &nextFileIndex,
-                    &completedCount, &shouldStop ]() {
+    auto worker = [ this, &filePaths, total, gen, context, &nextFileIndex, &completedCount,
+                    &shouldStop ]( std::unique_ptr<PatternMatcher> matcher ) {
         // Each worker owns its own PatternMatcher (private vectorscan scratch +
-        // matcher context), created once and reused across every file it
-        // processes. Concurrent hasMatch() on distinct matchers is safe.
-        auto matcher = expression.createMatcher();
-
+        // matcher context), pre-built serially by the caller and reused across
+        // every file it processes. Concurrent hasMatch() on distinct matchers
+        // is safe.
         while ( true ) {
             const int i = nextFileIndex.fetch_add( 1, std::memory_order_relaxed );
             if ( i >= total ) {
@@ -220,15 +221,27 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
         poolSize = 1;
     }
 
+    // Build one matcher per worker SERIALLY on this thread before spawning
+    // the pool. createMatcher() on a shared const RegularExpression races under
+    // TSan (it prototypes the shared hs scratch via hs_clone_scratch, and the
+    // PatternMatcher ctor likewise clones blockScratch_ for the buffer scanner),
+    // so it must not run concurrently. Each matcher is then handed exclusively
+    // to one worker, preserving the "each worker owns its matcher" design.
+    std::vector<std::unique_ptr<PatternMatcher>> workerMatchers;
+    workerMatchers.reserve( static_cast<size_t>( poolSize ) );
+    for ( int t = 0; t < poolSize; ++t ) {
+        workerMatchers.push_back( expression.createMatcher() );
+    }
+
     if ( poolSize <= 1 ) {
         // Single-file / single-core path: run inline to avoid thread overhead.
-        worker();
+        worker( std::move( workerMatchers[ 0 ] ) );
     }
     else {
         std::vector<std::thread> pool;
         pool.reserve( static_cast<size_t>( poolSize ) );
         for ( int t = 0; t < poolSize; ++t ) {
-            pool.emplace_back( worker );
+            pool.emplace_back( worker, std::move( workerMatchers[ static_cast<size_t>( t ) ] ) );
         }
         for ( auto& thread : pool ) {
             if ( thread.joinable() ) {

@@ -644,7 +644,19 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
                            QRegularExpression{} )
              == QStringLiteral( "m-999999" ) );
     REQUIRE( store.stats().memoryBytes == data.size() );
-    CHECK( elapsedMs < 200 );
+    // The per-line metadata budget is calibrated for optimised builds
+    // (RelWithDebInfo/Release legs, where NDEBUG is defined and -O2 is in
+    // effect).  The coverage leg builds with -O0 + gcov instrumentation,
+    // which runs the 1M-line append many times slower; give it the same
+    // generous budget the linear-time sibling test uses so the assertion
+    // stays a release-only regression guard rather than an -O0 wall-clock
+    // trip wire.  (Debug does not define NDEBUG; RelWithDebInfo does.)
+#ifdef NDEBUG
+    constexpr int MetadataOverheadBudgetMs = 200;
+#else
+    constexpr int MetadataOverheadBudgetMs = 2000;
+#endif
+    CHECK( elapsedMs < MetadataOverheadBudgetMs );
 }
 
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )
