@@ -1,0 +1,161 @@
+name: "Coverage"
+
+# Per-PR line/branch coverage ratchet.  Builds the test targets with
+# -DENABLE_COVERAGE=ON (gcc --coverage), runs ctest, then uses gcovr to
+# measure line and branch coverage over src/.  The measured percentages are
+# compared against the floors in .github/baselines/coverage-{line,branch}.txt
+# and the job fails if either drops below its floor (ratchet-up only).  The
+# floors are seeded to 0 so the first run always passes; bump them only after
+# the measured coverage has genuinely risen.  An HTML + JSON report is
+# uploaded as an artifact for offline review.
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    name: "Line/branch coverage ratchet"
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # agent-setup reads matrix.config.* to install Qt/Boost/CPM cache,
+          # mirroring the CodeQL workflow's native gcc-13 leg.
+          - arch: x64
+            qt_version: 6.9.3
+            qt_arch: linux_gcc_64
+            qt_modules: qt5compat
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      KLOGG_BUILD_ROOT: build_root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gcc-13 and gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13 gcovr
+
+      - name: Prepare compiler env
+        run: |
+          echo "CC=gcc-13" >> $GITHUB_ENV
+          echo "CXX=g++-13" >> $GITHUB_ENV
+
+      - uses: ./.github/actions/agent-setup
+
+      - name: Configure (Debug + coverage)
+        shell: bash
+        run: |
+          rm -rf "$KLOGG_BUILD_ROOT"
+          mkdir -p "$KLOGG_BUILD_ROOT"
+          cd "$KLOGG_BUILD_ROOT"
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DKLOGG_BUILD_TESTS=ON \
+            -DENABLE_COVERAGE=ON \
+            -DKLOGG_USE_VECTORSCAN=ON \
+            -DKLOGG_USE_LTO=OFF \
+            -DKLOGG_OVERRIDE_MALLOC=OFF \
+            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            "$KLOGG_WORKSPACE"
+
+      - name: Build tests
+        shell: bash
+        run: |
+          cmake --build "$KLOGG_BUILD_ROOT" -t klogg_tests klogg_itests -j"$(nproc)"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cd "$KLOGG_BUILD_ROOT"
+          ctest --output-on-failure
+
+      - name: Generate coverage report
+        shell: bash
+        run: |
+          mkdir -p coverage_report
+          # HTML report (primary, human-readable) + textual summary in one pass.
+          # --print-summary writes to stdout while -o directs the HTML output.
+          gcovr \
+            --root "$KLOGG_WORKSPACE" \
+            --filter '.*/src/.*' \
+            --gcov-ignore-parse-errors \
+            --html-details \
+            --html-self-contained \
+            --html-title "Klogg line/branch coverage" \
+            -o coverage_report/index.html \
+            --print-summary "$KLOGG_BUILD_ROOT" \
+            | tee coverage_report/summary.txt
+
+          # Best-effort JSON report.  gcovr is pinned to the ubuntu-22.04 apt
+          # version; never let an unsupported flag break the job -- the HTML
+          # report + summary above already carry the coverage numbers.
+          gcovr \
+            --root "$KLOGG_WORKSPACE" \
+            --filter '.*/src/.*' \
+            --gcov-ignore-parse-errors \
+            --json --json-pretty \
+            -o coverage_report/coverage.json \
+            "$KLOGG_BUILD_ROOT" \
+            || true
+
+          echo "=== gcovr summary ==="
+          cat coverage_report/summary.txt
+
+      - name: Enforce coverage ratchet
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, sys
+
+          def floor(path):
+              with open(path) as f:
+                  s = f.read().strip()
+              return float(s) if s else 0.0
+
+          def pct(label, text):
+              # Tolerant of both "lines: 81.3%" and "lines: ...... 81.3%" forms.
+              m = re.search(label + r':.*?([0-9]+(?:\.[0-9]+)?)\s*%', text)
+              return float(m.group(1)) if m else 0.0
+
+          with open('coverage_report/summary.txt') as f:
+              text = f.read()
+
+          line = pct('lines', text)
+          branch = pct('branches', text)
+          line_floor = floor('.github/baselines/coverage-line.txt')
+          branch_floor = floor('.github/baselines/coverage-branch.txt')
+
+          print(f'Line coverage:   measured {line}%   floor {line_floor}%')
+          print(f'Branch coverage: measured {branch}%   floor {branch_floor}%')
+
+          failed = 0
+          if line < line_floor:
+              print(f'::error::Line coverage {line}% is below the ratchet floor '
+                    f'{line_floor}% (fix the regression, or raise '
+                    f'.github/baselines/coverage-line.txt only after coverage '
+                    f'genuinely rose)')
+              failed = 1
+          if branch < branch_floor:
+              print(f'::error::Branch coverage {branch}% is below the ratchet floor '
+                    f'{branch_floor}% (fix the regression, or raise '
+                    f'.github/baselines/coverage-branch.txt only after coverage '
+                    f'genuinely rose)')
+              failed = 1
+
+          sys.exit(failed)
+          PY
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage_report/
+          if-no-files-found: warn

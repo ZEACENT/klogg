@@ -411,6 +411,30 @@ jobs:
             container: variar/klogg_ubuntu20.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
 
+          # Sanitizer legs: build + test only (no packaging, no artifacts).
+          # Folded into the Linux matrix so ci-gate (needs: [Linux]) covers them.
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-asan-ubsan-lsan
+            package_tag: asan-ubsan
+            container_root: docker/ubuntu22.04
+            container: variar/klogg_ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
+            sanitizer: address-undefined
+            package: false
+
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-tsan
+            package_tag: tsan
+            container_root: docker/ubuntu22.04
+            container: variar/klogg_ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            sanitizer: thread
+            package: false
+
 
     runs-on: ubuntu-22.04
     steps:
@@ -450,16 +474,30 @@ jobs:
         shell: sh
         run: |
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
+
+      - name: Set sanitizer env (forwarded into the container by docker-run-tests)
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          # Workspace is mounted at /usr/local inside the container, so the
+          # suppressions files live under /usr/local/tests/sanitizers/.
+          echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
+          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1:suppressions=/usr/local/tests/sanitizers/tsan_suppressions.txt" >> $GITHUB_ENV
+          echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt" >> $GITHUB_ENV
+
       - uses: ./.github/actions/docker-build
       - uses: ./.github/actions/docker-run-tests
       - uses: ./.github/actions/docker-package
-          
+        if: ${{ matrix.config.package != false }}
+
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
+        if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
-          if-no-files-found: error      
+          if-no-files-found: error
 
   Mac:
     needs: [SaveVersion]
@@ -491,6 +529,33 @@ jobs:
             package_tag: vs-arm64
             artifacts_id: macos-arm-qt6
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
+
+          # Sanitizer legs: build + test only (no packaging, no artifacts).
+          # Folded into the Mac matrix so ci-gate (needs: [Mac]) covers them.
+          # Run on the Intel runner so TSan's 2x threading overhead is stable.
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-asan-ubsan-lsan
+            package_tag: asan-ubsan
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
+            sanitizer: address-undefined
+            package: false
+
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-tsan
+            package_tag: tsan
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            sanitizer: thread
+            package: false
 
     runs-on: ${{ matrix.config.os }}
     steps:
@@ -543,9 +608,19 @@ jobs:
           # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
           echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
       
+      - name: Set sanitizer env
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=${{ github.workspace }}/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
+          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1:suppressions=${{ github.workspace }}/tests/sanitizers/tsan_suppressions.txt" >> $GITHUB_ENV
+          echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/tests/sanitizers/lsan_suppressions.txt" >> $GITHUB_ENV
+
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
       - uses: ./.github/actions/agent-package-mac
+        if: ${{ matrix.config.package != false }}
         # macOS signing/notarization is disabled until the CI account has a paid
         # Apple Developer Program membership and Developer ID certificates.
         # with:
@@ -558,9 +633,10 @@ jobs:
         #   notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
+        if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*' 
+          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
           if-no-files-found: warn
 
   Windows:
@@ -598,6 +674,23 @@ jobs:
             cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
             label: x86-qt5
             artifacts_id: windows-x86-qt5
+
+          # Sanitizer leg: build + test only (no packaging, no artifacts).
+          # MSVC ASan is x64-only, so this rides on the x64-qt6 leg. x86-qt5
+          # cannot run ASan and is intentionally left without a sanitizer leg.
+          - os: windows
+            os_version: 2022
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: win64_msvc2022_64
+            arch: x64
+            ssl_arch: -x64
+            package_tag: asan
+            cmake_opts: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
+            label: x64-qt6-asan
+            sanitizer: address
+            package: false
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
     steps:
@@ -707,6 +800,13 @@ jobs:
         run: |
           pkg-config --version
 
+      - name: Set sanitizer env
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          # MSVC ASan has no leak detector; detect_leaks must stay 0.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
+
       - uses: ./.github/actions/agent-build
 
       - name: Verify vectorscan config in CMake cache (x64)
@@ -806,14 +906,14 @@ jobs:
         run: exit 1
 
       - uses: ./.github/actions/agent-package-win
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           s3-key-id: ${{ secrets.WIN_CS_KEY_ID }}
           s3-secret: ${{ secrets.WIN_CS_SECRET }}
           s3-bucket: ${{ secrets.WIN_CS_BUCKET }}
 
       - name: Verify SSL/TLS packaging
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         shell: pwsh
         run: |
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
@@ -822,7 +922,7 @@ jobs:
 
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'

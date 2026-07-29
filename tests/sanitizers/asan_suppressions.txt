@@ -1,0 +1,16 @@
+# AddressSanitizer suppressions
+#
+# Consumed via ASAN_OPTIONS=suppressions=<path-to-this-file> on the ASan legs.
+#
+# This file is intentionally minimal: AddressSanitizer reports real memory
+# errors (heap-buffer-overflow, use-after-free, stack-use-after-return, etc.)
+# and suppressing them by default would hide genuine bugs. Do not add an entry
+# here unless a report is proven to be a false positive coming from system or
+# third-party code that we cannot fix.
+#
+# Suppression grammar (one entry per line):
+#   interceptor_via_lib:<libname>     suppress interceptor issues in <libname>
+#   <bug_type>:<symbol_or_source>     e.g. heap-buffer-overflow:known_false_positive_fn
+#
+# Examples (kept commented; uncomment only after triage):
+# interceptor_via_lib:libsystem_kernel.dylib

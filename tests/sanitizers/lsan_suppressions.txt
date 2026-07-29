@@ -1,0 +1,36 @@
+# LeakSanitizer suppressions
+#
+# Consumed via LSAN_OPTIONS=suppressions=<path-to-this-file> on the ASan legs
+# (detect_leaks=1 is set on every ASan leg). ASan on Linux/macOS delegates
+# leak reporting to LeakSanitizer, so this file covers those platforms.
+#
+# LeakSanitizer is NOT available in MSVC ASan builds (Windows uses
+# detect_leaks=0), so this file is a no-op there.
+#
+# Suppression grammar (one entry per line):
+#   leak:<pattern>     suppress any leak whose symbolized stack trace matches
+#                      <pattern>; '*' is a wildcard.
+#
+# Each entry below is a known benign still-reachable / exit-time "leak" that
+# lives in uninstrumented system or third-party libraries and is never reclaimed
+# at process exit. They are not klogg bugs.
+
+# FontConfig caches and font state are singletons released by the OS at exit.
+leak:fontconfig
+
+# D-Bus / libdbus connection objects are intentionally long-lived.
+leak:libdbus
+
+# Qt creates global/static state (QPA plugins, font databases, session managers)
+# that is deliberately not torn down at exit; these show up as exit-time leaks.
+leak:*Qt*
+
+# GLib type/option/global registries are allocated once and kept for the
+# lifetime of the process.
+leak:*glib*
+
+# mimalloc / TBB allocator bookkeeping; the allocator itself is a process-wide
+# singleton and is intentionally not freed. (ASan legs build with
+# KLOGG_OVERRIDE_MALLOC=OFF, but transitive uses may still appear.)
+leak:*mimalloc*
+leak:*tbb*

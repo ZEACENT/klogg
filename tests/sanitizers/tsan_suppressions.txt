@@ -1,0 +1,20 @@
+# ThreadSanitizer suppressions
+#
+# Consumed via TSAN_OPTIONS=suppressions=<path-to-this-file> on the TSan legs.
+#
+# Suppression grammar (one entry per line):
+#   race:<pattern>     suppress data races where at least one stack frame
+#                      matches <pattern>; '*' is a wildcard.
+#
+# Each entry below covers benign races reported inside uninstrumented
+# third-party libraries (built without -fsanitize=thread). Tsan cannot see the
+# synchronization inside those libraries, so it false-positives on their
+# internal globals. They are NOT klogg races.
+
+# Qt is linked as a prebuilt, uninstrumented library; Tsan reports races on
+# Qt's internal reference counting, signal/slot machinery and plugin globals.
+race:*Qt*
+
+# OneTBB is built without Tsan instrumentation; its task arena / scheduler
+# internals show up as data races.
+race:*tbb*
