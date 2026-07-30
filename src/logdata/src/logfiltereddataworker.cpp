@@ -614,25 +614,19 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
             }
 
             if ( percent == 100 ) {
-                // Promote any deferred live update so the next chunk dispatches
-                // promptly.  We intentionally do NOT call waitForDone()/
-                // joinOperationThread() here: that joins the worker thread on the
-                // owner/UI thread (joinOperationThread -> opThreadMutex_), and
-                // the worker being joined blocks on requestMutex_ inside
-                // finishLiveUpdateAndRestartIfNeeded() -> enqueueRequest() while
-                // the dispatch thread also holds requestMutex_ in dispatchLoop().
-                // The owner itself takes requestMutex_ via updateSearch() ->
-                // enqueueRequest(), so joining here would put the owner in both
-                // the requestMutex_ and opThreadMutex_ lock domains and invert
-                // their order across this callback and the next updateSearch(),
-                // which TSan reports as a double-lock/deadlock on requestMutex_.
-                // The dispatch thread owns the worker lifecycle exclusively: it
-                // joins opThread_ at the top of every dispatchLoop iteration
-                // before spawning the next op, and shutdownAndWait() joins it at
-                // teardown.  Search results are published under
-                // searchData_.dataMutex_ before the 100% signal is emitted, so
-                // terminal progress does not require the owner to join the worker.
-                promoteDeferredLiveRequest();
+                // Terminal progress: do NOT touch requestMutex_ here. This
+                // lambda runs on the owner thread (via dispatchToObject), and
+                // taking requestMutex_ here races with the dispatch thread's
+                // dispatchLoop() (which owns requestMutex_) and with the
+                // owner's own updateSearch() -> enqueueRequest(), which TSan
+                // reports as a double-lock/deadlock. The dispatch thread is the
+                // sole owner of the deferredLiveRequest_ lifecycle: it promotes
+                // a deferred live update on its coalesce deadline (dispatchLoop)
+                // and joins opThread_ at the top of every iteration, so deferred
+                // updates are dispatched without the progress callback touching
+                // the mutex. Search results are already published under
+                // searchData_.dataMutex_ before this 100% signal, so terminal
+                // progress needs no extra synchronisation here.
             }
 
             Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
