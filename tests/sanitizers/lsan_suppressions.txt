@@ -25,6 +25,20 @@ leak:libdbus
 # that is deliberately not torn down at exit; these show up as exit-time leaks.
 leak:*Qt*
 
+# The Qt "offscreen" QPA platform plugin (libqoffscreen.so), loaded by the
+# headless -platform offscreen test invocations, keeps static allocator state
+# that is never reclaimed at exit; surfaces as small indirect leaks from
+# .../qt5/plugins/platforms/libqoffscreen.so. The *Qt* rule above does not
+# match it because the install path uses lowercase "qt5"/"qoffscreen".
+leak:qoffscreen
+
+# The Qt "offscreen" QPA platform plugin (libqoffscreen.so), loaded by the
+# headless -platform offscreen test invocations, keeps static allocator state
+# that is never reclaimed at exit; surfaces as small indirect leaks from
+# .../qt5/plugins/platforms/libqoffscreen.so. The *Qt* rule above does not
+# match it because the install path uses lowercase "qt5"/"qoffscreen".
+leak:qoffscreen
+
 # GLib type/option/global registries are allocated once and kept for the
 # lifetime of the process.
 leak:*glib*

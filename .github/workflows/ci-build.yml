@@ -812,7 +812,23 @@ jobs:
         shell: sh
         run: |
           # MSVC ASan has no leak detector; detect_leaks must stay 0.
-          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
+          # detect_container_overflow=0: vendored simdutf's lazy implementation
+          # registry init (simdutf::get_available_implementations ->
+          # get_available_implementation_pointers) trips MSVC ASan
+          # container-annotation false positives on first use: a reported
+          # container-overflow in klogg_tests, and a downstream access-violation
+          # from a poisoned implementation pointer in the vectorscan child
+          # process. The same simdutf code is clean under GCC/Clang ASan on the
+          # Linux/macOS legs, so this is MSVC-ASan-specific. simdutf cannot be
+          # dropped from /fsanitize=address (that would reintroduce the LNK2038
+          # annotate_vector mismatch the global flag exists to fix), and MSVC ASan
+          # has no GCC-style per-symbol suppression file, so the supported,
+          # documented escape hatch (recommended by ASan's own report output) is
+          # to disable container-overflow detection for this leg. The option
+          # disables the annotation *poisoning*, not just the report, and is
+          # inherited by the QProcess-spawned vectorscan child, so both processes
+          # are covered. See tests/sanitizers/asan_suppressions.txt for rationale.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:detect_container_overflow=0" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
 

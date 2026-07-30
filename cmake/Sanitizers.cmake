@@ -53,6 +53,24 @@ function(enable_sanitizers project_name)
     endif()
   endif()
 
+  # UBSan's -fsanitize=undefined enables the 'vptr' sub-check, which flags any
+  # static_cast/downcast whose target type is not the object's dynamic type.
+  # The vendored TBB flow_graph implementation
+  # (oneapi/tbb/detail/_flow_graph_impl.h) relies on intentional "tagged"
+  # downcasts such as forward_task_bypass that legitimately violate this rule;
+  # the same idiom also appears in Qt internals. The check cannot be satisfied
+  # without patching TBB, and vptr is not suppressible at runtime via
+  # UBSAN_OPTIONS. Disable just vptr while keeping the rest of UBSan active
+  # (alignment, bool, bounds, integer, null, ...). -fno-sanitize=vptr must be
+  # passed to BOTH the compiler and the linker AND appear after -fsanitize=...
+  # so the later flag wins (GCC/Clang process these flags left-to-right).
+  if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR
+     AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+          OR CMAKE_CXX_COMPILER_ID MATCHES ".*Clang"))
+    target_compile_options(${project_name} INTERFACE -fno-sanitize=vptr)
+    target_link_libraries(${project_name} INTERFACE -fno-sanitize=vptr)
+  endif()
+
   if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # MSVC supports only the address sanitizer, and only on x64, via
     # /fsanitize=address. LeakSanitizer, UndefinedBehaviorSanitizer and

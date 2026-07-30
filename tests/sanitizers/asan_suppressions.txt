@@ -14,3 +14,35 @@
 #
 # Examples (kept commented; uncomment only after triage):
 # interceptor_via_lib:libsystem_kernel.dylib
+#
+# Windows / MSVC ASan note (this file is NOT consumed by MSVC ASan):
+# The Microsoft ASan implementation has no GCC/Clang-style per-symbol suppression
+# file, so Windows-only vendored-dependency false positives are handled through
+# ASAN_OPTIONS in .github/workflows/ci-build.yml instead. In particular the
+# Windows x64-qt6-asan leg sets detect_container_overflow=0: simdutf's lazy
+# implementation-registry initialization (simdutf::get_available_implementations
+# -> internal::get_available_implementation_pointers) triggers MSVC ASan
+# container-annotation false positives on first use (a container-overflow in
+# klogg_tests, and an access-violation from a poisoned implementation pointer in
+# the vectorscan child process). The identical simdutf code is clean under
+# GCC/Clang ASan on Linux/macOS, so this is an MSVC-ASan-specific false positive
+# in third-party code we cannot fix. simdutf cannot be excluded from
+# /fsanitize=address either, because that reintroduces the LNK2038
+# annotate_vector/annotate_string module-metadata mismatch that the global flag
+# was added to resolve.
+#
+# Windows / MSVC ASan note (this file is NOT consumed by MSVC ASan):
+# The Microsoft ASan implementation has no GCC/Clang-style per-symbol suppression
+# file, so Windows-only vendored-dependency false positives are handled through
+# ASAN_OPTIONS in .github/workflows/ci-build.yml instead. In particular the
+# Windows x64-qt6-asan leg sets detect_container_overflow=0: simdutf's lazy
+# implementation-registry initialization (simdutf::get_available_implementations
+# -> internal::get_available_implementation_pointers) triggers MSVC ASan
+# container-annotation false positives on first use (a container-overflow in
+# klogg_tests, and an access-violation from a poisoned implementation pointer in
+# the vectorscan child process). The identical simdutf code is clean under
+# GCC/Clang ASan on Linux/macOS, so this is an MSVC-ASan-specific false positive
+# in third-party code we cannot fix. simdutf cannot be excluded from
+# /fsanitize=address either, because that reintroduces the LNK2038
+# annotate_vector/annotate_string module-metadata mismatch that the global flag
+# was added to resolve.

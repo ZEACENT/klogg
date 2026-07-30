@@ -614,10 +614,25 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
             }
 
             if ( percent == 100 ) {
-                // Ensure terminal progress is delivered after the corresponding
-                // worker std::thread has fully exited, but avoid joining a newer
-                // search when this callback is delayed in the event queue.
-                waitForDone();
+                // Promote any deferred live update so the next chunk dispatches
+                // promptly.  We intentionally do NOT call waitForDone()/
+                // joinOperationThread() here: that joins the worker thread on the
+                // owner/UI thread (joinOperationThread -> opThreadMutex_), and
+                // the worker being joined blocks on requestMutex_ inside
+                // finishLiveUpdateAndRestartIfNeeded() -> enqueueRequest() while
+                // the dispatch thread also holds requestMutex_ in dispatchLoop().
+                // The owner itself takes requestMutex_ via updateSearch() ->
+                // enqueueRequest(), so joining here would put the owner in both
+                // the requestMutex_ and opThreadMutex_ lock domains and invert
+                // their order across this callback and the next updateSearch(),
+                // which TSan reports as a double-lock/deadlock on requestMutex_.
+                // The dispatch thread owns the worker lifecycle exclusively: it
+                // joins opThread_ at the top of every dispatchLoop iteration
+                // before spawning the next op, and shutdownAndWait() joins it at
+                // teardown.  Search results are published under
+                // searchData_.dataMutex_ before the 100% signal is emitted, so
+                // terminal progress does not require the owner to join the worker.
+                promoteDeferredLiveRequest();
             }
 
             Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
