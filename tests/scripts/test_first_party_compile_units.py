@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -84,7 +85,7 @@ class FirstPartyCompileUnitsTest(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     str(SCRIPT),
                     str(database_path),
                     str(source_root),

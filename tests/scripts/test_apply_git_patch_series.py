@@ -254,6 +254,39 @@ class ApplyGitPatchSeriesTest(unittest.TestCase):
         self.assertEqual((self.repo / "value.txt").read_text(), "after\n")
         self.assertEqual(source_tree_digest(self.repo), self.patched_digest)
 
+    def test_unreversible_applied_patch_fails_without_claiming_clean_rollback(self):
+        invalid_patch = self.root / "invalid.patch"
+        invalid_patch.write_text(
+            "diff --git a/value.txt b/value.txt\n"
+            "--- a/value.txt\n"
+            "+++ b/value.txt\n"
+            "@@ -1 +1 @@\n"
+            "-not-middle\n"
+            "+after\n"
+        )
+        pause_marker = self.root / "first-patch-applied"
+        release_marker = self.root / "release-rollback"
+        process = subprocess.Popen(
+            self.command(
+                pause_marker=pause_marker,
+                release_marker=release_marker,
+                patches=[self.first_patch, invalid_patch],
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self.environment,
+        )
+        self.wait_for_path(pause_marker)
+        (self.repo / "value.txt").write_text("tampered\n")
+        release_marker.write_text("resume")
+
+        stdout, stderr = process.communicate(timeout=10)
+        output = stdout + stderr
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("Cannot cleanly roll back patch", output)
+        self.assertNotIn("was restored to its approved clean state", output)
+
 
 if __name__ == "__main__":
     unittest.main()

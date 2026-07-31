@@ -279,6 +279,24 @@ steps:
             MODULE.coverage_workflow_issues(workflow),
         )
 
+    def test_coverage_rejects_duplicate_scope_and_output_options(self):
+        workflow = """\
+steps:
+  - run: |
+      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      gcovr --filter '^src/' --filter '.*' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html -o /tmp/redirected.html
+      gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
+"""
+        issues = MODULE.coverage_workflow_issues(workflow)
+        self.assertIn(
+            "gcovr must include root-relative src/ paths in every report pass",
+            issues,
+        )
+        self.assertIn(
+            "coverage must produce the authoritative HTML summary and JSON report",
+            issues,
+        )
+
     def test_clang_tidy_diff_find_fallback_preserves_explicit_error(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
         self.assertIn(

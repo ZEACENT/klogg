@@ -23,7 +23,7 @@ if(NOT DEFINED LOCK_TIMEOUT)
   set(LOCK_TIMEOUT 120)
 endif()
 
-function(klogg_reverse_patch_list patch_list)
+function(klogg_reverse_patch_list patch_list require_all)
   set(_patches ${patch_list})
   list(LENGTH _patches _patch_count)
   while(_patch_count GREATER 0)
@@ -45,13 +45,25 @@ function(klogg_reverse_patch_list patch_list)
         message(FATAL_ERROR "Failed to roll back patch: ${_patch_file}")
       endif()
       message(STATUS "Rolled back patch: ${_patch_file}")
+    elseif(require_all)
+      message(
+        FATAL_ERROR
+          "Cannot cleanly roll back patch: ${_patch_file}. ${DEPENDENCY} source is left in an unverified state."
+      )
     endif()
   endwhile()
 endfunction()
 
 function(klogg_rollback_applied_patches)
   if(_applied_patches)
-    klogg_reverse_patch_list("${_applied_patches}")
+    klogg_reverse_patch_list("${_applied_patches}" TRUE)
+    klogg_source_tree_sha256("${REPO_DIR}" _post_rollback_hash)
+    if(NOT "${_post_rollback_hash}" STREQUAL "${CLEAN_TREE_HASH}")
+      message(
+        FATAL_ERROR
+          "${DEPENDENCY} rollback produced ${_post_rollback_hash}, expected approved clean tree ${CLEAN_TREE_HASH}"
+      )
+    endif()
   endif()
 endfunction()
 
@@ -87,7 +99,7 @@ endif()
 
 if(NOT "${_initial_tree_hash}" STREQUAL "${CLEAN_TREE_HASH}")
   message(STATUS "Recovering interrupted ${DEPENDENCY} patch series")
-  klogg_reverse_patch_list("${PATCH_FILES}")
+  klogg_reverse_patch_list("${PATCH_FILES}" FALSE)
   klogg_source_tree_sha256("${REPO_DIR}" _recovered_tree_hash)
   if(NOT "${_recovered_tree_hash}" STREQUAL "${CLEAN_TREE_HASH}")
     message(

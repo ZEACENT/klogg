@@ -148,6 +148,12 @@ def option_value(tokens: list[str], option: str) -> str | None:
     return tokens[index + 1] if index + 1 < len(tokens) else None
 
 
+def unique_option_value(tokens: list[str], option: str) -> str | None:
+    if tokens.count(option) != 1:
+        return None
+    return option_value(tokens, option)
+
+
 def checkout_steps(text: str) -> list[tuple[int, str, str | None]]:
     lines = text.splitlines()
     checkouts: list[tuple[int, str, str | None]] = []
@@ -355,7 +361,8 @@ def coverage_workflow_issues(text: str) -> list[str]:
     gcovr_commands = [command for command in commands if command.startswith("gcovr ")]
     gcovr_tokens = [shell_tokens(command) for command in gcovr_commands]
     if len(gcovr_commands) != 2 or any(
-        option_value(tokens, "--filter") != "^src/" for tokens in gcovr_tokens
+        unique_option_value(tokens, "--filter") != "^src/"
+        for tokens in gcovr_tokens
     ):
         issues.append("gcovr must include root-relative src/ paths in every report pass")
 
@@ -364,7 +371,7 @@ def coverage_workflow_issues(text: str) -> list[str]:
         json_reports = []
         for command in gcovr_commands:
             tokens = shell_tokens(command)
-            output = option_value(tokens, "-o")
+            output = unique_option_value(tokens, "-o")
             if (
                 "--html-details" in tokens
                 and "--print-summary" in tokens
