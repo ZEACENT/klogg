@@ -1,3 +1,24 @@
+# add_link_options() was introduced in CMake 3.13, while klogg supports 3.12.
+# Keep one directory-wide compatibility path so source-built dependencies and
+# final executables receive the same sanitizer runtime flags.
+macro(klogg_add_link_options)
+  if(COMMAND add_link_options)
+    add_link_options(${ARGN})
+  elseif(MSVC)
+    foreach(_klogg_link_option IN LISTS ARGN)
+      foreach(_klogg_linker_flags_var
+              CMAKE_EXE_LINKER_FLAGS
+              CMAKE_SHARED_LINKER_FLAGS
+              CMAKE_MODULE_LINKER_FLAGS)
+        string(APPEND ${_klogg_linker_flags_var} " ${_klogg_link_option}")
+        set(${_klogg_linker_flags_var} "${${_klogg_linker_flags_var}}" PARENT_SCOPE)
+      endforeach()
+    endforeach()
+  else()
+    link_libraries(${ARGN})
+  endif()
+endmacro()
+
 function(enable_sanitizers project_name)
 
   # Sanitizer options are declared once and shared across compilers; each
@@ -6,6 +27,23 @@ function(enable_sanitizers project_name)
   option(ENABLE_SANITIZER_MEMORY "Enable memory sanitizer" FALSE)
   option(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR "Enable undefined behavior sanitizer" FALSE)
   option(ENABLE_SANITIZER_THREAD "Enable thread sanitizer" FALSE)
+
+  if(ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_MEMORY
+     OR ENABLE_SANITIZER_UNDEFINED_BEHAVIOR OR ENABLE_SANITIZER_THREAD)
+    set(KLOGG_ANY_SANITIZER ON CACHE INTERNAL "A sanitizer build is enabled" FORCE)
+  else()
+    set(KLOGG_ANY_SANITIZER OFF CACHE INTERNAL "A sanitizer build is enabled" FORCE)
+  endif()
+
+  if(KLOGG_ANY_SANITIZER
+     AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+     AND NOT CMAKE_CXX_COMPILER_ID MATCHES ".*Clang"
+     AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    message(
+      FATAL_ERROR
+        "Sanitizer builds are not configured for compiler '${CMAKE_CXX_COMPILER_ID}'"
+    )
+  endif()
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES ".*Clang")
     option(ENABLE_COVERAGE "Enable coverage reporting for gcc/clang" FALSE)
@@ -30,6 +68,12 @@ function(enable_sanitizers project_name)
     endif()
 
     if(ENABLE_SANITIZER_THREAD)
+      if(NOT CMAKE_CXX_COMPILER_ID MATCHES ".*Clang")
+        message(
+          FATAL_ERROR
+            "Klogg ThreadSanitizer builds require Clang because mimalloc's TSan instrumentation is Clang-only"
+        )
+      endif()
       list(APPEND SANITIZERS "thread")
     endif()
 
@@ -50,6 +94,17 @@ function(enable_sanitizers project_name)
     )
       target_compile_options(${project_name} INTERFACE -fsanitize=${LIST_OF_SANITIZERS})
       target_link_libraries(${project_name} INTERFACE -fsanitize=${LIST_OF_SANITIZERS})
+
+      # Sanitizers must cover source-built dependencies too. project_options is
+      # linked by first-party targets only, so also apply each sanitizer at this
+      # directory before 3rdparty/ is added. Keep non-C/C++ tools (for example
+      # resource compilers) out of the global compile flags.
+      foreach(_klogg_sanitizer IN LISTS SANITIZERS)
+        add_compile_options(
+          "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=${_klogg_sanitizer}>"
+        )
+        klogg_add_link_options(-fsanitize=${_klogg_sanitizer})
+      endforeach()
     endif()
   endif()
 
@@ -69,31 +124,49 @@ function(enable_sanitizers project_name)
           OR CMAKE_CXX_COMPILER_ID MATCHES ".*Clang"))
     target_compile_options(${project_name} INTERFACE -fno-sanitize=vptr)
     target_link_libraries(${project_name} INTERFACE -fno-sanitize=vptr)
+    add_compile_options(
+      "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-fno-sanitize=vptr>"
+    )
+    klogg_add_link_options(-fno-sanitize=vptr)
   endif()
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    # MSVC supports only the address sanitizer, and only on x64, via
-    # /fsanitize=address. LeakSanitizer, UndefinedBehaviorSanitizer and
-    # ThreadSanitizer are not available on MSVC, so the other
-    # ENABLE_SANITIZER_* options are intentionally ignored here.
+    # MSVC supports only AddressSanitizer. Fail configuration rather than
+    # silently producing an unsanitized binary when another sanitizer was
+    # explicitly requested.
+    if(ENABLE_SANITIZER_MEMORY)
+      message(FATAL_ERROR "MemorySanitizer is not supported by MSVC")
+    endif()
+    if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR)
+      message(FATAL_ERROR "UndefinedBehaviorSanitizer is not supported by MSVC")
+    endif()
+    if(ENABLE_SANITIZER_THREAD)
+      message(FATAL_ERROR "ThreadSanitizer is not supported by MSVC")
+    endif()
+
     # /INCREMENTAL:NO is required by the ASan linker instrumentation.
     if(ENABLE_SANITIZER_ADDRESS)
-      # MSVC ASan stamps every TU compiled with /fsanitize=address with
-      # container-annotation metadata (annotate_vector / annotate_string).
-      # The linker raises LNK2038 when objects with mismatched values are
-      # mixed: instrumented klogg TUs (value 1) cannot link with
-      # uninstrumented vendored static libs such as efsw/kdtoolbox/simdutf
-      # (value 0). Every object in the binary must therefore carry the
-      # flag, not just the klogg targets. target_compile_options on
-      # project_options only reaches targets that link that INTERFACE
-      # library, so the flag is applied GLOBALLY (current directory and
-      # below) so the vendored deps inherit it. This works because
-      # enable_sanitizers() is called from the top-level CMakeLists.txt
-      # before add_subdirectory(3rdparty) pulls in those dependencies.
-      # add_compile_options covers both C and CXX, which is required since
-      # some deps (whereami.c, uchardet) are C.
-      add_compile_options(/fsanitize=address)
-      add_link_options(/INCREMENTAL:NO)
+      if(CMAKE_GENERATOR_PLATFORM)
+        set(_klogg_msvc_target_arch "${CMAKE_GENERATOR_PLATFORM}")
+      else()
+        set(_klogg_msvc_target_arch "${CMAKE_SYSTEM_PROCESSOR}")
+      endif()
+      if(CMAKE_SIZEOF_VOID_P EQUAL 4
+         OR NOT _klogg_msvc_target_arch MATCHES "^(x64|X64|AMD64|amd64|x86_64|X86_64)$")
+        message(
+          FATAL_ERROR
+            "MSVC AddressSanitizer is supported only for x64 builds, not '${_klogg_msvc_target_arch}'"
+        )
+      endif()
+
+      # MSVC ASan stamps every C/C++ TU with container-annotation metadata.
+      # Vendored static libraries must carry the same flag to avoid LNK2038,
+      # but resource files must not receive a C/C++ compiler option.
+      add_compile_options(
+        "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:/fsanitize=address>"
+      )
+      target_compile_definitions(${project_name} INTERFACE KLOGG_MSVC_ASAN=1)
+      klogg_add_link_options(/INCREMENTAL:NO)
     endif()
   endif()
 

@@ -863,17 +863,24 @@ void CaptureStore::commitLine( const QByteArray& lineBytes, bool terminated )
     segment.byteSize = segment.memoryData->size();
     segment.spilled = false;
 
-    if ( rollingOutput_.isValid() ) {
-        appendOutputBytes( terminated ? lineBytes + '\n' : lineBytes );
-    }
-
     fileSize_ += lineBytes.size() + ( terminated ? 1 : 0 );
     memoryBytes_ += lineBytes.size() + ( terminated ? 1 : 0 );
     totalLines_ += 1;
     maxLineLength_ = qMax( maxLineLength_, static_cast<int>( lineBytes.size() ) );
 
+    // Complete every access through the segment reference before operations
+    // that can trim or grow segments_ and invalidate it. Keep the committed
+    // segment active while rolling output trims the capture window; rotating it
+    // first would make the just-committed line eligible for immediate removal.
     segment.cumulativeEndLine += 1;
+
+    if ( rollingOutput_.isValid() ) {
+        appendOutputBytes( terminated ? lineBytes + '\n' : lineBytes );
+    }
+
+    // appendOutputBytes() may have invalidated the segment reference above.
     rotateSegmentIfNeeded();
+
     if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
         enforceMemoryBudget();
     }

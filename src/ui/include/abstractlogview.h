@@ -163,6 +163,10 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // tests verify the signature cache skips redundant rebuilds across mouse
     // events that share the same data/geometry.
     int visibleLineMapBuildCount() const { return visibleLineMapBuildCount_; }
+    bool isQuickFindRunningForTest() const
+    {
+        return quickFind_ != nullptr && quickFind_->isSearchRunning();
+    }
 #endif
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.

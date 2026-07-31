@@ -49,10 +49,10 @@ Checks: >
   -modernize-use-nodiscard,
   -modernize-use-override,
   -modernize-use-trailing-return-type,
-  -modernize-use-transparent-comparisons,
+  -modernize-use-transparent-functors,
   -modernize-use-using,
   -performance-no-int-to-ptr,
-  -performance-type-promotion-in-math-expression,
+  -performance-type-promotion-in-math-fn,
   -performance-unnecessary-value-param,
   -readability-braces-around-statements,
   -readability-convert-member-functions-to-static,
@@ -69,11 +69,8 @@ Checks: >
   -readability-simplify-boolean-expr,
   -readability-uppercase-literal-suffix
 
-# Only analyse first-party headers under src/<module>/ -- either directly
-# (src/app/kloggapp.h) or nested under include/ / src/.  This excludes vendored
-# CPM-cache packages (which carry their own src/ trees), the generated build
-# tree (build_root/.../*_autogen/, whose paths have an extra segment before
-# include/), 3rd-party deps and Qt system headers.  llvm::Regex has no lookahead,
-# so the match is anchored on the known src/ module names; add a new top-level
-# module here when one is introduced.
-HeaderFilterRegex: '.*/src/(app|crash_handler|filewatch|klogg_version|logdata|logging|regex|settings|ui|utils|versioncheck)/([^/]*\.(h|hpp)$|(include|src)/.*\.(h|hpp)$)'
+# Only analyse first-party headers below the canonical klogg/src root. This
+# excludes cpm_cache packages (whose src/ comes after a dependency hash), the
+# generated build tree, 3rd-party deps, and Qt system headers while allowing a
+# PR to add a new top-level source module without updating this allowlist first.
+HeaderFilterRegex: '.*/klogg/src/.*\.(h|hh|hpp|hxx)$'

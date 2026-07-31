@@ -1,34 +1,8 @@
 # ThreadSanitizer suppressions
 #
-# Consumed via TSAN_OPTIONS=suppressions=<path-to-this-file> on the TSan legs.
-#
-# Suppression grammar (one entry per line):
-#   race:<pattern>     suppress data races where at least one stack frame
-#                      matches <pattern>; '*' is a wildcard.
-#
-# Each entry below covers benign races reported inside uninstrumented
-# third-party libraries (built without -fsanitize=thread). Tsan cannot see the
-# synchronization inside those libraries, so it false-positives on their
-# internal globals. They are NOT klogg races.
-
-# Qt is linked as a prebuilt, uninstrumented library; Tsan reports races on
-# Qt's internal reference counting, signal/slot machinery and plugin globals.
-race:*Qt*
-
-# OneTBB is built without Tsan instrumentation; its task arena / scheduler
-# internals show up as data races.
-race:*tbb*
-
-# mimalloc is vendored via CPM as a static library (MI_OVERRIDE OFF, MI_TSAN not
-# set) and does not inherit -fsanitize=thread -- project_options only reaches
-# klogg targets, not the CPM-fetched mimalloc-static. Its internal arena/segment
-# locks are therefore invisible to Tsan. When two indexing worker threads
-# (separate LogData instances opened by the same test) allocate concurrently
-# they race on mimalloc's segment bookkeeping (mi_segment_alloc -> _mi_memzero
-# -> memset); the "Mutex ... is already destroyed" note is mimalloc retiring its
-# own segment lock, not a klogg mutex. This is NOT a klogg race: each LogData's
-# operation queue serialises its own operations under operationsMutex_ (the
-# worker is spawned only after indexAll joins the previous opThread_, and
-# OperationQueue::tryStartPendingOperation runs only under the queue mutex).
-race:*mi_segment_alloc*
-race:*_mi_memzero*
+# Intentionally empty. Dependencies built from source (oneTBB and mimalloc)
+# are instrumented on TSan legs, and first-party cross-thread delivery avoids
+# transient Qt functor objects. Do not add module-wide patterns such as
+# race:*Qt* or race:*tbb*: they also hide application races whose stacks pass
+# through those frameworks. Any unavoidable platform false positive must be
+# captured with its full stack and suppressed by an exact top-level symbol.

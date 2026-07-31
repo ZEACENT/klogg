@@ -31,7 +31,11 @@
 
 #include "cpu_info.h"
 #include "log.h"
+#if defined( KLOGG_MSVC_ASAN )
+#include <cstdlib>
+#else
 #include <mimalloc.h>
+#endif
 
 namespace {
 
@@ -39,7 +43,13 @@ namespace {
 struct HsAllocatorInit {
     HsAllocatorInit()
     {
+#if defined( KLOGG_MSVC_ASAN )
+        // MSVC ASan cannot use mimalloc's GCC/Clang-only MI_TRACK_ASAN mode.
+        // Keep Vectorscan allocations visible to the CRT allocator interceptor.
+        hs_set_allocator( std::malloc, std::free );
+#else
         hs_set_allocator( mi_malloc, mi_free );
+#endif
     }
 };
 static HsAllocatorInit hsAllocatorInit;

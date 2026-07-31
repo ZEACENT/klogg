@@ -1,50 +1,14 @@
-# LeakSanitizer suppressions
+# LeakSanitizer suppressions (Linux only)
 #
-# Consumed via LSAN_OPTIONS=suppressions=<path-to-this-file> on the ASan legs
-# (detect_leaks=1 is set on every ASan leg). ASan on Linux/macOS delegates
-# leak reporting to LeakSanitizer, so this file covers those platforms.
-#
-# LeakSanitizer is NOT available in MSVC ASan builds (Windows uses
-# detect_leaks=0), so this file is a no-op there.
-#
-# Suppression grammar (one entry per line):
-#   leak:<pattern>     suppress any leak whose symbolized stack trace matches
-#                      <pattern>; '*' is a wildcard.
-#
-# Each entry below is a known benign still-reachable / exit-time "leak" that
-# lives in uninstrumented system or third-party libraries and is never reclaimed
-# at process exit. They are not klogg bugs.
+# Keep entries scoped to exact system/plugin modules. Never add framework-wide
+# patterns such as leak:*Qt*, leak:*glib*, leak:*mimalloc* or leak:*tbb*: those
+# can hide first-party leaks whose allocation stack passes through a framework.
 
-# FontConfig caches and font state are singletons released by the OS at exit.
+# FontConfig caches and font state are process-lifetime singletons.
 leak:fontconfig
 
-# D-Bus / libdbus connection objects are intentionally long-lived.
+# D-Bus connection objects are intentionally process-lifetime state.
 leak:libdbus
 
-# Qt creates global/static state (QPA plugins, font databases, session managers)
-# that is deliberately not torn down at exit; these show up as exit-time leaks.
-leak:*Qt*
-
-# The Qt "offscreen" QPA platform plugin (libqoffscreen.so), loaded by the
-# headless -platform offscreen test invocations, keeps static allocator state
-# that is never reclaimed at exit; surfaces as small indirect leaks from
-# .../qt5/plugins/platforms/libqoffscreen.so. The *Qt* rule above does not
-# match it because the install path uses lowercase "qt5"/"qoffscreen".
+# The headless Qt offscreen QPA plugin retains process-lifetime plugin state.
 leak:qoffscreen
-
-# The Qt "offscreen" QPA platform plugin (libqoffscreen.so), loaded by the
-# headless -platform offscreen test invocations, keeps static allocator state
-# that is never reclaimed at exit; surfaces as small indirect leaks from
-# .../qt5/plugins/platforms/libqoffscreen.so. The *Qt* rule above does not
-# match it because the install path uses lowercase "qt5"/"qoffscreen".
-leak:qoffscreen
-
-# GLib type/option/global registries are allocated once and kept for the
-# lifetime of the process.
-leak:*glib*
-
-# mimalloc / TBB allocator bookkeeping; the allocator itself is a process-wide
-# singleton and is intentionally not freed. (ASan legs build with
-# KLOGG_OVERRIDE_MALLOC=OFF, but transitive uses may still appear.)
-leak:*mimalloc*
-leak:*tbb*

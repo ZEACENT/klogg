@@ -44,6 +44,7 @@
 #include <QToolButton>
 
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -86,10 +87,17 @@ QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArr
 QString makeFile( const QTemporaryDir& dir, const QString& name, int totalLines,
                   const std::vector<int>& matchLines )
 {
+    REQUIRE( std::all_of( matchLines.cbegin(), matchLines.cend(),
+                          [ totalLines ]( int line ) { return line >= 0 && line < totalLines; } ) );
+
+    std::vector<bool> matches( static_cast<std::size_t>( totalLines ), false );
+    for ( const auto line : matchLines ) {
+        matches[ static_cast<std::size_t>( line ) ] = true;
+    }
+
     QByteArray bytes;
     for ( int i = 0; i < totalLines; ++i ) {
-        const bool isMatch = std::find( matchLines.begin(), matchLines.end(), i ) != matchLines.end();
-        bytes.append( isMatch ? "ERROR line\n" : "padding line\n" );
+        bytes.append( matches[ static_cast<std::size_t>( i ) ] ? "ERROR line\n" : "padding line\n" );
     }
     return writeFile( dir, name, bytes );
 }
@@ -1435,8 +1443,12 @@ TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker bef
 
     REQUIRE( widget.filteredView() != nullptr );
     widget.filteredView()->searchForward(); // spawns the QtConcurrent reader
-    QTest::qWait( 10 );                     // let the worker enter its scan loop
-    // ~FolderCrawlerWidget runs here; it must join the worker before panes_ is freed.
+    REQUIRE( waitFor( [ & ] {
+        return widget.filteredView()->isQuickFindRunningForTest();
+    } ) );
+    REQUIRE( widget.filteredView()->isQuickFindRunningForTest() );
+    // ~FolderCrawlerWidget runs here while the worker is observably active; it
+    // must join the worker before panes_ is freed.
 }
 #endif // KLOGG_TEST_ASAN
 

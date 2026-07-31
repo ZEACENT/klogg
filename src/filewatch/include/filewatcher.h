@@ -40,11 +40,11 @@
 #define FILEWATCHER_H
 
 #include <QObject>
-#include <QThreadPool>
 
 #include <memory>
 
 class EfswFileWatcher;
+class SerialExecutor;
 class QTimer;
 
 namespace KDToolBox {
@@ -98,13 +98,11 @@ class FileWatcher : public QObject {
     KDToolBox::KDGenericSignalThrottler* throttler_;
     std::vector<QString> changes_;
 
+    // Dedicated serial executor for efsw operations. A std::thread-backed
+    // queue provides sanitizer-visible synchronization while preserving the
+    // single-worker ordering required by the native watcher.
+    std::unique_ptr<SerialExecutor> worker_;
     std::unique_ptr<EfswFileWatcher, EfswFileWatcherDeleter> efswWatcher_;
-
-    // Dedicated single-worker thread pool for efsw operations.
-    // Using a dedicated pool with maxThreadCount(1) ensures efsw
-    // operations are naturally serialized on one worker thread,
-    // avoiding contention on the global QThreadPool.
-    QThreadPool workerPool_;
 };
 
 #endif

@@ -34,6 +34,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QProcess>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -1131,6 +1132,83 @@ class StartupStderrFailureTransport : public ProcessLiveSourceTransport {
 #endif
     }
 };
+
+class DeferredStartTestTransport : public ProcessLiveSourceTransport {
+  public:
+    enum class Mode { LongRunning, StderrFailure };
+
+    DeferredStartTestTransport( Mode mode, AsyncStartupTiming timing )
+        : mode_( mode ), timing_( timing )
+    {
+    }
+
+    Command streamingCommand() const override
+    {
+        if ( mode_ == Mode::StderrFailure ) {
+#ifdef Q_OS_WIN
+            return { QStringLiteral( "cmd" ),
+                     { QStringLiteral( "/c" ),
+                       QStringLiteral( "echo startup-boom 1>&2 & exit /b 13" ) } };
+#else
+            return { QStringLiteral( "/bin/sh" ),
+                     { QStringLiteral( "-c" ),
+                       QStringLiteral( "echo startup-boom >&2; exit 13" ) } };
+#endif
+        }
+
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "ping" ), { QStringLiteral( "-n" ), QStringLiteral( "60" ),
+                                             QStringLiteral( "127.0.0.1" ) } };
+#else
+        return { QStringLiteral( "sleep" ), { QStringLiteral( "60" ) } };
+#endif
+    }
+
+    Command clearCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return { QStringLiteral( "cmd" ), { QStringLiteral( "/c" ), QStringLiteral( "echo" ) } };
+#else
+        return { QStringLiteral( "true" ), {} };
+#endif
+    }
+
+    bool hasPendingStart() const
+    {
+        return pendingProcess_ != nullptr;
+    }
+
+    int startRequestCount() const
+    {
+        return startRequestCount_;
+    }
+
+    void releaseStart()
+    {
+        REQUIRE( pendingProcess_ != nullptr );
+        auto* const process = pendingProcess_;
+        pendingProcess_ = nullptr;
+        process->start();
+    }
+
+  protected:
+    void startProcessAsync( QProcess& process ) override
+    {
+        pendingProcess_ = &process;
+        ++startRequestCount_;
+    }
+
+    AsyncStartupTiming asyncStartupTiming() const override
+    {
+        return timing_;
+    }
+
+  private:
+    Mode mode_;
+    AsyncStartupTiming timing_;
+    QProcess* pendingProcess_ = nullptr;
+    int startRequestCount_ = 0;
+};
 } // namespace
 
 TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intentional disconnect" )
@@ -1143,7 +1221,8 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     // Connect -- the long-running process starts successfully
     REQUIRE( transport.connectTransport() );
 
-    // Disconnect -- sets disconnectRequested_ = true before terminating
+    // Disconnect detaches the process and removes all transport signal
+    // connections before terminating it.
     transport.disconnectTransport();
 
     // Process events to let any queued signals through
@@ -1151,8 +1230,7 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     QTest::qWait( 200 );
     QCoreApplication::processEvents();
 
-    // Verify: no errorOccurred signals should have been emitted during disconnect
-    // (the disconnectRequested_ guard should suppress them)
+    // The detached process can no longer report its intentional termination.
     CHECK( errorSpy.count() == 0 );
 
     // The final state should be Disconnected (not Error)
@@ -1205,22 +1283,23 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
 // blocking waitForStarted + grace loop for the auto-reconnect path)
 // ---------------------------------------------------------------------------
 
-TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync returns immediately" )
+TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync returns with startup pending" )
 {
-    LongRunningTestTransport transport;
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 3000, 20 } );
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
 
-    QElapsedTimer timer;
-    timer.start();
     transport.connectTransportAsync();
-    const auto elapsed = timer.elapsed();
 
-    // Must not block for the 250ms grace period or 3s waitForStarted.
-    CHECK( elapsed < 100 );
+    REQUIRE( transport.startRequestCount() == 1 );
+    REQUIRE( transport.hasPendingStart() );
+    REQUIRE( stateSpy.count() == 1 );
+    CHECK( stateSpy.at( 0 ).at( 0 ).value<LiveSourceTransport::State>()
+           == LiveSourceTransport::State::Connecting );
+    CHECK( errorSpy.count() == 0 );
 
     transport.disconnectTransport();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
 }
 
 namespace {
@@ -1235,28 +1314,52 @@ bool spyContainsState( const SafeQSignalSpy& spy, LiveSourceTransport::State tar
 }
 } // namespace
 
-TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync connects via grace timer" )
+TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started" )
 {
-    LongRunningTestTransport transport;
-
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 3000, 20 } );
     SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
     transport.connectTransportAsync();
 
-    // safeWait returns on the first signal (Connecting); we must keep
-    // processing events until the grace timer fires and transitions to
-    // Connected.
+    // Hold QProcess in the pre-start phase longer than the post-start grace.
+    QTest::qWait( 60 );
+    QCoreApplication::processEvents();
+    CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
+    CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    CHECK( errorSpy.count() == 0 );
+
+    transport.releaseStart();
     QElapsedTimer deadline;
     deadline.start();
     while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Connected )
-            && deadline.elapsed() < 2000 ) {
+            && deadline.elapsed() < 3000 ) {
         QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
     }
     REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
 
     transport.disconnectTransport();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+}
+
+TEST_CASE( "ProcessLiveSourceTransport times out while waiting for QProcess started" )
+{
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 30, 10 } );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
+    transport.connectTransportAsync();
+
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Error )
+            && deadline.elapsed() < 1000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+
+    REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
+    REQUIRE( errorSpy.count() == 1 );
+    CHECK( transport.lastError().contains( QStringLiteral( "Timed out" ) ) );
 }
 
 TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects startup failure" )
@@ -1281,28 +1384,32 @@ TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects startup fai
     REQUIRE_FALSE( transport.lastError().isEmpty() );
 }
 
-TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects fast exit" )
+TEST_CASE( "ProcessLiveSourceTransport preserves stderr during post-start grace" )
 {
-    StartupStderrFailureTransport transport;
-
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::StderrFailure,
+                                          { 3000, 1000 } );
     SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
     transport.connectTransportAsync();
 
-    // The process exits (with stderr) within the grace period; the finished
-    // handler must detect this and transition to Error.
+    QTest::qWait( 60 );
+    QCoreApplication::processEvents();
+    CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+
+    transport.releaseStart();
     QElapsedTimer deadline;
     deadline.start();
     while ( !spyContainsState( stateSpy, LiveSourceTransport::State::Error )
-            && deadline.elapsed() < 2000 ) {
+            && deadline.elapsed() < 3000 ) {
         QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
     }
     REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
+    REQUIRE( errorSpy.count() == 1 );
     REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
+    CHECK( errorSpy.at( 0 ).at( 0 ).toString().contains( QStringLiteral( "startup-boom" ) ) );
 
     transport.disconnectTransport();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
 }
 
 TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async disconnect" )

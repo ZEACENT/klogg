@@ -1142,8 +1142,15 @@ bool AbstractLogView::event( QEvent* e )
 
 int AbstractLogView::lineNumberToVerticalScroll( LineNumber line ) const
 {
-    return static_cast<int>(
-        std::round( static_cast<double>( line.get() ) * verticalScrollMultiplicator() ) );
+    const auto scrollPosition
+        = std::round( static_cast<double>( line.get() ) * verticalScrollMultiplicator() );
+    if ( !( scrollPosition > 0.0 ) ) {
+        return 0;
+    }
+    if ( scrollPosition >= static_cast<double>( std::numeric_limits<int>::max() ) ) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>( scrollPosition );
 }
 
 LineNumber AbstractLogView::verticalScrollToLineNumber( int scrollPosition ) const
@@ -1998,8 +2005,11 @@ void AbstractLogView::jumpToLine( LineNumber line )
     //
     // To guarantee visibility in wrap mode, place the requested logical line at the top
     // (except for the end-of-file snap-to-bottom case below).
+    const auto centerOffset = getNbVisibleLines().get() / divisor;
     const auto desiredTopLine
-        = useTextWrap_ ? line : ( line - LinesCount( getNbVisibleLines().get() / divisor ) );
+        = useTextWrap_ ? line
+                       : ( line.get() > centerOffset ? LineNumber( line.get() - centerOffset )
+                                                     : 0_lnum );
     const bool snapToBottom = useTextWrap_ && ( line >= scrollMaxLine );
     const auto newTopLine = snapToBottom ? scrollMaxLine : desiredTopLine;
 

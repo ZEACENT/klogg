@@ -35,14 +35,21 @@ void ProcessLiveSourceTransport::createProcess()
 {
     process_ = std::make_unique<QProcess>();
     process_->setProcessChannelMode( QProcess::SeparateChannels );
+    auto* const currentProcess = process_.get();
+    const QPointer<QProcess> processGuard( currentProcess );
 
     // Redirect stderr to a temp file so it never reaches the log view.
     // We read the file in the finished handler for error detection only.
     stderrFilePath_ = QDir::tempPath() + QStringLiteral( "/klogg_stderr_%1.log" )
                           .arg( reinterpret_cast<quintptr>( this ), 0, 16 );
 
-    connect( process_.get(), &QProcess::readyReadStandardOutput, this, [ this ] {
-        auto data = process_->readAllStandardOutput();
+    connect( currentProcess, &QProcess::readyReadStandardOutput, this,
+             [ this, processGuard ] {
+        if ( !processGuard || process_.get() != processGuard.data() ) {
+            return;
+        }
+
+        auto data = processGuard->readAllStandardOutput();
         if ( !data.isEmpty() ) {
             filterReceivedBytes( data );
             if ( !data.isEmpty() ) {
@@ -51,58 +58,52 @@ void ProcessLiveSourceTransport::createProcess()
         }
     } );
 
-    connect( process_.get(), &QProcess::errorOccurred, this, [ this ]( QProcess::ProcessError ) {
-        if ( disconnectRequested_ ) {
+    connect( currentProcess, &QProcess::started, this, [ this, processGuard ] {
+        if ( destroyed_ || !processGuard || process_.get() != processGuard.data()
+             || state_ != State::Connecting
+             || asyncStartupPhase_ != AsyncStartupPhase::Starting ) {
             return;
         }
-        lastError_ = process_->errorString();
-        setState( State::Error );
-        Q_EMIT errorOccurred( lastError_ );
+
+        const auto timing = asyncStartupTiming();
+        cancelStartupTimer();
+        asyncStartupPhase_ = AsyncStartupPhase::PostStartGrace;
+        armStartupTimer( AsyncStartupPhase::PostStartGrace, timing.postStartGraceMs,
+                         processGuard.data() );
     } );
 
-    connect( process_.get(),
+    connect( currentProcess, &QProcess::errorOccurred, this,
+             [ this, processGuard ]( QProcess::ProcessError error ) {
+        if ( destroyed_ || !processGuard || process_.get() != processGuard.data()
+             || ( state_ != State::Connecting && state_ != State::Connected ) ) {
+            return;
+        }
+
+        lastError_ = processGuard->errorString();
+        // Crashed is followed by finished(), which can recover redirected stderr.
+        if ( error != QProcess::Crashed ) {
+            failCurrentProcess( lastError_ );
+        }
+    } );
+
+    connect( currentProcess,
              qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this,
-             [ this ]( int exitCode, QProcess::ExitStatus exitStatus ) {
-                 if ( destroyed_ ) {
-                     return;
-                 }
+             [ this, processGuard ]( int exitCode, QProcess::ExitStatus exitStatus ) {
+        if ( destroyed_ || !processGuard || process_.get() != processGuard.data() ) {
+            return;
+        }
 
-                 const auto disconnectRequested = disconnectRequested_;
-                 disconnectRequested_ = false;
+        cancelStartupTimer();
+        asyncStartupPhase_ = AsyncStartupPhase::Idle;
+        if ( state_ == State::Connected || state_ == State::Connecting ) {
+            const auto fallback = exitStatus == QProcess::NormalExit
+                                      ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
+                                      : tr( "Live source crashed" );
+            failCurrentProcess( fallback );
+        }
 
-                 if ( disconnectRequested ) {
-                     setState( State::Disconnected );
-                     return;
-                 }
-
-                 if ( state_ == State::Connected || state_ == State::Connecting ) {
-                     // Read stderr from the temp file for error detection.
-                     // Stderr never reaches the log view because it's
-                     // redirected to this file.
-                     if ( lastError_.isEmpty() ) {
-                         QFile stderrFile( stderrFilePath_ );
-                         if ( stderrFile.open( QIODevice::ReadOnly ) ) {
-                             const auto stdErr
-                                 = QString::fromUtf8( stderrFile.readAll() ).trimmed();
-                             if ( !stdErr.isEmpty() ) {
-                                 lastError_ = stdErr;
-                                 LOG_WARNING << "live source stderr " << stdErr;
-                             }
-                             stderrFile.close();
-                         }
-                     }
-                     if ( lastError_.isEmpty() ) {
-                         lastError_ = exitStatus == QProcess::NormalExit
-                                          ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
-                                          : tr( "Live source crashed" );
-                     }
-                     setState( State::Error );
-                     Q_EMIT errorOccurred( lastError_ );
-                 }
-
-                 // Clean up stderr temp file
-                 QFile::remove( stderrFilePath_ );
-             } );
+        QFile::remove( stderrFilePath_ );
+    } );
 }
 
 ProcessLiveSourceTransport::~ProcessLiveSourceTransport()
@@ -126,7 +127,6 @@ bool ProcessLiveSourceTransport::connectTransport()
     process_->setStandardErrorFile( stderrFilePath_ );
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
-    disconnectRequested_ = false;
     setState( State::Connecting );
     process_->start();
 
@@ -177,9 +177,12 @@ bool ProcessLiveSourceTransport::connectTransport()
 
 void ProcessLiveSourceTransport::connectTransportAsync()
 {
-    if ( state_ == State::Connected ) {
+    if ( state_ == State::Connected || state_ == State::Connecting ) {
         return;
     }
+
+    cancelStartupTimer();
+    asyncStartupPhase_ = AsyncStartupPhase::Idle;
 
     const auto command = streamingCommand();
     lastError_.clear();
@@ -187,83 +190,21 @@ void ProcessLiveSourceTransport::connectTransportAsync()
     process_->setStandardErrorFile( stderrFilePath_ );
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
-    disconnectRequested_ = false;
     setState( State::Connecting );
-    process_->start();
 
-    // After the grace period, if we're still in Connecting state and the
-    // process is running, we're connected.  If the process failed to start
-    // (errorOccurred FailedToStart) or crashed during the grace (finished),
-    // the existing handlers already transitioned to Error — the timer just
-    // confirms the happy path.
-    QPointer<ProcessLiveSourceTransport> self( this );
-    // Capture the specific process instance so a reconnect that replaces
-    // process_ before the timer fires cannot promote the wrong process to
-    // Connected.
-    auto* startedProcess = process_.get();
-
-    // Cancel any stale grace timer from a previous connectTransportAsync()
-    // that was interrupted by disconnectTransport() before it fired.
-    cancelGraceTimer();
-
-    graceTimer_ = new QTimer( this );
-    graceTimer_->setSingleShot( true );
-    connect( graceTimer_, &QTimer::timeout, this,
-             [ this, self, startedProcess ]() {
-        // Single-shot timer fired: drop the handle and free the QTimer. The
-        // object was only stop()ed+null'd on cancel; on fire it would otherwise
-        // linger parented to this until destruction (cancelGraceTimer deletes
-        // it synchronously; here deleteLater is required since we are inside the
-        // timer's own timeout signal).
-        auto* const firedTimer = graceTimer_;
-        graceTimer_ = nullptr;
-        if ( firedTimer != nullptr ) {
-            firedTimer->deleteLater();
-        }
-
-        if ( !self || destroyed_ || disconnectRequested_ ) {
-            return;
-        }
-        // Another handler (errorOccurred / finished) already moved us past
-        // Connecting — nothing to do.
-        if ( state_ != State::Connecting ) {
-            return;
-        }
-
-        // A reconnect replaced process_ — this timer is stale.
-        if ( process_.get() != startedProcess ) {
-            return;
-        }
-
-        if ( process_->state() == QProcess::Running ) {
-            setState( State::Connected );
-        }
-        else {
-            // Process exited during the grace without triggering the normal
-            // errorOccurred/finished handlers — read stderr for diagnostics.
-            QString stdErr;
-            QFile stderrFile( stderrFilePath_ );
-            if ( stderrFile.open( QIODevice::ReadOnly ) ) {
-                stdErr = QString::fromUtf8( stderrFile.readAll() ).trimmed();
-                stderrFile.close();
-            }
-            lastError_ = stdErr.isEmpty() ? tr( "Live source terminated during startup" ) : stdErr;
-            setState( State::Error );
-            Q_EMIT errorOccurred( lastError_ );
-        }
-    } );
-    graceTimer_->start( StartupFailureGracePeriodMs );
+    const auto timing = asyncStartupTiming();
+    asyncStartupPhase_ = AsyncStartupPhase::Starting;
+    armStartupTimer( AsyncStartupPhase::Starting, timing.startTimeoutMs, process_.get() );
+    startProcessAsync( *process_ );
 }
 
 void ProcessLiveSourceTransport::disconnectTransport()
 {
-    // Cancel any pending grace timer before tearing down the process.
-    // The timer captures process_ pointers that become stale after
-    // createProcess() replaces the instance.
-    cancelGraceTimer();
+    // Cancel pending startup work before replacing or terminating the process.
+    cancelStartupTimer();
+    asyncStartupPhase_ = AsyncStartupPhase::Idle;
 
     if ( !process_ || process_->state() == QProcess::NotRunning ) {
-        disconnectRequested_ = false;
         setState( State::Disconnected );
         return;
     }
@@ -276,8 +217,6 @@ void ProcessLiveSourceTransport::disconnectTransport()
     // Detach old process and cut all signal connections
     auto* dying = process_.release();
     dying->disconnect( this );
-
-    disconnectRequested_ = false;
 
     // Terminate the old process
     if ( destroyed_ ) {
@@ -370,12 +309,93 @@ bool ProcessLiveSourceTransport::runBlockingCommand( const Command& command, QBy
     return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
 }
 
-void ProcessLiveSourceTransport::cancelGraceTimer()
+void ProcessLiveSourceTransport::startProcessAsync( QProcess& process )
 {
-    if ( graceTimer_ ) {
-        graceTimer_->stop();
-        delete graceTimer_;
-        graceTimer_ = nullptr;
+    process.start();
+}
+
+ProcessLiveSourceTransport::AsyncStartupTiming ProcessLiveSourceTransport::asyncStartupTiming() const
+{
+    return { 3000, StartupFailureGracePeriodMs };
+}
+
+void ProcessLiveSourceTransport::armStartupTimer( AsyncStartupPhase phase, int timeoutMs,
+                                                  QProcess* process )
+{
+    cancelStartupTimer();
+
+    startupTimer_ = new QTimer( this );
+    auto* const timer = startupTimer_;
+    const QPointer<ProcessLiveSourceTransport> self( this );
+    const QPointer<QProcess> processGuard( process );
+    timer->setSingleShot( true );
+    timer->setTimerType( Qt::PreciseTimer );
+    connect( timer, &QTimer::timeout, this,
+             [ this, self, processGuard, timer, phase ] {
+        if ( startupTimer_ != timer ) {
+            timer->deleteLater();
+            return;
+        }
+
+        startupTimer_ = nullptr;
+        timer->deleteLater();
+        if ( !self || destroyed_ || !processGuard || process_.get() != processGuard.data()
+             || state_ != State::Connecting || asyncStartupPhase_ != phase ) {
+            return;
+        }
+
+        asyncStartupPhase_ = AsyncStartupPhase::Idle;
+        if ( phase == AsyncStartupPhase::Starting ) {
+            failCurrentProcess( tr( "Timed out waiting for the live source process to start" ) );
+            if ( processGuard->state() != QProcess::NotRunning ) {
+                processGuard->kill();
+            }
+        }
+        else if ( processGuard->state() == QProcess::Running ) {
+            setState( State::Connected );
+        }
+        else {
+            failCurrentProcess( tr( "Live source terminated during startup" ) );
+        }
+    } );
+    timer->start( timeoutMs );
+}
+
+void ProcessLiveSourceTransport::cancelStartupTimer()
+{
+    if ( startupTimer_ ) {
+        startupTimer_->stop();
+        delete startupTimer_;
+        startupTimer_ = nullptr;
+    }
+}
+
+QString ProcessLiveSourceTransport::capturedStderr() const
+{
+    QFile stderrFile( stderrFilePath_ );
+    if ( !stderrFile.open( QIODevice::ReadOnly ) ) {
+        return {};
+    }
+    return QString::fromUtf8( stderrFile.readAll() ).trimmed();
+}
+
+void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback )
+{
+    cancelStartupTimer();
+    asyncStartupPhase_ = AsyncStartupPhase::Idle;
+
+    const auto stdErr = capturedStderr();
+    if ( !stdErr.isEmpty() ) {
+        lastError_ = stdErr;
+        LOG_WARNING << "live source stderr " << stdErr;
+    }
+    else if ( lastError_.isEmpty() ) {
+        lastError_ = fallback;
+    }
+
+    if ( state_ != State::Error ) {
+        setState( State::Error );
+        Q_EMIT errorOccurred( lastError_ );
     }
 }
 

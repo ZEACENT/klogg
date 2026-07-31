@@ -107,6 +107,8 @@ class QuickFind : public QObject {
     // Make the object forget the 'no more match' flag.
     void resetLimits();
 
+    bool isSearchRunning() const { return operationWatcher_.isRunning(); }
+
   public Q_SLOTS:
     // Used for incremental searches
     // Return the first occurrence of the passed pattern from the starting

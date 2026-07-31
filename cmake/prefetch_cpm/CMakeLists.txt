@@ -29,7 +29,7 @@ cpmaddpackage(
 cpmaddpackage(
   NAME streamvbyte
   GITHUB_REPOSITORY lemire/streamvbyte
-  VERSION 1.0.0
+  GIT_TAG c43294a81501e0fdf14adc83818d47f7f9bc1bb6
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(
@@ -113,7 +113,7 @@ cpmaddpackage(
 cpmaddpackage(
   NAME efsw
   GITHUB_REPOSITORY SpartanJ/efsw
-  GIT_TAG 1.4.1
+  GIT_TAG 62f785c56b7a34f035193d4cb831921347b586b8
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(

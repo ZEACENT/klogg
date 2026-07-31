@@ -4,10 +4,92 @@ include(CPM)
 
 set(_TMP_CPM_USE_LOCAL_PACKAGES ${CPM_USE_LOCAL_PACKAGES})
 
-cpmaddpackage("gh:simdutf/simdutf@5.6.2")
+function(klogg_require_pinned_revision dependency source_dir expected_revision)
+  execute_process(
+    COMMAND git -C ${source_dir} rev-parse HEAD
+    RESULT_VARIABLE _revision_result
+    OUTPUT_VARIABLE _actual_revision
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(NOT _revision_result EQUAL 0 OR NOT "${_actual_revision}" STREQUAL "${expected_revision}")
+    message(
+      FATAL_ERROR
+        "${dependency} source must be pinned at ${expected_revision}, got '${_actual_revision}' from '${source_dir}'"
+    )
+  endif()
+endfunction()
+
+set(_klogg_simdutf_options
+    "SIMDUTF_TESTS OFF"
+    "SIMDUTF_TOOLS OFF"
+    "SIMDUTF_BENCHMARKS OFF"
+)
+if(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
+  list(APPEND _klogg_simdutf_options "SIMDUTF_SANITIZE ON")
+endif()
+if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR AND NOT MSVC)
+  list(APPEND _klogg_simdutf_options "SIMDUTF_SANITIZE_UNDEFINED ON")
+endif()
+cpmaddpackage(
+  NAME simdutf
+  GITHUB_REPOSITORY simdutf/simdutf
+  VERSION 5.6.2
+  OPTIONS ${_klogg_simdutf_options}
+)
+# MSVC ASan trips over simdutf's lazy multi-ISA implementation registry even
+# when container annotation diagnostics are disabled. Keep simdutf and all
+# first-party callers instrumented, but use its scalar implementation for this
+# one sanitizer/toolchain combination so no poisoned registry is constructed.
+if(TARGET simdutf AND MSVC AND ENABLE_SANITIZER_ADDRESS)
+  target_compile_definitions(
+    simdutf
+    PUBLIC SIMDUTF_IMPLEMENTATION_ICELAKE=0
+           SIMDUTF_IMPLEMENTATION_HASWELL=0
+           SIMDUTF_IMPLEMENTATION_WESTMERE=0
+           SIMDUTF_IMPLEMENTATION_ARM64=0
+           SIMDUTF_IMPLEMENTATION_PPC64=0
+           SIMDUTF_IMPLEMENTATION_RVV=0
+           SIMDUTF_IMPLEMENTATION_FALLBACK=1
+  )
+endif()
 cpmaddpackage("gh:foonathan/type_safe@0.2.4")
 cpmaddpackage("gh:RoaringBitmap/CRoaring@4.2.1")
-cpmaddpackage("gh:lemire/streamvbyte@1.0.0")
+
+# Patched dependencies must always use their pinned source trees, never a
+# find_package() result selected by CPM_USE_LOCAL_PACKAGES.
+set(CPM_USE_LOCAL_PACKAGES OFF)
+cpmaddpackage(
+  NAME streamvbyte
+  GITHUB_REPOSITORY lemire/streamvbyte
+  GIT_TAG c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+  DOWNLOAD_ONLY YES
+)
+klogg_require_pinned_revision(
+  streamvbyte ${streamvbyte_SOURCE_DIR} c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+)
+execute_process(
+  COMMAND
+    ${CMAKE_COMMAND}
+    -DREPO_DIR=${streamvbyte_SOURCE_DIR}
+    -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_streamvbyte_unaligned_stores.patch
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+  RESULT_VARIABLE _streamvbyte_patch_result
+)
+if(NOT _streamvbyte_patch_result EQUAL 0)
+  message(FATAL_ERROR "Failed to apply streamvbyte unaligned-store patch")
+endif()
+if(TARGET streamvbyte)
+  get_target_property(_streamvbyte_target_source_dir streamvbyte SOURCE_DIR)
+  get_filename_component(_streamvbyte_expected_source_dir "${streamvbyte_SOURCE_DIR}" REALPATH)
+  get_filename_component(_streamvbyte_actual_source_dir "${_streamvbyte_target_source_dir}" REALPATH)
+  if(NOT "${_streamvbyte_actual_source_dir}" STREQUAL "${_streamvbyte_expected_source_dir}")
+    message(FATAL_ERROR "Existing streamvbyte target does not use the pinned patched source")
+  endif()
+else()
+  add_subdirectory(${streamvbyte_SOURCE_DIR} ${streamvbyte_BINARY_DIR} EXCLUDE_FROM_ALL)
+endif()
+set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 
 if(APPLE)
   cpmaddpackage(
@@ -338,24 +420,70 @@ if(KDToolBox_ADDED)
   set_target_properties(kdtoolbox PROPERTIES AUTOMOC ON)
 endif()
 
+# Download before configuring so the backend race fixes can be applied
+# deterministically to the pinned 1.4.1 source. Upgrading wholesale would
+# raise efsw's CMake minimum beyond klogg's Ubuntu 20.04 baseline.
+set(CPM_USE_LOCAL_PACKAGES OFF)
 cpmaddpackage(
   NAME
   efsw
   GITHUB_REPOSITORY
   SpartanJ/efsw
   GIT_TAG
-  1.4.1
-  EXCLUDE_FROM_ALL
+  62f785c56b7a34f035193d4cb831921347b586b8
+  DOWNLOAD_ONLY
   YES
-  OPTIONS
-  "BUILD_TEST_APP OFF"
 )
-if(efsw_ADDED)
-  target_compile_definitions(efsw PRIVATE EFSW_FSEVENTS_NOT_SUPPORTED)
+klogg_require_pinned_revision(
+  efsw ${efsw_SOURCE_DIR} 62f785c56b7a34f035193d4cb831921347b586b8
+)
+
+# The target used by klogg must always come from the pinned, patched source.
+# Do not let an earlier superproject package registration silently substitute
+# an unpatched efsw target.
+foreach(_efsw_patch IN ITEMS fix_efsw_inotify_watcher_uaf.patch fix_efsw_kqueue_watcher_races.patch)
+  execute_process(
+    COMMAND
+      ${CMAKE_COMMAND}
+      -DREPO_DIR=${efsw_SOURCE_DIR}
+      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/${_efsw_patch}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+    RESULT_VARIABLE _efsw_patch_result
+  )
+  if(NOT _efsw_patch_result EQUAL 0)
+    message(FATAL_ERROR "Failed to apply efsw patch ${_efsw_patch}")
+  endif()
+endforeach()
+
+if(TARGET efsw)
+  get_target_property(_efsw_target_source_dir efsw SOURCE_DIR)
+  get_filename_component(_efsw_expected_source_dir "${efsw_SOURCE_DIR}" REALPATH)
+  get_filename_component(_efsw_actual_source_dir "${_efsw_target_source_dir}" REALPATH)
+  if(NOT "${_efsw_actual_source_dir}" STREQUAL "${_efsw_expected_source_dir}")
+    message(
+      FATAL_ERROR
+        "Existing efsw target comes from '${_efsw_actual_source_dir}', expected pinned source '${_efsw_expected_source_dir}'"
+    )
+  endif()
+else()
+  set(BUILD_TEST_APP OFF CACHE BOOL "" FORCE)
+  add_subdirectory(${efsw_SOURCE_DIR} ${efsw_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
+target_compile_definitions(efsw PRIVATE EFSW_FSEVENTS_NOT_SUPPORTED)
+set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 
 if(WIN32)
   set(BUILD_SHARED_LIBS ON)
+endif()
+set(_klogg_tbb_options
+    "TBB_TEST OFF"
+    "TBB_EXAMPLES OFF"
+    "TBB_STRICT OFF"
+)
+if(ENABLE_SANITIZER_THREAD)
+  list(APPEND _klogg_tbb_options "TBB_SANITIZE thread")
+elseif(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
+  list(APPEND _klogg_tbb_options "TBB_SANITIZE address")
 endif()
 cpmaddpackage(
   NAME
@@ -366,10 +494,7 @@ cpmaddpackage(
   c9be1ac2930f02dea523003ed801b4489f3e6b6e
   EXCLUDE_FROM_ALL
   YES
-  OPTIONS
-  "TBB_TEST OFF"
-  "TBB_EXAMPLES OFF"
-  "TBB_STRICT OFF"
+  OPTIONS ${_klogg_tbb_options}
 )
 
 if(WIN32)
@@ -377,6 +502,20 @@ if(WIN32)
 endif()
 
 set(CPM_USE_LOCAL_PACKAGES OFF)
+set(_klogg_mimalloc_options
+    "MI_BUILD_TESTS OFF"
+    "MI_SECURE OFF"
+    "MI_BUILD_SHARED OFF"
+    "MI_BUILD_STATIC ON"
+    "MI_BUILD_OBJECT OFF"
+    "MI_OVERRIDE OFF"
+)
+if(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
+  list(APPEND _klogg_mimalloc_options "MI_TRACK_ASAN ON")
+endif()
+if(ENABLE_SANITIZER_THREAD)
+  list(APPEND _klogg_mimalloc_options "MI_DEBUG_TSAN ON")
+endif()
 cpmaddpackage(
   NAME
   mimalloc
@@ -386,13 +525,7 @@ cpmaddpackage(
   2.1.7
   EXCLUDE_FROM_ALL
   YES
-  OPTIONS
-  "MI_BUILD_TESTS OFF"
-  "MI_SECURE OFF"
-  "MI_BUILD_SHARED OFF"
-  "MI_BUILD_STATIC ON"
-  "MI_BUILD_OBJECT OFF"
-  "MI_OVERRIDE OFF"
+  OPTIONS ${_klogg_mimalloc_options}
 )
 if(mimalloc_ADDED)
   message("Adding alias for mimalloc")

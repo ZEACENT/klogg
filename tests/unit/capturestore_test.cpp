@@ -33,6 +33,15 @@
 #include "capturestore.h"
 #include "rollingfilemanager.h"
 
+#if defined( __has_feature )
+#  if __has_feature( thread_sanitizer ) || __has_feature( address_sanitizer ) \
+      || __has_feature( undefined_behavior_sanitizer )
+#    define KLOGG_TEST_SANITIZER 1
+#  endif
+#elif defined( __SANITIZE_THREAD__ ) || defined( __SANITIZE_ADDRESS__ )
+#  define KLOGG_TEST_SANITIZER 1
+#endif
+
 namespace {
 QString makeTestDir( const QString& prefix )
 {
@@ -356,6 +365,39 @@ TEST_CASE( "CaptureStore finishInput commits a trailing partial line without add
     REQUIRE( readUtf8File( outputPath ) == QStringLiteral( "partial-line" ) );
 }
 
+TEST_CASE( "CaptureStore keeps a finished partial line when rolling output rotates" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 4;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 64;
+    limits.rollingBackupCount = 1;
+
+    const auto rootPath = makeTestDir( "capturestore_partial_finish_rotation" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "saved.log" ) );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    store.appendUtf8( QByteArrayLiteral( "old-a\nold-b\n" ) );
+
+    // Rebind with a window smaller than the replayed segments. Finishing the
+    // partial line rotates output and front-trims segments_, invalidating any
+    // reference retained across appendOutputBytes().
+    limits.rollingMaxFileSize = 4;
+    store.setLimits( limits );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+    store.appendUtf8( QByteArrayLiteral( "abcdef" ) );
+
+    const auto result = store.finishInput();
+
+    REQUIRE( result.lineCount == 1_lcount );
+    REQUIRE( store.lineCount() == 1_lcount );
+    REQUIRE( store.lineAt( 0_lnum, codec, QRegularExpression{} )
+             == QStringLiteral( "abcdef" ) );
+    REQUIRE( store.stats().fileSize == 6 );
+    REQUIRE( readUtf8File( outputPath ) == QStringLiteral( "abcdef" ) );
+}
+
 TEST_CASE( "CaptureStore persists a trailing partial line on destruction" )
 {
     CaptureStore::Limits limits;
@@ -649,12 +691,13 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
     // effect).  The coverage leg builds with -O0 + gcov instrumentation,
     // which runs the 1M-line append many times slower; give it the same
     // generous budget the linear-time sibling test uses so the assertion
-    // stays a release-only regression guard rather than an -O0 wall-clock
-    // trip wire.  (Debug does not define NDEBUG; RelWithDebInfo does.)
-#ifdef NDEBUG
-    constexpr int MetadataOverheadBudgetMs = 200;
-#else
+    // stays a release-only regression guard rather than an instrumentation
+    // wall-clock trip wire. Sanitizer legs instrument allocator dependencies
+    // as well; Debug does not define NDEBUG, while RelWithDebInfo does.
+#if defined( KLOGG_TEST_SANITIZER ) || !defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 2000;
+#else
+    constexpr int MetadataOverheadBudgetMs = 200;
 #endif
     CHECK( elapsedMs < MetadataOverheadBudgetMs );
 }

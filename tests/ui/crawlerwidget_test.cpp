@@ -37,6 +37,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <limits>
 
 #include "savedsearches.h"
 #include "session.h"
@@ -268,6 +269,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static int textViewportHeight( const AbstractLogView* view )
     {
         return view->textViewportHeight();
+    }
+
+    static int lineNumberToVerticalScroll( const AbstractLogView* view, LineNumber line )
+    {
+        return view->lineNumberToVerticalScroll( line );
     }
 
     static QShortcut* shortcutFor( const AbstractLogView* view, const QString& key )
@@ -775,6 +781,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             crawler->filteredView_ );
     }
 
+    int filteredScrollForLine( LineNumber line ) const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::lineNumberToVerticalScroll(
+            crawler->filteredView_, line );
+    }
+
     SearchPerformanceCounters searchPerformanceCounters() const
     {
         return crawler->logFilteredData_->searchPerformanceCounters();
@@ -1031,6 +1043,17 @@ SCENARIO( "Crawler widget search", "[ui]" )
             THEN( "all lines are matched" )
             {
                 REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES );
+            }
+
+            THEN( "restoring the first-line selection keeps the filtered view at the top" )
+            {
+                REQUIRE( crawlerVisitor.filteredTopLine() == 0_lnum );
+            }
+
+            THEN( "oversized line positions clamp to the scrollbar range" )
+            {
+                REQUIRE( crawlerVisitor.filteredScrollForLine( maxValue<LineNumber>() )
+                         == std::numeric_limits<int>::max() );
             }
 
             AND_WHEN( "copy all from main view" )

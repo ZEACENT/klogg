@@ -312,6 +312,11 @@ Q_SIGNALS:
     // to copy the new data back.
     void searchFinished();
 
+private Q_SLOTS:
+    void deliverSearchProgressed( LinesCount nbMatches, int percent, LineNumber initialLine,
+                                  quint64 generation, quint64 operationId );
+    void deliverSearchFinished( quint64 generation, quint64 operationId );
+
 private:
     using OperationId = quint64;
 

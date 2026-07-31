@@ -400,6 +400,9 @@ Q_SIGNALS:
   private Q_SLOTS:
     void onIndexingFinished( bool result );
     void onCheckFileFinished( MonitoredFileStatus result );
+    void deliverIndexingProgressed( int percent );
+    void deliverIndexingFinished( LoadingStatus status );
+    void deliverCheckFileFinished( MonitoredFileStatus status );
 
   private:
     OperationResult connectSignalsAndRun( IndexOperation* operationRequested );

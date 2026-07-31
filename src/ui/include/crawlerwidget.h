@@ -357,8 +357,8 @@ class CrawlerWidget : public QSplitter,
 
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
-    LogMainView* logMainView_;
-    FilteredView* filteredView_;
+    LogMainView* logMainView_ = nullptr;
+    FilteredView* filteredView_ = nullptr;
     std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
     QTabWidget* tabbedFilteredView_;
 

@@ -22,11 +22,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # One in-flight run per workflow+ref: a new push cancels the superseded run
-  # instead of piling up (keeps the runner pool clear and the PR check list
-  # to a single, latest result per gate).
+  # Cancel superseded PR validation, but serialize master publication runs.
+  # A master run replaces the continuous tag/release; canceling it between
+  # deletion and recreation could leave the release missing indefinitely.
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   SaveVersion:
@@ -36,7 +36,9 @@ jobs:
     outputs:
       klogg_version: ${{ steps.save-version.outputs.klogg_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/klogg-version
 
       - name: Save version
@@ -62,7 +64,9 @@ jobs:
       OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
       CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Restore shared CPM cache
         uses: actions/cache@v4
@@ -250,7 +254,9 @@ jobs:
     name: "Prefetch Windows MSYS2 tools"
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Restore MSYS2 tools cache
         id: cache-msys2-tools
@@ -391,6 +397,7 @@ jobs:
             container_root: docker/ubuntu22.04
             container: variar/klogg_ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
+            package: true
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
 
           - os: ubuntu_noble
@@ -406,6 +413,7 @@ jobs:
             container_root: docker/ubuntu24.04
             container: variar/klogg_ubuntu24.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
+            package: true
 
           - os: ubuntu_appimage
             os_version: 20.04
@@ -417,6 +425,7 @@ jobs:
             container_root: docker/ubuntu20.04
             container: variar/klogg_ubuntu20.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
+            package: true
 
           # Sanitizer legs: build + test only (no packaging, no artifacts).
           # Folded into the Linux matrix so ci-gate (needs: [Linux]) covers them.
@@ -438,14 +447,17 @@ jobs:
             package_tag: tsan
             container_root: docker/ubuntu22.04
             container: variar/klogg_ubuntu22.04
-            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            cmake_opts: -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
             sanitizer: thread
             package: false
 
 
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -490,7 +502,7 @@ jobs:
           # suppressions files live under /usr/local/tests/sanitizers/.
           echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
           echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
-          echo "TSAN_OPTIONS=halt_on_error=1:suppressions=/usr/local/tests/sanitizers/tsan_suppressions.txt" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
           echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt" >> $GITHUB_ENV
 
       - uses: ./.github/actions/docker-build
@@ -526,6 +538,7 @@ jobs:
             package_tag: vs-gen
             artifacts_id: macos-intel-qt6
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
+            package: true
           - os: macos-latest
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
@@ -536,6 +549,7 @@ jobs:
             package_tag: vs-arm64
             artifacts_id: macos-arm-qt6
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
+            package: true
 
           # Sanitizer legs: build + test only (no packaging, no artifacts).
           # Folded into the Mac matrix so ci-gate (needs: [Mac]) covers them.
@@ -546,7 +560,7 @@ jobs:
             qt_archives: qtbase icu qtsvg qttools qttranslations
             qt_arch: clang_64
             arch: x64
-            label: intel-qt6-asan-ubsan-lsan
+            label: intel-qt6-asan-ubsan
             package_tag: asan-ubsan
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
             sanitizer: address-undefined
@@ -565,8 +579,11 @@ jobs:
             package: false
 
     runs-on: ${{ matrix.config.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       
       - name: List available Xcode versions
         shell: sh
@@ -619,10 +636,11 @@ jobs:
         if: ${{ matrix.config.sanitizer }}
         shell: sh
         run: |
-          echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=${{ github.workspace }}/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
+          # Apple ASan does not support LeakSanitizer; detect_leaks=1 aborts
+          # before main(). Linux remains the required LSan platform.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
           echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
-          echo "TSAN_OPTIONS=halt_on_error=1:suppressions=${{ github.workspace }}/tests/sanitizers/tsan_suppressions.txt" >> $GITHUB_ENV
-          echo "LSAN_OPTIONS=suppressions=${{ github.workspace }}/tests/sanitizers/lsan_suppressions.txt" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
@@ -668,6 +686,7 @@ jobs:
             cmake_opts: -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_VECTORSCAN=ON
             label: x64-qt6
             artifacts_id: windows-x64-qt6
+            package: true
 
           - os: windows
             os_version: 2022
@@ -681,6 +700,7 @@ jobs:
             cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
             label: x86-qt5
             artifacts_id: windows-x86-qt5
+            package: true
 
           # Sanitizer leg: build + test only (no packaging, no artifacts).
           # MSVC ASan is x64-only, so this rides on the x64-qt6 leg. x86-qt5
@@ -700,8 +720,11 @@ jobs:
             package: false
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         if: ${{ startsWith(matrix.config.qt_version, '5') }}
@@ -811,24 +834,10 @@ jobs:
         if: ${{ matrix.config.sanitizer }}
         shell: sh
         run: |
-          # MSVC ASan has no leak detector; detect_leaks must stay 0.
-          # detect_container_overflow=0: vendored simdutf's lazy implementation
-          # registry init (simdutf::get_available_implementations ->
-          # get_available_implementation_pointers) trips MSVC ASan
-          # container-annotation false positives on first use: a reported
-          # container-overflow in klogg_tests, and a downstream access-violation
-          # from a poisoned implementation pointer in the vectorscan child
-          # process. The same simdutf code is clean under GCC/Clang ASan on the
-          # Linux/macOS legs, so this is MSVC-ASan-specific. simdutf cannot be
-          # dropped from /fsanitize=address (that would reintroduce the LNK2038
-          # annotate_vector mismatch the global flag exists to fix), and MSVC ASan
-          # has no GCC-style per-symbol suppression file, so the supported,
-          # documented escape hatch (recommended by ASan's own report output) is
-          # to disable container-overflow detection for this leg. The option
-          # disables the annotation *poisoning*, not just the report, and is
-          # inherited by the QProcess-spawned vectorscan child, so both processes
-          # are covered. See tests/sanitizers/asan_suppressions.txt for rationale.
-          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1:detect_container_overflow=0" >> $GITHUB_ENV
+          # MSVC ASan has no leak detector; keep every supported container check
+          # enabled globally. Any dependency-specific workaround must be scoped
+          # to the affected test process instead of weakening the whole leg.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
 
@@ -1006,8 +1015,9 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Generate Changelog
