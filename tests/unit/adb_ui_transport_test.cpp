@@ -178,6 +178,48 @@ class ImmediateFailureAdbProcessTransport : public AdbProcessTransport {
     }
 };
 
+class ReentrantReconnectAdbProcessTransport final
+    : public ImmediateFailureAdbProcessTransport {
+  public:
+    QString stderrFilePathForTest() const
+    {
+        return stderrFilePath();
+    }
+
+  protected:
+    void startProcessAsync( QProcess& ) override
+    {
+        // Keep the replacement capture alive without starting a second process.
+    }
+};
+
+class LongRunningAdbProcessTransport final : public AdbProcessTransport {
+  public:
+    LongRunningAdbProcessTransport()
+        : AdbProcessTransport( QString{}, QStringLiteral( "serial-123" ), {} )
+    {
+    }
+
+    QString stderrFilePathForTest() const
+    {
+        return stderrFilePath();
+    }
+
+  protected:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return Command{ QStringLiteral( "cmd" ),
+                        { QStringLiteral( "/d" ), QStringLiteral( "/q" ),
+                          QStringLiteral( "/c" ),
+                          QStringLiteral( "ping -n 30 127.0.0.1 >NUL" ) } };
+#else
+        return Command{ QStringLiteral( "/bin/sh" ),
+                        { QStringLiteral( "-c" ), QStringLiteral( "sleep 30" ) } };
+#endif
+    }
+};
+
 class TestIosLogProcessTransport : public IosLogProcessTransport {
   public:
     using IosLogProcessTransport::IosLogProcessTransport;
@@ -326,6 +368,72 @@ TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
                              QStringLiteral( "00008030-001C195E36D8802E" ),
                              QStringLiteral( "--match" ),
                              QStringLiteral( "process name" ) } );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport creates unique private stderr capture files" )
+{
+    TestIosLogProcessTransport first( QStringLiteral( "pymobiledevice3" ),
+                                      QStringLiteral( "first-device" ), QString{} );
+    TestIosLogProcessTransport second( QStringLiteral( "pymobiledevice3" ),
+                                       QStringLiteral( "second-device" ), QString{} );
+
+    const QFileInfo firstFile( first.stderrFilePathForTest() );
+    const QFileInfo secondFile( second.stderrFilePathForTest() );
+    REQUIRE( firstFile.exists() );
+    REQUIRE( secondFile.exists() );
+    REQUIRE( firstFile.absoluteFilePath() != secondFile.absoluteFilePath() );
+#ifndef Q_OS_WIN
+    const auto permissions = firstFile.permissions();
+    CHECK_FALSE( permissions.testFlag( QFileDevice::ReadGroup ) );
+    CHECK_FALSE( permissions.testFlag( QFileDevice::WriteGroup ) );
+    CHECK_FALSE( permissions.testFlag( QFileDevice::ReadOther ) );
+    CHECK_FALSE( permissions.testFlag( QFileDevice::WriteOther ) );
+#endif
+}
+
+TEST_CASE( "ProcessLiveSourceTransport keeps a reentrant reconnect capture alive" )
+{
+    ReentrantReconnectAdbProcessTransport transport;
+    const auto initialPath = transport.stderrFilePathForTest();
+    QString failedPath;
+    bool reconnected = false;
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport,
+                      [ & ] {
+        if ( !reconnected ) {
+            failedPath = transport.stderrFilePathForTest();
+            reconnected = true;
+            transport.connectTransportAsync();
+        }
+    } );
+
+    CHECK_FALSE( transport.connectTransport() );
+    REQUIRE( reconnected );
+    REQUIRE( failedPath != initialPath );
+    REQUIRE( transport.stderrFilePathForTest() != failedPath );
+    REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
+
+    transport.disconnectTransport();
+}
+
+TEST_CASE( "ProcessLiveSourceTransport removes detached stderr captures after disconnect" )
+{
+    LongRunningAdbProcessTransport transport;
+    REQUIRE( transport.connectTransport() );
+
+    const auto detachedPath = transport.stderrFilePathForTest();
+    REQUIRE( QFileInfo::exists( detachedPath ) );
+
+    transport.disconnectTransport();
+    REQUIRE( transport.stderrFilePathForTest() != detachedPath );
+    REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
+
+    QElapsedTimer cleanupTimer;
+    cleanupTimer.start();
+    while ( QFileInfo::exists( detachedPath ) && cleanupTimer.elapsed() < 3000 ) {
+        QCoreApplication::processEvents();
+        QTest::qWait( 10 );
+    }
+    CHECK_FALSE( QFileInfo::exists( detachedPath ) );
 }
 
 TEST_CASE( "IosLogProcessTransport passes color flags as pymobiledevice3 top-level options" )

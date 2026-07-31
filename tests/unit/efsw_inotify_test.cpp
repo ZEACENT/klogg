@@ -44,13 +44,9 @@ class RemovingListener final : public efsw::FileWatchListener {
                            const std::string&, efsw::Action action,
                            std::string ) override
     {
-        if ( action == efsw::Actions::Add ) {
-            watcher_.removeWatch( watchId );
-            return;
-        }
-
-        if ( action == efsw::Actions::Modified && !completed_.exchange( true ) ) {
+        if ( action == efsw::Actions::Add && !completed_.exchange( true ) ) {
             observedDirectory_ = dir;
+            watcher_.removeWatch( watchId );
             completion_.set_value();
         }
     }

@@ -84,17 +84,43 @@ def git_file(base_sha: str, path: Path) -> str:
     if commit.returncode != 0:
         raise ValueError(f"cannot read base commit {base_sha}: {commit.stderr.strip()}")
 
+    relative_path = path.as_posix()
+    tree_entry = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "--full-tree",
+            "-r",
+            "--name-only",
+            base_sha,
+            "--",
+            relative_path,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if tree_entry.returncode != 0:
+        raise ValueError(
+            f"cannot inspect {relative_path} at {base_sha}: "
+            f"{tree_entry.stderr.strip()}"
+        )
+    if relative_path not in tree_entry.stdout.splitlines():
+        # The first ratcheted PR bootstraps a positive floor from a base that
+        # predates the baseline files. Missing thereafter is equivalent to the
+        # only permitted prior value: zero.
+        return "0"
+
     result = subprocess.run(
-        ["git", "show", f"{base_sha}:{path.as_posix()}"],
+        ["git", "show", f"{base_sha}:{relative_path}"],
         check=False,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        # The first ratcheted PR bootstraps a positive floor from a base that
-        # predates the baseline files. Missing thereafter is equivalent to the
-        # only permitted prior value: zero.
-        return "0"
+        raise ValueError(
+            f"cannot read {relative_path} at {base_sha}: {result.stderr.strip()}"
+        )
     return result.stdout
 
 

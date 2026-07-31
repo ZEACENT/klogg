@@ -11,6 +11,7 @@
 #include <QStringList>
 
 class QProcess;
+class QTemporaryFile;
 class QTimer;
 
 class LiveSourceTransport : public QObject {
@@ -84,6 +85,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
 
     void setState( State state );
     void createProcess();
+    bool prepareStderrCapture();
     void armStartupTimer( AsyncStartupPhase phase, int timeoutMs, QProcess* process );
     void cancelStartupTimer();
     QString capturedStderr() const;
@@ -91,6 +93,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
 
   private:
     std::unique_ptr<QProcess> process_;
+    std::unique_ptr<QTemporaryFile> stderrFile_;
     QTimer* startupTimer_{ nullptr };
     AsyncStartupPhase asyncStartupPhase_{ AsyncStartupPhase::Idle };
     State state_{ State::Disconnected };

@@ -7,6 +7,7 @@
 #include <QMetaType>
 #include <QPointer>
 #include <QProcess>
+#include <QTemporaryFile>
 #include <QTimer>
 
 #include "log.h"
@@ -38,10 +39,10 @@ void ProcessLiveSourceTransport::createProcess()
     auto* const currentProcess = process_.get();
     const QPointer<QProcess> processGuard( currentProcess );
 
-    // Redirect stderr to a temp file so it never reaches the log view.
-    // We read the file in the finished handler for error detection only.
-    stderrFilePath_ = QDir::tempPath() + QStringLiteral( "/klogg_stderr_%1.log" )
-                          .arg( reinterpret_cast<quintptr>( this ), 0, 16 );
+    // Create the capture path exclusively before exposing it to a subprocess
+    // command. QTemporaryFile keeps the randomized, private file owned by this
+    // transport until the process has finished.
+    prepareStderrCapture();
 
     connect( currentProcess, &QProcess::readyReadStandardOutput, this,
              [ this, processGuard ] {
@@ -93,6 +94,7 @@ void ProcessLiveSourceTransport::createProcess()
             return;
         }
 
+        const auto finishedStderrFilePath = stderrFilePath_;
         cancelStartupTimer();
         asyncStartupPhase_ = AsyncStartupPhase::Idle;
         if ( state_ == State::Connected || state_ == State::Connecting ) {
@@ -102,8 +104,27 @@ void ProcessLiveSourceTransport::createProcess()
             failCurrentProcess( fallback );
         }
 
-        QFile::remove( stderrFilePath_ );
+        QFile::remove( finishedStderrFilePath );
     } );
+}
+
+bool ProcessLiveSourceTransport::prepareStderrCapture()
+{
+    auto stderrFile = std::make_unique<QTemporaryFile>(
+        QDir( QDir::tempPath() ).filePath(
+            QStringLiteral( "klogg_stderr_XXXXXX.log" ) ) );
+    if ( !stderrFile->open() ) {
+        lastError_ = tr( "Failed to create a private stderr capture file: %1" )
+                         .arg( stderrFile->errorString() );
+        stderrFile_.reset();
+        stderrFilePath_.clear();
+        return false;
+    }
+
+    stderrFilePath_ = stderrFile->fileName();
+    stderrFile->close();
+    stderrFile_ = std::move( stderrFile );
+    return true;
 }
 
 ProcessLiveSourceTransport::~ProcessLiveSourceTransport()
@@ -118,12 +139,16 @@ bool ProcessLiveSourceTransport::connectTransport()
         return true;
     }
 
-    const auto command = streamingCommand();
     lastError_.clear();
-    // Clean up any previous stderr temp file and redirect stderr so it never
-    // appears in the log view. We read it in the finished handler for error
-    // detection only.
-    QFile::remove( stderrFilePath_ );
+    if ( !prepareStderrCapture() ) {
+        setState( State::Error );
+        Q_EMIT errorOccurred( lastError_ );
+        return false;
+    }
+
+    // streamingCommand() may embed stderrFilePath_ in a PTY wrapper, so the
+    // fresh private path must exist before the command is assembled.
+    const auto command = streamingCommand();
     process_->setStandardErrorFile( stderrFilePath_ );
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
@@ -184,9 +209,16 @@ void ProcessLiveSourceTransport::connectTransportAsync()
     cancelStartupTimer();
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
 
-    const auto command = streamingCommand();
     lastError_.clear();
-    QFile::remove( stderrFilePath_ );
+    if ( !prepareStderrCapture() ) {
+        setState( State::Error );
+        Q_EMIT errorOccurred( lastError_ );
+        return;
+    }
+
+    // streamingCommand() may embed stderrFilePath_ in a PTY wrapper, so the
+    // fresh private path must exist before the command is assembled.
+    const auto command = streamingCommand();
     process_->setStandardErrorFile( stderrFilePath_ );
     process_->setProgram( command.program );
     process_->setArguments( command.arguments );
@@ -209,11 +241,6 @@ void ProcessLiveSourceTransport::disconnectTransport()
         return;
     }
 
-    // Clean up the stderr temp file before detaching the process.
-    // The finished lambda (which normally removes this file) will never
-    // fire because we're about to disconnect it.
-    QFile::remove( stderrFilePath_ );
-
     // Detach old process and cut all signal connections
     auto* dying = process_.release();
     dying->disconnect( this );
@@ -234,21 +261,33 @@ void ProcessLiveSourceTransport::disconnectTransport()
         delete dying;
     }
     else {
-        // Create fresh process for future connections
+        // Keep the old capture owner alive until the detached process closes
+        // its redirected stderr handle. Windows cannot unlink an open redirect.
+        const auto detachedStderrFilePath = stderrFilePath_;
+        std::shared_ptr<QTemporaryFile> detachedStderrFile(
+            std::move( stderrFile_ ) );
+
+        // Create fresh process and capture resources for future connections.
         createProcess();
         setState( State::Disconnected );
 
-        // Async cleanup, non-blocking.
+        // Async cleanup, non-blocking. Connect before killing so even a fast
+        // exit releases the old capture after QProcess closes its handles.
+        QObject::connect(
+            dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+            dying,
+            [ dying, detachedStderrFile,
+              detachedStderrFilePath ]( int, QProcess::ExitStatus ) mutable {
+            QFile::remove( detachedStderrFilePath );
+            detachedStderrFile.reset();
+            dying->deleteLater();
+        } );
+
         // On macOS, QProcess::terminate() followed by deleteLater can cause
         // ~QProcess() to re-send SIGTERM with a stale PID if the child was
-        // already reaped and the OS reused the PID.  Use kill() (SIGKILL)
-        // which forces immediate exit and is safe against PID reuse because
-        // SIGKILL cannot be caught and the destructor's terminateProcess()
-        // will see processState == NotRunning.
+        // already reaped and the OS reused the PID. Use kill() (SIGKILL), which
+        // forces immediate exit and leaves the destructor with NotRunning.
         dying->kill();
-        QObject::connect( dying,
-                          qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
-                          dying, &QObject::deleteLater );
         QPointer<QProcess> guard( dying );
         QTimer::singleShot( 1500, dying, [ guard ] {
             if ( guard && guard->state() != QProcess::NotRunning ) {

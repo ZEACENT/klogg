@@ -4,7 +4,8 @@ import tempfile
 import unittest
 
 
-SCRIPT = pathlib.Path(__file__).parents[2] / "scripts" / "lint_ci_quality.py"
+ROOT = pathlib.Path(__file__).parents[2]
+SCRIPT = ROOT / "scripts" / "lint_ci_quality.py"
 SPEC = importlib.util.spec_from_file_location("lint_ci_quality", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -276,6 +277,13 @@ steps:
         self.assertIn(
             "coverage report generation must fail closed",
             MODULE.coverage_workflow_issues(workflow),
+        )
+
+    def test_clang_tidy_diff_find_fallback_preserves_explicit_error(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertIn(
+            "find /usr/lib/llvm-*/share/clang -name clang-tidy-diff.py -print -quit 2>/dev/null || true",
+            workflow,
         )
 
     def test_static_analysis_uses_only_configured_first_party_units(self):

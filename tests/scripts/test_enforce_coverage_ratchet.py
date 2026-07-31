@@ -61,7 +61,7 @@ class CoverageRatchetTest(unittest.TestCase):
         with mock.patch.object(
             MODULE.subprocess,
             "run",
-            side_effect=[completed(0), completed(128, stderr="path does not exist")],
+            side_effect=[completed(0), completed(0, stdout="")],
         ):
             self.assertEqual(MODULE.git_file("base", pathlib.Path("floor.txt")), "0")
 
@@ -72,6 +72,22 @@ class CoverageRatchetTest(unittest.TestCase):
         with mock.patch.object(MODULE.subprocess, "run", return_value=completed):
             with self.assertRaises(ValueError):
                 MODULE.git_file("missing", pathlib.Path("floor.txt"))
+
+    def test_unexpected_base_file_read_failure_fails_closed(self):
+        completed = lambda returncode, stderr="", stdout="": subprocess.CompletedProcess(
+            args=[], returncode=returncode, stdout=stdout, stderr=stderr
+        )
+        with mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            side_effect=[
+                completed(0),
+                completed(0, stdout="floor.txt\n"),
+                completed(128, stderr="fatal: object read error"),
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "cannot read floor.txt at base"):
+                MODULE.git_file("base", pathlib.Path("floor.txt"))
 
     def test_missing_summary_percentage_fails_closed(self):
         with self.assertRaises(ValueError):

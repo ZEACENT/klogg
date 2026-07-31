@@ -77,7 +77,7 @@ jobs:
             tidy_diff=$(command -v clang-tidy-diff-18.py || true)
           fi
           if [ -z "$tidy_diff" ]; then
-            tidy_diff=$(find /usr/lib/llvm-*/share/clang -name clang-tidy-diff.py -print -quit)
+            tidy_diff=$(find /usr/lib/llvm-*/share/clang -name clang-tidy-diff.py -print -quit 2>/dev/null || true)
           fi
           if [ -z "$tidy_diff" ]; then
             echo "::error::clang-tidy-diff was not installed with clang-tidy"
