@@ -363,7 +363,7 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         LOG_WARNING << "Cpu doesn't have sse2 or ssse3, use qt regex engine";
     }
 
-    auto allocScratchForDb = []( hs_database_t* db ) -> hs_scratch_t* {
+    auto allocScratchForDb = []( const hs_database_t* db ) -> hs_scratch_t* {
         hs_scratch_t* scratch = nullptr;
         const auto scratchResult = hs_alloc_scratch( db, &scratch );
         if ( scratchResult != HS_SUCCESS ) {
@@ -495,7 +495,7 @@ std::unique_ptr<HsBufferScanner> HsRegularExpression::createBufferScanner() cons
     }
 
     auto scannerScratch = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
-        []( hs_scratch_t* prototype ) -> hs_scratch_t* {
+        []( const hs_scratch_t* prototype ) -> hs_scratch_t* {
             hs_scratch_t* scratch = nullptr;
             const auto err = hs_clone_scratch( prototype, &scratch );
             if ( err != HS_SUCCESS ) {
@@ -530,7 +530,7 @@ MatcherVariant HsRegularExpression::createMatcher() const
     }
 
     auto matcherScratch = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
-        []( hs_scratch_t* prototype ) -> hs_scratch_t* {
+        []( const hs_scratch_t* prototype ) -> hs_scratch_t* {
             hs_scratch_t* scratch = nullptr;
 
             const auto err = hs_clone_scratch( prototype, &scratch );

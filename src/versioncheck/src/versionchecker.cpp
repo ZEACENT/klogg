@@ -42,6 +42,8 @@
 
 #include "klogg_version.h"
 
+#include <algorithm>
+
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -127,10 +129,11 @@ QString selectAssetDownloadUrl( const QVariantList& assets )
             continue;
         }
         const auto name = assetMap.value( QStringLiteral( "name" ) ).toString().toLower();
-        for ( const auto& alias : archAliases ) {
-            if ( name.contains( alias ) ) {
-                return assetMap.value( QStringLiteral( "browser_download_url" ) ).toString();
-            }
+        const auto matchesArchitecture
+            = std::any_of( archAliases.cbegin(), archAliases.cend(),
+                           [ & ]( const QString& alias ) { return name.contains( alias ); } );
+        if ( matchesArchitecture ) {
+            return assetMap.value( QStringLiteral( "browser_download_url" ) ).toString();
         }
     }
 

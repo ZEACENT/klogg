@@ -352,6 +352,62 @@ TEST_CASE( "checkVersionData: extracts download URL from assets matching current
     CHECK( downloadUrl.contains( currentArch ) );
 }
 
+TEST_CASE( "checkVersionData: architecture aliases beat generic platform assets",
+           "[versionchecker]" )
+{
+    VersionChecker checker;
+    SafeQSignalSpy versionSpy(
+        &checker, SIGNAL( newVersionFound( QString, QString, QString, QStringList ) ) );
+
+    const auto currentArch = QSysInfo::currentCpuArchitecture().toLower();
+    QStringList archAliases;
+    if ( currentArch == QStringLiteral( "arm64" )
+         || currentArch == QStringLiteral( "aarch64" ) ) {
+        archAliases = { QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
+    }
+    else if ( currentArch == QStringLiteral( "x86_64" )
+              || currentArch == QStringLiteral( "amd64" ) ) {
+        archAliases = { QStringLiteral( "x86_64" ), QStringLiteral( "x64" ),
+                        QStringLiteral( "amd64" ) };
+    }
+    else {
+        WARN( "No alternate architecture alias is defined for " << currentArch.toStdString() );
+        return;
+    }
+    archAliases.removeAll( currentArch );
+    REQUIRE_FALSE( archAliases.isEmpty() );
+    const auto alternateAlias = archAliases.front();
+
+    QVariantMap genericAsset;
+    QVariantMap aliasAsset;
+#if defined( Q_OS_MAC )
+    genericAsset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-macOS.dmg" );
+    aliasAsset[ "name" ]
+        = QStringLiteral( "klogg-99.0.0.0-macOS-%1.dmg" ).arg( alternateAlias );
+#elif defined( Q_OS_WIN )
+    genericAsset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-win64.exe" );
+    aliasAsset[ "name" ]
+        = QStringLiteral( "klogg-99.0.0.0-win64-%1.exe" ).arg( alternateAlias );
+#else
+    genericAsset[ "name" ] = QStringLiteral( "klogg-99.0.0.0-linux.AppImage" );
+    aliasAsset[ "name" ]
+        = QStringLiteral( "klogg-99.0.0.0-linux-%1.AppImage" ).arg( alternateAlias );
+#endif
+    genericAsset[ "browser_download_url" ]
+        = QStringLiteral( "https://example.com/download/generic" );
+    const auto aliasUrl
+        = QStringLiteral( "https://example.com/download/%1" ).arg( alternateAlias );
+    aliasAsset[ "browser_download_url" ] = aliasUrl;
+
+    const auto json = makeReleaseJsonForVersion(
+        QStringLiteral( "99.0.0.0" ), QStringLiteral( "https://example.com" ), {},
+        QVariantList{ genericAsset, aliasAsset } );
+
+    REQUIRE( checker.checkVersionData( json ) );
+    REQUIRE( versionSpy.count() == 1 );
+    CHECK( versionSpy.at( 0 ).at( 2 ).toString() == aliasUrl );
+}
+
 TEST_CASE( "checkVersionData: falls back to platform match when no arch-specific asset",
            "[versionchecker]" )
 {

@@ -4,9 +4,6 @@ shadowFunction:*/src/settings/src/shortcuts.cpp:120
 functionStatic:*/src/regex/src/hsregularexpression.cpp:191
 noExplicitConstructor:*/src/regex/include/hsregularexpression.h:82
 returnByReference:*/src/regex/include/regularexpressionpattern.h:58
-constParameterPointer:*/src/regex/src/hsregularexpression.cpp:366
-constParameterPointer:*/src/regex/src/hsregularexpression.cpp:494
-constParameterPointer:*/src/regex/src/hsregularexpression.cpp:529
 returnByReference:*/src/settings/include/configuration.h:601
 returnByReference:*/src/settings/include/configuration.h:689
 returnByReference:*/src/regex/include/booleanevaluator.h:37
@@ -19,6 +16,11 @@ useInitializationList:*/src/ui/src/signalmux.cpp:30
 shadowFunction:*/src/ui/src/viewtools.cpp:50
 shadowFunction:*/src/ui/src/viewtools.cpp:55
 shadowFunction:*/src/ui/src/searchtoolbar.cpp:260
+shadowFunction:*/src/versioncheck/src/versionchecker.cpp:205
+shadowFunction:*/src/versioncheck/src/versionchecker.cpp:266
+shadowFunction:*/src/versioncheck/src/versionchecker.cpp:271
+shadowFunction:*/src/ui/src/tabgroup.cpp:109
+shadowFunction:*/src/ui/include/viewtools.h:66
 returnByReference:*/src/ui/include/favoritefiles.h:37
 functionStatic:*/src/ui/src/iconloader.cpp:57
 functionStatic:*/src/ui/src/iconloader.cpp:62

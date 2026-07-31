@@ -526,12 +526,12 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "defaultView.searchLogicalCombining", searchLogicalCombining_ );
     settings.setValue( "defaultView.encodingMib", defaultEncodingMib_ );
 
-    QList<QVariant> splitterSizes;
+    QList<QVariant> serializedSplitterSizes;
     std::transform( splitterSizes_.cbegin(), splitterSizes_.cend(),
-                    std::back_inserter( splitterSizes ),
+                    std::back_inserter( serializedSplitterSizes ),
                     []( auto s ) { return QVariant::fromValue( s ); } );
 
-    settings.setValue( "defaultView.splitterSizes", splitterSizes );
+    settings.setValue( "defaultView.splitterSizes", serializedSplitterSizes );
 
     settings.beginWriteArray( "shortcuts" );
     auto shortcutIndex = 0;

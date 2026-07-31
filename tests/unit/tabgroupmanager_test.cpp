@@ -58,6 +58,32 @@ TEST_CASE( "TabGroupManager removes an empty group when the last tab is removed"
     REQUIRE( changedSpy.count() >= 3 );
 }
 
+TEST_CASE( "TabGroupManager locates later groups and their tabs" )
+{
+    TabGroupManager manager;
+    manager.createGroup( "Frontend", QColor( "#3366FF" ) );
+    manager.createGroup( "Backend", QColor( "#00AA66" ) );
+    REQUIRE( manager.groups().size() == 2 );
+
+    const auto firstGroupId = manager.groups().front().id;
+    const auto secondGroupId = manager.groups().back().id;
+    const auto backendPath = QStringLiteral( "/tmp/backend.log" );
+    manager.addTabToGroup( secondGroupId, backendPath );
+
+    REQUIRE( manager.groupById( secondGroupId ) != nullptr );
+    CHECK( manager.groupById( secondGroupId )->name == QStringLiteral( "Backend" ) );
+    CHECK( manager.groupById( QStringLiteral( "missing" ) ) == nullptr );
+    CHECK( manager.groupIdForTab( backendPath ) == secondGroupId );
+    CHECK( manager.groupIdForTab( QStringLiteral( "/tmp/missing.log" ) ).isEmpty() );
+    CHECK( manager.groupForTab( backendPath ) == manager.groupById( secondGroupId ) );
+    CHECK( manager.groupById( firstGroupId ) != nullptr );
+
+    const auto& constManager = manager;
+    REQUIRE( constManager.groupById( secondGroupId ) != nullptr );
+    CHECK( constManager.groupById( secondGroupId )->name == QStringLiteral( "Backend" ) );
+    CHECK( constManager.groupById( QStringLiteral( "missing" ) ) == nullptr );
+}
+
 TEST_CASE( "TabGroupManager moveTabToGroup with empty target removes group membership" )
 {
     TabGroupManager manager;
