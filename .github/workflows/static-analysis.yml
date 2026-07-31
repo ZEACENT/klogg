@@ -71,7 +71,7 @@ jobs:
       - name: Install gcc-13, clang-tidy and cppcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck libxkbcommon-dev libxkbcommon-x11-dev
+          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck libcurl4-openssl-dev libxkbcommon-dev libxkbcommon-x11-dev
           tidy_diff=$(command -v clang-tidy-diff || true)
           if [ -z "$tidy_diff" ]; then
             tidy_diff=$(command -v clang-tidy-diff-18.py || true)

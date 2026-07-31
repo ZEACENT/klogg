@@ -23,6 +23,7 @@
 #include <QSignalSpy>
 #include <QLineEdit>
 #include <QProxyStyle>
+#include <QPointer>
 #include <QScrollBar>
 #include <QStyle>
 #include <QTemporaryFile>
@@ -34,6 +35,7 @@
 
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QEvent>
 #include <QUuid>
 
 #include <algorithm>
@@ -994,9 +996,88 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->deleteMarkLinesFromMain( lines );
         QTest::qWait( 20 );
     }
+
+    FilteredView* activeFilteredView() const
+    {
+        return crawler->filteredView_;
+    }
+
+    int filteredViewCount() const
+    {
+        return crawler->tabbedFilteredView_->count();
+    }
+
+    std::size_t filteredViewDataCount() const
+    {
+        return crawler->filteredViewsData_.size();
+    }
+
+    int currentFilteredViewIndex() const
+    {
+        return crawler->tabbedFilteredView_->currentIndex();
+    }
+
+    void createAdditionalFilteredView()
+    {
+        crawler->searchToolbar_->setKeepResultsChecked( true );
+        crawler->startNewSearch();
+        QCoreApplication::processEvents();
+    }
+
+    void closeFilteredView( int index )
+    {
+        crawler->closeFilteredView( index );
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+        QCoreApplication::processEvents();
+    }
 };
 
 using CrawlerWidgetVisitor = CrawlerWidget::access_by<CrawlerWidgetPrivate>;
+
+TEST_CASE( "Crawler widget preserves its final filtered results view", "[ui]" )
+{
+    QTemporaryFile file{ "crawler_final_filtered_view_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    QPointer<FilteredView> originalView( crawlerVisitor.activeFilteredView() );
+    REQUIRE( originalView );
+    REQUIRE( crawlerVisitor.filteredViewCount() == 1 );
+
+    crawlerVisitor.closeFilteredView( 0 );
+    CHECK( originalView );
+    CHECK( crawlerVisitor.activeFilteredView() == originalView.data() );
+    CHECK( crawlerVisitor.filteredViewCount() == 1 );
+}
+
+TEST_CASE( "Crawler widget removes a closed filtered view from its live registry", "[ui]" )
+{
+    QTemporaryFile file{ "crawler_closed_filtered_view_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.createAdditionalFilteredView();
+    REQUIRE( crawlerVisitor.filteredViewCount() == 2 );
+    REQUIRE( crawlerVisitor.filteredViewDataCount() == 2 );
+
+    QPointer<FilteredView> closingView( crawlerVisitor.activeFilteredView() );
+    crawlerVisitor.closeFilteredView( crawlerVisitor.currentFilteredViewIndex() );
+
+    REQUIRE_FALSE( closingView );
+    CHECK( crawlerVisitor.filteredViewCount() == 1 );
+    CHECK( crawlerVisitor.filteredViewDataCount() == 1 );
+    CHECK( crawlerVisitor.activeFilteredView() != nullptr );
+}
 
 SCENARIO( "Crawler widget search", "[ui]" )
 {

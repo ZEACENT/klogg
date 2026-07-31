@@ -33,10 +33,17 @@ function(klogg_require_pinned_revision dependency source_dir expected_revision)
       OUTPUT_STRIP_TRAILING_WHITESPACE
       ERROR_QUIET
     )
-    if(NOT _revision_result EQUAL 0 OR NOT "${_actual_revision}" STREQUAL "${expected_revision}")
+    if(_revision_result EQUAL 0)
+      if(NOT "${_actual_revision}" STREQUAL "${expected_revision}")
+        message(
+          FATAL_ERROR
+            "${dependency} source must be pinned at ${expected_revision}, got '${_actual_revision}' from '${source_dir}'"
+        )
+      endif()
+    else()
       message(
-        FATAL_ERROR
-          "${dependency} source must be pinned at ${expected_revision}, got '${_actual_revision}' from '${source_dir}'"
+        STATUS
+          "${dependency} Git metadata is incomplete; verifying the exact approved source-tree digest"
       )
     endif()
   endif()

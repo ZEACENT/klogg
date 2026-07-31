@@ -304,6 +304,10 @@ steps:
             workflow,
         )
 
+    def test_static_analysis_installs_crashpad_curl_dependency(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertIn("libcurl4-openssl-dev", workflow)
+
     def test_static_analysis_uses_only_configured_first_party_units(self):
         insecure = """\
 steps:

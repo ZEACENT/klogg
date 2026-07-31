@@ -126,6 +126,11 @@ class VerifyPinnedSourceTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source tree SHA-256 mismatch", result.stdout + result.stderr)
 
+    def test_incomplete_git_metadata_falls_back_to_exact_content(self):
+        (self.source / ".git").mkdir()
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_approved_patched_tree_is_accepted(self):
         self.sentinel.write_text("approved patched contents\n")
         patched_digest = source_tree_digest(self.source)

@@ -271,17 +271,19 @@ void ProcessLiveSourceTransport::disconnectTransport()
         createProcess();
         setState( State::Disconnected );
 
-        // Async cleanup, non-blocking. Connect before killing so even a fast
-        // exit releases the old capture after QProcess closes its handles.
+        // QProcess on Windows keeps redirected handles open until its destructor,
+        // which is later than finished(). Retain the old capture through QObject
+        // destruction, then remove it after the QProcess-specific teardown.
         QObject::connect(
-            dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
-            dying,
-            [ dying, detachedStderrFile,
-              detachedStderrFilePath ]( int, QProcess::ExitStatus ) mutable {
+            dying, &QObject::destroyed,
+            [ detachedStderrFile,
+              detachedStderrFilePath ]( QObject* ) mutable {
             QFile::remove( detachedStderrFilePath );
             detachedStderrFile.reset();
-            dying->deleteLater();
         } );
+        QObject::connect(
+            dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+            dying, &QObject::deleteLater );
 
         // On macOS, QProcess::terminate() followed by deleteLater can cause
         // ~QProcess() to re-send SIGTERM with a stale PID if the child was
