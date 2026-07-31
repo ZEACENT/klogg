@@ -1,6 +1,7 @@
 #ifndef LIVESOURCETRANSPORT_H
 #define LIVESOURCETRANSPORT_H
 
+#include <cstdint>
 #include <memory>
 
 #include <QByteArray>
@@ -79,7 +80,7 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     }
 
   private:
-    enum class AsyncStartupPhase { Idle, Starting, PostStartGrace };
+    enum class AsyncStartupPhase : std::uint8_t { Idle, Starting, PostStartGrace };
 
     void setState( State state );
     void createProcess();

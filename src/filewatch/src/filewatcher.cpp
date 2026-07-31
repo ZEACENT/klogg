@@ -20,7 +20,6 @@
 #include "filewatcher.h"
 
 #include "configuration.h"
-#include "dispatch_to.h"
 #include "log.h"
 #include "synchronization.h"
 
@@ -315,9 +314,8 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         };
 
         for ( const auto& changedFile : collectChangedFiles() ) {
-            dispatchToMainThread( [ watcher = parent_, changedFile ]() {
-                watcher->fileChangedOnDisk( changedFile );
-            } );
+            QMetaObject::invokeMethod( parent_, "fileChangedOnDisk", Qt::QueuedConnection,
+                                       Q_ARG( QString, changedFile ) );
         }
     }
 
@@ -354,9 +352,8 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         const auto& fullChangedFilename = findChangedFilename( directory, filename, oldFilename );
 
         if ( !fullChangedFilename.isEmpty() ) {
-            dispatchToMainThread( [ watcher = parent_, fullChangedFilename ]() {
-                watcher->fileChangedOnDisk( fullChangedFilename );
-            } );
+            QMetaObject::invokeMethod( parent_, "fileChangedOnDisk", Qt::QueuedConnection,
+                                       Q_ARG( QString, fullChangedFilename ) );
         }
     }
 

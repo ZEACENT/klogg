@@ -378,10 +378,14 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
                                                                        database_.get() );
     }
 
-    // Compile a second database WITHOUT HS_FLAG_SINGLEMATCH for bulk buffer scanning.
-    // This allows hs_scan to report all match occurrences across the buffer
-    // (one per line that matches), not just the first match overall.
-    if ( !isPrefilter_ ) {
+    // Compile a second database WITHOUT HS_FLAG_SINGLEMATCH only for the
+    // single exact pattern path that can create a bulk buffer scanner.
+    // Multi-pattern and explicit-prefilter expressions are consumed per-line;
+    // compiling an unused exact database for them is both wasteful and unsafe
+    // with MSVC ASan in Vectorscan's multi-pattern compiler.
+    const bool canBuildBufferScanner
+        = !isPrefilter_ && patterns_.size() == 1 && !patterns_.front().isPrefilter;
+    if ( canBuildBufferScanner ) {
         auto compileBlockDatabase
             = []( const klogg::vector<RegularExpressionPattern>& expressions,
                   QString& errorMessage ) -> hs_database_t* {

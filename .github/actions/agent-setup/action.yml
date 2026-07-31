@@ -35,7 +35,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/cpm_cache
-        key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
+        key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}${{ env.KLOGG_CPM_CACHE_KEY_SUFFIX }}
 
     - name: Install Boost
       shell: bash

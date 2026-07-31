@@ -40,6 +40,7 @@
 
 #include <configuration.h>
 #include <highlighterset.h>
+#include <hsregularexpression.h>
 #include <logger.h>
 #include <persistentinfo.h>
 #include <test_utils.h>
@@ -604,6 +605,32 @@ TEST_CASE( "Product-like backend is active in vectorscan test binary", "[vectors
 #endif
 }
 
+TEST_CASE( "Multi-pattern prefilters do not build an unused buffer scanner",
+           "[vectorscan][buffer]" )
+{
+    HsRegularExpression expression( makeRegressionPatterns( { 1, 3 } ) );
+
+    REQUIRE( expression.isValid() );
+    REQUIRE_FALSE( expression.hasBufferScanner() );
+}
+
+TEST_CASE( "Block scan accepts zero-length Vectorscan history", "[vectorscan][buffer]" )
+{
+    HsRegularExpression expression(
+        RegularExpressionPattern{ QStringLiteral( R"(\d{3}9$)" ) } );
+    auto scanner = expression.createBufferScanner();
+    REQUIRE( scanner );
+
+    const QByteArray data{ "1239\n" };
+    const klogg::vector<qint64> endOfLines{ static_cast<qint64>( data.size() ) };
+    klogg::vector<uint64_t> matchedLines;
+    scanner->scan( data.constData(), static_cast<unsigned int>( data.size() ), endOfLines,
+                   matchedLines );
+
+    REQUIRE( matchedLines.size() == 1 );
+    CHECK( matchedLines.front() == 0 );
+}
+
 TEST_CASE( "Direct multi compile/free succeeds for representative patterns",
            "[vectorscan][smoke]" )
 {
@@ -619,6 +646,13 @@ TEST_CASE( "Highlighter-backed compile path succeeds for representative patterns
 
     REQUIRE( runHighlighterCompileChild( { 0, 5 }, AllocatorMode::Crt ) == 0 );
     REQUIRE( runHighlighterCollectionChild( { 0, 5 }, AllocatorMode::Crt ) == 0 );
+}
+
+TEST_CASE( "Multi-pattern highlighter prefilters exit cleanly with CRT allocation",
+           "[vectorscan][regression]" )
+{
+    requireSuccessfulChildRun( ChildCase::HighlighterCompilePrefilter, AllocatorMode::Crt,
+                               { 1, 3 } );
 }
 
 TEST_CASE( "Representative child cases succeed for both allocators", "[vectorscan][child]" )

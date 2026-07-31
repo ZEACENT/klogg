@@ -30,6 +30,7 @@ cpmaddpackage(
   NAME streamvbyte
   GITHUB_REPOSITORY lemire/streamvbyte
   GIT_TAG c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+  GIT_CONFIG core.autocrlf=false
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(
@@ -48,6 +49,7 @@ cpmaddpackage(
   NAME vectorscan
   GITHUB_REPOSITORY VectorCamp/vectorscan
   GIT_TAG d29730e1cb9daaa66bda63426cdce83505d2c809
+  GIT_CONFIG core.autocrlf=false
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(
@@ -114,6 +116,7 @@ cpmaddpackage(
   NAME efsw
   GITHUB_REPOSITORY SpartanJ/efsw
   GIT_TAG 62f785c56b7a34f035193d4cb831921347b586b8
+  GIT_CONFIG core.autocrlf=false
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(

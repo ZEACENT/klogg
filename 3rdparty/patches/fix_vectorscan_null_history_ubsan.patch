@@ -1,0 +1,16 @@
+diff --git a/src/runtime.c b/src/runtime.c
+--- a/src/runtime.c
++++ b/src/runtime.c
+@@ -132,7 +132,11 @@ void populateCoreInfo(struct hs_scratch *s, const struct RoseEngine *rose,
+     s->core_info.status = status;
+     s->core_info.buf = (const u8 *)data;
+     s->core_info.len = length;
+-    s->core_info.hbuf = history;
++    /* Block mode has no history buffer. Use the start of the main buffer as
++     * the zero-length history endpoint so engines can form hbuf + hlen
++     * without applying a zero offset to a null pointer. */
++    assert(history || data);
++    s->core_info.hbuf = history ? history : (const u8 *)data;
+     s->core_info.hlen = hlen;
+     s->core_info.buf_offset = offset;
+

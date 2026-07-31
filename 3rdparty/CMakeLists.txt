@@ -1,22 +1,27 @@
 set(QAPPLICATION_CLASS QApplication)
 
 include(CPM)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_pinned_source.cmake)
 
 set(_TMP_CPM_USE_LOCAL_PACKAGES ${CPM_USE_LOCAL_PACKAGES})
 
-function(klogg_require_pinned_revision dependency source_dir expected_revision)
+function(klogg_apply_pinned_patch_series dependency source_dir expected_revision clean_hash patched_hash)
+  set(_patch_files ${ARGN})
   execute_process(
-    COMMAND git -C ${source_dir} rev-parse HEAD
-    RESULT_VARIABLE _revision_result
-    OUTPUT_VARIABLE _actual_revision
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
+    COMMAND
+      ${CMAKE_COMMAND}
+      -DDEPENDENCY=${dependency}
+      -DREPO_DIR=${source_dir}
+      -DEXPECTED_REVISION=${expected_revision}
+      -DCLEAN_TREE_HASH=${clean_hash}
+      "-DAPPROVED_TREE_HASHES=${clean_hash};${patched_hash}"
+      -DPATCHED_TREE_HASH=${patched_hash}
+      "-DPATCH_FILES=${_patch_files}"
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch_series.cmake
+    RESULT_VARIABLE _patch_series_result
   )
-  if(NOT _revision_result EQUAL 0 OR NOT "${_actual_revision}" STREQUAL "${expected_revision}")
-    message(
-      FATAL_ERROR
-        "${dependency} source must be pinned at ${expected_revision}, got '${_actual_revision}' from '${source_dir}'"
-    )
+  if(NOT _patch_series_result EQUAL 0)
+    message(FATAL_ERROR "Failed to verify and patch ${dependency} source")
   endif()
 endfunction()
 
@@ -63,22 +68,17 @@ cpmaddpackage(
   NAME streamvbyte
   GITHUB_REPOSITORY lemire/streamvbyte
   GIT_TAG c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+  GIT_CONFIG core.autocrlf=false
   DOWNLOAD_ONLY YES
 )
-klogg_require_pinned_revision(
-  streamvbyte ${streamvbyte_SOURCE_DIR} c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+klogg_apply_pinned_patch_series(
+  streamvbyte
+  ${streamvbyte_SOURCE_DIR}
+  c43294a81501e0fdf14adc83818d47f7f9bc1bb6
+  3f4a410e6b1ad8f1f1d53c8463dc7accc7e1c94a32ca1ed1da778a181f5892b9
+  d736c1c9bc9e3aca800bea90765f805e27229785e3d8e417e64103ba5fc96164
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_streamvbyte_unaligned_stores.patch
 )
-execute_process(
-  COMMAND
-    ${CMAKE_COMMAND}
-    -DREPO_DIR=${streamvbyte_SOURCE_DIR}
-    -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_streamvbyte_unaligned_stores.patch
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
-  RESULT_VARIABLE _streamvbyte_patch_result
-)
-if(NOT _streamvbyte_patch_result EQUAL 0)
-  message(FATAL_ERROR "Failed to apply streamvbyte unaligned-store patch")
-endif()
 if(TARGET streamvbyte)
   get_target_property(_streamvbyte_target_source_dir streamvbyte SOURCE_DIR)
   get_filename_component(_streamvbyte_expected_source_dir "${streamvbyte_SOURCE_DIR}" REALPATH)
@@ -157,6 +157,10 @@ if(KLOGG_USE_VECTORSCAN)
       "Vectorscan toolchain: C_COMPILER_ID=${CMAKE_C_COMPILER_ID}, C_COMPILER=${CMAKE_C_COMPILER}, MSVC=${MSVC}"
   )
 
+  # Patched Vectorscan must use the pinned source tree, never a package
+  # substituted through CPM_USE_LOCAL_PACKAGES.
+  set(CPM_USE_LOCAL_PACKAGES OFF)
+
   # Download vectorscan source without processing its cmake files.
   # Patches must be applied BEFORE add_subdirectory so that cmake-level
   # fixes (e.g. MSVC warning flags) take effect during configuration.
@@ -169,33 +173,21 @@ if(KLOGG_USE_VECTORSCAN)
     VectorCamp/vectorscan
     GIT_TAG
     d29730e1cb9daaa66bda63426cdce83505d2c809
+    GIT_CONFIG
+    core.autocrlf=false
     DOWNLOAD_ONLY
     YES
   )
-
-  execute_process(
-    COMMAND
-      ${CMAKE_COMMAND}
-      -DREPO_DIR=${vectorscan_SOURCE_DIR}
-      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
-    RESULT_VARIABLE _vectorscan_warning_patch_result
+  klogg_apply_pinned_patch_series(
+    vectorscan
+    ${vectorscan_SOURCE_DIR}
+    d29730e1cb9daaa66bda63426cdce83505d2c809
+    04357c577d094b3ea8760c3635c776789fb671c1bff010c66a43f479f442eefd
+    bd842a94bd5ba6ba87cc475bcd0881f5d53ab6e9b45cd964bc3d4c2ea7f1298a
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_null_history_ubsan.patch
   )
-  if(NOT _vectorscan_warning_patch_result EQUAL 0)
-    message(FATAL_ERROR "Failed to apply VectorScan warning flags patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch")
-  endif()
-
-  execute_process(
-    COMMAND
-      ${CMAKE_COMMAND}
-      -DREPO_DIR=${vectorscan_SOURCE_DIR}
-      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
-    RESULT_VARIABLE _vectorscan_patch_result
-  )
-  if(NOT _vectorscan_patch_result EQUAL 0)
-    message(FATAL_ERROR "Failed to apply VectorScan aligned_free patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch")
-  endif()
 
   # Set vectorscan build options before processing its cmake files
   set(BUILD_STATIC_LIBS ON CACHE INTERNAL "" FORCE)
@@ -210,7 +202,11 @@ if(KLOGG_USE_VECTORSCAN)
   set(BUILD_AVX512VBMI ${VECTORSCAN_BUILD_AVX512} CACHE INTERNAL "" FORCE)
   set(FAT_RUNTIME OFF CACHE INTERNAL "" FORCE)
 
+  if(TARGET hs)
+    message(FATAL_ERROR "hs was configured before Klogg could apply the pinned Vectorscan patches")
+  endif()
   add_subdirectory(${vectorscan_SOURCE_DIR} ${vectorscan_BINARY_DIR} EXCLUDE_FROM_ALL)
+  set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 
   message("Adding alias for vectorscan")
   add_library(klogg_vectorscan INTERFACE)
@@ -431,29 +427,24 @@ cpmaddpackage(
   SpartanJ/efsw
   GIT_TAG
   62f785c56b7a34f035193d4cb831921347b586b8
+  GIT_CONFIG
+  core.autocrlf=false
   DOWNLOAD_ONLY
   YES
 )
-klogg_require_pinned_revision(
-  efsw ${efsw_SOURCE_DIR} 62f785c56b7a34f035193d4cb831921347b586b8
+klogg_apply_pinned_patch_series(
+  efsw
+  ${efsw_SOURCE_DIR}
+  62f785c56b7a34f035193d4cb831921347b586b8
+  c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677
+  08283124ae155e995254ef3282fb41882c7599f30b79346764b71ec0815789ee
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_inotify_watcher_uaf.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_kqueue_watcher_races.patch
 )
 
 # The target used by klogg must always come from the pinned, patched source.
 # Do not let an earlier superproject package registration silently substitute
 # an unpatched efsw target.
-foreach(_efsw_patch IN ITEMS fix_efsw_inotify_watcher_uaf.patch fix_efsw_kqueue_watcher_races.patch)
-  execute_process(
-    COMMAND
-      ${CMAKE_COMMAND}
-      -DREPO_DIR=${efsw_SOURCE_DIR}
-      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/${_efsw_patch}
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
-    RESULT_VARIABLE _efsw_patch_result
-  )
-  if(NOT _efsw_patch_result EQUAL 0)
-    message(FATAL_ERROR "Failed to apply efsw patch ${_efsw_patch}")
-  endif()
-endforeach()
 
 if(TARGET efsw)
   get_target_property(_efsw_target_source_dir efsw SOURCE_DIR)

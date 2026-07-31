@@ -93,6 +93,7 @@ jobs:
           gcovr \
             --root "$KLOGG_WORKSPACE" \
             --filter '^src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --html-details \
             --html-self-contained \
             --html-title "Klogg line/branch coverage" \
@@ -106,6 +107,7 @@ jobs:
           gcovr \
             --root "$KLOGG_WORKSPACE" \
             --filter '^src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --json --json-pretty \
             -o coverage_report/coverage.json \
             "$KLOGG_BUILD_ROOT"

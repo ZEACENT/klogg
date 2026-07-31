@@ -60,6 +60,11 @@ class SanitizerConfigurationTest(unittest.TestCase):
         ).read_text()
         self.assertIn("hs_set_allocator( std::malloc, std::free )", allocator_source)
 
+    def test_filewatcher_cross_thread_notifications_use_named_slots(self):
+        source = (ROOT / "src" / "filewatch" / "src" / "filewatcher.cpp").read_text()
+        self.assertNotIn("dispatchToMainThread", source)
+        self.assertEqual(source.count('"fileChangedOnDisk", Qt::QueuedConnection'), 2)
+
     def test_rejects_msvc_arm64_address_sanitizer(self):
         result = self.configure(
             "MSVC", "-DENABLE_SANITIZER_ADDRESS=ON", processor="ARM64"

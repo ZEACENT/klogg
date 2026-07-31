@@ -104,6 +104,18 @@ struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
         return worker->deferredLiveRequest_.has_value();
     }
 
+    static LineNumber deferredLiveEndLine( LogFilteredDataWorker* worker )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        return worker->deferredLiveRequest_->endLine;
+    }
+
+    static quint64 deferredLiveOperationId( LogFilteredDataWorker* worker )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        return worker->deferredLiveRequest_->operationId;
+    }
+
   private:
     static SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
     {
@@ -143,4 +155,23 @@ TEST_CASE( "LogFilteredDataWorker clears deferred live update when immediate liv
     WorkerVisitor::enqueueImmediateLiveRequest( &worker, 2, 100_lnum );
 
     CHECK_FALSE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
+}
+
+TEST_CASE( "LogFilteredDataWorker deterministically coalesces deferred live endpoints" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
+    worker.shutdownAndWait();
+
+    for ( quint64 operationId = 1; operationId <= 4; ++operationId ) {
+        const auto endLine = LineNumber( 10000 + operationId * 10000 );
+        WorkerVisitor::enqueueOrDeferLiveRequest( &worker, operationId, endLine );
+    }
+
+    REQUIRE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
+    CHECK( WorkerVisitor::deferredLiveEndLine( &worker ) == 50000_lnum );
+    CHECK( WorkerVisitor::deferredLiveOperationId( &worker ) == 4 );
+    CHECK( worker.performanceCounters().coalescedLiveUpdates == 3 );
 }

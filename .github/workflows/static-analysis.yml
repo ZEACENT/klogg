@@ -57,6 +57,9 @@ jobs:
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
       KLOGG_BUILD_ROOT: build_root
+      # Sentry/Crashpad expands the CPM dependency set. Keep this cache mutable
+      # independently from the smaller default profile used by Coverage.
+      KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -119,12 +122,11 @@ jobs:
             header_lines=false
 
             if [ "$header_count" -gt 0 ]; then
-              find src -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) | sort > tidy_files.txt
               python3 scripts/clang_tidy_header_filter.py tidy_patch.diff > tidy_header_filter.json
               if [ "$(cat tidy_header_filter.json)" != "[]" ]; then
                 header_lines=true
               fi
-              echo "clang-tidy: $header_count changed header(s); checking added lines through all first-party TUs."
+              echo "clang-tidy: $header_count changed header(s); checking added lines through all configured first-party TUs."
             fi
             echo "header_lines=$header_lines" >> "$GITHUB_OUTPUT"
 
@@ -136,11 +138,10 @@ jobs:
               echo "clang-tidy-diff: $source_count changed src/ TU(s)."
             fi
           else
-            # push-to-master / workflow_dispatch: audit all of src/, NON-FATAL
-            # (report-only) so pre-existing findings never block the branch.
+            # push-to-master / workflow_dispatch: audit every configured first-party
+            # translation unit, NON-FATAL (report-only), so pre-existing findings
+            # never block the branch.
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            find src -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) | sort > tidy_files.txt
-            echo "clang-tidy: full src/ audit (report-only), $(wc -l < tidy_files.txt) file(s)."
           fi
 
       - name: Configure (generate compile_commands.json)
@@ -153,10 +154,21 @@ jobs:
             -DKLOGG_BUILD_TESTS=ON \
             -DKLOGG_USE_VECTORSCAN=OFF \
             -DKLOGG_USE_LTO=OFF \
-            -DKLOGG_USE_SENTRY=OFF \
+            -DKLOGG_USE_SENTRY=ON \
             -DKLOGG_GENERIC_CPU=ON \
             -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build first-party clang-tidy TU list
+        if: steps.targets.outputs.skip != 'true'
+        shell: bash
+        run: |
+          python3 scripts/first_party_compile_units.py \
+            "$KLOGG_BUILD_ROOT/compile_commands.json" \
+            "$KLOGG_WORKSPACE/src" \
+            --null \
+            > tidy_files.nul
+          echo "clang-tidy: configured first-party TU list is ready."
 
       - name: Generate Qt UI headers for analysis
         if: steps.targets.outputs.skip != 'true'
@@ -212,12 +224,12 @@ jobs:
               TIDY_LINE_FILTER=$(cat tidy_header_filter.json)
               export TIDY_LINE_FILTER
               set +e
-              xargs -P "$(nproc)" -I{} bash -c '
+              xargs -0 -P "$(nproc)" -n 1 bash -c '
                 clang-tidy -p "$KLOGG_BUILD_ROOT" \
                   --line-filter="$TIDY_LINE_FILTER" \
                   --extra-arg=-Wno-unknown-warning-option \
-                  "{}"
-              ' < tidy_files.txt > tidy_header_out.txt 2>&1
+                  "$1"
+              ' _ < tidy_files.nul > tidy_header_out.txt 2>&1
               header_status=$?
               set -e
               cat tidy_header_out.txt >> tidy_diff_out.txt
@@ -265,10 +277,10 @@ jobs:
             # (report-only): clang-tidy runs WITHOUT --warnings-as-errors, so
             # findings surface in the log but never block the branch.
             export KLOGG_BUILD_ROOT
-            xargs -P "$(nproc)" -I{} bash -c '
+            xargs -0 -P "$(nproc)" -n 1 bash -c '
               clang-tidy -p "$KLOGG_BUILD_ROOT" \
-                --extra-arg=-Wno-unknown-warning-option "{}" || exit 0
-            ' < tidy_files.txt || true
+                --extra-arg=-Wno-unknown-warning-option "$1" || exit 0
+            ' _ < tidy_files.nul || true
             echo "clang-tidy: full src/ audit complete (report-only, non-fatal)."
           fi
 

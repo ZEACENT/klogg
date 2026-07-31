@@ -22,10 +22,50 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 
+#include <atomic>
+#include <thread>
+
 #include "filewatcher.h"
+
+TEST_CASE( "FileWatcher named slot accepts queued cross-thread notifications" )
+{
+    auto& watcher = FileWatcher::getFileWatcher();
+    REQUIRE( watcher.metaObject()->indexOfSlot( "fileChangedOnDisk(QString)" ) >= 0 );
+
+    QSignalSpy changedSpy{ &watcher, &FileWatcher::fileChanged };
+    REQUIRE( changedSpy.isValid() );
+    const QString changedFile = QStringLiteral( "queued-slot-regression.log" );
+    std::atomic<bool> invoked{ false };
+    std::thread notifier{ [ & ] {
+        invoked.store( QMetaObject::invokeMethod( &watcher, "fileChangedOnDisk",
+                                                  Qt::QueuedConnection,
+                                                  Q_ARG( QString, changedFile ) ) );
+    } };
+    notifier.join();
+    REQUIRE( invoked.load() );
+
+    QElapsedTimer timer;
+    timer.start();
+    bool delivered = false;
+    while ( timer.elapsed() < 2000 && !delivered ) {
+        const auto remaining = 2000 - static_cast<int>( timer.elapsed() );
+        if ( remaining <= 0 ) {
+            break;
+        }
+        changedSpy.wait( qMin( 100, remaining ) );
+        for ( const auto& signal : changedSpy ) {
+            if ( signal.at( 0 ).toString() == changedFile ) {
+                delivered = true;
+                break;
+            }
+        }
+    }
+    REQUIRE( delivered );
+}
 
 TEST_CASE( "FileWatcher addFile returns immediately without blocking caller" )
 {
