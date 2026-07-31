@@ -2006,10 +2006,12 @@ void AbstractLogView::jumpToLine( LineNumber line )
     // To guarantee visibility in wrap mode, place the requested logical line at the top
     // (except for the end-of-file snap-to-bottom case below).
     const auto centerOffset = getNbVisibleLines().get() / divisor;
-    const auto desiredTopLine
-        = useTextWrap_ ? line
-                       : ( line.get() > centerOffset ? LineNumber( line.get() - centerOffset )
-                                                     : 0_lnum );
+    auto desiredTopLine = line;
+    if ( !useTextWrap_ ) {
+        desiredTopLine = line.get() > centerOffset
+                             ? LineNumber( line.get() - centerOffset )
+                             : 0_lnum;
+    }
     const bool snapToBottom = useTextWrap_ && ( line >= scrollMaxLine );
     const auto newTopLine = snapToBottom ? scrollMaxLine : desiredTopLine;
 

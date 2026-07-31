@@ -333,7 +333,9 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         // This avoids deadlock between the internal efsw lock and our mutex_,
         // and prevents the main thread from blocking on mutex_ when the
         // worker holds it during a blocking addWatch() call (e.g. macOS TCC).
-        worker_->post( [ = ] { notifyOnFileAction( dir, filename, oldFilename ); } );
+        worker_->post( [ this, dir, filename, oldFilename ] {
+            notifyOnFileAction( dir, filename, oldFilename );
+        } );
     }
 
     void notifyOnFileAction( const std::string& dir, const std::string& filename,

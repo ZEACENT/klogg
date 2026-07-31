@@ -259,7 +259,7 @@ class CrawlerWidget : public QSplitter,
 
     void changeFilteredView(int tabIndex);
     void closeFilteredView(int tabIndex);
-    void filteredViewDestroyed(QObject* view);
+    void filteredViewDestroyed(FilteredView* view);
     
     // Context lines handlers
     void contextLinesModeChanged(int index);

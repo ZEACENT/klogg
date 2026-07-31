@@ -1501,13 +1501,12 @@ void CrawlerWidget::closeFilteredView( int tabIndex )
     tabFilteredView->deleteLater();
 }
 
-void CrawlerWidget::filteredViewDestroyed( QObject* view )
+void CrawlerWidget::filteredViewDestroyed( FilteredView* view )
 {
-    auto* destroyedView = static_cast<FilteredView*>( view );
-    if ( filteredView_ == destroyedView ) {
+    if ( filteredView_ == view ) {
         filteredView_ = nullptr;
     }
-    filteredViewsData_.erase( destroyedView );
+    filteredViewsData_.erase( view );
 }
 
 void CrawlerWidget::saveSplitterSizes() const

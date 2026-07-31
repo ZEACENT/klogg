@@ -365,6 +365,8 @@ void ProcessLiveSourceTransport::armStartupTimer( AsyncStartupPhase phase, int t
 {
     cancelStartupTimer();
 
+    // QTimer is owned by QObject parentage; startupTimer_ is only an observer.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     startupTimer_ = new QTimer( this );
     auto* const timer = startupTimer_;
     const QPointer<ProcessLiveSourceTransport> self( this );
