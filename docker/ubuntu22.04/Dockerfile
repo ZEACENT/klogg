@@ -7,7 +7,7 @@ RUN apt update -y && \
                     qtbase5-dev qt5-qmake qtbase5-dev-tools qttools5-dev qttranslations5-l10n \
                     libqt5svg5-dev libxkbcommon-dev libxkbcommon-x11-dev \
                     libboost-dev libssl-dev libcurl4-openssl-dev \
-                    ragel ninja-build zlib1g-dev git pkg-config cppcheck clang \
+                    ragel ninja-build zlib1g-dev git pkg-config cppcheck clang llvm-14 \
                     wget ca-certificates fuse file -y && \
     apt clean && rm -rf /var/lib/apt/lists/*
 

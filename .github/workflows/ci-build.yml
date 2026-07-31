@@ -502,8 +502,14 @@ jobs:
           # suppressions files live under /usr/local/tests/sanitizers/.
           echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
           echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
-          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
-          echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt" >> $GITHUB_ENV
+          if [ "${{ matrix.config.sanitizer }}" = "thread" ]; then
+            docker run --rm ${{ matrix.config.container }} test -x /usr/bin/llvm-symbolizer-14
+            echo "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14" >> $GITHUB_ENV
+          fi
+          # Slow unwinding retains the qoffscreen plugin frame in indirect Qt
+          # allocation stacks, allowing the existing module-scoped suppression
+          # to match without broad QObject/Qt suppressions.
+          echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0" >> $GITHUB_ENV
 
       - uses: ./.github/actions/docker-build
       - uses: ./.github/actions/docker-run-tests

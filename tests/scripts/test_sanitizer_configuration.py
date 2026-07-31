@@ -1,3 +1,4 @@
+import json
 import pathlib
 import re
 import subprocess
@@ -7,6 +8,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).parents[2]
 SANITIZERS = ROOT / "cmake" / "Sanitizers.cmake"
+CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
+UBUNTU_22_DOCKERFILE = ROOT / "docker" / "ubuntu22.04" / "Dockerfile"
 
 
 class SanitizerConfigurationTest(unittest.TestCase):
@@ -42,10 +45,78 @@ class SanitizerConfigurationTest(unittest.TestCase):
         result = self.configure("Clang", "-DENABLE_SANITIZER_ADDRESS=ON")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_vptr_disable_follows_undefined_sanitizer_for_every_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "first_party.cpp").write_text("int first_party() { return 1; }\n")
+            (root / "vendored.cpp").write_text("int vendored() { return 2; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.12)\n"
+                "project(sanitizer_order LANGUAGES C CXX)\n"
+                "add_library(project_options INTERFACE)\n"
+                'set(CMAKE_CXX_COMPILER_ID "GNU")\n'
+                f'include("{SANITIZERS}")\n'
+                "enable_sanitizers(project_options)\n"
+                "add_library(vendored STATIC vendored.cpp)\n"
+                "add_library(first_party STATIC first_party.cpp)\n"
+                "target_link_libraries(first_party PRIVATE project_options)\n"
+            )
+            result = subprocess.run(
+                [
+                    "cmake",
+                    "-S",
+                    str(root),
+                    "-B",
+                    str(root / "build"),
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                    "-DENABLE_SANITIZER_ADDRESS=ON",
+                    "-DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            commands = json.loads(
+                (root / "build" / "compile_commands.json").read_text()
+            )
+            for source in ("first_party.cpp", "vendored.cpp"):
+                command = next(
+                    entry["command"] for entry in commands if source in entry["file"]
+                )
+                undefined_positions = [
+                    match.start()
+                    for match in re.finditer(r"-fsanitize=\S*undefined", command)
+                ]
+                self.assertTrue(undefined_positions, command)
+                self.assertGreater(
+                    command.rfind("-fno-sanitize=vptr"),
+                    max(undefined_positions),
+                    command,
+                )
+
     def test_rejects_gcc_tsan_because_mimalloc_requires_clang(self):
         result = self.configure("GNU", "-DENABLE_SANITIZER_THREAD=ON")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ThreadSanitizer builds require Clang", result.stdout + result.stderr)
+
+    def test_linux_tsan_requires_an_installed_explicit_symbolizer(self):
+        dockerfile = UBUNTU_22_DOCKERFILE.read_text()
+        workflow = CI_BUILD.read_text()
+        self.assertRegex(dockerfile, r"\bllvm-14\b")
+        self.assertIn("test -x /usr/bin/llvm-symbolizer-14", workflow)
+        self.assertIn(
+            "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14",
+            workflow,
+        )
+
+    def test_linux_lsan_uses_complete_stacks_for_narrow_suppressions(self):
+        workflow = CI_BUILD.read_text()
+        self.assertIn(
+            "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0",
+            workflow,
+        )
 
     def test_rejects_unconfigured_compiler_instead_of_false_green(self):
         result = self.configure("IntelLLVM", "-DENABLE_SANITIZER_ADDRESS=ON")

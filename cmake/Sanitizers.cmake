@@ -92,7 +92,19 @@ function(enable_sanitizers project_name)
        STREQUAL
        ""
     )
-      target_compile_options(${project_name} INTERFACE -fsanitize=${LIST_OF_SANITIZERS})
+      if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR)
+        # Keep the target-local vptr disable in the same shell option group as
+        # -fsanitize=undefined. CMake de-duplicates standalone compile options;
+        # without this group, the directory-wide -fno-sanitize=vptr is retained
+        # before the target's combined -fsanitize=address,undefined flag and the
+        # later flag silently re-enables vptr for first-party translation units.
+        target_compile_options(
+          ${project_name}
+          INTERFACE "SHELL:-fsanitize=${LIST_OF_SANITIZERS} -fno-sanitize=vptr"
+        )
+      else()
+        target_compile_options(${project_name} INTERFACE -fsanitize=${LIST_OF_SANITIZERS})
+      endif()
       target_link_libraries(${project_name} INTERFACE -fsanitize=${LIST_OF_SANITIZERS})
 
       # Sanitizers must cover source-built dependencies too. project_options is
@@ -122,7 +134,6 @@ function(enable_sanitizers project_name)
   if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR
      AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
           OR CMAKE_CXX_COMPILER_ID MATCHES ".*Clang"))
-    target_compile_options(${project_name} INTERFACE -fno-sanitize=vptr)
     target_link_libraries(${project_name} INTERFACE -fno-sanitize=vptr)
     add_compile_options(
       "$<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:-fno-sanitize=vptr>"

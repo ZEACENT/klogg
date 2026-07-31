@@ -209,13 +209,11 @@ class LongRunningAdbProcessTransport final : public AdbProcessTransport {
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
-        return Command{ QStringLiteral( "cmd" ),
-                        { QStringLiteral( "/d" ), QStringLiteral( "/q" ),
-                          QStringLiteral( "/c" ),
-                          QStringLiteral( "ping -n 30 127.0.0.1 >NUL" ) } };
+        return Command{ QStringLiteral( "ping" ),
+                        { QStringLiteral( "-n" ), QStringLiteral( "30" ),
+                          QStringLiteral( "127.0.0.1" ) } };
 #else
-        return Command{ QStringLiteral( "/bin/sh" ),
-                        { QStringLiteral( "-c" ), QStringLiteral( "sleep 30" ) } };
+        return Command{ QStringLiteral( "/bin/sleep" ), { QStringLiteral( "30" ) } };
 #endif
     }
 };
