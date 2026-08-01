@@ -8,8 +8,10 @@ import unittest
 
 ROOT = pathlib.Path(__file__).parents[2]
 SANITIZERS = ROOT / "cmake" / "Sanitizers.cmake"
+TEST_TARGET_OPTIONS = ROOT / "cmake" / "TestTargetOptions.cmake"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 UBUNTU_22_DOCKERFILE = ROOT / "docker" / "ubuntu22.04" / "Dockerfile"
+CAPTURESTORE_TEST = ROOT / "tests" / "unit" / "capturestore_test.cpp"
 
 
 class SanitizerConfigurationTest(unittest.TestCase):
@@ -33,6 +35,72 @@ class SanitizerConfigurationTest(unittest.TestCase):
                 text=True,
             )
 
+    def configure_consumer(
+        self,
+        compiler_id,
+        *options,
+        processor="x86_64",
+        exercise_legacy_link_options=False,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            legacy_exercise = (
+                "set(MSVC TRUE)\n"
+                "function(exercise_legacy_link_options)\n"
+                "  klogg_add_legacy_link_options(/INCREMENTAL:NO)\n"
+                "endfunction()\n"
+                "exercise_legacy_link_options()\n"
+                if exercise_legacy_link_options
+                else ""
+            )
+            (root / "consumer.cpp").write_text("int consumer() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.12)\n"
+                "project(sanitizer_consumer LANGUAGES C CXX)\n"
+                "add_library(project_options INTERFACE)\n"
+                f'set(CMAKE_CXX_COMPILER_ID "{compiler_id}")\n'
+                f'set(CMAKE_SYSTEM_PROCESSOR "{processor}")\n'
+                "set(CMAKE_SIZEOF_VOID_P 8)\n"
+                + f'include("{SANITIZERS}")\n'
+                + legacy_exercise
+                + "enable_sanitizers(project_options)\n"
+                "file(WRITE \"${CMAKE_BINARY_DIR}/legacy_link_flags.txt\" "
+                "\"${CMAKE_EXE_LINKER_FLAGS}\")\n"
+                "add_library(consumer STATIC consumer.cpp)\n"
+                "target_link_libraries(consumer PRIVATE project_options)\n"
+            )
+            result = subprocess.run(
+                [
+                    "cmake",
+                    "-S",
+                    str(root),
+                    "-B",
+                    str(root / "build"),
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                    *options,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            command = ""
+            commands_path = root / "build" / "compile_commands.json"
+            if commands_path.exists():
+                commands = json.loads(commands_path.read_text())
+                command = next(
+                    entry["command"]
+                    for entry in commands
+                    if entry["file"].endswith("consumer.cpp")
+                )
+
+            link_flags = ""
+            link_flags_path = root / "build" / "legacy_link_flags.txt"
+            if link_flags_path.exists():
+                link_flags = link_flags_path.read_text()
+
+            return result, command, link_flags
+
     def test_cmake_312_uses_the_link_option_compatibility_wrapper(self):
         text = SANITIZERS.read_text()
         self.assertIn("if(COMMAND add_link_options)", text)
@@ -44,6 +112,115 @@ class SanitizerConfigurationTest(unittest.TestCase):
     def test_supported_clang_address_sanitizer_configures(self):
         result = self.configure("Clang", "-DENABLE_SANITIZER_ADDRESS=ON")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_msvc_vectorscan_diagnostics_keep_symbols_without_relaxing_other_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "test.cpp").write_text("int main() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.12)\n"
+                "project(test_target_options LANGUAGES CXX)\n"
+                "set(MSVC TRUE)\n"
+                f'include("{TEST_TARGET_OPTIONS}")\n'
+                "add_executable(ordinary_test test.cpp)\n"
+                "klogg_configure_test_target(ordinary_test)\n"
+                "get_target_property(ordinary_flags ordinary_test "
+                "LINK_FLAGS_RELWITHDEBINFO)\n"
+                "file(WRITE \"${CMAKE_BINARY_DIR}/ordinary_flags.txt\" "
+                "\"${ordinary_flags}\")\n"
+                "add_executable(vectorscan_test test.cpp)\n"
+                "klogg_configure_test_target(vectorscan_test KEEP_DEBUG_SYMBOLS)\n"
+                "get_target_property(vectorscan_flags vectorscan_test "
+                "LINK_FLAGS_RELWITHDEBINFO)\n"
+                "file(WRITE \"${CMAKE_BINARY_DIR}/vectorscan_flags.txt\" "
+                "\"${vectorscan_flags}\")\n"
+            )
+            result = subprocess.run(
+                ["cmake", "-S", str(root), "-B", str(root / "build")],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            ordinary_flags = (root / "build" / "ordinary_flags.txt").read_text()
+            vectorscan_flags = (root / "build" / "vectorscan_flags.txt").read_text()
+            self.assertIn("/DEBUG:NONE", ordinary_flags)
+            self.assertIn("/INCREMENTAL:NO", ordinary_flags)
+            self.assertIn("/DEBUG:FULL", vectorscan_flags)
+            self.assertIn("/INCREMENTAL:NO", vectorscan_flags)
+            self.assertNotIn("/DEBUG:NONE", vectorscan_flags)
+
+    def test_sanitizer_build_contract_reaches_first_party_consumers(self):
+        configurations = (
+            (
+                "Clang ASan+UBSan",
+                "Clang",
+                (
+                    "-DENABLE_SANITIZER_ADDRESS=ON",
+                    "-DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON",
+                ),
+                {
+                    "KLOGG_SANITIZER_BUILD=1",
+                    "KLOGG_ASAN_BUILD=1",
+                    "KLOGG_UBSAN_BUILD=1",
+                },
+            ),
+            (
+                "Clang TSan",
+                "Clang",
+                ("-DENABLE_SANITIZER_THREAD=ON",),
+                {"KLOGG_SANITIZER_BUILD=1", "KLOGG_TSAN_BUILD=1"},
+            ),
+            (
+                "GNU ASan",
+                "GNU",
+                ("-DENABLE_SANITIZER_ADDRESS=ON",),
+                {"KLOGG_SANITIZER_BUILD=1", "KLOGG_ASAN_BUILD=1"},
+            ),
+            (
+                "MSVC ASan",
+                "MSVC",
+                ("-DENABLE_SANITIZER_ADDRESS=ON",),
+                {
+                    "KLOGG_SANITIZER_BUILD=1",
+                    "KLOGG_ASAN_BUILD=1",
+                    "KLOGG_MSVC_ASAN=1",
+                },
+            ),
+        )
+
+        for name, compiler_id, options, expected_definitions in configurations:
+            with self.subTest(name=name):
+                result, command, _ = self.configure_consumer(
+                    compiler_id, *options
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for definition in expected_definitions:
+                    self.assertRegex(
+                        command,
+                        rf"(?:^|\s)(?:-D|/D){re.escape(definition)}(?:\s|$)",
+                    )
+
+    def test_non_sanitizer_build_does_not_relax_first_party_test_budgets(self):
+        result, command, _ = self.configure_consumer("Clang")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotRegex(command, r"(?:-D|/D)KLOGG_(?:SANITIZER|A|M|UB|T)SAN_BUILD")
+        self.assertNotIn("KLOGG_MSVC_ASAN", command)
+
+    def test_capturestore_budget_uses_the_propagated_contract(self):
+        capturestore_test = CAPTURESTORE_TEST.read_text()
+        self.assertIn("#if defined( KLOGG_SANITIZER_BUILD )", capturestore_test)
+        self.assertNotIn("#if defined( __has_feature )", capturestore_test)
+
+    def test_cmake_312_legacy_msvc_link_flag_path_is_executable(self):
+        result, _, link_flags = self.configure_consumer(
+            "MSVC",
+            "-DENABLE_SANITIZER_ADDRESS=ON",
+            exercise_legacy_link_options=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("/INCREMENTAL:NO", link_flags)
 
     def test_vptr_disable_follows_undefined_sanitizer_for_every_target(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -122,6 +299,16 @@ class SanitizerConfigurationTest(unittest.TestCase):
         result = self.configure("IntelLLVM", "-DENABLE_SANITIZER_ADDRESS=ON")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Sanitizer builds are not configured", result.stdout + result.stderr)
+
+    def test_windows_asan_failure_retains_vectorscan_symbols(self):
+        workflow = CI_BUILD.read_text()
+        self.assertIn("Collect Windows ASan diagnostics", workflow)
+        self.assertIn("klogg_vectorscan_tests.pdb", workflow)
+        self.assertIn("windows-x64-asan-diagnostics", workflow)
+        self.assertIn(
+            "matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure'",
+            workflow,
+        )
 
     def test_msvc_address_sanitizer_marks_intercepted_dependency_allocations(self):
         text = SANITIZERS.read_text()

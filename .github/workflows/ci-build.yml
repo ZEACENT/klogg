@@ -970,6 +970,35 @@ jobs:
           path: '${{ github.workspace }}\build_root\diagnostics\**\*'
           if-no-files-found: warn
 
+      - name: Collect Windows ASan diagnostics
+        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          $workspace = $env:GITHUB_WORKSPACE
+          $diagRoot = Join-Path $workspace "build_root\asan_diagnostics"
+          New-Item -ItemType Directory -Force -Path $diagRoot | Out-Null
+
+          $ctestTemp = Join-Path $workspace "build_root\Testing\Temporary"
+          if ( Test-Path $ctestTemp ) {
+            Copy-Item $ctestTemp -Destination (Join-Path $diagRoot "Testing-Temporary") -Recurse -Force
+          }
+
+          $outputRoot = Join-Path $workspace "build_root\output"
+          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {
+            $source = Join-Path $outputRoot $name
+            if ( Test-Path $source ) {
+              Copy-Item $source -Destination $diagRoot -Force
+            }
+          }
+
+      - name: Upload Windows ASan diagnostics artifact
+        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-asan-diagnostics
+          path: '${{ github.workspace }}\build_root\asan_diagnostics\**\*'
+          if-no-files-found: error
+
       - name: Fail when tests fail
         if: ${{ steps.run-tests.outcome == 'failure' }}
         shell: sh

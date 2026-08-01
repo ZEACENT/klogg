@@ -1,11 +1,9 @@
 # add_link_options() was introduced in CMake 3.13, while klogg supports 3.12.
 # Keep one directory-wide compatibility path so source-built dependencies and
 # final executables receive the same sanitizer runtime flags.
-macro(klogg_add_link_options)
-  if(COMMAND add_link_options)
-    add_link_options(${ARGN})
-  elseif(MSVC)
-    foreach(_klogg_link_option IN LISTS ARGN)
+macro(klogg_add_legacy_link_options)
+  if(MSVC)
+    foreach(_klogg_link_option ${ARGN})
       foreach(_klogg_linker_flags_var
               CMAKE_EXE_LINKER_FLAGS
               CMAKE_SHARED_LINKER_FLAGS
@@ -16,6 +14,14 @@ macro(klogg_add_link_options)
     endforeach()
   else()
     link_libraries(${ARGN})
+  endif()
+endmacro()
+
+macro(klogg_add_link_options)
+  if(COMMAND add_link_options)
+    add_link_options(${ARGN})
+  else()
+    klogg_add_legacy_link_options(${ARGN})
   endif()
 endmacro()
 
@@ -33,6 +39,22 @@ function(enable_sanitizers project_name)
     set(KLOGG_ANY_SANITIZER ON CACHE INTERNAL "A sanitizer build is enabled" FORCE)
   else()
     set(KLOGG_ANY_SANITIZER OFF CACHE INTERNAL "A sanitizer build is enabled" FORCE)
+  endif()
+
+  if(KLOGG_ANY_SANITIZER)
+    target_compile_definitions(${project_name} INTERFACE KLOGG_SANITIZER_BUILD=1)
+  endif()
+  if(ENABLE_SANITIZER_ADDRESS)
+    target_compile_definitions(${project_name} INTERFACE KLOGG_ASAN_BUILD=1)
+  endif()
+  if(ENABLE_SANITIZER_MEMORY)
+    target_compile_definitions(${project_name} INTERFACE KLOGG_MSAN_BUILD=1)
+  endif()
+  if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR)
+    target_compile_definitions(${project_name} INTERFACE KLOGG_UBSAN_BUILD=1)
+  endif()
+  if(ENABLE_SANITIZER_THREAD)
+    target_compile_definitions(${project_name} INTERFACE KLOGG_TSAN_BUILD=1)
   endif()
 
   if(KLOGG_ANY_SANITIZER

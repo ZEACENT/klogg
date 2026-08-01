@@ -12,7 +12,7 @@ target_link_libraries(
           test_utils
           klogg_mimalloc_wrapper
 )
-klogg_configure_test_target(klogg_vectorscan_tests)
+klogg_configure_test_target(klogg_vectorscan_tests KEEP_DEBUG_SYMBOLS)
 
 target_compile_definitions(klogg_vectorscan_tests PUBLIC -DKLOGG_TESTS)
 

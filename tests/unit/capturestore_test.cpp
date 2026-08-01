@@ -33,15 +33,6 @@
 #include "capturestore.h"
 #include "rollingfilemanager.h"
 
-#if defined( __has_feature )
-#  if __has_feature( thread_sanitizer ) || __has_feature( address_sanitizer ) \
-      || __has_feature( undefined_behavior_sanitizer )
-#    define KLOGG_TEST_SANITIZER 1
-#  endif
-#elif defined( __SANITIZE_THREAD__ ) || defined( __SANITIZE_ADDRESS__ )
-#  define KLOGG_TEST_SANITIZER 1
-#endif
-
 namespace {
 QString makeTestDir( const QString& prefix )
 {
@@ -694,7 +685,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
     // stays a release-only regression guard rather than an instrumentation
     // wall-clock trip wire. Sanitizer legs instrument allocator dependencies
     // as well; Debug does not define NDEBUG, while RelWithDebInfo does.
-#if defined( KLOGG_TEST_SANITIZER ) || !defined( NDEBUG )
+#if defined( KLOGG_SANITIZER_BUILD ) || !defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 2000;
 #else
     constexpr int MetadataOverheadBudgetMs = 200;

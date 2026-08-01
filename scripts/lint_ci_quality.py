@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import math
 import re
 import shlex
@@ -140,6 +141,79 @@ def shell_tokens(command: str) -> list[str]:
         return []
 
 
+def xargs_bash_script_index(tokens: list[str]) -> int | None:
+    if not tokens or tokens[0] != "xargs":
+        return None
+
+    seen_null = False
+    seen_max_args = False
+    seen_parallel = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-0" and not seen_null:
+            seen_null = True
+            index += 1
+        elif token == "-n" and not seen_max_args and index + 1 < len(tokens):
+            if tokens[index + 1] != "1":
+                return None
+            seen_max_args = True
+            index += 2
+        elif token == "-P" and not seen_parallel and index + 1 < len(tokens):
+            seen_parallel = True
+            index += 2
+        elif token == "bash":
+            if (
+                not seen_null
+                or not seen_max_args
+                or index + 1 >= len(tokens)
+                or tokens[index + 1] != "-c"
+            ):
+                return None
+            return index + 2
+        else:
+            return None
+    return None
+
+
+def clang_tidy_consumes_xargs_argument(script: str) -> bool:
+    tokens = shell_tokens(script)
+    if not tokens or tokens[0] != "clang-tidy":
+        return False
+    for control in (";", "&&", "||", "\n"):
+        if control in tokens:
+            tokens = tokens[: tokens.index(control)]
+    return bool(tokens) and tokens[-1] in {"$1", "${1}"}
+
+
+def cmake_cache_assignments(tokens: list[str], name: str) -> list[str]:
+    assignments: list[str] = []
+    for index, token in enumerate(tokens):
+        candidate = None
+        if token == "-D" and index + 1 < len(tokens):
+            candidate = tokens[index + 1]
+        elif token.startswith("-D"):
+            candidate = token[2:]
+        if candidate is None:
+            continue
+        match = re.fullmatch(rf"{re.escape(name)}(?::[^=]+)?=(.*)", candidate)
+        if match is not None:
+            assignments.append(match.group(1).upper())
+    return assignments
+
+
+def cmake_unsets_cache_entry(tokens: list[str], name: str) -> bool:
+    for index, token in enumerate(tokens):
+        pattern = None
+        if token == "-U" and index + 1 < len(tokens):
+            pattern = tokens[index + 1]
+        elif token.startswith("-U"):
+            pattern = token[2:]
+        if pattern and fnmatch.fnmatchcase(name, pattern):
+            return True
+    return False
+
+
 def option_value(tokens: list[str], option: str) -> str | None:
     try:
         index = tokens.index(option)
@@ -152,6 +226,17 @@ def unique_option_value(tokens: list[str], option: str) -> str | None:
     if tokens.count(option) != 1:
         return None
     return option_value(tokens, option)
+
+
+def unique_cmake_option_value(tokens: list[str], option: str) -> str | None:
+    values: list[str] = []
+    for index, token in enumerate(tokens):
+        if token == option and index + 1 < len(tokens):
+            values.append(tokens[index + 1])
+        elif token.startswith(option) and token != option:
+            value = token[len(option) :]
+            values.append(value[1:] if value.startswith("=") else value)
+    return values[0] if len(values) == 1 else None
 
 
 def checkout_steps(text: str) -> list[tuple[int, str, str | None]]:
@@ -268,20 +353,24 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
     report_only_consumers = []
     for command in commands:
         tokens = shell_tokens(command)
+        script_index = xargs_bash_script_index(tokens)
         if (
-            not tokens
-            or tokens[0] != "xargs"
-            or "-0" not in tokens
+            script_index is None
             or option_value(tokens, "<") != "tidy_files.nul"
-            or "bash" not in tokens
-            or "-c" not in tokens
+            or tokens.count("<") != 1
+            or tokens.count("-c") != 1
         ):
             continue
-        script_index = tokens.index("-c") + 1
-        if script_index >= len(tokens):
+        if (
+            script_index + 2 >= len(tokens)
+            or tokens[script_index + 1] != "_"
+            or tokens[script_index + 2] != "<"
+        ):
             continue
         script = tokens[script_index].strip()
-        if not script.startswith("clang-tidy "):
+        if not script.startswith("clang-tidy ") or not clang_tidy_consumes_xargs_argument(
+            script
+        ):
             continue
         if (
             '--line-filter="$TIDY_LINE_FILTER"' in script
@@ -309,20 +398,33 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
     sentry_configures = [
         tokens
         for tokens in cmake_commands
-        if option_value(tokens, "-S") == "$KLOGG_WORKSPACE"
-        and option_value(tokens, "-B") == "$KLOGG_BUILD_ROOT"
+        if unique_cmake_option_value(tokens, "-S") == "$KLOGG_WORKSPACE"
+        and unique_cmake_option_value(tokens, "-B") == "$KLOGG_BUILD_ROOT"
+        and "-P" not in tokens
     ]
     sentry_assignments = [
-        token.split("=", 1)[1].upper()
-        for tokens in cmake_commands
-        for token in tokens
-        if token.startswith("-DKLOGG_USE_SENTRY=")
+        value
+        for tokens in sentry_configures
+        for value in cmake_cache_assignments(tokens, "KLOGG_USE_SENTRY")
     ]
+    later_sentry_commands = [
+        tokens
+        for tokens in cmake_commands
+        if tokens not in sentry_configures
+        and unique_cmake_option_value(tokens, "-B") == "$KLOGG_BUILD_ROOT"
+        and "-P" not in tokens
+    ]
+    sentry_unset = any(
+        cmake_unsets_cache_entry(tokens, "KLOGG_USE_SENTRY")
+        for tokens in sentry_configures
+    )
     cmake_true_values = {"1", "ON", "TRUE", "YES", "Y"}
     if (
         len(sentry_configures) != 1
         or len(sentry_assignments) != 1
         or sentry_assignments[-1] not in cmake_true_values
+        or later_sentry_commands
+        or sentry_unset
     ):
         issues.append("static analysis must configure optional Sentry production code")
 

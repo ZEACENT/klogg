@@ -337,6 +337,23 @@ steps:
 """
         self.assertEqual(MODULE.static_analysis_workflow_issues(secure), [])
 
+    def test_static_analysis_sentry_flag_must_belong_to_the_real_configure(self):
+        workflow = """\
+env:
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+steps:
+  - run: |
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT"
+      cmake -DKLOGG_USE_SENTRY=ON -P verify_sentry.cmake
+      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+"""
+        self.assertIn(
+            "static analysis must configure optional Sentry production code",
+            MODULE.static_analysis_workflow_issues(workflow),
+        )
+
     def test_static_analysis_requires_nul_consumers_for_the_tu_list(self):
         workflow = """\
 env:
@@ -392,6 +409,62 @@ steps:
             issues,
         )
 
+    def test_static_analysis_consumers_must_forward_each_tu_to_clang_tidy(self):
+        workflow = """\
+env:
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+steps:
+  - run: |
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" src/benign.cpp' _ < tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" src/benign.cpp || exit 0' _ < tidy_files.nul || true
+"""
+        self.assertIn(
+            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
+            MODULE.static_analysis_workflow_issues(workflow),
+        )
+
+    def test_static_analysis_consumers_reject_xargs_batch_and_fixed_arguments(self):
+        consumers = (
+            (
+                "xargs -0 -n 2 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
+                "xargs -0 -n 2 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
+            ),
+            (
+                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ src/benign.cpp < tidy_files.nul",
+                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ src/benign.cpp < tidy_files.nul || true",
+            ),
+            (
+                "xargs -0 -n 1 true bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
+                "xargs -0 -n 1 true bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
+            ),
+            (
+                "xargs -0 -n 1 -a benign.nul bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul",
+                "xargs -0 -n 1 -a benign.nul bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul || true",
+            ),
+            (
+                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" --line-filter=\"$TIDY_LINE_FILTER\" \"$1\"' _ < tidy_files.nul < benign.nul",
+                "xargs -0 -n 1 bash -c 'clang-tidy -p \"$KLOGG_BUILD_ROOT\" \"$1\" || exit 0' _ < tidy_files.nul < benign.nul || true",
+            ),
+        )
+        for strict_consumer, report_consumer in consumers:
+            with self.subTest(strict_consumer=strict_consumer):
+                workflow = f"""\
+env:
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+steps:
+  - run: |
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
+      {strict_consumer}
+      {report_consumer}
+"""
+                self.assertIn(
+                    "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
+                    MODULE.static_analysis_workflow_issues(workflow),
+                )
+
     def test_static_analysis_requires_the_strict_pr_consumer(self):
         workflow = """\
 env:
@@ -439,6 +512,36 @@ steps:
             "static analysis must configure optional Sentry production code",
             MODULE.static_analysis_workflow_issues(workflow),
         )
+
+    def test_static_analysis_rejects_typed_and_unset_sentry_reconfiguration(self):
+        reconfigures = (
+            'cmake -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
+            'cmake -B "$KLOGG_BUILD_ROOT" -U KLOGG_USE_SENTRY',
+            'cmake -B "$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
+            'cmake -B"$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
+            'cmake -B"$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
+            'cmake -B="$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY:BOOL=OFF',
+            'cmake -B="$KLOGG_BUILD_ROOT" -UKLOGG_USE_SENTRY',
+            'cmake -B "$KLOGG_BUILD_ROOT"',
+            'cmake -B "$KLOGG_BUILD_ROOT" --fresh',
+        )
+        for reconfigure in reconfigures:
+            with self.subTest(reconfigure=reconfigure):
+                workflow = f"""\
+env:
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+steps:
+  - run: |
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      {reconfigure}
+      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+"""
+                self.assertIn(
+                    "static analysis must configure optional Sentry production code",
+                    MODULE.static_analysis_workflow_issues(workflow),
+                )
 
     def test_static_analysis_rejects_all_false_sentry_spellings(self):
         for false_value in ("OFF", "FALSE", "NO", "0"):
