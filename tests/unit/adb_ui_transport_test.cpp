@@ -35,6 +35,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QProcess>
+#include <QSemaphore>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -216,6 +217,47 @@ class LongRunningAdbProcessTransport final : public AdbProcessTransport {
         return Command{ QStringLiteral( "/bin/sleep" ), { QStringLiteral( "30" ) } };
 #endif
     }
+};
+
+struct DeviceListTaskState {
+    QSemaphore taskEntered;
+    QSemaphore allowTaskToFinish;
+    QString result = QStringLiteral( "snapshot" );
+};
+
+class SnapshotDeviceListProvider final : public DeviceListProviderBase<QString> {
+  public:
+    explicit SnapshotDeviceListProvider( std::shared_ptr<DeviceListTaskState> state )
+        : DeviceListProviderBase<QString>(
+              [ state, snapshot = state->result ] {
+                  state->taskEntered.release();
+                  if ( !state->allowTaskToFinish.tryAcquire( 1, 3000 ) ) {
+                      return QList<QString>{};
+                  }
+                  return QList<QString>{ snapshot };
+              } )
+        , state_( std::move( state ) )
+    {
+    }
+
+  protected:
+    QList<QString> doListDevices( QString* ) const override
+    {
+        const auto state = state_;
+        state->taskEntered.release();
+        if ( !state->allowTaskToFinish.tryAcquire( 1, 3000 ) ) {
+            return {};
+        }
+        return { state->result };
+    }
+
+    bool deviceMatches( const QString& device, const QString& deviceId ) const override
+    {
+        return device == deviceId;
+    }
+
+  private:
+    std::shared_ptr<DeviceListTaskState> state_;
 };
 
 class TestIosLogProcessTransport : public IosLogProcessTransport {
@@ -2475,35 +2517,20 @@ TEST_CASE( "AdbLogcatSource manual reconnect resets the attempt counter" )
 #endif
 }
 
-TEST_CASE( "DeviceListProvider async enumeration is safe against provider destruction" )
+TEST_CASE( "DeviceListProvider async enumeration snapshots work before provider destruction" )
 {
-#ifdef Q_OS_WIN
-    WARN( "Skipping POSIX shell based device-provider lifetime test on Windows." );
-#else
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
+    auto state = std::make_shared<DeviceListTaskState>();
+    auto provider = std::make_unique<SnapshotDeviceListProvider>( state );
+    auto future = provider->listDevicesAsync();
 
-    // A slow fake adb keeps the async task in flight while we destroy the
-    // provider, exercising the lifetime guard in listDevicesAsync().
-    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
-    QFile script( scriptPath );
-    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
-    script.write( "#!/bin/sh\nsleep 1\nexit 0\n" );
-    script.close();
-    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
-
-    auto* provider = new AdbDeviceListProvider( scriptPath );
-    QFuture<QList<AdbDeviceInfo>> future = provider->listDevicesAsync();
-
-    // Destroy the provider while the task is still in flight. The QPointer guard
-    // must keep this from dereferencing freed memory.
-    delete provider;
-    future.waitForFinished(); // must not crash
+    REQUIRE( state->taskEntered.tryAcquire( 1, 3000 ) );
+    state->result = QStringLiteral( "changed-after-dispatch" );
+    provider.reset();
+    state->allowTaskToFinish.release();
+    future.waitForFinished();
 
     REQUIRE( future.resultCount() == 1 );
-    // Guarded path yields an empty list when the provider no longer exists.
-    REQUIRE( future.result().isEmpty() );
-#endif
+    REQUIRE( future.result() == QList<QString>{ QStringLiteral( "snapshot" ) } );
 }
 
 TEST_CASE( "AdbLogcatSessionData round-trips the bound output file and ANSI save mode",

@@ -12,9 +12,6 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QUuid>
-#include <QtConcurrent>
-
-#include <memory>
 
 #include "configuration.h"
 #include "iosdevicelistprovider.h"
@@ -148,13 +145,10 @@ void IosLogDialog::refreshDevices()
     updateAcceptState();
     statusLabel_->setText( tr( "Detecting iOS devices..." ) );
 
-    // Enumerate off the GUI thread: pymobiledevice3 can block for up to ~8s,
-    // and the previous synchronous call froze the whole dialog. A shared_ptr
-    // keeps the provider alive for the entire task, so this is use-after-free
-    // safe even if the dialog is closed mid-enumeration.
-    auto provider = std::make_shared<IosDeviceListProvider>( executableEdit_->text() );
-    deviceRefreshWatcher_->setFuture(
-        QtConcurrent::run( [provider]() { return provider->listDevices(); } ) );
+    // The provider snapshots an immutable enumeration plan before returning the
+    // future, so the local provider can be destroyed while the task continues.
+    IosDeviceListProvider provider( executableEdit_->text() );
+    deviceRefreshWatcher_->setFuture( provider.listDevicesAsync() );
 }
 
 void IosLogDialog::onDevicesEnumerated()
