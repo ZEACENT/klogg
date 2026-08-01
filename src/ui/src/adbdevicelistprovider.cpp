@@ -185,12 +185,12 @@ QString AdbDeviceListProvider::detectAdbExecutable()
 
 QString AdbDeviceListProvider::normalizedExecutable( const QString& adbExecutable )
 {
-    const auto expanded = expandTildePath( adbExecutable.trimmed() );
+    auto expanded = expandTildePath( adbExecutable.trimmed() );
     if ( !expanded.isEmpty() ) {
         return expanded;
     }
 
-    const auto resolved = findAdbAtKnownLocation();
+    auto resolved = findAdbAtKnownLocation();
     if ( !resolved.isEmpty() ) {
         return resolved;
     }

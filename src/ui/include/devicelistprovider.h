@@ -99,7 +99,7 @@ class DeviceListProviderBase : public QObject {
                                 const QString& deviceId ) const = 0;
 
   private:
-    const AsyncListOperation asyncListOperation_;
+    AsyncListOperation asyncListOperation_;
 };
 
 #endif // KLOGG_DEVICELISTPROVIDER_H

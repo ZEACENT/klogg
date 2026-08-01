@@ -447,6 +447,48 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
     return findings
 
 
+def _check_qstringlist_brace_assignment(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag assignment of a raw braced list to an existing QStringList.
+
+    Qt 6 accepts ``names = { ... }``, but Qt 5 exposes assignment overloads for
+    both QStringList and QList<QString>; the untyped initializer list cannot
+    choose between them. This passed the local Qt 6 build and failed every Qt 5
+    CI leg in PR #50. Construct an explicit ``QStringList{ ... }`` temporary so
+    overload resolution is portable.
+    """
+    lines = text.splitlines()
+    declared: set[str] = set()
+    declaration_re = re.compile(r"\bQStringList\s+(\w+)\s*;")
+
+    for line in lines:
+        for match in declaration_re.finditer(_strip_line_comment(line)):
+            declared.add(match.group(1))
+
+    if not declared:
+        return []
+
+    findings: list[tuple[int, str]] = []
+    for line_num, line in enumerate(lines, start=1):
+        if ALLOW_MARKER in line:
+            continue
+        code = _strip_line_comment(line)
+        for name in declared:
+            if re.search(rf"\b{re.escape(name)}\s*=\s*\{{", code):
+                findings.append(
+                    (
+                        line_num,
+                        f"QStringList variable '{name}' is assigned a raw braced "
+                        "initializer. Qt 5 cannot choose between QStringList and "
+                        "QList<QString> assignment overloads, although Qt 6 accepts "
+                        "the code. Assign an explicit QStringList{ ... } temporary "
+                        "instead. (PR #50 Qt 5 matrix compile failure.)",
+                    )
+                )
+                break
+
+    return findings
+
+
 def _check_main_view_text_pixel_probe(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag main-view text pixel probes that assert on viewport grabs.
 
@@ -833,6 +875,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qsizetype-to-qt-int-api",
         "check": _check_qsizetype_to_int_conversion,
+    },
+    {
+        "name": "qstringlist-brace-assignment",
+        "check": _check_qstringlist_brace_assignment,
     },
 ]
 

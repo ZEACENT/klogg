@@ -363,12 +363,12 @@ TEST_CASE( "checkVersionData: architecture aliases beat generic platform assets"
     QStringList archAliases;
     if ( currentArch == QStringLiteral( "arm64" )
          || currentArch == QStringLiteral( "aarch64" ) ) {
-        archAliases = { QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
+        archAliases = QStringList{ QStringLiteral( "arm64" ), QStringLiteral( "aarch64" ) };
     }
     else if ( currentArch == QStringLiteral( "x86_64" )
               || currentArch == QStringLiteral( "amd64" ) ) {
-        archAliases = { QStringLiteral( "x86_64" ), QStringLiteral( "x64" ),
-                        QStringLiteral( "amd64" ) };
+        archAliases = QStringList{ QStringLiteral( "x86_64" ), QStringLiteral( "x64" ),
+                                   QStringLiteral( "amd64" ) };
     }
     else {
         WARN( "No alternate architecture alias is defined for " << currentArch.toStdString() );
