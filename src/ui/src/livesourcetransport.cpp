@@ -116,7 +116,8 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
         return;
     }
 
-    auto* const dying = process_.release();
+    auto dyingProcess = std::move( process_ );
+    auto* const dying = dyingProcess.get();
     dying->disconnect( this );
 
     // QProcess can retain a redirected Windows handle until its destructor,
@@ -135,7 +136,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
                 dying->waitForFinished( 1500 );
             }
         }
-        delete dying;
+        dyingProcess.reset();
         QFile::remove( detachedStderrFilePath );
         detachedStderrFile.reset();
         return;
@@ -155,6 +156,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
     } );
 
     if ( dying->state() == QProcess::NotRunning ) {
+        dyingProcess.release();
         dying->deleteLater();
         return;
     }
@@ -172,6 +174,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
             guard->kill();
         }
     } );
+    dyingProcess.release();
 }
 
 bool ProcessLiveSourceTransport::prepareStderrCapture()
