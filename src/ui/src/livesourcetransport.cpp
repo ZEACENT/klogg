@@ -83,7 +83,7 @@ void ProcessLiveSourceTransport::createProcess()
         lastError_ = processGuard->errorString();
         // Crashed is followed by finished(), which can recover redirected stderr.
         if ( error != QProcess::Crashed ) {
-            failCurrentProcess( lastError_ );
+            failCurrentProcess( lastError_, true );
         }
     } );
 
@@ -94,17 +94,83 @@ void ProcessLiveSourceTransport::createProcess()
             return;
         }
 
-        const auto finishedStderrFilePath = stderrFilePath_;
         cancelStartupTimer();
         asyncStartupPhase_ = AsyncStartupPhase::Idle;
         if ( state_ == State::Connected || state_ == State::Connecting ) {
             const auto fallback = exitStatus == QProcess::NormalExit
                                       ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
                                       : tr( "Live source crashed" );
-            failCurrentProcess( fallback );
+            failCurrentProcess( fallback, true );
         }
+        else {
+            // Even after finished(), QProcess can retain redirected Windows
+            // handles until destruction. Retire it before releasing the capture.
+            retireCurrentProcess();
+        }
+    } );
+}
 
-        QFile::remove( finishedStderrFilePath );
+void ProcessLiveSourceTransport::retireCurrentProcess()
+{
+    if ( !process_ ) {
+        return;
+    }
+
+    auto* const dying = process_.release();
+    dying->disconnect( this );
+
+    // QProcess can retain a redirected Windows handle until its destructor,
+    // even after state() becomes NotRunning. Keep the QTemporaryFile owner and
+    // path attached to that exact process lifetime.
+    const auto detachedStderrFilePath = stderrFilePath_;
+    std::shared_ptr<QTemporaryFile> detachedStderrFile( std::move( stderrFile_ ) );
+
+    if ( destroyed_ ) {
+        if ( dying->state() != QProcess::NotRunning ) {
+            if ( dying->processId() > 0 ) {
+                dying->terminate();
+            }
+            if ( !dying->waitForFinished( 1500 ) ) {
+                dying->kill();
+                dying->waitForFinished( 1500 );
+            }
+        }
+        delete dying;
+        QFile::remove( detachedStderrFilePath );
+        detachedStderrFile.reset();
+        return;
+    }
+
+    // Future connects must never reuse the process whose finished/error signal
+    // is currently unwinding. A reentrant error handler therefore sees a fresh
+    // process and capture pair.
+    createProcess();
+
+    QObject::connect(
+        dying, &QObject::destroyed,
+        [ detachedStderrFile,
+          detachedStderrFilePath ]( QObject* ) mutable {
+        QFile::remove( detachedStderrFilePath );
+        detachedStderrFile.reset();
+    } );
+
+    if ( dying->state() == QProcess::NotRunning ) {
+        dying->deleteLater();
+        return;
+    }
+
+    QObject::connect( dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), dying,
+                      &QObject::deleteLater );
+
+    // On macOS, QProcess::terminate() followed by deleteLater can cause
+    // ~QProcess() to re-send SIGTERM with a stale PID if the child was already
+    // reaped and the OS reused the PID. Use kill() to force immediate exit.
+    dying->kill();
+    QPointer<QProcess> guard( dying );
+    QTimer::singleShot( 1500, dying, [ guard ] {
+        if ( guard && guard->state() != QProcess::NotRunning ) {
+            guard->kill();
+        }
     } );
 }
 
@@ -149,35 +215,43 @@ bool ProcessLiveSourceTransport::connectTransport()
     // streamingCommand() may embed stderrFilePath_ in a PTY wrapper, so the
     // fresh private path must exist before the command is assembled.
     const auto command = streamingCommand();
-    process_->setStandardErrorFile( stderrFilePath_ );
-    process_->setProgram( command.program );
-    process_->setArguments( command.arguments );
+    auto* const currentProcess = process_.get();
+    currentProcess->setStandardErrorFile( stderrFilePath_ );
+    currentProcess->setProgram( command.program );
+    currentProcess->setArguments( command.arguments );
     setState( State::Connecting );
-    process_->start();
+    currentProcess->start();
 
-    if ( !process_->waitForStarted( 3000 ) ) {
-        lastError_ = process_->errorString();
-        setState( State::Error );
-        Q_EMIT errorOccurred( lastError_ );
+    const auto started = currentProcess->waitForStarted( 3000 );
+    if ( process_.get() != currentProcess ) {
+        return false;
+    }
+    if ( !started ) {
+        lastError_ = currentProcess->errorString();
+        failCurrentProcess( lastError_, true );
         return false;
     }
 
     QElapsedTimer startupTimer;
     startupTimer.start();
-    while ( state_ != State::Error && process_->state() != QProcess::NotRunning
+    while ( process_.get() == currentProcess && state_ != State::Error
+            && currentProcess->state() != QProcess::NotRunning
             && startupTimer.elapsed() < StartupFailureGracePeriodMs ) {
-        process_->waitForFinished( StartupFailurePollIntervalMs );
+        currentProcess->waitForFinished( StartupFailurePollIntervalMs );
         QCoreApplication::processEvents();
 
-        // A disconnect may have been processed during processEvents(),
-        // swapping process_ with a fresh idle instance.  Bail out cleanly
-        // instead of misdiagnosing the new process as a startup failure.
-        if ( state_ == State::Disconnected ) {
+        // A disconnect or failure may have been processed during processEvents(),
+        // swapping process_ with a fresh idle instance. Bail out without touching
+        // the retired QProcess again.
+        if ( process_.get() != currentProcess || state_ == State::Disconnected ) {
             return false;
         }
     }
 
-    if ( state_ == State::Error || process_->state() == QProcess::NotRunning ) {
+    if ( process_.get() != currentProcess ) {
+        return false;
+    }
+    if ( state_ == State::Error || currentProcess->state() == QProcess::NotRunning ) {
         if ( lastError_.isEmpty() ) {
             // stderr is redirected to stderrFilePath_ via setStandardErrorFile(),
             // so readAllStandardError() is always empty here. Read the temp file
@@ -236,67 +310,17 @@ void ProcessLiveSourceTransport::disconnectTransport()
     cancelStartupTimer();
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
 
-    if ( !process_ || process_->state() == QProcess::NotRunning ) {
+    if ( !process_ ) {
         setState( State::Disconnected );
         return;
     }
-
-    // Detach old process and cut all signal connections
-    auto* dying = process_.release();
-    dying->disconnect( this );
-
-    // Terminate the old process
-    if ( destroyed_ ) {
-        // Destructor path: synchronous cleanup, no need to create a new process
-        setState( State::Disconnected );
-        // Guard against pid == 0: if the child already exited and Qt cleared
-        // the pid, kill(0, SIGTERM) would send SIGTERM to our process group.
-        if ( dying->processId() > 0 ) {
-            dying->terminate();
-        }
-        if ( !dying->waitForFinished( 1500 ) ) {
-            dying->kill();
-            dying->waitForFinished( 1500 );
-        }
-        delete dying;
+    if ( !destroyed_ && state_ == State::Disconnected
+         && process_->state() == QProcess::NotRunning ) {
+        return;
     }
-    else {
-        // Keep the old capture owner alive until the detached process closes
-        // its redirected stderr handle. Windows cannot unlink an open redirect.
-        const auto detachedStderrFilePath = stderrFilePath_;
-        std::shared_ptr<QTemporaryFile> detachedStderrFile(
-            std::move( stderrFile_ ) );
 
-        // Create fresh process and capture resources for future connections.
-        createProcess();
-        setState( State::Disconnected );
-
-        // QProcess on Windows keeps redirected handles open until its destructor,
-        // which is later than finished(). Retain the old capture through QObject
-        // destruction, then remove it after the QProcess-specific teardown.
-        QObject::connect(
-            dying, &QObject::destroyed,
-            [ detachedStderrFile,
-              detachedStderrFilePath ]( QObject* ) mutable {
-            QFile::remove( detachedStderrFilePath );
-            detachedStderrFile.reset();
-        } );
-        QObject::connect(
-            dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
-            dying, &QObject::deleteLater );
-
-        // On macOS, QProcess::terminate() followed by deleteLater can cause
-        // ~QProcess() to re-send SIGTERM with a stale PID if the child was
-        // already reaped and the OS reused the PID. Use kill() (SIGKILL), which
-        // forces immediate exit and leaves the destructor with NotRunning.
-        dying->kill();
-        QPointer<QProcess> guard( dying );
-        QTimer::singleShot( 1500, dying, [ guard ] {
-            if ( guard && guard->state() != QProcess::NotRunning ) {
-                guard->kill();
-            }
-        } );
-    }
+    retireCurrentProcess();
+    setState( State::Disconnected );
 }
 
 bool ProcessLiveSourceTransport::clearRemote( QString* error )
@@ -389,16 +413,14 @@ void ProcessLiveSourceTransport::armStartupTimer( AsyncStartupPhase phase, int t
 
         asyncStartupPhase_ = AsyncStartupPhase::Idle;
         if ( phase == AsyncStartupPhase::Starting ) {
-            failCurrentProcess( tr( "Timed out waiting for the live source process to start" ) );
-            if ( processGuard->state() != QProcess::NotRunning ) {
-                processGuard->kill();
-            }
+            failCurrentProcess( tr( "Timed out waiting for the live source process to start" ),
+                                true );
         }
         else if ( processGuard->state() == QProcess::Running ) {
             setState( State::Connected );
         }
         else {
-            failCurrentProcess( tr( "Live source terminated during startup" ) );
+            failCurrentProcess( tr( "Live source terminated during startup" ), true );
         }
     } );
     timer->start( timeoutMs );
@@ -422,7 +444,7 @@ QString ProcessLiveSourceTransport::capturedStderr() const
     return QString::fromUtf8( stderrFile.readAll() ).trimmed();
 }
 
-void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback )
+void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback, bool retireProcess )
 {
     cancelStartupTimer();
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
@@ -434,6 +456,10 @@ void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback )
     }
     else if ( lastError_.isEmpty() ) {
         lastError_ = fallback;
+    }
+
+    if ( retireProcess ) {
+        retireCurrentProcess();
     }
 
     if ( state_ != State::Error ) {

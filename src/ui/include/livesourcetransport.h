@@ -85,11 +85,12 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
 
     void setState( State state );
     void createProcess();
+    void retireCurrentProcess();
     bool prepareStderrCapture();
     void armStartupTimer( AsyncStartupPhase phase, int timeoutMs, QProcess* process );
     void cancelStartupTimer();
     QString capturedStderr() const;
-    void failCurrentProcess( const QString& fallback );
+    void failCurrentProcess( const QString& fallback, bool retireProcess = false );
 
   private:
     std::unique_ptr<QProcess> process_;

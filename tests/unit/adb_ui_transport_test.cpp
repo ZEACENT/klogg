@@ -1233,6 +1233,11 @@ class LongRunningTestTransport : public ProcessLiveSourceTransport {
 
 class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
   public:
+    QString stderrFilePathForTest() const
+    {
+        return stderrFilePath();
+    }
+
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
@@ -1326,6 +1331,16 @@ class DeferredStartTestTransport : public ProcessLiveSourceTransport {
         return pendingProcess_ != nullptr;
     }
 
+    QProcess* pendingProcessForTest() const
+    {
+        return pendingProcess_;
+    }
+
+    QString stderrFilePathForTest() const
+    {
+        return stderrFilePath();
+    }
+
     int startRequestCount() const
     {
         return startRequestCount_;
@@ -1396,9 +1411,21 @@ TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as e
     SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
 
     REQUIRE( transport.connectTransport() );
+    const auto failedCapturePath = transport.stderrFilePathForTest();
+    REQUIRE( QFileInfo::exists( failedCapturePath ) );
 
     REQUIRE( errorSpy.safeWait( 3000 ) );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
+    REQUIRE( transport.stderrFilePathForTest() != failedCapturePath );
+    REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
+
+    QElapsedTimer cleanupTimer;
+    cleanupTimer.start();
+    while ( QFileInfo::exists( failedCapturePath ) && cleanupTimer.elapsed() < 3000 ) {
+        QCoreApplication::processEvents();
+        QTest::qWait( 10 );
+    }
+    CHECK_FALSE( QFileInfo::exists( failedCapturePath ) );
 
     REQUIRE( stateSpy.count() >= 1 );
     const auto lastState
@@ -1508,6 +1535,54 @@ TEST_CASE( "ProcessLiveSourceTransport times out while waiting for QProcess star
     CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
     REQUIRE( errorSpy.count() == 1 );
     CHECK( transport.lastError().contains( QStringLiteral( "Timed out" ) ) );
+}
+
+TEST_CASE( "ProcessLiveSourceTransport retires a timed-out process before reentrant reconnect" )
+{
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 30, 20 } );
+    auto* firstProcess = static_cast<QProcess*>( nullptr );
+    auto* secondProcess = static_cast<QProcess*>( nullptr );
+    QString firstCapturePath;
+    QString secondCapturePath;
+    bool reconnected = false;
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport,
+                      [ & ] {
+        if ( reconnected ) {
+            return;
+        }
+        reconnected = true;
+        transport.connectTransportAsync();
+        secondProcess = transport.pendingProcessForTest();
+        secondCapturePath = transport.stderrFilePathForTest();
+    } );
+
+    transport.connectTransportAsync();
+    firstProcess = transport.pendingProcessForTest();
+    firstCapturePath = transport.stderrFilePathForTest();
+    REQUIRE( firstProcess != nullptr );
+    REQUIRE( QFileInfo::exists( firstCapturePath ) );
+
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !reconnected && deadline.elapsed() < 1000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
+    }
+
+    REQUIRE( reconnected );
+    REQUIRE( secondProcess != nullptr );
+    REQUIRE( secondProcess != firstProcess );
+    REQUIRE( secondCapturePath != firstCapturePath );
+    REQUIRE( QFileInfo::exists( secondCapturePath ) );
+
+    REQUIRE( transport.startRequestCount() == 2 );
+    REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
+    REQUIRE( stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>()
+             == LiveSourceTransport::State::Connecting );
+
+    transport.disconnectTransport();
 }
 
 TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects startup failure" )
