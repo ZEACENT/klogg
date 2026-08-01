@@ -13,6 +13,7 @@ SPEC.loader.exec_module(MODULE)
 
 
 PINNED = "11d5960a326750d5838078e36cf38b85af677262"
+CODEQL_PINNED = "4187e74d05793876e9989daffde9c3e66b4acd07"
 
 
 class CiQualityLintTest(unittest.TestCase):
@@ -96,6 +97,58 @@ class CiQualityLintTest(unittest.TestCase):
             "      persist-credentials: false\n",
         )
         self.assertEqual(issues, [])
+
+    def test_codeql_requires_pinned_matching_actions_and_timeout(self):
+        insecure = """\
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/analyze@v3
+"""
+        issues = MODULE.codeql_workflow_issues(insecure)
+        self.assertTrue(any("init must use" in issue for issue in issues))
+        self.assertTrue(any("analyze must use" in issue for issue in issues))
+        self.assertTrue(any("timeout-minutes" in issue for issue in issues))
+
+    def test_codeql_rejects_mismatched_action_revisions(self):
+        text = f"""\
+jobs:
+  analyze:
+    timeout-minutes: 30
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - uses: github/codeql-action/analyze@{'a' * 40}
+"""
+        issues = MODULE.codeql_workflow_issues(text)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("same reviewed SHA", issues[0])
+
+    def test_codeql_rejects_continue_on_error(self):
+        text = f"""\
+jobs:
+  analyze:
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
+"""
+        issues = MODULE.codeql_workflow_issues(text)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("continue-on-error", issues[0])
+
+    def test_secure_codeql_workflow_is_accepted(self):
+        text = f"""\
+jobs:
+  analyze:
+    timeout-minutes: 30
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
+"""
+        self.assertEqual(MODULE.codeql_workflow_issues(text), [])
 
     def test_scans_yaml_workflows_and_composite_actions(self):
         with tempfile.TemporaryDirectory() as directory:

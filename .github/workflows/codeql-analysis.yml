@@ -9,6 +9,7 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     # Expose values that agent-setup reads via matrix.config.*
     strategy:
@@ -28,7 +29,7 @@ jobs:
         persist-credentials: false
 
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+      uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
       with:
         languages: c-cpp
 
@@ -54,4 +55,4 @@ jobs:
         cmake --build build -t klogg
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
+      uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3

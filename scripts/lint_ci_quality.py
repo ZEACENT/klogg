@@ -12,6 +12,9 @@ from pathlib import Path
 
 
 CHECKOUT_SHA_RE = re.compile(r"actions/checkout@[0-9a-f]{40}")
+CODEQL_ACTION_SHA_RE = re.compile(
+    r"github/codeql-action/(?P<action>init|analyze)@(?P<sha>[0-9a-f]{40})"
+)
 LIST_ITEM_RE = re.compile(r"^(?P<indent>\s*)-(?:\s+|$)")
 KEY_VALUE_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[\w-]+):\s*(?P<value>.*)$")
 BROAD_SUPPRESSION_RE = re.compile(
@@ -321,6 +324,89 @@ def check_checkout_blocks(path: Path, text: str) -> list[str]:
     return issues
 
 
+def codeql_workflow_issues(text: str) -> list[str]:
+    """Validate the fail-closed CodeQL job and its remote action revisions."""
+    lines = text.splitlines()
+    job_start: int | None = None
+    job_indent = 0
+    for index, line in enumerate(lines):
+        match = re.match(r"^(?P<indent>\s*)analyze:\s*(?:#.*)?$", line)
+        if match is not None:
+            job_start = index
+            job_indent = len(match.group("indent"))
+            break
+
+    if job_start is None:
+        return ["CodeQL workflow must define the analyze job"]
+
+    job_end = len(lines)
+    for index in range(job_start + 1, len(lines)):
+        line = lines[index]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= job_indent:
+            job_end = index
+            break
+
+    job_lines = lines[job_start + 1 : job_end]
+    direct_entries: list[tuple[str, str]] = []
+    nested_entries: list[tuple[str, str]] = []
+    child_indents = [
+        len(line) - len(line.lstrip())
+        for line in job_lines
+        if strip_yaml_comment(line)
+        and (len(line) - len(line.lstrip())) > job_indent
+        and KEY_VALUE_RE.match(line) is not None
+    ]
+    direct_indent = min(child_indents) if child_indents else job_indent + 2
+
+    for line in job_lines:
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None:
+            continue
+        key = entry.group("key")
+        value = scalar(entry.group("value"))
+        indent = len(entry.group("indent"))
+        nested_entries.append((key, value))
+        if indent == direct_indent:
+            direct_entries.append((key, value))
+
+    issues: list[str] = []
+    timeout_values = [value for key, value in direct_entries if key == "timeout-minutes"]
+    if timeout_values != ["30"]:
+        issues.append("CodeQL analyze job must set timeout-minutes: 30")
+
+    if any(key == "continue-on-error" for key, _ in nested_entries):
+        issues.append("CodeQL workflow must not use continue-on-error")
+
+    action_refs: dict[str, list[str]] = {"init": [], "analyze": []}
+    for key, value in nested_entries:
+        if key != "uses" or not value.startswith("github/codeql-action/"):
+            continue
+        action = value.partition("github/codeql-action/")[2].partition("@")[0]
+        if action in action_refs:
+            action_refs[action].append(value)
+
+    pinned_shas: dict[str, str] = {}
+    for action in ("init", "analyze"):
+        refs = action_refs[action]
+        if len(refs) != 1:
+            issues.append(f"CodeQL workflow must use exactly one {action} action")
+            continue
+        match = CODEQL_ACTION_SHA_RE.fullmatch(refs[0])
+        if match is None:
+            issues.append(f"CodeQL {action} must use a reviewed 40-char SHA")
+            continue
+        pinned_shas[action] = match.group("sha")
+
+    if len(pinned_shas) == 2 and pinned_shas["init"] != pinned_shas["analyze"]:
+        issues.append("CodeQL init and analyze must use the same reviewed SHA")
+
+    return issues
+
+
 def has_unsupported_macos_lsan(text: str) -> bool:
     return re.search(r"ASAN_OPTIONS=.*detect_leaks=1", text) is not None
 
@@ -577,6 +663,12 @@ def check_repo(root: Path) -> list[str]:
         issues.append(
             ".github/workflows/coverage.yml: coverage artifact upload must use a reviewed commit SHA"
         )
+
+    codeql_text = (workflows / "codeql-analysis.yml").read_text()
+    issues.extend(
+        f".github/workflows/codeql-analysis.yml: {issue}"
+        for issue in codeql_workflow_issues(codeql_text)
+    )
 
     static_text = (workflows / "static-analysis.yml").read_text()
     issues.extend(

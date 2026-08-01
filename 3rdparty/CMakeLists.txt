@@ -1,6 +1,7 @@
 set(QAPPLICATION_CLASS QApplication)
 
 include(CPM)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MsvcAsanDependencies.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_pinned_source.cmake)
 
 set(_TMP_CPM_USE_LOCAL_PACKAGES ${CPM_USE_LOCAL_PACKAGES})
@@ -206,6 +207,7 @@ if(KLOGG_USE_VECTORSCAN)
     message(FATAL_ERROR "hs was configured before Klogg could apply the pinned Vectorscan patches")
   endif()
   add_subdirectory(${vectorscan_SOURCE_DIR} ${vectorscan_BINARY_DIR} EXCLUDE_FROM_ALL)
+  klogg_stabilize_msvc_asan_dependencies(hs_exec hs_compile)
   set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 
   message("Adding alias for vectorscan")

@@ -9,6 +9,7 @@ import unittest
 ROOT = pathlib.Path(__file__).parents[2]
 SANITIZERS = ROOT / "cmake" / "Sanitizers.cmake"
 TEST_TARGET_OPTIONS = ROOT / "cmake" / "TestTargetOptions.cmake"
+MSVC_ASAN_DEPENDENCIES = ROOT / "cmake" / "MsvcAsanDependencies.cmake"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 UBUNTU_22_DOCKERFILE = ROOT / "docker" / "ubuntu22.04" / "Dockerfile"
 CAPTURESTORE_TEST = ROOT / "tests" / "unit" / "capturestore_test.cpp"
@@ -150,6 +151,43 @@ class SanitizerConfigurationTest(unittest.TestCase):
             self.assertIn("/DEBUG:FULL", vectorscan_flags)
             self.assertIn("/INCREMENTAL:NO", vectorscan_flags)
             self.assertNotIn("/DEBUG:NONE", vectorscan_flags)
+
+    def test_msvc_asan_stabilizes_only_named_dependency_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "dependency.cpp").write_text("int dependency() { return 0; }\n")
+            (root / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.12)\n"
+                "project(msvc_asan_dependencies LANGUAGES CXX)\n"
+                "set(MSVC TRUE)\n"
+                "set(ENABLE_SANITIZER_ADDRESS ON)\n"
+                f'include("{MSVC_ASAN_DEPENDENCIES}")\n'
+                "add_library(hs_exec STATIC dependency.cpp)\n"
+                "add_library(hs_compile STATIC dependency.cpp)\n"
+                "add_library(unrelated STATIC dependency.cpp)\n"
+                "klogg_stabilize_msvc_asan_dependencies(hs_exec hs_compile)\n"
+                "set(ENABLE_SANITIZER_ADDRESS OFF)\n"
+                "add_library(release_dependency STATIC dependency.cpp)\n"
+                "klogg_stabilize_msvc_asan_dependencies(release_dependency)\n"
+                "get_target_property(exec_options hs_exec COMPILE_OPTIONS)\n"
+                "get_target_property(compile_options hs_compile COMPILE_OPTIONS)\n"
+                "get_target_property(unrelated_options unrelated COMPILE_OPTIONS)\n"
+                "get_target_property(release_options release_dependency COMPILE_OPTIONS)\n"
+                "file(WRITE \"${CMAKE_BINARY_DIR}/options.txt\" "
+                "\"exec=${exec_options}\\ncompile=${compile_options}\\nunrelated=${unrelated_options}\\nrelease=${release_options}\")\n"
+            )
+            result = subprocess.run(
+                ["cmake", "-S", str(root), "-B", str(root / "build")],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            options = (root / "build" / "options.txt").read_text()
+            self.assertIn("exec=/Od;/Ob0", options)
+            self.assertIn("compile=/Od;/Ob0", options)
+            self.assertIn("unrelated=unrelated_options-NOTFOUND", options)
+            self.assertIn("release=release_options-NOTFOUND", options)
 
     def test_sanitizer_build_contract_reaches_first_party_consumers(self):
         configurations = (
