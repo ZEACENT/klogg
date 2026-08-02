@@ -16,6 +16,10 @@ MSVC_ASAN_DEPENDENCIES = ROOT / "cmake" / "MsvcAsanDependencies.cmake"
 VERIFY_TSAN_QT = ROOT / "cmake" / "VerifyTsanQt.cmake"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 DOCKER_BUILD_ACTION = ROOT / ".github" / "actions" / "docker-build" / "action.yml"
+RESTORE_CPM_CACHE_ACTION = (
+    ROOT / ".github" / "actions" / "restore-cpm-cache" / "action.yml"
+)
+RESTORE_CPM_CACHE_SCRIPT = ROOT / "scripts" / "restore_cpm_cache.sh"
 THIRD_PARTY_CMAKE = ROOT / "3rdparty" / "CMakeLists.txt"
 CPM_PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 UBUNTU_22_DOCKERFILE = ROOT / "docker" / "ubuntu22.04" / "Dockerfile"
@@ -650,6 +654,44 @@ class SanitizerConfigurationTest(unittest.TestCase):
                     rf"\$\{{mimalloc_SOURCE_DIR\}}{binary_dir}\s+"
                     rf"{expected_commit}\s+{expected_tree_hash}\s*\)",
                 )
+
+    def test_cpm_cache_artifact_is_atomic_and_validated(self):
+        workflow = CI_BUILD.read_text()
+        self.assertIn(
+            'tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz"',
+            workflow,
+        )
+        self.assertRegex(
+            workflow,
+            r"name: cpm-cache\s+path: cpm-cache\.tar\.gz\s+"
+            r"if-no-files-found: error\s+compression-level: 0",
+        )
+        self.assertEqual(
+            workflow.count("uses: ./.github/actions/restore-cpm-cache"),
+            3,
+        )
+        self.assertNotRegex(
+            workflow,
+            r"name: cpm-cache\s+path: \$\{\{ github\.workspace \}\}/cpm_cache",
+        )
+
+        restore_action = RESTORE_CPM_CACHE_ACTION.read_text()
+        self.assertIn(
+            'run: "$GITHUB_WORKSPACE/scripts/restore_cpm_cache.sh"',
+            restore_action,
+        )
+
+        restore_script = RESTORE_CPM_CACHE_SCRIPT.read_text()
+        for guard in (
+            'gzip -t "${archive}"',
+            'tar -tzf "${archive}"',
+            'tar -xzf "${archive}" -C "${staging}"',
+            'mv "${staging}/cpm_cache" "${workspace}/cpm_cache"',
+            "roaring.pc.in",
+            "tests/config.h.in",
+            "src/CMakeLists.txt",
+        ):
+            self.assertIn(guard, restore_script)
 
     def test_linux_tsan_requires_an_installed_explicit_symbolizer(self):
         dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()

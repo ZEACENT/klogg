@@ -1,0 +1,8 @@
+name: "Restore CPM cache archive"
+description: "Validate and atomically extract the prefetched CPM source cache"
+runs:
+  using: "composite"
+  steps:
+    - name: Validate and extract CPM cache
+      shell: bash
+      run: "$GITHUB_WORKSPACE/scripts/restore_cpm_cache.sh"

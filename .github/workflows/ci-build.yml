@@ -221,12 +221,18 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - name: Archive shared CPM cache
+        shell: bash
+        run: |
+          tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz" \
+            -C "$KLOGG_WORKSPACE" cpm_cache
+
       - uses: actions/upload-artifact@v4
         with:
           name: cpm-cache
-          path: cpm_cache
+          path: cpm-cache.tar.gz
           if-no-files-found: error
-          include-hidden-files: true
+          compression-level: 0
 
       - uses: actions/upload-artifact@v4
         with:
@@ -467,7 +473,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
 
       - uses: actions/download-artifact@v4
         with:
@@ -669,7 +676,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Disable Sentry on macOS
@@ -830,7 +838,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Lock CPM downloads to prefetched cache
