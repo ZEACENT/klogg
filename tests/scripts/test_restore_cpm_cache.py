@@ -19,10 +19,12 @@ REQUIRED_PATHS = (
 
 
 class RestoreCpmCacheTest(unittest.TestCase):
-    def run_restore(self, workspace, runner_temp):
+    def run_restore(self, workspace, runner_temp, env_overrides=None):
         env = os.environ.copy()
         env["GITHUB_WORKSPACE"] = str(workspace)
         env["RUNNER_TEMP"] = str(runner_temp)
+        if env_overrides:
+            env.update(env_overrides)
         return subprocess.run(
             ["bash", str(RESTORE_SCRIPT)],
             check=False,
@@ -53,6 +55,54 @@ class RestoreCpmCacheTest(unittest.TestCase):
             self.write_archive(workspace, REQUIRED_PATHS)
 
             result = self.run_restore(workspace, runner_temp)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(stale.exists())
+            for relative_path in REQUIRED_PATHS:
+                self.assertTrue((workspace / relative_path).is_file())
+
+    def test_windows_style_workspace_is_normalized_with_cygpath(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            workspace = root / "workspace"
+            runner_temp = root / "runner-temp"
+            fake_bin = root / "bin"
+            workspace.mkdir()
+            runner_temp.mkdir()
+            fake_bin.mkdir()
+            stale = workspace / "cpm_cache/stale.txt"
+            stale.parent.mkdir()
+            stale.write_text("stale\n")
+            self.write_archive(workspace, REQUIRED_PATHS)
+
+            windows_workspace = "D:\\a\\klogg\\klogg"
+            windows_runner_temp = "D:\\a\\_temp"
+            cygpath = fake_bin / "cygpath"
+            cygpath.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$2" in\n'
+                '  "$FAKE_WINDOWS_WORKSPACE") '
+                'printf \'%s\\n\' "$FAKE_POSIX_WORKSPACE" ;;\n'
+                '  "$FAKE_WINDOWS_RUNNER_TEMP") '
+                'printf \'%s\\n\' "$FAKE_POSIX_RUNNER_TEMP" ;;\n'
+                "  *) exit 2 ;;\n"
+                "esac\n"
+            )
+            cygpath.chmod(0o755)
+
+            result = self.run_restore(
+                workspace,
+                runner_temp,
+                {
+                    "GITHUB_WORKSPACE": windows_workspace,
+                    "RUNNER_TEMP": windows_runner_temp,
+                    "FAKE_WINDOWS_WORKSPACE": windows_workspace,
+                    "FAKE_WINDOWS_RUNNER_TEMP": windows_runner_temp,
+                    "FAKE_POSIX_WORKSPACE": str(workspace),
+                    "FAKE_POSIX_RUNNER_TEMP": str(runner_temp),
+                    "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(stale.exists())

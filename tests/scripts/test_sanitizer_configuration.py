@@ -683,6 +683,8 @@ class SanitizerConfigurationTest(unittest.TestCase):
 
         restore_script = RESTORE_CPM_CACHE_SCRIPT.read_text()
         for guard in (
+            'workspace=$( cygpath -u "${workspace}" )',
+            'runner_temp=$( cygpath -u "${runner_temp}" )',
             'gzip -t "${archive}"',
             'tar -tzf "${archive}"',
             'tar -xzf "${archive}" -C "${staging}"',
