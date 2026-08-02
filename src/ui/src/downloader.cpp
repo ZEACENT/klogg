@@ -30,6 +30,14 @@ Downloader::Downloader( QObject* parent )
     manager_.setRedirectPolicy( QNetworkRequest::NoLessSafeRedirectPolicy );
 }
 
+Downloader::~Downloader()
+{
+    abort();
+    // QNetworkAccessManager owns an internal worker thread. Stop and join it
+    // before manager_ destroys replies and their worker-side delegates.
+    manager_.clearConnectionCache();
+}
+
 QString Downloader::lastError() const
 {
     return lastError_;

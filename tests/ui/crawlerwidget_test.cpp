@@ -459,6 +459,27 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->grab();
     }
 
+    void settleVerticallyAtBottom( AbstractLogView* view )
+    {
+        auto* const scrollBar = view->verticalScrollBar();
+        constexpr int maxSettlePasses = 4;
+
+        for ( int pass = 0; pass < maxSettlePasses; ++pass ) {
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+            QCoreApplication::processEvents();
+            scrollBar->setValue( scrollBar->maximum() );
+            render();
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+            QCoreApplication::processEvents();
+
+            if ( scrollBar->value() == scrollBar->maximum() ) {
+                return;
+            }
+        }
+
+        REQUIRE( scrollBar->value() == scrollBar->maximum() );
+    }
+
     int mainHorizontalScrollMaximum() const
     {
         return crawler->logMainView_->horizontalScrollBar()->maximum();
@@ -944,6 +965,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->logMainView_->verticalScrollBar()->setValue(
             crawler->logMainView_->verticalScrollBar()->maximum() );
         QTest::qWait( 50 );
+    }
+
+    void settleMainVerticallyAtBottom()
+    {
+        settleVerticallyAtBottom( crawler->logMainView_ );
+    }
+
+    void settleFilteredVerticallyAtBottom()
+    {
+        settleVerticallyAtBottom( crawler->filteredView_ );
     }
 
     void scrollMainVerticallyToMiddle()
@@ -2422,6 +2453,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
 
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 4; } ) );
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
 
     // Search first so the (possibly recreated) filtered view gets wrap applied.
     crawlerVisitor.setSearchPattern( "wrap overflow line" );
@@ -2446,8 +2478,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
     {
         REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
 
-        crawlerVisitor.scrollMainVerticallyToBottom();
-        crawlerVisitor.render();
+        crawlerVisitor.settleMainVerticallyAtBottom();
 
         REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
         REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
@@ -2457,8 +2488,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
     {
         REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
 
-        crawlerVisitor.scrollFilteredVerticallyToBottom();
-        crawlerVisitor.render();
+        crawlerVisitor.settleFilteredVerticallyAtBottom();
 
         REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
         REQUIRE( crawlerVisitor.filteredDrawingTopOffset() < 0 );

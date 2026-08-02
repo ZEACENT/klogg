@@ -18,7 +18,7 @@ git clone https://github.com/ZEACENT/klogg
 
 To build Klogg:
 
-- cmake 3.12 or later to generate build files
+- CMake 3.14 or later to generate build files
 - C++ compiler with decent C++17 support (at least gcc 7.5, clang 7, msvc 19.14)
 - Qt libraries 5.9 or later (CI builds use Qt 5.9.5/5.12.5/5.15.2):
   - QtCore
@@ -183,7 +183,7 @@ brew install cmake ninja qt@6 boost ragel
 ```
 
 **Notes:**
-- `cmake`: Build system generator (requires version 3.12 or later)
+- `cmake`: Build system generator (requires version 3.14 or later)
 - `ninja`: Fast build tool
 - `qt@6`: Qt 6 libraries (project supports Qt 5.9+ or Qt 6, CI uses Qt 6.9.3)
 - `boost`: Boost C++ libraries (header-only part, for Vectorscan)

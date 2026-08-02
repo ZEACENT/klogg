@@ -22,8 +22,8 @@ function(klogg_configure_test_target target)
       set(_klogg_debug_option /DEBUG:NONE)
     endif()
 
-    # target_link_options() requires CMake 3.13. Keep the equivalent
-    # configuration-specific target property for the supported 3.12 baseline.
+    # Keep the configuration-specific target property so the debug and
+    # incremental-link flags apply only to RelWithDebInfo test binaries.
     set_property(
       TARGET ${target}
       APPEND_STRING

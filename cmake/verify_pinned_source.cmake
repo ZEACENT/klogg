@@ -66,3 +66,17 @@ function(klogg_require_pinned_source dependency source_dir expected_revision)
     )
   endif()
 endfunction()
+
+# Verify dependency bytes before evaluating their CMakeLists.txt. This ordering
+# is a security boundary for source-cache artifacts: a mismatched dependency
+# must not execute CMake code before the integrity gate rejects it.
+function(klogg_add_verified_subdirectory dependency source_dir binary_dir expected_revision)
+  if(NOT ARGN)
+    message(FATAL_ERROR "${dependency} verified subdirectory requires approved tree digests")
+  endif()
+
+  klogg_require_pinned_source(
+    "${dependency}" "${source_dir}" "${expected_revision}" ${ARGN}
+  )
+  add_subdirectory("${source_dir}" "${binary_dir}" EXCLUDE_FROM_ALL)
+endfunction()

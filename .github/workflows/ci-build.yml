@@ -63,6 +63,7 @@ jobs:
       BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
       OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
       CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -200,11 +201,13 @@ jobs:
 
             if curl --fail --retry 3 --retry-delay 10 --progress-bar --location \
               --output "$CMAKE_INSTALLER" "$CMAKE_INSTALLER_URL"; then
-              if head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
+              if printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$CMAKE_INSTALLER" \
+                | sha256sum --check --strict \
+                && head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
                 chmod +x "$CMAKE_INSTALLER"
                 exit 0
               fi
-              echo "Downloaded file is not a valid shell script, retrying..."
+              echo "Downloaded CMake installer failed integrity validation, retrying..."
               rm -f "$CMAKE_INSTALLER"
             fi
 
@@ -381,6 +384,7 @@ jobs:
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     strategy:
       fail-fast: false
       matrix:
@@ -445,15 +449,16 @@ jobs:
             arch: x64
             label: ubuntu-22.04-tsan
             package_tag: tsan
-            container_root: docker/ubuntu22.04
-            container: variar/klogg_ubuntu22.04
-            cmake_opts: -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            container_root: docker/ubuntu22.04-tsan
+            container: variar/klogg_ubuntu22.04-tsan
+            cmake_opts: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
             sanitizer: thread
+            timeout_minutes: 120
             package: false
 
 
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -470,23 +475,41 @@ jobs:
           path: ${{ github.workspace }}/tools
 
       - uses: actions/download-artifact@v4
+        if: ${{ matrix.config.sanitizer != 'thread' }}
         with:
           name: cmake-installer
           path: ${{ github.workspace }}/tools
 
-      - name: Copy CMake installer to Docker context
+      - name: Verify and copy CMake installer to Docker context
+        if: ${{ matrix.config.sanitizer != 'thread' }}
         shell: sh
         run: |
-          cp "${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh" "${{ matrix.config.container_root }}/"
+          installer="${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh"
+          printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$installer" \
+            | sha256sum --check --strict
+          cp "$installer" "${{ matrix.config.container_root }}/"
 
       #- uses: satackey/action-docker-layer-caching@v0.0.11
       #  # Ignore the failure of a step and avoid terminating the job.
       #  continue-on-error: true
 
+      - name: Set up Buildx for the TSan Qt image
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build cached TSan Qt container
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.config.container_root }}
+          load: true
+          tags: ${{ matrix.config.container }}
+          cache-from: type=gha,scope=klogg-qt5-tsan
+          cache-to: type=gha,mode=max,scope=klogg-qt5-tsan
+
       - name: Build container
-        run: |
-          cd ${{ matrix.config.container_root }}
-          docker build -t ${{ matrix.config.container }} .
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        run: docker build -t "${{ matrix.config.container }}" "${{ matrix.config.container_root }}"
 
       - uses: ./.github/actions/prepare-workspace-env
       - name: Lock CPM downloads to prefetched cache
@@ -503,7 +526,12 @@ jobs:
           echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
           echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
           if [ "${{ matrix.config.sanitizer }}" = "thread" ]; then
-            docker run --rm ${{ matrix.config.container }} test -x /usr/bin/llvm-symbolizer-14
+            docker run --rm "${{ matrix.config.container }}" /bin/bash -c '
+              test -x /usr/bin/llvm-symbolizer-14 &&
+              test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so &&
+              llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_acquire &&
+              llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_release
+            '
             echo "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14" >> $GITHUB_ENV
           fi
           # Slow unwinding retains the qoffscreen plugin frame in indirect Qt
@@ -512,6 +540,19 @@ jobs:
           echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0" >> $GITHUB_ENV
 
       - uses: ./.github/actions/docker-build
+
+      - name: Verify TSan Qt runtime provenance
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        shell: bash
+        run: |
+          docker run --rm \
+            --env TSAN_OPTIONS \
+            -v "$KLOGG_WORKSPACE:/usr/local" \
+            "${{ matrix.config.container }}" \
+            /usr/local/scripts/verify_tsan_qt_runtime.sh \
+            "/usr/local/$KLOGG_BUILD_ROOT/output/klogg_itests" \
+            /opt/qt5-tsan
+
       - uses: ./.github/actions/docker-run-tests
       - uses: ./.github/actions/docker-package
         if: ${{ matrix.config.package != false }}
@@ -559,6 +600,8 @@ jobs:
 
           # Sanitizer legs: build + test only (no packaging, no artifacts).
           # Folded into the Mac matrix so ci-gate (needs: [Mac]) covers them.
+          # macOS TSan covers first-party and source-built dependencies; prebuilt Qt 6 is not TSan-instrumented.
+          # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
           # Run on the Intel runner so TSan's 2x threading overhead is stable.
           - os: macos-15-intel
             qt_version: 6.9.3
@@ -578,7 +621,7 @@ jobs:
             qt_archives: qtbase icu qtsvg qttools qttranslations
             qt_arch: clang_64
             arch: x64
-            label: intel-qt6-tsan
+            label: intel-qt6-first-party-tsan
             package_tag: tsan
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
             sanitizer: thread

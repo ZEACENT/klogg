@@ -2672,7 +2672,9 @@ void AbstractLogView::createMenu()
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
     popupMenu_ = new QMenu( this );
-    highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ) );
+    // popupMenu_ owns the submenu through QObject parentage.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ), popupMenu_ );
     popupMenu_->addMenu( highlightersMenu_ );
     colorLabelsMenu_ = popupMenu_->addMenu( tr( "Color labels" ) );
 

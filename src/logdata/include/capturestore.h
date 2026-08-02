@@ -11,12 +11,15 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
+#include <QStringList>
 
 #include "linetypes.h"
 #include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
 class CaptureStore {
+    friend class CaptureStoreTestAccess;
+
   public:
     struct Limits {
         qint64 segmentTargetBytes = 1024 * 1024;
@@ -60,8 +63,9 @@ class CaptureStore {
     static void cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
                                        const QString& rootPath = {},
                                        const QDateTime& preserveModifiedAfter = {} );
-    static void cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
-                                            const QString& rootPath = {} );
+    static void cleanupUnusedCapturesAsync(
+        const QSet<QString>& retainCaptureIds, const QString& rootPath = {},
+        const QDateTime& preserveModifiedAfter = {} );
 
     CaptureStore( const CaptureStore& ) = delete;
     CaptureStore& operator=( const CaptureStore& ) = delete;
@@ -102,6 +106,14 @@ class CaptureStore {
     Stats stats() const;
 
   private:
+    static QStringList collectUnusedCapturePaths( const QSet<QString>& retainCaptureIds,
+                                                  const QString& rootPath );
+    static void cleanupCapturePaths( const QStringList& capturePaths,
+                                     const QDateTime& preserveModifiedAfter );
+    static void scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
+                                               const QString& rootPath,
+                                               const QDateTime& preserveModifiedAfter );
+
     void commitLine( const QByteArray& lineBytes, bool terminated );
     void commitLines( const AppendResult& appendResult );
     void ensureCaptureDir();
@@ -144,6 +156,7 @@ class CaptureStore {
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
     std::function<void()> outputFlushedCallback_;
+    mutable std::function<void()> beforeRawSnapshotCopyCallbackForTesting_;
     TrimResult lastTrimResult_;
 
     // Spill throttling: avoid frequent small spills

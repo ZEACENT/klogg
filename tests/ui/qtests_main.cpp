@@ -154,8 +154,8 @@ int main( int argc, char* argv[] )
 
     QThreadPool::globalInstance()->reserveThread();
 
-    TestRunner* runner = new TestRunner( argc, argv );
+    TestRunner runner( argc, argv );
 
-    runner->process();
-    return runner->result();
+    runner.process();
+    return runner.result();
 }

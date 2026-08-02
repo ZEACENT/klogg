@@ -495,41 +495,55 @@ if(WIN32)
 endif()
 
 set(CPM_USE_LOCAL_PACKAGES OFF)
-set(_klogg_mimalloc_options
-    "MI_BUILD_TESTS OFF"
-    "MI_SECURE OFF"
-    "MI_BUILD_SHARED OFF"
-    "MI_BUILD_STATIC ON"
-    "MI_BUILD_OBJECT OFF"
-    "MI_OVERRIDE OFF"
-)
+set(MI_BUILD_TESTS OFF)
+set(MI_SECURE OFF)
+set(MI_BUILD_SHARED OFF)
+set(MI_BUILD_STATIC ON)
+set(MI_BUILD_OBJECT OFF)
+set(MI_OVERRIDE OFF)
+set(MI_TRACK_ASAN OFF)
+set(MI_DEBUG_TSAN OFF)
 if(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
-  list(APPEND _klogg_mimalloc_options "MI_TRACK_ASAN ON")
+  set(MI_TRACK_ASAN ON)
 endif()
 if(ENABLE_SANITIZER_THREAD)
-  list(APPEND _klogg_mimalloc_options "MI_DEBUG_TSAN ON")
+  set(MI_DEBUG_TSAN ON)
 endif()
+# Peeled commit for the annotated v2.1.7 tag. Download without evaluating the
+# dependency's CMakeLists.txt, verify its complete source tree, then add it.
 cpmaddpackage(
   NAME
   mimalloc
   GITHUB_REPOSITORY
   microsoft/mimalloc
-  VERSION
-  2.1.7
-  EXCLUDE_FROM_ALL
+  GIT_TAG
+  8c532c32c3c96e5ba1f2283e032f69ead8add00f
+  DOWNLOAD_ONLY
   YES
-  OPTIONS ${_klogg_mimalloc_options}
 )
-if(mimalloc_ADDED)
-  message("Adding alias for mimalloc")
-  add_library(klogg_mimalloc_wrapper INTERFACE)
-  target_link_libraries(klogg_mimalloc_wrapper INTERFACE mimalloc-static)
-  target_include_directories(klogg_mimalloc_wrapper INTERFACE ${mimalloc_SOURCE_DIR}/include)
-else()
-  add_library(klogg_mimalloc_wrapper INTERFACE)
-  target_link_libraries(klogg_mimalloc_wrapper INTERFACE ${MIMALLOC_LIBRARY})
-  target_include_directories(klogg_mimalloc_wrapper INTERFACE ${MIMALLOC_INCLUDE_DIR})
+if(TARGET mimalloc-static)
+  message(FATAL_ERROR "mimalloc-static exists before pinned source verification")
 endif()
+klogg_add_verified_subdirectory(
+  mimalloc
+  ${mimalloc_SOURCE_DIR}
+  ${mimalloc_BINARY_DIR}
+  8c532c32c3c96e5ba1f2283e032f69ead8add00f
+  f08b3cb3f1dfb1e37558e9f9461913bc69b2062998a42f5365c95fd1e3807db1
+)
+if(NOT TARGET mimalloc-static)
+  message(FATAL_ERROR "Verified mimalloc source did not define mimalloc-static")
+endif()
+get_target_property(_mimalloc_target_source_dir mimalloc-static SOURCE_DIR)
+get_filename_component(_mimalloc_expected_source_dir "${mimalloc_SOURCE_DIR}" REALPATH)
+get_filename_component(_mimalloc_actual_source_dir "${_mimalloc_target_source_dir}" REALPATH)
+if(NOT "${_mimalloc_actual_source_dir}" STREQUAL "${_mimalloc_expected_source_dir}")
+  message(FATAL_ERROR "mimalloc-static does not use the verified pinned source")
+endif()
+message("Adding alias for mimalloc")
+add_library(klogg_mimalloc_wrapper INTERFACE)
+target_link_libraries(klogg_mimalloc_wrapper INTERFACE mimalloc-static)
+target_include_directories(klogg_mimalloc_wrapper INTERFACE ${mimalloc_SOURCE_DIR}/include)
 
 set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 

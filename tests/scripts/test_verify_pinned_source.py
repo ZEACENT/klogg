@@ -150,6 +150,36 @@ class VerifyPinnedSourceTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source tree SHA-256 mismatch", result.stdout + result.stderr)
 
+    def test_verified_subdirectory_rejects_tampering_before_execution(self):
+        executed_sentinel = self.root / "dependency-executed.txt"
+        (self.source / "CMakeLists.txt").write_text(
+            f"file(WRITE [[{executed_sentinel.as_posix()}]] [[executed]])\n"
+        )
+        project = self.root / "project"
+        project.mkdir()
+        (project / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.14)\n"
+            "project(verified_dependency NONE)\n"
+            f"include([[{VERIFY_SCRIPT.as_posix()}]])\n"
+            "klogg_add_verified_subdirectory(\n"
+            f"  test-dependency [[{self.source.as_posix()}]]\n"
+            "  [[${CMAKE_BINARY_DIR}/dependency]] expected-revision\n"
+            f"  [[{self.clean_digest}]]\n"
+            ")\n"
+        )
+
+        result = subprocess.run(
+            ["cmake", "-S", str(project), "-B", str(self.root / "build")],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=self.environment,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source tree SHA-256 mismatch", result.stdout + result.stderr)
+        self.assertFalse(executed_sentinel.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

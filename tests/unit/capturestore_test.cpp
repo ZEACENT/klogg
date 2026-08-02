@@ -19,8 +19,12 @@
 
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <QDir>
 #include <QElapsedTimer>
@@ -32,6 +36,46 @@
 
 #include "capturestore.h"
 #include "rollingfilemanager.h"
+
+class CaptureStoreTestAccess {
+  public:
+    static void setBeforeRawSnapshotCopyCallback( CaptureStore& store,
+                                                  std::function<void()> callback )
+    {
+        const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+        store.beforeRawSnapshotCopyCallbackForTesting_ = std::move( callback );
+    }
+
+    static void forceActiveStorageRelocation( CaptureStore& store )
+    {
+        const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+        auto& activeData = *store.segments_.back().memoryData;
+        QByteArray relocated = activeData;
+        relocated.detach();
+        activeData.swap( relocated );
+        relocated.fill( 'z' );
+    }
+
+    static void scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
+                                               const QString& rootPath,
+                                               const QDateTime& preserveModifiedAfter )
+    {
+        CaptureStore::scheduleCleanupUnusedCaptures( retainCaptureIds, rootPath,
+                                                     preserveModifiedAfter );
+    }
+
+    static QStringList collectUnusedCapturePaths( const QSet<QString>& retainCaptureIds,
+                                                  const QString& rootPath )
+    {
+        return CaptureStore::collectUnusedCapturePaths( retainCaptureIds, rootPath );
+    }
+
+    static void cleanupCapturePaths( const QStringList& capturePaths,
+                                     const QDateTime& preserveModifiedAfter )
+    {
+        CaptureStore::cleanupCapturePaths( capturePaths, preserveModifiedAfter );
+    }
+};
 
 namespace {
 QString makeTestDir( const QString& prefix )
@@ -159,9 +203,15 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     orphanSegment.write( QByteArray( 1024 * 1024, 'x' ) );
     orphanSegment.close();
 
+    // The async behavior is independent of timestamp ordering. Inject a future
+    // cutoff so bind-mounted filesystem timestamp skew cannot turn this into a
+    // preservation test; that contract is covered separately below.
+    const auto cleanupCutoff = QDateTime::currentDateTimeUtc().addSecs( 5 );
+
     QElapsedTimer timer;
     timer.start();
-    CaptureStore::cleanupUnusedCapturesAsync( QSet<QString>{ retainedCaptureId }, rootPath );
+    CaptureStore::cleanupUnusedCapturesAsync(
+        QSet<QString>{ retainedCaptureId }, rootPath, cleanupCutoff );
     const auto elapsedMs = timer.elapsed();
 
     INFO( "cleanup scheduling elapsed ms: " << elapsedMs );
@@ -178,6 +228,33 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     REQUIRE( QDir{ retainedPath }.exists() );
 }
 
+TEST_CASE( "CaptureStore cleanup snapshot excludes captures created after scheduling" )
+{
+    const auto rootPath = makeTestDir( "capturestore_cleanup_snapshot" );
+    const auto orphanCaptureId = makeCaptureId();
+    const auto orphanPath = QDir( rootPath ).filePath( orphanCaptureId );
+
+    REQUIRE( QDir{}.mkpath( orphanPath ) );
+    QFile orphanSegment( QDir( orphanPath ).filePath( QStringLiteral( "segment_000000.log" ) ) );
+    REQUIRE( orphanSegment.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    orphanSegment.write( QByteArrayLiteral( "orphan\n" ) );
+    orphanSegment.close();
+
+    const auto cleanupCandidates
+        = CaptureStoreTestAccess::collectUnusedCapturePaths( {}, rootPath );
+
+    const auto activeCaptureId = makeCaptureId();
+    CaptureStore activeStore( activeCaptureId, rootPath );
+    activeStore.appendUtf8( QByteArrayLiteral( "active\n" ) );
+
+    CaptureStoreTestAccess::cleanupCapturePaths(
+        cleanupCandidates, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE_FALSE( QDir{ orphanPath }.exists() );
+    REQUIRE( QDir{ activeStore.capturePath() }.exists() );
+    REQUIRE( activeStore.lineCount() == 1_lcount );
+}
+
 TEST_CASE( "CaptureStore cleanupUnusedCaptures preserves captures modified after cutoff" )
 {
     const auto rootPath = makeTestDir( "capturestore_cleanup_cutoff" );
@@ -192,13 +269,19 @@ TEST_CASE( "CaptureStore cleanupUnusedCaptures preserves captures modified after
     orphanSegment.write( QByteArrayLiteral( "old\n" ) );
     orphanSegment.close();
 
-    const auto cleanupCutoff = QDateTime::currentDateTimeUtc();
-    std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+    // Keep the cutoff clear of filesystem timestamp rounding, then assign the
+    // active segment an explicit post-cutoff modification time. Bind-mounted
+    // filesystems used by sanitizer containers do not guarantee that a 20 ms
+    // sleep produces distinct directory/file timestamps.
+    const auto cleanupCutoff = QDateTime::currentDateTimeUtc().addSecs( 5 );
 
     REQUIRE( QDir{}.mkpath( activePath ) );
     QFile activeSegment( QDir( activePath ).filePath( QStringLiteral( "segment_000000.log" ) ) );
     REQUIRE( activeSegment.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
     activeSegment.write( QByteArrayLiteral( "new\n" ) );
+    REQUIRE( activeSegment.flush() );
+    REQUIRE( activeSegment.setFileTime( cleanupCutoff.addSecs( 5 ),
+                                        QFileDevice::FileModificationTime ) );
     activeSegment.close();
 
     CaptureStore::cleanupUnusedCaptures( {}, rootPath, cleanupCutoff );
@@ -411,35 +494,69 @@ TEST_CASE( "CaptureStore persists a trailing partial line on destruction" )
              == QStringLiteral( "tail-fragment" ) );
 }
 
-TEST_CASE( "CaptureStore serializes concurrent append and read access" )
+TEST_CASE( "CaptureStore snapshots active bytes before concurrent append" )
 {
     CaptureStore::Limits limits;
-    limits.segmentTargetBytes = 32;
-    limits.memoryBudgetBytes = 64;
+    limits.segmentTargetBytes = 4 * 1024 * 1024;
+    limits.memoryBudgetBytes = 4 * 1024 * 1024;
 
     const auto rootPath = makeTestDir( "capturestore_concurrent" );
     CaptureStore store( makeCaptureId(), rootPath, limits );
     auto* codec = QTextCodec::codecForName( "UTF-8" );
 
-    std::atomic<bool> writerDone{ false };
-    std::thread writer( [ &store, &writerDone ] {
-        for ( int i = 0; i < 200; ++i ) {
-            store.appendUtf8( QStringLiteral( "line-%1\n" ).arg( i ).toUtf8() );
-        }
-        writerDone = true;
+    constexpr int snapshotLines = 256;
+    QByteArray expectedSnapshot;
+    for ( int i = 0; i < snapshotLines; ++i ) {
+        expectedSnapshot.append(
+            ( QStringLiteral( "line-%1-%2" )
+                  .arg( i, 3, 10, QLatin1Char( '0' ) )
+                  .arg( QString( 4096, QLatin1Char( 'x' ) ) )
+              + QLatin1Char( '\n' ) )
+                .toUtf8() );
+    }
+    store.appendUtf8( expectedSnapshot );
+
+    std::atomic<bool> snapshotReady{ false };
+    std::atomic<bool> appendComplete{ false };
+    CaptureStoreTestAccess::setBeforeRawSnapshotCopyCallback(
+        store, [ &snapshotReady, &appendComplete ] {
+            snapshotReady.store( true, std::memory_order_release );
+            while ( !appendComplete.load( std::memory_order_acquire ) ) {
+                std::this_thread::yield();
+            }
+        } );
+
+    std::unique_ptr<SearchableLogData::RawLines> rawLines;
+    std::thread reader( [ &store, codec, &rawLines ] {
+        rawLines = std::make_unique<SearchableLogData::RawLines>(
+            store.buildRawLines( 0_lnum, LinesCount( snapshotLines ), codec,
+                                 QRegularExpression{} ) );
     } );
 
-    while ( !writerDone.load() ) {
-        const auto lines = store.lineCount();
-        if ( lines > 0_lcount ) {
-            const auto rawLines = store.buildRawLines( 0_lnum, lines, codec, QRegularExpression{} );
-            REQUIRE( rawLines.endOfLines.size() <= static_cast<size_t>( lines.get() ) );
-        }
+    QElapsedTimer waitForSnapshot;
+    waitForSnapshot.start();
+    while ( !snapshotReady.load( std::memory_order_acquire )
+            && waitForSnapshot.elapsed() < 5000 ) {
+        std::this_thread::yield();
     }
+    const auto reachedSnapshot = snapshotReady.load( std::memory_order_acquire );
+    if ( reachedSnapshot ) {
+        store.appendUtf8( QByteArrayLiteral( "appended-after-snapshot\n" ) );
+        // Reproduce QByteArray's reallocation boundary deterministically: the
+        // active object gets equivalent new storage and the retired allocation
+        // is overwritten before buildRawLines consumes its captured pointer.
+        CaptureStoreTestAccess::forceActiveStorageRelocation( store );
+    }
+    appendComplete.store( true, std::memory_order_release );
+    reader.join();
 
-    writer.join();
-    REQUIRE( store.lineCount().get() == 200 );
-    REQUIRE( store.lineAt( LineNumber( 199 ), codec, QRegularExpression{} ) == QStringLiteral( "line-199" ) );
+    REQUIRE( reachedSnapshot );
+    REQUIRE( rawLines );
+    REQUIRE( rawLines->buffer.size()
+             == static_cast<size_t>( expectedSnapshot.size() ) );
+    REQUIRE( std::equal( rawLines->buffer.cbegin(), rawLines->buffer.cend(),
+                         expectedSnapshot.cbegin() ) );
+    REQUIRE( store.lineCount().get() == snapshotLines + 1 );
 }
 
 TEST_CASE( "CaptureStore buildRawLines snapshot consistency under concurrent append" )

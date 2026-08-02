@@ -90,19 +90,32 @@ QString CaptureStore::defaultRootPath()
     return QDir( QDir::tempPath() ).filePath( "klogg_live" );
 }
 
-void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
-                                          const QString& rootPath,
-                                          const QDateTime& preserveModifiedAfter )
+QStringList CaptureStore::collectUnusedCapturePaths( const QSet<QString>& retainCaptureIds,
+                                                      const QString& rootPath )
 {
     QDir capturesRoot( rootPath.isEmpty() ? defaultRootPath() : rootPath );
     if ( !capturesRoot.exists() ) {
-        return;
+        return {};
     }
 
-    const auto cutoff = preserveModifiedAfter.toUTC();
     const auto entries = capturesRoot.entryInfoList( QDir::Dirs | QDir::NoDotAndDotDot );
+    QStringList capturePaths;
+    capturePaths.reserve( entries.size() );
     for ( const auto& entry : entries ) {
-        if ( retainCaptureIds.contains( entry.fileName() ) ) {
+        if ( !retainCaptureIds.contains( entry.fileName() ) ) {
+            capturePaths.append( entry.absoluteFilePath() );
+        }
+    }
+    return capturePaths;
+}
+
+void CaptureStore::cleanupCapturePaths( const QStringList& capturePaths,
+                                        const QDateTime& preserveModifiedAfter )
+{
+    const auto cutoff = preserveModifiedAfter.toUTC();
+    for ( const auto& capturePath : capturePaths ) {
+        const QFileInfo entry( capturePath );
+        if ( !entry.isDir() ) {
             continue;
         }
 
@@ -110,17 +123,35 @@ void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
             continue;
         }
 
-        QDir orphanCaptureDir( entry.absoluteFilePath() );
+        QDir orphanCaptureDir( capturePath );
         orphanCaptureDir.removeRecursively();
     }
 }
 
-void CaptureStore::cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
-                                               const QString& rootPath )
+void CaptureStore::cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
+                                          const QString& rootPath,
+                                          const QDateTime& preserveModifiedAfter )
 {
-    const auto cleanupScheduledAt = QDateTime::currentDateTimeUtc();
-    std::thread( [ retainCaptureIds, rootPath, cleanupScheduledAt ] {
-        CaptureStore::cleanupUnusedCaptures( retainCaptureIds, rootPath, cleanupScheduledAt );
+    cleanupCapturePaths( collectUnusedCapturePaths( retainCaptureIds, rootPath ),
+                         preserveModifiedAfter );
+}
+
+void CaptureStore::cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptureIds,
+                                               const QString& rootPath,
+                                               const QDateTime& preserveModifiedAfter )
+{
+    const auto cutoff = preserveModifiedAfter.isValid() ? preserveModifiedAfter
+                                                        : QDateTime::currentDateTimeUtc();
+    scheduleCleanupUnusedCaptures( retainCaptureIds, rootPath, cutoff );
+}
+
+void CaptureStore::scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
+                                                  const QString& rootPath,
+                                                  const QDateTime& preserveModifiedAfter )
+{
+    auto capturePaths = collectUnusedCapturePaths( retainCaptureIds, rootPath );
+    std::thread( [ capturePaths = std::move( capturePaths ), preserveModifiedAfter ] {
+        CaptureStore::cleanupCapturePaths( capturePaths, preserveModifiedAfter );
     } ).detach();
 }
 
@@ -520,6 +551,7 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
 
 void CaptureStore::setOutputFlushedCallback( std::function<void()> callback )
 {
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     outputFlushedCallback_ = std::move( callback );
 }
 
@@ -580,18 +612,18 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
     // This avoids per-line QByteArray allocations that dominate the old path.
 
     struct SegmentRead {
-        std::shared_ptr<QByteArray> memoryData;
-        QString filePath;
-        qint64 byteStart;
-        qint64 byteLength;
+        QByteArray data;
         qint64 lineCount;
     };
 
     LinesCount::UnderlyingType totalRequestedLines = 0;
     std::vector<SegmentRead> segmentReads;
+    std::function<void()> beforeRawSnapshotCopyCallback;
 
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        beforeRawSnapshotCopyCallback
+            = std::move( beforeRawSnapshotCopyCallbackForTesting_ );
         const auto totalLines = lineCount();
         const auto availableLines = qMax<LineNumber::UnderlyingType>(
             0, totalLines.get() - qMin( first.get(), totalLines.get() ) );
@@ -639,18 +671,38 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             }
 
             SegmentRead read;
-            read.memoryData = segIt->memoryData;
-            read.filePath = segIt->filePath;
             read.lineCount = static_cast<qint64>( linesInThisSegment );
 
-            read.byteStart = segIt->lineOffsets[ static_cast<size_t>( localStart ) ];
+            const auto byteStart
+                = segIt->lineOffsets[ static_cast<size_t>( localStart ) ];
             const auto lastLocalLine = localStart + static_cast<int>( linesInThisSegment ) - 1;
 
+            qint64 byteLength;
             if ( lastLocalLine + 1 < klogg::ssize( segIt->lineOffsets ) ) {
-                read.byteLength = segIt->lineOffsets[ static_cast<size_t>( lastLocalLine + 1 ) ]
-                                - read.byteStart;
+                byteLength = segIt->lineOffsets[ static_cast<size_t>( lastLocalLine + 1 ) ]
+                           - byteStart;
             } else {
-                read.byteLength = segIt->byteSize - read.byteStart;
+                byteLength = segIt->byteSize - byteStart;
+            }
+
+            // Snapshot the selected bytes while segment metadata and storage are
+            // protected by mutex_. A shared_ptr copy would preserve only the
+            // QByteArray object's lifetime; append() could still reallocate its
+            // backing storage while this reader uses constData() after unlock.
+            if ( segIt->memoryData ) {
+                read.data = segIt->memoryData->mid(
+                    type_safe::narrow_cast<int>( byteStart ),
+                    type_safe::narrow_cast<int>( byteLength ) );
+                // QByteArray::mid() may retain the source allocation when the
+                // whole array is selected. Force a deep copy before mutex_ is
+                // released so later append() calls cannot mutate this snapshot.
+                read.data.detach();
+            } else {
+                QFile file( segIt->filePath );
+                if ( file.open( QIODevice::ReadOnly ) ) {
+                    file.seek( byteStart );
+                    read.data = file.read( byteLength );
+                }
             }
 
             segmentReads.push_back( std::move( read ) );
@@ -682,7 +734,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
         // exact line boundaries without per-line allocation.
         qint64 totalBytes = 0;
         for ( const auto& read : segmentReads ) {
-            totalBytes += read.byteLength;
+            totalBytes += read.data.size();
         }
         rawLines.buffer.reserve( static_cast<size_t>( totalBytes ) );
         rawLines.endOfLines.reserve( static_cast<size_t>( totalRequestedLines ) );
@@ -690,19 +742,14 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
         for ( const auto& read : segmentReads ) {
             const auto outputStart = klogg::ssize( rawLines.buffer );
 
-            if ( read.memoryData ) {
-                const auto* src = read.memoryData->constData() + read.byteStart;
-                rawLines.buffer.insert( rawLines.buffer.end(), src, src + read.byteLength );
-            } else {
-                QFile file( read.filePath );
-                if ( file.open( QIODevice::ReadOnly ) ) {
-                    file.seek( read.byteStart );
-                    const auto data = file.read( read.byteLength );
-                    if ( data.size() > 0 ) {
-                        rawLines.buffer.insert( rawLines.buffer.end(), data.constBegin(),
-                                                data.constEnd() );
-                    }
+            if ( !read.data.isEmpty() ) {
+                const auto* const sourceBegin = read.data.constData();
+                const auto* const sourceEnd = sourceBegin + read.data.size();
+                if ( beforeRawSnapshotCopyCallback ) {
+                    auto callback = std::move( beforeRawSnapshotCopyCallback );
+                    callback();
                 }
+                rawLines.buffer.insert( rawLines.buffer.end(), sourceBegin, sourceEnd );
             }
 
             // Scan for \n to compute endOfLines
@@ -725,17 +772,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
     } else {
         // Slow path: bulk read per segment, per-line codec conversion or prefilter
         for ( const auto& read : segmentReads ) {
-            QByteArray segmentData;
-            if ( read.memoryData ) {
-                segmentData = read.memoryData->mid( type_safe::narrow_cast<int>( read.byteStart ),
-                                                    type_safe::narrow_cast<int>( read.byteLength ) );
-            } else {
-                QFile file( read.filePath );
-                if ( file.open( QIODevice::ReadOnly ) ) {
-                    file.seek( read.byteStart );
-                    segmentData = file.read( read.byteLength );
-                }
-            }
+            const auto& segmentData = read.data;
 
             qint64 lineStart = 0;
             for ( qint64 lineIdx = 0; lineIdx < read.lineCount; ++lineIdx ) {

@@ -1,6 +1,6 @@
-# add_link_options() was introduced in CMake 3.13, while klogg supports 3.12.
-# Keep one directory-wide compatibility path so source-built dependencies and
-# final executables receive the same sanitizer runtime flags.
+# Keep one directory-wide linker-option path so source-built dependencies and
+# final executables receive the same sanitizer runtime flags. The legacy helper
+# remains available to standalone consumers of this module.
 macro(klogg_add_legacy_link_options)
   if(MSVC)
     foreach(_klogg_link_option ${ARGN})

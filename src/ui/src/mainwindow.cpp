@@ -1096,7 +1096,7 @@ void MainWindow::createMenus()
     toolsMenu->addSeparator();
     toolsMenu->addAction( mergeTabsAction );
 
-    menuBar()->addMenu( EncodingMenu::generate( encodingGroup ) );
+    menuBar()->addMenu( EncodingMenu::generate( encodingGroup, menuBar() ) );
     menuBar()->addSeparator();
 
     favoritesMenu = menuBar()->addMenu( tr( menu::favoritesTitle ) );

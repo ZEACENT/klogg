@@ -5,6 +5,7 @@ project(klogg_prefetch NONE)
 # Keep this list in sync with 3rdparty/CMakeLists.txt. This project only warms
 # the shared CPM source cache, so every dependency is fetched as DOWNLOAD_ONLY.
 include(${CMAKE_CURRENT_LIST_DIR}/../CPM.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/../verify_pinned_source.cmake)
 
 set(CPM_USE_LOCAL_PACKAGES OFF)
 
@@ -125,11 +126,18 @@ cpmaddpackage(
   GIT_TAG c9be1ac2930f02dea523003ed801b4489f3e6b6e
   DOWNLOAD_ONLY YES
 )
+# Peeled commit for the annotated v2.1.7 tag; keep this aligned with 3rdparty.
 cpmaddpackage(
   NAME mimalloc
   GITHUB_REPOSITORY microsoft/mimalloc
-  VERSION 2.1.7
+  GIT_TAG 8c532c32c3c96e5ba1f2283e032f69ead8add00f
   DOWNLOAD_ONLY YES
+)
+klogg_require_pinned_source(
+  mimalloc
+  ${mimalloc_SOURCE_DIR}
+  8c532c32c3c96e5ba1f2283e032f69ead8add00f
+  f08b3cb3f1dfb1e37558e9f9461913bc69b2062998a42f5365c95fd1e3807db1
 )
 cpmaddpackage(
   NAME sentry

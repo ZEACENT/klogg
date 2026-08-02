@@ -98,35 +98,28 @@ ScratchPad::ScratchPad( QWidget* parent )
 
     auto toolBar = std::make_unique<QToolBar>();
 
-    auto decodeBase64Action = std::make_unique<QAction>( "From base64" );
-    connect( decodeBase64Action.get(), &QAction::triggered, [ this ]( auto ) { decodeBase64(); } );
-    toolBar->addAction( decodeBase64Action.release() );
+    auto* decodeBase64Action = toolBar->addAction( "From base64" );
+    connect( decodeBase64Action, &QAction::triggered, [ this ]( auto ) { decodeBase64(); } );
 
-    auto encodeBase64Action = std::make_unique<QAction>( "To base64" );
-    connect( encodeBase64Action.get(), &QAction::triggered, [ this ]( auto ) { encodeBase64(); } );
-    toolBar->addAction( encodeBase64Action.release() );
+    auto* encodeBase64Action = toolBar->addAction( "To base64" );
+    connect( encodeBase64Action, &QAction::triggered, [ this ]( auto ) { encodeBase64(); } );
 
-    auto decodeHexAction = std::make_unique<QAction>( "From hex" );
-    connect( decodeHexAction.get(), &QAction::triggered, [ this ]( auto ) { decodeHex(); } );
-    toolBar->addAction( decodeHexAction.release() );
+    auto* decodeHexAction = toolBar->addAction( "From hex" );
+    connect( decodeHexAction, &QAction::triggered, [ this ]( auto ) { decodeHex(); } );
 
-    auto encodeHexAction = std::make_unique<QAction>( "To hex" );
-    connect( encodeHexAction.get(), &QAction::triggered, [ this ]( auto ) { encodeHex(); } );
-    toolBar->addAction( encodeHexAction.release() );
+    auto* encodeHexAction = toolBar->addAction( "To hex" );
+    connect( encodeHexAction, &QAction::triggered, [ this ]( auto ) { encodeHex(); } );
 
-    auto decodeUrlAction = std::make_unique<QAction>( "Decode url" );
-    connect( decodeUrlAction.get(), &QAction::triggered, [ this ]( auto ) { decodeUrl(); } );
-    toolBar->addAction( decodeUrlAction.release() );
+    auto* decodeUrlAction = toolBar->addAction( "Decode url" );
+    connect( decodeUrlAction, &QAction::triggered, [ this ]( auto ) { decodeUrl(); } );
 
     toolBar->addSeparator();
 
-    auto formatJsonAction = std::make_unique<QAction>( "Format json" );
-    connect( formatJsonAction.get(), &QAction::triggered, [ this ]( auto ) { formatJson(); } );
-    toolBar->addAction( formatJsonAction.release() );
+    auto* formatJsonAction = toolBar->addAction( "Format json" );
+    connect( formatJsonAction, &QAction::triggered, [ this ]( auto ) { formatJson(); } );
 
-    auto formatXmlAction = std::make_unique<QAction>( "Format xml" );
-    connect( formatXmlAction.get(), &QAction::triggered, [ this ]( auto ) { formatXml(); } );
-    toolBar->addAction( formatXmlAction.release() );
+    auto* formatXmlAction = toolBar->addAction( "Format xml" );
+    connect( formatXmlAction, &QAction::triggered, [ this ]( auto ) { formatXml(); } );
 
     toolBar->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Minimum );
 
