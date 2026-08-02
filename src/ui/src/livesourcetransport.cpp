@@ -156,7 +156,9 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
     } );
 
     if ( dying->state() == QProcess::NotRunning ) {
-        dyingProcess.release();
+        auto* const qtOwnedProcess = dyingProcess.release();
+        Q_ASSERT( qtOwnedProcess == dying );
+        Q_UNUSED( qtOwnedProcess );
         dying->deleteLater();
         return;
     }
@@ -174,7 +176,9 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
             guard->kill();
         }
     } );
-    dyingProcess.release();
+    auto* const qtOwnedProcess = dyingProcess.release();
+    Q_ASSERT( qtOwnedProcess == dying );
+    Q_UNUSED( qtOwnedProcess );
 }
 
 bool ProcessLiveSourceTransport::prepareStderrCapture()

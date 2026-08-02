@@ -678,9 +678,9 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             const auto lastLocalLine = localStart + static_cast<int>( linesInThisSegment ) - 1;
 
             qint64 byteLength;
-            if ( lastLocalLine + 1 < klogg::ssize( segIt->lineOffsets ) ) {
-                byteLength = segIt->lineOffsets[ static_cast<size_t>( lastLocalLine + 1 ) ]
-                           - byteStart;
+            const auto nextLocalLine = static_cast<size_t>( lastLocalLine ) + 1U;
+            if ( nextLocalLine < segIt->lineOffsets.size() ) {
+                byteLength = segIt->lineOffsets[ nextLocalLine ] - byteStart;
             } else {
                 byteLength = segIt->byteSize - byteStart;
             }
@@ -747,6 +747,7 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
                 const auto* const sourceEnd = sourceBegin + read.data.size();
                 if ( beforeRawSnapshotCopyCallback ) {
                     auto callback = std::move( beforeRawSnapshotCopyCallback );
+                    beforeRawSnapshotCopyCallback = {};
                     callback();
                 }
                 rawLines.buffer.insert( rawLines.buffer.end(), sourceBegin, sourceEnd );
