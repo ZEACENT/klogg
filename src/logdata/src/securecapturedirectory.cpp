@@ -474,18 +474,13 @@ ScopedHandle openOrCreateDirectoryNoFollow( HANDLE parent,
         return {};
     }
 
-    ScopedHandle creationParent( ReOpenFile(
-        parent, ParentCreateAccess, ShareAll,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT ) );
-    if ( !creationParent.valid() ) {
-        LOG_WARNING << "SecureCaptureDirectory: parent reopen for create of "
-                    << name << " failed, error "
-                    << winErrorHex( GetLastError() );
-        return {};
-    }
+    // ReOpenFile fails on these NT-native directory handles (NULL with
+    // GetLastError()==0 on Windows Server CI), so creation cannot go
+    // through a re-opened parent. The caller must hand over a parent whose
+    // access already includes FILE_ADD_SUBDIRECTORY; bindParentPath threads
+    // ParentCreateAccess through the walk whenever parents may be created.
     auto created = ntOpenRelative(
-        creationParent.get(), name, access, nt::FileCreate,
-        FILE_ATTRIBUTE_DIRECTORY,
+        parent, name, access, nt::FileCreate, FILE_ATTRIBUTE_DIRECTORY,
         nt::FileDirectoryFile | nt::FileSynchronousIoNonAlert, &status );
     if ( created.valid() ) {
         return isNonReparseDirectory( created.get() ) ? std::move( created )
@@ -551,17 +546,22 @@ ScopedHandle bindParentPath( const QString& parentPath,
                     << parentPath;
         return {};
     }
+    // A creation-capable walk needs FILE_ADD_SUBDIRECTORY on every ancestor
+    // handle; it cannot be granted afterwards (ReOpenFile fails on these
+    // NT-native handles), so the access is threaded from the anchor down.
+    const auto walkAccess
+        = createMissingParents ? ParentCreateAccess : ParentAccess;
     auto current = openExistingDirectoryNoFollow(
-        nullptr, splitPath->first, ParentAccess );
+        nullptr, splitPath->first, walkAccess );
     if ( !current.valid() ) {
         return {};
     }
     for ( const auto& component : splitPath->second ) {
         auto next = createMissingParents
                         ? openOrCreateDirectoryNoFollow(
-                              current.get(), component, ParentAccess )
+                              current.get(), component, walkAccess )
                         : openExistingDirectoryNoFollow(
-                              current.get(), component, ParentAccess );
+                              current.get(), component, walkAccess );
         if ( !next.valid() ) {
             LOG_WARNING << "SecureCaptureDirectory: parent path walk failed at "
                            "component "
@@ -764,21 +764,18 @@ struct WindowsDirectoryEntry {
 std::optional<std::vector<WindowsDirectoryEntry>> enumerateDirectory(
     HANDLE directoryHandle )
 {
-    ScopedHandle enumerationHandle( ReOpenFile(
-        directoryHandle, EnumerationAccess, ShareAll,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT ) );
-    if ( !enumerationHandle.valid()
-         || !sameFileIdentity( directoryHandle, enumerationHandle.get() ) ) {
-        return std::nullopt;
-    }
-
+    // Enumeration runs on the bound handle itself: its access already
+    // covers FILE_LIST_DIRECTORY (CaptureAccess and TreeDeleteAccess both
+    // include it) and ReOpenFile cannot mint a second handle here (it
+    // fails on these NT-native directory handles). Callers serialize
+    // enumeration per handle and every pass restarts the scan.
     std::vector<WindowsDirectoryEntry> entries;
     QByteArray buffer( 64 * 1024, '\0' );
     BOOLEAN restartScan = TRUE;
     while ( true ) {
         nt::IoStatusBlock io{};
         const auto status = nativeApi().queryDirectoryFile(
-            enumerationHandle.get(), nullptr, nullptr, nullptr, &io,
+            directoryHandle, nullptr, nullptr, nullptr, &io,
             buffer.data(), static_cast<ULONG>( buffer.size() ),
             nt::FileDirectoryInformation, FALSE, nullptr, restartScan );
         restartScan = FALSE;

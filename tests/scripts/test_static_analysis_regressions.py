@@ -431,6 +431,31 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
             open_object.index("nt::FileDirectoryFile"),
         )
 
+    def test_windows_creation_and_enumeration_do_not_reopen_handles(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        create_directory = function_body(
+            source, "ScopedHandle openOrCreateDirectoryNoFollow("
+        )
+        enumerate_directory = function_body(
+            source,
+            "std::optional<std::vector<WindowsDirectoryEntry>> "
+            "enumerateDirectory(",
+        )
+        bind_parent = function_body(source, "ScopedHandle bindParentPath(")
+
+        # ReOpenFile fails deterministically (NULL with GetLastError()==0) on
+        # the NT-native directory handles used by this PAL; every capture
+        # bind died at the creation-parent reopen on Windows CI (PR #50).
+        # Creation capability is threaded through the walk instead: when
+        # parents may be created, bindParentPath opens the anchor and every
+        # component with FILE_ADD_SUBDIRECTORY (ParentCreateAccess), and
+        # openOrCreateDirectoryNoFollow creates directly on that bound
+        # parent. Enumeration runs on the bound handle itself, whose access
+        # already covers FILE_LIST_DIRECTORY.
+        self.assertNotIn("ReOpenFile(", create_directory)
+        self.assertNotIn("ReOpenFile(", enumerate_directory)
+        self.assertIn("ParentCreateAccess", bind_parent)
+
     def test_secure_capture_windows_cleanup_uses_guarded_delete_handles(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
         split_path = function_body(
