@@ -192,6 +192,7 @@ constexpr Status StatusSuccess = 0;
 constexpr Status StatusNoMoreFiles = static_cast<Status>( 0x80000006UL );
 constexpr Status StatusNoSuchFile = static_cast<Status>( 0xC000000FUL );
 constexpr Status StatusObjectNameNotFound = static_cast<Status>( 0xC0000034UL );
+constexpr Status StatusFileIsADirectory = static_cast<Status>( 0xC00000BAUL );
 constexpr Status StatusObjectNameCollision = static_cast<Status>( 0xC0000035UL );
 constexpr Status StatusObjectPathNotFound = static_cast<Status>( 0xC000003AUL );
 } // namespace nt
@@ -400,10 +401,13 @@ ScopedHandle openExistingDirectoryNoFollow( HANDLE parent,
                                             nt::Status* status = nullptr,
                                             ULONG shareAccess = ShareAll )
 {
+    // FILE_DIRECTORY_FILE is mandatory: NTFS rejects a directory open without
+    // it (STATUS_FILE_IS_A_DIRECTORY), so every bind fails when it is missing.
     auto handle = ntOpenRelative(
         parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
-        nt::FileSynchronousIoNonAlert | nt::FileOpenReparsePoint, status,
-        nullptr, shareAccess );
+        nt::FileDirectoryFile | nt::FileSynchronousIoNonAlert
+            | nt::FileOpenReparsePoint,
+        status, nullptr, shareAccess );
     if ( !handle.valid() || !isNonReparseDirectory( handle.get() ) ) {
         return {};
     }
@@ -535,10 +539,26 @@ ScopedHandle openExistingObjectNoFollow( HANDLE parent,
                                          nt::Status* status = nullptr,
                                          ULONG shareAccess = ShareAll )
 {
+    // The child type is not known ahead of time. Open as a plain object
+    // first; NTFS rejects a directory without FILE_DIRECTORY_FILE
+    // (STATUS_FILE_IS_A_DIRECTORY), in which case retry with the directory
+    // flag so tree walks can descend into subdirectories.
+    nt::Status firstStatus = nt::StatusSuccess;
+    auto handle = ntOpenRelative(
+        parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
+        nt::FileOpenReparsePoint | nt::FileSynchronousIoNonAlert,
+        &firstStatus, nullptr, shareAccess );
+    if ( handle.valid() || firstStatus != nt::StatusFileIsADirectory ) {
+        if ( status != nullptr ) {
+            *status = firstStatus;
+        }
+        return handle;
+    }
     return ntOpenRelative(
         parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
-        nt::FileOpenReparsePoint | nt::FileSynchronousIoNonAlert, status,
-        nullptr, shareAccess );
+        nt::FileDirectoryFile | nt::FileOpenReparsePoint
+            | nt::FileSynchronousIoNonAlert,
+        status, nullptr, shareAccess );
 }
 
 bool isNamedChildStill( HANDLE parent, const QString& name,
@@ -1307,12 +1327,12 @@ bool SecureCaptureDirectory::ensureExists()
     if ( !directory.valid() ) {
         return false;
     }
-    const auto identityKey = identityKeyForHandle( directory.get() );
-    if ( identityKey.isEmpty() ) {
+    const auto boundIdentity = identityKeyForHandle( directory.get() );
+    if ( boundIdentity.isEmpty() ) {
         return false;
     }
     impl_->directoryHandle = std::move( directory );
-    impl_->identityKey = identityKey;
+    impl_->identityKey = boundIdentity;
     return true;
 #else
     if ( impl_->directoryFd >= 0 ) {
@@ -1353,12 +1373,12 @@ bool SecureCaptureDirectory::bindExisting()
     if ( !directory.valid() ) {
         return false;
     }
-    const auto identityKey = identityKeyForHandle( directory.get() );
-    if ( identityKey.isEmpty() ) {
+    const auto boundIdentity = identityKeyForHandle( directory.get() );
+    if ( boundIdentity.isEmpty() ) {
         return false;
     }
     impl_->directoryHandle = std::move( directory );
-    impl_->identityKey = identityKey;
+    impl_->identityKey = boundIdentity;
     return true;
 #else
     if ( impl_->parentFd < 0 ) {
@@ -1394,13 +1414,13 @@ bool SecureCaptureDirectory::bindExisting()
         ::close( directoryFd );
         return false;
     }
-    const auto identityKey = identityKeyForStat( openedInfo );
-    if ( identityKey.isEmpty() ) {
+    const auto boundIdentity = identityKeyForStat( openedInfo );
+    if ( boundIdentity.isEmpty() ) {
         ::close( directoryFd );
         return false;
     }
     impl_->directoryFd = directoryFd;
-    impl_->identityKey = identityKey;
+    impl_->identityKey = boundIdentity;
     return true;
 #endif
 }

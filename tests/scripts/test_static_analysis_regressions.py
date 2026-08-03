@@ -409,6 +409,28 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("} else {", branch)
         self.assertNotIn("return true", branch.split("} else {")[0])
 
+    def test_windows_directory_opens_request_the_directory_create_option(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        open_directory = function_body(
+            source, "ScopedHandle openExistingDirectoryNoFollow("
+        )
+        open_object = function_body(
+            source, "ScopedHandle openExistingObjectNoFollow("
+        )
+
+        # NTFS rejects opening a directory unless CreateOptions carries
+        # FILE_DIRECTORY_FILE (STATUS_FILE_IS_A_DIRECTORY). Missing the flag
+        # broke every capture bind on Windows (PR #50 CI). Type-agnostic
+        # object opens must retry with the flag on that exact status so tree
+        # walks can descend into subdirectories.
+        self.assertIn("nt::FileDirectoryFile", open_directory)
+        self.assertIn("nt::StatusFileIsADirectory", open_object)
+        self.assertIn("nt::FileDirectoryFile", open_object)
+        self.assertLess(
+            open_object.index("nt::StatusFileIsADirectory"),
+            open_object.index("nt::FileDirectoryFile"),
+        )
+
     def test_secure_capture_windows_cleanup_uses_guarded_delete_handles(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
         split_path = function_body(
