@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build a clang-tidy line filter for added lines in changed headers."""
 
+from __future__ import annotations
+
 import json
 import re
 import sys
@@ -8,7 +10,7 @@ from pathlib import Path
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-HEADER_RE = re.compile(r"\.(?:h|hh|hpp|hxx)$")
+HEADER_RE = re.compile(r"\.(?:h|hh|hpp|hxx)$", re.IGNORECASE)
 
 
 def build_filter(patch: str) -> list[dict[str, object]]:

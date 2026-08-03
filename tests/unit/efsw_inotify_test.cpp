@@ -36,6 +36,26 @@
 #  include <QTemporaryDir>
 
 namespace {
+class WatcherResetGuard final {
+  public:
+    explicit WatcherResetGuard(
+        std::unique_ptr<efsw::FileWatcher>& watcher )
+        : watcher_( watcher )
+    {
+    }
+
+    ~WatcherResetGuard()
+    {
+        watcher_.reset();
+    }
+
+    WatcherResetGuard( const WatcherResetGuard& ) = delete;
+    WatcherResetGuard& operator=( const WatcherResetGuard& ) = delete;
+
+  private:
+    std::unique_ptr<efsw::FileWatcher>& watcher_;
+};
+
 class RemovingListener final : public efsw::FileWatchListener {
   public:
     explicit RemovingListener( efsw::FileWatcher& watcher ) : watcher_( watcher ) {}
@@ -119,6 +139,7 @@ TEST_CASE( "efsw inotify keeps a removed watcher alive through its in-flight act
 
     auto watcher = std::make_unique<efsw::FileWatcher>();
     RemovingListener listener( *watcher );
+    WatcherResetGuard stopWatcher{ watcher };
     auto completion = listener.completion();
     const auto watchId = watcher->addWatch( watchedPath.toStdString(), &listener, false );
     REQUIRE( watchId >= 0 );
@@ -153,6 +174,7 @@ TEST_CASE( "efsw inotify safely removes a watch from a moved-out callback" )
 
     auto watcher = std::make_unique<efsw::FileWatcher>();
     MoveOutRemovingListener listener( *watcher );
+    WatcherResetGuard stopWatcher{ watcher };
     auto completion = listener.completion();
     const auto watchId = watcher->addWatch( watchedPath.toStdString(), &listener, false );
     REQUIRE( watchId >= 0 );

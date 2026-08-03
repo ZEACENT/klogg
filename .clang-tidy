@@ -9,6 +9,12 @@
 # checks that fire broadly on existing Qt/C++ code are suppressed below and can
 # be re-enabled one at a time as the affected code is cleaned up (remove a
 # `-check-name` line to start enforcing it, then fix or NOLINT the findings).
+# Checks that only exist in clang-19+ (use-concise-preprocessor-directives,
+# use-scoped-lock, inconsistent-ifelse-braces, ambiguous-smartptr-reset-call,
+# math-missing-parentheses, pro-bounds-avoid-unchecked-container-access) are
+# disabled so the gate stays toolchain-version stable: CI pins clang-tidy-18,
+# and a local newer clang-tidy must produce the same verdict. clang-18
+# silently ignores the unknown entries.
 #
 # Run locally:  clang-tidy -p build_root <file.cpp>
 # Checks are read from this file automatically.
@@ -32,6 +38,7 @@ Checks: >
   -cppcoreguidelines-init-variables,
   -cppcoreguidelines-non-private-member-variables-in-classes,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
   -cppcoreguidelines-pro-bounds-constant-array-index,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-pro-type-cstyle-cast,
@@ -48,6 +55,7 @@ Checks: >
   -modernize-use-emplace,
   -modernize-use-nodiscard,
   -modernize-use-override,
+  -modernize-use-scoped-lock,
   -modernize-use-trailing-return-type,
   -modernize-use-transparent-functors,
   -modernize-use-using,
@@ -55,13 +63,17 @@ Checks: >
   -performance-type-promotion-in-math-fn,
   -performance-unnecessary-value-param,
   -readability-braces-around-statements,
+  -readability-use-concise-preprocessor-directives,
+  -readability-ambiguous-smartptr-reset-call,
   -readability-convert-member-functions-to-static,
   -readability-else-after-return,
   -readability-function-cognitive-complexity,
   -readability-identifier-naming,
   -readability-implicit-bool-conversion,
+  -readability-inconsistent-ifelse-braces,
   -readability-isolate-declaration,
   -readability-magic-numbers,
+  -readability-math-missing-parentheses,
   -readability-named-parameter,
   -readability-qualified-auto,
   -readability-redundant-access-specifiers,

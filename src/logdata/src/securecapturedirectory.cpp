@@ -1,6 +1,11 @@
 #include "securecapturedirectory.h"
 
+#include "log.h"
+
+#include "qtcompat/qtcompat.h"
+
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -10,6 +15,7 @@
 #include <vector>
 
 #include <QFileInfo>
+#include <QHash>
 #include <QUuid>
 
 #if defined( Q_OS_WIN )
@@ -220,16 +226,17 @@ const NativeApi& nativeApi()
 
 constexpr ULONG ShareAll
     = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+constexpr ULONG ShareWithoutDelete = FILE_SHARE_READ | FILE_SHARE_WRITE;
 constexpr ACCESS_MASK ParentAccess
     = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 constexpr ACCESS_MASK ParentCreateAccess
     = ParentAccess | FILE_ADD_SUBDIRECTORY;
 constexpr ACCESS_MASK CaptureAccess
     = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_ADD_FILE
-      | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE;
+      | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 constexpr ACCESS_MASK EnumerationAccess
     = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-constexpr ACCESS_MASK TreeAccess
+constexpr ACCESS_MASK TreeDeleteAccess
     = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | DELETE
       | SYNCHRONIZE;
 constexpr ACCESS_MASK ReadAccess
@@ -237,8 +244,18 @@ constexpr ACCESS_MASK ReadAccess
 constexpr ACCESS_MASK TemporaryAccess
     = FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | DELETE
       | SYNCHRONIZE;
-constexpr ACCESS_MASK RenameDeleteAccess
+constexpr ACCESS_MASK PublishRenameAccess
     = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+constexpr ACCESS_MASK FileDeleteAccess
+    = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+constexpr auto FileDispositionInfoExClass
+    = static_cast<FILE_INFO_BY_HANDLE_CLASS>( 21 );
+constexpr DWORD FileDispositionFlagDelete = 0x00000001UL;
+constexpr DWORD FileDispositionFlagIgnoreReadonlyAttribute = 0x00000010UL;
+
+struct ExtendedFileDispositionInfo {
+    DWORD flags;
+};
 
 bool initializeUnicodeString( const QString& text, nt::UnicodeString& result )
 {
@@ -269,7 +286,8 @@ ScopedHandle ntOpenRelative( HANDLE root, const QString& name,
                              ACCESS_MASK access, ULONG disposition,
                              ULONG fileAttributes, ULONG createOptions,
                              nt::Status* resultStatus = nullptr,
-                             ULONG_PTR* resultInformation = nullptr )
+                             ULONG_PTR* resultInformation = nullptr,
+                             ULONG shareAccess = ShareAll )
 {
     nt::UnicodeString unicodeName{};
     if ( !nativeApi().available()
@@ -281,7 +299,7 @@ ScopedHandle ntOpenRelative( HANDLE root, const QString& name,
     nt::IoStatusBlock io{};
     HANDLE handle = nullptr;
     const auto status = nativeApi().createFile(
-        &handle, access, &attributes, &io, nullptr, fileAttributes, ShareAll,
+        &handle, access, &attributes, &io, nullptr, fileAttributes, shareAccess,
         disposition, createOptions, nullptr, 0 );
     if ( resultStatus != nullptr ) {
         *resultStatus = status;
@@ -325,38 +343,67 @@ bool isRegularDiskFile( HANDLE handle )
            && !standard.Directory && GetFileType( handle ) == FILE_TYPE_DISK;
 }
 
-bool sameFileIdentity( HANDLE lhs, HANDLE rhs )
-{
-    BY_HANDLE_FILE_INFORMATION lhsInfo{};
-    BY_HANDLE_FILE_INFORMATION rhsInfo{};
-    return GetFileInformationByHandle( lhs, &lhsInfo )
-           && GetFileInformationByHandle( rhs, &rhsInfo )
-           && lhsInfo.dwVolumeSerialNumber == rhsInfo.dwVolumeSerialNumber
-           && lhsInfo.nFileIndexHigh == rhsInfo.nFileIndexHigh
-           && lhsInfo.nFileIndexLow == rhsInfo.nFileIndexLow;
-}
-
 QString identityKeyForHandle( HANDLE handle )
 {
+    FILE_ID_INFO extendedInfo{};
+    if ( GetFileInformationByHandleEx(
+             handle, FileIdInfo, &extendedInfo,
+             sizeof( extendedInfo ) ) ) {
+        const auto fileId = QByteArray(
+            reinterpret_cast<const char*>( extendedInfo.FileId.Identifier ),
+            sizeof( extendedInfo.FileId.Identifier ) )
+                                .toHex();
+        return QStringLiteral( "win:%1:%2" )
+            .arg( extendedInfo.VolumeSerialNumber, 0, 16 )
+            .arg( QString::fromLatin1( fileId ) );
+    }
+
+    std::array<WCHAR, MAX_PATH + 1> filesystemName{};
+    if ( !GetVolumeInformationByHandleW(
+             handle, nullptr, 0, nullptr, nullptr, nullptr,
+             filesystemName.data(),
+             static_cast<DWORD>( filesystemName.size() ) ) ) {
+        // The 128-bit identity query failed and the filesystem is unknown
+        // (for example a legacy SMB client). The legacy 64-bit index is not
+        // authoritative on ReFS, so without a filesystem name we cannot tell
+        // whether it is safe to trust. Fail closed.
+        return {};
+    }
+    if ( QString::fromWCharArray( filesystemName.data() )
+             .compare( QStringLiteral( "ReFS" ), Qt::CaseInsensitive )
+         == 0 ) {
+        // The legacy 64-bit file index is not authoritative on ReFS.
+        return {};
+    }
+
     BY_HANDLE_FILE_INFORMATION info{};
     if ( !GetFileInformationByHandle( handle, &info ) ) {
         return {};
     }
     const auto fileIndex = ( static_cast<quint64>( info.nFileIndexHigh ) << 32U )
                            | info.nFileIndexLow;
-    return QStringLiteral( "win:%1:%2" )
+    return QStringLiteral( "win-legacy:%1:%2" )
         .arg( info.dwVolumeSerialNumber, 0, 16 )
         .arg( fileIndex, 0, 16 );
+}
+
+bool sameFileIdentity( HANDLE lhs, HANDLE rhs )
+{
+    const auto lhsIdentity = identityKeyForHandle( lhs );
+    const auto rhsIdentity = identityKeyForHandle( rhs );
+    return !lhsIdentity.isEmpty() && lhsIdentity == rhsIdentity;
 }
 
 ScopedHandle openExistingDirectoryNoFollow( HANDLE parent,
                                             const QString& name,
                                             ACCESS_MASK access,
-                                            nt::Status* status = nullptr )
+                                            nt::Status* status = nullptr,
+                                            ULONG shareAccess = ShareAll )
 {
     auto handle = ntOpenRelative(
         parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
-        nt::FileSynchronousIoNonAlert | nt::FileOpenReparsePoint, status );
+        nt::FileSynchronousIoNonAlert | nt::FileOpenReparsePoint, status,
+        nullptr, shareAccess );
     if ( !handle.valid() || !isNonReparseDirectory( handle.get() ) ) {
         return {};
     }
@@ -423,11 +470,12 @@ std::optional<std::pair<QString, QStringList>> splitWindowsPath(
         const auto anchor = QStringLiteral( "\\??\\" ) + nativePath.left( 3 );
         return std::make_pair(
             anchor,
-            nativePath.mid( 3 ).split( QLatin1Char( '\\' ), Qt::SkipEmptyParts ) );
+            nativePath.mid( 3 ).split(
+                QLatin1Char( '\\' ), klogg::qtcompat::skipEmptyParts() ) );
     }
     if ( nativePath.startsWith( QStringLiteral( "\\\\" ) ) ) {
         auto components = nativePath.mid( 2 ).split(
-            QLatin1Char( '\\' ), Qt::SkipEmptyParts );
+            QLatin1Char( '\\' ), klogg::qtcompat::skipEmptyParts() );
         if ( components.size() < 2 ) {
             return std::nullopt;
         }
@@ -468,13 +516,13 @@ ScopedHandle bindParentPath( const QString& parentPath,
 ScopedHandle openExistingRegularFileNoFollow(
     HANDLE parent, const QString& name, ACCESS_MASK access,
     ULONG extraOptions = 0, nt::Status* status = nullptr,
-    ULONG_PTR* information = nullptr )
+    ULONG_PTR* information = nullptr, ULONG shareAccess = ShareAll )
 {
     auto handle = ntOpenRelative(
         parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
         nt::FileNonDirectoryFile | nt::FileOpenReparsePoint
             | nt::FileSynchronousIoNonAlert | extraOptions,
-        status, information );
+        status, information, shareAccess );
     if ( !handle.valid() || !isRegularDiskFile( handle.get() ) ) {
         return {};
     }
@@ -484,11 +532,13 @@ ScopedHandle openExistingRegularFileNoFollow(
 ScopedHandle openExistingObjectNoFollow( HANDLE parent,
                                          const QString& name,
                                          ACCESS_MASK access,
-                                         nt::Status* status = nullptr )
+                                         nt::Status* status = nullptr,
+                                         ULONG shareAccess = ShareAll )
 {
     return ntOpenRelative(
         parent, name, access, nt::FileOpen, FILE_ATTRIBUTE_NORMAL,
-        nt::FileOpenReparsePoint | nt::FileSynchronousIoNonAlert, status );
+        nt::FileOpenReparsePoint | nt::FileSynchronousIoNonAlert, status,
+        nullptr, shareAccess );
 }
 
 bool isNamedChildStill( HANDLE parent, const QString& name,
@@ -499,12 +549,134 @@ bool isNamedChildStill( HANDLE parent, const QString& name,
     return current.valid() && sameFileIdentity( current.get(), expectedHandle );
 }
 
-bool markDeleteByHandle( HANDLE handle )
+ScopedHandle openCurrentDirectoryForDeletion( HANDLE parent,
+                                              const QString& name,
+                                              HANDLE expectedHandle )
 {
+    auto guarded = openExistingDirectoryNoFollow(
+        parent, name, TreeDeleteAccess, nullptr, ShareWithoutDelete );
+    if ( !guarded.valid()
+         || !sameFileIdentity( guarded.get(), expectedHandle ) ) {
+        return {};
+    }
+    return guarded;
+}
+
+bool setFileAttributesByHandle( HANDLE handle, DWORD attributes )
+{
+    FILE_BASIC_INFO update{};
+    update.FileAttributes
+        = attributes == 0 ? FILE_ATTRIBUTE_NORMAL : attributes;
+    return SetFileInformationByHandle( handle, FileBasicInfo, &update,
+                                       sizeof( update ) );
+}
+
+bool markDeleteByHandle( HANDLE handle, HANDLE attributeRoot = nullptr,
+                         const QString& attributeName = {} )
+{
+    FILE_BASIC_INFO original{};
+    if ( !GetFileInformationByHandleEx( handle, FileBasicInfo, &original,
+                                        sizeof( original ) ) ) {
+        return false;
+    }
+
+    ExtendedFileDispositionInfo extendedDisposition{
+        FileDispositionFlagDelete
+        | FileDispositionFlagIgnoreReadonlyAttribute };
+    if ( SetFileInformationByHandle(
+             handle, FileDispositionInfoExClass, &extendedDisposition,
+             sizeof( extendedDisposition ) ) ) {
+        return true;
+    }
+
+    const auto extendedError = GetLastError();
+    const auto isReadOnly
+        = ( original.FileAttributes & FILE_ATTRIBUTE_READONLY ) != 0;
+    if ( isReadOnly ) {
+        // The legacy disposition path cannot delete a read-only file. The
+        // attribute belongs to the shared file record, so clearing it is
+        // only safe when this object has a single link; with surviving
+        // hard-link aliases the attribute must remain read-only.
+        if ( ( original.FileAttributes & FILE_ATTRIBUTE_DIRECTORY ) != 0
+             || attributeRoot == nullptr || attributeName.isEmpty() ) {
+            SetLastError( extendedError );
+            return false;
+        }
+        // The link count is a point-in-time check: a concurrent actor with
+        // write access to this directory could still CreateHardLink before
+        // the attribute is cleared below. The window is accepted because the
+        // capture directory is klogg-private and the post-open identity check
+        // confines any mutation to this exact record either way.
+        BY_HANDLE_FILE_INFORMATION linkInfo{};
+        if ( !GetFileInformationByHandle( handle, &linkInfo )
+             || linkInfo.nNumberOfLinks != 1 ) {
+            SetLastError( extendedError );
+            return false;
+        }
+
+        const auto expectedIdentity = identityKeyForHandle( handle );
+        if ( expectedIdentity.isEmpty() ) {
+            SetLastError( extendedError );
+            return false;
+        }
+
+        // The deletion handle shares without DELETE, so ReOpenFile cannot
+        // grant FILE_WRITE_ATTRIBUTES through it. Reopen the verified name
+        // relative to the bound directory instead; only the attribute grant
+        // is requested, which the existing handles' sharing permits, and the
+        // post-open identity check proves the same single-link record before
+        // its attribute is touched.
+        nt::Status attributeStatus = nt::StatusSuccess;
+        auto attributeHandle = openExistingRegularFileNoFollow(
+            attributeRoot, attributeName,
+            FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE, 0,
+            &attributeStatus, nullptr, ShareAll );
+        if ( !attributeHandle.valid()
+             || identityKeyForHandle( attributeHandle.get() )
+                    != expectedIdentity ) {
+            SetLastError( extendedError );
+            return false;
+        }
+        if ( !setFileAttributesByHandle(
+                 attributeHandle.get(),
+                 original.FileAttributes & ~FILE_ATTRIBUTE_READONLY ) ) {
+            SetLastError( extendedError );
+            return false;
+        }
+
+        FILE_DISPOSITION_INFO disposition{};
+        disposition.DeleteFile = TRUE;
+        if ( SetFileInformationByHandle(
+                 handle, FileDispositionInfo, &disposition,
+                 sizeof( disposition ) ) ) {
+            return true;
+        }
+
+        const auto dispositionError = GetLastError();
+        if ( !setFileAttributesByHandle( attributeHandle.get(),
+                                         original.FileAttributes ) ) {
+            // The deletion failed and the original read-only attribute could
+            // not be restored; the record stays behind less protected than
+            // the owner configured it. The retry sweep still owns the file's
+            // lifecycle, but surface the drift instead of hiding it.
+            LOG_WARNING << "Failed to restore read-only attribute after a"
+                           " failed legacy disposition on a capture file";
+        }
+        SetLastError( dispositionError );
+        return false;
+    }
+
     FILE_DISPOSITION_INFO disposition{};
     disposition.DeleteFile = TRUE;
     return SetFileInformationByHandle( handle, FileDispositionInfo,
                                        &disposition, sizeof( disposition ) );
+}
+
+bool markDescriptorDeleteOnClose( int descriptor )
+{
+    const auto nativeValue = _get_osfhandle( descriptor );
+    return nativeValue != -1
+           && markDeleteByHandle( reinterpret_cast<HANDLE>( nativeValue ) );
 }
 
 struct WindowsDirectoryEntry {
@@ -583,9 +755,17 @@ bool removeWindowsTreeContents( HANDLE directoryHandle )
         return false;
     }
     for ( const auto& entry : *entries ) {
+        // FILE_LIST_DIRECTORY and FILE_TRAVERSE alias FILE_READ_DATA and
+        // FILE_EXECUTE on regular files; an orphan file can be deletable
+        // without either. Ask for directory access only for directories.
+        const auto childAccess
+            = ( entry.attributes & FILE_ATTRIBUTE_DIRECTORY ) != 0
+                  ? TreeDeleteAccess
+                  : FileDeleteAccess;
         nt::Status status = nt::StatusSuccess;
         auto child = openExistingObjectNoFollow(
-            directoryHandle, entry.name, TreeAccess, &status );
+            directoryHandle, entry.name, childAccess, &status,
+            ShareWithoutDelete );
         if ( !child.valid() ) {
             if ( isMissingStatus( status ) ) {
                 continue;
@@ -604,7 +784,8 @@ bool removeWindowsTreeContents( HANDLE directoryHandle )
             return false;
         }
         if ( !isNamedChildStill( directoryHandle, entry.name, child.get() )
-             || !markDeleteByHandle( child.get() ) ) {
+             || !markDeleteByHandle( child.get(), directoryHandle,
+                                     entry.name ) ) {
             return false;
         }
     }
@@ -657,9 +838,47 @@ std::optional<QDateTime> latestWindowsModificationTime( HANDLE directoryHandle )
     return latest;
 }
 #else
+int openPath( const QByteArray& path, int flags )
+{
+    // POSIX open() is variadic only when O_CREAT/O_TMPFILE is present; this
+    // fixed-arity wrapper never permits either flag.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::open( path.constData(), flags );
+}
+
+int openRelative( int directoryFd, const char* name, int flags )
+{
+    // POSIX openat() is variadic only when O_CREAT/O_TMPFILE is present; this
+    // fixed-arity wrapper never permits either flag.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::openat( directoryFd, name, flags );
+}
+
+int createRelative( int directoryFd, const char* name, int flags,
+                    mode_t permissions )
+{
+    // This is the sole typed boundary for the mode-bearing openat() overload.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::openat( directoryFd, name, flags, permissions );
+}
+
+#if !defined( Q_OS_MACOS )
+long renameNoReplaceRelative( int oldDirectoryFd, const char* oldName,
+                              int newDirectoryFd, const char* newName,
+                              unsigned int renameFlags )
+{
+    // Linux exposes renameat2 through syscall() on the oldest supported libc.
+    // Keep the unavoidable variadic boundary isolated behind this fixed API.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::syscall( SYS_renameat2, oldDirectoryFd, oldName, newDirectoryFd,
+                      newName, renameFlags );
+}
+#endif
+
 int openDirectory( const QByteArray& path )
 {
-    return ::open( path.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
+    return openPath(
+        path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
 }
 
 bool sameIdentity( const struct stat& lhs, const struct stat& rhs )
@@ -673,6 +892,43 @@ QString identityKeyForStat( const struct stat& info )
     return QStringLiteral( "posix:%1:%2" )
         .arg( static_cast<qulonglong>( info.st_dev ), 0, 16 )
         .arg( static_cast<qulonglong>( info.st_ino ), 0, 16 );
+}
+
+std::optional<qulonglong> mountIdentityForDescriptor( int descriptor )
+{
+#if defined( Q_OS_MACOS )
+    Q_UNUSED( descriptor );
+    return std::nullopt;
+#else
+    QFile descriptorInfo(
+        QStringLiteral( "/proc/self/fdinfo/%1" ).arg( descriptor ) );
+    if ( !descriptorInfo.open( QIODevice::ReadOnly ) ) {
+        return std::nullopt;
+    }
+    while ( !descriptorInfo.atEnd() ) {
+        const auto line = descriptorInfo.readLine().trimmed();
+        if ( !line.startsWith( QByteArrayLiteral( "mnt_id:" ) ) ) {
+            continue;
+        }
+        bool valid = false;
+        const auto mountId = line.mid( 7 ).trimmed().toULongLong( &valid );
+        return valid ? std::optional<qulonglong>{ mountId }
+                     : std::nullopt;
+    }
+    return std::nullopt;
+#endif
+}
+
+bool isSameMountedFilesystem( int parentFd, int childFd,
+                              const struct stat& parentInfo,
+                              const struct stat& childInfo )
+{
+    if ( parentInfo.st_dev != childInfo.st_dev ) {
+        return false;
+    }
+    const auto parentMount = mountIdentityForDescriptor( parentFd );
+    const auto childMount = mountIdentityForDescriptor( childFd );
+    return !parentMount || !childMount || *parentMount == *childMount;
 }
 
 qint64 modificationMilliseconds( const struct stat& info )
@@ -695,7 +951,7 @@ QDateTime latestModificationTimeForDirectory( int directoryFd )
     auto latest = QDateTime::fromMSecsSinceEpoch(
         modificationMilliseconds( directoryInfo ) ).toUTC();
 
-    const auto iteratorFd = ::openat(
+    const auto iteratorFd = openRelative(
         directoryFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
     if ( iteratorFd < 0 ) {
         return latest;
@@ -725,14 +981,18 @@ QDateTime latestModificationTimeForDirectory( int directoryFd )
             latest = modified;
         }
 
-        if ( S_ISDIR( entryInfo.st_mode ) ) {
-            const auto childFd = ::openat(
+        if ( S_ISDIR( entryInfo.st_mode )
+             && entryInfo.st_dev == directoryInfo.st_dev ) {
+            const auto childFd = openRelative(
                 directoryFd, name.constData(),
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
             if ( childFd >= 0 ) {
                 struct stat openedChildInfo {};
                 if ( ::fstat( childFd, &openedChildInfo ) == 0
-                     && sameIdentity( entryInfo, openedChildInfo ) ) {
+                     && sameIdentity( entryInfo, openedChildInfo )
+                     && isSameMountedFilesystem(
+                         directoryFd, childFd, directoryInfo,
+                         openedChildInfo ) ) {
                     const auto childLatest
                         = latestModificationTimeForDirectory( childFd );
                     if ( childLatest > latest ) {
@@ -755,8 +1015,10 @@ bool renameNoReplace( int oldDirectoryFd, const QByteArray& oldName,
                            newName.constData(), RENAME_EXCL ) == 0;
 #else
     constexpr unsigned int RenameNoReplace = 1U;
-    return ::syscall( SYS_renameat2, oldDirectoryFd, oldName.constData(),
-                      newDirectoryFd, newName.constData(), RenameNoReplace ) == 0;
+    return renameNoReplaceRelative(
+               oldDirectoryFd, oldName.constData(), newDirectoryFd,
+               newName.constData(), RenameNoReplace )
+           == 0;
 #endif
 }
 
@@ -772,7 +1034,7 @@ std::optional<QByteArray> quarantineEntry( int directoryFd,
                                            const QByteArray& prefix )
 {
     for ( int attempt = 0; attempt < 32; ++attempt ) {
-        const auto quarantineName = uniqueDeletionName( prefix );
+        auto quarantineName = uniqueDeletionName( prefix );
         if ( !renameNoReplace( directoryFd, entryName, directoryFd,
                               quarantineName ) ) {
             if ( errno == EEXIST ) {
@@ -817,8 +1079,9 @@ bool restoreQuarantinedEntry( int directoryFd,
         return true;
     }
 
-    // Never leave an unexpected replacement exposed under the public name.
-    renameNoReplace( directoryFd, publicName, directoryFd, quarantineName );
+    // The public name changed after restore. Never move that unverified live
+    // occupant back into an internal quarantine path; leave it untouched and
+    // let the old bound generation fail closed.
     return false;
 }
 
@@ -829,7 +1092,7 @@ bool removeQuarantinedEntry( int directoryFd,
                              const struct stat& expectedInfo )
 {
     if ( S_ISDIR( expectedInfo.st_mode ) ) {
-        const auto childFd = ::openat(
+        const auto childFd = openRelative(
             directoryFd, quarantineName.constData(),
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
         if ( childFd < 0 ) {
@@ -862,8 +1125,13 @@ bool removeQuarantinedEntry( int directoryFd,
 
 bool removeDirectoryContents( int directoryFd )
 {
+    struct stat directoryInfo {};
+    if ( ::fstat( directoryFd, &directoryInfo ) != 0 ) {
+        return false;
+    }
+
     std::vector<QByteArray> names;
-    const auto iteratorFd = ::openat(
+    const auto iteratorFd = openRelative(
         directoryFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
     if ( iteratorFd < 0 ) {
         return false;
@@ -889,6 +1157,26 @@ bool removeDirectoryContents( int directoryFd )
                 continue;
             }
             return false;
+        }
+        if ( S_ISDIR( entryInfo.st_mode ) ) {
+            const auto childFd = openRelative(
+                directoryFd, name.constData(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
+            struct stat openedChildInfo {};
+            const auto sameMount
+                = childFd >= 0
+                  && ::fstat( childFd, &openedChildInfo ) == 0
+                  && sameIdentity( entryInfo, openedChildInfo )
+                  && isSameMountedFilesystem(
+                      directoryFd, childFd, directoryInfo,
+                      openedChildInfo );
+            if ( childFd >= 0 ) {
+                ::close( childFd );
+            }
+            if ( !sameMount ) {
+                // Do not recurse through bind, FUSE, or other mounts.
+                return false;
+            }
         }
         const auto quarantineName = quarantineEntry(
             directoryFd, name, entryInfo,
@@ -946,10 +1234,26 @@ struct SecureCaptureDirectory::Impl {
     QString parentPath;
     QString leafName;
     QString identityKey;
+    void invalidateBoundDirectory()
+    {
+#if defined( Q_OS_WIN )
+        directoryHandle.reset();
+#else
+        if ( directoryFd >= 0 ) {
+            ::close( directoryFd );
+            directoryFd = -1;
+        }
+#endif
+        removed = true;
+    }
+
     bool removed = false;
+    bool failNextRecursiveRemovalForTesting = false;
+    std::function<void()> afterRecursiveRemovalQuarantineCallbackForTesting;
 #if defined( Q_OS_WIN )
     ScopedHandle parentHandle;
     ScopedHandle directoryHandle;
+    mutable QHash<QString, QString> pendingFileDeletions;
 #else
     int parentFd = -1;
     int directoryFd = -1;
@@ -1072,7 +1376,7 @@ bool SecureCaptureDirectory::bindExisting()
          || !S_ISDIR( namedInfo.st_mode ) ) {
         return false;
     }
-    const auto directoryFd = ::openat(
+    const auto directoryFd = openRelative(
         impl_->parentFd, leafName.constData(),
         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW );
     if ( directoryFd < 0 ) {
@@ -1139,9 +1443,72 @@ QString SecureCaptureDirectory::identityKey() const
     return impl_->identityKey;
 }
 
+QString SecureCaptureDirectory::fileIdentity( const QString& filePath ) const
+{
+    const auto fileName = leafNameForPath( impl_->path, filePath );
+    if ( fileName.isEmpty() || !isCurrentPath() ) {
+        return {};
+    }
+#if defined( Q_OS_WIN )
+    auto handle = openExistingRegularFileNoFollow(
+        impl_->directoryHandle.get(), fileName,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE );
+    return handle.valid() ? identityKeyForHandle( handle.get() ) : QString{};
+#else
+    const auto encodedName = QFile::encodeName( fileName );
+    const auto descriptor = openRelative(
+        impl_->directoryFd, encodedName.constData(),
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW );
+    if ( descriptor < 0 ) {
+        return {};
+    }
+    struct stat fileInfo {};
+    const auto identity
+        = ::fstat( descriptor, &fileInfo ) == 0 && S_ISREG( fileInfo.st_mode )
+              ? identityKeyForStat( fileInfo )
+              : QString{};
+    ::close( descriptor );
+    return identity;
+#endif
+}
+
 QString SecureCaptureDirectory::path() const
 {
     return impl_->path;
+}
+
+bool SecureCaptureDirectory::hasEntries() const
+{
+    if ( !isCurrentPath() ) {
+        return true;
+    }
+#if defined( Q_OS_WIN )
+    const auto entries = enumerateDirectory( impl_->directoryHandle.get() );
+    return !entries || !entries->empty();
+#else
+    const auto iteratorFd = openRelative(
+        impl_->directoryFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
+    if ( iteratorFd < 0 ) {
+        return true;
+    }
+    auto* directory = ::fdopendir( iteratorFd );
+    if ( directory == nullptr ) {
+        ::close( iteratorFd );
+        return true;
+    }
+
+    bool hasNamedEntry = false;
+    while ( const auto* entry = ::readdir( directory ) ) {
+        const QByteArray encodedName( entry->d_name );
+        if ( encodedName != QByteArrayLiteral( "." )
+             && encodedName != QByteArrayLiteral( ".." ) ) {
+            hasNamedEntry = true;
+            break;
+        }
+    }
+    ::closedir( directory );
+    return hasNamedEntry;
+#endif
 }
 
 QStringList SecureCaptureDirectory::entryList( const QStringList& nameFilters,
@@ -1180,7 +1547,7 @@ QStringList SecureCaptureDirectory::entryList( const QStringList& nameFilters,
         }
     }
 #else
-    const auto iteratorFd = ::openat(
+    const auto iteratorFd = openRelative(
         impl_->directoryFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
     if ( iteratorFd < 0 ) {
         return entries;
@@ -1229,54 +1596,67 @@ QStringList SecureCaptureDirectory::entryList( QDir::Filters filters,
     return entryList( {}, filters, sort );
 }
 
-bool SecureCaptureDirectory::openReadFile( const QString& filePath, QFile& file ) const
+std::unique_ptr<QFile> SecureCaptureDirectory::openReadFile(
+    const QString& filePath, const QString& expectedIdentity ) const
 {
     const auto fileName = leafNameForPath( impl_->path, filePath );
     if ( fileName.isEmpty() ) {
-        return false;
+        return {};
     }
 #if defined( Q_OS_WIN )
     if ( !impl_->directoryHandle.valid() ) {
-        return false;
+        return {};
     }
     auto handle = openExistingRegularFileNoFollow(
         impl_->directoryHandle.get(), fileName, ReadAccess,
         nt::FileSequentialOnly );
-    if ( !handle.valid() || !isCurrentPath() ) {
-        return false;
+    if ( !handle.valid() || !isCurrentPath()
+         || ( !expectedIdentity.isEmpty()
+              && identityKeyForHandle( handle.get() ) != expectedIdentity ) ) {
+        return {};
     }
     const auto nativeHandle = handle.release();
     const auto descriptor = _open_osfhandle(
         reinterpret_cast<intptr_t>( nativeHandle ), _O_BINARY | _O_RDONLY );
     if ( descriptor < 0 ) {
         CloseHandle( nativeHandle );
-        return false;
+        return {};
     }
-    if ( !file.open( descriptor, QIODevice::ReadOnly,
-                     QFileDevice::AutoCloseHandle ) ) {
-        _close( descriptor );
-        return false;
-    }
-    return true;
 #else
     if ( impl_->directoryFd < 0 ) {
-        return false;
+        return {};
     }
     const auto encodedName = QFile::encodeName( fileName );
-    const auto descriptor = ::openat( impl_->directoryFd, encodedName.constData(),
-                                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW );
+    const auto descriptor = openRelative(
+        impl_->directoryFd, encodedName.constData(),
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW );
     if ( descriptor < 0 ) {
-        return false;
+        return {};
     }
-    struct stat fileInfo {};
-    if ( ::fstat( descriptor, &fileInfo ) != 0 || !S_ISREG( fileInfo.st_mode )
-         || !file.open( descriptor, QIODevice::ReadOnly,
-                        QFileDevice::AutoCloseHandle ) ) {
-        ::close( descriptor );
-        return false;
-    }
-    return true;
 #endif
+
+    auto file = std::make_unique<QFile>();
+    // QFile adopts this already-open native capability; it does not resolve a
+    // path again. Validate the adopted object through the same descriptor.
+    if ( !file->open( descriptor, QIODevice::ReadOnly,
+                      QFileDevice::AutoCloseHandle ) ) {
+#if defined( Q_OS_WIN )
+        _close( descriptor );
+#else
+        ::close( descriptor );
+#endif
+        return {};
+    }
+#if !defined( Q_OS_WIN )
+    struct stat fileInfo {};
+    if ( ::fstat( file->handle(), &fileInfo ) != 0
+         || !S_ISREG( fileInfo.st_mode )
+         || ( !expectedIdentity.isEmpty()
+              && identityKeyForStat( fileInfo ) != expectedIdentity ) ) {
+        return {};
+    }
+#endif
+    return file;
 }
 
 std::unique_ptr<QFile>
@@ -1310,16 +1690,16 @@ SecureCaptureDirectory::createTemporaryFile( QString& filePath ) const
             markDeleteByHandle( handle.get() );
             return {};
         }
-        const auto nativeHandle = handle.release();
         const auto descriptor = _open_osfhandle(
-            reinterpret_cast<intptr_t>( nativeHandle ), _O_BINARY | _O_RDWR );
+            reinterpret_cast<intptr_t>( handle.get() ), _O_BINARY | _O_RDWR );
         if ( descriptor < 0 ) {
-            CloseHandle( nativeHandle );
+            markDeleteByHandle( handle.get() );
             return {};
         }
+        handle.release();
 #else
         const auto encodedName = QFile::encodeName( fileName );
-        const auto descriptor = ::openat(
+        const auto descriptor = createRelative(
             impl_->directoryFd, encodedName.constData(),
             O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600 );
         if ( descriptor < 0 ) {
@@ -1333,6 +1713,7 @@ SecureCaptureDirectory::createTemporaryFile( QString& filePath ) const
         if ( !file->open( descriptor, QIODevice::ReadWrite,
                           QFileDevice::AutoCloseHandle ) ) {
 #if defined( Q_OS_WIN )
+            markDescriptorDeleteOnClose( descriptor );
             _close( descriptor );
 #else
             ::close( descriptor );
@@ -1354,7 +1735,7 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
     }
 #if defined( Q_OS_WIN )
     auto source = openExistingRegularFileNoFollow(
-        impl_->directoryHandle.get(), temporaryName, RenameDeleteAccess );
+        impl_->directoryHandle.get(), temporaryName, PublishRenameAccess );
     if ( !source.valid() || !isCurrentPath() ) {
         return PublishResult::Error;
     }
@@ -1404,7 +1785,8 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
 #endif
 }
 
-bool SecureCaptureDirectory::removeFile( const QString& filePath ) const
+bool SecureCaptureDirectory::removeFile(
+    const QString& filePath, const QString& expectedIdentity ) const
 {
     const auto fileName = leafNameForPath( impl_->path, filePath );
     if ( fileName.isEmpty() ) {
@@ -1414,43 +1796,204 @@ bool SecureCaptureDirectory::removeFile( const QString& filePath ) const
     if ( !impl_->directoryHandle.valid() ) {
         return false;
     }
+    // Prefer the public name so the common case also proves the directory is
+    // still where callers expect it. If the name is missing or now identifies
+    // a successor directory, fall back to the bound handle: it pins the
+    // original directory object, so child operations relative to it still
+    // target the generation this object owns (POSIX descriptor parity) and
+    // can never reach the successor.
+    auto publicRoot = openExistingDirectoryNoFollow(
+        impl_->parentHandle.get(), impl_->leafName, TreeDeleteAccess, nullptr,
+        ShareWithoutDelete );
+    HANDLE rootHandle = impl_->directoryHandle.get();
+    ScopedHandle rootGuard;
+    if ( publicRoot.valid()
+         && sameFileIdentity( publicRoot.get(),
+                              impl_->directoryHandle.get() ) ) {
+        rootGuard = std::move( publicRoot );
+        rootHandle = rootGuard.get();
+    } else {
+        // Do not pin a successor directory (or linger on a failed open)
+        // while the bound generation is serviced through its own handle.
+        publicRoot.reset();
+    }
+    const auto pendingDeletion
+        = impl_->pendingFileDeletions.find( fileName );
+    if ( pendingDeletion != impl_->pendingFileDeletions.end() ) {
+        nt::Status currentStatus = nt::StatusSuccess;
+        auto current = openExistingRegularFileNoFollow(
+            rootHandle, fileName,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0, &currentStatus,
+            nullptr, ShareAll );
+        if ( !current.valid() ) {
+            if ( isMissingStatus( currentStatus ) ) {
+                impl_->pendingFileDeletions.erase( pendingDeletion );
+                return true;
+            }
+            return false;
+        }
+        const auto currentIdentity = identityKeyForHandle( current.get() );
+        if ( currentIdentity.isEmpty() ) {
+            return false;
+        }
+        if ( currentIdentity != pendingDeletion.value() ) {
+            // The disposition-bound original is gone and this name now owns a
+            // successor, so the old retirement is complete. Do not stop here:
+            // the caller may have asked to retire exactly this successor
+            // (expectedIdentity matches the current occupant). Fall through
+            // to the regular path so it applies the same expectedIdentity
+            // checks as POSIX instead of leaving a requested file behind.
+            impl_->pendingFileDeletions.erase( pendingDeletion );
+        } else {
+            // A successful open proves the object is not delete-pending: the
+            // original link disappeared and the same file record was linked
+            // back under this name. The retirement is identity-bound, so
+            // reapply the disposition instead of leaving the tombstone stuck
+            // forever.
+            current.reset();
+            nt::Status deleteStatus = nt::StatusSuccess;
+            auto deleteHandle = openExistingRegularFileNoFollow(
+                rootHandle, fileName, FileDeleteAccess, 0, &deleteStatus,
+                nullptr, ShareWithoutDelete );
+            if ( !deleteHandle.valid()
+                 || identityKeyForHandle( deleteHandle.get() )
+                        != pendingDeletion.value()
+                 || !isNamedChildStill( rootHandle, fileName,
+                                        deleteHandle.get() )
+                 || !markDeleteByHandle( deleteHandle.get(), rootHandle,
+                                        fileName ) ) {
+                return false;
+            }
+            deleteHandle.reset();
+
+            nt::Status remainingStatus = nt::StatusSuccess;
+            auto remaining = openExistingRegularFileNoFollow(
+                rootHandle, fileName,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0, &remainingStatus,
+                nullptr, ShareAll );
+            if ( !remaining.valid() ) {
+                if ( isMissingStatus( remainingStatus ) ) {
+                    impl_->pendingFileDeletions.erase( pendingDeletion );
+                    return true;
+                }
+                return false;
+            }
+            const auto remainingIdentity
+                = identityKeyForHandle( remaining.get() );
+            if ( remainingIdentity.isEmpty() ) {
+                return false;
+            }
+            if ( remainingIdentity != pendingDeletion.value() ) {
+                impl_->pendingFileDeletions.erase( pendingDeletion );
+                return true;
+            }
+            return false;
+        }
+    }
+
     nt::Status status = nt::StatusSuccess;
     auto handle = openExistingRegularFileNoFollow(
-        impl_->directoryHandle.get(), fileName, RenameDeleteAccess, 0,
-        &status );
+        rootHandle, fileName, FileDeleteAccess, 0, &status, nullptr,
+        ShareWithoutDelete );
     if ( !handle.valid() ) {
         return isMissingStatus( status );
     }
-    return isCurrentPath()
-           && isNamedChildStill( impl_->directoryHandle.get(), fileName,
-                                 handle.get() )
-           && markDeleteByHandle( handle.get() );
+    const auto deletedIdentity = identityKeyForHandle( handle.get() );
+    if ( deletedIdentity.isEmpty() ) {
+        return false;
+    }
+    if ( !expectedIdentity.isEmpty()
+         && deletedIdentity != expectedIdentity ) {
+        return true;
+    }
+    if ( !isNamedChildStill( rootHandle, fileName, handle.get() )
+         || !markDeleteByHandle( handle.get(), rootHandle, fileName ) ) {
+        return false;
+    }
+    handle.reset();
+
+    nt::Status remainingStatus = nt::StatusSuccess;
+    auto remaining = openExistingRegularFileNoFollow(
+        rootHandle, fileName,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE, 0, &remainingStatus,
+        nullptr, ShareAll );
+    if ( !remaining.valid() ) {
+        if ( isMissingStatus( remainingStatus ) ) {
+            return true;
+        }
+        impl_->pendingFileDeletions.insert( fileName, deletedIdentity );
+        return false;
+    }
+    const auto remainingIdentity = identityKeyForHandle( remaining.get() );
+    if ( remainingIdentity.isEmpty() ) {
+        impl_->pendingFileDeletions.insert( fileName, deletedIdentity );
+        return false;
+    }
+    if ( remainingIdentity != deletedIdentity ) {
+        return true;
+    }
+    impl_->pendingFileDeletions.insert( fileName, deletedIdentity );
+    return false;
 #else
     if ( impl_->directoryFd < 0 ) {
         return false;
     }
     const auto encodedName = QFile::encodeName( fileName );
-    return ::unlinkat( impl_->directoryFd, encodedName.constData(), 0 ) == 0
-           || errno == ENOENT;
+    struct stat namedInfo {};
+    if ( ::fstatat( impl_->directoryFd, encodedName.constData(), &namedInfo,
+                    AT_SYMLINK_NOFOLLOW ) != 0 ) {
+        return errno == ENOENT;
+    }
+    if ( !S_ISREG( namedInfo.st_mode ) ) {
+        return false;
+    }
+    if ( !expectedIdentity.isEmpty()
+         && identityKeyForStat( namedInfo ) != expectedIdentity ) {
+        return true;
+    }
+
+    const auto quarantineName = quarantineEntry(
+        impl_->directoryFd, encodedName, namedInfo,
+        QByteArrayLiteral( ".klogg-delete-" ) );
+    if ( !quarantineName ) {
+        return false;
+    }
+    if ( removeQuarantinedEntry( impl_->directoryFd, *quarantineName,
+                                 namedInfo ) ) {
+        return true;
+    }
+    restoreQuarantinedEntry( impl_->directoryFd, *quarantineName,
+                             encodedName, namedInfo );
+    return false;
 #endif
 }
 
 bool SecureCaptureDirectory::removeIfEmpty()
 {
-    if ( !isCurrentPath()
-         || !entryList( QDir::AllEntries | QDir::Hidden | QDir::System,
-                        QDir::NoSort )
-                 .isEmpty() ) {
+    if ( !isCurrentPath() ) {
         return false;
     }
 #if defined( Q_OS_WIN )
-    if ( !markDeleteByHandle( impl_->directoryHandle.get() ) ) {
+    auto guardedRoot = openCurrentDirectoryForDeletion(
+        impl_->parentHandle.get(), impl_->leafName,
+        impl_->directoryHandle.get() );
+    const auto entries = guardedRoot.valid()
+                             ? enumerateDirectory( guardedRoot.get() )
+                             : std::nullopt;
+    if ( !entries || !entries->empty()
+         || !markDeleteByHandle( guardedRoot.get() ) ) {
         return false;
     }
+    guardedRoot.reset();
     impl_->directoryHandle.reset();
     impl_->removed = true;
     return true;
 #else
+    if ( !entryList( QDir::AllEntries | QDir::Hidden | QDir::System,
+                     QDir::NoSort )
+              .isEmpty() ) {
+        return false;
+    }
     const auto publicName = QFile::encodeName( impl_->leafName );
     const auto quarantineName = quarantineBoundDirectory(
         impl_->parentFd, impl_->directoryFd, publicName );
@@ -1463,6 +2006,7 @@ bool SecureCaptureDirectory::removeIfEmpty()
         if ( !restoreQuarantinedDirectory(
                  impl_->parentFd, *quarantineName, publicName,
                  impl_->directoryFd ) ) {
+            impl_->invalidateBoundDirectory();
             return false;
         }
         impl_->leafName = QFile::decodeName( publicName );
@@ -1494,17 +2038,33 @@ bool SecureCaptureDirectory::removeIfEmpty()
 #endif
 }
 
+void SecureCaptureDirectory::failNextRecursiveRemovalForTesting()
+{
+    impl_->failNextRecursiveRemovalForTesting = true;
+}
+
+void SecureCaptureDirectory::setAfterRecursiveRemovalQuarantineCallbackForTesting(
+    std::function<void()> callback )
+{
+    impl_->afterRecursiveRemovalQuarantineCallbackForTesting
+        = std::move( callback );
+}
+
 bool SecureCaptureDirectory::removeRecursively()
 {
     if ( !isCurrentPath() ) {
         return false;
     }
 #if defined( Q_OS_WIN )
-    if ( !removeWindowsTreeContents( impl_->directoryHandle.get() )
-         || !isCurrentPath()
-         || !markDeleteByHandle( impl_->directoryHandle.get() ) ) {
+    auto guardedRoot = openCurrentDirectoryForDeletion(
+        impl_->parentHandle.get(), impl_->leafName,
+        impl_->directoryHandle.get() );
+    if ( !guardedRoot.valid()
+         || !removeWindowsTreeContents( guardedRoot.get() )
+         || !markDeleteByHandle( guardedRoot.get() ) ) {
         return false;
     }
+    guardedRoot.reset();
     impl_->directoryHandle.reset();
     impl_->removed = true;
     return true;
@@ -1521,6 +2081,7 @@ bool SecureCaptureDirectory::removeRecursively()
         if ( !restoreQuarantinedDirectory(
                  impl_->parentFd, *quarantineName, publicName,
                  impl_->directoryFd ) ) {
+            impl_->invalidateBoundDirectory();
             return false;
         }
         impl_->leafName = QFile::decodeName( publicName );
@@ -1528,7 +2089,18 @@ bool SecureCaptureDirectory::removeRecursively()
         return true;
     };
 
-    if ( !removeDirectoryContents( impl_->directoryFd ) ) {
+    auto afterQuarantineCallback = std::move(
+        impl_->afterRecursiveRemovalQuarantineCallbackForTesting );
+    impl_->afterRecursiveRemovalQuarantineCallbackForTesting = {};
+    if ( afterQuarantineCallback ) {
+        afterQuarantineCallback();
+    }
+
+    const auto failsRecursiveRemoval
+        = impl_->failNextRecursiveRemovalForTesting;
+    impl_->failNextRecursiveRemovalForTesting = false;
+    if ( failsRecursiveRemoval
+         || !removeDirectoryContents( impl_->directoryFd ) ) {
         restorePublicName();
         return false;
     }

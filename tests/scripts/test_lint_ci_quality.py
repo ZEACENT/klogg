@@ -203,16 +203,40 @@ steps:
       --filter '.*/src/.*'
       --filter '.*/src/.*'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 4)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 5)
 
         secure = """\
+env:
+  EVENT_NAME: ${{ github.event_name }}
 steps:
   - run: |
       cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
+      git fetch --no-tags origin "$base_sha"
+      git cat-file -e "$base_sha^{commit}"
+      echo "coverage ratchet base commit"
 """
         self.assertEqual(MODULE.coverage_workflow_issues(secure), [])
+
+    def test_coverage_ratchet_requires_the_authoritative_event_base(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "coverage.yml"
+        ).read_text()
+        self.assertNotIn(
+            "coverage ratchet must fail closed on the event base commit",
+            MODULE.coverage_workflow_issues(workflow),
+        )
+
+        insecure = workflow.replace(
+            'git fetch --no-tags origin "$base_sha"',
+            'base_sha=$(git rev-parse HEAD^ 2>/dev/null || true)',
+            1,
+        )
+        self.assertIn(
+            "coverage ratchet must fail closed on the event base commit",
+            MODULE.coverage_workflow_issues(insecure),
+        )
 
     def test_coverage_comments_cannot_spoof_scope_or_targets(self):
         workflow = """\
@@ -223,7 +247,7 @@ steps:
       # --filter '^src/'
       cmake --build build_root -t klogg_tests klogg_itests
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 4)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
 
     def test_inline_shell_comments_cannot_spoof_coverage_policy(self):
         workflow = """\
@@ -233,7 +257,7 @@ steps:
       true # --filter '^src/'
       true # --filter '^src/'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 4)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
 
     def test_coverage_noop_tokens_cannot_spoof_report_policy(self):
         workflow = """\
@@ -357,9 +381,45 @@ steps:
             workflow,
         )
 
-    def test_static_analysis_installs_crashpad_curl_dependency(self):
+    def test_static_analysis_installs_optional_dependency_build_tools(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
         self.assertIn("libcurl4-openssl-dev", workflow)
+        self.assertIn("ragel", workflow)
+
+    def test_static_analysis_uses_reusable_changed_line_runner(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertIn("python3 scripts/run_changed_clang_tidy.py", workflow)
+        self.assertIn("--base '${{ github.event.pull_request.base.sha }}'", workflow)
+        self.assertIn('--build-dir "$KLOGG_BUILD_ROOT"', workflow)
+        self.assertIn('--clang-tidy-diff "$CLANG_TIDY_DIFF"', workflow)
+
+    def test_static_analysis_rejects_masked_report_only_tool_failures(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        mutated = workflow.replace(
+            "' _ < tidy_files.nul\n",
+            "' _ < tidy_files.nul || true\n",
+            1,
+        )
+        self.assertIn(
+            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
+            MODULE.static_analysis_workflow_issues(mutated),
+        )
+
+    def test_static_analysis_rejects_duplicate_runner_options(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        mutated = workflow.replace(
+            "--jobs \"$(nproc)\"",
+            "--jobs \"$(nproc)\" --base HEAD",
+            1,
+        )
+        self.assertIn(
+            "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
+            MODULE.static_analysis_workflow_issues(mutated),
+        )
 
     def test_static_analysis_uses_only_configured_first_party_units(self):
         insecure = """\
@@ -380,27 +440,44 @@ steps:
 
         secure = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertEqual(MODULE.static_analysis_workflow_issues(secure), [])
+
+    def test_static_analysis_configures_vectorscan_production_code(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        self.assertIn("-DKLOGG_USE_VECTORSCAN=ON", workflow)
+        self.assertNotIn("-DKLOGG_USE_VECTORSCAN=OFF", workflow)
+
+        insecure = workflow.replace(
+            "-DKLOGG_USE_VECTORSCAN=ON",
+            "-DKLOGG_USE_VECTORSCAN=OFF",
+            1,
+        )
+        self.assertIn(
+            "static analysis must configure optional Vectorscan production code",
+            MODULE.static_analysis_workflow_issues(insecure),
+        )
 
     def test_static_analysis_sentry_flag_must_belong_to_the_real_configure(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
       cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT"
-      cmake -DKLOGG_USE_SENTRY=ON -P verify_sentry.cmake
+      cmake -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -P verify_sentry.cmake
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertIn(
             "static analysis must configure optional Sentry production code",
@@ -410,10 +487,10 @@ steps:
     def test_static_analysis_requires_nul_consumers_for_the_tu_list(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -n 1 clang-tidy < tidy_files.nul
 """
@@ -429,7 +506,7 @@ steps:
   - run: |
       echo "python3 scripts/first_party_compile_units.py db src > tidy_files.txt"
       find src -type f -name '*.cpp' > tidy_files.txt
-      cmake -S . -B build -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_SENTRY=OFF
+      cmake -S . -B build -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DKLOGG_USE_SENTRY=OFF
 """
         issues = MODULE.static_analysis_workflow_issues(workflow)
         self.assertIn(
@@ -444,10 +521,10 @@ steps:
     def test_static_analysis_rejects_wrong_scope_and_fake_consumers(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py wrong.json src/ui --null > tidy_files.nul
       xargs -0 -n 1 echo clang-tidy < tidy_files.nul
       xargs -0 -n 1 bash -c 'echo clang-tidy "$1" || exit 0' _ < tidy_files.nul || true
@@ -465,10 +542,10 @@ steps:
     def test_static_analysis_consumers_must_forward_each_tu_to_clang_tidy(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" src/benign.cpp' _ < tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" src/benign.cpp || exit 0' _ < tidy_files.nul || true
@@ -505,10 +582,10 @@ steps:
             with self.subTest(strict_consumer=strict_consumer):
                 workflow = f"""\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       {strict_consumer}
       {report_consumer}
@@ -521,12 +598,12 @@ steps:
     def test_static_analysis_requires_the_strict_pr_consumer(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertIn(
             "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
@@ -536,13 +613,13 @@ steps:
     def test_static_analysis_strict_consumer_must_propagate_exit_status(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"; exit 0' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertIn(
             "clang-tidy TU scope must use NUL-delimited strict and report-only consumers",
@@ -552,14 +629,14 @@ steps:
     def test_static_analysis_rejects_later_sentry_reconfigure_override(self):
         workflow = """\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       cmake -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=OFF
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertIn(
             "static analysis must configure optional Sentry production code",
@@ -582,14 +659,14 @@ steps:
             with self.subTest(reconfigure=reconfigure):
                 workflow = f"""\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       {reconfigure}
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
                 self.assertIn(
                     "static analysis must configure optional Sentry production code",
@@ -601,13 +678,13 @@ steps:
             with self.subTest(false_value=false_value):
                 workflow = f"""\
 env:
-  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+  KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_SENTRY={false_value}
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DKLOGG_USE_SENTRY={false_value}
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
                 self.assertIn(
                     "static analysis must configure optional Sentry production code",
@@ -618,13 +695,13 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1" || exit 0' _ < tidy_files.nul || true
+      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
 """
         self.assertIn(
-            "static analysis must use a Sentry-specific CPM cache key",
+            "static analysis must use a Sentry-and-Vectorscan-specific CPM cache key",
             MODULE.static_analysis_workflow_issues(workflow),
         )
 

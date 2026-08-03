@@ -118,17 +118,28 @@ jobs:
       - name: Enforce coverage ratchet
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          base_sha="$PR_BASE_SHA"
+          case "$EVENT_NAME" in
+            pull_request) base_sha="$PR_BASE_SHA" ;;
+            push) base_sha="$PUSH_BASE_SHA" ;;
+            workflow_dispatch) base_sha=$(git rev-parse HEAD^ 2>/dev/null || true) ;;
+            *) echo "::error::unsupported coverage ratchet event: $EVENT_NAME"; exit 1 ;;
+          esac
+
           if [ -z "$base_sha" ] || [[ "$base_sha" =~ ^0+$ ]]; then
-            base_sha="$PUSH_BASE_SHA"
+            echo "::error::coverage ratchet base is unavailable for $EVENT_NAME"
+            exit 1
           fi
-          if [ -z "$base_sha" ] || [[ "$base_sha" =~ ^0+$ ]] \
-             || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
-            base_sha=$(git rev-parse HEAD^ 2>/dev/null || true)
+          if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base_sha"
+          fi
+          if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            echo "::error::coverage ratchet base commit $base_sha is unavailable"
+            exit 1
           fi
 
           args=(
@@ -136,9 +147,7 @@ jobs:
             --line-floor .github/baselines/coverage-line.txt
             --branch-floor .github/baselines/coverage-branch.txt
           )
-          if [ -n "$base_sha" ]; then
-            args+=(--base-sha "$base_sha")
-          fi
+          args+=(--base-sha "$base_sha")
           python3 scripts/enforce_coverage_ratchet.py "${args[@]}"
 
       - name: Upload coverage report

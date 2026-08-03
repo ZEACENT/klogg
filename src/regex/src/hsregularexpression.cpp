@@ -363,9 +363,10 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         LOG_WARNING << "Cpu doesn't have sse2 or ssse3, use qt regex engine";
     }
 
-    auto allocScratchForDb = []( const hs_database_t* db ) -> hs_scratch_t* {
+    auto allocScratchForDb
+        = []( const hs_database_t* database ) -> hs_scratch_t* {
         hs_scratch_t* scratch = nullptr;
-        const auto scratchResult = hs_alloc_scratch( db, &scratch );
+        const auto scratchResult = hs_alloc_scratch( database, &scratch );
         if ( scratchResult != HS_SUCCESS ) {
             LOG_ERROR << "Failed to allocate scratch";
             return nullptr;

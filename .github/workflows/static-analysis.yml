@@ -59,7 +59,7 @@ jobs:
       KLOGG_BUILD_ROOT: build_root
       # Sentry/Crashpad expands the CPM dependency set. Keep this cache mutable
       # independently from the smaller default profile used by Coverage.
-      KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry
+      KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -71,7 +71,7 @@ jobs:
       - name: Install gcc-13, clang-tidy and cppcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck libcurl4-openssl-dev libxkbcommon-dev libxkbcommon-x11-dev
+          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck ragel libcurl4-openssl-dev libxkbcommon-dev libxkbcommon-x11-dev
           tidy_diff=$(command -v clang-tidy-diff || true)
           if [ -z "$tidy_diff" ]; then
             tidy_diff=$(command -v clang-tidy-diff-18.py || true)
@@ -101,22 +101,31 @@ jobs:
             # A mixed PR must run both passes so a changed header included only by
             # unchanged translation units cannot bypass analysis.
             BASE='${{ github.event.pull_request.base.sha }}'
-            git config core.quotePath false
-            mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE" HEAD -- src/)
+            changed_paths_file=$(mktemp)
+            trap 'rm -f "$changed_paths_file"' EXIT
+            if ! git -c core.quotePath=false diff --name-only -z "$BASE" HEAD -- src/ \
+                 > "$changed_paths_file"; then
+              echo "::error::failed to discover changed C/C++ analysis paths"
+              exit 1
+            fi
+            mapfile -d '' -t changed_paths < "$changed_paths_file"
             source_count=0
             header_count=0
             for file in "${changed_paths[@]}"; do
-              if [[ "$file" == *$'\n'* || "$file" == *$'\r'* || "$file" == *$'\t'* \
-                    || "$file" == *'"'* || "$file" == *'\'* ]]; then
+              if [[ "$file" == *[[:cntrl:]]* || "$file" == *'"'* || "$file" == *'\'* ]]; then
                 echo "::error file=$file::C/C++ analysis does not support quoted/control characters in paths"
                 exit 1
               fi
-              case "$file" in
+              case "${file,,}" in
                 *.c|*.cc|*.cpp|*.cxx) ((source_count+=1)) ;;
                 *.h|*.hh|*.hpp|*.hxx) ((header_count+=1)) ;;
               esac
             done
-            git diff -U0 "$BASE" HEAD -- src/ > tidy_patch.diff
+            if ! git -c core.quotePath=false diff -U0 "$BASE" HEAD -- src/ \
+                 > tidy_patch.diff; then
+              echo "::error::failed to build the changed-line analysis patch"
+              exit 1
+            fi
             echo "source_count=$source_count" >> "$GITHUB_OUTPUT"
             echo "header_count=$header_count" >> "$GITHUB_OUTPUT"
             header_lines=false
@@ -152,7 +161,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DKLOGG_BUILD_TESTS=ON \
-            -DKLOGG_USE_VECTORSCAN=OFF \
+            -DKLOGG_USE_VECTORSCAN=ON \
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_USE_SENTRY=ON \
             -DKLOGG_GENERIC_CPU=ON \
@@ -181,107 +190,25 @@ jobs:
         run: |
           set -u
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # CHANGED-LINES-ONLY: clang-tidy-diff feeds clang-tidy the TUs
-            # touched by the patch (tidy_patch.diff on stdin) plus a --line-filter
-            # built from the diff hunks, so clang-tidy reports ONLY diagnostics
-            # on added lines -- pre-existing style findings on unchanged lines
-            # (and findings in transitively-included headers) never fail the
-            # gate. Notes for the LLVM 18 clang-tidy-diff script discovered
-            # from Ubuntu's versioned LLVM package:
-            #   -p 1                strip git's leading "b/" diff prefix so paths
-            #                       match compile_commands.json entries;
-            #   -path <build_root>  the compile_commands.json dir (NOT -p, which
-            #                       in this tool strips diff-path prefixes);
-            #   -iregex             restrict the run to compilation units (skip
-            #                       standalone headers, which lack TU flags);
-            #   -extra-arg          absorb gcc-specific -W flags in the DB.
-            # clang-tidy-diff has NO --warnings-as-errors flag, and its exit code
-            # only reflects clang-tidy PROCESS failures, so the filtered stdout
-            # (" warning:" / " error:" per finding) is the gate signal.
-            echo "::group::clang-tidy (changed lines only)"
-            : > tidy_diff_out.txt
-            tidy_status=0
-
-            if [ "${{ steps.targets.outputs.source_count }}" -gt 0 ]; then
-              set +e
-              python3 "$CLANG_TIDY_DIFF" \
-                -p 1 \
-                -path "$KLOGG_BUILD_ROOT" \
-                -iregex '.*\.(c|cc|cpp|cxx)$' \
-                -extra-arg=-Wno-unknown-warning-option \
-                -quiet \
-                < tidy_patch.diff > tidy_source_out.txt 2>&1
-              source_status=$?
-              set -e
-              cat tidy_source_out.txt >> tidy_diff_out.txt
-              if [ "$source_status" -ne 0 ]; then
-                tidy_status=$source_status
-              fi
-            fi
-
-            if [ "${{ steps.targets.outputs.header_lines }}" = "true" ]; then
-              export KLOGG_BUILD_ROOT
-              TIDY_LINE_FILTER=$(cat tidy_header_filter.json)
-              export TIDY_LINE_FILTER
-              set +e
-              xargs -0 -P "$(nproc)" -n 1 bash -c '
-                clang-tidy -p "$KLOGG_BUILD_ROOT" \
-                  --line-filter="$TIDY_LINE_FILTER" \
-                  --extra-arg=-Wno-unknown-warning-option \
-                  "$1"
-              ' _ < tidy_files.nul > tidy_header_out.txt 2>&1
-              header_status=$?
-              set -e
-              cat tidy_header_out.txt >> tidy_diff_out.txt
-              if [ "$header_status" -ne 0 ]; then
-                tidy_status=$header_status
-              fi
-            elif [ "${{ steps.targets.outputs.header_count }}" -gt 0 ]; then
-              echo "clang-tidy: changed headers contain no added lines; header pass is empty." \
-                >> tidy_diff_out.txt
-            fi
-            echo "::endgroup::"
-            cat tidy_diff_out.txt
-            if [ "$tidy_status" -ne 0 ] || grep -q '^Error while processing ' tidy_diff_out.txt; then
-              echo "::error::clang-tidy failed to analyze one or more translation units"
-              exit 1
-            fi
-            # Defensive post-filter: clang-tidy-diff is patch-driven, but its
-            # file detection can occasionally surface a finding in a TU that is
-            # NOT in this PR's real diff (a pre-existing issue in an unrelated
-            # file). Re-derive the exact set of src/ files this PR changed and
-            # fail ONLY on findings whose path matches one of them, so the gate
-            # is strict on this PR's new code and blind to pre-existing leaks.
-            BASE='${{ github.event.pull_request.base.sha }}'
-            mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE" HEAD -- src/)
-            new_findings=""
-            for file in "${changed_paths[@]}"; do
-              case "$file" in
-                *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
-                  matches=$(grep -F "$file:" tidy_diff_out.txt \
-                    | grep -E ' (warning|error):' || true)
-                  if [ -n "$matches" ]; then
-                    new_findings+="$matches"$'\n'
-                  fi
-                  ;;
-              esac
-            done
-            if [ -n "$new_findings" ]; then
-              echo "::error::clang-tidy reported issues on this PR's changed files:"
-              echo "$new_findings"
-              exit 1
-            fi
-            echo "clang-tidy-diff: clean (no issues on this PR's changed src/ files)."
+            # Use the same PR-base-aware changed-line gate locally and in CI.
+            # The helper runs clang-tidy-diff for changed source files, analyzes
+            # added header lines through every configured first-party TU, and
+            # fails only for diagnostics in this PR's changed src/ paths.
+            python3 scripts/run_changed_clang_tidy.py \
+              --base '${{ github.event.pull_request.base.sha }}' \
+              --build-dir "$KLOGG_BUILD_ROOT" \
+              --clang-tidy-diff "$CLANG_TIDY_DIFF" \
+              --jobs "$(nproc)"
           else
-            # Full src/ audit on push-to-master / workflow_dispatch, NON-FATAL
-            # (report-only): clang-tidy runs WITHOUT --warnings-as-errors, so
-            # findings surface in the log but never block the branch.
+            # Full src/ audit on push-to-master / workflow_dispatch is
+            # report-only for diagnostics because warnings-as-errors is absent,
+            # but compiler/configuration/tool failures still fail the job.
             export KLOGG_BUILD_ROOT
             xargs -0 -P "$(nproc)" -n 1 bash -c '
               clang-tidy -p "$KLOGG_BUILD_ROOT" \
-                --extra-arg=-Wno-unknown-warning-option "$1" || exit 0
-            ' _ < tidy_files.nul || true
-            echo "clang-tidy: full src/ audit complete (report-only, non-fatal)."
+                --extra-arg=-Wno-unknown-warning-option "$1"
+            ' _ < tidy_files.nul
+            echo "clang-tidy: full src/ audit complete (findings report-only)."
           fi
 
       - name: Run cppcheck (warning+style over src/)
@@ -306,11 +233,18 @@ jobs:
             # in UNCHANGED files -- e.g. a redundantInitialization false positive
             # in styles.cpp's theme logic -- don't block the gate. New issues in
             # touched files are still caught (the whole changed TU is checked).
-            mapfile -d '' -t changed_paths < <(git diff --name-only -z "$BASE" HEAD -- src/)
+            changed_paths_file=$(mktemp)
+            trap 'rm -f "$changed_paths_file"' EXIT
+            if ! git -c core.quotePath=false diff --name-only -z "$BASE" HEAD -- src/ \
+                 > "$changed_paths_file"; then
+              echo "::error::failed to discover changed cppcheck paths"
+              exit 1
+            fi
+            mapfile -d '' -t changed_paths < "$changed_paths_file"
             changed_src=()
             changed_headers=()
             for file in "${changed_paths[@]}"; do
-              case "$file" in
+              case "${file,,}" in
                 *.c|*.cc|*.cpp|*.cxx) changed_src+=("$file") ;;
                 *.h|*.hh|*.hpp|*.hxx) changed_headers+=("$file") ;;
               esac
@@ -323,8 +257,10 @@ jobs:
               echo "cppcheck: changed header present; checking all first-party src/ TUs."
               CC_PROJECT=/tmp/cc_src.json
             else
-              printf '%s\n' "${changed_src[@]}" > /tmp/changed_src.txt
-              python3 -c "import json,sys; changed=[l.strip() for l in open('/tmp/changed_src.txt') if l.strip()]; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if any(g(e).endswith(c) for c in changed)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)} changed src/ TUs')" /tmp/cc_src.json /tmp/cc_changed.json
+              printf '%s\0' "${changed_src[@]}" > /tmp/changed_src.nul
+              python3 scripts/filter_compile_database.py \
+                /tmp/cc_src.json "$KLOGG_WORKSPACE" \
+                /tmp/changed_src.nul /tmp/cc_changed.json
               CC_PROJECT=/tmp/cc_changed.json
             fi
             CC_EXTRA="--error-exitcode=1"

@@ -14,11 +14,29 @@ ADB_LOGCAT_SOURCE = ROOT / "src" / "ui" / "src" / "adblogcatsource.cpp"
 SESSION_SOURCE = ROOT / "src" / "ui" / "src" / "session.cpp"
 QUICKFIND_HEADER = ROOT / "src" / "ui" / "include" / "quickfind.h"
 QUICKFIND_SOURCE = ROOT / "src" / "ui" / "src" / "quickfind.cpp"
+FILEWATCHER_SOURCE = ROOT / "src" / "filewatch" / "src" / "filewatcher.cpp"
+EFSW_INOTIFY_TEST = ROOT / "tests" / "unit" / "efsw_inotify_test.cpp"
+APP_MAIN = ROOT / "src" / "app" / "main.cpp"
+UNIT_TEST_MAIN = ROOT / "tests" / "unit" / "tests_main.cpp"
+UI_TEST_MAIN = ROOT / "tests" / "ui" / "qtests_main.cpp"
 
 
 def function_body(source, signature):
     start = source.index(signature)
-    opening_brace = source.index("{", start)
+    # The body opens at the first "{" that is either alone on its line
+    # (Allman style) or directly follows the parameter list (K&R). Brace
+    # pairs inside the declaration (for example "= {}" default arguments)
+    # satisfy neither condition.
+    opening_brace = start
+    while True:
+        opening_brace = source.index("{", opening_brace)
+        line_start = source.rfind("\n", 0, opening_brace) + 1
+        if (
+            source[line_start:opening_brace].strip() == ""
+            or source[start:opening_brace].rstrip().endswith(")")
+        ):
+            break
+        opening_brace += 1
     depth = 0
     for position in range(opening_brace, len(source)):
         if source[position] == "{":
@@ -31,6 +49,99 @@ def function_body(source, signature):
 
 
 class StaticAnalysisRegressionTest(unittest.TestCase):
+    def test_filewatch_executor_contains_callback_exceptions(self):
+        source = FILEWATCHER_SOURCE.read_text()
+        runner = function_body(source, "    void run()")
+        callback = function_body(source, "    void handleFileAction(")
+        deleter = function_body(
+            source, "void EfswFileWatcherDeleter::operator()"
+        )
+
+        self.assertRegex(
+            runner,
+            re.compile(
+                r"try\s*\{\s*task\(\);\s*\}\s*"
+                r"catch \( const std::exception& error \)"
+            ),
+        )
+        self.assertIn("catch ( ... )", runner)
+        self.assertIn(
+            "NOLINTNEXTLINE(bugprone-exception-escape)", callback
+        )
+        self.assertIn(
+            "NOLINTNEXTLINE(cppcoreguidelines-owning-memory)", deleter
+        )
+
+    def test_efsw_listener_outlives_native_watcher_on_assertion_failure(self):
+        source = EFSW_INOTIFY_TEST.read_text()
+
+        guard = source[
+            source.index("class WatcherResetGuard") :
+            source.index("class RemovingListener")
+        ]
+        self.assertIn("~WatcherResetGuard()", guard)
+        self.assertIn("watcher_.reset();", guard)
+        self.assertEqual(
+            source.count("WatcherResetGuard stopWatcher{ watcher };"), 2
+        )
+
+    def test_capturestore_retries_terminal_gate_timeouts_and_foreign_readers(self):
+        source = CAPTURESTORE_SOURCE.read_text()
+        activation = function_body(source, "std::optional<ActivationResult> activate()")
+        deactivation = function_body(
+            source, "    void deactivate( const QByteArray& activationToken )"
+        )
+        release = function_body(
+            source, "void CaptureStore::CapturePathState::releaseRetiredFile"
+        )
+        retry = function_body(
+            source,
+            "void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistryGateHeld",
+        )
+        cleanup = function_body(
+            source, "void CaptureStore::cleanupCaptureCandidates("
+        )
+        scheduler = function_body(
+            source,
+            "void CaptureStore::CapturePathState::scheduleRetry( bool force )",
+        )
+        retryable = function_body(
+            source,
+            "bool CaptureStore::CapturePathState::hasRetryableMaintenance() const",
+        )
+        directory_removal = function_body(
+            source, "    void removeDirectoryIfRequestedAndEmptyGateHeld()"
+        )
+
+        self.assertIn("QFile::remove( activeMarkerPath() )", activation)
+        self.assertIn("activeStoreTokens_.remove( activationToken )", deactivation)
+        self.assertIn("processMarker_.reset()", deactivation)
+        self.assertIn("scheduleRetry()", deactivation)
+        self.assertIn("scheduleRetry()", release)
+        self.assertIn("hasActiveProcessMarker()", release)
+        self.assertIn("hasActiveProcessMarker()", retry)
+        self.assertIn("directory_.isRemoved()", cleanup)
+        self.assertIn("fileLeases_.value( retired.key() ).expired()", retryable)
+        self.assertIn("activeStoreTokens_.isEmpty()", retryable)
+        self.assertLess(
+            scheduler.index("!state->hasPendingGateRetry()"),
+            scheduler.index("std::this_thread::sleep_for"),
+        )
+        self.assertIn("gateRetryRequestEpoch_.fetch_add", scheduler)
+        self.assertIn("gateRetryCompletedEpoch_.store", scheduler)
+        self.assertIn("CaptureRetryAttemptLimit", scheduler)
+        self.assertIn("CaptureRetryInitialDelay", scheduler)
+        self.assertIn("CaptureRetryMaximumDelay", scheduler)
+        self.assertIn("retryDelay * 2", scheduler)
+        self.assertIn("newRetryRequestArrived", scheduler)
+        self.assertIn("registerCaptureBackgroundThread()", scheduler)
+        self.assertNotIn("QCoreApplication::closingDown()", scheduler)
+        self.assertIn("qAddPostRoutine( stopCaptureBackgroundThreads )", source)
+        self.assertIn("directory_.hasEntries()", directory_removal)
+        self.assertIn("cancelDirectoryDeletionLocked()", directory_removal)
+        self.assertNotIn("hasPendingMaintenance", source)
+        self.assertNotIn("pendingDeactivationTokens_", source)
+
     def test_capturestore_widens_before_next_index_arithmetic(self):
         source = CAPTURESTORE_SOURCE.read_text()
         self.assertNotIn(
@@ -60,9 +171,12 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         ]
         unlock_position = method.index("// mutex released")
         file_read_position = method.index(
-            "QFile file( read.spilledFile->path() )"
+            "auto file = read.spilledFile->openForRead()"
         )
-        self.assertNotIn("QFile file(", method[:unlock_position])
+        self.assertNotIn("openForRead()", method[:unlock_position])
+        self.assertNotIn(
+            "QFile file( read.spilledFile->path() )", method
+        )
         self.assertIn(
             "read.spilledFile = segIt->spilledFile;",
             method[:unlock_position],
@@ -98,7 +212,13 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("compare_exchange_weak", source)
         self.assertNotIn("nextSegmentId_ = 0", loader)
         self.assertIn("capturePathState_->mutex_", loader)
-        self.assertIn("std::sort( segmentFiles.begin()", loader)
+        self.assertRegex(
+            loader,
+            re.compile(
+                r"std::sort\(\s*segmentFiles\.begin\(\),\s*"
+                r"segmentFiles\.end\(\),"
+            ),
+        )
         self.assertIn("scanSegment( segment )", loader)
         self.assertIn(
             "spilledFile->retire( capturePathActivationToken_ );",
@@ -111,11 +231,18 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("localProcessGeneration_", source)
         self.assertIn("CaptureProcessFileOwnership", source)
         self.assertIn("processFileOwnership_", source)
-        self.assertIn("ownedFilePaths", source)
+        self.assertIn("ownedFiles", source)
+        self.assertNotIn("ownedFilePaths", source)
+        self.assertIn("trackedFileKey", source)
+        self.assertIn("struct TrackedFile", source)
+        self.assertIn("pendingRetirementFiles_", source)
+        self.assertIn("retiredFiles_", source)
+        self.assertNotIn("pendingRetirementIdentities_", source)
+        self.assertNotIn("retiredFileIdentities_", source)
         self.assertIn("registerCreatedFile", source)
         self.assertIn("transferCreatedFile", source)
         self.assertIn("tryRetireOwnedFile", source)
-        self.assertNotIn("ownedFilePaths", loader)
+        self.assertNotIn("ownedFiles", loader)
         self.assertNotIn("snapshotInheritedCaptureFiles", source)
         self.assertNotIn("relocateRetiredFilesForReplacement", source)
         self.assertIn("QLockFile", source)
@@ -134,28 +261,43 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("captureCoordinationStem( registryKey_ )", source)
         self.assertIn("terminallyRemoved_", source)
         self.assertIn("retainedRegistryKeys", source)
-        self.assertIn("finalizeRemovedGenerationLocked", source)
+        self.assertIn("finalizeRemovedGenerationGateHeldLocked", source)
         self.assertIn("directoryDeletionGeneration_", source)
         self.assertIn("directoryDeletionRequesterToken_", source)
         self.assertIn("activeStoreTokens_", source)
         self.assertIn("pendingRetirementRequesters_", source)
         self.assertIn("RetireResult::Deferred", source)
         self.assertIn("notifyOnRelease_", source)
+        self.assertIn("retiredFiles_", source)
+        self.assertIn("pendingRetirementFiles_", source)
+        self.assertIn("fileIdentity", source)
+        self.assertIn("identity_", source)
         self.assertIn("promotePendingRetirementsLocked", source)
-        self.assertIn("pendingDeactivationTokens_", source)
-        self.assertIn("applyPendingDeactivationsLocked", source)
+        self.assertNotIn("pendingDeactivationTokens_", source)
+        self.assertNotIn("applyPendingDeactivationsLocked", source)
+        self.assertNotIn(
+            "activeStoreTokens_.remove( activationToken ) > 0", source
+        )
+        self.assertIn("processMarker_.reset();", source)
+        self.assertIn("removeProcessGeneration();", source)
         self.assertNotIn("lockUntilAcquired", source)
         self.assertIn("removeDirectoryIfRequestedAndEmptyGateHeld", source)
         self.assertIn("retryRetiredFilesAndReleaseRegistryGateHeld", source)
         self.assertIn(
             "processGeneration() != directoryDeletionGeneration_", source
         )
-        self.assertIn("ownedFilePaths.insert( fileName )", source)
+        self.assertIn("ownedFiles.insert( fileName, fileIdentity )", source)
         self.assertNotIn("rebindOrCreate", source)
         self.assertNotIn("pathRegistry.entries[ path ]", source)
         self.assertNotIn("QTemporaryFile temporaryFile", source)
         self.assertNotIn("QFile::rename( temporaryPath, segment.filePath )", source)
         self.assertIn("catch ( const std::exception& error )", destructor)
+        self.assertNotIn(
+            "retryRetiredFilesAndReleaseRegistry();", destructor
+        )
+        self.assertNotIn(
+            "retryRetiredFilesAndReleaseRegistry();", delete_files
+        )
         self.assertLess(
             appender.index("ensureSegmentIdsAvailable"),
             appender.index("persistBufferedSegmentsOnDestroy_ = true"),
@@ -169,6 +311,57 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         for method in ( clear, trim, delete_files ):
             self.assertNotIn("capturePathState_->mutex_", method)
             self.assertIn("retiredLeases", method)
+
+    def test_marker_scan_rechecks_incoherent_record_before_removal(self):
+        source = CAPTURESTORE_SOURCE.read_text()
+        marker_scan = function_body(source, "bool hasActiveProcessMarker")
+
+        # QLockFile creates the marker O_EXCL and writes the pid record in a
+        # separate step, so a live sibling can briefly own a marker whose
+        # record is unreadable or names another pid. The scan must re-read
+        # the record through a bounded grace window before removing; only a
+        # marker that stays incoherent is treated as abandoned. Removing on
+        # first sight orphans a mid-creation sibling, while keeping it
+        # unconditionally lets pid-reuse leftovers block cleanup forever
+        # (pinned by the unlocked-foreign-pid unit tests).
+        self.assertIn("lockInfoAvailable", marker_scan)
+        grace = marker_scan.index("MarkerRecordGraceMs")
+        self.assertIn("getLockInfo", marker_scan[grace:])
+        self.assertLess(grace, marker_scan.index("QFile::remove", grace))
+
+    def test_async_capture_cleanup_collects_and_handles_failures_off_thread(self):
+        source = CAPTURESTORE_SOURCE.read_text()
+        scheduler = function_body(
+            source, "void CaptureStore::scheduleCleanupUnusedCaptures("
+        )
+
+        self.assertLess(
+            scheduler.index("std::thread"),
+            scheduler.index("collectUnusedCaptureCandidates"),
+        )
+        self.assertGreaterEqual(
+            scheduler.count("catch ( const std::exception& error )"), 2
+        )
+        self.assertGreaterEqual(scheduler.count("catch ( ... )"), 2)
+        self.assertIn("registerCaptureBackgroundThread()", scheduler)
+        self.assertIn("CaptureBackgroundThreadRegistration registration", scheduler)
+        self.assertIn("captureBackgroundThreadsStopping()", scheduler)
+        self.assertIn("rootPath, 0, shouldStop", scheduler)
+        self.assertIn("preserveModifiedAfter, {}, 0,", scheduler)
+
+    def test_capture_background_workers_stop_before_qt_teardown(self):
+        header = CAPTURESTORE_HEADER.read_text()
+        source = CAPTURESTORE_SOURCE.read_text()
+
+        self.assertIn("static void shutdownBackgroundWorkers();", header)
+        self.assertIn("std::condition_variable stopped;", source)
+        self.assertIn("tracker.stopped.wait", source)
+        self.assertIn("stopCaptureBackgroundThreads();", source)
+        for entry_point in (APP_MAIN, UNIT_TEST_MAIN, UI_TEST_MAIN):
+            self.assertIn(
+                "CaptureStore::shutdownBackgroundWorkers();",
+                entry_point.read_text(),
+            )
 
     def test_live_capture_ids_are_validated_and_fail_closed(self):
         header = CAPTURESTORE_HEADER.read_text()
@@ -198,6 +391,129 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("catch ( const std::exception& error )", opener)
         self.assertGreaterEqual(opener.count("return nullptr;"), 2)
 
+    def test_windows_tombstone_mismatch_falls_through_to_expected_identity(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        remove_file = function_body(
+            source, "bool SecureCaptureDirectory::removeFile"
+        )
+
+        # A tombstone whose recorded identity no longer matches the current
+        # occupant is complete, but the caller may have asked to retire
+        # exactly that occupant. The mismatch branch must erase the tombstone
+        # and fall through to the regular expectedIdentity path (POSIX
+        # parity) instead of returning without deleting a requested file.
+        mismatch = remove_file.index(
+            "currentIdentity != pendingDeletion.value()"
+        )
+        branch = remove_file[mismatch : mismatch + 900]
+        self.assertIn("} else {", branch)
+        self.assertNotIn("return true", branch.split("} else {")[0])
+
+    def test_secure_capture_windows_cleanup_uses_guarded_delete_handles(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        split_path = function_body(
+            source,
+            "std::optional<std::pair<QString, QStringList>> splitWindowsPath",
+        )
+        native_open = function_body(source, "ScopedHandle ntOpenRelative(")
+        recursive_cleanup = function_body(
+            source, "bool removeWindowsTreeContents( HANDLE directoryHandle )"
+        )
+        remove_file = function_body(
+            source, "bool SecureCaptureDirectory::removeFile("
+        )
+        remove_if_empty = function_body(
+            source, "bool SecureCaptureDirectory::removeIfEmpty()"
+        )
+        remove_recursively = function_body(
+            source, "bool SecureCaptureDirectory::removeRecursively()"
+        )
+        identity_for_handle = function_body(
+            source, "QString identityKeyForHandle( HANDLE handle )"
+        )
+
+        self.assertIn('#include "qtcompat/qtcompat.h"', source)
+        self.assertNotIn("Qt::SkipEmptyParts", split_path)
+        self.assertEqual(
+            split_path.count("klogg::qtcompat::skipEmptyParts()"), 2
+        )
+        self.assertIn("constexpr ULONG ShareWithoutDelete", source)
+        capture_access = source[
+            source.index("constexpr ACCESS_MASK CaptureAccess") :
+            source.index("constexpr ACCESS_MASK EnumerationAccess")
+        ]
+        self.assertNotIn("DELETE", capture_access)
+        self.assertIn("ULONG shareAccess = ShareAll", native_open)
+        self.assertIn("fileAttributes, shareAccess", native_open)
+        self.assertIn("disposition, createOptions", native_open)
+        self.assertIn("ShareWithoutDelete", recursive_cleanup)
+        # Regular files must not require read-data or execute access merely
+        # to be deleted; only directories need the wider traversal mask.
+        self.assertIn("entry.attributes & FILE_ATTRIBUTE_DIRECTORY", recursive_cleanup)
+        self.assertIn("FileDeleteAccess", recursive_cleanup)
+        self.assertIn("ShareWithoutDelete", remove_file)
+        self.assertIn("pendingFileDeletions", remove_file)
+        self.assertIn("expectedIdentity", remove_file)
+        self.assertIn("identityKeyForHandle", remove_file)
+        self.assertIn("quarantineEntry", remove_file)
+        # Tombstone retirement must follow the bound directory object when
+        # the public name was displaced (POSIX descriptor parity), and a
+        # relinked same-identity name must have its disposition reapplied
+        # rather than wedging the tombstone.
+        self.assertIn("HANDLE rootHandle = impl_->directoryHandle.get();", remove_file)
+        self.assertIn("sameFileIdentity( publicRoot.get(),", remove_file)
+        self.assertIn(
+            "markDeleteByHandle( deleteHandle.get(), rootHandle,", remove_file
+        )
+        self.assertIn("openCurrentDirectoryForDeletion", remove_if_empty)
+        self.assertIn("openCurrentDirectoryForDeletion", remove_recursively)
+        delete_access = source[
+            source.index("constexpr ACCESS_MASK TreeDeleteAccess") :
+            source.index("bool initializeUnicodeString")
+        ]
+        self.assertNotIn("FILE_WRITE_ATTRIBUTES", delete_access)
+        # Identity must fail closed when neither the 128-bit identity nor the
+        # filesystem name is available (legacy SMB + ReFS), prefer FILE_ID_INFO
+        # otherwise, and refuse the 64-bit fallback on ReFS.
+        self.assertIn("FileIdInfo", identity_for_handle)
+        self.assertIn("!GetVolumeInformationByHandleW(", identity_for_handle)
+        self.assertIn('"ReFS"', identity_for_handle)
+        self.assertIn("win-legacy:", identity_for_handle)
+        self.assertGreaterEqual(identity_for_handle.count("return {};"), 3)
+
+    def test_secure_capture_temp_adoption_and_readonly_delete_are_fail_closed(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        create = function_body(
+            source, "SecureCaptureDirectory::createTemporaryFile("
+        )
+        delete_by_handle = function_body(
+            source,
+            "bool markDeleteByHandle( HANDLE handle, HANDLE attributeRoot = nullptr,\n"
+            "                         const QString& attributeName = {} )",
+        )
+
+        self.assertIn("_get_osfhandle", source)
+        self.assertIn("markDescriptorDeleteOnClose", source)
+        self.assertLess(
+            create.index("_open_osfhandle("),
+            create.index("handle.release()"),
+        )
+        self.assertIn("markDeleteByHandle( handle.get() )", create)
+        self.assertIn("markDescriptorDeleteOnClose( descriptor )", create)
+        self.assertIn("FILE_ATTRIBUTE_READONLY", delete_by_handle)
+        self.assertIn("FileBasicInfo", delete_by_handle)
+        self.assertIn("FileDispositionInfoEx", delete_by_handle)
+        self.assertIn("FileDispositionFlagIgnoreReadonlyAttribute", delete_by_handle)
+        # Pre-1709 fallback: only a single-link read-only record may have its
+        # attribute cleared, and only through an identity-verified reopen.
+        self.assertIn("nNumberOfLinks != 1", delete_by_handle)
+        self.assertIn("identityKeyForHandle", delete_by_handle)
+        self.assertIn("openExistingRegularFileNoFollow", delete_by_handle)
+        self.assertIn("FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE", delete_by_handle)
+        self.assertIn("setFileAttributesByHandle", delete_by_handle)
+        self.assertIn("FILE_ATTRIBUTE_READONLY )", delete_by_handle)
+        self.assertNotIn("ReOpenFile(", delete_by_handle)
+
     def test_secure_capture_cleanup_quarantines_validated_posix_identities(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
 
@@ -209,6 +525,11 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
             "restoreQuarantinedEntry",
             "restoreQuarantinedDirectory",
             "restorePublicName",
+            "openPath",
+            "openRelative",
+            "createRelative",
+            "renameNoReplaceRelative",
+            "O_NONBLOCK",
             "AT_SYMLINK_NOFOLLOW",
             "sameIdentity( expectedInfo, quarantinedInfo )",
             "sameIdentity( openedInfo, finalNamedInfo )",
@@ -222,16 +543,59 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
             "AT_REMOVEDIR )",
             source,
         )
+        restore_entry = function_body(
+            source, "bool restoreQuarantinedEntry("
+        )
+        self.assertNotIn(
+            "renameNoReplace( directoryFd, publicName, directoryFd, quarantineName )",
+            restore_entry,
+        )
+        self.assertEqual(
+            source.count("impl_->invalidateBoundDirectory();"), 2
+        )
         recursive_cleanup = function_body(
             source, "bool removeDirectoryContents( int directoryFd )\n{"
         )
+        latest_modification = function_body(
+            source, "QDateTime latestModificationTimeForDirectory( int directoryFd )"
+        )
         self.assertIn("restoreQuarantinedEntry", recursive_cleanup)
+        self.assertIn("isSameMountedFilesystem(", recursive_cleanup)
+        self.assertIn("isSameMountedFilesystem(", latest_modification)
+        self.assertIn("mountIdentityForDescriptor(", source)
+        self.assertNotIn("entryInfo.st_dev != directoryInfo.st_dev", recursive_cleanup)
         for signature in (
             "bool SecureCaptureDirectory::removeIfEmpty()",
             "bool SecureCaptureDirectory::removeRecursively()",
         ):
             cleanup = function_body(source, signature)
             self.assertGreaterEqual(cleanup.count("restorePublicName();"), 1)
+
+        has_entries = function_body(
+            source, "bool SecureCaptureDirectory::hasEntries() const"
+        )
+        self.assertIn("enumerateDirectory", has_entries)
+        self.assertIn("entries->empty()", has_entries)
+        self.assertNotIn("entries->isEmpty()", has_entries)
+        self.assertIn("::readdir", has_entries)
+        self.assertIn("return true;", has_entries)
+
+        file_identity = function_body(
+            source, "QString SecureCaptureDirectory::fileIdentity("
+        )
+        self.assertIn("identityKeyForHandle", file_identity)
+        self.assertIn("identityKeyForStat", file_identity)
+
+        secure_reader = function_body(
+            source, "SecureCaptureDirectory::openReadFile("
+        )
+        self.assertIn("expectedIdentity", secure_reader)
+        self.assertIn("std::make_unique<QFile>()", secure_reader)
+        self.assertIn("QFileDevice::AutoCloseHandle", secure_reader)
+        self.assertIn("::fstat( file->handle()", secure_reader)
+        self.assertEqual(source.count("::openat("), 2)
+        self.assertEqual(source.count("::open("), 1)
+        self.assertEqual(source.count("::syscall("), 1)
 
     def test_secure_capture_windows_operations_are_handle_relative(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()

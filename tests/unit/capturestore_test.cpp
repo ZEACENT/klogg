@@ -41,6 +41,10 @@
 #include <QTextCodec>
 #include <QUuid>
 
+#if defined( Q_OS_WIN )
+#include <windows.h>
+#endif
+
 #include "capturestore.h"
 #include "rollingfilemanager.h"
 
@@ -122,6 +126,16 @@ class CaptureStoreTestAccess {
             timeoutMs );
     }
 
+    static bool hasCapturePathCoordinationOwnership( const CaptureStore& store )
+    {
+        return store.hasCapturePathCoordinationOwnershipForTesting();
+    }
+
+    static QString activeMarkerPath( const CaptureStore& store )
+    {
+        return store.capturePathActiveMarkerPathForTesting();
+    }
+
     static bool spillFirstSegment( CaptureStore& store )
     {
         const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
@@ -189,6 +203,29 @@ class CaptureStoreTestAccess {
         return candidate.capturePathState.use_count();
     }
 
+    static void failNextCandidateRecursiveRemoval(
+        const CaptureStore::CleanupCandidate& candidate )
+    {
+        CaptureStore::failNextCandidateRecursiveRemovalForTesting(
+            candidate );
+    }
+
+    static void setBeforeCandidateActivationCallback(
+        const CaptureStore::CleanupCandidate& candidate,
+        std::function<void()> callback )
+    {
+        CaptureStore::setBeforeCandidateActivationCallbackForTesting(
+            candidate, std::move( callback ) );
+    }
+
+    static void setAfterCandidateRecursiveRemovalQuarantineCallback(
+        const CaptureStore::CleanupCandidate& candidate,
+        std::function<void()> callback )
+    {
+        CaptureStore::setAfterCandidateRecursiveRemovalQuarantineCallbackForTesting(
+            candidate, std::move( callback ) );
+    }
+
     static void cleanupCapturePaths( const QStringList& capturePaths,
                                      const QDateTime& preserveModifiedAfter )
     {
@@ -242,6 +279,60 @@ bool createSignalFile( const QString& filePath )
     return file.open( QIODevice::WriteOnly | QIODevice::Truncate );
 }
 
+#if defined( Q_OS_WIN )
+class ScopedWindowsTestHandle {
+  public:
+    explicit ScopedWindowsTestHandle( HANDLE handle )
+        : handle_( handle )
+    {
+    }
+    ~ScopedWindowsTestHandle()
+    {
+        reset();
+    }
+
+    ScopedWindowsTestHandle( const ScopedWindowsTestHandle& ) = delete;
+    ScopedWindowsTestHandle& operator=( const ScopedWindowsTestHandle& ) = delete;
+
+    bool valid() const
+    {
+        return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+    }
+
+    void reset()
+    {
+        if ( valid() ) {
+            CloseHandle( handle_ );
+        }
+        handle_ = nullptr;
+    }
+
+  private:
+    HANDLE handle_ = nullptr;
+};
+
+class WindowsFileAttributesGuard {
+  public:
+    WindowsFileAttributesGuard( QString path, DWORD attributes )
+        : path_( std::move( path ) )
+        , attributes_( attributes )
+    {
+    }
+    ~WindowsFileAttributesGuard()
+    {
+        if ( QFileInfo::exists( path_ ) ) {
+            const auto nativePath = QDir::toNativeSeparators( path_ );
+            SetFileAttributesW(
+                reinterpret_cast<LPCWSTR>( nativePath.utf16() ), attributes_ );
+        }
+    }
+
+  private:
+    QString path_;
+    DWORD attributes_;
+};
+#endif
+
 bool createDirectoryAlias( const QString& targetPath, const QString& aliasPath )
 {
 #if defined( Q_OS_WIN )
@@ -275,6 +366,27 @@ bool waitForFile( const QString& filePath, int timeoutMs = 5000 )
         std::this_thread::yield();
     }
     return QFileInfo::exists( filePath );
+}
+
+bool waitForMissingFile( const QString& filePath, int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( QFileInfo::exists( filePath ) && deadline.elapsed() < timeoutMs ) {
+        std::this_thread::yield();
+    }
+    return !QFileInfo::exists( filePath );
+}
+
+bool waitForFlag( const std::atomic<bool>& flag, int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !flag.load( std::memory_order_acquire )
+            && deadline.elapsed() < timeoutMs ) {
+        std::this_thread::yield();
+    }
+    return flag.load( std::memory_order_acquire );
 }
 
 class ChildProcessReleaseGuard {
@@ -341,6 +453,11 @@ class ActiveCaptureChild {
     QString captureIdentity() const
     {
         return readUtf8File( readyPath_ );
+    }
+
+    qint64 processId() const
+    {
+        return process_.processId();
     }
 
     bool releaseAndWait()
@@ -494,6 +611,70 @@ TEST_CASE( "CaptureStore supports extended-length Windows drive roots" )
     REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
     REQUIRE( segmentFiles( store.capturePath() ).size() == 1 );
 }
+
+TEST_CASE( "CaptureStore cleanup defers while a capture root has a rename-capable handle" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_windows_delete_share_guard" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+    const auto nestedPath
+        = QDir( capturePath ).filePath( QStringLiteral( "nested" ) );
+    const auto sentinelPath
+        = QDir( nestedPath ).filePath( QStringLiteral( "sentinel.log" ) );
+
+    REQUIRE( QDir{}.mkpath( nestedPath ) );
+    REQUIRE( createSignalFile( sentinelPath ) );
+
+    const auto nativeCapturePath = QDir::toNativeSeparators( capturePath );
+    ScopedWindowsTestHandle renameCapableHandle( CreateFileW(
+        reinterpret_cast<LPCWSTR>( nativeCapturePath.utf16() ),
+        DELETE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr ) );
+    REQUIRE( renameCapableHandle.valid() );
+
+    CaptureStore::cleanupUnusedCaptures(
+        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE( QFileInfo::exists( sentinelPath ) );
+    REQUIRE( QFileInfo::exists( capturePath ) );
+
+    renameCapableHandle.reset();
+    CaptureStore::cleanupUnusedCaptures(
+        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+}
+
+TEST_CASE( "CaptureStore cleanup removes read-only Windows segment files" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_windows_readonly_cleanup" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+    const auto segmentPath = QDir( capturePath ).filePath(
+        QStringLiteral( "segment_000000.log" ) );
+
+    REQUIRE( QDir{}.mkpath( capturePath ) );
+    REQUIRE( createSignalFile( segmentPath ) );
+
+    const auto nativeSegmentPath = QDir::toNativeSeparators( segmentPath );
+    const auto originalAttributes = GetFileAttributesW(
+        reinterpret_cast<LPCWSTR>( nativeSegmentPath.utf16() ) );
+    REQUIRE( originalAttributes != INVALID_FILE_ATTRIBUTES );
+    REQUIRE( SetFileAttributesW(
+        reinterpret_cast<LPCWSTR>( nativeSegmentPath.utf16() ),
+        originalAttributes | FILE_ATTRIBUTE_READONLY ) );
+    WindowsFileAttributesGuard restoreAttributes( segmentPath,
+                                                  originalAttributes );
+
+    CaptureStore::cleanupUnusedCaptures(
+        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+}
 #endif
 
 TEST_CASE( "CaptureStore cleanup never follows capture symlinks" )
@@ -560,6 +741,33 @@ TEST_CASE( "CaptureStore cleanup removes nested trees without following child sy
     REQUIRE( QFileInfo::exists( externalSentinel ) );
 }
 
+TEST_CASE( "CaptureStore directory deletion stops retrying when a nonregular child remains" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_nonregular_child_directory_retry" );
+    const auto captureId = makeCaptureId();
+    const auto externalPath = makeTestDir(
+        "capturestore_nonregular_child_external" );
+
+    std::weak_ptr<void> capturePathStateLifetime;
+    QString aliasPath;
+    {
+        auto store = std::make_unique<CaptureStore>( captureId, rootPath );
+        aliasPath = QDir( store->capturePath() ).filePath(
+            QStringLiteral( "external-alias" ) );
+        REQUIRE( createDirectoryAlias( externalPath, aliasPath ) );
+        REQUIRE( QFileInfo::exists( aliasPath ) );
+        capturePathStateLifetime
+            = CaptureStoreTestAccess::capturePathStateLifetime( *store );
+
+        store->deleteCaptureFiles();
+        REQUIRE( QFileInfo::exists( aliasPath ) );
+    }
+
+    REQUIRE( QFileInfo::exists( aliasPath ) );
+    REQUIRE( capturePathStateLifetime.expired() );
+}
+
 TEST_CASE( "CaptureStore cleanup restores a quarantine after a transient recursive failure" )
 {
 #if defined( Q_OS_WIN )
@@ -568,18 +776,19 @@ TEST_CASE( "CaptureStore cleanup restores a quarantine after a transient recursi
     const auto rootPath = makeTestDir( "capturestore_cleanup_restore_quarantine" );
     const auto captureId = makeCaptureId();
     const auto capturePath = QDir( rootPath ).filePath( captureId );
-    const auto blockedPath
-        = QDir( capturePath ).filePath( QStringLiteral( "blocked" ) );
-    REQUIRE( QDir{}.mkpath( blockedPath ) );
-    QFile blockedFile(
-        QDir( blockedPath ).filePath( QStringLiteral( "segment.log" ) ) );
-    REQUIRE( blockedFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
-    REQUIRE( blockedFile.write( QByteArrayLiteral( "blocked\n" ) ) > 0 );
-    blockedFile.close();
-    REQUIRE( QFile::setPermissions( blockedPath, {} ) );
+    const auto nestedPath
+        = QDir( capturePath ).filePath( QStringLiteral( "nested" ) );
+    REQUIRE( QDir{}.mkpath( nestedPath ) );
+    REQUIRE( createSignalFile(
+        QDir( nestedPath ).filePath( QStringLiteral( "segment.log" ) ) ) );
 
-    CaptureStore::cleanupUnusedCaptures(
-        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+    const auto candidates
+        = CaptureStoreTestAccess::collectUnusedCaptureCandidates( {}, rootPath );
+    REQUIRE( candidates.size() == 1 );
+    CaptureStoreTestAccess::failNextCandidateRecursiveRemoval(
+        candidates.front() );
+    CaptureStoreTestAccess::cleanupCaptureCandidates(
+        candidates, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
 
     const auto quarantines = QDir( rootPath ).entryList(
         QStringList{ QStringLiteral( ".klogg-capture-delete-*" ) },
@@ -588,12 +797,99 @@ TEST_CASE( "CaptureStore cleanup restores a quarantine after a transient recursi
     REQUIRE( QFileInfo::exists( capturePath ) );
     REQUIRE( quarantines.isEmpty() );
 
-    REQUIRE( QFile::setPermissions(
-        blockedPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                         | QFileDevice::ExeOwner ) );
     CaptureStore::cleanupUnusedCaptures(
         {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
     REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+#endif
+}
+
+TEST_CASE( "CaptureStore activation retries when quarantine restoration loses to a successor" )
+{
+#if defined( Q_OS_WIN )
+    SUCCEED( "POSIX quarantine restoration drives this regression" );
+#else
+    const auto rootPath = makeTestDir(
+        "capturestore_cleanup_restore_successor_overlap" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+    const auto nestedPath
+        = QDir( capturePath ).filePath( QStringLiteral( "nested" ) );
+    const auto successorSentinel
+        = QDir( capturePath ).filePath( QStringLiteral( "successor" ) );
+    REQUIRE( QDir{}.mkpath( nestedPath ) );
+    REQUIRE( createSignalFile(
+        QDir( nestedPath ).filePath( QStringLiteral( "old.log" ) ) ) );
+
+    const auto candidates
+        = CaptureStoreTestAccess::collectUnusedCaptureCandidates( {}, rootPath );
+    REQUIRE( candidates.size() == 1 );
+
+    std::atomic<bool> activationPaused{ false };
+    std::atomic<bool> releaseActivation{ false };
+    CaptureStoreTestAccess::setBeforeCandidateActivationCallback(
+        candidates.front(), [ & ] {
+            activationPaused.store( true, std::memory_order_release );
+            while ( !releaseActivation.load( std::memory_order_acquire ) ) {
+                std::this_thread::yield();
+            }
+        } );
+
+    bool successorCreated = false;
+    CaptureStoreTestAccess::setAfterCandidateRecursiveRemovalQuarantineCallback(
+        candidates.front(), [ & ] {
+            successorCreated = QDir{}.mkpath( capturePath )
+                               && createSignalFile( successorSentinel );
+        } );
+    CaptureStoreTestAccess::failNextCandidateRecursiveRemoval(
+        candidates.front() );
+
+    std::unique_ptr<CaptureStore> waitingStore;
+    std::exception_ptr constructionError;
+    std::thread constructor( [ & ] {
+        try {
+            waitingStore = std::make_unique<CaptureStore>(
+                captureId, rootPath );
+        } catch ( ... ) {
+            constructionError = std::current_exception();
+        }
+    } );
+
+    QElapsedTimer waitForActivation;
+    waitForActivation.start();
+    while ( !activationPaused.load( std::memory_order_acquire )
+            && waitForActivation.elapsed() < 5000 ) {
+        std::this_thread::yield();
+    }
+    const auto reachedActivationBoundary
+        = activationPaused.load( std::memory_order_acquire );
+
+    if ( reachedActivationBoundary ) {
+        CaptureStoreTestAccess::cleanupCaptureCandidates(
+            candidates, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+    }
+    releaseActivation.store( true, std::memory_order_release );
+    constructor.join();
+
+    REQUIRE( reachedActivationBoundary );
+    if ( constructionError ) {
+        std::rethrow_exception( constructionError );
+    }
+    REQUIRE( successorCreated );
+    REQUIRE( waitingStore );
+    REQUIRE( QFileInfo::exists( successorSentinel ) );
+
+    waitingStore->appendUtf8( QByteArrayLiteral( "successor-data\n" ) );
+    REQUIRE( CaptureStoreTestAccess::spillLastSegment( *waitingStore ) );
+    REQUIRE_FALSE( segmentFiles( capturePath ).isEmpty() );
+
+    const auto quarantines = QDir( rootPath ).entryList(
+        QStringList{ QStringLiteral( ".klogg-capture-delete-*" ) },
+        QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot,
+        QDir::NoSort );
+    REQUIRE( quarantines.size() == 1 );
+    REQUIRE( segmentFiles(
+                 QDir( rootPath ).filePath( quarantines.front() ) )
+                 .isEmpty() );
 #endif
 }
 
@@ -1214,7 +1510,11 @@ TEST_CASE( "CaptureStore releases retired leases after dropping the path mutex" 
 
     REQUIRE( siblingHoldsGate.load( std::memory_order_acquire ) );
     REQUIRE( siblingCompleted );
-    REQUIRE( clearElapsed < 1000 );
+    // A clear() that wrongly blocked on the contended gate would cost the
+    // full default 5000ms gate timeout (plus QLockFile contention sleeps).
+    // Keep the bound comfortably below that regression floor while allowing
+    // sanitizer-instrumented runs several seconds of legitimate headroom.
+    REQUIRE( clearElapsed < 4000 );
     sibling.reset();
     REQUIRE( segmentFiles( owner.capturePath() ).isEmpty() );
 }
@@ -1230,6 +1530,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
         = CaptureStoreTestAccess::setCapturePathGateTimeout( 20 );
     std::atomic<bool> gateHeld{ false };
     std::atomic<bool> releaseGate{ false };
+    std::atomic<bool> deletionStarted{ false };
     std::atomic<bool> deletionFinished{ false };
     bool holderCompleted = false;
     std::thread holder( [ & ] {
@@ -1252,25 +1553,43 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
         std::this_thread::yield();
     }
 
+    QElapsedTimer deletionTimer;
+    deletionTimer.start();
     std::thread deletion( [ & ] {
+        deletionStarted.store( true, std::memory_order_release );
         store.deleteCaptureFiles();
         deletionFinished.store( true, std::memory_order_release );
     } );
-    std::this_thread::sleep_for( std::chrono::milliseconds( 80 ) );
+    const auto deletionStartedBeforeDeadline
+        = waitForFlag( deletionStarted );
+    // The semantic property is that the deletion returns without waiting for
+    // the contended gate: it must finish while the holder still owns the gate.
+    // QLockFile's first contention sleep is 100ms regardless of the 20ms gate
+    // timeout, and sanitizer instrumentation multiplies that file I/O, so the
+    // watchdog needs generous headroom; a true gate deadlock still trips it.
     const auto deletionFinishedBeforeRelease
-        = deletionFinished.load( std::memory_order_acquire );
+        = deletionStartedBeforeDeadline
+          && waitForFlag( deletionFinished, 15000 );
+    const auto deletionElapsed = deletionTimer.elapsed();
     releaseGate.store( true, std::memory_order_release );
 
     holder.join();
     deletion.join();
-    store.clear();
+    const auto deletionCompletedAfterRelease
+        = waitForMissingFile( capturePath );
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
     REQUIRE( holderCompleted );
+    REQUIRE( deletionStartedBeforeDeadline );
     REQUIRE( deletionFinishedBeforeRelease );
+    // The 15000ms watchdog alone would still pass a regression that wrongly
+    // waited the full default 5000ms gate timeout. Keep an elapsed bound
+    // below that regression floor while allowing sanitizer-instrumented runs
+    // several seconds of legitimate headroom.
+    REQUIRE( deletionElapsed < 4000 );
     REQUIRE( deletionFinished.load( std::memory_order_acquire ) );
-    REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+    REQUIRE( deletionCompletedAfterRelease );
 }
 
 TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
@@ -1285,6 +1604,7 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
         = CaptureStoreTestAccess::setCapturePathGateTimeout( 20 );
     std::atomic<bool> gateHeld{ false };
     std::atomic<bool> releaseGate{ false };
+    std::atomic<bool> destructionStarted{ false };
     std::atomic<bool> destructionFinished{ false };
     bool holderCompleted = false;
     std::thread holder( [ & ] {
@@ -1307,13 +1627,22 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
         std::this_thread::yield();
     }
 
+    QElapsedTimer destructionTimer;
+    destructionTimer.start();
     std::thread destruction( [ & ] {
+        destructionStarted.store( true, std::memory_order_release );
         exitingStore.reset();
         destructionFinished.store( true, std::memory_order_release );
     } );
-    std::this_thread::sleep_for( std::chrono::milliseconds( 80 ) );
+    const auto destructionStartedBeforeDeadline
+        = waitForFlag( destructionStarted );
+    // As above: completion while the gate is still held is the property; the
+    // window only needs to outlast sanitizer-amplified QLockFile contention
+    // sleeps, not enforce a wall-clock latency bound.
     const auto destructionFinishedBeforeRelease
-        = destructionFinished.load( std::memory_order_acquire );
+        = destructionStartedBeforeDeadline
+          && waitForFlag( destructionFinished, 15000 );
+    const auto destructionElapsed = destructionTimer.elapsed();
     releaseGate.store( true, std::memory_order_release );
 
     holder.join();
@@ -1323,8 +1652,114 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
 
     REQUIRE( gateHeld.load( std::memory_order_acquire ) );
     REQUIRE( holderCompleted );
+    REQUIRE( destructionStartedBeforeDeadline );
     REQUIRE( destructionFinishedBeforeRelease );
+    // Same regression floor as the deletion case: a destruction that wrongly
+    // waited the full default 5000ms gate timeout must not slip past the
+    // generous watchdog.
+    REQUIRE( destructionElapsed < 4000 );
     REQUIRE( destructionFinished.load( std::memory_order_acquire ) );
+    REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+}
+
+TEST_CASE( "CaptureStore removes an unlocked active marker reporting the reused current pid" )
+{
+    const auto rootPath = makeTestDir( "capturestore_reused_pid_marker" );
+    const auto captureId = makeCaptureId();
+    QString markerPath;
+    QByteArray markerData;
+    {
+        CaptureStore store( captureId, rootPath );
+        markerPath = CaptureStoreTestAccess::activeMarkerPath( store );
+        QFile marker( markerPath );
+        REQUIRE( marker.open( QIODevice::ReadOnly ) );
+        markerData = marker.readAll();
+        REQUIRE( markerData.contains(
+            QByteArray::number( QCoreApplication::applicationPid() ) ) );
+    }
+    REQUIRE_FALSE( QFileInfo::exists( markerPath ) );
+
+    QFile staleMarker( markerPath );
+    REQUIRE( staleMarker.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( staleMarker.write( markerData ) == markerData.size() );
+    staleMarker.close();
+
+    REQUIRE_NOTHROW( [ & ] {
+        CaptureStore replacement( captureId, rootPath );
+    }() );
+}
+
+TEST_CASE( "CaptureStore cleanup removes an unlocked marker named for a live foreign pid" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_unlocked_foreign_pid_marker" );
+    const auto targetCaptureId = makeCaptureId();
+    const auto holderCaptureId = makeCaptureId();
+    const auto targetCapturePath
+        = QDir( rootPath ).filePath( targetCaptureId );
+
+    QString markerPath;
+    {
+        CaptureStore target( targetCaptureId, rootPath );
+        markerPath = CaptureStoreTestAccess::activeMarkerPath( target );
+    }
+    REQUIRE_FALSE( QFileInfo::exists( markerPath ) );
+
+    ActiveCaptureChild holder( rootPath, holderCaptureId, false );
+    REQUIRE( holder.startAndWaitUntilReady() );
+    REQUIRE( holder.processId() > 0 );
+
+    const auto pidSeparator = markerPath.lastIndexOf( QLatin1Char( '.' ) );
+    REQUIRE( pidSeparator >= 0 );
+    const auto fakeMarkerPath
+        = markerPath.left( pidSeparator + 1 )
+          + QString::number( holder.processId() );
+    REQUIRE( createSignalFile( fakeMarkerPath ) );
+
+    CaptureStore::cleanupUnusedCaptures(
+        QSet<QString>{ holderCaptureId }, rootPath,
+        QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE_FALSE( QFileInfo::exists( fakeMarkerPath ) );
+    REQUIRE_FALSE( QFileInfo::exists( targetCapturePath ) );
+    REQUIRE( holder.releaseAndWait() );
+}
+
+TEST_CASE( "CaptureStore cleanup preserves a differently named live process marker" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_different_application_marker" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+
+    ActiveCaptureChild child( rootPath, captureId, false );
+    REQUIRE( child.startAndWaitUntilReady() );
+    REQUIRE( QFileInfo::exists( capturePath ) );
+    const auto coordinationRoot = QDir( QDir::tempPath() ).filePath(
+        QStringLiteral( "klogg_capture_coordination" ) );
+    const auto childMarkers = QDir( coordinationRoot ).entryList(
+        QStringList{ QStringLiteral( "*.active.%1" ).arg( child.processId() ) },
+        QDir::Files | QDir::Hidden, QDir::NoSort );
+    REQUIRE( childMarkers.size() == 1 );
+    QFile childMarker(
+        QDir( coordinationRoot ).filePath( childMarkers.front() ) );
+    REQUIRE( childMarker.open( QIODevice::ReadWrite ) );
+    auto markerLines = childMarker.readAll().split( '\n' );
+    REQUIRE( markerLines.size() >= 3 );
+    markerLines[ 1 ] = QByteArrayLiteral( "renamed-klogg-capture-test" );
+    REQUIRE( childMarker.resize( 0 ) );
+    REQUIRE( childMarker.seek( 0 ) );
+    REQUIRE( childMarker.write( markerLines.join( '\n' ) ) > 0 );
+    childMarker.close();
+
+    CaptureStore::cleanupUnusedCaptures(
+        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
+
+    REQUIRE( QFileInfo::exists( capturePath ) );
+    REQUIRE( child.releaseAndWait() );
+
+    CaptureStore::cleanupUnusedCaptures(
+        {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
     REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
 }
 
@@ -1404,9 +1839,10 @@ TEST_CASE( "CaptureStore maintenance retires only locally owned files while an e
     }
 
     REQUIRE( QFileInfo::exists( externalPath ) );
-    REQUIRE_FALSE( QFileInfo::exists( parentPath ) );
+    REQUIRE( QFileInfo::exists( parentPath ) );
     REQUIRE( QFileInfo::exists( capturePath ) );
     REQUIRE( child.releaseAndWait() );
+    REQUIRE( waitForMissingFile( parentPath ) );
 }
 
 TEST_CASE( "CaptureStore case aliases share physical capture coordination" )
@@ -1609,8 +2045,10 @@ TEST_CASE( "CaptureStore process ownership survives an inactive local-store gap"
     successor.deleteCaptureFiles();
 
     REQUIRE( QFileInfo::exists( externalPath ) );
-    REQUIRE_FALSE( QFileInfo::exists( locallyOwnedPath ) );
+    REQUIRE( QFileInfo::exists( locallyOwnedPath ) );
     REQUIRE( child.releaseAndWait() );
+    REQUIRE( waitForMissingFile( locallyOwnedPath ) );
+    REQUIRE( QFileInfo::exists( externalPath ) );
 }
 
 TEST_CASE( "CaptureStore cleanup retires ownership with the deleted directory generation" )
@@ -2630,6 +3068,12 @@ TEST_CASE( "CaptureStore publishes spilled segments only after a complete write"
         CaptureStoreTestAccess::failNextSegmentWrite( store );
         REQUIRE_FALSE( CaptureStoreTestAccess::spillFirstSegment( store ) );
         REQUIRE( segmentFiles( capturePath ).isEmpty() );
+        const auto abandonedTemporaryFiles = QDir( capturePath ).entryList(
+            QStringList{ QStringLiteral( ".klogg-segment-*.tmp" ) },
+            QDir::Files | QDir::Hidden, QDir::NoSort );
+        REQUIRE( abandonedTemporaryFiles.size() == 1 );
+        REQUIRE( waitForMissingFile( QDir( capturePath ).filePath(
+            abandonedTemporaryFiles.front() ) ) );
 
         REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
         REQUIRE( segmentFiles( capturePath ).size() == 1 );
@@ -2884,6 +3328,206 @@ TEST_CASE( "CaptureStore pins spilled raw reads while maintenance proceeds" )
     } else {
         REQUIRE( QFileInfo::exists( capturePath ) != expectCaptureDirectoryRemoval );
     }
+}
+
+TEST_CASE( "CaptureStore spilled reads reject a symlink name replacement" )
+{
+#if defined( Q_OS_WIN )
+    SUCCEED( "Creating a real file symlink requires elevated privileges or Developer Mode" );
+#else
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 16;
+
+    const auto rootPath = makeTestDir( "capturestore_spilled_read_symlink" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    store.appendUtf8(
+        QByteArrayLiteral( "aaa\nbbb\nccc\nddd\neee\nfff\n" ) );
+
+    const auto spilledFiles = segmentFiles( store.capturePath() );
+    REQUIRE_FALSE( spilledFiles.isEmpty() );
+    const auto selectedPath
+        = QDir( store.capturePath() ).filePath( spilledFiles.front() );
+    const auto displacedPath = selectedPath + QStringLiteral( ".displaced" );
+    const auto externalPath = QDir( makeTestDir( "capturestore_spilled_read_external" ) )
+                                  .filePath( QStringLiteral( "sentinel.log" ) );
+    QFile externalFile( externalPath );
+    REQUIRE( externalFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( externalFile.write( QByteArrayLiteral( "external-secret\n" ) ) > 0 );
+    externalFile.close();
+
+    std::atomic<bool> readPaused{ false };
+    std::atomic<bool> releaseRead{ false };
+    CaptureStoreTestAccess::setBeforeSpilledSegmentReadCallback(
+        store, [ & ] {
+            readPaused.store( true, std::memory_order_release );
+            while ( !releaseRead.load( std::memory_order_acquire ) ) {
+                std::this_thread::yield();
+            }
+        } );
+
+    SearchableLogData::RawLines rawLines;
+    std::thread reader( [ & ] {
+        rawLines = store.buildRawLines(
+            0_lnum, 2_lcount, QTextCodec::codecForName( "UTF-8" ),
+            QRegularExpression{} );
+    } );
+
+    const auto reachedReadBoundary = waitForFlag( readPaused );
+    bool installedSymlink = false;
+    if ( reachedReadBoundary && QFile::rename( selectedPath, displacedPath ) ) {
+        installedSymlink = QFile( externalPath ).link( selectedPath );
+    }
+    releaseRead.store( true, std::memory_order_release );
+    reader.join();
+
+    REQUIRE( reachedReadBoundary );
+    REQUIRE( installedSymlink );
+    REQUIRE_FALSE( QByteArray( rawLines.buffer.data(),
+                               static_cast<int>( rawLines.buffer.size() ) )
+                       .contains( QByteArrayLiteral( "external-secret" ) ) );
+
+    REQUIRE( QFile::remove( selectedPath ) );
+    REQUIRE( QFile::rename( displacedPath, selectedPath ) );
+#endif
+}
+
+TEST_CASE( "CaptureStore spilled reads reject a regular same-name replacement" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 16;
+
+    const auto rootPath = makeTestDir(
+        "capturestore_spilled_read_regular_replacement" );
+    CaptureStore store( makeCaptureId(), rootPath, limits );
+    store.appendUtf8(
+        QByteArrayLiteral( "aaa\nbbb\nccc\nddd\neee\nfff\n" ) );
+
+    const auto spilledFiles = segmentFiles( store.capturePath() );
+    REQUIRE_FALSE( spilledFiles.isEmpty() );
+    const auto selectedPath
+        = QDir( store.capturePath() ).filePath( spilledFiles.front() );
+    const auto displacedPath = selectedPath + QStringLiteral( ".displaced" );
+
+    std::atomic<bool> readPaused{ false };
+    std::atomic<bool> releaseRead{ false };
+    CaptureStoreTestAccess::setBeforeSpilledSegmentReadCallback(
+        store, [ & ] {
+            readPaused.store( true, std::memory_order_release );
+            while ( !releaseRead.load( std::memory_order_acquire ) ) {
+                std::this_thread::yield();
+            }
+        } );
+
+    SearchableLogData::RawLines rawLines;
+    std::thread reader( [ & ] {
+        rawLines = store.buildRawLines(
+            0_lnum, 2_lcount, QTextCodec::codecForName( "UTF-8" ),
+            QRegularExpression{} );
+    } );
+
+    const auto reachedReadBoundary = waitForFlag( readPaused );
+    bool replacementCreated = false;
+    if ( reachedReadBoundary && QFile::rename( selectedPath, displacedPath ) ) {
+        QFile replacement( selectedPath );
+        replacementCreated
+            = replacement.open( QIODevice::WriteOnly | QIODevice::Truncate )
+              && replacement.write(
+                     QByteArrayLiteral( "replacement-secret\n" ) )
+                     > 0;
+    }
+    releaseRead.store( true, std::memory_order_release );
+    reader.join();
+
+    REQUIRE( reachedReadBoundary );
+    REQUIRE( replacementCreated );
+    REQUIRE_FALSE( QByteArray( rawLines.buffer.data(),
+                               static_cast<int>( rawLines.buffer.size() ) )
+                       .contains( QByteArrayLiteral( "replacem" ) ) );
+
+    REQUIRE( QFile::remove( selectedPath ) );
+    REQUIRE( QFile::rename( displacedPath, selectedPath ) );
+}
+
+TEST_CASE( "CaptureStore reuses a live lease after same-name identity cycling" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 64;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir(
+        "capturestore_identity_cycle_lease" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+    CaptureStore store( captureId, rootPath, limits );
+    store.appendUtf8( QByteArrayLiteral( "aaa\nbbb\n" ) );
+    REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
+    const auto files = segmentFiles( capturePath );
+    REQUIRE( files.size() == 1 );
+    const auto selectedPath = QDir( capturePath ).filePath( files.front() );
+    const auto originalPath = selectedPath + QStringLiteral( ".original" );
+    const auto replacementPath
+        = selectedPath + QStringLiteral( ".replacement" );
+    auto originalLease
+        = CaptureStoreTestAccess::pinFirstSpilledSegment( store );
+    REQUIRE( originalLease );
+
+    REQUIRE( QFile::rename( selectedPath, originalPath ) );
+    QFile replacement( selectedPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "replacement\n" ) ) > 0 );
+    replacement.close();
+    REQUIRE( store.loadFromDisk() );
+
+    REQUIRE( QFile::rename( selectedPath, replacementPath ) );
+    REQUIRE( QFile::rename( originalPath, selectedPath ) );
+    REQUIRE( store.loadFromDisk() );
+    auto cycledLease
+        = CaptureStoreTestAccess::pinFirstSpilledSegment( store );
+    REQUIRE( cycledLease == originalLease );
+
+    store.deleteCaptureFiles();
+    cycledLease.reset();
+    REQUIRE( QFileInfo::exists( selectedPath ) );
+    originalLease.reset();
+    REQUIRE_FALSE( QFileInfo::exists( selectedPath ) );
+    REQUIRE( QFileInfo::exists( replacementPath ) );
+}
+
+TEST_CASE( "CaptureStore retirement preserves a regular same-name replacement" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 64;
+    limits.memoryBudgetBytes = 4096;
+
+    const auto rootPath = makeTestDir(
+        "capturestore_retire_regular_replacement" );
+    const auto captureId = makeCaptureId();
+    const auto capturePath = QDir( rootPath ).filePath( captureId );
+    auto store = std::make_unique<CaptureStore>( captureId, rootPath, limits );
+    store->appendUtf8( QByteArrayLiteral( "aaa\nbbb\n" ) );
+    REQUIRE( CaptureStoreTestAccess::spillFirstSegment( *store ) );
+    const auto files = segmentFiles( capturePath );
+    REQUIRE( files.size() == 1 );
+    const auto selectedPath = QDir( capturePath ).filePath( files.front() );
+    const auto displacedPath = selectedPath + QStringLiteral( ".displaced" );
+    auto pinned = CaptureStoreTestAccess::pinFirstSpilledSegment( *store );
+    REQUIRE( pinned );
+
+    store->deleteCaptureFiles();
+    store.reset();
+    REQUIRE( QFile::rename( selectedPath, displacedPath ) );
+    QFile replacement( selectedPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "replacement\n" ) ) > 0 );
+    replacement.close();
+
+    pinned.reset();
+
+    REQUIRE( QFileInfo::exists( selectedPath ) );
+    REQUIRE( readUtf8File( selectedPath ) == QStringLiteral( "replacement\n" ) );
+    REQUIRE( QFileInfo::exists( displacedPath ) );
 }
 
 TEST_CASE( "CaptureStore keeps same-path replacement files separate from pinned readers" )
@@ -3144,6 +3788,9 @@ TEST_CASE( "CaptureStore persists a replacement generation after deletion" )
     {
         CaptureStore store( captureId, rootPath );
         store.deleteCaptureFiles();
+        REQUIRE_FALSE(
+            CaptureStoreTestAccess::hasCapturePathCoordinationOwnership(
+                store ) );
         store.appendUtf8( QByteArrayLiteral( "replacement-tail" ) );
     }
 

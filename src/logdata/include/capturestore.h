@@ -73,6 +73,7 @@ class CaptureStore {
     static void cleanupUnusedCapturesAsync(
         const QSet<QString>& retainCaptureIds, const QString& rootPath = {},
         const QDateTime& preserveModifiedAfter = {} );
+    static void shutdownBackgroundWorkers();
 
     CaptureStore( const CaptureStore& ) = delete;
     CaptureStore& operator=( const CaptureStore& ) = delete;
@@ -123,13 +124,17 @@ class CaptureStore {
     static QStringList collectUnusedCapturePaths( const QSet<QString>& retainCaptureIds,
                                                   const QString& rootPath );
     static std::vector<CleanupCandidate> collectUnusedCaptureCandidates(
-        const QSet<QString>& retainCaptureIds, const QString& rootPath );
+        const QSet<QString>& retainCaptureIds, const QString& rootPath,
+        int gateTimeoutMs = -1,
+        const std::function<bool()>& shouldStop = {} );
     static void cleanupCapturePaths( const QStringList& capturePaths,
                                      const QDateTime& preserveModifiedAfter );
     static void cleanupCaptureCandidates(
         const std::vector<CleanupCandidate>& candidates,
         const QDateTime& preserveModifiedAfter,
-        const std::function<void( const QString& )>& beforeRemoval = {} );
+        const std::function<void( const QString& )>& beforeRemoval = {},
+        int gateTimeoutMs = -1,
+        const std::function<bool()>& shouldStop = {} );
     static void scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
                                                const QString& rootPath,
                                                const QDateTime& preserveModifiedAfter );
@@ -140,6 +145,12 @@ class CaptureStore {
     void synchronizeSegmentIdsWithDisk();
     void failNextRetiredFileRemovalForTesting();
     void failNextCaptureDirectoryRemovalForTesting();
+    static void failNextCandidateRecursiveRemovalForTesting(
+        const CleanupCandidate& candidate );
+    static void setBeforeCandidateActivationCallbackForTesting(
+        const CleanupCandidate& candidate, std::function<void()> callback );
+    static void setAfterCandidateRecursiveRemovalQuarantineCallbackForTesting(
+        const CleanupCandidate& candidate, std::function<void()> callback );
     void failNextSegmentWriteForTesting();
     void setAfterCaptureFilesRetiredCallbackForTesting(
         std::function<void()> callback );
@@ -148,6 +159,8 @@ class CaptureStore {
     bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
                                         std::function<void()> waitForRelease );
     static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    bool hasCapturePathCoordinationOwnershipForTesting() const;
+    QString capturePathActiveMarkerPathForTesting() const;
     QString capturePathIdentity() const;
     void commitLine( const QByteArray& lineBytes, bool terminated );
     void commitLines( const AppendResult& appendResult );

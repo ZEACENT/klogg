@@ -436,9 +436,23 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
         )
 
     strict_consumers = []
+    strict_runners = []
     report_only_consumers = []
     for command in commands:
         tokens = shell_tokens(command)
+        if (
+            len(tokens) >= 2
+            and tokens[:2]
+            == ["python3", "scripts/run_changed_clang_tidy.py"]
+            and unique_option_value(tokens, "--base")
+            == "${{ github.event.pull_request.base.sha }}"
+            and unique_option_value(tokens, "--build-dir") == "$KLOGG_BUILD_ROOT"
+            and unique_option_value(tokens, "--clang-tidy-diff")
+            == "$CLANG_TIDY_DIFF"
+            and not any(control in tokens for control in ("&&", "||", ";"))
+        ):
+            strict_runners.append(command)
+
         script_index = xargs_bash_script_index(tokens)
         if (
             script_index is None
@@ -464,11 +478,16 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
             and not any(control in tokens for control in ("&&", "||", ";"))
         ):
             strict_consumers.append(command)
-        if "|| exit 0" in script and command.rstrip().endswith("|| true"):
+        if (
+            "--line-filter" not in script
+            and "--warnings-as-errors" not in script
+            and not any(control in script for control in (";", "&&", "||", "\n"))
+            and not any(control in tokens for control in ("&&", "||", ";"))
+        ):
             report_only_consumers.append(command)
 
     if (
-        len(strict_consumers) != 1
+        len(strict_consumers) + len(strict_runners) != 1
         or len(report_only_consumers) != 1
         or any("tidy_files.txt" in command for command in commands)
     ):
@@ -514,10 +533,33 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
     ):
         issues.append("static analysis must configure optional Sentry production code")
 
-    if not re.search(
-        r"^\s*KLOGG_CPM_CACHE_KEY_SUFFIX:\s*-sentry\s*$", text, re.MULTILINE
+    vectorscan_assignments = [
+        value
+        for tokens in sentry_configures
+        for value in cmake_cache_assignments(tokens, "KLOGG_USE_VECTORSCAN")
+    ]
+    vectorscan_unset = any(
+        cmake_unsets_cache_entry(tokens, "KLOGG_USE_VECTORSCAN")
+        for tokens in sentry_configures
+    )
+    if (
+        len(vectorscan_assignments) != 1
+        or vectorscan_assignments[-1] not in cmake_true_values
+        or later_sentry_commands
+        or vectorscan_unset
     ):
-        issues.append("static analysis must use a Sentry-specific CPM cache key")
+        issues.append(
+            "static analysis must configure optional Vectorscan production code"
+        )
+
+    if not re.search(
+        r"^\s*KLOGG_CPM_CACHE_KEY_SUFFIX:\s*-sentry-vectorscan\s*$",
+        text,
+        re.MULTILINE,
+    ):
+        issues.append(
+            "static analysis must use a Sentry-and-Vectorscan-specific CPM cache key"
+        )
     return issues
 
 
@@ -553,6 +595,18 @@ def coverage_workflow_issues(text: str) -> list[str]:
         for tokens in gcovr_tokens
     ):
         issues.append("gcovr must include root-relative src/ paths in every report pass")
+
+    if (
+        "EVENT_NAME: ${{ github.event_name }}" not in text
+        or 'git fetch --no-tags origin "$base_sha"' not in text
+        or 'git cat-file -e "$base_sha^{commit}"' not in text
+        or "coverage ratchet base commit" not in text
+        or "base_sha=$(git rev-parse HEAD^ 2>/dev/null || true)" in text.replace(
+            "workflow_dispatch) base_sha=$(git rev-parse HEAD^ 2>/dev/null || true)",
+            "",
+        )
+    ):
+        issues.append("coverage ratchet must fail closed on the event base commit")
 
     if len(gcovr_commands) == 2:
         html_reports = []
@@ -675,7 +729,10 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/static-analysis.yml: {issue}"
         for issue in static_analysis_workflow_issues(static_text)
     )
-    if 'python3 "$CLANG_TIDY_DIFF"' not in static_text:
+    if (
+        'python3 "$CLANG_TIDY_DIFF"' not in static_text
+        and '--clang-tidy-diff "$CLANG_TIDY_DIFF"' not in static_text
+    ):
         issues.append(
             ".github/workflows/static-analysis.yml: clang-tidy-diff must use the discovered Ubuntu tool path"
         )
@@ -684,7 +741,9 @@ def check_repo(root: Path) -> list[str]:
             issues.append(
                 f".github/workflows/static-analysis.yml: static analysis must include {extension} files"
             )
-    if "git diff --name-only -z" not in static_text:
+    if not re.search(
+        r"git(?: -c core\.quotePath=false)? diff --name-only -z", static_text
+    ):
         issues.append(
             ".github/workflows/static-analysis.yml: changed paths must use NUL-delimited Git output"
         )

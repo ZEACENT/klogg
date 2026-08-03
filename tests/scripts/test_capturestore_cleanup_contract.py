@@ -8,7 +8,7 @@ CAPTURESTORE_SOURCE = ROOT / "src" / "logdata" / "src" / "capturestore.cpp"
 
 
 class CaptureStoreCleanupContractTest(unittest.TestCase):
-    def test_async_cleanup_snapshots_candidates_before_detaching(self):
+    def test_async_cleanup_collects_candidates_after_detaching(self):
         source = CAPTURESTORE_SOURCE.read_text()
         method_start = source.index(
             "void CaptureStore::scheduleCleanupUnusedCaptures("
@@ -16,19 +16,18 @@ class CaptureStoreCleanupContractTest(unittest.TestCase):
         method_end = source.index("CaptureStore::CaptureStore(", method_start)
         method = source[method_start:method_end]
 
-        collect_position = method.index(
-            "auto captureCandidates = collectUnusedCaptureCandidates("
-        )
         thread_position = method.index("std::thread(")
-        self.assertLess(collect_position, thread_position)
+        collect_position = method.index("collectUnusedCaptureCandidates(")
+        self.assertLess(thread_position, collect_position)
 
         detached_work = method[thread_position:]
-        self.assertIn(
-            "[ captureCandidates = std::move( captureCandidates ), preserveModifiedAfter ]",
-            detached_work,
-        )
+        self.assertIn("retainCaptureIds", detached_work)
+        self.assertIn("rootPath", detached_work)
         self.assertIn("cleanupCaptureCandidates", detached_work)
-        self.assertNotIn("retainCaptureIds", detached_work)
+        self.assertGreaterEqual(
+            method.count("catch ( const std::exception& error )"), 2
+        )
+        self.assertGreaterEqual(method.count("catch ( ... )"), 2)
 
     def test_cleanup_retries_hidden_quarantine_directories(self):
         source = CAPTURESTORE_SOURCE.read_text()
@@ -60,10 +59,10 @@ class CaptureStoreCleanupContractTest(unittest.TestCase):
         self.assertIn("qint64 registrySlotEpoch_ = 0;", source)
         self.assertIn("directory.identityKey()", source)
         self.assertIn(
-            "candidate.capturePathState->finalizeRemovedGeneration();",
+            "candidate.capturePathState->finalizeRemovedGenerationGateHeld();",
             source,
         )
-        self.assertIn("processFileOwnership_->ownedFilePaths.clear();", source)
+        self.assertIn("processFileOwnership_->ownedFiles.clear();", source)
         self.assertIn(
             "segmentIds_->nextSegmentId.store( 0, std::memory_order_release );",
             source,

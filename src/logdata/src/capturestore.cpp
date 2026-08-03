@@ -4,8 +4,13 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <csignal>
+#include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -23,7 +28,6 @@
 #if defined( Q_OS_WIN )
 #include <windows.h>
 #else
-#include <signal.h>
 #include <sys/types.h>
 #endif
 
@@ -32,9 +36,10 @@
 #include "securecapturedirectory.h"
 
 namespace {
-QString makeSegmentFileName( qint64 id )
+QString makeSegmentFileName( qint64 segmentId )
 {
-    return QString( "segment_%1.log" ).arg( id, 6, 10, QLatin1Char( '0' ) );
+    return QString( "segment_%1.log" ).arg( segmentId, 6, 10,
+                                             QLatin1Char( '0' ) );
 }
 
 std::optional<qint64> segmentIdFromFileName( const QString& fileName )
@@ -42,12 +47,13 @@ std::optional<qint64> segmentIdFromFileName( const QString& fileName )
     bool isValid = false;
     const auto numericId
         = QFileInfo( fileName ).baseName().mid( QString( "segment_" ).size() );
-    const auto id = numericId.toLongLong( &isValid );
-    if ( !isValid || id < 0 || id == std::numeric_limits<qint64>::max()
-         || fileName != makeSegmentFileName( id ) ) {
+    const auto segmentId = numericId.toLongLong( &isValid );
+    if ( !isValid || segmentId < 0
+         || segmentId == std::numeric_limits<qint64>::max()
+         || fileName != makeSegmentFileName( segmentId ) ) {
         return std::nullopt;
     }
-    return id;
+    return segmentId;
 }
 
 QString decodeUtf8Line( const QByteArray& utf8Line, QTextCodec* codec,
@@ -78,8 +84,9 @@ void reserveSegmentMemory( QByteArray& data, qint64 targetBytes, qint64 budgetBy
 LineNumber tailFirstLine( qint64 totalLines, LinesCount lineCount )
 {
     const auto count = static_cast<qint64>( lineCount.get() );
-    return LineNumber( static_cast<LineNumber::UnderlyingType>(
-        totalLines >= count ? totalLines - count : 0 ) );
+    auto firstLine = LineNumber{ static_cast<LineNumber::UnderlyingType>(
+        totalLines >= count ? totalLines - count : 0 ) };
+    return firstLine;
 }
 
 // Clamp untrusted limit inputs (session-restore JSON, hand-edited .ini) so the
@@ -187,7 +194,7 @@ QString captureCoordinationStem( const QString& directoryIdentity )
 
 QString directChildName( const QString& filePath )
 {
-    const auto fileName = QFileInfo( filePath ).fileName();
+    auto fileName = QFileInfo( filePath ).fileName();
     if ( fileName.isEmpty() || fileName == QStringLiteral( "." )
          || fileName == QStringLiteral( ".." )
          || fileName.contains( QLatin1Char( '/' ) )
@@ -220,19 +227,24 @@ bool isProcessRunning( qint64 processId )
 }
 
 std::atomic<int> capturePathGateTimeoutMs{ 5000 };
+constexpr int CaptureRetryAttemptLimit = 8;
+constexpr auto CaptureRetryInitialDelay = std::chrono::milliseconds( 25 );
+constexpr auto CaptureRetryMaximumDelay = std::chrono::milliseconds( 400 );
 
 class CapturePathGate {
   public:
     explicit CapturePathGate( QString gatePath )
-        : lock_( std::move( gatePath ) )
+        : lock_( gatePath )
     {
         lock_.setStaleLockTime( 0 );
     }
 
-    bool lock()
+    bool lock( int timeoutOverrideMs = -1 )
     {
         const auto timeout
-            = capturePathGateTimeoutMs.load( std::memory_order_acquire );
+            = timeoutOverrideMs >= 0
+                  ? timeoutOverrideMs
+                  : capturePathGateTimeoutMs.load( std::memory_order_acquire );
         if ( lock_.tryLock( timeout ) ) {
             return true;
         }
@@ -257,6 +269,81 @@ class CapturePathGate {
     QLockFile lock_;
 };
 
+struct CaptureBackgroundThreadTracker {
+    std::mutex mutex;
+    std::condition_variable stopped;
+    bool stopping = false;
+    size_t activeThreads = 0;
+};
+
+CaptureBackgroundThreadTracker& captureBackgroundThreadTracker()
+{
+    static CaptureBackgroundThreadTracker tracker;
+    return tracker;
+}
+
+void stopCaptureBackgroundThreads()
+{
+    auto& tracker = captureBackgroundThreadTracker();
+    std::unique_lock<std::mutex> lock( tracker.mutex );
+    tracker.stopping = true;
+    tracker.stopped.wait( lock, [ &tracker ] {
+        return tracker.activeThreads == 0;
+    } );
+}
+
+bool registerCaptureBackgroundThread()
+{
+    if ( QCoreApplication::instance() == nullptr ) {
+        return false;
+    }
+
+    static std::once_flag cleanupRegistered;
+    std::call_once( cleanupRegistered, [] {
+        qAddPostRoutine( stopCaptureBackgroundThreads );
+    } );
+
+    auto& tracker = captureBackgroundThreadTracker();
+    const std::lock_guard<std::mutex> lock( tracker.mutex );
+    if ( tracker.stopping ) {
+        return false;
+    }
+    ++tracker.activeThreads;
+    return true;
+}
+
+void unregisterCaptureBackgroundThread()
+{
+    auto& tracker = captureBackgroundThreadTracker();
+    const std::lock_guard<std::mutex> lock( tracker.mutex );
+    --tracker.activeThreads;
+    if ( tracker.activeThreads == 0 ) {
+        tracker.stopped.notify_all();
+    }
+}
+
+bool captureBackgroundThreadsStopping()
+{
+    auto& tracker = captureBackgroundThreadTracker();
+    const std::lock_guard<std::mutex> lock( tracker.mutex );
+    return tracker.stopping;
+}
+
+class CaptureBackgroundThreadRegistration {
+  public:
+    CaptureBackgroundThreadRegistration() = default;
+
+    ~CaptureBackgroundThreadRegistration()
+    {
+        unregisterCaptureBackgroundThread();
+    }
+
+    CaptureBackgroundThreadRegistration(
+        const CaptureBackgroundThreadRegistration& ) = delete;
+    CaptureBackgroundThreadRegistration& operator=(
+        const CaptureBackgroundThreadRegistration& ) = delete;
+};
+
 } // namespace
 
 bool CaptureStore::isValidCaptureId( const QString& captureId )
@@ -269,7 +356,7 @@ struct CaptureSegmentIdState {
 };
 
 struct CaptureProcessFileOwnership {
-    QSet<QString> ownedFilePaths;
+    QHash<QString, QString> ownedFiles;
 };
 
 struct CaptureStore::CapturePathState
@@ -283,7 +370,19 @@ struct CaptureStore::CapturePathState
         qint64 activityEpoch = 0;
     };
 
-    enum class RetireResult {
+    struct TrackedFile {
+        QString name;
+        QString identity;
+    };
+
+    static QString trackedFileKey( const QString& name,
+                                   const QString& identity )
+    {
+        return QString::number( name.size() ) + QLatin1Char( ':' ) + name
+               + identity;
+    }
+
+    enum class RetireResult : std::uint8_t {
         Retired,
         Deferred,
         Rejected,
@@ -319,13 +418,23 @@ struct CaptureStore::CapturePathState
 
     std::optional<ActivationResult> activate()
     {
+        std::function<void()> beforeActivationCallback;
+        {
+            const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+            beforeActivationCallback
+                = std::move( beforeActivationCallbackForTesting_ );
+            beforeActivationCallbackForTesting_ = {};
+        }
+        if ( beforeActivationCallback ) {
+            beforeActivationCallback();
+        }
+
         CapturePathGate gate( coordinationStem_ + QStringLiteral( ".gate" ) );
         if ( !gate.lock() ) {
             throw std::runtime_error( "Failed to acquire capture activation gate" );
         }
         {
             const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-            applyPendingDeactivationsLocked();
             if ( terminallyRemoved_.load( std::memory_order_acquire ) ) {
                 return std::nullopt;
             }
@@ -347,6 +456,11 @@ struct CaptureStore::CapturePathState
             const auto mayAdoptExistingFiles
                 = activeStoreTokens_.isEmpty() && !hasSiblingProcess;
             if ( activeStoreTokens_.isEmpty() ) {
+                if ( QFileInfo::exists( activeMarkerPath() )
+                     && !QFile::remove( activeMarkerPath() ) ) {
+                    throw std::runtime_error(
+                        "Failed to remove stale local capture marker" );
+                }
                 processMarker_ = std::make_unique<QLockFile>( activeMarkerPath() );
                 processMarker_->setStaleLockTime( 0 );
                 if ( !processMarker_->tryLock( 0 ) ) {
@@ -355,15 +469,20 @@ struct CaptureStore::CapturePathState
                 }
             }
             if ( mayAdoptExistingFiles ) {
-                QSet<QString> currentCaptureFiles;
+                QHash<QString, QString> currentCaptureFiles;
                 const auto captureFiles = directory_.entryList(
                     QDir::Files | QDir::Hidden, QDir::NoSort );
                 for ( const auto& fileName : captureFiles ) {
-                    currentCaptureFiles.insert( fileName );
+                    const auto fileIdentity = directory_.fileIdentity( fileName );
+                    if ( fileIdentity.isEmpty() ) {
+                        continue;
+                    }
+                    currentCaptureFiles.insert( fileName, fileIdentity );
                     result.inheritedCaptureFiles.insert(
                         QDir( path_ ).filePath( fileName ) );
                 }
-                processFileOwnership_->ownedFilePaths = std::move( currentCaptureFiles );
+                processFileOwnership_->ownedFiles
+                    = std::move( currentCaptureFiles );
             }
             localProcessGeneration_ = activationGeneration;
             activeStoreTokens_.insert( result.activationToken );
@@ -373,8 +492,12 @@ struct CaptureStore::CapturePathState
             // or retire files that the new store may load.
             cancelDirectoryDeletionLocked();
             pendingRetirementRequesters_.clear();
+            pendingRetirementFiles_.clear();
         }
         retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( hasRetryableMaintenance() ) {
+            scheduleRetry();
+        }
         return result;
     }
 
@@ -382,16 +505,27 @@ struct CaptureStore::CapturePathState
     {
         {
             const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-            if ( activeStoreTokens_.contains( activationToken ) ) {
-                pendingDeactivationTokens_.insert( activationToken );
+            if ( activeStoreTokens_.remove( activationToken ) ) {
+                ++activityEpoch_;
+            }
+            if ( activeStoreTokens_.isEmpty() ) {
+                processMarker_.reset();
+                if ( retiredFiles_.isEmpty() && !QDir( path_ ).exists() ) {
+                    segmentIds_->nextSegmentId.store( 0,
+                                                      std::memory_order_release );
+                }
             }
         }
 
         CapturePathGate gate( coordinationStem_ + QStringLiteral( ".gate" ) );
         if ( !gate.lock() ) {
+            scheduleRetry( true );
             return;
         }
         retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( hasRetryableMaintenance() ) {
+            scheduleRetry();
+        }
     }
 
     bool isTerminallyRemoved() const
@@ -405,6 +539,7 @@ struct CaptureStore::CapturePathState
         if ( startsReplacement ) {
             cancelDirectoryDeletionLocked();
             pendingRetirementRequesters_.clear();
+            pendingRetirementFiles_.clear();
         }
         if ( !directory_.ensureExists() ) {
             throw std::runtime_error( "Capture directory identity changed" );
@@ -426,21 +561,28 @@ struct CaptureStore::CapturePathState
 
         CapturePathGate gate( gatePath() );
         if ( !gate.lock() ) {
+            scheduleRetry( true );
             return;
         }
         retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( hasRetryableMaintenance() ) {
+            scheduleRetry();
+        }
     }
 
     std::shared_ptr<SpilledSegmentFile> leaseFor( const QString& filePath );
     void registerCreatedFile( const QString& filePath );
     void transferCreatedFile( const QString& oldPath, const QString& newPath );
     RetireResult tryRetireOwnedFile(
-        const QString& filePath, const QByteArray& activationToken );
+        const QString& filePath, const QString& fileIdentity,
+        const QByteArray& activationToken );
     void retireFile( const QString& filePath );
     bool isTombstoned( const QString& filePath ) const;
     QString physicalPath( const QString& filePath ) const;
-    bool openReadFile( const QString& filePath, QFile& file ) const;
-    void releaseRetiredFile( const QString& filePath );
+    std::unique_ptr<QFile> openReadFile(
+        const QString& filePath, const QString& fileIdentity ) const;
+    void releaseRetiredFile( const QString& filePath,
+                             const QString& fileIdentity );
 
     QString gatePath() const
     {
@@ -466,16 +608,70 @@ struct CaptureStore::CapturePathState
             if ( processId == QCoreApplication::applicationPid() ) {
                 continue;
             }
-            if ( isProcessRunning( processId ) ) {
-                return true;
+
+            QLockFile markerLock( markerPath );
+            markerLock.setStaleLockTime( 0 );
+            if ( markerLock.tryLock( 0 ) ) {
+                markerLock.unlock();
+                continue;
             }
-            QFile::remove( markerPath );
+
+            const auto lockError = markerLock.error();
+            qint64 lockProcessId = 0;
+            QString hostname;
+            QString applicationName;
+            auto lockInfoAvailable
+                = markerLock.getLockInfo( &lockProcessId, &hostname,
+                                          &applicationName );
+            if ( lockError == QLockFile::LockFailedError
+                 && ( !lockInfoAvailable || lockProcessId != processId ) ) {
+                // QLockFile creates the marker with O_EXCL and writes the
+                // record in a separate step, so a live sibling can briefly
+                // own a marker whose record is not readable yet. Re-read
+                // through a bounded grace window so that creation window can
+                // close; a marker that stays incoherent is an abandoned or
+                // forged file and must still be removed — a live filename
+                // pid alone is not proof of ownership, since pid reuse is
+                // exactly how such leftovers appear.
+                constexpr auto MarkerRecordGraceMs = 100;
+                constexpr auto MarkerRecordPollMs = 10;
+                for ( auto waited = 0;
+                      waited < MarkerRecordGraceMs
+                      && ( !lockInfoAvailable
+                           || lockProcessId != processId );
+                      waited += MarkerRecordPollMs ) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds{ MarkerRecordPollMs } );
+                    lockProcessId = 0;
+                    lockInfoAvailable = markerLock.getLockInfo(
+                        &lockProcessId, &hostname, &applicationName );
+                }
+                if ( !lockInfoAvailable || lockProcessId != processId ) {
+                    QFile::remove( markerPath );
+                    continue;
+                }
+            }
+            if ( lockError != QLockFile::LockFailedError
+                 || !lockInfoAvailable
+                 || lockProcessId != processId
+                 || !isProcessRunning( lockProcessId ) ) {
+                QFile::remove( markerPath );
+                continue;
+            }
+            // A renamed executable or another compatible klogg build can use a
+            // different application name while still owning this exact locked
+            // marker. Once the lock metadata PID is coherent and live, fail
+            // closed rather than deleting a capture that process still uses.
+            return true;
         }
         return false;
     }
 
     void retryRetiredFilesAndReleaseRegistry();
     void retryRetiredFilesAndReleaseRegistryGateHeld();
+    void scheduleRetry( bool force = false );
+    bool hasRetryableMaintenance() const;
+    bool hasPendingGateRetry() const;
     void failNextRetiredFileRemovalForTesting()
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
@@ -486,6 +682,38 @@ struct CaptureStore::CapturePathState
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
         failNextCaptureDirectoryRemovalForTesting_ = true;
+    }
+
+    void failNextRecursiveDirectoryRemovalForTesting()
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        directory_.failNextRecursiveRemovalForTesting();
+    }
+
+    void setBeforeActivationCallbackForTesting(
+        std::function<void()> callback )
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        beforeActivationCallbackForTesting_ = std::move( callback );
+    }
+
+    void setAfterRecursiveRemovalQuarantineCallbackForTesting(
+        std::function<void()> callback )
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        directory_.setAfterRecursiveRemovalQuarantineCallbackForTesting(
+            std::move( callback ) );
+    }
+
+    bool hasLocalCoordinationOwnershipForTesting() const
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        return processMarker_ || QFileInfo::exists( processGenerationPath() );
+    }
+
+    QString activeMarkerPathForTesting() const
+    {
+        return activeMarkerPath();
     }
 
     std::vector<qint64> reserveSegmentIds( qint64 count )
@@ -504,24 +732,26 @@ struct CaptureStore::CapturePathState
             if ( segmentIds_->nextSegmentId.compare_exchange_weak(
                     nextId, nextId + count, std::memory_order_acq_rel,
                     std::memory_order_acquire ) ) {
-                std::vector<qint64> ids;
-                ids.reserve( static_cast<size_t>( count ) );
-                for ( qint64 id = nextId; id < nextId + count; ++id ) {
-                    ids.push_back( id );
+                std::vector<qint64> segmentIds;
+                segmentIds.reserve( static_cast<size_t>( count ) );
+                for ( qint64 segmentId = nextId; segmentId < nextId + count;
+                      ++segmentId ) {
+                    segmentIds.push_back( segmentId );
                 }
-                return ids;
+                return segmentIds;
             }
         }
     }
 
-    void observeSegmentId( qint64 id )
+    void observeSegmentId( qint64 segmentId )
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        if ( id < 0 || id == std::numeric_limits<qint64>::max() ) {
+        if ( segmentId < 0
+             || segmentId == std::numeric_limits<qint64>::max() ) {
             return;
         }
 
-        const auto afterId = id + 1;
+        const auto afterId = segmentId + 1;
         auto nextId = segmentIds_->nextSegmentId.load( std::memory_order_acquire );
         while ( nextId < afterId
                && !segmentIds_->nextSegmentId.compare_exchange_weak(
@@ -554,10 +784,10 @@ struct CaptureStore::CapturePathState
     QString coordinationStem_;
     SecureCaptureDirectory directory_;
 
-    void finalizeRemovedGeneration()
+    void finalizeRemovedGenerationGateHeld()
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        finalizeRemovedGenerationLocked();
+        finalizeRemovedGenerationGateHeldLocked();
     }
 
   private:
@@ -569,27 +799,6 @@ struct CaptureStore::CapturePathState
                                    qint64 registrySlotEpoch,
                                    const std::shared_ptr<CapturePathState>& state,
                                    qint64 tombstoneEpoch );
-
-    void applyPendingDeactivationsLocked()
-    {
-        bool removedActivation = false;
-        for ( const auto& activationToken : pendingDeactivationTokens_ ) {
-            removedActivation
-                = activeStoreTokens_.remove( activationToken ) > 0
-                  || removedActivation;
-        }
-        pendingDeactivationTokens_.clear();
-        if ( removedActivation ) {
-            ++activityEpoch_;
-        }
-        if ( activeStoreTokens_.isEmpty() ) {
-            processMarker_.reset();
-            if ( retiredPaths_.isEmpty() && !QDir( path_ ).exists() ) {
-                segmentIds_->nextSegmentId.store( 0,
-                                                  std::memory_order_release );
-            }
-        }
-    }
 
     void pruneExpiredLeases()
     {
@@ -620,10 +829,14 @@ struct CaptureStore::CapturePathState
                 ++pending;
                 continue;
             }
-            if ( !retiredPaths_.contains( pending.key() ) ) {
-                retiredPaths_.insert( pending.key() );
+            const auto pendingFile
+                = pendingRetirementFiles_.value( pending.key() );
+            if ( !pendingFile.identity.isEmpty()
+                 && !retiredFiles_.contains( pending.key() ) ) {
+                retiredFiles_.insert( pending.key(), pendingFile );
                 retainEpoch = ++tombstoneEpoch_;
             }
+            pendingRetirementFiles_.remove( pending.key() );
             pending = pendingRetirementRequesters_.erase( pending );
         }
         return retainEpoch;
@@ -631,7 +844,7 @@ struct CaptureStore::CapturePathState
 
     bool hasProtectedFiles() const
     {
-        if ( !retiredPaths_.isEmpty() ) {
+        if ( !retiredFiles_.isEmpty() ) {
             return true;
         }
         for ( auto lease = fileLeases_.cbegin(); lease != fileLeases_.cend(); ++lease ) {
@@ -653,13 +866,13 @@ struct CaptureStore::CapturePathState
         return coordinationStem_ + QStringLiteral( ".generation" );
     }
 
-    bool removeRetiredFile( const QString& filePath )
+    bool removeRetiredFile( const TrackedFile& file )
     {
         if ( failNextRetiredFileRemovalForTesting_ ) {
             failNextRetiredFileRemovalForTesting_ = false;
             return false;
         }
-        return directory_.removeFile( filePath );
+        return directory_.removeFile( file.name, file.identity );
     }
 
     void cancelDirectoryDeletionLocked()
@@ -669,10 +882,14 @@ struct CaptureStore::CapturePathState
         directoryDeletionGeneration_.clear();
     }
 
-    void finalizeRemovedGenerationLocked()
+    void finalizeRemovedGenerationGateHeldLocked()
     {
-        processFileOwnership_->ownedFilePaths.clear();
+        processMarker_.reset();
+        removeProcessGeneration();
+        processFileOwnership_->ownedFiles.clear();
         pendingRetirementRequesters_.clear();
+        pendingRetirementFiles_.clear();
+        retiredFiles_.clear();
         segmentIds_->nextSegmentId.store( 0, std::memory_order_release );
         localProcessGeneration_.clear();
         cancelDirectoryDeletionLocked();
@@ -681,7 +898,7 @@ struct CaptureStore::CapturePathState
 
     void removeDirectoryIfRequestedAndEmptyGateHeld()
     {
-        if ( !directoryDeletionRequested_ || !retiredPaths_.isEmpty() ) {
+        if ( !directoryDeletionRequested_ || !retiredFiles_.isEmpty() ) {
             return;
         }
         if ( directoryDeletionRequesterToken_.isEmpty() ) {
@@ -712,18 +929,27 @@ struct CaptureStore::CapturePathState
         }
 
         if ( directory_.isRemoved() ) {
-            finalizeRemovedGenerationLocked();
+            finalizeRemovedGenerationGateHeldLocked();
             return;
         }
-        if ( !failNextCaptureDirectoryRemovalForTesting_ && directory_.removeIfEmpty() ) {
-            finalizeRemovedGenerationLocked();
+        if ( directory_.hasEntries() ) {
+            if ( activeStoreTokens_.isEmpty() ) {
+                cancelDirectoryDeletionLocked();
+            }
+            return;
+        }
+        if ( !failNextCaptureDirectoryRemovalForTesting_ ) {
+            const auto directoryRemoved = directory_.removeIfEmpty();
+            if ( directoryRemoved || directory_.isRemoved() ) {
+                finalizeRemovedGenerationGateHeldLocked();
+            }
         }
         failNextCaptureDirectoryRemovalForTesting_ = false;
     }
 
     qint64 takeTombstoneRegistryReleaseEpochLocked()
     {
-        if ( !retiredPaths_.isEmpty() ) {
+        if ( !retiredFiles_.isEmpty() ) {
             return 0;
         }
 
@@ -734,28 +960,34 @@ struct CaptureStore::CapturePathState
     }
 
     QSet<QByteArray> activeStoreTokens_;
-    QSet<QByteArray> pendingDeactivationTokens_;
     qint64 activityEpoch_ = 0;
     bool directoryDeletionRequested_ = false;
     QByteArray localProcessGeneration_;
     QByteArray directoryDeletionRequesterToken_;
     QByteArray directoryDeletionGeneration_;
     std::atomic<bool> terminallyRemoved_{ false };
+    std::atomic<bool> retryScheduled_{ false };
+    std::atomic<std::uint64_t> gateRetryRequestEpoch_{ 0 };
+    std::atomic<std::uint64_t> gateRetryCompletedEpoch_{ 0 };
     qint64 tombstoneEpoch_ = 0;
     qint64 pendingTombstoneRegistryReleaseEpoch_ = 0;
     bool failNextRetiredFileRemovalForTesting_ = false;
     bool failNextCaptureDirectoryRemovalForTesting_ = false;
+    std::function<void()> beforeActivationCallbackForTesting_;
     std::unique_ptr<QLockFile> processMarker_;
     std::shared_ptr<CaptureSegmentIdState> segmentIds_;
     QHash<QString, std::weak_ptr<SpilledSegmentFile>> fileLeases_;
     std::shared_ptr<CaptureProcessFileOwnership> processFileOwnership_;
     QHash<QString, QSet<QByteArray>> pendingRetirementRequesters_;
-    QSet<QString> retiredPaths_;
+    QHash<QString, TrackedFile> pendingRetirementFiles_;
+    QHash<QString, TrackedFile> retiredFiles_;
 };
 
 struct CaptureStore::SpilledSegmentFile {
-    SpilledSegmentFile( QString path, std::shared_ptr<CapturePathState> capturePathState )
+    SpilledSegmentFile( QString path, QString identity,
+                        std::shared_ptr<CapturePathState> capturePathState )
         : path_( std::move( path ) )
+        , identity_( std::move( identity ) )
         , capturePathState_( std::move( capturePathState ) )
     {
     }
@@ -764,7 +996,11 @@ struct CaptureStore::SpilledSegmentFile {
     {
         if ( retired_.load( std::memory_order_acquire )
              || notifyOnRelease_.load( std::memory_order_acquire ) ) {
-            capturePathState_->releaseRetiredFile( path_ );
+            try {
+                capturePathState_->releaseRetiredFile( path_, identity_ );
+            } catch ( ... ) {
+                LOG_WARNING << "Failed to release retired capture file";
+            }
         }
     }
 
@@ -776,7 +1012,7 @@ struct CaptureStore::SpilledSegmentFile {
             return;
         }
         const auto result = capturePathState_->tryRetireOwnedFile(
-            path_, activationToken );
+            path_, identity_, activationToken );
         if ( result == CapturePathState::RetireResult::Deferred ) {
             notifyOnRelease_.store( true, std::memory_order_release );
         }
@@ -795,13 +1031,19 @@ struct CaptureStore::SpilledSegmentFile {
         return retired_.load( std::memory_order_acquire );
     }
 
-    bool openForRead( QFile& file ) const
+    QString identity() const
     {
-        return capturePathState_->openReadFile( path_, file );
+        return identity_;
+    }
+
+    std::unique_ptr<QFile> openForRead() const
+    {
+        return capturePathState_->openReadFile( path_, identity_ );
     }
 
   private:
     QString path_;
+    QString identity_;
     std::shared_ptr<CapturePathState> capturePathState_;
     std::atomic<bool> retired_{ false };
     std::atomic<bool> notifyOnRelease_{ false };
@@ -824,6 +1066,9 @@ struct CaptureStore::CapturePathState::Registry {
 
 CaptureStore::CapturePathState::Registry& CaptureStore::CapturePathState::registry()
 {
+    // The registry intentionally outlives Qt and static teardown: path-state
+    // destructors may run during process shutdown and still need this mutex.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     static auto* const registry = new Registry;
     return *registry;
 }
@@ -837,7 +1082,7 @@ CaptureStore::CapturePathState::~CapturePathState()
          && entry->slotEpoch == registrySlotEpoch_ && entry->state.expired()
          && !entry->tombstoneState
          && ( !entry->processFileOwnership
-              || entry->processFileOwnership->ownedFilePaths.isEmpty() ) ) {
+              || entry->processFileOwnership->ownedFiles.isEmpty() ) ) {
         pathRegistry.entries.erase( entry );
     }
 }
@@ -859,7 +1104,7 @@ QByteArray CaptureStore::CapturePathState::advanceProcessGeneration()
         return {};
     }
 
-    const auto generation
+    auto generation
         = QUuid::createUuid().toByteArray( QUuid::WithoutBraces );
     if ( generationFile.write( generation ) != generation.size()
          || !generationFile.commit() ) {
@@ -934,7 +1179,7 @@ CaptureStore::CapturePathState::acquire( const QString& path, bool createIfMissi
         std::move( directory ), registryKey, newEntry.slotEpoch,
         newEntry.segmentIds, newEntry.processFileOwnership );
     newEntry.state = state;
-    pathRegistry.entries.insert( registryKey, std::move( newEntry ) );
+    pathRegistry.entries.insert( registryKey, newEntry );
     return state;
 }
 
@@ -979,12 +1224,18 @@ CaptureStore::CapturePathState::leaseFor( const QString& filePath )
     }
 
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    if ( const auto retained = fileLeases_.value( fileName ).lock() ) {
+    const auto fileIdentity = directory_.fileIdentity( fileName );
+    if ( fileIdentity.isEmpty() ) {
+        return {};
+    }
+    const auto fileKey = trackedFileKey( fileName, fileIdentity );
+    if ( const auto retained = fileLeases_.value( fileKey ).lock() ) {
         return retained;
     }
 
-    auto spilledFile = std::make_shared<SpilledSegmentFile>( fileName, shared_from_this() );
-    fileLeases_.insert( fileName, spilledFile );
+    auto spilledFile = std::make_shared<SpilledSegmentFile>(
+        fileName, fileIdentity, shared_from_this() );
+    fileLeases_.insert( fileKey, spilledFile );
     return spilledFile;
 }
 
@@ -995,7 +1246,10 @@ void CaptureStore::CapturePathState::registerCreatedFile( const QString& filePat
         return;
     }
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    processFileOwnership_->ownedFilePaths.insert( fileName );
+    const auto fileIdentity = directory_.fileIdentity( fileName );
+    if ( !fileIdentity.isEmpty() ) {
+        processFileOwnership_->ownedFiles.insert( fileName, fileIdentity );
+    }
 }
 
 void CaptureStore::CapturePathState::transferCreatedFile( const QString& oldPath,
@@ -1007,32 +1261,42 @@ void CaptureStore::CapturePathState::transferCreatedFile( const QString& oldPath
         return;
     }
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    processFileOwnership_->ownedFilePaths.remove( oldName );
-    processFileOwnership_->ownedFilePaths.insert( newName );
+    const auto fileIdentity
+        = processFileOwnership_->ownedFiles.take( oldName );
+    if ( !fileIdentity.isEmpty() ) {
+        processFileOwnership_->ownedFiles.insert( newName, fileIdentity );
+    }
 }
 
 CaptureStore::CapturePathState::RetireResult
 CaptureStore::CapturePathState::tryRetireOwnedFile(
-    const QString& filePath, const QByteArray& activationToken )
+    const QString& filePath, const QString& fileIdentity,
+    const QByteArray& activationToken )
 {
     const auto fileName = directChildName( filePath );
-    if ( fileName.isEmpty() || activationToken.isEmpty() ) {
+    if ( fileName.isEmpty() || fileIdentity.isEmpty()
+         || activationToken.isEmpty() ) {
         return RetireResult::Rejected;
     }
 
+    const auto fileKey = trackedFileKey( fileName, fileIdentity );
     qint64 tombstoneEpoch = 0;
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        if ( !processFileOwnership_->ownedFilePaths.contains( fileName )
+        if ( processFileOwnership_->ownedFiles.value( fileName )
+                 != fileIdentity
              || !activeStoreTokens_.contains( activationToken ) ) {
             return RetireResult::Rejected;
         }
         if ( activeStoreTokens_.size() != 1 ) {
-            pendingRetirementRequesters_[ fileName ].insert(
+            pendingRetirementRequesters_[ fileKey ].insert(
                 activationToken );
+            pendingRetirementFiles_.insert(
+                fileKey, TrackedFile{ fileName, fileIdentity } );
             return RetireResult::Deferred;
         }
-        retiredPaths_.insert( fileName );
+        retiredFiles_.insert(
+            fileKey, TrackedFile{ fileName, fileIdentity } );
         tombstoneEpoch = ++tombstoneEpoch_;
     }
     retainTombstones( registryKey_, registrySlotEpoch_, shared_from_this(),
@@ -1047,10 +1311,17 @@ void CaptureStore::CapturePathState::retireFile( const QString& filePath )
         return;
     }
 
+    const auto fileIdentity = directory_.fileIdentity( fileName );
+    if ( fileIdentity.isEmpty() ) {
+        return;
+    }
+
+    const auto fileKey = trackedFileKey( fileName, fileIdentity );
     qint64 tombstoneEpoch = 0;
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        retiredPaths_.insert( fileName );
+        retiredFiles_.insert(
+            fileKey, TrackedFile{ fileName, fileIdentity } );
         tombstoneEpoch = ++tombstoneEpoch_;
     }
     retainTombstones( registryKey_, registrySlotEpoch_, shared_from_this(),
@@ -1061,7 +1332,13 @@ bool CaptureStore::CapturePathState::isTombstoned( const QString& filePath ) con
 {
     const auto fileName = directChildName( filePath );
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    return !fileName.isEmpty() && retiredPaths_.contains( fileName );
+    if ( fileName.isEmpty() ) {
+        return false;
+    }
+    const auto currentIdentity = directory_.fileIdentity( fileName );
+    return !currentIdentity.isEmpty()
+           && retiredFiles_.contains(
+               trackedFileKey( fileName, currentIdentity ) );
 }
 
 QString CaptureStore::CapturePathState::physicalPath( const QString& filePath ) const
@@ -1070,35 +1347,45 @@ QString CaptureStore::CapturePathState::physicalPath( const QString& filePath ) 
     return fileName.isEmpty() ? QString{} : QDir( path_ ).filePath( fileName );
 }
 
-bool CaptureStore::CapturePathState::openReadFile( const QString& filePath, QFile& file ) const
+std::unique_ptr<QFile> CaptureStore::CapturePathState::openReadFile(
+    const QString& filePath, const QString& fileIdentity ) const
 {
     const auto fileName = directChildName( filePath );
-    return !fileName.isEmpty() && directory_.openReadFile( fileName, file );
+    return fileName.isEmpty()
+               ? nullptr
+               : directory_.openReadFile( fileName, fileIdentity );
 }
 
-void CaptureStore::CapturePathState::releaseRetiredFile( const QString& filePath )
+void CaptureStore::CapturePathState::releaseRetiredFile(
+    const QString& filePath, const QString& fileIdentity )
 {
     CapturePathGate gate( gatePath() );
     if ( !gate.lock() ) {
+        scheduleRetry( true );
         return;
     }
+    const auto foreignProcessActive = hasActiveProcessMarker();
 
     qint64 retainEpoch = 0;
     qint64 releaseEpoch = 0;
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        applyPendingDeactivationsLocked();
         pruneExpiredLeases();
         retainEpoch = promotePendingRetirementsLocked();
-        if ( retiredPaths_.contains( filePath ) ) {
-            auto removed = removeRetiredFile( filePath );
+        const auto fileKey = trackedFileKey( filePath, fileIdentity );
+        const auto retired = retiredFiles_.find( fileKey );
+        if ( retired != retiredFiles_.end() && !foreignProcessActive ) {
+            auto removed = removeRetiredFile( retired.value() );
             if ( !removed ) {
                 std::this_thread::yield();
-                removed = removeRetiredFile( filePath );
+                removed = removeRetiredFile( retired.value() );
             }
             if ( removed ) {
-                retiredPaths_.remove( filePath );
-                processFileOwnership_->ownedFilePaths.remove( filePath );
+                if ( processFileOwnership_->ownedFiles.value( filePath )
+                     == fileIdentity ) {
+                    processFileOwnership_->ownedFiles.remove( filePath );
+                }
+                retiredFiles_.erase( retired );
                 ++tombstoneEpoch_;
                 removeDirectoryIfRequestedAndEmptyGateHeld();
                 releaseEpoch = takeTombstoneRegistryReleaseEpochLocked();
@@ -1114,40 +1401,56 @@ void CaptureStore::CapturePathState::releaseRetiredFile( const QString& filePath
         releaseTombstones( registryKey_, registrySlotEpoch_, shared_from_this(),
                            releaseEpoch );
     }
+    if ( hasRetryableMaintenance() ) {
+        scheduleRetry();
+    }
 }
 
 void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistry()
 {
     CapturePathGate gate( gatePath() );
     if ( !gate.lock() ) {
+        scheduleRetry( true );
         return;
     }
     retryRetiredFilesAndReleaseRegistryGateHeld();
+    if ( hasRetryableMaintenance() ) {
+        scheduleRetry();
+    }
 }
 
 void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistryGateHeld()
 {
+    const auto foreignProcessActive = hasActiveProcessMarker();
     qint64 retainEpoch = 0;
     qint64 releaseEpoch = 0;
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-        applyPendingDeactivationsLocked();
         pruneExpiredLeases();
         retainEpoch = promotePendingRetirementsLocked();
-        for ( auto retired = retiredPaths_.begin(); retired != retiredPaths_.end(); ) {
-            if ( fileLeases_.value( *retired ).lock() ) {
-                ++retired;
-                continue;
-            }
-            if ( removeRetiredFile( *retired ) ) {
-                processFileOwnership_->ownedFilePaths.remove( *retired );
-                retired = retiredPaths_.erase( retired );
-                ++tombstoneEpoch_;
-            } else {
-                ++retired;
+        if ( !foreignProcessActive ) {
+            for ( auto retired = retiredFiles_.begin();
+                  retired != retiredFiles_.end(); ) {
+                if ( !fileLeases_.value( retired.key() ).expired() ) {
+                    ++retired;
+                    continue;
+                }
+                if ( removeRetiredFile( retired.value() ) ) {
+                    const auto& retiredFile = retired.value();
+                    if ( processFileOwnership_->ownedFiles.value(
+                             retiredFile.name )
+                         == retiredFile.identity ) {
+                        processFileOwnership_->ownedFiles.remove(
+                            retiredFile.name );
+                    }
+                    retired = retiredFiles_.erase( retired );
+                    ++tombstoneEpoch_;
+                } else {
+                    ++retired;
+                }
             }
         }
-        if ( retiredPaths_.isEmpty() ) {
+        if ( retiredFiles_.isEmpty() ) {
             removeDirectoryIfRequestedAndEmptyGateHeld();
             releaseEpoch = takeTombstoneRegistryReleaseEpochLocked();
         }
@@ -1163,13 +1466,127 @@ void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistryGateHeld
     }
 }
 
+bool CaptureStore::CapturePathState::hasRetryableMaintenance() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    for ( auto retired = retiredFiles_.cbegin();
+          retired != retiredFiles_.cend(); ++retired ) {
+        if ( fileLeases_.value( retired.key() ).expired() ) {
+            return true;
+        }
+    }
+    if ( !pendingRetirementRequesters_.isEmpty()
+         && activeStoreTokens_.isEmpty() ) {
+        return true;
+    }
+    return directoryDeletionRequested_ && activeStoreTokens_.isEmpty()
+           && retiredFiles_.isEmpty();
+}
+
+bool CaptureStore::CapturePathState::hasPendingGateRetry() const
+{
+    return gateRetryCompletedEpoch_.load( std::memory_order_acquire )
+           != gateRetryRequestEpoch_.load( std::memory_order_acquire );
+}
+
+void CaptureStore::CapturePathState::scheduleRetry( bool force )
+{
+    if ( !force && !hasPendingGateRetry() && !hasRetryableMaintenance() ) {
+        return;
+    }
+    gateRetryRequestEpoch_.fetch_add( 1, std::memory_order_acq_rel );
+
+    bool expected = false;
+    if ( !retryScheduled_.compare_exchange_strong(
+             expected, true, std::memory_order_acq_rel ) ) {
+        return;
+    }
+
+    if ( !registerCaptureBackgroundThread() ) {
+        retryScheduled_.store( false, std::memory_order_release );
+        return;
+    }
+
+    auto state = shared_from_this();
+    try {
+        std::thread( [ state = std::move( state ) ]() noexcept {
+            CaptureBackgroundThreadRegistration registration;
+            auto lastAttemptRequestEpoch = std::uint64_t{ 0 };
+            try {
+                auto retryDelay = CaptureRetryInitialDelay;
+                for ( int attempt = 0;
+                      attempt < CaptureRetryAttemptLimit
+                      && !captureBackgroundThreadsStopping();
+                      ++attempt ) {
+                    lastAttemptRequestEpoch
+                        = state->gateRetryRequestEpoch_.load(
+                            std::memory_order_acquire );
+                    {
+                        CapturePathGate gate( state->gatePath() );
+                        if ( gate.lock( 0 ) ) {
+                            state->retryRetiredFilesAndReleaseRegistryGateHeld();
+                            state->gateRetryCompletedEpoch_.store(
+                                lastAttemptRequestEpoch,
+                                std::memory_order_release );
+                        }
+                    }
+                    if ( !state->hasPendingGateRetry()
+                         && !state->hasRetryableMaintenance() ) {
+                        state->retryScheduled_.store(
+                            false, std::memory_order_release );
+                        if ( state->hasPendingGateRetry()
+                             || state->hasRetryableMaintenance() ) {
+                            state->scheduleRetry();
+                        }
+                        return;
+                    }
+                    if ( attempt + 1 < CaptureRetryAttemptLimit ) {
+                        std::this_thread::sleep_for( retryDelay );
+                        retryDelay = std::min( retryDelay * 2,
+                                               CaptureRetryMaximumDelay );
+                    }
+                }
+            } catch ( const std::exception& error ) {
+                LOG_ERROR << "Capture gate retry worker failed: " << error.what();
+            } catch ( ... ) {
+                LOG_ERROR << "Capture gate retry worker failed with an unknown error";
+            }
+
+            // The epilogue runs outside the retry loop's guard but must still
+            // never let an exception escape this detached noexcept thread:
+            // scheduleRetry() allocates and can re-enter the registry.
+            try {
+                state->retryScheduled_.store( false, std::memory_order_release );
+                const auto requestEpoch
+                    = state->gateRetryRequestEpoch_.load(
+                        std::memory_order_acquire );
+                const auto newRetryRequestArrived
+                    = requestEpoch != lastAttemptRequestEpoch;
+                if ( !captureBackgroundThreadsStopping()
+                     && newRetryRequestArrived ) {
+                    state->scheduleRetry();
+                }
+            } catch ( const std::exception& error ) {
+                LOG_ERROR << "Failed to reschedule capture gate retry worker: "
+                          << error.what();
+            } catch ( ... ) {
+                LOG_ERROR << "Failed to reschedule capture gate retry worker";
+            }
+        } ).detach();
+    } catch ( ... ) {
+        unregisterCaptureBackgroundThread();
+        retryScheduled_.store( false, std::memory_order_release );
+    }
+}
+
 QString CaptureStore::defaultRootPath()
 {
     return QDir( QDir::tempPath() ).filePath( "klogg_live" );
 }
 
 std::vector<CaptureStore::CleanupCandidate> CaptureStore::collectUnusedCaptureCandidates(
-    const QSet<QString>& retainCaptureIds, const QString& rootPath )
+    const QSet<QString>& retainCaptureIds, const QString& rootPath,
+    int gateTimeoutMs, const std::function<bool()>& shouldStop )
 {
     QDir capturesRoot( canonicalCaptureRoot( rootPath.isEmpty() ? defaultRootPath() : rootPath ) );
     if ( !capturesRoot.exists() ) {
@@ -1194,6 +1611,9 @@ std::vector<CaptureStore::CleanupCandidate> CaptureStore::collectUnusedCaptureCa
     std::vector<CleanupCandidate> candidates;
     candidates.reserve( static_cast<size_t>( entries.size() ) );
     for ( const auto& entry : entries ) {
+        if ( shouldStop && shouldStop() ) {
+            break;
+        }
         // Never resolve capture-directory symlinks: their target may be outside
         // the configured root or may alias a retained real capture.
         if ( entry.isSymLink() || retainCaptureIds.contains( entry.fileName() ) ) {
@@ -1207,7 +1627,8 @@ std::vector<CaptureStore::CleanupCandidate> CaptureStore::collectUnusedCaptureCa
             continue;
         }
         CapturePathGate gate( capturePathState->gatePath() );
-        if ( !gate.lock() || capturePathState->hasActiveProcessMarker() ) {
+        if ( !gate.lock( gateTimeoutMs )
+             || capturePathState->hasActiveProcessMarker() ) {
             continue;
         }
         capturePathState->retryRetiredFilesAndReleaseRegistryGateHeld();
@@ -1236,12 +1657,17 @@ QStringList CaptureStore::collectUnusedCapturePaths( const QSet<QString>& retain
 void CaptureStore::cleanupCaptureCandidates(
     const std::vector<CleanupCandidate>& candidates,
     const QDateTime& preserveModifiedAfter,
-    const std::function<void( const QString& )>& beforeRemoval )
+    const std::function<void( const QString& )>& beforeRemoval,
+    int gateTimeoutMs, const std::function<bool()>& shouldStop )
 {
     const auto cutoff = preserveModifiedAfter.toUTC();
     for ( const auto& candidate : candidates ) {
+        if ( shouldStop && shouldStop() ) {
+            break;
+        }
         CapturePathGate gate( candidate.capturePathState->gatePath() );
-        if ( !gate.lock() || candidate.capturePathState->hasActiveProcessMarker()
+        if ( !gate.lock( gateTimeoutMs )
+             || candidate.capturePathState->hasActiveProcessMarker()
              || candidate.capturePathState->processGeneration()
                     != candidate.processGeneration ) {
             continue;
@@ -1267,9 +1693,11 @@ void CaptureStore::cleanupCaptureCandidates(
         if ( beforeRemoval ) {
             beforeRemoval( candidate.capturePath );
         }
-        if ( candidate.capturePathState->directory_.removeRecursively() ) {
-            candidate.capturePathState->finalizeRemovedGeneration();
-            candidate.capturePathState->removeProcessGeneration();
+        const auto directoryRemoved
+            = candidate.capturePathState->directory_.removeRecursively();
+        if ( directoryRemoved
+             || candidate.capturePathState->directory_.isRemoved() ) {
+            candidate.capturePathState->finalizeRemovedGenerationGateHeld();
         }
     }
 }
@@ -1318,17 +1746,56 @@ void CaptureStore::cleanupUnusedCapturesAsync( const QSet<QString>& retainCaptur
 {
     const auto cutoff = preserveModifiedAfter.isValid() ? preserveModifiedAfter
                                                         : QDateTime::currentDateTimeUtc();
+    if ( QCoreApplication::instance() == nullptr ) {
+        cleanupUnusedCaptures( retainCaptureIds, rootPath, cutoff );
+        return;
+    }
     scheduleCleanupUnusedCaptures( retainCaptureIds, rootPath, cutoff );
+}
+
+void CaptureStore::shutdownBackgroundWorkers()
+{
+    stopCaptureBackgroundThreads();
 }
 
 void CaptureStore::scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
                                                   const QString& rootPath,
                                                   const QDateTime& preserveModifiedAfter )
 {
-    auto captureCandidates = collectUnusedCaptureCandidates( retainCaptureIds, rootPath );
-    std::thread( [ captureCandidates = std::move( captureCandidates ), preserveModifiedAfter ] {
-        CaptureStore::cleanupCaptureCandidates( captureCandidates, preserveModifiedAfter );
-    } ).detach();
+    if ( !registerCaptureBackgroundThread() ) {
+        return;
+    }
+
+    try {
+        std::thread( [ retainCaptureIds, rootPath, preserveModifiedAfter ] {
+            CaptureBackgroundThreadRegistration registration;
+            try {
+                const auto shouldStop = [] {
+                    return captureBackgroundThreadsStopping();
+                };
+                const auto captureCandidates
+                    = CaptureStore::collectUnusedCaptureCandidates(
+                        retainCaptureIds, rootPath, 0, shouldStop );
+                if ( !shouldStop() ) {
+                    CaptureStore::cleanupCaptureCandidates(
+                        captureCandidates, preserveModifiedAfter, {}, 0,
+                        shouldStop );
+                }
+            } catch ( const std::exception& error ) {
+                LOG_WARNING << "Asynchronous capture cleanup failed: "
+                            << error.what();
+            } catch ( ... ) {
+                LOG_WARNING << "Asynchronous capture cleanup failed";
+            }
+        } ).detach();
+    } catch ( const std::exception& error ) {
+        unregisterCaptureBackgroundThread();
+        LOG_WARNING << "Failed to schedule asynchronous capture cleanup: "
+                    << error.what();
+    } catch ( ... ) {
+        unregisterCaptureBackgroundThread();
+        LOG_WARNING << "Failed to schedule asynchronous capture cleanup";
+    }
 }
 
 CaptureStore::CaptureStore( QString captureId, QString rootPath )
@@ -1395,16 +1862,25 @@ CaptureStore::~CaptureStore()
         LOG_ERROR << "Failed to flush capture output during destruction";
     }
 
-    // Release store-owned leases before deactivation, then perform a safe
-    // tombstone retry/registry release outside the path mutex. This avoids
-    // retaining an otherwise clean per-path state forever after final teardown.
+    // Release store-owned leases before deactivation. deactivate() records the
+    // lifecycle transition before its single bounded gate attempt, then retries
+    // tombstones under that same gate when acquisition succeeds.
     segments_.clear();
     inheritedCaptureFiles_.clear();
-    capturePathState_->retryRetiredFilesAndReleaseRegistry();
 
     // Deactivate only after all persistence attempts, preserving the path's
     // active epoch for asynchronous cleanup that was scheduled concurrently.
-    capturePathState_->deactivate( capturePathActivationToken_ );
+    // deactivate() performs bounded gate and tombstone filesystem work that can
+    // throw; a destructor must never let that escape. A failed deactivation
+    // leaves the active marker behind, but it carries this process's pid, so a
+    // later activation or cleanup round treats it as stale and removes it.
+    try {
+        capturePathState_->deactivate( capturePathActivationToken_ );
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Failed to deactivate capture path during destruction: " << error.what();
+    } catch ( ... ) {
+        LOG_ERROR << "Failed to deactivate capture path during destruction";
+    }
 }
 
 std::shared_ptr<CaptureStore::SpilledSegmentFile>
@@ -1425,6 +1901,27 @@ void CaptureStore::failNextCaptureDirectoryRemovalForTesting()
     capturePathState_->failNextCaptureDirectoryRemovalForTesting();
 }
 
+void CaptureStore::failNextCandidateRecursiveRemovalForTesting(
+    const CleanupCandidate& candidate )
+{
+    candidate.capturePathState->failNextRecursiveDirectoryRemovalForTesting();
+}
+
+void CaptureStore::setBeforeCandidateActivationCallbackForTesting(
+    const CleanupCandidate& candidate, std::function<void()> callback )
+{
+    candidate.capturePathState->setBeforeActivationCallbackForTesting(
+        std::move( callback ) );
+}
+
+void CaptureStore::setAfterCandidateRecursiveRemovalQuarantineCallbackForTesting(
+    const CleanupCandidate& candidate, std::function<void()> callback )
+{
+    candidate.capturePathState
+        ->setAfterRecursiveRemovalQuarantineCallbackForTesting(
+            std::move( callback ) );
+}
+
 void CaptureStore::failNextSegmentWriteForTesting()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
@@ -1442,6 +1939,18 @@ int CaptureStore::setCapturePathGateTimeoutForTesting( int timeoutMs )
 {
     return capturePathGateTimeoutMs.exchange( timeoutMs,
                                               std::memory_order_acq_rel );
+}
+
+bool CaptureStore::hasCapturePathCoordinationOwnershipForTesting() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return capturePathState_->hasLocalCoordinationOwnershipForTesting();
+}
+
+QString CaptureStore::capturePathActiveMarkerPathForTesting() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return capturePathState_->activeMarkerPathForTesting();
 }
 
 bool CaptureStore::holdCapturePathGateForTesting(
@@ -1495,7 +2004,9 @@ void CaptureStore::retireSpilledSegment( Segment& segment )
     if ( !segment.spilledFile ) {
         segment.spilledFile = spilledFileLease( segment.filePath );
     }
-    segment.spilledFile->retire( capturePathActivationToken_ );
+    if ( segment.spilledFile ) {
+        segment.spilledFile->retire( capturePathActivationToken_ );
+    }
 }
 
 void CaptureStore::synchronizeSegmentIdsWithDisk()
@@ -1505,8 +2016,8 @@ void CaptureStore::synchronizeSegmentIdsWithDisk()
         QStringList{ "segment_*.log" }, QDir::Files,
         QDir::Name | QDir::IgnoreCase );
     for ( const auto& fileName : segmentFiles ) {
-        if ( const auto id = segmentIdFromFileName( fileName ) ) {
-            capturePathState_->observeSegmentId( *id );
+        if ( const auto segmentId = segmentIdFromFileName( fileName ) ) {
+            capturePathState_->observeSegmentId( *segmentId );
         }
     }
 }
@@ -1525,8 +2036,10 @@ CaptureStore::retireCaptureFiles()
 
     for ( const auto& filePath : inheritedCaptureFiles_ ) {
         auto spilledFile = spilledFileLease( filePath );
-        spilledFile->retire( capturePathActivationToken_ );
-        retiredLeases.push_back( std::move( spilledFile ) );
+        if ( spilledFile ) {
+            spilledFile->retire( capturePathActivationToken_ );
+            retiredLeases.push_back( std::move( spilledFile ) );
+        }
     }
     inheritedCaptureFiles_.clear();
 
@@ -1542,52 +2055,64 @@ bool CaptureStore::loadFromDisk()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     capturePathState_->retryRetiredFilesAndReleaseRegistry();
-    const std::lock_guard<std::recursive_mutex> pathLock( capturePathState_->mutex_ );
-    ensureCaptureDir( false );
+    decltype( segments_ ) oldSegments;
+    {
+        const std::lock_guard<std::recursive_mutex> pathLock(
+            capturePathState_->mutex_ );
+        ensureCaptureDir( false );
 
-    segments_.clear();
-    partialLine_.clear();
-    reservedSegmentIds_.clear();
-    fileSize_ = 0;
-    memoryBytes_ = 0;
-    totalLines_ = 0;
-    maxLineLength_ = 0;
-    lastModified_ = QDateTime{};
+        oldSegments = std::move( segments_ );
+        partialLine_.clear();
+        reservedSegmentIds_.clear();
+        fileSize_ = 0;
+        memoryBytes_ = 0;
+        totalLines_ = 0;
+        maxLineLength_ = 0;
+        lastModified_ = QDateTime{};
 
-    std::vector<std::pair<qint64, QString>> segmentFiles;
-    auto fileNames = capturePathState_->directory_.entryList(
-        QStringList{ "segment_*.log" }, QDir::Files, QDir::NoSort );
-    std::sort( fileNames.begin(), fileNames.end() );
-    segmentFiles.reserve( static_cast<size_t>( fileNames.size() ) );
-    QSet<qint64> observedIds;
-    for ( const auto& fileName : fileNames ) {
-        const auto id = segmentIdFromFileName( fileName );
-        if ( !id ) {
-            LOG_WARNING << "Ignoring capture segment with noncanonical name " << fileName;
-            continue;
+        std::vector<std::pair<qint64, QString>> segmentFiles;
+        auto fileNames = capturePathState_->directory_.entryList(
+            QStringList{ "segment_*.log" }, QDir::Files,
+            QDir::NoSort );
+        std::sort( fileNames.begin(), fileNames.end() );
+        segmentFiles.reserve( static_cast<size_t>( fileNames.size() ) );
+        QSet<qint64> observedSegmentIds;
+        for ( const auto& fileName : fileNames ) {
+            const auto segmentId = segmentIdFromFileName( fileName );
+            if ( !segmentId ) {
+                LOG_WARNING << "Ignoring capture segment with noncanonical name "
+                            << fileName;
+                continue;
+            }
+            if ( observedSegmentIds.contains( *segmentId ) ) {
+                LOG_WARNING << "Ignoring capture segment with duplicate id "
+                            << fileName;
+                continue;
+            }
+            observedSegmentIds.insert( *segmentId );
+            capturePathState_->observeSegmentId( *segmentId );
+            segmentFiles.emplace_back( *segmentId, fileName );
         }
-        if ( observedIds.contains( *id ) ) {
-            LOG_WARNING << "Ignoring capture segment with duplicate id " << fileName;
-            continue;
+        std::sort(
+            segmentFiles.begin(), segmentFiles.end(),
+            []( const auto& lhs, const auto& rhs ) {
+                return lhs.first < rhs.first;
+            } );
+
+        for ( const auto& [ segmentId, fileName ] : segmentFiles ) {
+            Segment segment;
+            segment.id = segmentId;
+            segment.filePath = QDir( capturePath_ ).filePath( fileName );
+            if ( !capturePathState_->isTombstoned( segment.filePath )
+                 && scanSegment( segment ) ) {
+                segments_.push_back( std::move( segment ) );
+            }
         }
-        observedIds.insert( *id );
-        capturePathState_->observeSegmentId( *id );
-        segmentFiles.emplace_back( *id, fileName );
+
+        rebuildCumulativeLineCounts();
+        enforceMemoryBudget();
     }
-    std::sort( segmentFiles.begin(), segmentFiles.end(),
-               []( const auto& lhs, const auto& rhs ) { return lhs.first < rhs.first; } );
-
-    for ( const auto& [ id, fileName ] : segmentFiles ) {
-        Segment segment;
-        segment.id = id;
-        segment.filePath = QDir( capturePath_ ).filePath( fileName );
-        if ( !capturePathState_->isTombstoned( segment.filePath ) && scanSegment( segment ) ) {
-            segments_.push_back( std::move( segment ) );
-        }
-    }
-
-    rebuildCumulativeLineCounts();
-    enforceMemoryBudget();
+    oldSegments.clear();
     return true;
 }
 
@@ -1988,7 +2513,6 @@ void CaptureStore::deleteCaptureFiles()
     flush();
     rollingOutput_.close();
     rollingOutput_ = RollingFileManager();
-    capturePathState_->retryRetiredFilesAndReleaseRegistry();
     // Bind delayed removal to the current cross-process generation before
     // taking the path mutex; every removal path follows gate -> mutex order.
     capturePathState_->requestDirectoryDeletion(
@@ -2133,10 +2657,9 @@ SearchableLogData::RawLines CaptureStore::buildRawLines( LineNumber first, Lines
             callback();
         }
 
-        QFile file( read.spilledFile->path() );
-        if ( read.spilledFile->openForRead( file ) ) {
-            file.seek( read.byteStart );
-            read.data = file.read( read.byteLength );
+        if ( auto file = read.spilledFile->openForRead() ) {
+            file->seek( read.byteStart );
+            read.data = file->read( read.byteLength );
         }
     }
 
@@ -2544,9 +3067,9 @@ qint64 CaptureStore::takeNextSegmentId()
         reservedSegmentIds_.insert( reservedSegmentIds_.end(), ids.cbegin(), ids.cend() );
     }
 
-    const auto id = reservedSegmentIds_.front();
+    const auto segmentId = reservedSegmentIds_.front();
     reservedSegmentIds_.pop_front();
-    return id;
+    return segmentId;
 }
 
 CaptureStore::Segment& CaptureStore::ensureActiveSegment()
@@ -2615,23 +3138,23 @@ void CaptureStore::enforceMemoryBudget()
 bool CaptureStore::scanSegment( Segment& segment )
 {
     auto spilledFile = spilledFileLease( segment.filePath );
-    if ( spilledFile->isRetired() ) {
+    if ( !spilledFile || spilledFile->isRetired() ) {
         return false;
     }
 
-    QFile file;
-    if ( !spilledFile->openForRead( file ) ) {
+    auto file = spilledFile->openForRead();
+    if ( !file ) {
         return false;
     }
 
     segment.spilledFile = std::move( spilledFile );
-    segment.byteSize = file.size();
+    segment.byteSize = file->size();
     segment.spilled = true;
-    lastModified_ = file.fileTime( QFileDevice::FileModificationTime );
+    lastModified_ = file->fileTime( QFileDevice::FileModificationTime );
 
     qint64 offset = 0;
-    while ( !file.atEnd() ) {
-        const auto lineBytes = file.readLine();
+    while ( !file->atEnd() ) {
+        const auto lineBytes = file->readLine();
         if ( lineBytes.isEmpty() ) {
             break;
         }
@@ -2708,6 +3231,9 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
         LOG_WARNING << "Failed to write temporary capture segment " << temporaryPath;
         capturePathState_->retireFile( temporaryPath );
         capturePathState_->retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( capturePathState_->hasRetryableMaintenance() ) {
+            capturePathState_->scheduleRetry();
+        }
         return false;
     }
 
@@ -2728,12 +3254,23 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
         LOG_WARNING << "Failed to publish capture segment " << segment.filePath;
         capturePathState_->retireFile( temporaryPath );
         capturePathState_->retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( capturePathState_->hasRetryableMaintenance() ) {
+            capturePathState_->scheduleRetry();
+        }
         return false;
     }
 
     capturePathState_->transferCreatedFile(
         temporaryPath, directChildName( segment.filePath ) );
     segment.spilledFile = spilledFileLease( segment.filePath );
+    if ( !segment.spilledFile ) {
+        capturePathState_->retireFile( segment.filePath );
+        capturePathState_->retryRetiredFilesAndReleaseRegistryGateHeld();
+        if ( capturePathState_->hasRetryableMaintenance() ) {
+            capturePathState_->scheduleRetry();
+        }
+        return false;
+    }
     segment.spilled = true;
     return true;
 }
@@ -2757,15 +3294,22 @@ QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine 
         return segment.memoryData->mid( type_safe::narrow_cast<int>( lineOffset ), lineLength );
     }
 
-    QFile file( segment.spilledFile ? segment.spilledFile->path() : segment.filePath );
-    if ( segment.spilledFile ? !segment.spilledFile->openForRead( file )
-                              : !file.open( QIODevice::ReadOnly ) ) {
+    std::unique_ptr<QFile> file;
+    if ( segment.spilledFile ) {
+        file = segment.spilledFile->openForRead();
+    } else {
+        file = std::make_unique<QFile>( segment.filePath );
+        if ( !file->open( QIODevice::ReadOnly ) ) {
+            file.reset();
+        }
+    }
+    if ( !file ) {
         return {};
     }
     const auto lineOffset = segment.lineOffsets[ static_cast<size_t>( localLine ) ];
     const auto lineLength = segment.lineLengths[ static_cast<size_t>( localLine ) ];
-    file.seek( lineOffset );
-    return file.read( lineLength );
+    file->seek( lineOffset );
+    return file->read( lineLength );
 }
 
 bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* device ) const
@@ -2778,15 +3322,23 @@ bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* devi
         return device->write( *segment.memoryData ) == segment.memoryData->size();
     }
 
-    QFile file( segment.spilledFile ? segment.spilledFile->path() : segment.filePath );
-    if ( segment.spilledFile ? !segment.spilledFile->openForRead( file )
-                              : !file.open( QIODevice::ReadOnly ) ) {
+    std::unique_ptr<QFile> file;
+    if ( segment.spilledFile ) {
+        file = segment.spilledFile->openForRead();
+    } else {
+        file = std::make_unique<QFile>( segment.filePath );
+        if ( !file->open( QIODevice::ReadOnly ) ) {
+            file.reset();
+        }
+    }
+    if ( !file ) {
         return false;
     }
 
     std::array<char, 64 * 1024> buffer{};
     while ( true ) {
-        const auto bytesRead = file.read( buffer.data(), type_safe::narrow_cast<qint64>( buffer.size() ) );
+        const auto bytesRead = file->read(
+            buffer.data(), type_safe::narrow_cast<qint64>( buffer.size() ) );
         if ( bytesRead < 0 ) {
             return false;
         }

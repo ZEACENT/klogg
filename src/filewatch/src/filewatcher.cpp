@@ -28,6 +28,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -98,7 +99,13 @@ class SerialExecutor {
                 runningTask_ = true;
             }
 
-            task();
+            try {
+                task();
+            } catch ( const std::exception& error ) {
+                LOG_ERROR << "Serial file watcher task failed: " << error.what();
+            } catch ( ... ) {
+                LOG_ERROR << "Serial file watcher task failed";
+            }
 
             {
                 std::lock_guard<std::mutex> lock( mutex_ );
@@ -333,9 +340,17 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         // This avoids deadlock between the internal efsw lock and our mutex_,
         // and prevents the main thread from blocking on mutex_ when the
         // worker holds it during a blocking addWatch() call (e.g. macOS TCC).
-        worker_->post( [ this, dir, filename, oldFilename ] {
-            notifyOnFileAction( dir, filename, oldFilename );
-        } );
+        try {
+            // SerialExecutor::run catches task exceptions at the dispatch boundary.
+            // NOLINTNEXTLINE(bugprone-exception-escape)
+            worker_->post( [ this, dir, filename, oldFilename ] {
+                notifyOnFileAction( dir, filename, oldFilename );
+            } );
+        } catch ( const std::exception& error ) {
+            LOG_ERROR << "Failed to queue file notification: " << error.what();
+        } catch ( ... ) {
+            LOG_ERROR << "Failed to queue file notification";
+        }
     }
 
     void notifyOnFileAction( const std::string& dir, const std::string& filename,
@@ -413,6 +428,9 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
 void EfswFileWatcherDeleter::operator()( EfswFileWatcher* watcher ) const
 {
+    // This custom deleter is the ownership boundary for the header's
+    // unique_ptr to the intentionally incomplete EfswFileWatcher type.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     delete watcher;
 }
 

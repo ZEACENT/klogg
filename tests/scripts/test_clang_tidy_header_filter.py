@@ -79,6 +79,19 @@ diff --git a/src/ui/include/example.h b/src/ui/include/example.h
             [{"name": "src/ui/include/example.h", "lines": [[3, 4], [11, 11]]}],
         )
 
+    def test_accepts_uppercase_header_extensions(self):
+        patch = """\
+diff --git a/src/ui/include/example.H b/src/ui/include/example.H
+--- a/src/ui/include/example.H
++++ b/src/ui/include/example.H
+@@ -1,0 +2,1 @@
++int value;
+"""
+        self.assertEqual(
+            MODULE.build_filter(patch),
+            [{"name": "src/ui/include/example.H", "lines": [[2, 2]]}],
+        )
+
     def test_accepts_unquoted_non_ascii_header_paths(self):
         patch = """\
 diff --git a/src/ui/include/ümlaut.hxx b/src/ui/include/ümlaut.hxx

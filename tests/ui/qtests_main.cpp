@@ -29,6 +29,7 @@
 #include <sys/resource.h>
 #endif
 
+#include <capturestore.h>
 #include <configuration.h>
 #include <linetypes.h>
 #include <highlighterset.h>
@@ -157,5 +158,6 @@ int main( int argc, char* argv[] )
     TestRunner runner( argc, argv );
 
     runner.process();
+    CaptureStore::shutdownBackgroundWorkers();
     return runner.result();
 }
