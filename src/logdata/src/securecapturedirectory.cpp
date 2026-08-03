@@ -161,6 +161,8 @@ using CreateFileFn = Status( NTAPI* )(
 using QueryDirectoryFileFn = Status( NTAPI* )(
     HANDLE, HANDLE, ApcRoutine, PVOID, IoStatusBlock*, PVOID, ULONG, ULONG,
     BOOLEAN, UnicodeString*, BOOLEAN );
+using SetInformationFileFn = Status( NTAPI* )( HANDLE, IoStatusBlock*, PVOID,
+                                               ULONG, ULONG );
 
 struct DirectoryInformation {
     ULONG nextEntryOffset;
@@ -187,6 +189,7 @@ constexpr ULONG FileSynchronousIoNonAlert = 0x00000020UL;
 constexpr ULONG FileNonDirectoryFile = 0x00000040UL;
 constexpr ULONG FileOpenReparsePoint = 0x00200000UL;
 constexpr ULONG FileDirectoryInformation = 1UL;
+constexpr ULONG FileRenameInformationClass = 10UL;
 constexpr ULONG_PTR FileCreated = 2UL;
 constexpr Status StatusSuccess = 0;
 constexpr Status StatusNoMoreFiles = static_cast<Status>( 0x80000006UL );
@@ -213,10 +216,12 @@ QString winErrorHex( DWORD error )
 struct NativeApi {
     nt::CreateFileFn createFile = nullptr;
     nt::QueryDirectoryFileFn queryDirectoryFile = nullptr;
+    nt::SetInformationFileFn setInformationFile = nullptr;
 
     bool available() const noexcept
     {
-        return createFile != nullptr && queryDirectoryFile != nullptr;
+        return createFile != nullptr && queryDirectoryFile != nullptr
+               && setInformationFile != nullptr;
     }
 };
 
@@ -233,6 +238,10 @@ const NativeApi& nativeApi()
                 ? nullptr
                 : reinterpret_cast<nt::QueryDirectoryFileFn>(
                       GetProcAddress( module, "NtQueryDirectoryFile" ) ),
+            module == nullptr
+                ? nullptr
+                : reinterpret_cast<nt::SetInformationFileFn>(
+                      GetProcAddress( module, "NtSetInformationFile" ) ),
         };
     }();
     return api;
@@ -1833,6 +1842,11 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
     const auto temporaryName = leafNameForPath( impl_->path, temporaryPath );
     const auto targetName = leafNameForPath( impl_->path, targetPath );
     if ( temporaryName.isEmpty() || targetName.isEmpty() || !isCurrentPath() ) {
+        LOG_WARNING << "SecureCaptureDirectory: publish rejected for "
+                    << temporaryName << " to " << targetName
+                    << " temporaryEmpty " << temporaryName.isEmpty()
+                    << " targetEmpty " << targetName.isEmpty() << " current "
+                    << isCurrentPath();
         return PublishResult::Error;
     }
 #if defined( Q_OS_WIN )
@@ -1861,19 +1875,26 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
     rename->RootDirectory = impl_->directoryHandle.get();
     rename->FileNameLength = static_cast<DWORD>( nameBytes );
     std::memcpy( rename->FileName, targetName.utf16(), nameBytes );
-    if ( SetFileInformationByHandle(
-             source.get(), FileRenameInfo, rename,
-             static_cast<DWORD>( bufferBytes ) ) ) {
+    // Go through the NT native API like every other operation in this PAL.
+    // The Win32 SetFileInformationByHandle wrapper (FileRenameInfo class)
+    // rejects these NT-native handles with ERROR_INVALID_PARAMETER even
+    // though the buffer satisfies every [MS-FSA] FileRenameInformation
+    // validation rule; calling NtSetInformationFile directly both bypasses
+    // the Win32 wrapper and reports the exact NT status on failure.
+    nt::IoStatusBlock renameIo{};
+    const auto renameStatus = nativeApi().setInformationFile(
+        source.get(), &renameIo, rename, static_cast<ULONG>( bufferBytes ),
+        nt::FileRenameInformationClass );
+    if ( statusSucceeded( renameStatus ) ) {
         // The source handle now owns the published target even if the public
         // capture pathname changed concurrently. Report the completed atomic
         // rename so CaptureStore transfers ownership to the target name.
         return PublishResult::Success;
     }
-    const auto error = GetLastError();
     LOG_WARNING << "SecureCaptureDirectory: publish rename of " << temporaryName
-                << " to " << targetName << " failed, error "
-                << winErrorHex( error );
-    return error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS
+                << " to " << targetName << " failed, status "
+                << ntStatusHex( renameStatus );
+    return renameStatus == nt::StatusObjectNameCollision
                ? PublishResult::AlreadyExists
                : PublishResult::Error;
 #else

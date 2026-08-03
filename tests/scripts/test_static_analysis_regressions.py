@@ -456,6 +456,29 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertNotIn("ReOpenFile(", enumerate_directory)
         self.assertIn("ParentCreateAccess", bind_parent)
 
+    def test_windows_publish_rename_uses_native_set_information(self):
+        source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
+        publish = function_body(
+            source,
+            "SecureCaptureDirectory::PublishResult "
+            "SecureCaptureDirectory::publishTemporaryFile(",
+        )
+        native_api = function_body(source, "const NativeApi& nativeApi(")
+
+        # SetFileInformationByHandle(FileRenameInfo) fails deterministically
+        # with ERROR_INVALID_PARAMETER (0x57) for the NT-native handles used
+        # by this PAL — 27,394/27,394 publish renames on Windows CI (PR #50)
+        # even though every parameter satisfies [MS-FSA] FileRenameInformation
+        # validation. The PAL is NT-native end to end (NtCreateFile opens,
+        # NtQueryDirectoryFile enumeration), so the publish rename must use
+        # NtSetInformationFile(FileRenameInformation) as well: it bypasses
+        # whatever the Win32 wrapper rejects and surfaces the raw NT status
+        # (STATUS_OBJECT_NAME_COLLISION maps to AlreadyExists) instead of a
+        # lossy GetLastError translation.
+        self.assertNotIn("SetFileInformationByHandle(", publish)
+        self.assertIn("setInformationFile(", publish)
+        self.assertIn("NtSetInformationFile", native_api)
+
     def test_secure_capture_windows_cleanup_uses_guarded_delete_handles(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
         split_path = function_body(
