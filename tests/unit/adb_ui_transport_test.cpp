@@ -312,6 +312,23 @@ bool waitForSourceState( const AdbLogcatSource& source, AdbLogcatSource::State s
     }
     return source.state() == state;
 }
+
+// Transport teardown retires QProcess objects with deleteLater(), which only
+// takes effect once a DeferredDelete event is delivered. A late process signal
+// arriving during the final event-loop pass posts a new deferred deletion that
+// no later pass delivers, and LeakSanitizer then reports the retired QProcess
+// at binary exit (CI ubuntu-22.04-asan-ubsan-lsan flake). Make teardown
+// deterministic: settle async signals, deliver the deletions they posted, and
+// deliver any fallout from those deletions once more.
+void drainLiveSourceEvents( int settleMs )
+{
+    QCoreApplication::processEvents();
+    QTest::qWait( settleMs );
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    QCoreApplication::processEvents();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+}
 } // namespace
 
 TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
@@ -1796,9 +1813,7 @@ TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote c
     REQUIRE( waitForLineCount( logData, 1 ) );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
@@ -1851,9 +1866,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     REQUIRE( logData->getNbLine().get() == 0 );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
@@ -1902,9 +1915,7 @@ TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear 
     REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
@@ -1963,9 +1974,7 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
     REQUIRE_FALSE( source.lastError().isEmpty() );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
@@ -2226,9 +2235,7 @@ TEST_CASE( "AdbLogcatSource keeps auto-reconnect failures out of streaming log d
     CHECK_FALSE( logText.contains( QStringLiteral( "reconnected" ) ) );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 }
 
 TEST_CASE( "AdbLogcatSource exponential backoff preserves attempt count after rapid "
@@ -2303,9 +2310,7 @@ TEST_CASE( "AdbLogcatSource exponential backoff preserves attempt count after ra
 
     source.cancelAutoReconnect();
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 500 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 500 );
 #endif
 }
 
@@ -2375,9 +2380,7 @@ TEST_CASE( "AdbLogcatSource keeps async reconnect failure out of streaming log" 
 
     source.cancelAutoReconnect();
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 500 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 500 );
 #endif
 }
 
@@ -2505,7 +2508,7 @@ TEST_CASE( "ProcessLiveSourceTransport surfaces real stderr on startup failure" 
     REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
 
     transport.disconnectTransport();
-    QTest::qWait( 200 );
+    drainLiveSourceEvents( 200 );
 }
 
 TEST_CASE( "AdbLogcatSource does not auto-reconnect before being enabled" )
@@ -2538,9 +2541,7 @@ TEST_CASE( "AdbLogcatSource does not auto-reconnect before being enabled" )
     REQUIRE_FALSE( source.isAutoReconnectActive() );
 
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
@@ -2586,9 +2587,7 @@ TEST_CASE( "AdbLogcatSource manual reconnect resets the attempt counter" )
 
     source.setAutoReconnectEnabled( false );
     source.disconnectSource();
-    QCoreApplication::processEvents();
-    QTest::qWait( 200 );
-    QCoreApplication::processEvents();
+    drainLiveSourceEvents( 200 );
 #endif
 }
 
