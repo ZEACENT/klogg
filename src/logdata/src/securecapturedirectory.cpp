@@ -197,6 +197,19 @@ constexpr Status StatusObjectNameCollision = static_cast<Status>( 0xC0000035UL )
 constexpr Status StatusObjectPathNotFound = static_cast<Status>( 0xC000003AUL );
 } // namespace nt
 
+QString ntStatusHex( nt::Status status )
+{
+    return QStringLiteral( "0x%1" )
+        .arg( static_cast<qulonglong>( static_cast<quint32>( status ) ), 8, 16,
+              QLatin1Char( '0' ) );
+}
+
+QString winErrorHex( DWORD error )
+{
+    return QStringLiteral( "0x%1" )
+        .arg( static_cast<qulonglong>( error ), 8, 16, QLatin1Char( '0' ) );
+}
+
 struct NativeApi {
     nt::CreateFileFn createFile = nullptr;
     nt::QueryDirectoryFileFn queryDirectoryFile = nullptr;
@@ -291,8 +304,15 @@ ScopedHandle ntOpenRelative( HANDLE root, const QString& name,
                              ULONG shareAccess = ShareAll )
 {
     nt::UnicodeString unicodeName{};
-    if ( !nativeApi().available()
-         || !initializeUnicodeString( name, unicodeName ) ) {
+    if ( !nativeApi().available() ) {
+        LOG_WARNING << "SecureCaptureDirectory: NT native API unavailable, "
+                       "cannot open "
+                    << name;
+        return {};
+    }
+    if ( !initializeUnicodeString( name, unicodeName ) ) {
+        LOG_WARNING << "SecureCaptureDirectory: name too long for NT open: "
+                    << name.size();
         return {};
     }
     nt::ObjectAttributes attributes{ sizeof( attributes ), root, &unicodeName,
@@ -368,17 +388,25 @@ QString identityKeyForHandle( HANDLE handle )
         // (for example a legacy SMB client). The legacy 64-bit index is not
         // authoritative on ReFS, so without a filesystem name we cannot tell
         // whether it is safe to trust. Fail closed.
+        LOG_WARNING << "SecureCaptureDirectory: identity query failed, "
+                       "filesystem unknown, error "
+                    << winErrorHex( GetLastError() );
         return {};
     }
     if ( QString::fromWCharArray( filesystemName.data() )
              .compare( QStringLiteral( "ReFS" ), Qt::CaseInsensitive )
          == 0 ) {
         // The legacy 64-bit file index is not authoritative on ReFS.
+        LOG_WARNING << "SecureCaptureDirectory: no trustworthy file identity "
+                       "on ReFS";
         return {};
     }
 
     BY_HANDLE_FILE_INFORMATION info{};
     if ( !GetFileInformationByHandle( handle, &info ) ) {
+        LOG_WARNING << "SecureCaptureDirectory: legacy identity query failed, "
+                       "error "
+                    << winErrorHex( GetLastError() );
         return {};
     }
     const auto fileIndex = ( static_cast<quint64>( info.nFileIndexHigh ) << 32U )
@@ -408,7 +436,25 @@ ScopedHandle openExistingDirectoryNoFollow( HANDLE parent,
         nt::FileDirectoryFile | nt::FileSynchronousIoNonAlert
             | nt::FileOpenReparsePoint,
         status, nullptr, shareAccess );
-    if ( !handle.valid() || !isNonReparseDirectory( handle.get() ) ) {
+    if ( !handle.valid() ) {
+        nt::Status localStatus = nt::StatusSuccess;
+        if ( status == nullptr ) {
+            status = &localStatus;
+        }
+        LOG_WARNING << "SecureCaptureDirectory: directory open failed for "
+                    << name << " status " << ntStatusHex( *status );
+        return {};
+    }
+    if ( !isNonReparseDirectory( handle.get() ) ) {
+        FILE_ATTRIBUTE_TAG_INFO tags{};
+        FILE_STANDARD_INFO standard{};
+        const auto queried = queryTagAndStandard( handle.get(), tags, standard );
+        LOG_WARNING << "SecureCaptureDirectory: rejecting " << name
+                    << " queried " << queried
+                    << " error " << winErrorHex( queried ? 0 : GetLastError() )
+                    << " attributes "
+                    << winErrorHex( queried ? tags.FileAttributes : 0 )
+                    << " isDirectory " << ( queried && standard.Directory );
         return {};
     }
     return handle;
@@ -432,6 +478,9 @@ ScopedHandle openOrCreateDirectoryNoFollow( HANDLE parent,
         parent, ParentCreateAccess, ShareAll,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT ) );
     if ( !creationParent.valid() ) {
+        LOG_WARNING << "SecureCaptureDirectory: parent reopen for create of "
+                    << name << " failed, error "
+                    << winErrorHex( GetLastError() );
         return {};
     }
     auto created = ntOpenRelative(
@@ -445,6 +494,8 @@ ScopedHandle openOrCreateDirectoryNoFollow( HANDLE parent,
     if ( status == nt::StatusObjectNameCollision ) {
         return openExistingDirectoryNoFollow( parent, name, access );
     }
+    LOG_WARNING << "SecureCaptureDirectory: directory create failed for "
+                << name << " status " << ntStatusHex( status );
     return {};
 }
 
@@ -496,6 +547,8 @@ ScopedHandle bindParentPath( const QString& parentPath,
 {
     const auto splitPath = splitWindowsPath( parentPath );
     if ( !splitPath ) {
+        LOG_WARNING << "SecureCaptureDirectory: cannot split parent path "
+                    << parentPath;
         return {};
     }
     auto current = openExistingDirectoryNoFollow(
@@ -510,6 +563,9 @@ ScopedHandle bindParentPath( const QString& parentPath,
                         : openExistingDirectoryNoFollow(
                               current.get(), component, ParentAccess );
         if ( !next.valid() ) {
+            LOG_WARNING << "SecureCaptureDirectory: parent path walk failed at "
+                           "component "
+                        << component << " of " << parentPath;
             return {};
         }
         current = std::move( next );
@@ -1329,6 +1385,9 @@ bool SecureCaptureDirectory::ensureExists()
     }
     const auto boundIdentity = identityKeyForHandle( directory.get() );
     if ( boundIdentity.isEmpty() ) {
+        LOG_WARNING << "SecureCaptureDirectory: no identity for capture "
+                       "directory "
+                    << impl_->leafName;
         return false;
     }
     impl_->directoryHandle = std::move( directory );
@@ -1375,6 +1434,9 @@ bool SecureCaptureDirectory::bindExisting()
     }
     const auto boundIdentity = identityKeyForHandle( directory.get() );
     if ( boundIdentity.isEmpty() ) {
+        LOG_WARNING << "SecureCaptureDirectory: no identity for existing "
+                       "capture directory "
+                    << impl_->leafName;
         return false;
     }
     impl_->directoryHandle = std::move( directory );
