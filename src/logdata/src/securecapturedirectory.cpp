@@ -583,7 +583,18 @@ ScopedHandle openExistingRegularFileNoFollow(
         nt::FileNonDirectoryFile | nt::FileOpenReparsePoint
             | nt::FileSynchronousIoNonAlert | extraOptions,
         status, information, shareAccess );
-    if ( !handle.valid() || !isRegularDiskFile( handle.get() ) ) {
+    if ( !handle.valid() ) {
+        return {};
+    }
+    if ( !isRegularDiskFile( handle.get() ) ) {
+        FILE_ATTRIBUTE_TAG_INFO tags{};
+        FILE_STANDARD_INFO standard{};
+        const auto queried = queryTagAndStandard( handle.get(), tags, standard );
+        LOG_WARNING << "SecureCaptureDirectory: rejecting file " << name
+                    << " queried " << queried
+                    << " attributes "
+                    << winErrorHex( queried ? tags.FileAttributes : 0 )
+                    << " isDirectory " << ( queried && standard.Directory );
         return {};
     }
     return handle;
@@ -1686,12 +1697,17 @@ std::unique_ptr<QFile> SecureCaptureDirectory::openReadFile(
     if ( !impl_->directoryHandle.valid() ) {
         return {};
     }
+    nt::Status readStatus = nt::StatusSuccess;
     auto handle = openExistingRegularFileNoFollow(
         impl_->directoryHandle.get(), fileName, ReadAccess,
-        nt::FileSequentialOnly );
+        nt::FileSequentialOnly, &readStatus );
     if ( !handle.valid() || !isCurrentPath()
          || ( !expectedIdentity.isEmpty()
               && identityKeyForHandle( handle.get() ) != expectedIdentity ) ) {
+        LOG_WARNING << "SecureCaptureDirectory: read open failed for "
+                    << fileName << " status " << ntStatusHex( readStatus )
+                    << " valid " << handle.valid() << " current "
+                    << isCurrentPath();
         return {};
     }
     const auto nativeHandle = handle.release();
@@ -1762,10 +1778,17 @@ SecureCaptureDirectory::createTemporaryFile( QString& filePath ) const
             if ( status == nt::StatusObjectNameCollision ) {
                 continue;
             }
+            LOG_WARNING << "SecureCaptureDirectory: temporary file create "
+                           "failed for "
+                        << fileName << " status " << ntStatusHex( status );
             return {};
         }
         if ( information != nt::FileCreated || !isRegularDiskFile( handle.get() )
              || !isCurrentPath() ) {
+            LOG_WARNING << "SecureCaptureDirectory: rejecting temporary file "
+                        << fileName << " information " << information
+                        << " regularDiskFile " << isRegularDiskFile( handle.get() )
+                        << " current " << isCurrentPath();
             markDeleteByHandle( handle.get() );
             return {};
         }
@@ -1813,9 +1836,15 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
         return PublishResult::Error;
     }
 #if defined( Q_OS_WIN )
+    nt::Status sourceStatus = nt::StatusSuccess;
     auto source = openExistingRegularFileNoFollow(
-        impl_->directoryHandle.get(), temporaryName, PublishRenameAccess );
+        impl_->directoryHandle.get(), temporaryName, PublishRenameAccess, 0,
+        &sourceStatus );
     if ( !source.valid() || !isCurrentPath() ) {
+        LOG_WARNING << "SecureCaptureDirectory: publish source open failed for "
+                    << temporaryName << " status "
+                    << ntStatusHex( sourceStatus ) << " current "
+                    << isCurrentPath();
         return PublishResult::Error;
     }
     const auto nameBytes
@@ -1841,6 +1870,9 @@ SecureCaptureDirectory::PublishResult SecureCaptureDirectory::publishTemporaryFi
         return PublishResult::Success;
     }
     const auto error = GetLastError();
+    LOG_WARNING << "SecureCaptureDirectory: publish rename of " << temporaryName
+                << " to " << targetName << " failed, error "
+                << winErrorHex( error );
     return error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS
                ? PublishResult::AlreadyExists
                : PublishResult::Error;
