@@ -23,7 +23,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -31,9 +33,11 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QProcess>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QStringList>
 
 #include <hs.h>
@@ -52,6 +56,14 @@ const bool PersistentInfo::ForcePortable = true;
 namespace {
 
 constexpr int kChildTimeoutMs = 60000;
+constexpr size_t kExhaustiveSearchSpaceSize = 42;
+constexpr size_t kExhaustiveChildRunCount = 336;
+
+#if defined(Q_OS_WIN) && defined(_MSC_VER)
+// Keep the Windows/MSVC ASan process matrix comfortably below hosted-runner capacity.
+constexpr int kDefaultChildConcurrency = 4;
+constexpr int kMaxChildConcurrency = 8;
+#endif
 
 enum class AllocatorMode { Crt, Mimalloc };
 
@@ -81,6 +93,19 @@ struct ChildRunResult {
     QString output;
 };
 
+#if defined(Q_OS_WIN) && defined(_MSC_VER)
+struct ChildBatchResult {
+    std::vector<ChildRunResult> results;
+    std::optional<size_t> failureIndex;
+};
+
+bool childRunSucceeded( const ChildRunResult& result )
+{
+    return result.started && result.finished && result.exitStatus == QProcess::NormalExit
+           && result.exitCode == 0;
+}
+#endif
+
 void configureTestTempDir()
 {
     const auto tempDir = QDir::cleanPath( QCoreApplication::applicationDirPath() + QDir::separator()
@@ -93,13 +118,38 @@ void configureTestTempDir()
     qputenv( "TMPDIR", tempDirUtf8 );
 }
 
-void configureProductLikeTestState()
+void configureProductLikeTestState( Configuration& config )
 {
-    auto& config = Configuration::getSynced();
     configureProductLikeRegexpEngine( config );
     config.setConfirmTabClose( false );
-    config.save();
 }
+
+void configureProductLikeTestState()
+{
+    configureProductLikeTestState( Configuration::get() );
+}
+
+void initializeProductLikeTestState()
+{
+    // Child processes only need product-like in-memory settings. Initializing the
+    // singleton from defaults avoids migrations and writes to the shared portable
+    // configuration beside the executable.
+    configureProductLikeTestState( Configuration::getDefaultForTests() );
+}
+
+#if defined(Q_OS_WIN) && defined(_MSC_VER)
+int childConcurrency()
+{
+    bool isValid = false;
+    const auto configured = qEnvironmentVariableIntValue(
+        "KLOGG_VECTORSCAN_CHILD_CONCURRENCY", &isValid );
+    if ( !isValid || configured < 1 || configured > kMaxChildConcurrency ) {
+        return kDefaultChildConcurrency;
+    }
+
+    return configured;
+}
+#endif
 
 QString joinIndexes( const std::vector<int>& indexes )
 {
@@ -340,6 +390,29 @@ std::optional<ChildOptions> parseChildOptions( const QStringList& arguments )
     searchSpace.push_back( values );
 
     return searchSpace;
+}
+
+std::vector<ChildOptions> buildExhaustiveChildRuns()
+{
+    const std::array childCases = {
+        ChildCase::DirectSinglePrefilter,
+        ChildCase::DirectMultiPrefilter,
+        ChildCase::HighlighterCompilePrefilter,
+        ChildCase::HighlighterCollectionRestorePrefilter,
+    };
+    const auto searchSpace = buildSearchSpace();
+
+    std::vector<ChildOptions> childRuns;
+    childRuns.reserve( kExhaustiveChildRunCount );
+    for ( const auto allocator : { AllocatorMode::Crt, AllocatorMode::Mimalloc } ) {
+        for ( const auto childCase : childCases ) {
+            for ( const auto& indexes : searchSpace ) {
+                childRuns.push_back( ChildOptions{ childCase, allocator, indexes } );
+            }
+        }
+    }
+
+    return childRuns;
 }
 
 void writeHighlighterSet( QSettings& settings,
@@ -733,7 +806,7 @@ int runHighlighterCompileChild( const std::vector<int>& indexes, AllocatorMode a
     std::cout << "phase=highlighter_allocator complete rc=" << allocatorResult << std::endl;
 
     std::cout << "phase=highlighter_config start" << std::endl;
-    configureProductLikeTestState();
+    initializeProductLikeTestState();
     std::cout << "phase=highlighter_config complete" << std::endl;
 
     QTemporaryDir tempDir( QDir::tempPath() + QStringLiteral( "/vectorscan-child-XXXXXX" ) );
@@ -777,7 +850,7 @@ int runHighlighterCollectionChild( const std::vector<int>& indexes, AllocatorMod
         std::cerr << "hs_set_allocator failed rc=" << allocatorResult << std::endl;
         return 39;
     }
-    configureProductLikeTestState();
+    initializeProductLikeTestState();
 
     QTemporaryDir tempDir( QDir::tempPath() + QStringLiteral( "/vectorscan-collection-XXXXXX" ) );
     if ( !tempDir.isValid() ) {
@@ -827,8 +900,7 @@ int runVectorscanChild( const ChildOptions& options )
     return 99;
 }
 
-ChildRunResult runChildProcess( ChildCase childCase, AllocatorMode allocator,
-                                const std::vector<int>& indexes )
+ChildRunResult runChildProcess( const ChildOptions& options )
 {
     ChildRunResult result;
 
@@ -837,10 +909,12 @@ ChildRunResult runChildProcess( ChildCase childCase, AllocatorMode allocator,
     process.setProcessChannelMode( QProcess::MergedChannels );
     process.setArguments( { QStringLiteral( "-platform" ),
                             QStringLiteral( "offscreen" ),
-                            QStringLiteral( "--vectorscan-child=" ) + childCaseName( childCase ),
+                            QStringLiteral( "--vectorscan-child=" )
+                                + childCaseName( options.childCase ),
                             QStringLiteral( "--vectorscan-allocator=" )
-                                + allocatorName( allocator ),
-                            QStringLiteral( "--vectorscan-indexes=" ) + joinIndexes( indexes ) } );
+                                + allocatorName( options.allocator ),
+                            QStringLiteral( "--vectorscan-indexes=" )
+                                + joinIndexes( options.indexes ) } );
     process.start();
 
     result.started = process.waitForStarted();
@@ -856,14 +930,172 @@ ChildRunResult runChildProcess( ChildCase childCase, AllocatorMode allocator,
     return result;
 }
 
-void requireSuccessfulChildRun( ChildCase childCase, AllocatorMode allocator,
-                                const std::vector<int>& indexes )
+#if defined(Q_OS_WIN) && defined(_MSC_VER)
+std::vector<ChildRunResult> runChildProcesses(
+    const std::vector<ChildOptions>& childRuns, std::optional<size_t>& failureIndex )
 {
-    const auto result = runChildProcess( childCase, allocator, indexes );
+    struct RunningChild {
+        explicit RunningChild( const ChildOptions& childOptions )
+            : options( childOptions )
+        {
+        }
 
-    INFO( "child case=" << childCaseName( childCase ).toStdString() << " allocator="
-                        << allocatorName( allocator ).toStdString() << " indexes="
-                        << joinIndexes( indexes ).toStdString() );
+        ChildOptions options;
+        QProcess process;
+        QTimer timeout;
+        ChildRunResult result;
+        bool timedOut = false;
+        bool cancelledAfterFailure = false;
+        bool completed = false;
+    };
+
+    std::optional<size_t> firstFailureIndex;
+    std::vector<ChildRunResult> results( childRuns.size() );
+    if ( childRuns.empty() ) {
+        failureIndex = std::nullopt;
+        return results;
+    }
+
+    const auto maxConcurrentChildren
+        = std::min( static_cast<size_t>( childConcurrency() ), childRuns.size() );
+    std::vector<std::unique_ptr<RunningChild>> runningChildren;
+    runningChildren.reserve( childRuns.size() );
+    QEventLoop completionLoop;
+    size_t nextChildIndex = 0;
+    size_t activeChildCount = 0;
+
+    std::function<void()> startChildren;
+    std::function<void( RunningChild*, size_t )> completeChild;
+    const auto latchFirstFailure = [ & ]( RunningChild* child, size_t childIndex ) {
+        if ( !firstFailureIndex ) {
+            firstFailureIndex = childIndex;
+
+            for ( const auto& siblingOwner : runningChildren ) {
+                auto* const sibling = siblingOwner.get();
+                if ( sibling == child || sibling->completed || sibling->cancelledAfterFailure ) {
+                    continue;
+                }
+
+                sibling->cancelledAfterFailure = true;
+                sibling->timeout.stop();
+                if ( sibling->process.state() != QProcess::NotRunning ) {
+                    sibling->process.kill();
+                }
+            }
+        }
+    };
+
+    completeChild = [ & ]( RunningChild* child, size_t childIndex ) {
+        if ( child->completed ) {
+            return;
+        }
+
+        child->completed = true;
+        child->timeout.stop();
+        results[ childIndex ] = child->result;
+        --activeChildCount;
+
+        if ( !child->cancelledAfterFailure && !childRunSucceeded( child->result ) ) {
+            latchFirstFailure( child, childIndex );
+        }
+        if ( !firstFailureIndex ) {
+            startChildren();
+        }
+        if ( activeChildCount == 0
+             && ( firstFailureIndex || nextChildIndex == childRuns.size() ) ) {
+            completionLoop.quit();
+        }
+    };
+
+    startChildren = [ & ] {
+        while ( !firstFailureIndex && activeChildCount < maxConcurrentChildren
+                && nextChildIndex < childRuns.size() ) {
+            const auto childIndex = nextChildIndex++;
+            auto child = std::make_unique<RunningChild>( childRuns[ childIndex ] );
+            auto* const runningChild = child.get();
+            auto* const process = &runningChild->process;
+            process->setProgram( QCoreApplication::applicationFilePath() );
+            process->setProcessChannelMode( QProcess::MergedChannels );
+            process->setArguments(
+                { QStringLiteral( "-platform" ),
+                  QStringLiteral( "offscreen" ),
+                  QStringLiteral( "--vectorscan-child=" )
+                      + childCaseName( runningChild->options.childCase ),
+                  QStringLiteral( "--vectorscan-allocator=" )
+                      + allocatorName( runningChild->options.allocator ),
+                  QStringLiteral( "--vectorscan-indexes=" )
+                      + joinIndexes( runningChild->options.indexes ) } );
+
+            QObject::connect( process, &QProcess::started, &completionLoop,
+                              [ runningChild ] { runningChild->result.started = true; } );
+            QObject::connect( process, &QProcess::readyReadStandardOutput, &completionLoop,
+                              [ runningChild ] {
+                                  runningChild->result.output += QString::fromUtf8(
+                                      runningChild->process.readAllStandardOutput() );
+                              } );
+            QObject::connect(
+                process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                &completionLoop, [ &, runningChild, childIndex ]( int exitCode,
+                                                                  QProcess::ExitStatus exitStatus ) {
+                    if ( runningChild->completed ) {
+                        return;
+                    }
+
+                    runningChild->result.finished = !runningChild->timedOut;
+                    runningChild->result.exitCode = exitCode;
+                    runningChild->result.exitStatus = exitStatus;
+                    runningChild->result.output += QString::fromUtf8(
+                        runningChild->process.readAllStandardOutput() );
+                    completeChild( runningChild, childIndex );
+                } );
+            QObject::connect(
+                process, &QProcess::errorOccurred, &completionLoop,
+                [ &, runningChild, childIndex ]( QProcess::ProcessError error ) {
+                    if ( runningChild->completed || error != QProcess::FailedToStart ) {
+                        return;
+                    }
+
+                    runningChild->result.output = runningChild->process.errorString();
+                    completeChild( runningChild, childIndex );
+                },
+                Qt::QueuedConnection );
+            QObject::connect(
+                &runningChild->timeout, &QTimer::timeout, &completionLoop,
+                [ &, runningChild, childIndex ] {
+                    if ( runningChild->completed || runningChild->cancelledAfterFailure
+                         || firstFailureIndex ) {
+                        return;
+                    }
+
+                    runningChild->timedOut = true;
+                    latchFirstFailure( runningChild, childIndex );
+                    runningChild->process.kill();
+                } );
+
+            runningChild->timeout.setSingleShot( true );
+            runningChild->timeout.setTimerType( Qt::PreciseTimer );
+            runningChildren.push_back( std::move( child ) );
+            ++activeChildCount;
+            runningChild->timeout.start( kChildTimeoutMs );
+            process->start();
+        }
+    };
+
+    startChildren();
+    if ( activeChildCount > 0 ) {
+        completionLoop.exec();
+    }
+
+    failureIndex = firstFailureIndex;
+    return results;
+}
+#endif
+
+void requireSuccessfulChildResult( const ChildOptions& options, const ChildRunResult& result )
+{
+    INFO( "child case=" << childCaseName( options.childCase ).toStdString() << " allocator="
+                        << allocatorName( options.allocator ).toStdString() << " indexes="
+                        << joinIndexes( options.indexes ).toStdString() );
     INFO( "child output:\n" << result.output.toStdString() );
 
     REQUIRE( result.started );
@@ -872,11 +1104,38 @@ void requireSuccessfulChildRun( ChildCase childCase, AllocatorMode allocator,
     REQUIRE( result.exitCode == 0 );
 }
 
+void requireSuccessfulChildRun( ChildCase childCase, AllocatorMode allocator,
+                                const std::vector<int>& indexes )
+{
+    const ChildOptions options{ childCase, allocator, indexes };
+    requireSuccessfulChildResult( options, runChildProcess( options ) );
+}
+
+#if defined(Q_OS_WIN) && defined(_MSC_VER)
+void requireSuccessfulChildRuns( const std::vector<ChildOptions>& childRuns )
+{
+    ChildBatchResult batch;
+    batch.results = runChildProcesses( childRuns, batch.failureIndex );
+    REQUIRE( batch.results.size() == childRuns.size() );
+
+    if ( batch.failureIndex ) {
+        const auto childIndex = *batch.failureIndex;
+        REQUIRE( childIndex < childRuns.size() );
+        requireSuccessfulChildResult( childRuns[ childIndex ], batch.results[ childIndex ] );
+        return;
+    }
+
+    for ( size_t childIndex = 0; childIndex < childRuns.size(); ++childIndex ) {
+        requireSuccessfulChildResult( childRuns[ childIndex ], batch.results[ childIndex ] );
+    }
+}
+#endif
+
 } // namespace
 
 TEST_CASE( "Product-like backend is active in vectorscan test binary", "[vectorscan][backend]" )
 {
-    auto& config = Configuration::getSynced();
+    auto& config = Configuration::get();
     configureProductLikeRegexpEngine( config );
 
 #ifdef KLOGG_HAS_VECTORSCAN
@@ -986,25 +1245,18 @@ TEST_CASE( "Representative child cases succeed for both allocators", "[vectorsca
     }
 }
 
+TEST_CASE( "VectorScan regression matrix preserves exhaustive cardinality",
+           "[vectorscan][regression]" )
+{
+    REQUIRE( buildSearchSpace().size() == kExhaustiveSearchSpaceSize );
+    REQUIRE( buildExhaustiveChildRuns().size() == kExhaustiveChildRunCount );
+}
+
 TEST_CASE( "Windows VectorScan regression search space exits cleanly",
            "[vectorscan][regression]" )
 {
 #if defined(Q_OS_WIN) && defined(_MSC_VER)
-    const std::array childCases = {
-        ChildCase::DirectSinglePrefilter,
-        ChildCase::DirectMultiPrefilter,
-        ChildCase::HighlighterCompilePrefilter,
-        ChildCase::HighlighterCollectionRestorePrefilter,
-    };
-
-    const auto searchSpace = buildSearchSpace();
-    for ( const auto allocator : { AllocatorMode::Crt, AllocatorMode::Mimalloc } ) {
-        for ( const auto childCase : childCases ) {
-            for ( const auto& indexes : searchSpace ) {
-                requireSuccessfulChildRun( childCase, allocator, indexes );
-            }
-        }
-    }
+    requireSuccessfulChildRuns( buildExhaustiveChildRuns() );
 #else
     SUCCEED( "Full allocator regression search is only required on Windows/MSVC." );
 #endif
@@ -1021,6 +1273,6 @@ int main( int argc, char* argv[] )
         return runVectorscanChild( *childOptions );
     }
 
-    configureProductLikeTestState();
+    initializeProductLikeTestState();
     return Catch::Session().run( argc, argv );
 }

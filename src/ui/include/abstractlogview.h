@@ -167,6 +167,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     {
         return quickFind_ != nullptr && quickFind_->isSearchRunning();
     }
+#if defined( KLOGG_ASAN_BUILD )
+    void pauseQuickFindBeforeLineReadForTest( std::atomic<bool>& entered )
+    {
+        quickFind_->pauseBeforeLineReadForTesting( entered );
+    }
+#endif
 #endif
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.

@@ -39,6 +39,11 @@
 #ifndef QUICKFIND_H
 #define QUICKFIND_H
 
+#if defined( KLOGG_ASAN_BUILD )
+#include <atomic>
+#include <functional>
+#endif
+
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QObject>
@@ -53,6 +58,9 @@
 
 class QuickFindPattern;
 class AbstractLogData;
+#if defined( KLOGG_ASAN_BUILD )
+class AbstractLogView;
+#endif
 
 // Handle "long processing" notifications to the UI.
 // reset() shall be called at the beginning of the search
@@ -146,6 +154,13 @@ class QuickFind : public QObject {
     void onSearchFutureReady();
 
   private:
+#if defined( KLOGG_ASAN_BUILD )
+    friend class AbstractLogView;
+
+    // ASan-only barrier exposed through AbstractLogView's KLOGG_TESTS wrapper.
+    void pauseBeforeLineReadForTesting( std::atomic<bool>& entered );
+#endif
+
     // Interrupt any running search and wait for it to finish.
     // The interrupt flag ensures the search stops at the next line boundary,
     // so the wait is bounded by single-line processing time.
@@ -238,6 +253,10 @@ class QuickFind : public QObject {
                               const QuickFindMatcher& matcher );
 
     AtomicFlag interruptRequested_;
+#if defined( KLOGG_ASAN_BUILD )
+    void runBeforeLineReadCallbackForTesting();
+    std::function<void( const AtomicFlag& )> beforeLineReadCallbackForTesting_;
+#endif
     QFuture<Portion> operationFuture_;
     QFutureWatcher<Portion> operationWatcher_;
 };

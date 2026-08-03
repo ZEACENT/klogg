@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <exception>
 
 #include <QDir>
 #include <QFile>
@@ -320,7 +321,21 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
                                        bool startConnected, const QString& viewContext )
 {
     auto restoredSessionData = sessionData;
-    auto logData = std::make_shared<StreamingLogData>( restoredSessionData.captureId );
+    if ( !restoredSessionData.isValid() ) {
+        LOG_WARNING << "Refusing live source with invalid capture id "
+                    << restoredSessionData.captureId;
+        return nullptr;
+    }
+
+    std::shared_ptr<StreamingLogData> logData;
+    try {
+        logData = std::make_shared<StreamingLogData>( restoredSessionData.captureId );
+    } catch ( const std::exception& error ) {
+        LOG_WARNING << "Failed to initialize live capture "
+                    << restoredSessionData.captureId << ": " << error.what();
+        return nullptr;
+    }
+
     if ( !restoredSessionData.boundOutputFile.isEmpty()
          && !logData->bindOutputFile( restoredSessionData.boundOutputFile,
                                       restoredSessionData.outputAnsiMode,

@@ -2631,4 +2631,20 @@ TEST_CASE( "AdbLogcatSessionData round-trips the bound output file and ANSI save
     const auto legacy = AdbLogcatSessionData::fromJson( legacyJson );
     REQUIRE( legacy.boundOutputFile == QStringLiteral( "/tmp/old.log" ) );
     REQUIRE( legacy.outputAnsiMode == LiveLogSaveAnsiMode::Strip );
+
+    REQUIRE( restored.isValid() );
+    for ( const auto& malformedCaptureId :
+          QStringList{ QString{}, QStringLiteral( "." ), QStringLiteral( ".." ),
+                       QStringLiteral( "../outside" ),
+                       QStringLiteral( "nested/capture" ),
+                       QStringLiteral( "nested\\capture" ),
+                       QStringLiteral( "capture:stream" ), QStringLiteral( "CON" ),
+                       QStringLiteral( "nul.txt" ), QStringLiteral( "COM1" ),
+                       QStringLiteral( "LPT9.log" ), QStringLiteral( "capture." ),
+                       QStringLiteral( "capture " ) } ) {
+        auto malformed = restored;
+        malformed.captureId = malformedCaptureId;
+        INFO( "capture id: " << malformedCaptureId.toStdString() );
+        REQUIRE_FALSE( malformed.isValid() );
+    }
 }

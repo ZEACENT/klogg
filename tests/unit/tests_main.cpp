@@ -38,7 +38,9 @@ void configureTestTempDir()
                                           + QLatin1String( "test_tmp" ) );
 
     QDir tempDirectory{ tempDir };
-    if ( tempDirectory.exists() ) {
+    const auto preservesParentTempDir
+        = qEnvironmentVariableIsSet( "KLOGG_TEST_PRESERVE_TEMP_DIR" );
+    if ( tempDirectory.exists() && !preservesParentTempDir ) {
         tempDirectory.removeRecursively();
     }
 

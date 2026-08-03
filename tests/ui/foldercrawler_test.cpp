@@ -29,8 +29,10 @@
 #include <QByteArray>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QLineEdit>
 #include <QMenu>
@@ -44,6 +46,7 @@
 #include <QToolButton>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <optional>
@@ -1400,7 +1403,7 @@ TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPatter
 #endif
 
 #ifdef KLOGG_TEST_ASAN
-TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker before freeing results",
+TEST_CASE( "FolderCrawlerWidget teardown joins QuickFind and discards queued notifications",
            "[folder][quickfind]" )
 {
     // Regression for a destruction-order use-after-free. A FolderFilteredView's
@@ -1414,41 +1417,45 @@ TEST_CASE( "FolderCrawlerWidget teardown joins an in-flight QuickFind worker bef
     // run and failed on merged master). onClosePane already orders this right
     // (delete view, then erase pane); the destructor previously did not.
     //
-    // Built large + a non-matching QuickFind pattern so the worker scans every
-    // result row (instead of stopping at the first hit) and is reliably still
-    // iterating when the widget is torn down. Under ASan the unfixed destructor
-    // reports a heap-use-after-free in doGetLineString here.
+    // A test-only QuickFind barrier stops the worker immediately before its first
+    // data read and releases only when teardown requests interruption. This makes
+    // the overlap deterministic without relying on document size or worker speed.
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
-    std::vector<int> matches;
-    constexpr int kRows = 50000;
-    matches.reserve( kRows );
-    for ( int i = 0; i < kRows; ++i ) {
-        matches.push_back( i );
+    const QString a = makeFile( dir, "quickfind.log", 8, { 0, 1, 2, 3, 4, 5, 6, 7 } );
+    std::atomic<bool> quickFindReadEntered{ false };
+
+    {
+        FolderCrawlerWidget widget;
+        widget.setFolder( dir.path(), QStringList{ a } );
+        widget.show();
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        auto qfp = std::make_shared<QuickFindPattern>();
+        qfp->changeSearchPattern( QStringLiteral( "ZZZ_NO_SUCH_TOKEN" ) );
+        widget.setQuickFindPattern( qfp );
+
+        REQUIRE( widget.filteredView() != nullptr );
+        widget.filteredView()->pauseQuickFindBeforeLineReadForTest(
+            quickFindReadEntered );
+        widget.filteredView()->searchForward();
+        REQUIRE( waitFor( [ & ] {
+            return quickFindReadEntered.load( std::memory_order_acquire );
+        } ) );
+        // ~FolderCrawlerWidget sets QuickFind's interrupt flag while the worker is
+        // held at the barrier. The worker then performs one data read before it
+        // observes the interrupt, and the destructor joins it before panes_ releases
+        // FolderSearchResults. Removing that early join makes the same read occur
+        // only after QObject later destroys the view, deterministically exposing the
+        // original destruction-order UAF under ASan.
     }
-    const QString a = makeFile( dir, "big.log", kRows, matches );
 
-    FolderCrawlerWidget widget;
-    widget.setFolder( dir.path(), QStringList{ a } );
-    widget.show();
-    widget.searchFor( "ERROR" );
-    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-
-    // A QuickFind pattern that matches nothing -> the forward search scans every
-    // result row to the end, keeping the worker resident long enough to overlap
-    // the teardown below.
-    auto qfp = std::make_shared<QuickFindPattern>();
-    qfp->changeSearchPattern( QStringLiteral( "ZZZ_NO_SUCH_TOKEN" ) );
-    widget.setQuickFindPattern( qfp );
-
-    REQUIRE( widget.filteredView() != nullptr );
-    widget.filteredView()->searchForward(); // spawns the QtConcurrent reader
-    REQUIRE( waitFor( [ & ] {
-        return widget.filteredView()->isQuickFindRunningForTest();
-    } ) );
-    REQUIRE( widget.filteredView()->isQuickFindRunningForTest() );
-    // ~FolderCrawlerWidget runs here while the worker is observably active; it
-    // must join the worker before panes_ is freed.
+    // stopSearchAndWait() joins the worker, but the worker may already have queued
+    // an interrupted/end-of-file notification. Drain queued metacalls after the
+    // QuickFind receiver is destroyed; receiver-bound delivery must discard them.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    QCoreApplication::processEvents();
 }
 #endif // KLOGG_TEST_ASAN
 

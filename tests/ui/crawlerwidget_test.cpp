@@ -1908,6 +1908,26 @@ SCENARIO( "Marks persist across a filter change and stay visible (single-file pa
     REQUIRE( crawlerVisitor.filteredLineText( 1 ).contains( "000010" ) );
 }
 
+TEST_CASE( "Session rejects malformed live capture ids without creating a view",
+           "[ui][live][session]" )
+{
+    Session session;
+    AdbLogcatSessionData adbSession;
+    adbSession.captureId = QStringLiteral( "../outside" );
+    bool viewFactoryCalled = false;
+
+    auto* const view = session.openAdbLogcat(
+        adbSession,
+        [ &viewFactoryCalled ]() {
+            viewFactoryCalled = true;
+            return new CrawlerWidget();
+        },
+        false );
+
+    REQUIRE( view == nullptr );
+    REQUIRE_FALSE( viewFactoryCalled );
+}
+
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
 {
     // Use production-like search buffer so each search chunk takes noticeable time.

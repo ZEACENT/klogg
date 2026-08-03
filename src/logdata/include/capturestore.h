@@ -1,9 +1,11 @@
 #ifndef CAPTURESTORE_H
 #define CAPTURESTORE_H
 
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <QByteArray>
 #include <QDateTime>
@@ -18,6 +20,9 @@
 #include "searchablelogdata.h"
 
 class CaptureStore {
+    struct CapturePathState;
+    struct SpilledSegmentFile;
+
     friend class CaptureStoreTestAccess;
 
   public:
@@ -30,13 +35,14 @@ class CaptureStore {
     };
 
     struct Segment {
-        int id = 0;
+        qint64 id = 0;
         QString filePath;
         qint64 byteSize = 0;
         qint64 cumulativeEndLine = 0;
         klogg::vector<qint64> lineOffsets;
         klogg::vector<int> lineLengths;
         std::shared_ptr<QByteArray> memoryData;
+        std::shared_ptr<SpilledSegmentFile> spilledFile;
         bool spilled = false;
     };
 
@@ -60,6 +66,7 @@ class CaptureStore {
     ~CaptureStore();
 
     static QString defaultRootPath();
+    static bool isValidCaptureId( const QString& captureId );
     static void cleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
                                        const QString& rootPath = {},
                                        const QDateTime& preserveModifiedAfter = {} );
@@ -106,24 +113,55 @@ class CaptureStore {
     Stats stats() const;
 
   private:
+    struct CleanupCandidate {
+        QString capturePath;
+        std::shared_ptr<CapturePathState> capturePathState;
+        qint64 activityEpoch = 0;
+        QByteArray processGeneration;
+    };
+
     static QStringList collectUnusedCapturePaths( const QSet<QString>& retainCaptureIds,
                                                   const QString& rootPath );
+    static std::vector<CleanupCandidate> collectUnusedCaptureCandidates(
+        const QSet<QString>& retainCaptureIds, const QString& rootPath );
     static void cleanupCapturePaths( const QStringList& capturePaths,
                                      const QDateTime& preserveModifiedAfter );
+    static void cleanupCaptureCandidates(
+        const std::vector<CleanupCandidate>& candidates,
+        const QDateTime& preserveModifiedAfter,
+        const std::function<void( const QString& )>& beforeRemoval = {} );
     static void scheduleCleanupUnusedCaptures( const QSet<QString>& retainCaptureIds,
                                                const QString& rootPath,
                                                const QDateTime& preserveModifiedAfter );
 
+    std::shared_ptr<SpilledSegmentFile> spilledFileLease( const QString& filePath ) const;
+    void retireSpilledSegment( Segment& segment );
+    std::vector<std::shared_ptr<SpilledSegmentFile>> retireCaptureFiles();
+    void synchronizeSegmentIdsWithDisk();
+    void failNextRetiredFileRemovalForTesting();
+    void failNextCaptureDirectoryRemovalForTesting();
+    void failNextSegmentWriteForTesting();
+    void setAfterCaptureFilesRetiredCallbackForTesting(
+        std::function<void()> callback );
+    bool contendForCapturePathAfterGateForTesting(
+        std::function<void()> gateAcquired );
+    bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
+                                        std::function<void()> waitForRelease );
+    static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    QString capturePathIdentity() const;
     void commitLine( const QByteArray& lineBytes, bool terminated );
     void commitLines( const AppendResult& appendResult );
-    void ensureCaptureDir();
+    void ensureCaptureDir( bool startsReplacement = true );
+    bool needsNewSegment() const;
+    void ensureSegmentIdsAvailable( const AppendResult& appendResult,
+                                    qint64 pendingPartialBytes );
     Segment& ensureActiveSegment();
-    void rotateSegmentIfNeeded();
     void rebuildCumulativeLineCounts( bool onlyLast = false );
     void enforceMemoryBudget();
     bool spillSegmentToDisk( Segment& segment );
     void persistBufferedSegments();
-    void scanSegment( Segment& segment );
+    bool scanSegment( Segment& segment );
+    qint64 takeNextSegmentId();
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
     bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
     void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
@@ -138,6 +176,8 @@ class CaptureStore {
     QString captureId_;
     QString rootPath_;
     QString capturePath_;
+    std::shared_ptr<CapturePathState> capturePathState_;
+    QByteArray capturePathActivationToken_;
     QString boundOutputFile_;
     RollingFileManager rollingOutput_;
     Limits limits_;
@@ -148,15 +188,20 @@ class CaptureStore {
     qint64 memoryBytes_ = 0;
     qint64 totalLines_ = 0;
     int maxLineLength_ = 0;
-    int nextSegmentId_ = 0;
+    std::deque<qint64> reservedSegmentIds_;
+    QSet<QString> inheritedCaptureFiles_;
     QDateTime lastModified_;
     bool persistBufferedSegmentsOnDestroy_ = true;
+    bool preserveTailDuringTrim_ = false;
+    bool failNextSegmentWriteForTesting_ = false;
     mutable std::recursive_mutex mutex_;
 
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
     std::function<void()> outputFlushedCallback_;
     mutable std::function<void()> beforeRawSnapshotCopyCallbackForTesting_;
+    mutable std::function<void()> beforeSpilledSegmentReadCallbackForTesting_;
+    std::function<void()> afterCaptureFilesRetiredCallbackForTesting_;
     TrimResult lastTrimResult_;
 
     // Spill throttling: avoid frequent small spills

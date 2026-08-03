@@ -44,6 +44,16 @@ class Persistable {
         return persistable;
     }
 
+#if defined( KLOGG_TESTS )
+    // Initialize the process-local singleton from its constructor defaults without
+    // touching QSettings. Isolated test children use this before get() so they do
+    // not race on shared portable configuration files.
+    static T& getDefaultForTests()
+    {
+        return getPersistable( true );
+    }
+#endif
+
     void save() const
     {
         auto& settings = PersistentInfo::getSettings( SettingsType{} );
