@@ -232,3 +232,11 @@ Upgrade from Vectorscan 5.4.11 commit
   block-scan exceptions.
 - Benchmark artifacts make compile cost, steady-state throughput, and live
   end-to-end latency independently comparable before P2 optimizations land.
+- Every `hs_scan()` return value is checked; a scan failure either triggers the
+  documented fallback or is made visible to tests and diagnostics.
+- Raw block scanning only runs on input validated against the UTF-8
+  byte-coordinate contract; anything else takes the decoded per-line path.
+- Differential tests cover the P0 corpus, and every accepted block-scan
+  exception is documented.
+- Both CPM pins, the patched builds, CPM prefetch, offline builds, and the
+  normal-artifact ISA restrictions are verified in the upgrade PR.
