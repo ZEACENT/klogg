@@ -1,6 +1,11 @@
 FROM ubuntu:focal
 
-ENV DEBIAN_FRONTEND=noninteractive
+# CCACHE_DIR lives under the workspace mount (/usr/local) so the cache can be
+# persisted across CI runs via actions/cache; keep it bounded and compressed.
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/usr/local/.ccache \
+    CCACHE_MAXSIZE=2G \
+    CCACHE_COMPRESS=1
 
 # Retry apt operations: CI docker builds hit archive.ubuntu.com/PPA network
 # flakes; retrying the whole apt invocation makes the base-image build
@@ -13,7 +18,7 @@ RUN set -eux; \
         && return 0; \
       sleep $((i * 15)); \
     done; return 1; }; \
-    apt_install software-properties-common && \
+    apt_install software-properties-common ccache && \
     apt_retry add-apt-repository ppa:beineri/opt-qt-5.15.3-focal -y && \
     apt_install build-essential python3 python-is-python3 \
                 qt515base qt515svg qt515tools qt515imageformats qt515translations \

@@ -1,6 +1,11 @@
 FROM ubuntu:noble
 
-ENV DEBIAN_FRONTEND=noninteractive
+# CCACHE_DIR lives under the workspace mount (/usr/local) so the cache can be
+# persisted across CI runs via actions/cache; keep it bounded and compressed.
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/usr/local/.ccache \
+    CCACHE_MAXSIZE=2G \
+    CCACHE_COMPRESS=1
 
 # Retry apt operations: CI docker builds hit archive.ubuntu.com network
 # flakes; retrying the whole apt invocation makes the base-image build
@@ -13,7 +18,7 @@ RUN set -eux; \
         && return 0; \
       sleep $((i * 15)); \
     done; return 1; }; \
-    apt_install build-essential python3 python-is-python3 \
+    apt_install build-essential python3 python-is-python3 ccache \
                 qt6-base-dev qt6-5compat-dev qt6-svg-dev qt6-translations-l10n \
                 qt6-tools-dev-tools qt6-base-dev-tools qt6-tools-dev \
                 libxkbcommon-dev libxkbcommon-x11-dev \

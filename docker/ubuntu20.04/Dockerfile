@@ -1,6 +1,11 @@
 FROM ubuntu:focal
 
-ENV DEBIAN_FRONTEND=noninteractive
+# CCACHE_DIR lives under the workspace mount (/usr/local) so the cache can be
+# persisted across CI runs via actions/cache; keep it bounded and compressed.
+ENV DEBIAN_FRONTEND=noninteractive \
+    CCACHE_DIR=/usr/local/.ccache \
+    CCACHE_MAXSIZE=2G \
+    CCACHE_COMPRESS=1
 
 # Retry apt operations as one update+install unit: CI docker builds hit
 # archive.ubuntu.com/PPA network flakes (the ubuntu-20.04-appimage leg failed
@@ -17,7 +22,7 @@ RUN set -eux; \
       sleep $((i * 15)); \
     done; return 1; }; \
     apt_install software-properties-common build-essential python3 python-is-python3 \
-                gnupg dirmngr wget ca-certificates && \
+                gnupg dirmngr wget ca-certificates ccache && \
     apt_retry apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
     echo "deb http://ppa.launchpad.net/ubuntu-toolchain-r/test/ubuntu focal main" \
         > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \

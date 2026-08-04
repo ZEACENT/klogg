@@ -514,15 +514,51 @@ jobs:
           cache-from: type=gha,scope=klogg-qt5-tsan
           cache-to: type=gha,mode=max,scope=klogg-qt5-tsan
 
-      - name: Build container
+      - name: Set up Buildx for the Linux build images
         if: ${{ matrix.config.sanitizer != 'thread' }}
-        run: docker build -t "${{ matrix.config.container }}" "${{ matrix.config.container_root }}"
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build cached Linux container
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.config.container_root }}
+          load: true
+          tags: ${{ matrix.config.container }}
+          # Same type=gha layer cache pattern as the TSan image. The scope is
+          # the container image name, so legs sharing an image (e.g. the deb
+          # and asan legs both build variar/klogg_ubuntu22.04) share one cache.
+          cache-from: type=gha,scope=klogg-linux-${{ matrix.config.container }}
+          cache-to: type=gha,mode=max,scope=klogg-linux-${{ matrix.config.container }}
+
+      - name: Restore ccache for the Linux build
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        uses: actions/cache@v4
+        with:
+          # The container compiles with CCACHE_DIR=/usr/local/.ccache, which is
+          # the workspace mounted at /usr/local, so restoring this host path
+          # warms the in-container cache. Key on the commit so each run saves a
+          # fresh entry; restore-keys falls back to the previous commit's cache.
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ matrix.config.label }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ matrix.config.label }}-ccache-
 
       - uses: ./.github/actions/prepare-workspace-env
       - name: Lock CPM downloads to prefetched cache
         shell: sh
         run: |
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
+
+      - name: Enable ccache compiler launcher
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        shell: sh
+        run: |
+          # Vectorscan is added via add_subdirectory, so the launcher setting
+          # propagates to it too. The sanitizer legs run with LTO off, so
+          # ccache covers the whole compile; a warm cache makes the compile
+          # phase ~5x faster regardless of runner CPU contention.
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
       - name: Set sanitizer env (forwarded into the container by docker-run-tests)
         if: ${{ matrix.config.sanitizer }}
