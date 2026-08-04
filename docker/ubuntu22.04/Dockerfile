@@ -2,8 +2,13 @@ FROM ubuntu:jammy
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt update -y && \
-    apt install --no-install-recommends build-essential python3 python-is-python3 \
+# Retry apt operations: CI docker builds hit archive.ubuntu.com network
+# flakes; retrying the whole apt invocation makes the base-image build
+# resilient instead of flaky.
+RUN set -eux; \
+    apt_retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep $((i * 10)); done; return 1; }; \
+    apt_retry apt update -y && \
+    apt_retry apt install --no-install-recommends build-essential python3 python-is-python3 \
                     qtbase5-dev qt5-qmake qtbase5-dev-tools qttools5-dev qttranslations5-l10n \
                     libqt5svg5-dev libxkbcommon-dev libxkbcommon-x11-dev \
                     libboost-dev libssl-dev libcurl4-openssl-dev \

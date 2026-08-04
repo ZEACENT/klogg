@@ -2,8 +2,14 @@ FROM ubuntu:focal
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -y && \
-    apt-get install --no-install-recommends software-properties-common \
+# Retry apt operations: CI docker builds hit archive.ubuntu.com/PPA network
+# flakes (the ubuntu-20.04-appimage leg failed in the build container on a
+# transient "Connection failed" from apt). Retrying the whole apt invocation
+# a few times makes the base-image build resilient instead of flaky.
+RUN set -eux; \
+    apt_retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep $((i * 10)); done; return 1; }; \
+    apt_retry apt-get update -y && \
+    apt_retry apt-get install --no-install-recommends software-properties-common \
                     build-essential python3 python-is-python3 \
                     gnupg dirmngr \
                     wget ca-certificates \
@@ -11,8 +17,8 @@ RUN apt-get update -y && \
     apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
     echo "deb http://ppa.launchpad.net/ubuntu-toolchain-r/test/ubuntu focal main" \
         > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
-    apt-get update -y && \
-    apt-get install --no-install-recommends \
+    apt_retry apt-get update -y && \
+    apt_retry apt-get install --no-install-recommends \
                     qtbase5-dev qt5-qmake qtbase5-dev-tools qttools5-dev qttranslations5-l10n \
                     libqt5svg5-dev libxkbcommon-dev libxkbcommon-x11-dev \
                     libboost-dev libssl-dev libicu-dev libcurl4-openssl-dev \

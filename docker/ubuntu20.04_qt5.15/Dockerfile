@@ -2,11 +2,16 @@ FROM ubuntu:focal
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -y && \
-    apt-get install --no-install-recommends software-properties-common -y && \
+# Retry apt operations: CI docker builds hit archive.ubuntu.com/PPA network
+# flakes; retrying the whole apt invocation makes the base-image build
+# resilient instead of flaky.
+RUN set -eux; \
+    apt_retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep $((i * 10)); done; return 1; }; \
+    apt_retry apt-get update -y && \
+    apt_retry apt-get install --no-install-recommends software-properties-common -y && \
     add-apt-repository ppa:beineri/opt-qt-5.15.3-focal -y && \
-    apt-get update -y && \
-    apt-get install --no-install-recommends build-essential python3 python-is-python3 \
+    apt_retry apt-get update -y && \
+    apt_retry apt-get install --no-install-recommends build-essential python3 python-is-python3 \
                     qt515base qt515svg qt515tools qt515imageformats qt515translations \
                     libxkbcommon-dev libxkbcommon-x11-dev \
                     mesa-common-dev libglu1-mesa-dev \

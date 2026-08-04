@@ -382,11 +382,19 @@ QString waitForPublishedContent( const QString& filePath, int timeoutMs = 5000 )
     QElapsedTimer deadline;
     deadline.start();
     while ( deadline.elapsed() < timeoutMs ) {
-        QFile file( filePath );
-        if ( file.open( QIODevice::ReadOnly ) ) {
-            const auto contents = QString::fromUtf8( file.readAll() );
-            if ( !contents.isEmpty() ) {
-                return contents;
+        // Only open the file once it has been atomically published (non-empty).
+        // Opening the empty-but-existing ready file holds a Windows read handle
+        // that can make a concurrent QSaveFile commit (atomic rename over the
+        // destination) fail with a sharing violation, which flaked the
+        // "transient empty publication" test on Windows. Content is published
+        // in a single atomic rename, so non-zero size implies complete content.
+        if ( QFileInfo( filePath ).size() > 0 ) {
+            QFile file( filePath );
+            if ( file.open( QIODevice::ReadOnly ) ) {
+                const auto contents = QString::fromUtf8( file.readAll() );
+                if ( !contents.isEmpty() ) {
+                    return contents;
+                }
             }
         }
         std::this_thread::yield();
@@ -523,12 +531,22 @@ TEST_CASE( "Published content wait tolerates a transient empty publication" )
     std::atomic<bool> published{ false };
     std::thread publisher( [ readyPath, &published ] {
         std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
-        QSaveFile publishedFile( readyPath );
-        publishedFile.setDirectWriteFallback( false );
+        // QSaveFile::commit() renames over the destination. On Windows a
+        // concurrent reader, or an AV scan of the temp file, can make that
+        // rename fail with a sharing violation; retry so a transient failure
+        // cannot flake the wait semantics under test. The reader only opens
+        // the destination once it is non-empty, so retrying is safe.
         const auto payload = QByteArrayLiteral( "win:volume:index" );
-        published.store( publishedFile.open( QIODevice::WriteOnly )
-                         && publishedFile.write( payload ) == payload.size()
-                         && publishedFile.commit() );
+        for ( int attempt = 0; attempt < 10 && !published.load(); ++attempt ) {
+            QSaveFile publishedFile( readyPath );
+            publishedFile.setDirectWriteFallback( false );
+            published.store( publishedFile.open( QIODevice::WriteOnly )
+                             && publishedFile.write( payload ) == payload.size()
+                             && publishedFile.commit() );
+            if ( !published.load() ) {
+                std::this_thread::sleep_for( std::chrono::milliseconds( 25 ) );
+            }
+        }
     } );
     const auto contents = waitForPublishedContent( readyPath );
     publisher.join();

@@ -2,8 +2,13 @@ FROM ubuntu:noble
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update -y && \
-    apt-get install --no-install-recommends build-essential python3 python-is-python3 \
+# Retry apt operations: CI docker builds hit archive.ubuntu.com network
+# flakes; retrying the whole apt invocation makes the base-image build
+# resilient instead of flaky.
+RUN set -eux; \
+    apt_retry() { for i in 1 2 3 4 5; do "$@" && return 0; sleep $((i * 10)); done; return 1; }; \
+    apt_retry apt-get update -y && \
+    apt_retry apt-get install --no-install-recommends build-essential python3 python-is-python3 \
                     qt6-base-dev qt6-5compat-dev qt6-svg-dev qt6-translations-l10n \
                     qt6-tools-dev-tools qt6-base-dev-tools qt6-tools-dev \
                     libxkbcommon-dev libxkbcommon-x11-dev \
