@@ -118,6 +118,21 @@ TEST_CASE( "System style still follows a light theme mode" )
     REQUIRE( windowColor.lightness() >= 100 );
 }
 
+TEST_CASE( "System style follows a dark theme mode into a dark palette" )
+{
+    // ThemeMode::Dark resolves the System style through the platform's dark
+    // style key (klogg::platform::darkStyleKey(), "DarkWindows" on Windows).
+    // The dark branch must recognize that key; before the fix a DarkWindows
+    // key fell through to the light fallback and "Theme mode: Dark" rendered
+    // light on Windows.
+    const ScopedStyleSetting styleGuard{ StyleManager::SystemKey, ThemeMode::Dark };
+
+    const auto windowColor = qApp->palette().color( QPalette::Window );
+    const auto textColor = qApp->palette().color( QPalette::WindowText );
+    REQUIRE( windowColor.lightness() < 100 );
+    REQUIRE( textColor.lightness() > 150 );
+}
+
 TEST_CASE( "Modern style sheet gives tabs a rounded iTerm-style treatment" )
 {
     const ScopedModernStyle styleGuard;
