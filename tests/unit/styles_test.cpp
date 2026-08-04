@@ -20,6 +20,7 @@
 #include <catch2/catch.hpp>
 
 #include <QApplication>
+#include <QPalette>
 
 #include "configuration.h"
 #include "styles.h"
@@ -49,7 +50,73 @@ class ScopedModernStyle {
     QString previousStyle_;
     ThemeMode previousThemeMode_;
 };
+
+// Applies a fixed style + theme mode for the duration of the test and
+// restores both afterwards. Mirrors ScopedModernStyle so style tests never
+// leak state into each other.
+class ScopedStyleSetting {
+  public:
+    ScopedStyleSetting( const QString& style, ThemeMode mode )
+        : previousStyle_( Configuration::getSynced().style() )
+        , previousThemeMode_( Configuration::getSynced().themeMode() )
+    {
+        if ( previousStyle_.isEmpty() ) {
+            previousStyle_ = StyleManager::defaultStyle();
+        }
+        Configuration::getSynced().setStyle( style );
+        Configuration::getSynced().setThemeMode( mode );
+        StyleManager::applyStyle( style );
+    }
+
+    ~ScopedStyleSetting()
+    {
+        Configuration::getSynced().setStyle( previousStyle_ );
+        Configuration::getSynced().setThemeMode( previousThemeMode_ );
+        StyleManager::applyStyle( previousStyle_ );
+    }
+
+  private:
+    QString previousStyle_;
+    ThemeMode previousThemeMode_;
+};
 } // namespace
+
+TEST_CASE( "Classic Dark is not overridden by a light theme mode" )
+{
+    // Regression for https://github.com/ZEACENT/klogg/issues/51 ("Classic
+    // dark won't stay enabled"). The theme mode (Light/Dark/Auto) governs how
+    // "Modern" and "System" adapt to the platform; it must not silently
+    // replace an explicit "Classic Dark" selection with the light platform
+    // default. Before the fix, ThemeMode::Light (and ThemeMode::Auto on a
+    // light system) rendered Classic Dark light.
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey, ThemeMode::Light };
+
+    const auto windowColor = qApp->palette().color( QPalette::Window );
+    const auto textColor = qApp->palette().color( QPalette::WindowText );
+    REQUIRE( windowColor.lightness() < 100 );
+    REQUIRE( textColor.lightness() > 150 );
+}
+
+TEST_CASE( "Classic Dark is not overridden by auto theme mode" )
+{
+    // Auto theme mode must not turn an explicit Classic Dark style light when
+    // the system theme is light (the default configuration is Auto).
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey, ThemeMode::Auto };
+
+    const auto windowColor = qApp->palette().color( QPalette::Window );
+    REQUIRE( windowColor.lightness() < 100 );
+}
+
+TEST_CASE( "System style still follows a light theme mode" )
+{
+    // Counter-check: the theme-mode feature itself is preserved. With an
+    // explicit dark style, theme mode is bypassed (tests above); with the
+    // System style it still resolves through the theme mode.
+    const ScopedStyleSetting styleGuard{ StyleManager::SystemKey, ThemeMode::Light };
+
+    const auto windowColor = qApp->palette().color( QPalette::Window );
+    REQUIRE( windowColor.lightness() >= 100 );
+}
 
 TEST_CASE( "Modern style sheet gives tabs a rounded iTerm-style treatment" )
 {
