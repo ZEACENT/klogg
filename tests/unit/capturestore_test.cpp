@@ -368,6 +368,32 @@ bool waitForFile( const QString& filePath, int timeoutMs = 5000 )
     return QFileInfo::exists( filePath );
 }
 
+// Cross-process publishers use QSaveFile (write temp + atomic rename), but
+// existence is not readability: on Windows a just-renamed file can be
+// transiently unopenable (search indexer, real-time AV), and
+// QFileInfo::exists reports the directory entry before any open would
+// succeed. Polling existence and then reading once therefore races the
+// publication. Poll for readable non-empty content instead — an empty
+// payload is never valid in these protocols, so it doubles as the
+// not-ready signal — and consume the content read inside the wait rather
+// than opening the file a second time.
+QString waitForPublishedContent( const QString& filePath, int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( deadline.elapsed() < timeoutMs ) {
+        QFile file( filePath );
+        if ( file.open( QIODevice::ReadOnly ) ) {
+            const auto contents = QString::fromUtf8( file.readAll() );
+            if ( !contents.isEmpty() ) {
+                return contents;
+            }
+        }
+        std::this_thread::yield();
+    }
+    return {};
+}
+
 bool waitForMissingFile( const QString& filePath, int timeoutMs = 5000 )
 {
     QElapsedTimer deadline;
@@ -447,12 +473,19 @@ class ActiveCaptureChild {
     bool startAndWaitUntilReady()
     {
         process_.start();
-        return process_.waitForStarted( 5000 ) && waitForFile( readyPath_ );
+        if ( !process_.waitForStarted( 5000 ) ) {
+            return false;
+        }
+        // Readiness is the published identity, not the file's existence;
+        // cache the content read inside the wait so captureIdentity()
+        // needs no second open.
+        readyContents_ = waitForPublishedContent( readyPath_ );
+        return !readyContents_.isEmpty();
     }
 
     QString captureIdentity() const
     {
-        return readUtf8File( readyPath_ );
+        return readyContents_;
     }
 
     qint64 processId() const
@@ -470,8 +503,75 @@ class ActiveCaptureChild {
     QProcess process_;
     QString readyPath_;
     QString releasePath_;
+    QString readyContents_;
 };
 } // namespace
+
+TEST_CASE( "Published content wait tolerates a transient empty publication" )
+{
+    // Reproduces the Windows CI flake from "CaptureStore deferred deletion
+    // preserves a newer cross-process generation": the ready file's
+    // directory entry exists (and is even openable, empty) before the
+    // publisher's atomic rename lands. Existence-based waiting plus an
+    // immediate read observes "" and fails the identity comparison; the
+    // wait must hold out for readable non-empty content.
+    const auto rootPath = makeTestDir( "capturestore_publication_window" );
+    const auto readyPath
+        = QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) );
+    REQUIRE( createSignalFile( readyPath ) );
+
+    std::atomic<bool> published{ false };
+    std::thread publisher( [ readyPath, &published ] {
+        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+        QSaveFile publishedFile( readyPath );
+        publishedFile.setDirectWriteFallback( false );
+        const auto payload = QByteArrayLiteral( "win:volume:index" );
+        published.store( publishedFile.open( QIODevice::WriteOnly )
+                         && publishedFile.write( payload ) == payload.size()
+                         && publishedFile.commit() );
+    } );
+    const auto contents = waitForPublishedContent( readyPath );
+    publisher.join();
+    REQUIRE( published.load() );
+    REQUIRE( contents == QStringLiteral( "win:volume:index" ) );
+}
+
+TEST_CASE( "Published content wait fails closed on an empty publication" )
+{
+    // An existing but empty file is not readiness: the wait must run to
+    // the deadline instead of returning the empty content.
+    const auto rootPath = makeTestDir( "capturestore_publication_empty" );
+    const auto readyPath
+        = QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) );
+    REQUIRE( createSignalFile( readyPath ) );
+
+    QElapsedTimer timer;
+    timer.start();
+    REQUIRE( waitForPublishedContent( readyPath, 250 ).isEmpty() );
+    REQUIRE( timer.elapsed() >= 250 );
+}
+
+TEST_CASE( "Published content wait follows a late publication" )
+{
+    const auto rootPath = makeTestDir( "capturestore_publication_late" );
+    const auto readyPath
+        = QDir( rootPath ).filePath( QStringLiteral( "child-ready" ) );
+
+    std::atomic<bool> published{ false };
+    std::thread publisher( [ readyPath, &published ] {
+        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+        QSaveFile publishedFile( readyPath );
+        publishedFile.setDirectWriteFallback( false );
+        const auto payload = QByteArrayLiteral( "content" );
+        published.store( publishedFile.open( QIODevice::WriteOnly )
+                         && publishedFile.write( payload ) == payload.size()
+                         && publishedFile.commit() );
+    } );
+    const auto contents = waitForPublishedContent( readyPath );
+    publisher.join();
+    REQUIRE( published.load() );
+    REQUIRE( contents == QStringLiteral( "content" ) );
+}
 
 TEST_CASE( "CaptureStore default spill limits prefer memory over temp files" )
 {
