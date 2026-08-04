@@ -59,6 +59,9 @@ def changed_paths(root: Path, base: str) -> list[Path]:
         "diff",
         "--name-only",
         "-z",
+        # Exclude deleted files: clang-tidy cannot analyze a path that no
+        # longer exists, so a file-deleting PR would break the gate.
+        "--diff-filter=d",
         base,
         "--",
         "src/",

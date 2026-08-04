@@ -103,7 +103,7 @@ jobs:
             BASE='${{ github.event.pull_request.base.sha }}'
             changed_paths_file=$(mktemp)
             trap 'rm -f "$changed_paths_file"' EXIT
-            if ! git -c core.quotePath=false diff --name-only -z "$BASE" HEAD -- src/ \
+            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
                  > "$changed_paths_file"; then
               echo "::error::failed to discover changed C/C++ analysis paths"
               exit 1
@@ -235,7 +235,7 @@ jobs:
             # touched files are still caught (the whole changed TU is checked).
             changed_paths_file=$(mktemp)
             trap 'rm -f "$changed_paths_file"' EXIT
-            if ! git -c core.quotePath=false diff --name-only -z "$BASE" HEAD -- src/ \
+            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
                  > "$changed_paths_file"; then
               echo "::error::failed to discover changed cppcheck paths"
               exit 1

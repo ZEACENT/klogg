@@ -24,6 +24,9 @@ class ChangedClangTidyTest(unittest.TestCase):
                 [pathlib.Path("src/example.cpp")],
             )
 
+        # --diff-filter=d excludes deleted files: a PR that deletes a source
+        # file must not feed a nonexistent path to clang-tidy (the gate would
+        # fail on the tool's "file not found" instead of the analysis).
         git_output.assert_called_once_with(
             root,
             "-c",
@@ -31,6 +34,7 @@ class ChangedClangTidyTest(unittest.TestCase):
             "diff",
             "--name-only",
             "-z",
+            "--diff-filter=d",
             "base-sha",
             "--",
             "src/",

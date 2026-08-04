@@ -560,6 +560,23 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
         issues.append(
             "static analysis must use a Sentry-and-Vectorscan-specific CPM cache key"
         )
+
+    # A PR that deletes a src/ file must not feed the deleted path to
+    # clang-tidy/cppcheck: both tools fail on the nonexistent file and the
+    # gate breaks for an unrelated reason. Every changed-path discovery
+    # (`git diff --name-only`) must therefore exclude deleted files.
+    for command in commands:
+        tokens = shell_tokens(command)
+        if (
+            "diff" in tokens
+            and "--name-only" in tokens
+            and "--diff-filter=d" not in tokens
+        ):
+            issues.append(
+                "changed-path discovery must exclude deleted files (--diff-filter=d)"
+            )
+            break
+
     return issues
 
 

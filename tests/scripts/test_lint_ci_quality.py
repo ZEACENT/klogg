@@ -467,6 +467,20 @@ steps:
             MODULE.static_analysis_workflow_issues(insecure),
         )
 
+    def test_static_analysis_changed_path_discovery_excludes_deleted_files(self):
+        # A PR that deletes a src/ file must not feed the deleted path to
+        # clang-tidy/cppcheck; both gates discover changed paths with
+        # `git diff --name-only -z` and must pass --diff-filter=d.
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        message = "changed-path discovery must exclude deleted files (--diff-filter=d)"
+        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
+
+        insecure = workflow.replace(" --diff-filter=d", "", 1)
+        self.assertNotEqual(insecure, workflow)
+        self.assertIn(message, MODULE.static_analysis_workflow_issues(insecure))
+
     def test_static_analysis_sentry_flag_must_belong_to_the_real_configure(self):
         workflow = """\
 env:
