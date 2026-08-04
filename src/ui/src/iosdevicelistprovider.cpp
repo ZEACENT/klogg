@@ -127,10 +127,51 @@ QStringList pymobiledeviceLegacyListArguments()
 }
 #endif // Q_OS_MAC
 
+QList<IosDeviceInfo> enumerateIosDevices( const QString& executable, QString* error )
+{
+#ifndef Q_OS_MAC
+    Q_UNUSED( executable );
+    if ( error ) {
+        *error = QObject::tr( "iOS log streaming is supported only on macOS." );
+    }
+    return {};
+#else
+    QList<IosDeviceInfo> devices;
+    const auto pymobiledeviceExecutable
+        = IosDeviceListProvider::normalizedExecutable( executable );
+    // Try the full JSON output first — it includes DeviceName, ProductType,
+    // ProductVersion, etc. Fall back to --simple (UDID-only) only if the
+    // full listing is not supported by the installed pymobiledevice3 version.
+    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable,
+                                        pymobiledeviceLegacyListArguments(), &devices,
+                                        error ) ) {
+        QString simpleError;
+        if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable,
+                                            pymobiledeviceSimpleListArguments(), &devices,
+                                            &simpleError ) ) {
+            if ( error && !simpleError.isEmpty() ) {
+                *error = simpleError;
+            }
+            return {};
+        }
+
+        if ( error ) {
+            error->clear();
+        }
+    }
+
+    if ( devices.isEmpty() && error ) {
+        *error = QObject::tr( "No iOS devices reported by pymobiledevice3." );
+    }
+    return devices;
+#endif
+}
+
 } // namespace
 
 IosDeviceListProvider::IosDeviceListProvider( QString executable, QObject* parent )
-    : DeviceListProviderBase( parent )
+    : DeviceListProviderBase(
+          [ executable ] { return enumerateIosDevices( executable, nullptr ); }, parent )
     , executable_( std::move( executable ) )
 {
 }
@@ -169,38 +210,5 @@ bool IosDeviceListProvider::deviceMatches( const IosDeviceInfo& device,
 
 QList<IosDeviceInfo> IosDeviceListProvider::doListDevices( QString* error ) const
 {
-#ifndef Q_OS_MAC
-    Q_UNUSED( error );
-    if ( error ) {
-        *error = QObject::tr( "iOS log streaming is supported only on macOS." );
-    }
-    return {};
-#else
-    QList<IosDeviceInfo> devices;
-    const auto pymobiledeviceExecutable = normalizedExecutable( executable_ );
-    // Try the full JSON output first — it includes DeviceName, ProductType,
-    // ProductVersion, etc.  Fall back to --simple (UDID-only) only if the
-    // full listing is not supported by the installed pymobiledevice3 version.
-    if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable, pymobiledeviceLegacyListArguments(),
-                                        &devices, error ) ) {
-        QString simpleError;
-        if ( !runPymobiledeviceListCommand( pymobiledeviceExecutable,
-                                            pymobiledeviceSimpleListArguments(), &devices,
-                                            &simpleError ) ) {
-            if ( error && !simpleError.isEmpty() ) {
-                *error = simpleError;
-            }
-            return {};
-        }
-
-        if ( error ) {
-            error->clear();
-        }
-    }
-
-    if ( devices.isEmpty() && error ) {
-        *error = QObject::tr( "No iOS devices reported by pymobiledevice3." );
-    }
-    return devices;
-#endif
+    return enumerateIosDevices( executable_, error );
 }

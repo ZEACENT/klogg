@@ -1,0 +1,88 @@
+diff --git a/src/efsw/FileWatcherKqueue.cpp b/src/efsw/FileWatcherKqueue.cpp
+index 32ef3dc..5249c8d 100644
+--- a/src/efsw/FileWatcherKqueue.cpp
++++ b/src/efsw/FileWatcherKqueue.cpp
+@@ -31,6 +31,11 @@ FileWatcherKqueue::FileWatcherKqueue( FileWatcher* parent ) :
+ }
+
+ FileWatcherKqueue::~FileWatcherKqueue() {
++	mInitOK = false;
++
++	// Stop the native watch thread before reclaiming the tree it traverses.
++	efSAFE_DELETE( mThread );
++
+ 	WatchMap::iterator iter = mWatches.begin();
+
+ 	for ( ; iter != mWatches.end(); ++iter ) {
+@@ -38,16 +43,16 @@ FileWatcherKqueue::~FileWatcherKqueue() {
+ 	}
+
+ 	mWatches.clear();
+-
+-	mInitOK = false;
+-
+-	efSAFE_DELETE( mThread );
+ }
+
+ WatchID FileWatcherKqueue::addWatch( const std::string& directory, FileWatchListener* watcher,
+ 									 bool recursive, const std::vector<WatcherOption>& options ) {
+ 	static bool s_ug = false;
+
++	// Serialize construction with the native watch loop. A watcher must not be
++	// visible in mWatches until addAll() has finished building its kevent list.
++	Lock lock( mWatchesLock );
++
+ 	std::string dir( directory );
+
+ 	FileSystem::dirAddSlashAtEnd( dir );
+@@ -82,19 +87,14 @@ WatchID FileWatcherKqueue::addWatch( const std::string& directory, FileWatchList
+
+ 		WatcherKqueue* watch = new WatcherKqueue( ++mLastWatchID, dir, watcher, recursive, this );
+
+-		{
+-			Lock lock( mWatchesLock );
+-			mWatches.insert( std::make_pair( mLastWatchID, watch ) );
+-		}
+-
+ 		watch->addAll();
+
+-		// if failed to open the directory... erase the watcher
+-		if ( !watch->initOK() ) {
++		// Publish only a fully initialized watcher to the native watch thread.
++		if ( watch->initOK() ) {
++			mWatches.insert( std::make_pair( mLastWatchID, watch ) );
++		} else {
+ 			int le = watch->lastErrno();
+
+-			mWatches.erase( watch->ID );
+-
+ 			efSAFE_DELETE( watch );
+
+ 			mLastWatchID--;
+@@ -104,7 +104,6 @@ WatchID FileWatcherKqueue::addWatch( const std::string& directory, FileWatchList
+ 				WatcherGeneric* genericWatch =
+ 					new WatcherGeneric( ++mLastWatchID, dir, watcher, this, recursive );
+
+-				Lock lock( mWatchesLock );
+ 				mWatches.insert( std::make_pair( mLastWatchID, genericWatch ) );
+ 			} else {
+ 				return Errors::Log::createLastError( Errors::Unspecified, link );
+@@ -121,7 +120,6 @@ WatchID FileWatcherKqueue::addWatch( const std::string& directory, FileWatchList
+
+ 		WatcherGeneric* watch = new WatcherGeneric( ++mLastWatchID, dir, watcher, this, recursive );
+
+-		Lock lock( mWatchesLock );
+ 		mWatches.insert( std::make_pair( mLastWatchID, watch ) );
+ 	}
+
+@@ -135,7 +133,9 @@ void FileWatcherKqueue::removeWatch( const std::string& directory ) {
+
+ 	for ( ; iter != mWatches.end(); ++iter ) {
+ 		if ( directory == iter->second->Directory ) {
+-			removeWatch( iter->first );
++			Watcher* watch = iter->second;
++			mWatches.erase( iter );
++			efSAFE_DELETE( watch );
+ 			return;
+ 		}
+ 	}

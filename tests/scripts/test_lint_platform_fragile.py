@@ -258,5 +258,51 @@ class QsizetypeConversionQStringViewDeclTest(unittest.TestCase):
         self.assertEqual(self._do_check(text), [])
 
 
+class QStringListBraceAssignmentTest(unittest.TestCase):
+    def check(self, text: str) -> list:
+        return lint._check_qstringlist_brace_assignment(
+            text, Path("versionchecker_test.cpp")
+        )
+
+    def test_assignment_from_braced_list_is_flagged(self):
+        # This compiles with Qt 6 but is ambiguous between QStringList and
+        # QList<QString> assignment overloads on Qt 5.
+        text = (
+            "QStringList archAliases;\n"
+            "if ( useArm ) {\n"
+            '    archAliases = { QStringLiteral( "arm64" ),\n'
+            '                    QStringLiteral( "aarch64" ) };\n'
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_explicit_qstringlist_temporary_is_accepted(self):
+        text = (
+            "QStringList archAliases;\n"
+            "if ( useArm ) {\n"
+            '    archAliases = QStringList{ QStringLiteral( "arm64" ),\n'
+            '                               QStringLiteral( "aarch64" ) };\n'
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_initializer_at_declaration_is_accepted(self):
+        text = (
+            'QStringList archAliases{ QStringLiteral( "x86_64" ),\n'
+            '                         QStringLiteral( "amd64" ) };\n'
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_suppresses_assignment(self):
+        text = (
+            "QStringList archAliases;\n"
+            'archAliases = { QStringLiteral( "x64" ) }; '
+            "// lint-allow: platform-fragile\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+
 if __name__ == "__main__":
     unittest.main()

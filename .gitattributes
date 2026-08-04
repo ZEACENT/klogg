@@ -1,2 +1,2 @@
 # Keep patch files as LF so `git apply` works reliably on Windows.
-3rdparty/patches/*.patch text eol=lf
+**/patches/*.patch text eol=lf -whitespace

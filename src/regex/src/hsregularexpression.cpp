@@ -31,7 +31,11 @@
 
 #include "cpu_info.h"
 #include "log.h"
+#if defined( KLOGG_MSVC_ASAN )
+#include <cstdlib>
+#else
 #include <mimalloc.h>
+#endif
 
 namespace {
 
@@ -39,7 +43,13 @@ namespace {
 struct HsAllocatorInit {
     HsAllocatorInit()
     {
+#if defined( KLOGG_MSVC_ASAN )
+        // MSVC ASan cannot use mimalloc's GCC/Clang-only MI_TRACK_ASAN mode.
+        // Keep Vectorscan allocations visible to the CRT allocator interceptor.
+        hs_set_allocator( std::malloc, std::free );
+#else
         hs_set_allocator( mi_malloc, mi_free );
+#endif
     }
 };
 static HsAllocatorInit hsAllocatorInit;
@@ -353,9 +363,10 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
         LOG_WARNING << "Cpu doesn't have sse2 or ssse3, use qt regex engine";
     }
 
-    auto allocScratchForDb = []( hs_database_t* db ) -> hs_scratch_t* {
+    auto allocScratchForDb
+        = []( const hs_database_t* database ) -> hs_scratch_t* {
         hs_scratch_t* scratch = nullptr;
-        const auto scratchResult = hs_alloc_scratch( db, &scratch );
+        const auto scratchResult = hs_alloc_scratch( database, &scratch );
         if ( scratchResult != HS_SUCCESS ) {
             LOG_ERROR << "Failed to allocate scratch";
             return nullptr;
@@ -368,10 +379,14 @@ HsRegularExpression::HsRegularExpression( const klogg::vector<RegularExpressionP
                                                                        database_.get() );
     }
 
-    // Compile a second database WITHOUT HS_FLAG_SINGLEMATCH for bulk buffer scanning.
-    // This allows hs_scan to report all match occurrences across the buffer
-    // (one per line that matches), not just the first match overall.
-    if ( !isPrefilter_ ) {
+    // Compile a second database WITHOUT HS_FLAG_SINGLEMATCH only for the
+    // single exact pattern path that can create a bulk buffer scanner.
+    // Multi-pattern and explicit-prefilter expressions are consumed per-line;
+    // compiling an unused exact database for them is both wasteful and unsafe
+    // with MSVC ASan in Vectorscan's multi-pattern compiler.
+    const bool canBuildBufferScanner
+        = !isPrefilter_ && patterns_.size() == 1 && !patterns_.front().isPrefilter;
+    if ( canBuildBufferScanner ) {
         auto compileBlockDatabase
             = []( const klogg::vector<RegularExpressionPattern>& expressions,
                   QString& errorMessage ) -> hs_database_t* {
@@ -481,7 +496,7 @@ std::unique_ptr<HsBufferScanner> HsRegularExpression::createBufferScanner() cons
     }
 
     auto scannerScratch = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
-        []( hs_scratch_t* prototype ) -> hs_scratch_t* {
+        []( const hs_scratch_t* prototype ) -> hs_scratch_t* {
             hs_scratch_t* scratch = nullptr;
             const auto err = hs_clone_scratch( prototype, &scratch );
             if ( err != HS_SUCCESS ) {
@@ -516,7 +531,7 @@ MatcherVariant HsRegularExpression::createMatcher() const
     }
 
     auto matcherScratch = makeUniqueResource<hs_scratch_t, hs_free_scratch>(
-        []( hs_scratch_t* prototype ) -> hs_scratch_t* {
+        []( const hs_scratch_t* prototype ) -> hs_scratch_t* {
             hs_scratch_t* scratch = nullptr;
 
             const auto err = hs_clone_scratch( prototype, &scratch );

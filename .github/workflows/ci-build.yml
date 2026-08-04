@@ -21,6 +21,13 @@ on:
       - .gitignore
   workflow_dispatch:
 
+concurrency:
+  # Cancel superseded PR validation, but serialize master publication runs.
+  # A master run replaces the continuous tag/release; canceling it between
+  # deletion and recreation could leave the release missing indefinitely.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   SaveVersion:
     needs: [PrefetchDeps, PrefetchWindowsTools]
@@ -29,7 +36,9 @@ jobs:
     outputs:
       klogg_version: ${{ steps.save-version.outputs.klogg_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/klogg-version
 
       - name: Save version
@@ -54,8 +63,11 @@ jobs:
       BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
       OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
       CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Restore shared CPM cache
         uses: actions/cache@v4
@@ -189,11 +201,13 @@ jobs:
 
             if curl --fail --retry 3 --retry-delay 10 --progress-bar --location \
               --output "$CMAKE_INSTALLER" "$CMAKE_INSTALLER_URL"; then
-              if head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
+              if printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$CMAKE_INSTALLER" \
+                | sha256sum --check --strict \
+                && head -1 "$CMAKE_INSTALLER" | grep -q '#!/'; then
                 chmod +x "$CMAKE_INSTALLER"
                 exit 0
               fi
-              echo "Downloaded file is not a valid shell script, retrying..."
+              echo "Downloaded CMake installer failed integrity validation, retrying..."
               rm -f "$CMAKE_INSTALLER"
             fi
 
@@ -207,12 +221,18 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - name: Archive shared CPM cache
+        shell: bash
+        run: |
+          tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz" \
+            -C "$KLOGG_WORKSPACE" cpm_cache
+
       - uses: actions/upload-artifact@v4
         with:
           name: cpm-cache
-          path: cpm_cache
+          path: cpm-cache.tar.gz
           if-no-files-found: error
-          include-hidden-files: true
+          compression-level: 0
 
       - uses: actions/upload-artifact@v4
         with:
@@ -243,7 +263,9 @@ jobs:
     name: "Prefetch Windows MSYS2 tools"
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Restore MSYS2 tools cache
         id: cache-msys2-tools
@@ -368,6 +390,7 @@ jobs:
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     strategy:
       fail-fast: false
       matrix:
@@ -384,6 +407,7 @@ jobs:
             container_root: docker/ubuntu22.04
             container: variar/klogg_ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
+            package: true
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
 
           - os: ubuntu_noble
@@ -399,6 +423,7 @@ jobs:
             container_root: docker/ubuntu24.04
             container: variar/klogg_ubuntu24.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
+            package: true
 
           - os: ubuntu_appimage
             os_version: 20.04
@@ -410,16 +435,46 @@ jobs:
             container_root: docker/ubuntu20.04
             container: variar/klogg_ubuntu20.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
+            package: true
+
+          # Sanitizer legs: build + test only (no packaging, no artifacts).
+          # Folded into the Linux matrix so ci-gate (needs: [Linux]) covers them.
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-asan-ubsan-lsan
+            package_tag: asan-ubsan
+            container_root: docker/ubuntu22.04
+            container: variar/klogg_ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
+            sanitizer: address-undefined
+            package: false
+
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-tsan
+            package_tag: tsan
+            container_root: docker/ubuntu22.04-tsan
+            container: variar/klogg_ubuntu22.04-tsan
+            cmake_opts: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            sanitizer: thread
+            timeout_minutes: 120
+            package: false
 
 
     runs-on: ubuntu-22.04
+    timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
 
       - uses: actions/download-artifact@v4
         with:
@@ -427,39 +482,95 @@ jobs:
           path: ${{ github.workspace }}/tools
 
       - uses: actions/download-artifact@v4
+        if: ${{ matrix.config.sanitizer != 'thread' }}
         with:
           name: cmake-installer
           path: ${{ github.workspace }}/tools
 
-      - name: Copy CMake installer to Docker context
+      - name: Verify and copy CMake installer to Docker context
+        if: ${{ matrix.config.sanitizer != 'thread' }}
         shell: sh
         run: |
-          cp "${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh" "${{ matrix.config.container_root }}/"
+          installer="${{ github.workspace }}/tools/cmake-3.20.2-linux-x86_64.sh"
+          printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$installer" \
+            | sha256sum --check --strict
+          cp "$installer" "${{ matrix.config.container_root }}/"
 
       #- uses: satackey/action-docker-layer-caching@v0.0.11
       #  # Ignore the failure of a step and avoid terminating the job.
       #  continue-on-error: true
 
+      - name: Set up Buildx for the TSan Qt image
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build cached TSan Qt container
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.config.container_root }}
+          load: true
+          tags: ${{ matrix.config.container }}
+          cache-from: type=gha,scope=klogg-qt5-tsan
+          cache-to: type=gha,mode=max,scope=klogg-qt5-tsan
+
       - name: Build container
-        run: |
-          cd ${{ matrix.config.container_root }}
-          docker build -t ${{ matrix.config.container }} .
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        run: docker build -t "${{ matrix.config.container }}" "${{ matrix.config.container_root }}"
 
       - uses: ./.github/actions/prepare-workspace-env
       - name: Lock CPM downloads to prefetched cache
         shell: sh
         run: |
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
+
+      - name: Set sanitizer env (forwarded into the container by docker-run-tests)
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          # Workspace is mounted at /usr/local inside the container, so the
+          # suppressions files live under /usr/local/tests/sanitizers/.
+          echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
+          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          if [ "${{ matrix.config.sanitizer }}" = "thread" ]; then
+            docker run --rm "${{ matrix.config.container }}" /bin/bash -c '
+              test -x /usr/bin/llvm-symbolizer-14 &&
+              test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so &&
+              llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_acquire &&
+              llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_release
+            '
+            echo "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14" >> $GITHUB_ENV
+          fi
+          # Slow unwinding retains the qoffscreen plugin frame in indirect Qt
+          # allocation stacks, allowing the existing module-scoped suppression
+          # to match without broad QObject/Qt suppressions.
+          echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0" >> $GITHUB_ENV
+
       - uses: ./.github/actions/docker-build
+
+      - name: Verify TSan Qt runtime provenance
+        if: ${{ matrix.config.sanitizer == 'thread' }}
+        shell: bash
+        run: |
+          docker run --rm \
+            --env TSAN_OPTIONS \
+            -v "$KLOGG_WORKSPACE:/usr/local" \
+            "${{ matrix.config.container }}" \
+            /usr/local/scripts/verify_tsan_qt_runtime.sh \
+            "/usr/local/$KLOGG_BUILD_ROOT/output/klogg_itests" \
+            /opt/qt5-tsan
+
       - uses: ./.github/actions/docker-run-tests
       - uses: ./.github/actions/docker-package
-          
+        if: ${{ matrix.config.package != false }}
+
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
+        if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
-          if-no-files-found: error      
+          if-no-files-found: error
 
   Mac:
     needs: [SaveVersion]
@@ -481,6 +592,7 @@ jobs:
             package_tag: vs-gen
             artifacts_id: macos-intel-qt6
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
+            package: true
           - os: macos-latest
             qt_version: 6.9.3
             qt_modules: qt5compat qtimageformats
@@ -491,10 +603,43 @@ jobs:
             package_tag: vs-arm64
             artifacts_id: macos-arm-qt6
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
+            package: true
+
+          # Sanitizer legs: build + test only (no packaging, no artifacts).
+          # Folded into the Mac matrix so ci-gate (needs: [Mac]) covers them.
+          # macOS TSan covers first-party and source-built dependencies; prebuilt Qt 6 is not TSan-instrumented.
+          # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
+          # Run on the Intel runner so TSan's 2x threading overhead is stable.
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-asan-ubsan
+            package_tag: asan-ubsan
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
+            sanitizer: address-undefined
+            package: false
+
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-first-party-tsan
+            package_tag: tsan
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            sanitizer: thread
+            package: false
 
     runs-on: ${{ matrix.config.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       
       - name: List available Xcode versions
         shell: sh
@@ -531,7 +676,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Disable Sentry on macOS
@@ -543,9 +689,20 @@ jobs:
           # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
           echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
       
+      - name: Set sanitizer env
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          # Apple ASan does not support LeakSanitizer; detect_leaks=1 aborts
+          # before main(). Linux remains the required LSan platform.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
+          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
+
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
       - uses: ./.github/actions/agent-package-mac
+        if: ${{ matrix.config.package != false }}
         # macOS signing/notarization is disabled until the CI account has a paid
         # Apple Developer Program membership and Developer ID certificates.
         # with:
@@ -558,9 +715,10 @@ jobs:
         #   notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
+        if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*' 
+          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
           if-no-files-found: warn
 
   Windows:
@@ -585,6 +743,7 @@ jobs:
             cmake_opts: -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_VECTORSCAN=ON
             label: x64-qt6
             artifacts_id: windows-x64-qt6
+            package: true
 
           - os: windows
             os_version: 2022
@@ -598,10 +757,31 @@ jobs:
             cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
             label: x86-qt5
             artifacts_id: windows-x86-qt5
+            package: true
+
+          # Sanitizer leg: build + test only (no packaging, no artifacts).
+          # MSVC ASan is x64-only, so this rides on the x64-qt6 leg. x86-qt5
+          # cannot run ASan and is intentionally left without a sanitizer leg.
+          - os: windows
+            os_version: 2022
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: win64_msvc2022_64
+            arch: x64
+            ssl_arch: -x64
+            package_tag: asan
+            cmake_opts: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
+            label: x64-qt6-asan
+            sanitizer: address
+            package: false
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         if: ${{ startsWith(matrix.config.qt_version, '5') }}
@@ -658,7 +838,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: cpm-cache
-          path: ${{ github.workspace }}/cpm_cache
+          path: ${{ github.workspace }}
+      - uses: ./.github/actions/restore-cpm-cache
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Lock CPM downloads to prefetched cache
@@ -706,6 +887,15 @@ jobs:
         shell: pwsh
         run: |
           pkg-config --version
+
+      - name: Set sanitizer env
+        if: ${{ matrix.config.sanitizer }}
+        shell: sh
+        run: |
+          # MSVC ASan has no leak detector; keep every supported container check
+          # enabled globally. Any dependency-specific workaround must be scoped
+          # to the affected test process instead of weakening the whole leg.
+          echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
 
@@ -757,6 +947,38 @@ jobs:
           reg add "$regPath" /v DumpCount /t REG_DWORD /d 10 /f
           reg add "$regPath" /v DumpType /t REG_DWORD /d 2 /f
 
+      - name: Stage MSVC AddressSanitizer runtime next to test binaries
+        if: ${{ matrix.config.sanitizer == 'address' }}
+        shell: pwsh
+        run: |
+          # VS 2022 (17.7+) ASan links a single ASan DLL into the
+          # executable for every CRT config, so Windows must resolve it at
+          # runtime. msvc-dev-cmd already places it on PATH; also copy it
+          # next to the built binaries so Windows finds it from the EXE
+          # directory regardless of PATH propagation through the MSYS2 sh
+          # shell used to run ctest.
+          $outDir = Join-Path $env:KLOGG_BUILD_ROOT "output"
+          if (-not (Test-Path $outDir)) {
+            Write-Warning "Build output directory not found: $outDir; skipping ASan DLL staging."
+            exit 0
+          }
+          $hostArch = $env:VSCMD_ARG_HOST_ARCH; if (-not $hostArch) { $hostArch = 'x64' }
+          $tgtArch  = $env:VSCMD_ARG_TGT_ARCH;  if (-not $tgtArch)  { $tgtArch  = 'x64' }
+          $asanDir  = Join-Path $env:VCToolsInstallDir "bin\Host$hostArch\$tgtArch"
+          $dllNames = @('clang_rt.asan_dynamic-x86_64.dll', 'cl_asan_x64.dll')
+          $staged = $false
+          foreach ($name in $dllNames) {
+            $src = Join-Path $asanDir $name
+            if (Test-Path $src) {
+              Copy-Item $src -Destination $outDir -Force
+              Write-Host "Staged $src -> $outDir"
+              $staged = $true
+            }
+          }
+          if (-not $staged) {
+            Write-Warning "No MSVC ASan DLL found under $asanDir; relying on PATH (msvc-dev-cmd) to provide it at runtime."
+          }
+
       - uses: ./.github/actions/agent-run-tests
         id: run-tests
         continue-on-error: true
@@ -800,20 +1022,49 @@ jobs:
           path: '${{ github.workspace }}\build_root\diagnostics\**\*'
           if-no-files-found: warn
 
+      - name: Collect Windows ASan diagnostics
+        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          $workspace = $env:GITHUB_WORKSPACE
+          $diagRoot = Join-Path $workspace "build_root\asan_diagnostics"
+          New-Item -ItemType Directory -Force -Path $diagRoot | Out-Null
+
+          $ctestTemp = Join-Path $workspace "build_root\Testing\Temporary"
+          if ( Test-Path $ctestTemp ) {
+            Copy-Item $ctestTemp -Destination (Join-Path $diagRoot "Testing-Temporary") -Recurse -Force
+          }
+
+          $outputRoot = Join-Path $workspace "build_root\output"
+          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {
+            $source = Join-Path $outputRoot $name
+            if ( Test-Path $source ) {
+              Copy-Item $source -Destination $diagRoot -Force
+            }
+          }
+
+      - name: Upload Windows ASan diagnostics artifact
+        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-asan-diagnostics
+          path: '${{ github.workspace }}\build_root\asan_diagnostics\**\*'
+          if-no-files-found: error
+
       - name: Fail when tests fail
         if: ${{ steps.run-tests.outcome == 'failure' }}
         shell: sh
         run: exit 1
 
       - uses: ./.github/actions/agent-package-win
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           s3-key-id: ${{ secrets.WIN_CS_KEY_ID }}
           s3-secret: ${{ secrets.WIN_CS_SECRET }}
           s3-bucket: ${{ secrets.WIN_CS_BUCKET }}
 
       - name: Verify SSL/TLS packaging
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         shell: pwsh
         run: |
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
@@ -822,7 +1073,7 @@ jobs:
 
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
-        if: ${{ steps.run-tests.outcome == 'success' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
@@ -851,8 +1102,9 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Generate Changelog

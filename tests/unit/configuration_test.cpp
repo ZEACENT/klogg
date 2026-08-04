@@ -67,6 +67,30 @@ TEST_CASE( "Configuration stores and restores line spacing percent" )
     REQUIRE( restoredConfig.lineSpacingPercent() == 145 );
 }
 
+TEST_CASE( "Configuration stores and restores splitter sizes" )
+{
+    const auto dirPath = makeTestDir( "configuration_splitter_sizes" );
+    REQUIRE( QDir{ dirPath }.exists() );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-splitter-sizes.ini" );
+    const QList<int> expectedSizes{ 420, 180 };
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+
+        Configuration config;
+        config.setSplitterSizes( expectedSizes );
+        config.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.status() == QSettings::NoError );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restoredConfig;
+    restoredConfig.retrieveFromStorage( restoredSettings );
+
+    REQUIRE( restoredConfig.splitterSizes() == expectedSizes );
+}
+
 TEST_CASE( "Configuration clamps line spacing percent to supported bounds" )
 {
     Configuration config;

@@ -104,6 +104,18 @@ struct LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate> {
         return worker->deferredLiveRequest_.has_value();
     }
 
+    static LineNumber deferredLiveEndLine( LogFilteredDataWorker* worker )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        return worker->deferredLiveRequest_->endLine;
+    }
+
+    static quint64 deferredLiveOperationId( LogFilteredDataWorker* worker )
+    {
+        std::lock_guard<std::mutex> lock( worker->requestMutex_ );
+        return worker->deferredLiveRequest_->operationId;
+    }
+
   private:
     static SearchRequest makeLiveRequest( quint64 operationId, LineNumber endLine )
     {
@@ -125,12 +137,41 @@ TEST_CASE( "LogFilteredDataWorker clears deferred live update when immediate liv
     TestSearchableLogData sourceLogData;
     LogFilteredDataWorker worker( sourceLogData );
 
+    // The constructor starts a dispatch thread whose dispatchLoop() consumes
+    // deferredLiveRequest_ under requestMutex_.  Inspecting that same private
+    // state from this test thread (hasDeferredLiveRequest also takes
+    // requestMutex_) is reported by TSan as a double-lock/deadlock risk.
+    // Stop the dispatch thread before the enqueue/inspect sequence so this
+    // thread is the only one touching requestMutex_; enqueueRequest and
+    // enqueueOrDeferLiveRequest manipulate the deferred/pending optionals
+    // under the lock regardless of whether a consumer is running, so the
+    // assertions below remain meaningful and become deterministic.  The
+    // destructor performs the final shutdownAndWait() teardown.
+    worker.shutdownAndWait();
+
     WorkerVisitor::enqueueOrDeferLiveRequest( &worker, 1, 10_lnum );
     REQUIRE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
 
     WorkerVisitor::enqueueImmediateLiveRequest( &worker, 2, 100_lnum );
 
     CHECK_FALSE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
+}
 
+TEST_CASE( "LogFilteredDataWorker deterministically coalesces deferred live endpoints" )
+{
+    using WorkerVisitor = LogFilteredDataWorker::access_by<LogFilteredDataWorkerPrivate>;
+
+    TestSearchableLogData sourceLogData;
+    LogFilteredDataWorker worker( sourceLogData );
     worker.shutdownAndWait();
+
+    for ( quint64 operationId = 1; operationId <= 4; ++operationId ) {
+        const auto endLine = LineNumber( 10000 + operationId * 10000 );
+        WorkerVisitor::enqueueOrDeferLiveRequest( &worker, operationId, endLine );
+    }
+
+    REQUIRE( WorkerVisitor::hasDeferredLiveRequest( &worker ) );
+    CHECK( WorkerVisitor::deferredLiveEndLine( &worker ) == 50000_lnum );
+    CHECK( WorkerVisitor::deferredLiveOperationId( &worker ) == 4 );
+    CHECK( worker.performanceCounters().coalescedLiveUpdates == 3 );
 }

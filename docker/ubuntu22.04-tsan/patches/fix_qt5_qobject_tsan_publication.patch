@@ -1,0 +1,201 @@
+Backport the Qt signal/slot publication fixes from:
+
+  d96da673e1e15a44b8dce8a0accc9f9bc194f4b5
+  QObject::connect: fix tsan issue with signalVector
+
+  2bdad17a2cf1475819057e2eb564e4904152daa5
+  QObject::connect: strengthen some of the atomic machinery
+
+  b2daed079984952d1617b6b696d110efc288b3b3
+  QObject: fix TSAN data race between resizeSignalVector and doActivate
+
+  be31faf39a824f79a1ad8e676512365b59448bea
+  QObject::doActivate: fix tsan-reported issue with maybeSignalConnected
+
+  b295841f70fd4313fc19464681ace39c1d9303ba
+  QObjectPrivate::Connection(List): storeRelaxed the contained atomics
+
+These changes fix QTBUG-146900 and QTBUG-146986. Qt 5.15 has the same
+lock-free signal activation design but publishes connection data, resized
+signal vectors, and newly inserted connections with relaxed atomics. It also
+retains ConnectionData only after the early connectivity check and byte-copies
+ConnectionList atomics while resizing. Concurrent connection, activation, and
+sender teardown can therefore expose uninitialized or freed connection state.
+Queued-argument metadata has the same publication gap: one emitter initializes
+and atomically publishes the type array while another acquire-less emitter
+immediately dereferences it.
+
+Adapt qobject_p_p.h changes to Qt 5.15's qobject_p.h layout, retain the Qt 5
+Connection ref-count initialization, and complete the release/acquire and
+lifetime pairs at the corresponding publication boundaries. Acquire-load the
+queued-argument pointer so it pairs with testAndSetOrdered() publication.
+
+--- a/src/corelib/kernel/qobject.cpp
++++ b/src/corelib/kernel/qobject.cpp
+@@ -329,11 +329,11 @@
+     ConnectionList &connectionList = cd->connectionsForSignal(signal);
+     if (connectionList.last.loadRelaxed()) {
+         Q_ASSERT(connectionList.last.loadRelaxed()->receiver.loadRelaxed());
+-        connectionList.last.loadRelaxed()->nextConnectionList.storeRelaxed(c);
++        connectionList.last.loadRelaxed()->nextConnectionList.storeRelease(c);
+     } else {
+-        connectionList.first.storeRelaxed(c);
+-    }
+-    c->id = ++cd->currentConnectionId;
++        connectionList.first.storeRelease(c);
++    }
++    c->id.storeRelease(++cd->currentConnectionId);
+     c->prevConnectionList = connectionList.last.loadRelaxed();
+     connectionList.last.storeRelaxed(c);
+ 
+@@ -471,7 +471,7 @@
+     if (checkDeclarative && isDeclarativeSignalConnected(signalIndex))
+         return true;
+ 
+-    ConnectionData *cd = connections.loadRelaxed();
++    ConnectionData *cd = connections.loadAcquire();
+     if (!cd)
+         return false;
+     SignalVector *signalVector = cd->signalVector.loadRelaxed();
+@@ -494,10 +494,10 @@
+ 
+ bool QObjectPrivate::maybeSignalConnected(uint signalIndex) const
+ {
+-    ConnectionData *cd = connections.loadRelaxed();
++    ConnectionData *cd = connections.loadAcquire();
+     if (!cd)
+         return false;
+-    SignalVector *signalVector = cd->signalVector.loadRelaxed();
++    SignalVector *signalVector = cd->signalVector.loadAcquire();
+     if (!signalVector)
+         return false;
+ 
+@@ -3746,7 +3746,9 @@
+ */
+ static void queued_activate(QObject *sender, int signal, QObjectPrivate::Connection *c, void **argv)
+ {
+-    const int *argumentTypes = c->argumentTypes.loadRelaxed();
++    // Pair with testAndSetOrdered() below so concurrent emitters see the
++    // initialized queued-argument array before dereferencing it.
++    const int *argumentTypes = c->argumentTypes.loadAcquire();
+     if (!argumentTypes) {
+         QMetaMethod m = QMetaObjectPrivate::signal(sender->metaObject(), signal);
+         argumentTypes = queuedConnectionTypes(m.parameterTypes());
+@@ -3755,7 +3757,7 @@
+         if (!c->argumentTypes.testAndSetOrdered(nullptr, argumentTypes)) {
+             if (argumentTypes != &DIRECT_CONNECTION_ONLY)
+                 delete [] argumentTypes;
+-            argumentTypes = c->argumentTypes.loadRelaxed();
++            argumentTypes = c->argumentTypes.loadAcquire();
+         }
+     }
+     if (argumentTypes == &DIRECT_CONNECTION_ONLY) // cannot activate
+@@ -3827,7 +3829,10 @@
+     if (!argv)
+         argv = empty_argv;
+ 
+-    if (!sp->maybeSignalConnected(signal_index)) {
++    bool senderDeleted = false;
++    {
++    QObjectPrivate::ConnectionDataPointer connections(sp->connections.loadAcquire());
++    if (!connections || !sp->maybeSignalConnected(signal_index)) {
+         // The possible declarative connection is done, and nothing else is connected
+         if (callbacks_enabled && signal_spy_set->signal_begin_callback != nullptr)
+             signal_spy_set->signal_begin_callback(sender, signal_index, argv);
+@@ -3839,11 +3844,9 @@
+     if (callbacks_enabled && signal_spy_set->signal_begin_callback != nullptr)
+         signal_spy_set->signal_begin_callback(sender, signal_index, argv);
+ 
+-    bool senderDeleted = false;
+-    {
+-    Q_ASSERT(sp->connections.loadAcquire());
+-    QObjectPrivate::ConnectionDataPointer connections(sp->connections.loadRelaxed());
+-    QObjectPrivate::SignalVector *signalVector = connections->signalVector.loadRelaxed();
++    // loadAcquire pairs with the storeRelease in resizeSignalVector(), ensuring
++    // that all writes to the new SignalVector's contents are visible here.
++    QObjectPrivate::SignalVector *signalVector = connections->signalVector.loadAcquire();
+ 
+     const QObjectPrivate::ConnectionList *list;
+     if (signal_index < signalVector->count())
+@@ -3858,7 +3861,7 @@
+     // during the signal emission are not emitted in this emission.
+     uint highestConnectionId = connections->currentConnectionId.loadRelaxed();
+     do {
+-        QObjectPrivate::Connection *c = list->first.loadRelaxed();
++        QObjectPrivate::Connection *c = list->first.loadAcquire();
+         if (!c)
+             continue;
+ 
+@@ -3957,7 +3960,8 @@
+                 if (callbacks_enabled && signal_spy_set->slot_end_callback != nullptr)
+                     signal_spy_set->slot_end_callback(receiver, method);
+             }
+-        } while ((c = c->nextConnectionList.loadRelaxed()) != nullptr && c->id <= highestConnectionId);
++        } while ((c = c->nextConnectionList.loadAcquire()) != nullptr
++                 && c->id.loadAcquire() <= highestConnectionId);
+ 
+     } while (list != &signalVector->at(-1) &&
+         //start over for all signals;
+--- a/src/corelib/kernel/qobject_p.h
++++ b/src/corelib/kernel/qobject_p.h
+@@ -162,7 +162,7 @@
+         };
+         QAtomicPointer<const int> argumentTypes;
+         QAtomicInt ref_;
+-        uint id = 0;
++        QAtomicInteger<uint> id{ 0 };
+         ushort method_offset;
+         ushort method_relative;
+         signed int signal_index : 27; // In signal range (see QObjectPrivate::signalIndex())
+@@ -170,6 +170,8 @@
+         ushort isSlotObject : 1;
+         ushort ownArgumentTypes : 1;
+         Connection() : ref_(2), ownArgumentTypes(true) {
++            receiver.storeRelaxed(nullptr);
++            receiverThreadData.storeRelaxed(nullptr);
+             //ref_ is 2 for the use in the internal lists, and for the use in QMetaObject::Connection
+         }
+         ~Connection();
+@@ -307,7 +309,10 @@
+             SignalVector *newVector = reinterpret_cast<SignalVector *>(malloc(sizeof(SignalVector) + (size + 1) * sizeof(ConnectionList)));
+             int start = -1;
+             if (vector) {
+-                memcpy(newVector, vector, sizeof(SignalVector) + (vector->allocated + 1) * sizeof(ConnectionList));
++                for (int i = -1; i < vector->count(); ++i) {
++                    new (&newVector->at(i)) ConnectionList{vector->at(i).first.loadRelaxed(),
++                                                           vector->at(i).last.loadRelaxed()};
++                }
+                 start = vector->count();
+             }
+             for (int i = start; i < int(size); ++i)
+@@ -315,7 +320,7 @@
+             newVector->next = nullptr;
+             newVector->allocated = size;
+ 
+-            signalVector.storeRelaxed(newVector);
++            signalVector.storeRelease(newVector);
+             if (vector) {
+                 Connection *o = nullptr;
+                 /* No ABA issue here: When adding a node, we only care about the list head, it doesn't
+@@ -327,8 +332,10 @@
+                 } while (!orphaned.testAndSetRelease(o, ConnectionOrSignalVector::fromSignalVector(vector)));
+             }
+         }
+-        int signalVectorCount() const {
+-            return  signalVector.loadAcquire() ? signalVector.loadRelaxed()->count() : -1;
++        int signalVectorCount() const
++        {
++            SignalVector *v = signalVector.loadAcquire();
++            return v ? v->count() : -1;
+         }
+ 
+         static void deleteOrphaned(ConnectionOrSignalVector *c);
+@@ -394,7 +401,7 @@
+             return;
+         ConnectionData *cd = new ConnectionData;
+         cd->ref.ref();
+-        connections.storeRelaxed(cd);
++        connections.storeRelease(cd);
+     }
+ public:
+     ExtraData *extraData;    // extra data set by the user

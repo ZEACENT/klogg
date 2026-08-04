@@ -88,7 +88,11 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     standardizeLayoutSpacing();
 
     // Validators
-    QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax );
+    // Parent the validator to the dialog so Qt parent-child ownership reclaims
+    // it; QLineEdit::setValidator() does not take ownership, so an unparented
+    // validator would leak for every OptionsDialog instance (seen as an
+    // LeakSanitizer exit leak in the unit tests).
+    QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax, this );
     pollIntervalLineEdit->setValidator( pollingIntervalValidator );
 
     connect( buttonBox, &QDialogButtonBox::clicked, this, &OptionsDialog::onButtonBoxClicked );

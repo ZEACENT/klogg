@@ -1,0 +1,284 @@
+name: "Static analysis"
+
+# Per-PR clang-tidy + cppcheck gate.  Configures once
+# (CMAKE_EXPORT_COMPILE_COMMANDS) to produce build_root/compile_commands.json,
+# then runs two independent analyses:
+#   * clang-tidy via clang-tidy-diff on PRs with a CHANGED-LINES-ONLY policy:
+#     strict on NEW code while ignoring the pre-existing style findings (hundreds
+#     of them across transitively-included headers) that make whole-file
+#     --warnings-as-errors unworkable on a legacy codebase.  On push-to-master /
+#     workflow_dispatch the full src/ audit runs NON-FATAL (report-only).
+#   * cppcheck --enable=warning,style --error-exitcode=1 over the first-party
+#     src/ compile units.
+# cppcheck returning non-zero, or a clang-tidy-diff finding on a changed PR
+# line, fails the job.  Setup mirrors the Coverage workflow (gcc-13 leg +
+# agent-setup for Qt/Boost/CPM cache).
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'website/**'
+      - BUILD.md
+      - CODE_OF_CONDUCT.md
+      - CONTRIBUTING.md
+      - README.md
+      - .gitignore
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - 'website/**'
+      - BUILD.md
+      - CODE_OF_CONDUCT.md
+      - CONTRIBUTING.md
+      - README.md
+      - .gitignore
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    name: "clang-tidy + cppcheck"
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # agent-setup reads matrix.config.* to install Qt/Boost/CPM cache,
+          # mirroring the Coverage workflow's native gcc-13 leg.
+          - arch: x64
+            qt_version: 6.9.3
+            qt_arch: linux_gcc_64
+            qt_modules: qt5compat
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      KLOGG_BUILD_ROOT: build_root
+      # Sentry/Crashpad expands the CPM dependency set. Keep this cache mutable
+      # independently from the smaller default profile used by Coverage.
+      KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # Full history so the clang-tidy-diff step can diff the PR branch
+          # against its exact base SHA (changed-LINES-ONLY policy).
+          fetch-depth: 0
+
+      - name: Install gcc-13, clang-tidy and cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13 clang-tidy cppcheck ragel libcurl4-openssl-dev libxkbcommon-dev libxkbcommon-x11-dev
+          tidy_diff=$(command -v clang-tidy-diff || true)
+          if [ -z "$tidy_diff" ]; then
+            tidy_diff=$(command -v clang-tidy-diff-18.py || true)
+          fi
+          if [ -z "$tidy_diff" ]; then
+            tidy_diff=$(find /usr/lib/llvm-*/share/clang -name clang-tidy-diff.py -print -quit 2>/dev/null || true)
+          fi
+          if [ -z "$tidy_diff" ]; then
+            echo "::error::clang-tidy-diff was not installed with clang-tidy"
+            exit 1
+          fi
+          echo "CLANG_TIDY_DIFF=$tidy_diff" >> "$GITHUB_ENV"
+
+      - name: Prepare compiler env
+        run: |
+          echo "CC=gcc-13" >> $GITHUB_ENV
+          echo "CXX=g++-13" >> $GITHUB_ENV
+
+      - uses: ./.github/actions/agent-setup
+
+      - name: Build clang-tidy review scope
+        id: targets
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # CHANGED-LINES-ONLY policy: source and header scopes are independent.
+            # A mixed PR must run both passes so a changed header included only by
+            # unchanged translation units cannot bypass analysis.
+            BASE='${{ github.event.pull_request.base.sha }}'
+            changed_paths_file=$(mktemp)
+            trap 'rm -f "$changed_paths_file"' EXIT
+            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
+                 > "$changed_paths_file"; then
+              echo "::error::failed to discover changed C/C++ analysis paths"
+              exit 1
+            fi
+            mapfile -d '' -t changed_paths < "$changed_paths_file"
+            source_count=0
+            header_count=0
+            for file in "${changed_paths[@]}"; do
+              if [[ "$file" == *[[:cntrl:]]* || "$file" == *'"'* || "$file" == *'\'* ]]; then
+                echo "::error file=$file::C/C++ analysis does not support quoted/control characters in paths"
+                exit 1
+              fi
+              case "${file,,}" in
+                *.c|*.cc|*.cpp|*.cxx) ((source_count+=1)) ;;
+                *.h|*.hh|*.hpp|*.hxx) ((header_count+=1)) ;;
+              esac
+            done
+            if ! git -c core.quotePath=false diff -U0 "$BASE" HEAD -- src/ \
+                 > tidy_patch.diff; then
+              echo "::error::failed to build the changed-line analysis patch"
+              exit 1
+            fi
+            echo "source_count=$source_count" >> "$GITHUB_OUTPUT"
+            echo "header_count=$header_count" >> "$GITHUB_OUTPUT"
+            header_lines=false
+
+            if [ "$header_count" -gt 0 ]; then
+              python3 scripts/clang_tidy_header_filter.py tidy_patch.diff > tidy_header_filter.json
+              if [ "$(cat tidy_header_filter.json)" != "[]" ]; then
+                header_lines=true
+              fi
+              echo "clang-tidy: $header_count changed header(s); checking added lines through all configured first-party TUs."
+            fi
+            echo "header_lines=$header_lines" >> "$GITHUB_OUTPUT"
+
+            if [ "$source_count" -eq 0 ] && [ "$header_count" -eq 0 ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "No changed C/C++ files under src/; skipping clang-tidy."
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "clang-tidy-diff: $source_count changed src/ TU(s)."
+            fi
+          else
+            # push-to-master / workflow_dispatch: audit every configured first-party
+            # translation unit, NON-FATAL (report-only), so pre-existing findings
+            # never block the branch.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure (generate compile_commands.json)
+        shell: bash
+        run: |
+          rm -rf "$KLOGG_BUILD_ROOT"
+          cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DKLOGG_BUILD_TESTS=ON \
+            -DKLOGG_USE_VECTORSCAN=ON \
+            -DKLOGG_USE_LTO=OFF \
+            -DKLOGG_USE_SENTRY=ON \
+            -DKLOGG_GENERIC_CPU=ON \
+            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build first-party clang-tidy TU list
+        if: steps.targets.outputs.skip != 'true'
+        shell: bash
+        run: |
+          python3 scripts/first_party_compile_units.py \
+            "$KLOGG_BUILD_ROOT/compile_commands.json" \
+            "$KLOGG_WORKSPACE/src" \
+            --null \
+            > tidy_files.nul
+          echo "clang-tidy: configured first-party TU list is ready."
+
+      - name: Generate Qt UI headers for analysis
+        if: steps.targets.outputs.skip != 'true'
+        shell: bash
+        run: cmake --build "$KLOGG_BUILD_ROOT" --target klogg_ui_autogen -j"$(nproc)"
+
+      - name: Run clang-tidy (changed lines on PRs; report-only on master)
+        if: steps.targets.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -u
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Use the same PR-base-aware changed-line gate locally and in CI.
+            # The helper runs clang-tidy-diff for changed source files, analyzes
+            # added header lines through every configured first-party TU, and
+            # fails only for diagnostics in this PR's changed src/ paths.
+            python3 scripts/run_changed_clang_tidy.py \
+              --base '${{ github.event.pull_request.base.sha }}' \
+              --build-dir "$KLOGG_BUILD_ROOT" \
+              --clang-tidy-diff "$CLANG_TIDY_DIFF" \
+              --jobs "$(nproc)"
+          else
+            # Full src/ audit on push-to-master / workflow_dispatch is
+            # report-only for diagnostics because warnings-as-errors is absent,
+            # but compiler/configuration/tool failures still fail the job.
+            export KLOGG_BUILD_ROOT
+            xargs -0 -P "$(nproc)" -n 1 bash -c '
+              clang-tidy -p "$KLOGG_BUILD_ROOT" \
+                --extra-arg=-Wno-unknown-warning-option "$1"
+            ' _ < tidy_files.nul
+            echo "clang-tidy: full src/ audit complete (findings report-only)."
+          fi
+
+      - name: Run cppcheck (warning+style over src/)
+        shell: bash
+        run: |
+          set -u
+          # cppcheck's -i does NOT exclude paths when --project is used (the JSON
+          # database pins the exact TU set), so first filter compile_commands.json
+          # down to first-party src/ TUs, dropping cpm_cache / _deps / build_root
+          # autogen / tests / benchmarks / 3rdparty. The first four suppressions
+          # are cppcheck Qt/preprocessor limitations. Every legacy warning/style
+          # baseline entry is location-qualified in tests/cppcheck_suppressions.txt
+          # so the same diagnostic ID at any new location still fails the gate.
+          BASE='${{ github.event.pull_request.base.sha }}'
+          # Filter compile_commands.json to first-party src/ TUs (cppcheck's -i
+          # does not exclude paths under --project, so we hand it a filtered DB).
+          python3 -c "import json,os,sys; src=os.path.abspath(os.path.join(os.getcwd(),'src'))+os.sep; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if g(e).startswith(src)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)}/{len(db)} first-party src/ TUs')" "$KLOGG_BUILD_ROOT/compile_commands.json" /tmp/cc_src.json
+
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$BASE" ]; then
+            # PR: scope cppcheck to THIS PR's changed src/ TUs (consistent with
+            # the clang-tidy-diff changed-lines policy) so pre-existing findings
+            # in UNCHANGED files -- e.g. a redundantInitialization false positive
+            # in styles.cpp's theme logic -- don't block the gate. New issues in
+            # touched files are still caught (the whole changed TU is checked).
+            changed_paths_file=$(mktemp)
+            trap 'rm -f "$changed_paths_file"' EXIT
+            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
+                 > "$changed_paths_file"; then
+              echo "::error::failed to discover changed cppcheck paths"
+              exit 1
+            fi
+            mapfile -d '' -t changed_paths < "$changed_paths_file"
+            changed_src=()
+            changed_headers=()
+            for file in "${changed_paths[@]}"; do
+              case "${file,,}" in
+                *.c|*.cc|*.cpp|*.cxx) changed_src+=("$file") ;;
+                *.h|*.hh|*.hpp|*.hxx) changed_headers+=("$file") ;;
+              esac
+            done
+            if [ "${#changed_src[@]}" -eq 0 ] && [ "${#changed_headers[@]}" -eq 0 ]; then
+              echo "cppcheck: no changed C/C++ files under src/; skipping."
+              exit 0
+            fi
+            if [ "${#changed_headers[@]}" -gt 0 ]; then
+              echo "cppcheck: changed header present; checking all first-party src/ TUs."
+              CC_PROJECT=/tmp/cc_src.json
+            else
+              printf '%s\0' "${changed_src[@]}" > /tmp/changed_src.nul
+              python3 scripts/filter_compile_database.py \
+                /tmp/cc_src.json "$KLOGG_WORKSPACE" \
+                /tmp/changed_src.nul /tmp/cc_changed.json
+              CC_PROJECT=/tmp/cc_changed.json
+            fi
+            CC_EXTRA="--error-exitcode=1"
+          else
+            # push-to-master / workflow_dispatch: full src/ audit, REPORT-ONLY
+            # (no --error-exitcode) so pre-existing findings never block master.
+            CC_PROJECT=/tmp/cc_src.json
+            CC_EXTRA=""
+          fi
+
+          cppcheck \
+            --project="$CC_PROJECT" \
+            --enable=warning,style \
+            $CC_EXTRA \
+            --inline-suppr \
+            --quiet \
+            --suppress=missingInclude \
+            --suppress=syntaxError \
+            --suppress=unknownMacro \
+            --suppress=preprocessorErrorDirective \
+            --suppressions-list=tests/cppcheck_suppressions.txt

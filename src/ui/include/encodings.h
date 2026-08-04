@@ -43,14 +43,16 @@ class EncodingMenu {
         };
     }
 
-    static QMenu* generate( QActionGroup* actionGroup )
+    static QMenu* generate( QActionGroup* actionGroup, QWidget* parent )
     {
         const auto supportedEncodings = EncodingMenu::supportedEncodings();
         const auto defaultEncodingMib = Configuration::get().defaultEncodingMib();
 
         using namespace klogg::mainwindow;
-        QMenu* encodingsMenu = new QMenu(
-            QApplication::translate( "klogg::mainwindow::menu", menu::encodingTitle ) );
+        // The QObject parent owns the generated menu for its full lifetime.
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+        auto* encodingsMenu = new QMenu(
+            QApplication::translate( "klogg::mainwindow::menu", menu::encodingTitle ), parent );
 
         auto autoEncoding = encodingsMenu->addAction(
             QApplication::translate( "klogg::mainwindow::action", action::autoEncodingText ) );

@@ -25,6 +25,7 @@
 
 #include <logger.h>
 
+#include "capturestore.h"
 #include "configuration.h"
 #include <persistentinfo.h>
 #include "test_utils.h"
@@ -38,7 +39,9 @@ void configureTestTempDir()
                                           + QLatin1String( "test_tmp" ) );
 
     QDir tempDirectory{ tempDir };
-    if ( tempDirectory.exists() ) {
+    const auto preservesParentTempDir
+        = qEnvironmentVariableIsSet( "KLOGG_TEST_PRESERVE_TEMP_DIR" );
+    if ( tempDirectory.exists() && !preservesParentTempDir ) {
         tempDirectory.removeRecursively();
     }
 
@@ -62,5 +65,7 @@ int main( int argc, char* argv[] )
     Q_UNUSED( config );
     configureProductLikeRegexpEngine( config );
 
-    return Catch::Session().run( argc, argv );
+    const auto result = Catch::Session().run( argc, argv );
+    CaptureStore::shutdownBackgroundWorkers();
+    return result;
 }

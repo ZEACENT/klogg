@@ -805,7 +805,7 @@ Supports:
 
 **Required**:
 - Qt5/Qt6 (Core, Widgets, Network)
-- CMake 3.12+
+- CMake 3.14+
 
 **Optional**:
 - Vectorscan

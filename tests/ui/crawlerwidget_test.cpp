@@ -23,6 +23,7 @@
 #include <QSignalSpy>
 #include <QLineEdit>
 #include <QProxyStyle>
+#include <QPointer>
 #include <QScrollBar>
 #include <QStyle>
 #include <QTemporaryFile>
@@ -34,9 +35,11 @@
 
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QEvent>
 #include <QUuid>
 
 #include <algorithm>
+#include <limits>
 
 #include "savedsearches.h"
 #include "session.h"
@@ -270,6 +273,11 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
         return view->textViewportHeight();
     }
 
+    static int lineNumberToVerticalScroll( const AbstractLogView* view, LineNumber line )
+    {
+        return view->lineNumberToVerticalScroll( line );
+    }
+
     static QShortcut* shortcutFor( const AbstractLogView* view, const QString& key )
     {
         const auto shortcut = view->shortcuts_.find( key );
@@ -449,6 +457,27 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     void render()
     {
         crawler->grab();
+    }
+
+    void settleVerticallyAtBottom( AbstractLogView* view )
+    {
+        auto* const scrollBar = view->verticalScrollBar();
+        constexpr int maxSettlePasses = 4;
+
+        for ( int pass = 0; pass < maxSettlePasses; ++pass ) {
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+            QCoreApplication::processEvents();
+            scrollBar->setValue( scrollBar->maximum() );
+            render();
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+            QCoreApplication::processEvents();
+
+            if ( scrollBar->value() == scrollBar->maximum() ) {
+                return;
+            }
+        }
+
+        REQUIRE( scrollBar->value() == scrollBar->maximum() );
     }
 
     int mainHorizontalScrollMaximum() const
@@ -775,6 +804,12 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
             crawler->filteredView_ );
     }
 
+    int filteredScrollForLine( LineNumber line ) const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::lineNumberToVerticalScroll(
+            crawler->filteredView_, line );
+    }
+
     SearchPerformanceCounters searchPerformanceCounters() const
     {
         return crawler->logFilteredData_->searchPerformanceCounters();
@@ -932,6 +967,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::qWait( 50 );
     }
 
+    void settleMainVerticallyAtBottom()
+    {
+        settleVerticallyAtBottom( crawler->logMainView_ );
+    }
+
+    void settleFilteredVerticallyAtBottom()
+    {
+        settleVerticallyAtBottom( crawler->filteredView_ );
+    }
+
     void scrollMainVerticallyToMiddle()
     {
         const auto max = crawler->logMainView_->verticalScrollBar()->maximum();
@@ -982,9 +1027,88 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->deleteMarkLinesFromMain( lines );
         QTest::qWait( 20 );
     }
+
+    FilteredView* activeFilteredView() const
+    {
+        return crawler->filteredView_;
+    }
+
+    int filteredViewCount() const
+    {
+        return crawler->tabbedFilteredView_->count();
+    }
+
+    std::size_t filteredViewDataCount() const
+    {
+        return crawler->filteredViewsData_.size();
+    }
+
+    int currentFilteredViewIndex() const
+    {
+        return crawler->tabbedFilteredView_->currentIndex();
+    }
+
+    void createAdditionalFilteredView()
+    {
+        crawler->searchToolbar_->setKeepResultsChecked( true );
+        crawler->startNewSearch();
+        QCoreApplication::processEvents();
+    }
+
+    void closeFilteredView( int index )
+    {
+        crawler->closeFilteredView( index );
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+        QCoreApplication::processEvents();
+    }
 };
 
 using CrawlerWidgetVisitor = CrawlerWidget::access_by<CrawlerWidgetPrivate>;
+
+TEST_CASE( "Crawler widget preserves its final filtered results view", "[ui]" )
+{
+    QTemporaryFile file{ "crawler_final_filtered_view_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    QPointer<FilteredView> originalView( crawlerVisitor.activeFilteredView() );
+    REQUIRE( originalView );
+    REQUIRE( crawlerVisitor.filteredViewCount() == 1 );
+
+    crawlerVisitor.closeFilteredView( 0 );
+    CHECK( originalView );
+    CHECK( crawlerVisitor.activeFilteredView() == originalView.data() );
+    CHECK( crawlerVisitor.filteredViewCount() == 1 );
+}
+
+TEST_CASE( "Crawler widget removes a closed filtered view from its live registry", "[ui]" )
+{
+    QTemporaryFile file{ "crawler_closed_filtered_view_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.createAdditionalFilteredView();
+    REQUIRE( crawlerVisitor.filteredViewCount() == 2 );
+    REQUIRE( crawlerVisitor.filteredViewDataCount() == 2 );
+
+    QPointer<FilteredView> closingView( crawlerVisitor.activeFilteredView() );
+    crawlerVisitor.closeFilteredView( crawlerVisitor.currentFilteredViewIndex() );
+
+    REQUIRE_FALSE( closingView );
+    CHECK( crawlerVisitor.filteredViewCount() == 1 );
+    CHECK( crawlerVisitor.filteredViewDataCount() == 1 );
+    CHECK( crawlerVisitor.activeFilteredView() != nullptr );
+}
 
 SCENARIO( "Crawler widget search", "[ui]" )
 {
@@ -1031,6 +1155,17 @@ SCENARIO( "Crawler widget search", "[ui]" )
             THEN( "all lines are matched" )
             {
                 REQUIRE( crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES );
+            }
+
+            THEN( "restoring the first-line selection keeps the filtered view at the top" )
+            {
+                REQUIRE( crawlerVisitor.filteredTopLine() == 0_lnum );
+            }
+
+            THEN( "oversized line positions clamp to the scrollbar range" )
+            {
+                REQUIRE( crawlerVisitor.filteredScrollForLine( maxValue<LineNumber>() )
+                         == std::numeric_limits<int>::max() );
             }
 
             AND_WHEN( "copy all from main view" )
@@ -1773,6 +1908,26 @@ SCENARIO( "Marks persist across a filter change and stay visible (single-file pa
     REQUIRE( crawlerVisitor.filteredLineText( 1 ).contains( "000010" ) );
 }
 
+TEST_CASE( "Session rejects malformed live capture ids without creating a view",
+           "[ui][live][session]" )
+{
+    Session session;
+    AdbLogcatSessionData adbSession;
+    adbSession.captureId = QStringLiteral( "../outside" );
+    bool viewFactoryCalled = false;
+
+    auto* const view = session.openAdbLogcat(
+        adbSession,
+        [ &viewFactoryCalled ]() {
+            viewFactoryCalled = true;
+            return new CrawlerWidget();
+        },
+        false );
+
+    REQUIRE( view == nullptr );
+    REQUIRE_FALSE( viewFactoryCalled );
+}
+
 SCENARIO( "Live source search auto-refresh is throttled", "[ui][live]" )
 {
     // Use production-like search buffer so each search chunk takes noticeable time.
@@ -2318,6 +2473,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
 
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == 4; } ) );
     REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
 
     // Search first so the (possibly recreated) filtered view gets wrap applied.
     crawlerVisitor.setSearchPattern( "wrap overflow line" );
@@ -2342,8 +2498,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
     {
         REQUIRE( crawlerVisitor.mainVerticalScrollMaximum() > 0 );
 
-        crawlerVisitor.scrollMainVerticallyToBottom();
-        crawlerVisitor.render();
+        crawlerVisitor.settleMainVerticallyAtBottom();
 
         REQUIRE( crawlerVisitor.mainShouldBottomAlign() );
         REQUIRE( crawlerVisitor.mainDrawingTopOffset() < 0 );
@@ -2353,8 +2508,7 @@ SCENARIO( "Wrap mode scrolls when few logical lines overflow the viewport",
     {
         REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
 
-        crawlerVisitor.scrollFilteredVerticallyToBottom();
-        crawlerVisitor.render();
+        crawlerVisitor.settleFilteredVerticallyAtBottom();
 
         REQUIRE( crawlerVisitor.filteredShouldBottomAlign() );
         REQUIRE( crawlerVisitor.filteredDrawingTopOffset() < 0 );

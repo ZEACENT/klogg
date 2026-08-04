@@ -1,0 +1,8 @@
+# ThreadSanitizer suppressions
+#
+# Intentionally empty. Dependencies built from source (oneTBB and mimalloc)
+# are instrumented on TSan legs, and first-party cross-thread delivery avoids
+# transient Qt functor objects. Do not add module-wide patterns such as
+# race:*Qt* or race:*tbb*: they also hide application races whose stacks pass
+# through those frameworks. Any unavoidable platform false positive must be
+# captured with its full stack and suppressed by an exact top-level symbol.

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
   message(FATAL_ERROR
@@ -77,6 +77,8 @@ option(KLOGG_USE_SENTRY "Use Sentry" OFF)
 option(KLOGG_GENERIC_CPU "Build for generic CPU" OFF)
 option(KLOGG_PERF_MEASURE_STREAMING "Enable streaming pipeline performance meters (off by default, for local perf profiling)" OFF)
 option(KLOGG_OSX_DEPLOYMENT_TARGET "Override target MacOS version" "")
+set(KLOGG_TSAN_QT_PREFIX "" CACHE PATH "Required TSan-instrumented Qt installation prefix")
+set(KLOGG_TSAN_QT_VERSION "" CACHE STRING "Required TSan-instrumented Qt version")
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
   set(KLOGG_ARCH 32)
@@ -134,6 +136,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(StandardProjectSettings)
 include(ucm)
+# ucm declares an older standalone minimum; keep the enclosing project on the
+# CMake 3.14 policy baseline after returning from the bundled module.
+cmake_policy(VERSION 3.14)
 include(prepare_version)
 include(FindPkgConfig)
 include(GNUInstallDirs)
@@ -227,31 +232,42 @@ if(APPLE)
   endif()
 endif()
 
+set(KLOGG_QT_COMPONENTS Core Gui Widgets Concurrent Network Xml Svg)
+if(KLOGG_BUILD_TESTS)
+  list(APPEND KLOGG_QT_COMPONENTS Test)
+endif()
+
 find_package(
   QT
   NAMES
   Qt6
   Qt5
-  COMPONENTS Core
-             Widgets
-             Concurrent
-             Network
-             Xml
-             Svg
+  COMPONENTS ${KLOGG_QT_COMPONENTS}
   REQUIRED
 )
 find_package(
   Qt${QT_VERSION_MAJOR}
-  COMPONENTS Core
-             Widgets
-             Concurrent
-             Network
-             Xml
-             Svg
+  COMPONENTS ${KLOGG_QT_COMPONENTS}
   REQUIRED
 )
 
 set(KLOGG_QT_VERSION ${Qt${QT_VERSION_MAJOR}Core_VERSION})
+
+if(ENABLE_SANITIZER_THREAD AND UNIX)
+  if(APPLE)
+    message(
+      STATUS
+        "macOS TSan covers first-party and source-built dependencies; prebuilt Qt remains uninstrumented. The Linux source-built Qt TSan leg verifies Qt internals."
+    )
+  else()
+    include(VerifyTsanQt)
+    set(_klogg_tsan_qt_targets)
+    foreach(_klogg_qt_component ${KLOGG_QT_COMPONENTS})
+      list(APPEND _klogg_tsan_qt_targets Qt${QT_VERSION_MAJOR}::${_klogg_qt_component})
+    endforeach()
+    klogg_verify_tsan_qt(${_klogg_tsan_qt_targets})
+  endif()
+endif()
 
 message("Qt version ${KLOGG_QT_VERSION}")
 message("LTO ${KLOGG_USE_LTO}")
@@ -323,6 +339,15 @@ function(klogg_add_runtime_test test_name target)
   else()
     add_test(NAME ${test_name} COMMAND ${target} -platform offscreen ${ARGN})
   endif()
+
+  if(test_name STREQUAL "klogg_smoke")
+    set(_klogg_test_timeout 120)
+  elseif(test_name STREQUAL "klogg_tests")
+    set(_klogg_test_timeout 900)
+  else()
+    set(_klogg_test_timeout 1200)
+  endif()
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_klogg_test_timeout})
 endfunction()
 
 klogg_add_runtime_test(klogg_smoke klogg -v)

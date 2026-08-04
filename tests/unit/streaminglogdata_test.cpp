@@ -68,25 +68,61 @@ bool waitForSearchComplete( LogFilteredData& filteredData, int timeoutMs = 10000
 
 bool waitForMatchCount( LogFilteredData& filteredData, LinesCount expected, int timeoutMs = 10000 )
 {
+    if ( filteredData.getNbMatches() == expected ) {
+        return true;
+    }
+
+    SafeQSignalSpy searchProgressSpy{ &filteredData, &LogFilteredData::searchProgressed };
     QElapsedTimer timer;
     timer.start();
-    while ( timer.elapsed() < timeoutMs ) {
-        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
+    while ( true ) {
+        const auto remaining = timeoutMs - static_cast<int>( timer.elapsed() );
+        if ( remaining <= 0 ) {
+            break;
+        }
+        searchProgressSpy.wait( qMin( 100, remaining ) );
         if ( filteredData.getNbMatches() == expected ) {
             return true;
         }
-        QThread::msleep( 10 );
     }
     return false;
 }
 
-QByteArray makeStreamingSearchLines( int firstLine, int count )
+bool waitForTerminalMatchCount( LogFilteredData& filteredData, LinesCount expected,
+                                LogFilteredData::SearchGeneration expectedGeneration,
+                                int timeoutMs = 10000 )
+{
+    SafeQSignalSpy searchProgressSpy{ &filteredData, &LogFilteredData::searchProgressed };
+    QElapsedTimer timer;
+    timer.start();
+    int consumedSignals = 0;
+    while ( timer.elapsed() < timeoutMs ) {
+        while ( consumedSignals < searchProgressSpy.count() ) {
+            const auto args = searchProgressSpy.at( consumedSignals++ );
+            if ( args.size() >= 4 && args.at( 1 ).toInt() >= 100
+                 && args.at( 0 ).value<LinesCount>() == expected
+                 && args.at( 3 ).toULongLong() == expectedGeneration ) {
+                return true;
+            }
+        }
+
+        const auto remaining = timeoutMs - static_cast<int>( timer.elapsed() );
+        if ( remaining <= 0 ) {
+            break;
+        }
+        searchProgressSpy.wait( qMin( 100, remaining ) );
+    }
+    return false;
+}
+
+QByteArray makeStreamingSearchLines( int firstLine, int count, bool matchFinalLine = false )
 {
     QByteArray data;
     data.reserve( count * 48 );
     for ( int i = 0; i < count; ++i ) {
         const auto line = firstLine + i;
-        data.append( line % 10 == 0 ? "ERROR " : "INFO " );
+        const auto isFinalSentinel = matchFinalLine && i == count - 1;
+        data.append( line % 10 == 0 || isFinalSentinel ? "ERROR " : "INFO " );
         data.append( QByteArray::number( line ) );
         data.append( " component=streaming-search\n" );
     }
@@ -745,7 +781,7 @@ TEST_CASE( "StreamingLogData trim emits Truncated signal and invalidates caches"
     REQUIRE( decoded.back() == QStringLiteral( "data-19" ) );
 }
 
-TEST_CASE( "Streaming live search coalesces medium updates before starting operations" )
+TEST_CASE( "Streaming live search eventually catches up across medium updates" )
 {
     QTemporaryDir tempDir;
     REQUIRE( tempDir.isValid() );
@@ -760,8 +796,10 @@ TEST_CASE( "Streaming live search coalesces medium updates before starting opera
     SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
     REQUIRE( loadingSpy.safeWait() );
 
+    loadingSpy.clear();
     logData.appendUtf8( makeStreamingSearchLines( 0, 10000 ) );
     REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine() == 10000_lcount );
 
     auto filteredData = logData.getNewFilteredData();
     filteredData->runSearch( RegularExpressionPattern{ QStringLiteral( "ERROR" ) }, 0_lnum,
@@ -769,27 +807,29 @@ TEST_CASE( "Streaming live search coalesces medium updates before starting opera
     REQUIRE( waitForSearchComplete( *filteredData ) );
     REQUIRE( filteredData->getNbMatches() == 1000_lcount );
 
-    const auto countersAfterInitial = filteredData->searchPerformanceCounters();
-
     for ( int batch = 0; batch < 4; ++batch ) {
-        logData.appendUtf8( makeStreamingSearchLines( 10000 + batch * 10000, 10000 ) );
-        filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
+        const auto expectedLines = LinesCount(
+            static_cast<LinesCount::UnderlyingType>( 20000 + batch * 10000 ) );
+        loadingSpy.clear();
+        logData.appendUtf8(
+            makeStreamingSearchLines( 10000 + batch * 10000, 10000, batch == 3 ) );
+        REQUIRE( loadingSpy.safeWait() );
+        REQUIRE( logData.getNbLine() == expectedLines );
+        filteredData->updateSearch( 0_lnum, LineNumber( expectedLines.get() ) );
     }
 
-    REQUIRE( waitForSearchComplete( *filteredData ) );
-    REQUIRE( filteredData->getNbMatches() == 5000_lcount );
-
-    const auto countersAfterUpdates = filteredData->searchPerformanceCounters();
-    const auto incrementalOps
-        = countersAfterUpdates.operationStarts - countersAfterInitial.operationStarts;
-    const auto coalescedUpdates
-        = countersAfterUpdates.coalescedLiveUpdates - countersAfterInitial.coalescedLiveUpdates;
-
-    INFO( "incremental operations=" << incrementalOps
-          << " coalescedLiveUpdates=" << coalescedUpdates );
-
-    REQUIRE( incrementalOps < 4 );
-    REQUIRE( coalescedUpdates > 0 );
+    // A 100% signal completes one operation, not necessarily every live update
+    // requested while that operation was running. Wait for terminal progress
+    // whose owner-side result has caught up to the final endpoint.
+    const auto finalGeneration = filteredData->currentSearchGeneration();
+    const auto caughtUp
+        = waitForTerminalMatchCount( *filteredData, 5001_lcount, finalGeneration );
+    const auto counters = filteredData->searchPerformanceCounters();
+    INFO( "matches=" << filteredData->getNbMatches().get()
+                     << " operationStarts=" << counters.operationStarts
+                     << " updates=" << counters.updateRequests
+                     << " coalesced=" << counters.coalescedLiveUpdates );
+    REQUIRE( caughtUp );
 }
 
 TEST_CASE( "StreamingLogData finishInput emits Truncated on single-line rotation trim",

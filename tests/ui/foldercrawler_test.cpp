@@ -29,8 +29,10 @@
 #include <QByteArray>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QLineEdit>
 #include <QMenu>
@@ -44,6 +46,8 @@
 #include <QToolButton>
 
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -86,10 +90,17 @@ QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArr
 QString makeFile( const QTemporaryDir& dir, const QString& name, int totalLines,
                   const std::vector<int>& matchLines )
 {
+    REQUIRE( std::all_of( matchLines.cbegin(), matchLines.cend(),
+                          [ totalLines ]( int line ) { return line >= 0 && line < totalLines; } ) );
+
+    std::vector<bool> matches( static_cast<std::size_t>( totalLines ), false );
+    for ( const auto line : matchLines ) {
+        matches[ static_cast<std::size_t>( line ) ] = true;
+    }
+
     QByteArray bytes;
     for ( int i = 0; i < totalLines; ++i ) {
-        const bool isMatch = std::find( matchLines.begin(), matchLines.end(), i ) != matchLines.end();
-        bytes.append( isMatch ? "ERROR line\n" : "padding line\n" );
+        bytes.append( matches[ static_cast<std::size_t>( i ) ] ? "ERROR line\n" : "padding line\n" );
     }
     return writeFile( dir, name, bytes );
 }
@@ -1376,6 +1387,77 @@ TEST_CASE( "FolderCrawlerWidget rebinds its views to the session QuickFindPatter
     REQUIRE( widget.filteredView()->quickFindPattern() == sessionQfp.get() );
     REQUIRE( widget.mainView()->quickFindPattern() == sessionQfp.get() );
 }
+
+// This regression test deliberately triggers a real use-after-free that only
+// AddressSanitizer catches deterministically. In a non-ASan build the freed
+// read can crash or corrupt the heap (and cascade into later tests in the same
+// binary), so it is compiled ONLY when ASan is active. The detection uses a
+// NESTED #if because gcc does not treat __has_feature as an operator inside a
+// single #if expression (it would error "missing binary operator before '(').
+#if defined( __has_feature )
+#  if __has_feature( address_sanitizer )
+#    define KLOGG_TEST_ASAN 1
+#  endif
+#elif defined( __SANITIZE_ADDRESS__ )
+#  define KLOGG_TEST_ASAN 1
+#endif
+
+#ifdef KLOGG_TEST_ASAN
+TEST_CASE( "FolderCrawlerWidget teardown joins QuickFind and discards queued notifications",
+           "[folder][quickfind]" )
+{
+    // Regression for a destruction-order use-after-free. A FolderFilteredView's
+    // QuickFind worker is a QtConcurrent task iterating the pane's
+    // FolderSearchResults (visibleRows_ / markLineCache_) through the
+    // `const AbstractLogData&` QuickFind holds. ~FolderCrawlerWidget must join
+    // that worker BEFORE the panes_ members (which own the FolderSearchResults)
+    // are released; otherwise the worker reads already-freed memory and corrupts
+    // the heap -- a damage that surfaces later as a flaky SIGSEGV deep in an
+    // unrelated worker's free() (the Windows-x86 CI crash that passed on the PR
+    // run and failed on merged master). onClosePane already orders this right
+    // (delete view, then erase pane); the destructor previously did not.
+    //
+    // A test-only QuickFind barrier stops the worker immediately before its first
+    // data read and releases only when teardown requests interruption. This makes
+    // the overlap deterministic without relying on document size or worker speed.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "quickfind.log", 8, { 0, 1, 2, 3, 4, 5, 6, 7 } );
+    std::atomic<bool> quickFindReadEntered{ false };
+
+    {
+        FolderCrawlerWidget widget;
+        widget.setFolder( dir.path(), QStringList{ a } );
+        widget.show();
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+        auto qfp = std::make_shared<QuickFindPattern>();
+        qfp->changeSearchPattern( QStringLiteral( "ZZZ_NO_SUCH_TOKEN" ) );
+        widget.setQuickFindPattern( qfp );
+
+        REQUIRE( widget.filteredView() != nullptr );
+        widget.filteredView()->pauseQuickFindBeforeLineReadForTest(
+            quickFindReadEntered );
+        widget.filteredView()->searchForward();
+        REQUIRE( waitFor( [ & ] {
+            return quickFindReadEntered.load( std::memory_order_acquire );
+        } ) );
+        // ~FolderCrawlerWidget sets QuickFind's interrupt flag while the worker is
+        // held at the barrier. The worker then performs one data read before it
+        // observes the interrupt, and the destructor joins it before panes_ releases
+        // FolderSearchResults. Removing that early join makes the same read occur
+        // only after QObject later destroys the view, deterministically exposing the
+        // original destruction-order UAF under ASan.
+    }
+
+    // stopSearchAndWait() joins the worker, but the worker may already have queued
+    // an interrupted/end-of-file notification. Drain queued metacalls after the
+    // QuickFind receiver is destroyed; receiver-bound delivery must discard them.
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    QCoreApplication::processEvents();
+}
+#endif // KLOGG_TEST_ASAN
 
 TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folder]" )
 {

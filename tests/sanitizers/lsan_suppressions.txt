@@ -1,0 +1,14 @@
+# LeakSanitizer suppressions (Linux only)
+#
+# Keep entries scoped to exact system/plugin modules. Never add framework-wide
+# patterns such as leak:*Qt*, leak:*glib*, leak:*mimalloc* or leak:*tbb*: those
+# can hide first-party leaks whose allocation stack passes through a framework.
+
+# FontConfig caches and font state are process-lifetime singletons.
+leak:fontconfig
+
+# D-Bus connection objects are intentionally process-lifetime state.
+leak:libdbus
+
+# The headless Qt offscreen QPA plugin retains process-lifetime plugin state.
+leak:qoffscreen

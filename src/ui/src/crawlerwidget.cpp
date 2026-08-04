@@ -174,6 +174,28 @@ private:
 
 // Constructor only does trivial construction. The real work is done once
 // the data is attached.
+CrawlerWidget::~CrawlerWidget()
+{
+    // Join each view's in-flight QuickFind worker BEFORE the data-source members
+    // (logData_ / logFilteredData_ / filteredViewsData_) are released. Same
+    // destruction-order hazard as ~FolderCrawlerWidget: a view's QuickFind worker
+    // is a QThreadPool task that holds a `const AbstractLogData&` into the
+    // LogData/LogFilteredData it was constructed over; the default
+    // member-destruction order frees those shared_ptrs before ~QObject deletes
+    // the child views (whose ~AbstractLogView joins the worker), so the worker
+    // would read already-freed memory. stopSearchAndWait only joins the worker
+    // (no view deletion / reparent / signals), so it cannot trigger Qt's
+    // child-removal cascade. The views themselves are deleted later by ~QObject.
+    if ( logMainView_ != nullptr ) {
+        logMainView_->stopSearchAndWait();
+    }
+    for ( const auto& entry : filteredViewsData_ ) {
+        if ( entry.first != nullptr ) {
+            entry.first->stopSearchAndWait();
+        }
+    }
+}
+
 CrawlerWidget::CrawlerWidget( QWidget* parent )
     : QSplitter( parent )
     , iconLoader_{ this }
@@ -434,6 +456,7 @@ void CrawlerWidget::startNewSearch()
         connectAllFilteredViewSlots( filteredView_ );
 
         auto index = tabbedFilteredView_->addTab( filteredView_, "" );
+        tabbedFilteredView_->setTabsClosable( true );
         tabbedFilteredView_->setCurrentIndex( index );
 
         connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
@@ -1276,7 +1299,7 @@ void CrawlerWidget::setup()
 
     // Construct the bottom window
     tabbedFilteredView_ = new QTabWidget;
-    tabbedFilteredView_->setTabsClosable( true );
+    tabbedFilteredView_->setTabsClosable( false );
     tabbedFilteredView_->addTab( filteredView_, "" );
     tabbedFilteredView_->setDocumentMode( true );
     tabbedFilteredView_->setTabBarAutoHide( true );
@@ -1455,14 +1478,35 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
 
 void CrawlerWidget::closeFilteredView( int tabIndex )
 {
-    auto* tabFilteredView = tabbedFilteredView_->widget( tabIndex );
-    connect( tabFilteredView, &QObject::destroyed, this, &CrawlerWidget::filteredViewDestroyed );
+    if ( tabIndex < 0 || tabIndex >= tabbedFilteredView_->count()
+         || tabbedFilteredView_->count() <= 1 ) {
+        return;
+    }
+
+    if ( tabIndex == tabbedFilteredView_->currentIndex() ) {
+        const auto replacementIndex = tabIndex == 0 ? 1 : tabIndex - 1;
+        tabbedFilteredView_->setCurrentIndex( replacementIndex );
+    }
+
+    auto* tabFilteredView
+        = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( tabIndex ) );
+    if ( tabFilteredView == nullptr ) {
+        return;
+    }
+    connect( tabFilteredView, &QObject::destroyed, this,
+             [ this, tabFilteredView ] { filteredViewDestroyed( tabFilteredView ); } );
+    if ( tabbedFilteredView_->count() == 2 ) {
+        tabbedFilteredView_->setTabsClosable( false );
+    }
     tabFilteredView->deleteLater();
 }
 
-void CrawlerWidget::filteredViewDestroyed( QObject* view )
+void CrawlerWidget::filteredViewDestroyed( FilteredView* view )
 {
-    filteredViewsData_.erase( qobject_cast<FilteredView*>( view ) );
+    if ( filteredView_ == view ) {
+        filteredView_ = nullptr;
+    }
+    filteredViewsData_.erase( view );
 }
 
 void CrawlerWidget::saveSplitterSizes() const

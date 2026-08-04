@@ -185,11 +185,19 @@ TEST_CASE( "Logdata decoding lines", "[logdata]" )
 
     auto finishedSpy
         = std::make_unique<SafeQSignalSpy>( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    QThread* loadingFinishedThread = nullptr;
+    QObject::connect(
+        &logData, &LogData::loadingFinished, &logData,
+        [ &loadingFinishedThread ]( LoadingStatus ) {
+            loadingFinishedThread = QThread::currentThread();
+        },
+        Qt::DirectConnection );
 
     logData.attachFile( QFileInfo{ file }.absoluteFilePath() );
 
     REQUIRE( finishedSpy->safeWait() );
     REQUIRE( finishedSpy->count() == 1 );
+    REQUIRE( loadingFinishedThread == logData.thread() );
     REQUIRE( logData.getNbLine() == 400_lcount );
 
     const auto rawLines = logData.getLinesRaw( 200_lnum, 200_lcount );

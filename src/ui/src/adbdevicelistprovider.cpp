@@ -93,44 +93,10 @@ bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
     return false;
 }
 
-} // namespace
-
-AdbDeviceListProvider::AdbDeviceListProvider( QString adbExecutable, QObject* parent )
-    : DeviceListProviderBase( parent )
-    , adbExecutable_( std::move( adbExecutable ) )
-{
-}
-
-QString AdbDeviceListProvider::detectAdbExecutable()
-{
-    return findAdbAtKnownLocation();
-}
-
-QString AdbDeviceListProvider::normalizedExecutable( const QString& adbExecutable )
-{
-    const auto expanded = expandTildePath( adbExecutable.trimmed() );
-    if ( !expanded.isEmpty() ) {
-        return expanded;
-    }
-
-    const auto resolved = findAdbAtKnownLocation();
-    if ( !resolved.isEmpty() ) {
-        return resolved;
-    }
-
-    return QStringLiteral( "adb" );
-}
-
-bool AdbDeviceListProvider::deviceMatches( const AdbDeviceInfo& device,
-                                           const QString& deviceId ) const
-{
-    return device.serial == deviceId;
-}
-
-QList<AdbDeviceInfo> AdbDeviceListProvider::doListDevices( QString* error ) const
+QList<AdbDeviceInfo> enumerateAdbDevices( const QString& adbExecutable, QString* error )
 {
     QProcess process;
-    process.start( normalizedExecutable( adbExecutable_ ),
+    process.start( AdbDeviceListProvider::normalizedExecutable( adbExecutable ),
                    { QStringLiteral( "devices" ), QStringLiteral( "-l" ) } );
     if ( !process.waitForStarted( 3000 ) ) {
         if ( error ) {
@@ -201,4 +167,44 @@ QList<AdbDeviceInfo> AdbDeviceListProvider::doListDevices( QString* error ) cons
     }
 
     return devices;
+}
+
+} // namespace
+
+AdbDeviceListProvider::AdbDeviceListProvider( QString adbExecutable, QObject* parent )
+    : DeviceListProviderBase(
+          [ adbExecutable ] { return enumerateAdbDevices( adbExecutable, nullptr ); }, parent )
+    , adbExecutable_( std::move( adbExecutable ) )
+{
+}
+
+QString AdbDeviceListProvider::detectAdbExecutable()
+{
+    return findAdbAtKnownLocation();
+}
+
+QString AdbDeviceListProvider::normalizedExecutable( const QString& adbExecutable )
+{
+    auto expanded = expandTildePath( adbExecutable.trimmed() );
+    if ( !expanded.isEmpty() ) {
+        return expanded;
+    }
+
+    auto resolved = findAdbAtKnownLocation();
+    if ( !resolved.isEmpty() ) {
+        return resolved;
+    }
+
+    return QStringLiteral( "adb" );
+}
+
+bool AdbDeviceListProvider::deviceMatches( const AdbDeviceInfo& device,
+                                           const QString& deviceId ) const
+{
+    return device.serial == deviceId;
+}
+
+QList<AdbDeviceInfo> AdbDeviceListProvider::doListDevices( QString* error ) const
+{
+    return enumerateAdbDevices( adbExecutable_, error );
 }

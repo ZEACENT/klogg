@@ -163,6 +163,16 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // tests verify the signature cache skips redundant rebuilds across mouse
     // events that share the same data/geometry.
     int visibleLineMapBuildCount() const { return visibleLineMapBuildCount_; }
+    bool isQuickFindRunningForTest() const
+    {
+        return quickFind_ != nullptr && quickFind_->isSearchRunning();
+    }
+#if defined( KLOGG_ASAN_BUILD )
+    void pauseQuickFindBeforeLineReadForTest( std::atomic<bool>& entered )
+    {
+        quickFind_->pauseBeforeLineReadForTesting( entered );
+    }
+#endif
 #endif
     // Instructs the widget to update it's content geometry,
     // used when the font is changed.
@@ -356,6 +366,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void incrementalSearchStop() override;
     // Abort the current incremental search (typically when user press esc)
     void incrementalSearchAbort() override;
+    // Synchronously interrupt the QuickFind search and block until its
+    // QThreadPool worker has finished. The worker holds a `const
+    // AbstractLogData&` and reads it off the UI thread; a host whose
+    // data-source members are destroyed before its Qt-child views (so
+    // ~AbstractLogView, which joins the worker, runs after the data is freed)
+    // must call this on each view BEFORE releasing the data, else the worker
+    // reads freed memory (the FolderCrawlerWidget teardown use-after-free that
+    // surfaced as the flaky Windows-x86 CI crash).
+    void stopSearchAndWait();
 
     // Signals the follow mode has been enabled.
     void followSet( bool checked );

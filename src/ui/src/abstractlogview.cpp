@@ -423,17 +423,25 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     } );
 }
 
-AbstractLogView::~AbstractLogView()
+void AbstractLogView::stopSearchAndWait()
 {
+    // Interrupt and join the QuickFind QThreadPool worker (stopSearch ->
+    // interruptAndWait -> waitForFinished). Public so a host can join the worker
+    // before the view's AbstractLogData source is destroyed, when the view
+    // (deleted later as a Qt child) would otherwise outlive its data.
     try {
         if ( quickFind_ ) {
             quickFind_->stopSearch();
-            delete quickFind_;
         }
     } catch ( const std::exception& e ) {
         LOG_ERROR << "Failed to stop search: " << e.what();
-        delete quickFind_;
     }
+}
+
+AbstractLogView::~AbstractLogView()
+{
+    stopSearchAndWait();
+    delete quickFind_;
 }
 
 //
@@ -1134,8 +1142,15 @@ bool AbstractLogView::event( QEvent* e )
 
 int AbstractLogView::lineNumberToVerticalScroll( LineNumber line ) const
 {
-    return static_cast<int>(
-        std::round( static_cast<double>( line.get() ) * verticalScrollMultiplicator() ) );
+    const auto scrollPosition
+        = std::round( static_cast<double>( line.get() ) * verticalScrollMultiplicator() );
+    if ( !( scrollPosition > 0.0 ) ) {
+        return 0;
+    }
+    if ( scrollPosition >= static_cast<double>( std::numeric_limits<int>::max() ) ) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>( scrollPosition );
 }
 
 LineNumber AbstractLogView::verticalScrollToLineNumber( int scrollPosition ) const
@@ -1990,8 +2005,13 @@ void AbstractLogView::jumpToLine( LineNumber line )
     //
     // To guarantee visibility in wrap mode, place the requested logical line at the top
     // (except for the end-of-file snap-to-bottom case below).
-    const auto desiredTopLine
-        = useTextWrap_ ? line : ( line - LinesCount( getNbVisibleLines().get() / divisor ) );
+    const auto centerOffset = getNbVisibleLines().get() / divisor;
+    auto desiredTopLine = line;
+    if ( !useTextWrap_ ) {
+        desiredTopLine = line.get() > centerOffset
+                             ? LineNumber( line.get() - centerOffset )
+                             : 0_lnum;
+    }
     const bool snapToBottom = useTextWrap_ && ( line >= scrollMaxLine );
     const auto newTopLine = snapToBottom ? scrollMaxLine : desiredTopLine;
 
@@ -2652,7 +2672,9 @@ void AbstractLogView::createMenu()
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
     popupMenu_ = new QMenu( this );
-    highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ) );
+    // popupMenu_ owns the submenu through QObject parentage.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ), popupMenu_ );
     popupMenu_->addMenu( highlightersMenu_ );
     colorLabelsMenu_ = popupMenu_->addMenu( tr( "Color labels" ) );
 

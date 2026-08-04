@@ -89,6 +89,7 @@ class CrawlerWidget : public QSplitter,
 
   public:
     CrawlerWidget( QWidget* parent = nullptr );
+    ~CrawlerWidget() override;
 
     // Get the line number of the first line displayed.
     LineNumber getTopLine() const;
@@ -258,7 +259,7 @@ class CrawlerWidget : public QSplitter,
 
     void changeFilteredView(int tabIndex);
     void closeFilteredView(int tabIndex);
-    void filteredViewDestroyed(QObject* view);
+    void filteredViewDestroyed(FilteredView* view);
     
     // Context lines handlers
     void contextLinesModeChanged(int index);
@@ -356,8 +357,8 @@ class CrawlerWidget : public QSplitter,
 
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
-    LogMainView* logMainView_;
-    FilteredView* filteredView_;
+    LogMainView* logMainView_ = nullptr;
+    FilteredView* filteredView_ = nullptr;
     std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
     QTabWidget* tabbedFilteredView_;
 

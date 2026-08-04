@@ -12,9 +12,6 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QUuid>
-#include <QtConcurrent>
-
-#include <memory>
 
 #include "adbdevicelistprovider.h"
 #include "adbprocesstransport.h"
@@ -146,14 +143,10 @@ void AdbLogcatDialog::refreshDevices()
     updateAcceptState();
     statusLabel_->setText( tr( "Detecting ADB devices..." ) );
 
-    // Enumerate off the GUI thread: `adb devices` can block for up to ~8s, and
-    // the previous synchronous call froze the whole dialog. A shared_ptr keeps
-    // the provider alive for the entire task, so this is use-after-free safe
-    // even if the dialog is closed mid-enumeration (the watcher is a dialog
-    // child; its finished handler is disconnected automatically on destruction).
-    auto provider = std::make_shared<AdbDeviceListProvider>( adbExecutableEdit_->text() );
-    deviceRefreshWatcher_->setFuture(
-        QtConcurrent::run( [provider]() { return provider->listDevices(); } ) );
+    // The provider snapshots an immutable enumeration plan before returning the
+    // future, so the local provider can be destroyed while the task continues.
+    AdbDeviceListProvider provider( adbExecutableEdit_->text() );
+    deviceRefreshWatcher_->setFuture( provider.listDevicesAsync() );
 }
 
 void AdbLogcatDialog::onDevicesEnumerated()

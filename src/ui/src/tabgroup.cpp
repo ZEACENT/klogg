@@ -19,6 +19,8 @@
 
 #include "tabgroup.h"
 
+#include <algorithm>
+
 #include <QSettings>
 #include <QtGlobal>
 
@@ -33,42 +35,38 @@ QList<TabGroup> TabGroupManager::groups() const
 
 TabGroup* TabGroupManager::groupById( const QString& groupId )
 {
-    for ( auto& group : groups_ ) {
-        if ( group.id == groupId ) {
-            return &group;
-        }
-    }
-    return nullptr;
+    const auto match = std::find_if( groups_.begin(), groups_.end(),
+                                     [ & ]( const TabGroup& group ) {
+                                         return group.id == groupId;
+                                     } );
+    return match == groups_.end() ? nullptr : &*match;
 }
 
 const TabGroup* TabGroupManager::groupById( const QString& groupId ) const
 {
-    for ( const auto& group : groups_ ) {
-        if ( group.id == groupId ) {
-            return &group;
-        }
-    }
-    return nullptr;
+    const auto match = std::find_if( groups_.cbegin(), groups_.cend(),
+                                     [ & ]( const TabGroup& group ) {
+                                         return group.id == groupId;
+                                     } );
+    return match == groups_.cend() ? nullptr : &*match;
 }
 
 QString TabGroupManager::groupIdForTab( const QString& tabPath ) const
 {
-    for ( const auto& group : groups_ ) {
-        if ( group.tabPaths.contains( tabPath ) ) {
-            return group.id;
-        }
-    }
-    return {};
+    const auto match = std::find_if( groups_.cbegin(), groups_.cend(),
+                                     [ & ]( const TabGroup& group ) {
+                                         return group.tabPaths.contains( tabPath );
+                                     } );
+    return match == groups_.cend() ? QString{} : match->id;
 }
 
 TabGroup* TabGroupManager::groupForTab( const QString& tabPath )
 {
-    for ( auto& group : groups_ ) {
-        if ( group.tabPaths.contains( tabPath ) ) {
-            return &group;
-        }
-    }
-    return nullptr;
+    const auto match = std::find_if( groups_.begin(), groups_.end(),
+                                     [ & ]( const TabGroup& group ) {
+                                         return group.tabPaths.contains( tabPath );
+                                     } );
+    return match == groups_.end() ? nullptr : &*match;
 }
 
 void TabGroupManager::createGroup( const QString& name, const QColor& color )

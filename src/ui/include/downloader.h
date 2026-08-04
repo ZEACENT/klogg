@@ -27,6 +27,7 @@ class Downloader : public QObject {
     Q_OBJECT
   public:
     explicit Downloader( QObject* parent = nullptr );
+    ~Downloader() override;
 
     void download( const QUrl& url, QFile* outputFile );
 
@@ -51,7 +52,7 @@ class Downloader : public QObject {
 
     QString lastError_;
 
-    QFile* output_;
+    QFile* output_ = nullptr;
 };
 
 #endif // KLOGG_DOWNLOADER_H

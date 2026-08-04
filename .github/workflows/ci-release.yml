@@ -15,8 +15,9 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
       DISCORD_NEW_VERSIONS_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       with:
+        persist-credentials: false
         fetch-depth: 0
 
     - name: Download artifacts for last successful CI workflow

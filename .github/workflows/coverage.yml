@@ -1,0 +1,159 @@
+name: "Coverage"
+
+# Per-PR line/branch coverage ratchet.  Builds the test targets with
+# -DENABLE_COVERAGE=ON (gcc --coverage), runs ctest, then uses gcovr to
+# measure line and branch coverage over src/.  The measured percentages are
+# compared against the floors in .github/baselines/coverage-{line,branch}.txt
+# and the job fails if either drops below its floor (ratchet-up only).  The
+# floors are seeded from a successful full run and may only move upward after
+# measured coverage has genuinely risen.  An HTML + JSON report is
+# uploaded as an artifact for offline review.
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: "Line/branch coverage ratchet"
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # agent-setup reads matrix.config.* to install Qt/Boost/CPM cache,
+          # mirroring the CodeQL workflow's native gcc-13 leg.
+          - arch: x64
+            qt_version: 6.9.3
+            qt_arch: linux_gcc_64
+            qt_modules: qt5compat
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      KLOGG_BUILD_ROOT: build_root
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install gcc-13 and gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13 gcovr libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Prepare compiler env
+        run: |
+          echo "CC=gcc-13" >> $GITHUB_ENV
+          echo "CXX=g++-13" >> $GITHUB_ENV
+
+      - uses: ./.github/actions/agent-setup
+
+      - name: Configure (Debug + coverage)
+        shell: bash
+        run: |
+          rm -rf "$KLOGG_BUILD_ROOT"
+          mkdir -p "$KLOGG_BUILD_ROOT"
+          cd "$KLOGG_BUILD_ROOT"
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DKLOGG_BUILD_TESTS=ON \
+            -DENABLE_COVERAGE=ON \
+            -DKLOGG_USE_VECTORSCAN=OFF \
+            -DKLOGG_USE_LTO=OFF \
+            -DKLOGG_OVERRIDE_MALLOC=OFF \
+            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            "$KLOGG_WORKSPACE"
+
+      - name: Build tests
+        shell: bash
+        run: |
+          cmake --build "$KLOGG_BUILD_ROOT" -t klogg klogg_grep klogg_tests klogg_itests -j"$(nproc)"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cd "$KLOGG_BUILD_ROOT"
+          ctest --output-on-failure
+
+      - name: Generate coverage report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p coverage_report
+          # HTML report (primary, human-readable) + textual summary in one pass.
+          # --print-summary writes to stdout while -o directs the HTML output.
+          gcovr \
+            --root "$KLOGG_WORKSPACE" \
+            --filter '^src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
+            --html-details \
+            --html-self-contained \
+            --html-title "Klogg line/branch coverage" \
+            -o coverage_report/index.html \
+            --print-summary "$KLOGG_BUILD_ROOT" \
+            | tee coverage_report/summary.txt
+
+          # Machine-readable companion to the authoritative summary. Keep this
+          # fail-closed too: malformed or missing first-party gcov data must not
+          # disappear from either report without failing the gate.
+          gcovr \
+            --root "$KLOGG_WORKSPACE" \
+            --filter '^src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
+            --json --json-pretty \
+            -o coverage_report/coverage.json \
+            "$KLOGG_BUILD_ROOT"
+
+          echo "=== gcovr summary ==="
+          cat coverage_report/summary.txt
+
+      - name: Enforce coverage ratchet
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base_sha="$PR_BASE_SHA" ;;
+            push) base_sha="$PUSH_BASE_SHA" ;;
+            workflow_dispatch) base_sha=$(git rev-parse HEAD^ 2>/dev/null || true) ;;
+            *) echo "::error::unsupported coverage ratchet event: $EVENT_NAME"; exit 1 ;;
+          esac
+
+          if [ -z "$base_sha" ] || [[ "$base_sha" =~ ^0+$ ]]; then
+            echo "::error::coverage ratchet base is unavailable for $EVENT_NAME"
+            exit 1
+          fi
+          if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base_sha"
+          fi
+          if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            echo "::error::coverage ratchet base commit $base_sha is unavailable"
+            exit 1
+          fi
+
+          args=(
+            --summary coverage_report/summary.txt
+            --line-floor .github/baselines/coverage-line.txt
+            --branch-floor .github/baselines/coverage-branch.txt
+          )
+          args+=(--base-sha "$base_sha")
+          python3 scripts/enforce_coverage_ratchet.py "${args[@]}"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-report
+          path: coverage_report/
+          if-no-files-found: warn

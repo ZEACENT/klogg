@@ -42,10 +42,14 @@
 // Search is started just after the selection and the selection is updated
 // if a match is found.
 
+#if defined( KLOGG_ASAN_BUILD )
+#include <thread>
+#endif
+
+#include <QMetaObject>
 #include <QtConcurrent>
 
 #include "abstractlogdata.h"
-#include "dispatch_to.h"
 #include "linetypes.h"
 #include "log.h"
 #include "qtcompat/qtcompat.h"
@@ -164,6 +168,28 @@ void QuickFind::interruptAndWait()
     operationWatcher_.waitForFinished();
 }
 
+#if defined( KLOGG_ASAN_BUILD )
+void QuickFind::pauseBeforeLineReadForTesting( std::atomic<bool>& entered )
+{
+    interruptAndWait();
+    beforeLineReadCallbackForTesting_ = [ &entered ]( const AtomicFlag& interruptRequested ) {
+        entered.store( true, std::memory_order_release );
+        while ( !interruptRequested ) {
+            std::this_thread::yield();
+        }
+    };
+}
+
+void QuickFind::runBeforeLineReadCallbackForTesting()
+{
+    if ( beforeLineReadCallbackForTesting_ ) {
+        auto callback = std::move( beforeLineReadCallbackForTesting_ );
+        beforeLineReadCallbackForTesting_ = {};
+        callback( interruptRequested_ );
+    }
+}
+#endif
+
 void QuickFind::stopSearch()
 {
     LOG_INFO << "Stop search for quickfind " << this;
@@ -205,6 +231,7 @@ void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatche
         incrementalSearchStatus_ = IncrementalSearchStatus( Forward, start_position, selection );
     }
 
+    interruptRequested_.clear();
     operationFuture_ = klogg::qtcompat::runConcurrent(
         QOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>::of(
             &QuickFind::doSearchForward ),
@@ -233,6 +260,7 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
         incrementalSearchStatus_ = IncrementalSearchStatus( Backward, start_position, selection );
     }
 
+    interruptRequested_.clear();
     operationFuture_ = klogg::qtcompat::runConcurrent(
         QOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>::of(
             &QuickFind::doSearchBackward ),
@@ -245,6 +273,7 @@ void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
+    interruptRequested_.clear();
     operationFuture_ = klogg::qtcompat::runConcurrent(
         QOverload<const Selection&, const QuickFindMatcher&>::of( &QuickFind::doSearchForward ),
         this, selection, matcher );
@@ -256,6 +285,7 @@ void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
     incrementalSearchStatus_ = IncrementalSearchStatus();
     interruptAndWait();
 
+    interruptRequested_.clear();
     operationFuture_ = klogg::qtcompat::runConcurrent(
         QOverload<const Selection&, const QuickFindMatcher&>::of( &QuickFind::doSearchBackward ),
         this, selection, matcher );
@@ -273,14 +303,16 @@ Portion QuickFind::doSearchForward( const Selection& selection, const QuickFindM
 Portion QuickFind::doSearchForward( const FilePosition& start_position, const Selection& selection,
                                     const QuickFindMatcher& matcher )
 {
-    interruptRequested_.clear();
-
     bool found = false;
     LineColumn found_start_col{};
     LineColumn found_end_col{};
 
     if ( !matcher.isActive() )
         return {};
+
+#if defined( KLOGG_ASAN_BUILD )
+    runBeforeLineReadCallbackForTesting();
+#endif
 
     // Optimisation: if we are already after the last match,
     // we don't do any search at all.
@@ -356,14 +388,16 @@ Portion QuickFind::doSearchBackward( const Selection& selection, const QuickFind
 Portion QuickFind::doSearchBackward( const FilePosition& start_position, const Selection& selection,
                                      const QuickFindMatcher& matcher )
 {
-    interruptRequested_.clear();
-
     bool found = false;
     LineColumn start_col{};
     LineColumn end_col{};
 
     if ( !matcher.isActive() )
         return {};
+
+#if defined( KLOGG_ASAN_BUILD )
+    runBeforeLineReadCallbackForTesting();
+#endif
 
     // Optimisation: if we are already before the first match,
     // we don't do any search at all.
@@ -443,5 +477,6 @@ void QuickFind::resetLimits()
 
 void QuickFind::sendNotification( QFNotification notification )
 {
-    dispatchToMainThread( [ this, notification ]() { notify( notification ); } );
+    QMetaObject::invokeMethod(
+        this, [ this, notification ] { Q_EMIT notify( notification ); }, Qt::QueuedConnection );
 }

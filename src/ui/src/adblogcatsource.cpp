@@ -81,7 +81,7 @@ QString AdbLogcatSessionData::persistedSourceType() const
 
 bool AdbLogcatSessionData::isValid() const
 {
-    return !captureId.isEmpty();
+    return CaptureStore::isValidCaptureId( captureId );
 }
 
 QString AdbLogcatSessionData::persistedSourceType( LiveLogSourceType sourceType )

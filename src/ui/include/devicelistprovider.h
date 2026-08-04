@@ -22,10 +22,13 @@
 
 #include <QList>
 #include <QObject>
-#include <QPointer>
 #include <QString>
 
 #include <QtConcurrent>
+
+#include <algorithm>
+#include <functional>
+#include <utility>
 
 // Base template for device list providers.
 //
@@ -44,8 +47,12 @@
 template <typename DeviceInfo>
 class DeviceListProviderBase : public QObject {
   public:
-    explicit DeviceListProviderBase( QObject* parent = nullptr )
+    using AsyncListOperation = std::function<QList<DeviceInfo>()>;
+
+    explicit DeviceListProviderBase( AsyncListOperation asyncListOperation,
+                                     QObject* parent = nullptr )
         : QObject( parent )
+        , asyncListOperation_( std::move( asyncListOperation ) )
     {
     }
 
@@ -56,20 +63,15 @@ class DeviceListProviderBase : public QObject {
         return doListDevices( error );
     }
 
-    // Asynchronous device enumeration.  Runs on the global thread pool.
-    // The returned QFuture resolves to the device list.
-    //
-    // The provider is guarded by a QPointer: if the provider (or its owning
-    // transport) is destroyed before the pool runs the task, the lambda returns
-    // an empty list instead of dereferencing freed memory. (Full mid-execution
-    // safety would require shared_ptr ownership of the provider; callers that
-    // need that guarantee should hold a shared_ptr themselves.)
+    // Asynchronous device enumeration. Runs on the global thread pool from an
+    // immutable work plan captured when the provider is constructed. The plan
+    // must own its inputs by value and must not capture this, another provider
+    // pointer, or any QObject reference. Once this function returns, destroying
+    // the provider cannot cancel or alter the submitted enumeration.
     QFuture<QList<DeviceInfo>> listDevicesAsync() const
     {
-        const QPointer<DeviceListProviderBase> self(
-            const_cast<DeviceListProviderBase*>( this ) );
-        return QtConcurrent::run(
-            [self]() { return self ? self->doListDevices( nullptr ) : QList<DeviceInfo>{}; } );
+        const auto operation = asyncListOperation_;
+        return QtConcurrent::run( [ operation ] { return operation(); } );
     }
 
     // Check whether a specific device (serial / UDID) is connected.
@@ -83,12 +85,9 @@ class DeviceListProviderBase : public QObject {
         if ( !error.isEmpty() ) {
             return true; // optimistic fallback
         }
-        for ( const auto& device : devices ) {
-            if ( deviceMatches( device, deviceId ) ) {
-                return true;
-            }
-        }
-        return false;
+        return std::any_of( devices.cbegin(), devices.cend(), [ this, &deviceId ]( const auto& device ) {
+            return deviceMatches( device, deviceId );
+        } );
     }
 
   protected:
@@ -98,6 +97,9 @@ class DeviceListProviderBase : public QObject {
     // Subclasses implement device identifier matching.
     virtual bool deviceMatches( const DeviceInfo& device,
                                 const QString& deviceId ) const = 0;
+
+  private:
+    AsyncListOperation asyncListOperation_;
 };
 
 #endif // KLOGG_DEVICELISTPROVIDER_H

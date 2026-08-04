@@ -342,5 +342,6 @@ int main( int argc, char* argv[] )
         sessionInfo.save();
     }
 
+    CaptureStore::shutdownBackgroundWorkers();
     return exitCode;
 }

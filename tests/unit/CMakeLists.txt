@@ -18,6 +18,7 @@ add_executable(klogg_tests
     overview_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
+    qt_event_queue_test.cpp
     searchgeneration_test.cpp
     searchtoolbar_test.cpp
     logfiltereddataworker_test.cpp
@@ -29,6 +30,7 @@ add_executable(klogg_tests
     tabgroupmanager_test.cpp
     tabbedcrawlerwidget_test.cpp
     filewatcher_test.cpp
+    efsw_inotify_test.cpp
     folderenumeration_test.cpp
     foldersearchengine_test.cpp
     foldersearchengine_parallel_test.cpp

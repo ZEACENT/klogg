@@ -20,14 +20,18 @@
 #include "filewatcher.h"
 
 #include "configuration.h"
-#include "dispatch_to.h"
 #include "log.h"
 #include "synchronization.h"
 
 #include <KDSignalThrottler.h>
 #include <efsw/efsw.hpp>
 
+#include <condition_variable>
+#include <deque>
+#include <exception>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #if QT_VERSION_MAJOR < 6
@@ -35,8 +39,92 @@
 #endif
 #include <QDir>
 #include <QFileInfo>
-#include <QThreadPool>
 #include <QTimer>
+
+class SerialExecutor {
+  public:
+    SerialExecutor() : thread_( [ this ] { run(); } ) {}
+
+    ~SerialExecutor()
+    {
+        shutdown();
+    }
+
+    void post( std::function<void()> task )
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex_ );
+            if ( stopping_ ) {
+                return;
+            }
+            tasks_.push_back( std::move( task ) );
+        }
+        taskAvailable_.notify_one();
+    }
+
+    void waitForDone()
+    {
+        std::unique_lock<std::mutex> lock( mutex_ );
+        idle_.wait( lock, [ this ] { return tasks_.empty() && !runningTask_; } );
+    }
+
+    void shutdown()
+    {
+        {
+            std::lock_guard<std::mutex> lock( mutex_ );
+            if ( stopping_ ) {
+                return;
+            }
+            stopping_ = true;
+        }
+        taskAvailable_.notify_one();
+        if ( thread_.joinable() ) {
+            thread_.join();
+        }
+    }
+
+  private:
+    void run()
+    {
+        while ( true ) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock( mutex_ );
+                taskAvailable_.wait( lock, [ this ] { return stopping_ || !tasks_.empty(); } );
+                if ( stopping_ && tasks_.empty() ) {
+                    return;
+                }
+                task = std::move( tasks_.front() );
+                tasks_.pop_front();
+                runningTask_ = true;
+            }
+
+            try {
+                task();
+            } catch ( const std::exception& error ) {
+                LOG_ERROR << "Serial file watcher task failed: " << error.what();
+            } catch ( ... ) {
+                LOG_ERROR << "Serial file watcher task failed";
+            }
+
+            {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                runningTask_ = false;
+                if ( tasks_.empty() ) {
+                    idle_.notify_all();
+                }
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable taskAvailable_;
+    std::condition_variable idle_;
+    std::deque<std::function<void()>> tasks_;
+    bool runningTask_ = false;
+    bool stopping_ = false;
+    std::thread thread_;
+};
 
 namespace {
 
@@ -69,33 +157,13 @@ bool isOnlyForPolling( const WatchedDirecotry& wd )
     return wd.watchId < 0;
 }
 
-// Qt5/Qt6 compatibility: QThreadPool::start() only accepts QRunnable* in Qt5.
-// Qt6 added a start(std::function<void()>) overload. This adapter allows
-// lambda-based dispatch to work on both versions while preserving the
-// dedicated worker pool.
-class FunctionRunnable : public QRunnable {
-  public:
-    explicit FunctionRunnable( std::function<void()> fn )
-        : fn_( std::move( fn ) )
-    {
-        setAutoDelete( true );
-    }
-    void run() override
-    {
-        fn_();
-    }
-
-  private:
-    std::function<void()> fn_;
-};
-
 } // namespace
 
 class EfswFileWatcher final : public efsw::FileWatchListener {
   public:
-    explicit EfswFileWatcher( FileWatcher* parent, QThreadPool* workerPool )
+    explicit EfswFileWatcher( FileWatcher* parent, SerialExecutor* worker )
         : parent_{ parent }
-        , workerPool_{ workerPool }
+        , worker_{ worker }
     {
     }
 
@@ -253,9 +321,8 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         };
 
         for ( const auto& changedFile : collectChangedFiles() ) {
-            dispatchToMainThread( [ watcher = parent_, changedFile ]() {
-                watcher->fileChangedOnDisk( changedFile );
-            } );
+            QMetaObject::invokeMethod( parent_, "fileChangedOnDisk", Qt::QueuedConnection,
+                                       Q_ARG( QString, changedFile ) );
         }
     }
 
@@ -273,9 +340,17 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         // This avoids deadlock between the internal efsw lock and our mutex_,
         // and prevents the main thread from blocking on mutex_ when the
         // worker holds it during a blocking addWatch() call (e.g. macOS TCC).
-        workerPool_->start( new FunctionRunnable( [ = ]() {
-            notifyOnFileAction( dir, filename, oldFilename );
-        } ) );
+        try {
+            // SerialExecutor::run catches task exceptions at the dispatch boundary.
+            // NOLINTNEXTLINE(bugprone-exception-escape)
+            worker_->post( [ this, dir, filename, oldFilename ] {
+                notifyOnFileAction( dir, filename, oldFilename );
+            } );
+        } catch ( const std::exception& error ) {
+            LOG_ERROR << "Failed to queue file notification: " << error.what();
+        } catch ( ... ) {
+            LOG_ERROR << "Failed to queue file notification";
+        }
     }
 
     void notifyOnFileAction( const std::string& dir, const std::string& filename,
@@ -294,9 +369,8 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         const auto& fullChangedFilename = findChangedFilename( directory, filename, oldFilename );
 
         if ( !fullChangedFilename.isEmpty() ) {
-            dispatchToMainThread( [ watcher = parent_, fullChangedFilename ]() {
-                watcher->fileChangedOnDisk( fullChangedFilename );
-            } );
+            QMetaObject::invokeMethod( parent_, "fileChangedOnDisk", Qt::QueuedConnection,
+                                       Q_ARG( QString, fullChangedFilename ) );
         }
     }
 
@@ -345,7 +419,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
     efsw::FileWatcher watcher_;
     std::vector<WatchedDirecotry> watchedPaths_;
     FileWatcher* parent_;
-    QThreadPool* workerPool_;
+    SerialExecutor* worker_;
 
     bool nativeWatchEnabled_ = true;
 
@@ -354,15 +428,18 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
 void EfswFileWatcherDeleter::operator()( EfswFileWatcher* watcher ) const
 {
+    // This custom deleter is the ownership boundary for the header's
+    // unique_ptr to the intentionally incomplete EfswFileWatcher type.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     delete watcher;
 }
 
 FileWatcher::FileWatcher()
     : checkTimer_{ new QTimer( this ) }
     , throttler_{ new KDToolBox::KDSignalThrottler( this ) }
-    , efswWatcher_{ new EfswFileWatcher( this, &workerPool_ ) }
+    , worker_{ std::make_unique<SerialExecutor>() }
+    , efswWatcher_{ new EfswFileWatcher( this, worker_.get() ) }
 {
-    workerPool_.setMaxThreadCount( 1 );
 
     connect( checkTimer_, &QTimer::timeout, this, &FileWatcher::checkWatches );
 
@@ -375,9 +452,11 @@ FileWatcher::FileWatcher()
 
 FileWatcher::~FileWatcher()
 {
-    if ( !workerPool_.waitForDone( 5000 ) ) {
-        LOG_WARNING << "FileWatcher worker pool did not finish within 5s timeout";
-    }
+    // Close task admission and drain every queued operation while its
+    // EfswFileWatcher receiver is still alive. Native callbacks racing with
+    // shutdown are then rejected by SerialExecutor::post().
+    worker_->shutdown();
+    efswWatcher_.reset();
 }
 
 FileWatcher& FileWatcher::getFileWatcher()
@@ -396,9 +475,7 @@ void FileWatcher::addFile( const QString& fileName )
     // Uses a dedicated single-worker thread pool to avoid contention
     // on the global QThreadPool.
     auto* watcher = efswWatcher_.get();
-    workerPool_.start( new FunctionRunnable( [ watcher, fileName ]() {
-        watcher->addFile( fileName );
-    } ) );
+    worker_->post( [ watcher, fileName ] { watcher->addFile( fileName ); } );
 }
 
 void FileWatcher::removeFile( const QString& fileName )
@@ -407,9 +484,7 @@ void FileWatcher::removeFile( const QString& fileName )
     // Dispatch to the same dedicated worker pool so that removeFile is
     // serialized with any in-progress addFile on the same worker thread.
     auto* watcher = efswWatcher_.get();
-    workerPool_.start( new FunctionRunnable( [ watcher, fileName ]() {
-        watcher->removeFile( fileName );
-    } ) );
+    worker_->post( [ watcher, fileName ] { watcher->removeFile( fileName ); } );
 }
 
 void FileWatcher::fileChangedOnDisk( const QString& fileName )
@@ -450,8 +525,7 @@ void FileWatcher::updateConfiguration()
     // holds it during a blocking addWatch() call (e.g. macOS TCC prompt).
     auto* watcher = efswWatcher_.get();
     const auto nativeEnabled = config.nativeFileWatchEnabled();
-    workerPool_.start( new FunctionRunnable(
-        [ watcher, nativeEnabled ]() { watcher->enableWatch( nativeEnabled ); } ) );
+    worker_->post( [ watcher, nativeEnabled ] { watcher->enableWatch( nativeEnabled ); } );
 }
 
 void FileWatcher::checkWatches()
@@ -460,6 +534,5 @@ void FileWatcher::checkWatches()
     // operations are serialized with addFile/removeFile/enableWatch
     // and never block the main thread on mutex_.
     auto* watcher = efswWatcher_.get();
-    workerPool_.start(
-        new FunctionRunnable( [ watcher ]() { watcher->checkWatches(); } ) );
+    worker_->post( [ watcher ] { watcher->checkWatches(); } );
 }

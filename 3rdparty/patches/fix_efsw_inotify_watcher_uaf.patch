@@ -1,0 +1,207 @@
+diff --git a/src/efsw/FileWatcherInotify.cpp b/src/efsw/FileWatcherInotify.cpp
+index 29be12b..c243b43 100644
+--- a/src/efsw/FileWatcherInotify.cpp
++++ b/src/efsw/FileWatcherInotify.cpp
+@@ -62,6 +62,11 @@ FileWatcherInotify::~FileWatcherInotify() {
+ 
+ 	mWatches.clear();
+ 
++	for ( auto watch : mDeletedWatches ) {
++		efSAFE_DELETE( watch );
++	}
++	mDeletedWatches.clear();
++
+ 	if ( mFD != -1 ) {
+ 		close( mFD );
+ 		mFD = -1;
+@@ -175,12 +180,15 @@ void FileWatcherInotify::removeWatchLocked( WatchID watchid ) {
+ 
+ 	WatcherInotify* watch = iter->second;
+ 
+-	for ( std::vector<std::pair<WatcherInotify*, std::string>>::iterator itm =
+-			  mMovedOutsideWatches.begin();
+-		  mMovedOutsideWatches.end() != itm; ++itm ) {
+-		if ( itm->first == watch ) {
+-			mMovedOutsideWatches.erase( itm );
+-			break;
++	{
++		Lock movedLock( mMovedOutsideLock );
++		for ( std::vector<std::pair<WatcherInotify*, std::string>>::iterator itm =
++				  mMovedOutsideWatches.begin();
++			  mMovedOutsideWatches.end() != itm; ++itm ) {
++			if ( itm->first == watch ) {
++				mMovedOutsideWatches.erase( itm );
++				break;
++			}
+ 		}
+ 	}
+ 
+@@ -217,7 +225,7 @@ void FileWatcherInotify::removeWatchLocked( WatchID watchid ) {
+ 		efDEBUG( "Removed watch %s with id: %d\n", watch->Directory.c_str(), watchid );
+ 	}
+ 
+-	efSAFE_DELETE( watch );
++	mDeletedWatches.push_back( watch );
+ }
+ 
+ void FileWatcherInotify::removeWatch( const std::string& directory ) {
+@@ -267,8 +275,8 @@ Watcher* FileWatcherInotify::watcherContainsDirectory( std::string dir ) {
+ void FileWatcherInotify::run() {
+ 	char* buff = new char[BUFF_SIZE];
+ 	memset( buff, 0, BUFF_SIZE );
+-	WatchMap::iterator wit;
+ 
++	WatcherInotify* curWatcher = NULL;
+ 	WatcherInotify* currentMoveFrom = NULL;
+ 	u_int32_t currentMoveCookie = -1;
+ 	bool lastWasMovedFrom = false;
+@@ -294,16 +302,20 @@ void FileWatcherInotify::run() {
+ 					struct inotify_event* pevent = (struct inotify_event*)&buff[i];
+ 
+ 					{
++						curWatcher = NULL;
++
+ 						{
+ 							Lock lock( mWatchesLock );
+ 
+-							wit = mWatches.find( pevent->wd );
++							auto wit = mWatches.find( pevent->wd );
++							if ( wit != mWatches.end() )
++								curWatcher = wit->second;
+ 						}
+ 
+-						if ( wit != mWatches.end() ) {
+-							handleAction( wit->second, (char*)pevent->name, pevent->mask );
++						if ( curWatcher ) {
++							handleAction( curWatcher, (char*)pevent->name, pevent->mask );
+ 
+-							if ( ( pevent->mask & IN_MOVED_TO ) && wit->second == currentMoveFrom &&
++							if ( ( pevent->mask & IN_MOVED_TO ) && curWatcher == currentMoveFrom &&
+ 								 pevent->cookie == currentMoveCookie ) {
+ 								/// make pair success
+ 								currentMoveFrom = NULL;
+@@ -312,16 +324,18 @@ void FileWatcherInotify::run() {
+ 								// Previous event was moved from and current event is moved from
+ 								// Treat it as a DELETE or moved ouside watches
+ 								if ( lastWasMovedFrom && currentMoveFrom ) {
++									Lock movedLock( mMovedOutsideLock );
+ 									mMovedOutsideWatches.push_back(
+ 										std::make_pair( currentMoveFrom, prevOldFileName ) );
+ 								}
+ 
+-								currentMoveFrom = wit->second;
++								currentMoveFrom = curWatcher;
+ 								currentMoveCookie = pevent->cookie;
+ 							} else {
+ 								/// Keep track of the IN_MOVED_FROM events to know
+ 								/// if the IN_MOVED_TO event is also fired
+ 								if ( currentMoveFrom ) {
++									Lock movedLock( mMovedOutsideLock );
+ 									mMovedOutsideWatches.push_back(
+ 										std::make_pair( currentMoveFrom, prevOldFileName ) );
+ 								}
+@@ -343,6 +357,7 @@ void FileWatcherInotify::run() {
+ 			// Here means no event received
+ 			// If last event is IN_MOVED_FROM, we assume no IN_MOVED_TO
+ 			if ( currentMoveFrom ) {
++				Lock movedLock( mMovedOutsideLock );
+ 				mMovedOutsideWatches.push_back(
+ 					std::make_pair( currentMoveFrom, currentMoveFrom->OldFileName ) );
+ 			}
+@@ -351,11 +366,13 @@ void FileWatcherInotify::run() {
+ 			currentMoveCookie = -1;
+ 		}
+ 
+-		if ( !mMovedOutsideWatches.empty() ) {
+-			// We need to make a copy since the element mMovedOutsideWatches could be modified
+-			// during the iteration.
+-			std::vector<std::pair<WatcherInotify*, std::string>> movedOutsideWatches(
+-				mMovedOutsideWatches );
++		std::vector<std::pair<WatcherInotify*, std::string>> movedOutsideWatches;
++		{
++			Lock movedLock( mMovedOutsideLock );
++			movedOutsideWatches = mMovedOutsideWatches;
++		}
++
++		if ( !movedOutsideWatches.empty() ) {
+ 
+ 			/// In case that the IN_MOVED_TO is never fired means that the file was moved to other
+ 			/// folder
+@@ -363,20 +380,19 @@ void FileWatcherInotify::run() {
+ 					  movedOutsideWatches.begin();
+ 				  it != movedOutsideWatches.end(); ++it ) {
+ 
+-				// Skip if the watch has already being removed
+-				if ( mMovedOutsideWatches.size() != movedOutsideWatches.size() ) {
+-					bool found = false;
+-					for ( std::vector<std::pair<WatcherInotify*, std::string>>::iterator itm =
+-							  mMovedOutsideWatches.begin();
+-						  mMovedOutsideWatches.end() != itm; ++itm ) {
+-						if ( itm->first == it->first ) {
++				// Skip if the watch was removed after this batch was copied.
++				bool found = false;
++				{
++					Lock movedLock( mMovedOutsideLock );
++					for ( const auto& moved : mMovedOutsideWatches ) {
++						if ( moved.first == it->first ) {
+ 							found = true;
+ 							break;
+ 						}
+ 					}
+-					if ( !found )
+-						continue;
+ 				}
++				if ( !found )
++					continue;
+ 
+ 				Watcher* watch = ( *it ).first;
+ 				const std::string& oldFileName = ( *it ).second;
+@@ -387,8 +403,8 @@ void FileWatcherInotify::run() {
+ 				{
+ 					Lock lock( mWatchesLock );
+ 
+-					for ( ; wit != mWatches.end(); ++wit ) {
+-						Watcher* oldWatch = wit->second;
++					for ( const auto& watched : mWatches ) {
++						Watcher* oldWatch = watched.second;
+ 
+ 						if ( oldWatch != watch &&
+ 							 -1 != String::strStartsWith( watch->Directory + oldFileName + "/",
+@@ -421,7 +437,22 @@ void FileWatcherInotify::run() {
+ 				}
+ 			}
+ 
+-			mMovedOutsideWatches.clear();
++			{
++				Lock movedLock( mMovedOutsideLock );
++				mMovedOutsideWatches.clear();
++			}
++		}
++
++		{
++			Lock lock( mWatchesLock );
++			for ( auto it = mDeletedWatches.begin(); it != mDeletedWatches.end(); ) {
++				if ( *it == currentMoveFrom ) {
++					++it;
++				} else {
++					efSAFE_DELETE( *it );
++					it = mDeletedWatches.erase( it );
++				}
++			}
+ 		}
+ 	} while ( mInitOK );
+ 
+diff --git a/src/efsw/FileWatcherInotify.hpp b/src/efsw/FileWatcherInotify.hpp
+index 84174a0..83f707a 100644
+--- a/src/efsw/FileWatcherInotify.hpp
++++ b/src/efsw/FileWatcherInotify.hpp
+@@ -62,7 +62,9 @@ class FileWatcherInotify : public FileWatcherImpl {
+ 	Mutex mRealWatchesLock;
+ 	Mutex mInitLock;
+ 	bool mIsTakingAction;
++	Mutex mMovedOutsideLock;
+ 	std::vector<std::pair<WatcherInotify*, std::string>> mMovedOutsideWatches;
++	std::vector<WatcherInotify*> mDeletedWatches;
+ 
+ 	WatchID addWatch( const std::string& directory, FileWatchListener* watcher, bool recursive,
+ 					  WatcherInotify* parent = NULL );

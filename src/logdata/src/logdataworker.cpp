@@ -185,6 +185,8 @@ size_t IndexingData::allocatedSize() const
 LogDataWorker::LogDataWorker( const std::shared_ptr<IndexingData>& indexing_data )
     : indexing_data_( indexing_data )
 {
+    qRegisterMetaType<LoadingStatus>( "LoadingStatus" );
+    qRegisterMetaType<MonitoredFileStatus>( "MonitoredFileStatus" );
 }
 
 LogDataWorker::~LogDataWorker() noexcept
@@ -326,17 +328,35 @@ void LogDataWorker::onCheckFileFinished( const MonitoredFileStatus result )
 
 void LogDataWorker::emitIndexingProgressedOnOwnerThread( int percent )
 {
-    dispatchToObject( [ this, percent ] { Q_EMIT indexingProgressed( percent ); }, this );
+    QMetaObject::invokeMethod( this, "deliverIndexingProgressed", Qt::QueuedConnection,
+                               Q_ARG( int, percent ) );
 }
 
 void LogDataWorker::emitIndexingFinishedOnOwnerThread( LoadingStatus status )
 {
-    dispatchToObject( [ this, status ] { Q_EMIT indexingFinished( status ); }, this );
+    QMetaObject::invokeMethod( this, "deliverIndexingFinished", Qt::QueuedConnection,
+                               Q_ARG( LoadingStatus, status ) );
 }
 
 void LogDataWorker::emitCheckFileFinishedOnOwnerThread( MonitoredFileStatus status )
 {
-    dispatchToObject( [ this, status ] { Q_EMIT checkFileChangesFinished( status ); }, this );
+    QMetaObject::invokeMethod( this, "deliverCheckFileFinished", Qt::QueuedConnection,
+                               Q_ARG( MonitoredFileStatus, status ) );
+}
+
+void LogDataWorker::deliverIndexingProgressed( int percent )
+{
+    Q_EMIT indexingProgressed( percent );
+}
+
+void LogDataWorker::deliverIndexingFinished( LoadingStatus status )
+{
+    Q_EMIT indexingFinished( status );
+}
+
+void LogDataWorker::deliverCheckFileFinished( MonitoredFileStatus status )
+{
+    Q_EMIT checkFileChangesFinished( status );
 }
 
 //

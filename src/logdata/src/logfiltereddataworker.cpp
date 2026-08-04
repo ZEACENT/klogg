@@ -233,6 +233,8 @@ void SearchData::clear()
 LogFilteredDataWorker::LogFilteredDataWorker( const SearchableLogData& sourceLogData )
     : sourceLogData_( sourceLogData )
 {
+    qRegisterMetaType<LinesCount>( "LinesCount" );
+    qRegisterMetaType<LineNumber>( "LineNumber" );
     dispatchThread_ = std::thread( [ this ] { dispatchLoop(); } );
 }
 
@@ -607,35 +609,42 @@ void LogFilteredDataWorker::emitSearchProgressedOnOwnerThread( LinesCount nbMatc
                                                                OperationGeneration generation,
                                                                OperationId operationId )
 {
-    dispatchToObject(
-        [ this, nbMatches, percent, initialLine, generation, operationId ] {
-            if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
-                return;
-            }
-
-            if ( percent == 100 ) {
-                // Ensure terminal progress is delivered after the corresponding
-                // worker std::thread has fully exited, but avoid joining a newer
-                // search when this callback is delayed in the event queue.
-                waitForDone();
-            }
-
-            Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
-        },
-        this );
+    // Use a named queued slot rather than a cross-thread functor. Qt owns and
+    // copies these registered value arguments in its event queue; no short-lived
+    // QCallableObject is concurrently destroyed while the owner thread invokes it.
+    QMetaObject::invokeMethod( this, "deliverSearchProgressed", Qt::QueuedConnection,
+                               Q_ARG( LinesCount, nbMatches ), Q_ARG( int, percent ),
+                               Q_ARG( LineNumber, initialLine ),
+                               Q_ARG( quint64, generation ), Q_ARG( quint64, operationId ) );
 }
 
 void LogFilteredDataWorker::emitSearchFinishedOnOwnerThread( OperationGeneration generation,
                                                              OperationId operationId )
 {
-    dispatchToObject(
-        [ this, generation, operationId ] {
-            if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
-                return;
-            }
-            Q_EMIT searchFinished();
-        },
-        this );
+    QMetaObject::invokeMethod( this, "deliverSearchFinished", Qt::QueuedConnection,
+                               Q_ARG( quint64, generation ), Q_ARG( quint64, operationId ) );
+}
+
+void LogFilteredDataWorker::deliverSearchProgressed( LinesCount nbMatches, int percent,
+                                                     LineNumber initialLine, quint64 generation,
+                                                     quint64 operationId )
+{
+    if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
+        return;
+    }
+
+    // Search results are published under searchData_.dataMutex_ before 100% is
+    // queued. Terminal progress means results are visible, not that opThread_
+    // has already returned; teardown uses shutdownAndWait() for that contract.
+    Q_EMIT searchProgressed( nbMatches, percent, initialLine, generation );
+}
+
+void LogFilteredDataWorker::deliverSearchFinished( quint64 generation, quint64 operationId )
+{
+    if ( generation != operationGeneration_.load() || operationId != operationId_.load() ) {
+        return;
+    }
+    Q_EMIT searchFinished();
 }
 
 // This will do an atomic copy of the object
@@ -821,7 +830,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
 
         const auto t2 = high_resolution_clock::now();
         const auto durationUs = duration_cast<microseconds>( t2 - t1 );
-        const auto durationMs = duration_cast<milliseconds>( t2 - t1 );
+        const auto durationSeconds = duration<double>( t2 - t1 ).count();
 
         LOG_INFO << "Searching done, overall duration " << durationUs;
         LOG_INFO << "Line reading took " << fileReadingDuration;
@@ -829,16 +838,14 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
         LOG_INFO << "Matching took " << matchDuration;
 
         const auto totalFileSize = sourceLogData_.getFileSize();
-        LOG_INFO << "Searching perf "
-                 << static_cast<uint64_t>(
-                        std::floor( 1000.f * static_cast<float>( ( endLine - initialLine ).get() )
-                                    / static_cast<float>( durationMs.count() ) ) )
-                 << " lines/s";
-        LOG_INFO << "Searching io perf "
-                 << ( 1000.f * static_cast<float>( totalFileSize )
-                      / static_cast<float>( durationMs.count() ) )
-                        / ( 1024 * 1024 )
-                 << " MiB/s";
+        const auto searchedLines = static_cast<double>( ( endLine - initialLine ).get() );
+        const auto linesPerSecond = durationSeconds > 0.0 ? searchedLines / durationSeconds : 0.0;
+        const auto mebibytesPerSecond
+            = durationSeconds > 0.0
+                  ? static_cast<double>( totalFileSize ) / durationSeconds / ( 1024.0 * 1024.0 )
+                  : 0.0;
+        LOG_INFO << "Searching perf " << linesPerSecond << " lines/s";
+        LOG_INFO << "Searching io perf " << mebibytesPerSecond << " MiB/s";
 
         Q_EMIT searchProgressed( nbMatches, 100, initialLine );
         Q_EMIT searchFinished();
@@ -941,6 +948,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     int reportedPercentage = 0;
 
     std::chrono::microseconds matchCombiningDuration{ 0 };
+    std::atomic<LineNumber::UnderlyingType> currentEndLine{ endLine.get() };
 
     auto matchProcessor
         = tbb::flow::function_node<BlockDataType, tbb::flow::continue_msg, tbb::flow::rejecting>(
@@ -981,7 +989,8 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
                 const auto matchProcessorEndTime = high_resolution_clock::now();
                 matchCombiningDuration += duration_cast<microseconds>( matchProcessorEndTime
                                                                        - matchProcessorStartTime );
-                const auto currentTotalLines = endLine - initialLine;
+                const auto currentTotalLines
+                    = LineNumber( currentEndLine.load() ) - initialLine;
                 const int percentage
                     = calculateProgress( totalProcessedLines.get(), currentTotalLines.get() );
 
@@ -1010,6 +1019,7 @@ void SearchOperation::doSearch( SearchData& searchData, LineNumber initialLine )
     while ( !interruptRequested_ ) {
         if ( chunkStart >= endLine ) {
             endLine = qMin( LineNumber( sourceLogData_.getNbLine().get() ), requestedEndLine() );
+            currentEndLine.store( endLine.get() );
             if ( chunkStart >= endLine ) {
                 break;
             }

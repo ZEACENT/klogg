@@ -1,6 +1,7 @@
 #ifndef LIVESOURCETRANSPORT_H
 #define LIVESOURCETRANSPORT_H
 
+#include <cstdint>
 #include <memory>
 
 #include <QByteArray>
@@ -10,6 +11,7 @@
 #include <QStringList>
 
 class QProcess;
+class QTemporaryFile;
 class QTimer;
 
 class LiveSourceTransport : public QObject {
@@ -47,6 +49,11 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
         QStringList arguments;
     };
 
+    struct AsyncStartupTiming {
+        int startTimeoutMs;
+        int postStartGraceMs;
+    };
+
     explicit ProcessLiveSourceTransport( QObject* parent = nullptr );
     ~ProcessLiveSourceTransport() override;
 
@@ -60,6 +67,8 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     virtual Command streamingCommand() const = 0;
     virtual Command clearCommand() const = 0;
     virtual void filterReceivedBytes( QByteArray& data );
+    virtual void startProcessAsync( QProcess& process );
+    virtual AsyncStartupTiming asyncStartupTiming() const;
     bool runBlockingCommand( const Command& command, QByteArray* stdErr ) const;
 
     // Path of the temp file that captures the subprocess stderr (it never
@@ -72,18 +81,26 @@ class ProcessLiveSourceTransport : public LiveSourceTransport {
     }
 
   private:
+    enum class AsyncStartupPhase : std::uint8_t { Idle, Starting, PostStartGrace };
+
     void setState( State state );
     void createProcess();
-    void cancelGraceTimer();
+    void retireCurrentProcess();
+    bool prepareStderrCapture();
+    void armStartupTimer( AsyncStartupPhase phase, int timeoutMs, QProcess* process );
+    void cancelStartupTimer();
+    QString capturedStderr() const;
+    void failCurrentProcess( const QString& fallback, bool retireProcess = false );
 
   private:
     std::unique_ptr<QProcess> process_;
-    QTimer* graceTimer_{ nullptr };
+    std::unique_ptr<QTemporaryFile> stderrFile_;
+    QTimer* startupTimer_{ nullptr };
+    AsyncStartupPhase asyncStartupPhase_{ AsyncStartupPhase::Idle };
     State state_{ State::Disconnected };
     QString lastError_;
     QString stderrFilePath_;
     bool destroyed_ = false;
-    bool disconnectRequested_ = false;
 };
 
 Q_DECLARE_METATYPE( LiveSourceTransport::State )

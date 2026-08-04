@@ -1,0 +1,10 @@
+# AddressSanitizer suppressions
+#
+# Intentionally empty. AddressSanitizer reports memory corruption and default
+# suppressions would hide genuine defects. Do not add an entry unless a report
+# is proven to be an unfixable system-library false positive.
+#
+# MSVC ASan has no GCC/Clang-style suppression file. The Windows sanitizer leg
+# keeps container checks enabled globally; simdutf is compiled with its scalar
+# fallback implementation there to avoid the third-party lazy multi-ISA
+# registry incompatibility without weakening first-party coverage.
