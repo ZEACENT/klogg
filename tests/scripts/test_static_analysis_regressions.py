@@ -431,6 +431,24 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
             open_object.index("nt::FileDirectoryFile"),
         )
 
+    def test_capture_cleanup_ignores_marker_application_name(self):
+        source = CAPTURESTORE_SOURCE.read_text()
+        marker_check = function_body(source, "bool hasActiveProcessMarker() const")
+
+        # A live foreign process marker must be honored regardless of the
+        # application name recorded in it: renamed executables and compatible
+        # builds write different names into the same locked marker, and the
+        # marker's name line is the OS process name (Qt 6 QLockFile uses
+        # processNameByPid, not QCoreApplication::applicationName()), so it
+        # cannot be customized in-process. The ownership decision may only
+        # use lock coherence and pid liveness; comparing the recorded
+        # application name would delete captures a live process still owns.
+        self.assertIn("getLockInfo(", marker_check)
+        self.assertNotIn("applicationName ==", marker_check)
+        self.assertNotIn("applicationName !=", marker_check)
+        self.assertNotIn("applicationName.contains", marker_check)
+        self.assertNotIn("applicationName.startsWith", marker_check)
+
     def test_windows_creation_and_enumeration_do_not_reopen_handles(self):
         source = SECURE_CAPTURE_DIRECTORY_SOURCE.read_text()
         create_directory = function_body(

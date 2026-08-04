@@ -991,6 +991,15 @@ TEST_CASE( "CaptureStore spill fails closed when its capture directory is replac
     REQUIRE( segmentFiles( capturePath ).size() == 1 );
 }
 
+#if !defined( Q_OS_WIN )
+// POSIX-only: displacing a live capture root is unreachable on Windows.
+// NTFS refuses to rename a directory while any descendant stays open
+// ([MS-FSA] 2.1.4.2 recurses the subtree and fails the rename with
+// STATUS_ACCESS_DENIED), so a bound capture's path cannot be swapped out
+// from under it at all — the OS itself enforces the anchoring this test
+// verifies on POSIX. Windows coverage for path replacement lives in
+// "CaptureStore spill fails closed when its capture directory is replaced"
+// (sibling displacement) and the reparse-point rejection tests.
 TEST_CASE( "CaptureStore spill stays anchored when the capture root is replaced" )
 {
     CaptureStore::Limits limits;
@@ -1032,6 +1041,7 @@ TEST_CASE( "CaptureStore spill stays anchored when the capture root is replaced"
     REQUIRE( removeDirectoryAlias( rootPath ) );
     REQUIRE( QDir( containerPath ).rename( displacedName, rootName ) );
 }
+#endif
 
 TEST_CASE( "CaptureStore tombstones stay bound to the displaced directory generation" )
 {
@@ -1725,7 +1735,7 @@ TEST_CASE( "CaptureStore cleanup removes an unlocked marker named for a live for
     REQUIRE( holder.releaseAndWait() );
 }
 
-TEST_CASE( "CaptureStore cleanup preserves a differently named live process marker" )
+TEST_CASE( "CaptureStore cleanup preserves a live foreign process marker" )
 {
     const auto rootPath = makeTestDir(
         "capturestore_different_application_marker" );
@@ -1743,14 +1753,18 @@ TEST_CASE( "CaptureStore cleanup preserves a differently named live process mark
     REQUIRE( childMarkers.size() == 1 );
     QFile childMarker(
         QDir( coordinationRoot ).filePath( childMarkers.front() ) );
-    REQUIRE( childMarker.open( QIODevice::ReadWrite ) );
-    auto markerLines = childMarker.readAll().split( '\n' );
-    REQUIRE( markerLines.size() >= 3 );
-    markerLines[ 1 ] = QByteArrayLiteral( "renamed-klogg-capture-test" );
-    REQUIRE( childMarker.resize( 0 ) );
-    REQUIRE( childMarker.seek( 0 ) );
-    REQUIRE( childMarker.write( markerLines.join( '\n' ) ) > 0 );
+    // Read-only: QLockFile on Windows holds the marker with read sharing
+    // only, so a write open of a live marker fails with a sharing violation.
+    // The record's application-name line is derived from the OS process name
+    // (Qt 6 QLockFile), not QCoreApplication::applicationName(), so it
+    // cannot be customized from inside the child; production deliberately
+    // never consults it when deciding marker ownership (pinned by the
+    // static-analysis regression suite).
+    REQUIRE( childMarker.open( QIODevice::ReadOnly ) );
+    const auto markerLines = childMarker.readAll().split( '\n' );
     childMarker.close();
+    REQUIRE( markerLines.size() >= 3 );
+    REQUIRE( markerLines.front().toLongLong() == child.processId() );
 
     CaptureStore::cleanupUnusedCaptures(
         {}, rootPath, QDateTime::currentDateTimeUtc().addSecs( 5 ) );
