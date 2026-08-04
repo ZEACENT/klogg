@@ -315,19 +315,22 @@ bool waitForSourceState( const AdbLogcatSource& source, AdbLogcatSource::State s
 
 // Transport teardown retires QProcess objects with deleteLater(), which only
 // takes effect once a DeferredDelete event is delivered. A late process signal
-// arriving during the final event-loop pass posts a new deferred deletion that
-// no later pass delivers, and LeakSanitizer then reports the retired QProcess
-// at binary exit (CI ubuntu-22.04-asan-ubsan-lsan flake). Make teardown
-// deterministic: settle async signals, deliver the deletions they posted, and
-// deliver any fallout from those deletions once more.
+// or a ~QProcess destruction cascade arriving during the final pass posts new
+// deferred deletions that no later pass delivers, and LeakSanitizer then
+// reports the retired QProcess at binary exit (CI ubuntu-22.04-asan-ubsan-lsan
+// flake, seen twice with the identical 6675-bytes/26-allocations signature).
+// Qt 6 has no public API to query the posted-event queue, so make teardown
+// deterministic by construction: alternate explicit DeferredDelete delivery
+// with processEvents (which drains the posted queue to a fixpoint, cascades
+// included) and always end on processEvents, never on sendPostedEvents.
 void drainLiveSourceEvents( int settleMs )
 {
     QCoreApplication::processEvents();
     QTest::qWait( settleMs );
-    QCoreApplication::processEvents();
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
-    QCoreApplication::processEvents();
-    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    for ( auto pass = 0; pass < 4; ++pass ) {
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+        QCoreApplication::processEvents();
+    }
 }
 } // namespace
 
