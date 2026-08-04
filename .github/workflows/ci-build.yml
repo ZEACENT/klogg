@@ -448,6 +448,11 @@ jobs:
             container: variar/klogg_ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
             sanitizer: address-undefined
+            # The ASan+UBSan+LSan compile and the full test suite under all
+            # three sanitizers is the longest pole in the matrix; leave headroom
+            # over the default 60 min for runner CPU contention (the deb legs
+            # hit the 60-min timeout on a slow runner).
+            timeout_minutes: 90
             package: false
 
           - os: ubuntu_jammy
@@ -589,6 +594,7 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
+            --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
             "${{ matrix.config.container }}" \
             /bin/bash -c '
@@ -596,9 +602,13 @@ jobs:
               for bin in klogg_tests klogg_itests; do
                 f="/usr/local/$KLOGG_BUILD_ROOT/output/$bin"
                 test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
-                nm "$f" | grep -q "asan_init" || {
+                # grep without -q: -q exits on the first match and closes the
+                # pipe, which SIGPIPEs nm; under pipefail that fails the check
+                # even when the symbol is present. Reading the whole stream is
+                # a few ms and keeps the pipeline exit status reliable.
+                nm "$f" 2>/dev/null | grep "asan_init" >/dev/null || {
                   echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
-                nm "$f" | grep -q "ubsan_handle" || {
+                nm "$f" 2>/dev/null | grep "ubsan_handle" >/dev/null || {
                   echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
               done
               echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
@@ -765,9 +775,13 @@ jobs:
           for bin in klogg_tests klogg_itests; do
             f="$KLOGG_BUILD_ROOT/output/$bin"
             test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
-            nm "$f" | grep -q "asan_init" || {
+            # grep without -q: -q exits on the first match and closes the pipe,
+            # which SIGPIPEs nm (LLVM nm aborts with "IO failure: Broken pipe");
+            # under pipefail that fails the check even when the symbol is
+            # present. Reading the whole stream keeps the exit status reliable.
+            nm "$f" 2>/dev/null | grep "asan_init" >/dev/null || {
               echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
-            nm "$f" | grep -q "ubsan_handle" || {
+            nm "$f" 2>/dev/null | grep "ubsan_handle" >/dev/null || {
               echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
           done
           echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
