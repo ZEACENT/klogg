@@ -413,6 +413,13 @@
              </layout>
             </item>
             <item>
+             <widget class="QLabel" name="themeModeHintLabel">
+              <property name="text">
+               <string>Classic Dark always uses the dark theme</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <widget class="QComboBox" name="styleComboBox"/>
             </item>
            </layout>

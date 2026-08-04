@@ -209,6 +209,22 @@ void OptionsDialog::setupStyles()
     themeModeComboBox->addItem( tr( "Light" ), static_cast<int>( ThemeMode::Light ) );
     themeModeComboBox->addItem( tr( "Dark" ), static_cast<int>( ThemeMode::Dark ) );
     themeModeComboBox->addItem( tr( "Auto (Follow System)" ), static_cast<int>( ThemeMode::Auto ) );
+
+    // "Classic Dark" is an inherently dark style; the theme mode selector has
+    // no effect on it, so disable it (and explain why) instead of presenting a
+    // dead control. The theme mode still applies to "Modern" and "System".
+    connect( styleComboBox, qOverload<int>( &QComboBox::currentIndexChanged ),
+             this, [ this ]( int ) { updateThemeModeAvailability(); } );
+    updateThemeModeAvailability();
+}
+
+void OptionsDialog::updateThemeModeAvailability()
+{
+    const bool classicDark
+        = styleComboBox->currentData() == StyleManager::DarkStyleKey;
+    themeModeComboBox->setEnabled( !classicDark );
+    themeModeLabel->setEnabled( !classicDark );
+    themeModeHintLabel->setVisible( classicDark );
 }
 
 void OptionsDialog::setupEncodings()
@@ -664,6 +680,11 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     else {
         themeModeComboBox->setCurrentIndex( 2 ); // Default to Auto
     }
+
+    // Reflect the saved style in the theme-selector availability (the style
+    // combo's own index change already fires the handler, but not when the
+    // saved style matches the current selection).
+    updateThemeModeAvailability();
 
     hideAnsiColorsCheckBox->setChecked( config.hideAnsiColorSequences() );
     renderAnsiColorsCheckBox->setChecked( !config.hideAnsiColorSequences()
