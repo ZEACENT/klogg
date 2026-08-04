@@ -548,6 +548,26 @@ jobs:
 
       - uses: ./.github/actions/docker-build
 
+      - name: Verify ASan/UBSan-instrumented test binaries
+        if: ${{ matrix.config.sanitizer == 'address-undefined' }}
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$KLOGG_WORKSPACE:/usr/local" \
+            "${{ matrix.config.container }}" \
+            /bin/bash -c '
+              set -euo pipefail
+              for bin in klogg_tests klogg_itests; do
+                f="/usr/local/$KLOGG_BUILD_ROOT/output/$bin"
+                test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
+                nm "$f" | grep -q "asan_init" || {
+                  echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
+                nm "$f" | grep -q "ubsan_handle" || {
+                  echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
+              done
+              echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
+            '
+
       - name: Verify TSan Qt runtime provenance
         if: ${{ matrix.config.sanitizer == 'thread' }}
         shell: bash
@@ -700,6 +720,22 @@ jobs:
           echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
+
+      - name: Verify ASan/UBSan-instrumented test binaries
+        if: ${{ matrix.config.sanitizer == 'address-undefined' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in klogg_tests klogg_itests; do
+            f="$KLOGG_BUILD_ROOT/output/$bin"
+            test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
+            nm "$f" | grep -q "asan_init" || {
+              echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
+            nm "$f" | grep -q "ubsan_handle" || {
+              echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
+          done
+          echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
+
       - uses: ./.github/actions/agent-run-tests
       - uses: ./.github/actions/agent-package-mac
         if: ${{ matrix.config.package != false }}
