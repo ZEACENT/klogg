@@ -21,6 +21,7 @@
 
 #include <QApplication>
 #include <QPalette>
+#include <QStyle>
 
 #include "configuration.h"
 #include "styles.h"
@@ -32,9 +33,6 @@ class ScopedModernStyle {
         : previousStyle_( Configuration::getSynced().style() )
         , previousThemeMode_( Configuration::getSynced().themeMode() )
     {
-        if ( previousStyle_.isEmpty() ) {
-            previousStyle_ = StyleManager::defaultStyle();
-        }
         Configuration::getSynced().setThemeMode( ThemeMode::Dark );
         StyleManager::applyStyle( StyleManager::ModernKey );
     }
@@ -43,7 +41,13 @@ class ScopedModernStyle {
     {
         Configuration::getSynced().setThemeMode( previousThemeMode_ );
         Configuration::getSynced().setStyle( previousStyle_ );
-        StyleManager::applyStyle( previousStyle_ );
+        // Restore the raw saved value; only substitute the default when the
+        // saved value was empty so an empty saved style is not leaked into the
+        // shared configuration.
+        const auto styleToApply = previousStyle_.isEmpty()
+                                      ? StyleManager::defaultStyle()
+                                      : previousStyle_;
+        StyleManager::applyStyle( styleToApply );
     }
 
   private:
@@ -60,9 +64,6 @@ class ScopedStyleSetting {
         : previousStyle_( Configuration::getSynced().style() )
         , previousThemeMode_( Configuration::getSynced().themeMode() )
     {
-        if ( previousStyle_.isEmpty() ) {
-            previousStyle_ = StyleManager::defaultStyle();
-        }
         Configuration::getSynced().setStyle( style );
         Configuration::getSynced().setThemeMode( mode );
         StyleManager::applyStyle( style );
@@ -72,7 +73,13 @@ class ScopedStyleSetting {
     {
         Configuration::getSynced().setStyle( previousStyle_ );
         Configuration::getSynced().setThemeMode( previousThemeMode_ );
-        StyleManager::applyStyle( previousStyle_ );
+        // Restore the raw saved value; only substitute the default when the
+        // saved value was empty so an empty saved style is not leaked into the
+        // shared configuration.
+        const auto styleToApply = previousStyle_.isEmpty()
+                                      ? StyleManager::defaultStyle()
+                                      : previousStyle_;
+        StyleManager::applyStyle( styleToApply );
     }
 
   private:
@@ -116,6 +123,22 @@ TEST_CASE( "System style still follows a light theme mode" )
 
     const auto windowColor = qApp->palette().color( QPalette::Window );
     REQUIRE( windowColor.lightness() >= 100 );
+}
+
+TEST_CASE( "Classic Dark keeps the Fusion widget style on every platform" )
+{
+    // applyDarkPalette picks the widget style from the resolved dark key.
+    // "Dark" (DarkStyleKey) is the Fusion-based classic dark; only the
+    // Windows-specific keys ("Windows Dark" / "DarkWindows") may install the
+    // Windows widget style. klogg::platform::darkStyleKey() is "DarkWindows"
+    // on Windows but "Dark" elsewhere, so on Linux/macOS it equals the generic
+    // Classic Dark key — a regression routed it into the Windows style there.
+    const ScopedStyleSetting styleGuard{ StyleManager::DarkStyleKey, ThemeMode::Light };
+
+    // objectName() is lowercased by QStyleFactory on macOS, so assert on the
+    // style class name which is stable across platforms and Qt versions.
+    REQUIRE( qApp->style()->metaObject()->className()
+             == QStringLiteral( "QFusionStyle" ) );
 }
 
 TEST_CASE( "System style follows a dark theme mode into a dark palette" )

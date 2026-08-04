@@ -715,8 +715,15 @@ void applyDarkPalette( const QString& style )
     darkPalette.setColor( QPalette::Disabled, QPalette::Light,
                           QColor( palette.at( "DisabledLight" ) ) );
 
-    if ( style == StyleManager::DarkWindowsStyleKey
-         || style == klogg::platform::darkStyleKey() ) {
+    // Only the Windows-specific dark keys install the native Windows widget
+    // style. klogg::platform::darkStyleKey() is "DarkWindows" on Windows but
+    // "Dark" elsewhere — where it equals the generic Classic Dark key and must
+    // keep the Fusion style rather than silently switching to Windows widgets.
+    const bool useWindowsDarkStyle
+        = style == StyleManager::DarkWindowsStyleKey
+          || ( style == klogg::platform::darkStyleKey()
+               && style != StyleManager::DarkStyleKey );
+    if ( useWindowsDarkStyle ) {
         qApp->setStyle( QStyleFactory::create( StyleManager::WindowsKey ) );
     }
     else {
