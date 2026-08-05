@@ -187,16 +187,6 @@ else()
   endif()
 endif(MSVC)
 
-if(WIN32)
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/win)
-elseif(APPLE)
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/mac)
-else()
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/linux)
-endif()
-
-message("Dump symbols tools path ${SYMS_TOOLS}")
-
 # standard compiler warnings
 # Link this 'library' to use the warnings specified in CompilerWarnings.cmake
 include(CompilerWarnings)

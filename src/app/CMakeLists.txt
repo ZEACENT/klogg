@@ -234,13 +234,9 @@ if(KLOGG_USE_SENTRY)
       COMMENT "Copy crash_handler"
     )
 
-    add_custom_command(
-      TARGET klogg
-      POST_BUILD
-      COMMAND cmake -E copy ${SYMS_TOOLS}/minidump_dump $<TARGET_FILE_DIR:klogg>/klogg_minidump_dump
-      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-      COMMENT "Copy stackwalk"
-    )
+    # The minidump_dump stack walker was vendored under 3rdparty/dump_syms and
+    # removed; crashhandler.cpp degrades gracefully when the binary is absent
+    # (logs a warning and skips the pending report instead of deleting it).
   else()
     add_custom_command(
       TARGET klogg
@@ -250,31 +246,17 @@ if(KLOGG_USE_SENTRY)
       COMMENT "Copy crash_handler"
     )
 
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-      add_custom_command(
-        TARGET klogg
-        POST_BUILD
-        COMMAND cmake -E copy ${SYMS_TOOLS}/minidump_dump_x64.exe $<TARGET_FILE_DIR:klogg>/klogg_minidump_dump.exe
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Copy stackwalk"
-      )
-    else()
-      add_custom_command(
-        TARGET klogg
-        POST_BUILD
-        COMMAND cmake -E copy ${SYMS_TOOLS}/minidump_dump_x86.exe $<TARGET_FILE_DIR:klogg>/klogg_minidump_dump.exe
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Copy stackwalk"
-      )
-    endif()
+    # The minidump_dump stack walker was vendored under 3rdparty/dump_syms and
+    # removed; crashhandler.cpp degrades gracefully when the binary is absent
+    # (logs a warning and skips the pending report instead of deleting it).
   endif()
 
   if(APPLE)
-    install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_minidump_dump $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
+    install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION $<TARGET_BUNDLE_CONTENT_DIR:klogg>/MacOS
     )
   elseif(NOT WIN32)
-    install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_minidump_dump $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
+    install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
   endif()
