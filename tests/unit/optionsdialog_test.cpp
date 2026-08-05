@@ -286,7 +286,14 @@ TEST_CASE( "Applying the dialog while Classic Dark is pinned preserves the pre-p
 
     auto* applyButton = buttonBox->button( QDialogButtonBox::Apply );
     REQUIRE( applyButton != nullptr );
-    applyButton->click();
+
+    // Invoke the same slot the Apply button drives. Clicking the button
+    // (QAbstractButton::click()) synthesizes a window-system mouse event that
+    // blocks on the offscreen platform in CI (klogg_tests timed out after the
+    // dialog construction); QMetaObject::invokeMethod is the established
+    // pattern for updateConfigFromDialog (see adb_ui_transport_test.cpp).
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog",
+                                        Qt::DirectConnection ) );
 
     // The persisted theme mode must be the pre-pin Auto, not the pinned Dark,
     // so switching away from Classic Dark later can restore the original mode.
