@@ -1239,7 +1239,12 @@ void OptionsDialog::updateConfigFromDialog()
     config.setShortcuts( shortcuts );
 
     // update translate when accept or apply clicked
-    restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    // An empty selector (the i18n resource is unavailable, e.g. in the unit
+    // tests) has no selection to compare against; a missing selector must not
+    // demand a restart, which would otherwise block Apply on a modal warning.
+    if ( !languageComboBox->currentData().isNull() ) {
+        restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    }
     updateTranslate();
     config.setLanguage( languageComboBox->currentData().toString() );
     retranslateUi( this );

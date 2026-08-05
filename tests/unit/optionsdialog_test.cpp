@@ -38,12 +38,16 @@ class ConfigurationScope {
     ConfigurationScope()
         : style_( Configuration::getSynced().style() )
         , themeMode_( Configuration::getSynced().themeMode() )
+        , language_( Configuration::getSynced().language() )
     {
     }
     ~ConfigurationScope()
     {
         Configuration::get().setStyle( style_ );
         Configuration::get().setThemeMode( themeMode_ );
+        // updateConfigFromDialog() writes the language from the combo; restore
+        // it too so later tests see the same process-wide configuration.
+        Configuration::get().setLanguage( language_ );
     }
 
     ConfigurationScope( const ConfigurationScope& ) = delete;
@@ -52,6 +56,7 @@ class ConfigurationScope {
   private:
     QString style_;
     ThemeMode themeMode_;
+    QString language_;
 };
 } // namespace
 
