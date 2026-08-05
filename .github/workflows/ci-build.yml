@@ -439,20 +439,36 @@ jobs:
 
           # Sanitizer legs: build + test only (no packaging, no artifacts).
           # Folded into the Linux matrix so ci-gate (needs: [Linux]) covers them.
+          # The former combined asan-ubsan-lsan leg was the matrix's critical
+          # path (~46 min); it is split into two parallel legs so the sanitizer
+          # compile runs on two runners. asan-lsan carries ASan + LeakSanitizer
+          # (detect_leaks=1 in ASAN_OPTIONS); ubsan carries the full UBSan
+          # suite (incl. -fno-sanitize=vptr handling). Union == combined leg.
           - os: ubuntu_jammy
             os_version: 22.04
             arch: x64
-            label: ubuntu-22.04-asan-ubsan-lsan
-            package_tag: asan-ubsan
+            label: ubuntu-22.04-asan-lsan
+            package_tag: asan
             container_root: docker/ubuntu22.04
             container: variar/klogg_ubuntu22.04
-            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
-            sanitizer: address-undefined
-            # The ASan+UBSan+LSan compile and the full test suite under all
-            # three sanitizers is the longest pole in the matrix; leave headroom
-            # over the default 60 min for runner CPU contention (the deb legs
-            # hit the 60-min timeout on a slow runner).
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: address
+            # ASan instrumentation + the full test suite is the longest pole in
+            # the matrix; leave headroom over the default 60 min for runner CPU
+            # contention (the deb legs hit the 60-min timeout on a slow runner).
             timeout_minutes: 90
+            package: false
+
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-ubsan
+            package_tag: ubsan
+            container_root: docker/ubuntu22.04
+            container: variar/klogg_ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: undefined
+            timeout_minutes: 60
             package: false
 
           - os: ubuntu_jammy
@@ -533,21 +549,29 @@ jobs:
           # Same type=gha layer cache pattern as the TSan image. The scope is
           # the container image name, so legs sharing an image (e.g. the deb
           # and asan legs both build variar/klogg_ubuntu22.04) share one cache.
+          # mode=min (final image only) instead of mode=max: these are
+          # single-stage images, so no intermediate stages are lost, and the
+          # smaller footprint keeps the shared 10GB repo cache budget from
+          # evicting the per-leg ccache entries that the restore step relies on.
           cache-from: type=gha,scope=klogg-linux-${{ matrix.config.container }}
-          cache-to: type=gha,mode=max,scope=klogg-linux-${{ matrix.config.container }}
+          cache-to: type=gha,mode=min,scope=klogg-linux-${{ matrix.config.container }}
 
       - name: Restore ccache for the Linux build
+        id: restore-ccache
         if: ${{ matrix.config.sanitizer != 'thread' }}
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           # The container compiles with CCACHE_DIR=/usr/local/.ccache, which is
           # the workspace mounted at /usr/local, so restoring this host path
-          # warms the in-container cache. Key on the commit so each run saves a
-          # fresh entry; restore-keys falls back to the previous commit's cache.
+          # warms the in-container cache. The key is stable per config (no
+          # per-commit SHA): per-sha entries exhausted the repo-wide 10GB cache
+          # budget, evicting every restore before the next run. restore-keys
+          # selects the most recent matching entry; the Save step below
+          # refreshes it on master pushes only, so PRs restore master's warm
+          # cache without writing throwaway entries of their own.
           path: ${{ github.workspace }}/.ccache
-          key: ${{ matrix.config.label }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ matrix.config.label }}-ccache-
+          key: ${{ matrix.config.label }}-ccache-v1
+          restore-keys: ${{ matrix.config.label }}-ccache-v1-
 
       - uses: ./.github/actions/prepare-workspace-env
       - name: Lock CPM downloads to prefetched cache
@@ -569,10 +593,20 @@ jobs:
         if: ${{ matrix.config.sanitizer }}
         shell: sh
         run: |
-          # Workspace is mounted at /usr/local inside the container, so the
-          # suppressions files live under /usr/local/tests/sanitizers/.
-          echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
-          echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          # Each sanitizer leg scopes only its own runtime options; docker-run-tests
+          # forwards whatever is set and passes empty values for the rest.
+          if [ "${{ matrix.config.sanitizer }}" = "address" ]; then
+            # detect_leaks=1 enables LeakSanitizer on the ASan leg; suppressions
+            # live under the workspace mount (/usr/local) inside the container.
+            echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1:halt_on_error=1:suppressions=/usr/local/tests/sanitizers/asan_suppressions.txt" >> $GITHUB_ENV
+            # Slow unwinding retains the qoffscreen plugin frame in indirect Qt
+            # allocation stacks, allowing the existing module-scoped suppression
+            # to match without broad QObject/Qt suppressions.
+            echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0" >> $GITHUB_ENV
+          fi
+          if [ "${{ matrix.config.sanitizer }}" = "undefined" ]; then
+            echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
+          fi
           if [ "${{ matrix.config.sanitizer }}" = "thread" ]; then
             docker run --rm "${{ matrix.config.container }}" /bin/bash -c '
               test -x /usr/bin/llvm-symbolizer-14 &&
@@ -582,15 +616,28 @@ jobs:
             '
             echo "TSAN_OPTIONS=halt_on_error=1:external_symbolizer_path=/usr/bin/llvm-symbolizer-14" >> $GITHUB_ENV
           fi
-          # Slow unwinding retains the qoffscreen plugin frame in indirect Qt
-          # allocation stacks, allowing the existing module-scoped suppression
-          # to match without broad QObject/Qt suppressions.
-          echo "LSAN_OPTIONS=suppressions=/usr/local/tests/sanitizers/lsan_suppressions.txt:fast_unwind_on_malloc=0" >> $GITHUB_ENV
 
       - uses: ./.github/actions/docker-build
 
-      - name: Verify ASan/UBSan-instrumented test binaries
-        if: ${{ matrix.config.sanitizer == 'address-undefined' }}
+      - name: Show ccache statistics
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        shell: bash
+        run: |
+          # Exposes the hit/miss ratio so a warm-cache regression is visible in
+          # the job log instead of silently costing a full rebuild every run.
+          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+            "${{ matrix.config.container }}" \
+            /bin/bash -c 'ccache -s 2>/dev/null || echo "ccache stats unavailable"'
+
+      - name: Save ccache for the Linux build
+        if: ${{ success() && matrix.config.sanitizer != 'thread' && github.event_name == 'push' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ matrix.config.label }}-ccache-v1-${{ github.ref }}
+
+      - name: Verify ASan-instrumented test binaries
+        if: ${{ matrix.config.sanitizer == 'address' }}
         shell: bash
         run: |
           docker run --rm \
@@ -608,10 +655,31 @@ jobs:
                 # a few ms and keeps the pipeline exit status reliable.
                 nm "$f" 2>/dev/null | grep "asan_init" >/dev/null || {
                   echo "ERROR: $bin missing ASan instrumentation (no asan_init symbol)"; exit 1; }
+              done
+              echo "ASan instrumentation verified in klogg_tests and klogg_itests"
+            '
+
+      - name: Verify UBSan-instrumented test binaries
+        if: ${{ matrix.config.sanitizer == 'undefined' }}
+        shell: bash
+        run: |
+          docker run --rm \
+            --env KLOGG_BUILD_ROOT \
+            -v "$KLOGG_WORKSPACE:/usr/local" \
+            "${{ matrix.config.container }}" \
+            /bin/bash -c '
+              set -euo pipefail
+              for bin in klogg_tests klogg_itests; do
+                f="/usr/local/$KLOGG_BUILD_ROOT/output/$bin"
+                test -x "$f" || { echo "test binary missing: $bin"; exit 1; }
+                # grep without -q: -q exits on the first match and closes the
+                # pipe, which SIGPIPEs nm; under pipefail that fails the check
+                # even when the symbol is present. Reading the whole stream is
+                # a few ms and keeps the pipeline exit status reliable.
                 nm "$f" 2>/dev/null | grep "ubsan_handle" >/dev/null || {
                   echo "ERROR: $bin missing UBSan instrumentation (no ubsan_handle symbol)"; exit 1; }
               done
-              echo "ASan+UBSan instrumentation verified in klogg_tests and klogg_itests"
+              echo "UBSan instrumentation verified in klogg_tests and klogg_itests"
             '
 
       - name: Verify TSan Qt runtime provenance
@@ -684,7 +752,7 @@ jobs:
             arch: x64
             label: intel-qt6-asan-ubsan
             package_tag: asan-ubsan
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: address-undefined
             package: false
 
