@@ -672,6 +672,70 @@ static bool isSystemDarkTheme()
 #endif
 }
 
+namespace {
+// A style resolves to the dark palette if it is one of the explicit dark
+// styles or the platform's dark-theme key (klogg::platform::darkStyleKey(),
+// e.g. "DarkWindows" on Windows). The platform dark key is what ThemeMode
+// Dark / Auto-on-a-dark-system resolve System requests to; it must not fall
+// through to the light path.
+bool isDarkStyle( const QString& style )
+{
+    return style == StyleManager::DarkStyleKey
+           || style == StyleManager::DarkWindowsStyleKey
+           || style == klogg::platform::darkStyleKey();
+}
+
+void applyDarkPalette( const QString& style )
+{
+    const auto palette = Configuration::get().darkPalette();
+
+    QPalette darkPalette;
+    darkPalette.setColor( QPalette::Window, QColor( palette.at( "Window" ) ) );
+    darkPalette.setColor( QPalette::WindowText, QColor( palette.at( "WindowText" ) ) );
+    darkPalette.setColor( QPalette::Base, QColor( palette.at( "Base" ) ) );
+    darkPalette.setColor( QPalette::AlternateBase, QColor( palette.at( "AlternateBase" ) ) );
+    darkPalette.setColor( QPalette::ToolTipBase, QColor( palette.at( "ToolTipBase" ) ) );
+    darkPalette.setColor( QPalette::ToolTipText, QColor( palette.at( "ToolTipText" ) ) );
+    darkPalette.setColor( QPalette::Text, QColor( palette.at( "Text" ) ) );
+    darkPalette.setColor( QPalette::Button, QColor( palette.at( "Button" ) ) );
+    darkPalette.setColor( QPalette::ButtonText, QColor( palette.at( "ButtonText" ) ) );
+    darkPalette.setColor( QPalette::Link, QColor( palette.at( "Link" ) ) );
+    darkPalette.setColor( QPalette::Highlight, QColor( palette.at( "Highlight" ) ) );
+    darkPalette.setColor( QPalette::HighlightedText,
+                          QColor( palette.at( "HighlightedText" ) ) );
+
+    darkPalette.setColor( QPalette::Active, QPalette::Button,
+                          QColor( palette.at( "ActiveButton" ) ) );
+    darkPalette.setColor( QPalette::Disabled, QPalette::ButtonText,
+                          QColor( palette.at( "DisabledButtonText" ) ) );
+    darkPalette.setColor( QPalette::Disabled, QPalette::WindowText,
+                          QColor( palette.at( "DisabledWindowText" ) ) );
+    darkPalette.setColor( QPalette::Disabled, QPalette::Text,
+                          QColor( palette.at( "DisabledText" ) ) );
+    darkPalette.setColor( QPalette::Disabled, QPalette::Light,
+                          QColor( palette.at( "DisabledLight" ) ) );
+
+    // Only the Windows-specific dark keys install the native Windows widget
+    // style. klogg::platform::darkStyleKey() is "DarkWindows" on Windows but
+    // "Dark" elsewhere — where it equals the generic Classic Dark key and must
+    // keep the Fusion style rather than silently switching to Windows widgets.
+    const bool useWindowsDarkStyle
+        = style == StyleManager::DarkWindowsStyleKey
+          || ( style == klogg::platform::darkStyleKey()
+               && style != StyleManager::DarkStyleKey );
+    if ( useWindowsDarkStyle ) {
+        qApp->setStyle( QStyleFactory::create( StyleManager::WindowsKey ) );
+    }
+    else {
+        qApp->setStyle( QStyleFactory::create( StyleManager::FusionKey ) );
+    }
+
+    qApp->setPalette( darkPalette );
+    qApp->setStyleSheet( "" );
+    qApp->setFont( QFontDatabase::systemFont( QFontDatabase::GeneralFont ) );
+}
+} // namespace
+
 void StyleManager::applyStyle( const QString& style )
 {
     static bool applyingStyle = false;
@@ -709,18 +773,24 @@ void StyleManager::applyStyle( const QString& style )
         return;
     }
 
+    // Classic Dark is an explicit user choice for a dark palette. Theme mode
+    // (Light/Dark/Auto) governs how "Modern" and "System" adapt to the
+    // platform; it must not silently override an explicit dark style — that
+    // made "Classic Dark won't stay enabled" (#51) whenever the theme mode
+    // resolved to light.
+    if ( style == DarkStyleKey || style == DarkWindowsStyleKey ) {
+        applyDarkPalette( style );
+        return;
+    }
+
     const bool isSystemStyle = ( style == SystemKey );
     QString actualStyle = isSystemStyle ? defaultPlatformStyle() : style;
     const auto mode = config.themeMode();
     const bool systemDark = isSystemDarkTheme();
 
     if ( mode == ThemeMode::Auto ) {
-        if ( systemDark ) {
-            actualStyle = klogg::platform::darkStyleKey();
-        }
-        else {
-            actualStyle = defaultPlatformStyle();
-        }
+        actualStyle = systemDark ? klogg::platform::darkStyleKey()
+                                 : defaultPlatformStyle();
         LOG_INFO << "Auto theme mode: system is " << ( systemDark ? "dark" : "light" )
                  << ", using style " << actualStyle;
     }
@@ -729,57 +799,13 @@ void StyleManager::applyStyle( const QString& style )
         LOG_INFO << "Dark theme mode: forcing dark style " << actualStyle;
     }
     else {
-        if ( style == DarkStyleKey || style == DarkWindowsStyleKey ) {
-            actualStyle = defaultPlatformStyle();
-            LOG_INFO << "Light theme mode: overriding dark style to " << actualStyle;
-        }
-        else if ( isSystemStyle ) {
-            actualStyle = defaultPlatformStyle();
-        }
-        else {
-            actualStyle = style;
-        }
+        // Light mode: keep the style as computed above (System -> platform
+        // default, anything else -> itself).
+        LOG_INFO << "Light theme mode: using style " << actualStyle;
     }
 
-    if ( actualStyle == DarkStyleKey || actualStyle == DarkWindowsStyleKey ) {
-        const auto palette = Configuration::get().darkPalette();
-
-        QPalette darkPalette;
-        darkPalette.setColor( QPalette::Window, QColor( palette.at( "Window" ) ) );
-        darkPalette.setColor( QPalette::WindowText, QColor( palette.at( "WindowText" ) ) );
-        darkPalette.setColor( QPalette::Base, QColor( palette.at( "Base" ) ) );
-        darkPalette.setColor( QPalette::AlternateBase, QColor( palette.at( "AlternateBase" ) ) );
-        darkPalette.setColor( QPalette::ToolTipBase, QColor( palette.at( "ToolTipBase" ) ) );
-        darkPalette.setColor( QPalette::ToolTipText, QColor( palette.at( "ToolTipText" ) ) );
-        darkPalette.setColor( QPalette::Text, QColor( palette.at( "Text" ) ) );
-        darkPalette.setColor( QPalette::Button, QColor( palette.at( "Button" ) ) );
-        darkPalette.setColor( QPalette::ButtonText, QColor( palette.at( "ButtonText" ) ) );
-        darkPalette.setColor( QPalette::Link, QColor( palette.at( "Link" ) ) );
-        darkPalette.setColor( QPalette::Highlight, QColor( palette.at( "Highlight" ) ) );
-        darkPalette.setColor( QPalette::HighlightedText,
-                              QColor( palette.at( "HighlightedText" ) ) );
-
-        darkPalette.setColor( QPalette::Active, QPalette::Button,
-                              QColor( palette.at( "ActiveButton" ) ) );
-        darkPalette.setColor( QPalette::Disabled, QPalette::ButtonText,
-                              QColor( palette.at( "DisabledButtonText" ) ) );
-        darkPalette.setColor( QPalette::Disabled, QPalette::WindowText,
-                              QColor( palette.at( "DisabledWindowText" ) ) );
-        darkPalette.setColor( QPalette::Disabled, QPalette::Text,
-                              QColor( palette.at( "DisabledText" ) ) );
-        darkPalette.setColor( QPalette::Disabled, QPalette::Light,
-                              QColor( palette.at( "DisabledLight" ) ) );
-
-        if ( actualStyle == DarkWindowsStyleKey ) {
-            qApp->setStyle( QStyleFactory::create( WindowsKey ) );
-        }
-        else {
-            qApp->setStyle( QStyleFactory::create( FusionKey ) );
-        }
-
-        qApp->setPalette( darkPalette );
-        qApp->setStyleSheet( "" );
-        qApp->setFont( QFontDatabase::systemFont( QFontDatabase::GeneralFont ) );
+    if ( isDarkStyle( actualStyle ) ) {
+        applyDarkPalette( actualStyle );
     }
     else {
         qApp->setStyle( actualStyle );

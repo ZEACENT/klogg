@@ -231,6 +231,14 @@ constexpr int CaptureRetryAttemptLimit = 8;
 constexpr auto CaptureRetryInitialDelay = std::chrono::milliseconds( 25 );
 constexpr auto CaptureRetryMaximumDelay = std::chrono::milliseconds( 400 );
 
+// activate() reports nullopt only while a competing cleanup is still tearing
+// down the previous generation (a permanently unusable capture path already
+// throws from acquire()). Retrying forever on a wedged teardown would hang the
+// streaming worker thread, so the retry is bounded and escalates to an
+// exception instead.
+constexpr int CaptureActivationMaxAttempts = 100;
+constexpr auto CaptureActivationRetryDelay = std::chrono::milliseconds( 10 );
+
 class CapturePathGate {
   public:
     explicit CapturePathGate( QString gatePath )
@@ -1810,20 +1818,13 @@ CaptureStore::CaptureStore( QString captureId, QString rootPath, Limits limits )
     , limits_( sanitizeLimits( limits ) )
 {
     // Activation precedes every directory operation so cleanup can never remove
-    // a just-constructed capture between path resolution and first use. If
-    // cleanup wins after acquisition, retry against the successor generation.
-    while ( !capturePathState_ ) {
-        auto candidateState = CapturePathState::acquire( capturePath_ );
-        auto activationResult = candidateState->activate();
-        if ( !activationResult ) {
-            continue;
-        }
-        capturePathState_ = std::move( candidateState );
-        capturePathActivationToken_
-            = std::move( activationResult->activationToken );
-        inheritedCaptureFiles_
-            = std::move( activationResult->inheritedCaptureFiles );
-    }
+    // a just-constructed capture between path resolution and first use. If a
+    // competing cleanup wins after acquisition, retry (bounded) against the
+    // successor generation.
+    auto activePath = activateCapturePathState();
+    capturePathState_ = std::move( activePath.state );
+    capturePathActivationToken_ = std::move( activePath.activationToken );
+    inheritedCaptureFiles_ = std::move( activePath.inheritedCaptureFiles );
     try {
         ensureCaptureDir( false );
         synchronizeSegmentIdsWithDisk();
@@ -2468,12 +2469,6 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
     return true;
 }
 
-void CaptureStore::setOutputFlushedCallback( std::function<void()> callback )
-{
-    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    outputFlushedCallback_ = std::move( callback );
-}
-
 void CaptureStore::setLimits( Limits limits )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
@@ -2982,6 +2977,23 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
     }
 }
 
+CaptureStore::ActiveCapturePath CaptureStore::activateCapturePathState()
+{
+    for ( int attempt = 0; attempt < CaptureActivationMaxAttempts; ++attempt ) {
+        auto candidateState = CapturePathState::acquire( capturePath_ );
+        auto activationResult = candidateState->activate();
+        if ( activationResult ) {
+            return { std::move( candidateState ),
+                     std::move( activationResult->activationToken ),
+                     std::move( activationResult->inheritedCaptureFiles ) };
+        }
+        // A competing cleanup is still tearing down the previous generation;
+        // give it time to finalize before retrying against its successor.
+        std::this_thread::sleep_for( CaptureActivationRetryDelay );
+    }
+    throw std::runtime_error( "Capture directory generation was removed" );
+}
+
 void CaptureStore::ensureCaptureDir( bool startsReplacement )
 {
     if ( capturePathState_->isTerminallyRemoved() ) {
@@ -2989,24 +3001,17 @@ void CaptureStore::ensureCaptureDir( bool startsReplacement )
             throw std::runtime_error( "Capture directory generation was removed" );
         }
 
-        while ( true ) {
-            auto replacementState = CapturePathState::acquire( capturePath_ );
-            auto activationResult = replacementState->activate();
-            if ( !activationResult ) {
-                continue;
-            }
-            auto previousState = std::move( capturePathState_ );
-            auto previousActivationToken
-                = std::move( capturePathActivationToken_ );
-            capturePathState_ = std::move( replacementState );
-            capturePathActivationToken_
-                = std::move( activationResult->activationToken );
-            inheritedCaptureFiles_
-                = std::move( activationResult->inheritedCaptureFiles );
-            reservedSegmentIds_.clear();
-            previousState->deactivate( previousActivationToken );
-            break;
-        }
+        auto activePath = activateCapturePathState();
+        auto previousState = std::move( capturePathState_ );
+        auto previousActivationToken
+            = std::move( capturePathActivationToken_ );
+        capturePathState_ = std::move( activePath.state );
+        capturePathActivationToken_
+            = std::move( activePath.activationToken );
+        inheritedCaptureFiles_
+            = std::move( activePath.inheritedCaptureFiles );
+        reservedSegmentIds_.clear();
+        previousState->deactivate( previousActivationToken );
     }
     capturePathState_->ensureDirectory( startsReplacement );
 }
@@ -3400,9 +3405,6 @@ void CaptureStore::flushOutputIfNeeded()
             return;
         }
         resetOutputFlushCounters();
-        if ( outputFlushedCallback_ ) {
-            outputFlushedCallback_();
-        }
     }
 }
 

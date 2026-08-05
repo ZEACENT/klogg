@@ -217,11 +217,14 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
 
     // FreshSave truncates the destination and replays the current capture
     // (user-initiated "Save As" — overwrite was already confirmed by the
-    // dialog). Restore opens the destination append-only and never replays, so
-    // content already streamed to the file survives a restart even when the
-    // volatile capture (OS temp dir) has been cleared and would otherwise
-    // rewrite the file empty.
-    const bool preserveExisting = ( mode == OutputBindMode::Restore );
+    // dialog). Restore opens the destination append-only so content already
+    // streamed to the file survives a restart even when the volatile capture
+    // (OS temp dir) has been cleared. If the destination is gone (moved or
+    // deleted while klogg was closed) but the capture still reloaded, fall back
+    // to the fresh replay path so the rebuilt file carries the restored history
+    // instead of starting empty.
+    const bool preserveExisting
+        = ( mode == OutputBindMode::Restore ) && QFileInfo::exists( outputPath );
 
     bool result = false;
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {

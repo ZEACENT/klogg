@@ -95,7 +95,6 @@ class CaptureStore {
     // opened append-only and the current capture is NOT replayed into it, so
     // previously streamed content already on disk is kept (session restore).
     bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
-    void setOutputFlushedCallback( std::function<void()> callback );
     void setLimits( Limits limits );
     QString boundOutputFile() const;
     QString captureId() const;
@@ -164,6 +163,16 @@ class CaptureStore {
     QString capturePathIdentity() const;
     void commitLine( const QByteArray& lineBytes, bool terminated );
     void commitLines( const AppendResult& appendResult );
+    struct ActiveCapturePath {
+        std::shared_ptr<CapturePathState> state;
+        QByteArray activationToken;
+        QSet<QString> inheritedCaptureFiles;
+    };
+    // Boundedly acquire and activate the capture path state, retrying while a
+    // competing cleanup is still tearing down the previous generation. Throws
+    // if activation cannot complete within CaptureActivationMaxAttempts so a
+    // wedged teardown cannot hang the streaming worker thread.
+    ActiveCapturePath activateCapturePathState();
     void ensureCaptureDir( bool startsReplacement = true );
     bool needsNewSegment() const;
     void ensureSegmentIdsAvailable( const AppendResult& appendResult,
@@ -211,7 +220,6 @@ class CaptureStore {
 
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
-    std::function<void()> outputFlushedCallback_;
     mutable std::function<void()> beforeRawSnapshotCopyCallbackForTesting_;
     mutable std::function<void()> beforeSpilledSegmentReadCallbackForTesting_;
     std::function<void()> afterCaptureFilesRetiredCallbackForTesting_;

@@ -211,7 +211,9 @@ LineNumber CrawlerWidget::getTopLine() const
 
 QString CrawlerWidget::getSelectedText() const
 {
-    if ( filteredView_->hasFocus() )
+    // filteredView_ is nulled when its tab is closed (filteredViewDestroyed);
+    // when the filtered view is gone the focus can only be on the main view.
+    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
         return filteredView_->getSelectedText();
     else
         return logMainView_->getSelectedText();
@@ -219,7 +221,7 @@ QString CrawlerWidget::getSelectedText() const
 
 bool CrawlerWidget::isPartialSelection() const
 {
-    if ( filteredView_->hasFocus() )
+    if ( filteredView_ != nullptr && filteredView_->hasFocus() )
         return filteredView_->isPartialSelection();
     else
         return logMainView_->isPartialSelection();

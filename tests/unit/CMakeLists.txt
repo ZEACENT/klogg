@@ -16,6 +16,7 @@ add_executable(klogg_tests
     linepositionarray_test.cpp
     mergefileorder_test.cpp
     overview_test.cpp
+    optionsdialog_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     qt_event_queue_test.cpp
