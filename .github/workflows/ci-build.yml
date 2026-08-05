@@ -634,7 +634,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ${{ matrix.config.label }}-ccache-v1-${{ github.ref }}
+          # Cache keys are immutable; a constant key (e.g. ...-${{ github.ref }})
+          # would make save silently skip after the first push and every PR would
+          # restore that first, forever-stale cache. run_id keeps each master push
+          # refreshing, while the stable label-ccache-v1- restore-keys prefix still
+          # picks the most recent entry on PR restore.
+          key: ${{ matrix.config.label }}-ccache-v1-${{ github.run_id }}
 
       - name: Verify ASan-instrumented test binaries
         if: ${{ matrix.config.sanitizer == 'address' }}

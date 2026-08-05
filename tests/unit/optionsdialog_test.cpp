@@ -21,12 +21,39 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDialogButtonBox>
 #include <QLabel>
 
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
 #include "styles.h"
+
+namespace {
+// Restore the process-wide Configuration when the test ends. Catch2 aborts a
+// test by throwing, so a manual restore at the end of the case would be skipped
+// on a REQUIRE failure and leak the modified global state into later tests.
+class ConfigurationScope {
+  public:
+    ConfigurationScope()
+        : style_( Configuration::getSynced().style() )
+        , themeMode_( Configuration::getSynced().themeMode() )
+    {
+    }
+    ~ConfigurationScope()
+    {
+        Configuration::get().setStyle( style_ );
+        Configuration::get().setThemeMode( themeMode_ );
+    }
+
+    ConfigurationScope( const ConfigurationScope& ) = delete;
+    ConfigurationScope& operator=( const ConfigurationScope& ) = delete;
+
+  private:
+    QString style_;
+    ThemeMode themeMode_;
+};
+} // namespace
 
 TEST_CASE( "Theme mode selector is disabled for the fixed Classic Dark style" )
 {
@@ -180,11 +207,11 @@ TEST_CASE( "Dialog initialized with Classic Dark shows the theme mode pinned to 
 
     // Open the dialog as if the user had saved Classic Dark + Auto: the theme
     // selector must present itself pinned to Dark, not as the saved Auto mode.
-    // Preserve the process-wide configuration so the test does not leak state.
-    // Use get() for the writes: getSynced() reloads from disk on every call, so
-    // a second getSynced() would discard the first setStyle().
-    const auto previousStyle = Configuration::getSynced().style();
-    const auto previousThemeMode = Configuration::getSynced().themeMode();
+    // The scope guard restores the process-wide configuration on stack
+    // unwinding (including a REQUIRE abort); get() is used for the writes
+    // because getSynced() reloads from disk on every call and a second
+    // getSynced() would discard the first setStyle().
+    ConfigurationScope configScope;
     Configuration::get().setStyle( StyleManager::DarkStyleKey );
     Configuration::get().setThemeMode( ThemeMode::Auto );
 
@@ -217,7 +244,52 @@ TEST_CASE( "Dialog initialized with Classic Dark shows the theme mode pinned to 
         REQUIRE( themeCombo->isEnabled() );
         REQUIRE( themeCombo->currentData() == static_cast<int>( ThemeMode::Auto ) );
     }
+    // configScope destructor restores the previous style/theme-mode.
+}
 
-    Configuration::get().setStyle( previousStyle );
-    Configuration::get().setThemeMode( previousThemeMode );
+TEST_CASE( "Applying the dialog while Classic Dark is pinned preserves the pre-pin theme mode" )
+{
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+    ConfigurationScope configScope;
+
+    // Deterministic start: saved as Classic Dark + Auto, so the dialog opens
+    // with the selector pinned to Dark and Auto remembered for later restore.
+    // Applying without leaving Classic Dark must persist Auto, not the pinned
+    // Dark. (A style switch would also work but sets restartAppMessage, whose
+    // modal QMessageBox would block the offscreen test.)
+    Configuration::get().setStyle( StyleManager::DarkStyleKey );
+    Configuration::get().setThemeMode( ThemeMode::Auto );
+
+    OptionsDialog dialog;
+    dialog.show();
+
+    auto* styleCombo
+        = dialog.findChild<QComboBox*>( QStringLiteral( "styleComboBox" ) );
+    auto* themeCombo
+        = dialog.findChild<QComboBox*>( QStringLiteral( "themeModeComboBox" ) );
+    auto* buttonBox
+        = dialog.findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
+    REQUIRE( styleCombo != nullptr );
+    REQUIRE( themeCombo != nullptr );
+    REQUIRE( buttonBox != nullptr );
+
+    const int darkStyleIndex = styleCombo->findData( StyleManager::DarkStyleKey );
+    const int autoModeIndex = themeCombo->findData( static_cast<int>( ThemeMode::Auto ) );
+    REQUIRE( darkStyleIndex != -1 );
+    REQUIRE( autoModeIndex != -1 );
+
+    // Dialog initialized with Classic Dark + Auto: selector pinned to Dark.
+    REQUIRE( styleCombo->currentData() == StyleManager::DarkStyleKey );
+    REQUIRE_FALSE( themeCombo->isEnabled() );
+    REQUIRE( themeCombo->currentData() == static_cast<int>( ThemeMode::Dark ) );
+
+    auto* applyButton = buttonBox->button( QDialogButtonBox::Apply );
+    REQUIRE( applyButton != nullptr );
+    applyButton->click();
+
+    // The persisted theme mode must be the pre-pin Auto, not the pinned Dark,
+    // so switching away from Classic Dark later can restore the original mode.
+    REQUIRE( Configuration::get().style() == StyleManager::DarkStyleKey );
+    REQUIRE( Configuration::get().themeMode() == ThemeMode::Auto );
 }

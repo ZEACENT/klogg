@@ -1196,8 +1196,16 @@ void OptionsDialog::updateConfigFromDialog()
 
     config.setStyle( selectedStyle );
     
-    // Theme mode
-    const auto themeMode = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+    // Theme mode: while Classic Dark is active the selector is pinned to Dark,
+    // so persist the mode the user selected before the pin (themeModeRestore_)
+    // rather than the disabled selector's value. Otherwise an Apply/OK while
+    // Classic Dark is selected would silently rewrite Auto/Light to Dark and a
+    // later switch away from Classic Dark could never restore the earlier mode.
+    const auto selectedThemeMode
+        = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+    const auto themeMode = themeModePinnedToDark_ && themeModeRestore_
+                               ? *themeModeRestore_
+                               : selectedThemeMode;
     const bool themeModeChanged = config.themeMode() != themeMode;
     config.setThemeMode( themeMode );
     

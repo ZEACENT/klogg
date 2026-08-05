@@ -1,5 +1,5 @@
 name: "Prepare klogg version env var"
-description: ""
+description: "Compute the CalVer-style KLOGG_VERSION (YY.MM.DD.BUILD_NUMBER) from the build date and run number, and export it to the job environment."
 runs:
   using: "composite"
   steps:
