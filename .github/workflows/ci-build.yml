@@ -234,10 +234,21 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+      - name: Package Boost artifact
+        shell: bash
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          # Store boost as a single tarball rather than the ~200k-file tree:
+          # download-artifact@v4 intermittently fails to extract zip64
+          # archives with many tiny files (observed on the macOS legs),
+          # silently leaving an empty path while reporting success. A
+          # single-file artifact extracts reliably and tar is deterministic.
+          tar -czf "$PREFETCH_ROOT/boost.tar.gz" -C "$PREFETCH_ROOT/boost" .
+
       - uses: actions/upload-artifact@v4
         with:
           name: boost-root
-          path: prefetch_artifacts/boost
+          path: prefetch_artifacts/boost.tar.gz
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
@@ -803,7 +814,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: boost-root
-          path: ${{ github.workspace }}/3rdparty/boost
+          path: ${{ github.workspace }}
+
+      - name: Extract Boost artifact
+        shell: sh
+        run: |
+          BOOST_ROOT="${{ github.workspace }}/3rdparty/boost"
+          rm -rf "$BOOST_ROOT"
+          mkdir -p "$BOOST_ROOT"
+          tar -xzf "${{ github.workspace }}/boost.tar.gz" -C "$BOOST_ROOT"
 
       - name: Require prefetched dependency artifacts
         shell: sh
@@ -980,12 +999,22 @@ jobs:
         shell: sh
         run: |
           echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ matrix.config.arch }}\bin" >> $GITHUB_ENV
-          echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV 
+          echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV
 
       - uses: actions/download-artifact@v4
         with:
           name: boost-root
-          path: ${{ github.workspace }}/3rdparty/boost
+          path: ${{ github.workspace }}
+
+      - name: Extract Boost artifact
+        shell: pwsh
+        run: |
+          # Forward slashes keep bsdtar's -C handling unambiguous on Windows.
+          $boostArchive = (Join-Path $env:GITHUB_WORKSPACE "boost.tar.gz").Replace("\", "/")
+          $boostRoot = (Join-Path $env:GITHUB_WORKSPACE "3rdparty/boost").Replace("\", "/")
+          if (Test-Path $boostRoot) { Remove-Item -Recurse -Force $boostRoot }
+          New-Item -ItemType Directory -Force -Path $boostRoot | Out-Null
+          tar -xzf $boostArchive -C $boostRoot
 
       - name: Require prefetched dependency artifacts
         shell: sh
