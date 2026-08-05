@@ -41,6 +41,12 @@ class RollingFileManager {
     // More reliable than comparing currentFileSize() before/after a write, which
     // misses rotations that leave the new file at least as large as the old one.
     bool rotated() const;
+    // True if the most recent open() started a brand-new file: either a
+    // truncating open, or an append that had to create a previously-missing
+    // path. Callers use this instead of their own pre-open existence check to
+    // decide whether a capture must be replayed into the file, avoiding the
+    // TOCTOU window between that check and the actual open().
+    bool openedNewFile() const;
     qint64 currentFileSize() const;
     qint64 maxFileSize() const;
     int backupCount() const;
@@ -69,6 +75,7 @@ class RollingFileManager {
     QFile currentFile_;
     qint64 currentBytes_ = 0;
     bool rotated_ = false;
+    bool openedNewFile_ = false;
 };
 
 #endif

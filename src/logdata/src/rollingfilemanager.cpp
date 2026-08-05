@@ -27,6 +27,7 @@ RollingFileManager::RollingFileManager( RollingFileManager&& other ) noexcept
     , maxFileSize_( other.maxFileSize_ )
     , backupCount_( other.backupCount_ )
     , currentBytes_( other.currentBytes_ )
+    , openedNewFile_( other.openedNewFile_ )
 {
     // Move the file handle by closing the old one and reopening in the new instance
     if ( other.currentFile_.isOpen() ) {
@@ -50,6 +51,7 @@ RollingFileManager& RollingFileManager::operator=( RollingFileManager&& other ) 
         maxFileSize_ = other.maxFileSize_;
         backupCount_ = other.backupCount_;
         currentBytes_ = other.currentBytes_;
+        openedNewFile_ = other.openedNewFile_;
         if ( other.currentFile_.isOpen() ) {
             other.currentFile_.close();
             currentFile_.setFileName( basePath_ );
@@ -97,6 +99,11 @@ bool RollingFileManager::flush()
         return currentFile_.flush();
     }
     return false;
+}
+
+bool RollingFileManager::openedNewFile() const
+{
+    return openedNewFile_;
 }
 
 qint64 RollingFileManager::write( const QByteArray& data )
@@ -290,6 +297,9 @@ void RollingFileManager::cleanupOldBackups()
 
 bool RollingFileManager::openNewFile( bool truncate )
 {
+    // Snapshot existence before opening. Append mode auto-creates a missing
+    // file, so a caller that checked existence first would race this open.
+    const auto existedBeforeOpen = QFileInfo::exists( basePath_ );
     currentFile_.setFileName( basePath_ );
     const auto mode = truncate ? ( QIODevice::WriteOnly | QIODevice::Truncate )
                                : ( QIODevice::WriteOnly | QIODevice::Append );
@@ -298,6 +308,10 @@ bool RollingFileManager::openNewFile( bool truncate )
         return false;
     }
     currentBytes_ = truncate ? 0 : currentFile_.size();
+    // A truncating open always starts a fresh file; an append only does when
+    // the path did not exist yet. Callers use this (not their own pre-open
+    // existence check) to decide whether to replay captured content.
+    openedNewFile_ = truncate || !existedBeforeOpen;
     return true;
 }
 

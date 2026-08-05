@@ -485,7 +485,11 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool pr
         return false;
     }
 
-    if ( !preserveExisting
+    // Replay only into a file this open actually created. Gating on
+    // openedNewFile() (rather than the pre-open preserveExisting flag) closes
+    // the TOCTOU window: a Restore open that found the file already missing
+    // created a new empty file, which must be seeded from the capture.
+    if ( rollingDisplayOutput_.openedNewFile()
          && !writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount() ) ) {
         closeDisplayOutputFile();
         return false;

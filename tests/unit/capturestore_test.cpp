@@ -1214,8 +1214,7 @@ TEST_CASE( "CaptureStore deferred deletion preserves a newer cross-process gener
     const auto rootPath = makeTestDir( "capturestore_deferred_generation" );
     const auto captureId = makeCaptureId();
     const auto capturePath = QDir( rootPath ).filePath( captureId );
-    const auto coordinationRoot = QDir( QDir::tempPath() ).filePath(
-        QStringLiteral( "klogg_capture_coordination" ) );
+    const auto coordinationRoot = captureCoordinationRoot();
     const auto activeMarkerFiles = [ &coordinationRoot ] {
         return QDir( coordinationRoot ).entryList(
             QStringList{ QStringLiteral( "*.active.*" ) },
@@ -1787,7 +1786,12 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
     // generous watchdog.
     REQUIRE( destructionElapsed < 4000 );
     REQUIRE( destructionFinished.load( std::memory_order_acquire ) );
-    REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
+    // The directory removal is deferred to a background retry thread, so an
+    // immediate existence check races it (it flaked under the ubsan-only leg).
+    // Mirror the sibling "deletion survives gate timeout" test and wait for the
+    // directory to actually disappear.
+    const auto captureRemovedAfterRelease = waitForMissingFile( capturePath );
+    REQUIRE( captureRemovedAfterRelease );
 }
 
 TEST_CASE( "CaptureStore removes an unlocked active marker reporting the reused current pid" )
@@ -1863,8 +1867,7 @@ TEST_CASE( "CaptureStore cleanup preserves a live foreign process marker" )
     ActiveCaptureChild child( rootPath, captureId, false );
     REQUIRE( child.startAndWaitUntilReady() );
     REQUIRE( QFileInfo::exists( capturePath ) );
-    const auto coordinationRoot = QDir( QDir::tempPath() ).filePath(
-        QStringLiteral( "klogg_capture_coordination" ) );
+    const auto coordinationRoot = captureCoordinationRoot();
     const auto childMarkers = QDir( coordinationRoot ).entryList(
         QStringList{ QStringLiteral( "*.active.%1" ).arg( child.processId() ) },
         QDir::Files | QDir::Hidden, QDir::NoSort );
