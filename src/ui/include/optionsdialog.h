@@ -46,6 +46,8 @@
 #include <QLabel>
 #include <QPushButton>
 
+#include <optional>
+
 #include "configuration.h"
 
 #include "ui_optionsdialog.h"
@@ -140,6 +142,13 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
 
     QColor mainSearchColor_;
     QColor qfSearchColor_;
+
+    // While "Classic Dark" is selected the theme-mode selector is pinned to
+    // Dark; this remembers the mode to restore when the style leaves Classic
+    // Dark (so e.g. Modern + Auto round-trips instead of degrading to Dark).
+    bool themeModePinnedToDark_ = false;
+    std::optional<ThemeMode> themeModeRestore_;
+
     QGroupBox* iosLogGroupBox_ = nullptr;
     QCheckBox* adbAnsiOutputCheckBox_ = nullptr;
     QLineEdit* iosLogExecutableLineEdit_ = nullptr;

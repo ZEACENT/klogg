@@ -222,6 +222,34 @@ void OptionsDialog::updateThemeModeAvailability()
 {
     const bool classicDark
         = styleComboBox->currentData() == StyleManager::DarkStyleKey;
+
+    if ( classicDark && !themeModePinnedToDark_ ) {
+        // Entering Classic Dark: remember the theme-mode the user had selected
+        // so it can be restored when leaving, then pin the selector to Dark.
+        // An inherently dark style makes the mode selector a no-op, and leaving
+        // it showing e.g. "Auto" is confusing.
+        themeModeRestore_
+            = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+        const int darkModeIndex
+            = themeModeComboBox->findData( static_cast<int>( ThemeMode::Dark ) );
+        if ( darkModeIndex != -1 ) {
+            themeModeComboBox->setCurrentIndex( darkModeIndex );
+        }
+        themeModePinnedToDark_ = true;
+    }
+    else if ( !classicDark && themeModePinnedToDark_ ) {
+        // Leaving Classic Dark: restore the theme-mode selected before it.
+        themeModePinnedToDark_ = false;
+        if ( themeModeRestore_ ) {
+            const int restoreIndex
+                = themeModeComboBox->findData( static_cast<int>( *themeModeRestore_ ) );
+            if ( restoreIndex != -1 ) {
+                themeModeComboBox->setCurrentIndex( restoreIndex );
+            }
+            themeModeRestore_.reset();
+        }
+    }
+
     themeModeComboBox->setEnabled( !classicDark );
     themeModeLabel->setEnabled( !classicDark );
     themeModeHintLabel->setVisible( classicDark );
@@ -667,11 +695,9 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     }
     languageComboBox->setCurrentIndex( langIdx );
 
-    const auto style = config.style();
-    const int styleIndex = styleComboBox->findData( style );
-    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
-
-    // Theme mode
+    // Theme mode is set before the style: selecting Classic Dark pins the theme
+    // selector to Dark via the style combo's change handler, which must read
+    // the configured mode here rather than the pre-init default.
     const auto themeMode = config.themeMode();
     const int themeModeIndex = themeModeComboBox->findData( static_cast<int>( themeMode ) );
     if ( themeModeIndex != -1 ) {
@@ -680,6 +706,10 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     else {
         themeModeComboBox->setCurrentIndex( 2 ); // Default to Auto
     }
+
+    const auto style = config.style();
+    const int styleIndex = styleComboBox->findData( style );
+    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
 
     // Reflect the saved style in the theme-selector availability (the style
     // combo's own index change already fires the handler, but not when the
