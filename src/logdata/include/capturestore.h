@@ -19,6 +19,11 @@
 #include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
+// Directory that gates capture-path ownership across klogg processes
+// (active-store markers + QLockFile stems). Per-user so a different local user
+// cannot pre-create or redirect it; see captureCoordinationRoot().
+QString captureCoordinationRoot();
+
 class CaptureStore {
     struct CapturePathState;
     struct SpilledSegmentFile;

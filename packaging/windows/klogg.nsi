@@ -73,7 +73,6 @@ Section "klogg" klogg
     File release\klogg.exe
 !if ${PLATFORM} == "x64"
     File release\klogg_crashpad_handler.exe
-    File release\klogg_minidump_dump.exe
 !endif
     File release\tbb12.dll
 
@@ -191,7 +190,6 @@ Section "Uninstall"
 
     Delete "$INSTDIR\klogg.exe"
     Delete "$INSTDIR\klogg_crashpad_handler.exe"
-    Delete "$INSTDIR\klogg_minidump_dump.exe"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\COPYING"
     Delete "$INSTDIR\NOTICE"

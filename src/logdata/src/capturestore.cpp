@@ -23,6 +23,7 @@
 #include <QHash>
 #include <QLockFile>
 #include <QSaveFile>
+#include <QStandardPaths>
 #include <QUuid>
 
 #if defined( Q_OS_WIN )
@@ -156,27 +157,6 @@ QString capturePathForId( const QString& rootPath, const QString& captureId )
 QString lexicalCapturePath( const QString& path )
 {
     return QDir::cleanPath( QFileInfo( path ).absoluteFilePath() );
-}
-
-QString captureCoordinationRoot()
-{
-    const auto root = QDir( QDir::tempPath() ).filePath(
-        QStringLiteral( "klogg_capture_coordination" ) );
-    if ( !QDir{}.mkpath( root ) ) {
-        return {};
-    }
-    const QFileInfo rootInfo( root );
-    if ( rootInfo.isSymLink() || !rootInfo.isDir() ) {
-        return {};
-    }
-#if !defined( Q_OS_WIN )
-    if ( !QFile::setPermissions( root, QFileDevice::ReadOwner
-                                          | QFileDevice::WriteOwner
-                                          | QFileDevice::ExeOwner ) ) {
-        return {};
-    }
-#endif
-    return QDir::cleanPath( rootInfo.absoluteFilePath() );
 }
 
 QString captureCoordinationStem( const QString& directoryIdentity )
@@ -353,6 +333,36 @@ class CaptureBackgroundThreadRegistration {
 };
 
 } // namespace
+
+QString captureCoordinationRoot()
+{
+    // Per-user, not the world-shared temp dir: the coordination markers gate
+    // capture-path ownership across processes, so another local user must not
+    // be able to pre-create or redirect them. GenericCacheLocation never
+    // depends on QCoreApplication::applicationName(), which klogg does not set.
+    const auto cacheRoot
+        = QStandardPaths::writableLocation( QStandardPaths::GenericCacheLocation );
+    if ( cacheRoot.isEmpty() ) {
+        return {};
+    }
+    const auto root = QDir( QDir( cacheRoot ).filePath( QStringLiteral( "klogg" ) ) )
+                          .filePath( QStringLiteral( "capture_coordination" ) );
+    if ( !QDir{}.mkpath( root ) ) {
+        return {};
+    }
+    const QFileInfo rootInfo( root );
+    if ( rootInfo.isSymLink() || !rootInfo.isDir() ) {
+        return {};
+    }
+#if !defined( Q_OS_WIN )
+    if ( !QFile::setPermissions( root, QFileDevice::ReadOwner
+                                          | QFileDevice::WriteOwner
+                                          | QFileDevice::ExeOwner ) ) {
+        return {};
+    }
+#endif
+    return QDir::cleanPath( rootInfo.absoluteFilePath() );
+}
 
 bool CaptureStore::isValidCaptureId( const QString& captureId )
 {
@@ -2450,7 +2460,11 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
         return false;
     }
 
-    if ( !preserveExisting ) {
+    // Replay only into a file this open actually created (see
+    // RollingFileManager::openedNewFile for the truncate-vs-missing rationale).
+    // The pre-open preserveExisting flag cannot gate this: a Restore open that
+    // found the path already gone starts a new empty file that must be seeded.
+    if ( rollingOutput_.openedNewFile() ) {
         // Write existing segments to the rolling file
         for ( const auto& segment : segments_ ) {
             if ( !writeSegmentToDevice( segment, rollingOutput_.currentFile() ) ) {

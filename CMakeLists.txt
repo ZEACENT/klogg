@@ -187,16 +187,6 @@ else()
   endif()
 endif(MSVC)
 
-if(WIN32)
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/win)
-elseif(APPLE)
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/mac)
-else()
-  set(SYMS_TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/dump_syms/linux)
-endif()
-
-message("Dump symbols tools path ${SYMS_TOOLS}")
-
 # standard compiler warnings
 # Link this 'library' to use the warnings specified in CompilerWarnings.cmake
 include(CompilerWarnings)
@@ -207,6 +197,22 @@ set_project_warnings(project_warnings)
 include(CompilerFlags)
 add_library(project_options INTERFACE)
 set_project_compile_flags(project_options)
+
+# CI sanitizer legs build RelWithDebInfo with -g1 (line tables only) instead of
+# full -g: sanitizer reports are symbolized from the symbol table plus DWARF
+# line info, so the full debug tree is unused weight that inflates compile time
+# and the ccache footprint. Enable on the CI sanitizer legs only
+# (-DKLOGG_CI_LIGHT_DEBUG=ON); release builds keep full -g unchanged.
+option(KLOGG_CI_LIGHT_DEBUG "Use -g1 instead of -g for RelWithDebInfo (CI sanitizer legs)" OFF)
+if(KLOGG_CI_LIGHT_DEBUG)
+  foreach(_klogg_lang C CXX)
+    if(CMAKE_${_klogg_lang}_FLAGS_RELWITHDEBINFO MATCHES "(^| )-g( |$)")
+      string(REGEX REPLACE "(^| )-g( |$)" "\\1-g1\\2" CMAKE_${_klogg_lang}_FLAGS_RELWITHDEBINFO "${CMAKE_${_klogg_lang}_FLAGS_RELWITHDEBINFO}")
+    else()
+      string(APPEND CMAKE_${_klogg_lang}_FLAGS_RELWITHDEBINFO " -g1")
+    endif()
+  endforeach()
+endif()
 
 if(KLOGG_PERF_MEASURE_STREAMING)
   target_compile_definitions(project_options INTERFACE KLOGG_PERF_MEASURE_STREAMING)

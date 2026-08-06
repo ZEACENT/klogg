@@ -240,3 +240,41 @@ TEST_CASE( "Live log save: forceOutputFlush preserves data integrity",
     REQUIRE( QFile::exists( outputPath ) );
     REQUIRE( QFileInfo( outputPath ).size() > 0 );
 }
+
+TEST_CASE( "RollingFileManager::openedNewFile reflects the open that created the file",
+           "[rolling][live_save]" )
+{
+    const auto rootPath = makeTestDir( "rollingfilemanager_opened_new" );
+    const auto existingPath = QDir( rootPath ).filePath( QStringLiteral( "existing.log" ) );
+    const auto missingPath = QDir( rootPath ).filePath( QStringLiteral( "missing.log" ) );
+
+    // A destination that does not exist yet: an append open auto-creates it and
+    // must report a brand-new file (this is what seeds the Restore replay path).
+    {
+        RollingFileManager fm( missingPath, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/false ) );
+        REQUIRE( fm.openedNewFile() );
+    }
+
+    // An already-existing destination opened append-only is not a new file: the
+    // caller must not replay capture content over content already on disk.
+    {
+        QFile seed( existingPath );
+        REQUIRE( seed.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        seed.write( "content" );
+        seed.close();
+
+        RollingFileManager fm( existingPath, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/false ) );
+        REQUIRE_FALSE( fm.openedNewFile() );
+        REQUIRE( fm.currentFileSize() == 7 ); // "content" preserved
+    }
+
+    // A truncating open always starts a fresh file, even when the path exists
+    // (FreshSave semantics: overwrite confirmed, capture must be replayed).
+    {
+        RollingFileManager fm( existingPath, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/true ) );
+        REQUIRE( fm.openedNewFile() );
+    }
+}

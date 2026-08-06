@@ -1,5 +1,5 @@
 name: "Set common env vars"
-description: ""
+description: "Export shared klogg build env vars (workspace, build root, arch, package tag, CMake opts, Qt version/dir) from the matrix config."
 runs:
   using: "composite"
   steps:

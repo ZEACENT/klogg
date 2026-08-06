@@ -222,6 +222,34 @@ void OptionsDialog::updateThemeModeAvailability()
 {
     const bool classicDark
         = styleComboBox->currentData() == StyleManager::DarkStyleKey;
+
+    if ( classicDark && !themeModePinnedToDark_ ) {
+        // Entering Classic Dark: remember the theme-mode the user had selected
+        // so it can be restored when leaving, then pin the selector to Dark.
+        // An inherently dark style makes the mode selector a no-op, and leaving
+        // it showing e.g. "Auto" is confusing.
+        themeModeRestore_
+            = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+        const int darkModeIndex
+            = themeModeComboBox->findData( static_cast<int>( ThemeMode::Dark ) );
+        if ( darkModeIndex != -1 ) {
+            themeModeComboBox->setCurrentIndex( darkModeIndex );
+        }
+        themeModePinnedToDark_ = true;
+    }
+    else if ( !classicDark && themeModePinnedToDark_ ) {
+        // Leaving Classic Dark: restore the theme-mode selected before it.
+        themeModePinnedToDark_ = false;
+        if ( themeModeRestore_ ) {
+            const int restoreIndex
+                = themeModeComboBox->findData( static_cast<int>( *themeModeRestore_ ) );
+            if ( restoreIndex != -1 ) {
+                themeModeComboBox->setCurrentIndex( restoreIndex );
+            }
+            themeModeRestore_.reset();
+        }
+    }
+
     themeModeComboBox->setEnabled( !classicDark );
     themeModeLabel->setEnabled( !classicDark );
     themeModeHintLabel->setVisible( classicDark );
@@ -667,11 +695,9 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     }
     languageComboBox->setCurrentIndex( langIdx );
 
-    const auto style = config.style();
-    const int styleIndex = styleComboBox->findData( style );
-    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
-
-    // Theme mode
+    // Theme mode is set before the style: selecting Classic Dark pins the theme
+    // selector to Dark via the style combo's change handler, which must read
+    // the configured mode here rather than the pre-init default.
     const auto themeMode = config.themeMode();
     const int themeModeIndex = themeModeComboBox->findData( static_cast<int>( themeMode ) );
     if ( themeModeIndex != -1 ) {
@@ -680,6 +706,10 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     else {
         themeModeComboBox->setCurrentIndex( 2 ); // Default to Auto
     }
+
+    const auto style = config.style();
+    const int styleIndex = styleComboBox->findData( style );
+    styleComboBox->setCurrentIndex( styleIndex == -1 ? 0 : styleIndex );
 
     // Reflect the saved style in the theme-selector availability (the style
     // combo's own index change already fires the handler, but not when the
@@ -1166,8 +1196,16 @@ void OptionsDialog::updateConfigFromDialog()
 
     config.setStyle( selectedStyle );
     
-    // Theme mode
-    const auto themeMode = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+    // Theme mode: while Classic Dark is active the selector is pinned to Dark,
+    // so persist the mode the user selected before the pin (themeModeRestore_)
+    // rather than the disabled selector's value. Otherwise an Apply/OK while
+    // Classic Dark is selected would silently rewrite Auto/Light to Dark and a
+    // later switch away from Classic Dark could never restore the earlier mode.
+    const auto selectedThemeMode
+        = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+    const auto themeMode = themeModePinnedToDark_ && themeModeRestore_
+                               ? *themeModeRestore_
+                               : selectedThemeMode;
     const bool themeModeChanged = config.themeMode() != themeMode;
     config.setThemeMode( themeMode );
     
@@ -1201,7 +1239,12 @@ void OptionsDialog::updateConfigFromDialog()
     config.setShortcuts( shortcuts );
 
     // update translate when accept or apply clicked
-    restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    // An empty selector (the i18n resource is unavailable, e.g. in the unit
+    // tests) has no selection to compare against; a missing selector must not
+    // demand a restart, which would otherwise block Apply on a modal warning.
+    if ( !languageComboBox->currentData().isNull() ) {
+        restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    }
     updateTranslate();
     config.setLanguage( languageComboBox->currentData().toString() );
     retranslateUi( this );
