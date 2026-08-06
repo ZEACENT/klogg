@@ -297,21 +297,35 @@ void RollingFileManager::cleanupOldBackups()
 
 bool RollingFileManager::openNewFile( bool truncate )
 {
-    // Snapshot existence before opening. Append mode auto-creates a missing
-    // file, so a caller that checked existence first would race this open.
-    const auto existedBeforeOpen = QFileInfo::exists( basePath_ );
     currentFile_.setFileName( basePath_ );
-    const auto mode = truncate ? ( QIODevice::WriteOnly | QIODevice::Truncate )
-                               : ( QIODevice::WriteOnly | QIODevice::Append );
-    if ( !currentFile_.open( mode ) ) {
+
+    // A truncating open always starts a fresh file, regardless of whether the
+    // path already exists (FreshSave semantics).
+    if ( truncate ) {
+        if ( !currentFile_.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+            LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
+            return false;
+        }
+        currentBytes_ = 0;
+        openedNewFile_ = true;
+        return true;
+    }
+
+    // Append path: decide "is this a brand-new file" atomically with the open.
+    // NewOnly (O_EXCL) succeeds only when the path did not exist, so the result
+    // cannot race a pre-open QFileInfo::exists() probe. On success the file was
+    // created by this open; on failure it pre-existed, so fall back to append.
+    if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+        currentBytes_ = 0;
+        openedNewFile_ = true;
+        return true;
+    }
+    if ( !currentFile_.open( QIODevice::WriteOnly | QIODevice::Append ) ) {
         LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
         return false;
     }
-    currentBytes_ = truncate ? 0 : currentFile_.size();
-    // A truncating open always starts a fresh file; an append only does when
-    // the path did not exist yet. Callers use this (not their own pre-open
-    // existence check) to decide whether to replay captured content.
-    openedNewFile_ = truncate || !existedBeforeOpen;
+    currentBytes_ = currentFile_.size();
+    openedNewFile_ = false;
     return true;
 }
 

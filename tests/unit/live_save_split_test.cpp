@@ -278,3 +278,47 @@ TEST_CASE( "RollingFileManager::openedNewFile reflects the open that created the
         REQUIRE( fm.openedNewFile() );
     }
 }
+
+TEST_CASE( "RollingFileManager::openedNewFile stays consistent across create/delete interleaving",
+           "[rolling][live_save]" )
+{
+    // The append path decides "new file?" atomically with the open (NewOnly
+    // first, Append fallback). Interleaving external create/delete with opens
+    // must keep the flag consistent with what the open actually saw: a created
+    // path is never reported as pre-existing, and a pre-existing path is never
+    // reported as new.
+    const auto rootPath = makeTestDir( "rollingfilemanager_interleave" );
+    const auto path = QDir( rootPath ).filePath( QStringLiteral( "interleave.log" ) );
+
+    // Delete then open: the open creates the file -> new.
+    QFile::remove( path );
+    {
+        RollingFileManager fm( path, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/false ) );
+        REQUIRE( fm.openedNewFile() );
+    }
+
+    // External create with content, then open: pre-existing -> not new, and the
+    // pre-existing content must be preserved (append, not truncate).
+    {
+        QFile seed( path );
+        REQUIRE( seed.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        seed.write( "interleaved" );
+        seed.close();
+
+        RollingFileManager fm( path, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/false ) );
+        REQUIRE_FALSE( fm.openedNewFile() );
+        REQUIRE( fm.currentFileSize() == 11 ); // "interleaved"
+    }
+
+    // Delete between manager construction and open: the open recreates the
+    // path -> new, and the old content is gone.
+    QFile::remove( path );
+    {
+        RollingFileManager fm( path, 1024, 2 );
+        REQUIRE( fm.open( /*truncate=*/false ) );
+        REQUIRE( fm.openedNewFile() );
+        REQUIRE( fm.currentFileSize() == 0 );
+    }
+}

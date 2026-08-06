@@ -190,6 +190,11 @@ Section "Uninstall"
 
     Delete "$INSTDIR\klogg.exe"
     Delete "$INSTDIR\klogg_crashpad_handler.exe"
+    ; Keep deleting the retired crash-stackwalker helper. New installs no longer
+    ; stage it (the install File line was removed), but released builds shipped
+    ; it, so uninstalling after an upgrade must still remove the stale copy or
+    ; it blocks RMDir $INSTDIR from cleaning up the install directory.
+    Delete "$INSTDIR\klogg_minidump_dump.exe"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\COPYING"
     Delete "$INSTDIR\NOTICE"

@@ -48,6 +48,11 @@ class ConfigurationScope {
         // updateConfigFromDialog() writes the language from the combo; restore
         // it too so later tests see the same process-wide configuration.
         Configuration::get().setLanguage( language_ );
+        // updateConfigFromDialog() also calls save(), persisting the test's
+        // values to the QSettings store. Persist the restored snapshot too, or
+        // a later getSynced() reloads the leaked test configuration and the
+        // suite becomes order-dependent.
+        Configuration::get().save();
     }
 
     ConfigurationScope( const ConfigurationScope& ) = delete;
@@ -304,4 +309,42 @@ TEST_CASE( "Applying the dialog while Classic Dark is pinned preserves the pre-p
     // so switching away from Classic Dark later can restore the original mode.
     REQUIRE( Configuration::get().style() == StyleManager::DarkStyleKey );
     REQUIRE( Configuration::get().themeMode() == ThemeMode::Auto );
+}
+
+TEST_CASE( "ConfigurationScope restores the persisted configuration on disk" )
+{
+    // updateConfigFromDialog() calls Configuration::save(), which writes the
+    // in-memory state to the QSettings store. ConfigurationScope must restore
+    // not just the in-memory singleton but the on-disk snapshot, otherwise a
+    // later Configuration::getSynced() (which reloads from disk on every call)
+    // observes the leaked test configuration and the suite becomes
+    // order-dependent.
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+
+    // Normalize to a known baseline first so the assertions below are
+    // deterministic regardless of what earlier tests left in the shared store.
+    Configuration::get().setStyle( StyleManager::ModernKey );
+    Configuration::get().setThemeMode( ThemeMode::Light );
+    Configuration::get().setLanguage( QStringLiteral( "baseline_lang" ) );
+    Configuration::get().save();
+
+    const auto originalStyle = Configuration::getSynced().style();
+    const auto originalThemeMode = Configuration::getSynced().themeMode();
+    const auto originalLanguage = Configuration::getSynced().language();
+
+    {
+        ConfigurationScope configScope;
+
+        // Simulate the OptionsDialog Apply path: mutate and persist.
+        Configuration::get().setStyle( StyleManager::DarkStyleKey );
+        Configuration::get().setThemeMode( ThemeMode::Auto );
+        Configuration::get().setLanguage( QStringLiteral( "test_language" ) );
+        Configuration::get().save();
+    }
+
+    // The disk-backed snapshot must be restored, not the leaked values above.
+    REQUIRE( Configuration::getSynced().style() == originalStyle );
+    REQUIRE( Configuration::getSynced().themeMode() == originalThemeMode );
+    REQUIRE( Configuration::getSynced().language() == originalLanguage );
 }
