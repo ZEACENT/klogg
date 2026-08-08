@@ -35,6 +35,20 @@ jobs:
         workflow: ci-build.yml
         run_id: ${{ github.event.inputs.ci-run-id }}
 
+    # Package artifacts are uploaded as single-file tarballs (not raw
+    # multi-file directories) to avoid GitHub's artifact backend intermittently
+    # corrupting multi-file zip64 archives ("No END header found" on extract).
+    # Restore the ./packages-*/ directory layout the steps below expect.
+    - name: Extract package tarballs
+      shell: sh
+      run: |
+        set -e
+        for t in $(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f); do
+          echo "Extracting: $t"
+          tar -xzf "$t" -C "$(dirname "$t")"
+          rm -f "$t"
+        done
+
     - name: Initialize version
       run: echo "KLOGG_VERSION=`cat klogg_version/klogg_version.txt`" >> $GITHUB_ENV
 

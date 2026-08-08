@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Catches platform-fragile patterns that pass on the developer's macOS / Linux
-build but fail on Windows CI.  Run before pushing or as a CI gate.
+build but fail in CI (Windows runners, or Linux-docker packaging).  Run before
+pushing or as a CI gate.
 
 Background: PR #12 surfaced two such patterns -- `startsWith(QLatin1Char('/'))`
 treating the leading-slash convention as portable, and `endsWith("\\adb.exe")`
@@ -887,7 +888,7 @@ def iter_target_files(paths: Iterable[Path]) -> Iterable[Path]:
     for root in paths:
         if not root.exists():
             continue
-        for ext in ("*.cpp", "*.h", "*.hpp", "*.cc"):
+        for ext in ("*.cpp", "*.h", "*.hpp", "*.cc", "*.yml", "*.yaml"):
             yield from root.rglob(ext)
 
 
@@ -901,8 +902,60 @@ def iter_staged_files() -> Iterable[Path]:
     for raw in out.splitlines():
         if not raw.strip():
             continue
-        if raw.endswith((".cpp", ".h", ".hpp", ".cc")):
+        if raw.endswith((".cpp", ".h", ".hpp", ".cc", ".yml", ".yaml")):
             yield Path(raw)
+
+
+def _check_ci_tarball_into_build_root(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag workflow/action YAML that writes package tarballs into
+    ``$KLOGG_BUILD_ROOT``.
+
+    PR #54's package-upload tarball step wrote the archive into the build root
+    and failed on every Linux leg with ``tar: ... Cannot open: Permission
+    denied``. On Linux the build root is created by docker as root (build and
+    packaging steps run in containers with the workspace mounted at
+    ``/usr/local``), so the host runner cannot create files inside it. Upload
+    tarballs must be written to ``$KLOGG_WORKSPACE``, which the runner owns —
+    the ``cpm-cache.tar.gz`` prefetch already followed that rule.
+
+    Two manifestations are caught, both zero-false-positive on the current
+    tree:
+      1. An upload-artifact ``path:`` (or any path line) referencing a
+         ``.tar.gz`` under ``KLOGG_BUILD_ROOT``.
+      2. A host step that ``cd "$KLOGG_BUILD_ROOT"`` and then ``tar -czf``s a
+         file into it (the write lands in the root-owned build root).
+    Reading from the build root (e.g. ``tar ... -C "$KLOGG_BUILD_ROOT/packages"``)
+    is fine and is not flagged.
+    """
+    findings: list[tuple[int, str]] = []
+    lines = text.splitlines()
+
+    for i, line in enumerate(lines, start=1):
+        if "path:" in line and "KLOGG_BUILD_ROOT" in line and ".tar.gz" in line:
+            findings.append(
+                (
+                    i,
+                    "package tarball referenced under $KLOGG_BUILD_ROOT; that "
+                    "directory is root-owned on Linux (docker-created), so the "
+                    "host runner cannot write there. Write/upload tarballs "
+                    "from $KLOGG_WORKSPACE instead.",
+                )
+            )
+        if 'cd "$KLOGG_BUILD_ROOT"' in line:
+            for j in range(i, min(i + 15, len(lines) + 1)):
+                if "tar -czf" in lines[j - 1]:
+                    findings.append(
+                        (
+                            i,
+                            '`cd "$KLOGG_BUILD_ROOT"` followed by `tar -czf` '
+                            "writes the archive into the root-owned build root "
+                            "on Linux (docker-created); the host runner cannot "
+                            "create files there. Write the tarball into "
+                            "$KLOGG_WORKSPACE instead.",
+                        )
+                    )
+                    break
+    return findings
 
 
 def lint_file(path: Path) -> int:
@@ -911,6 +964,17 @@ def lint_file(path: Path) -> int:
     except OSError:
         return 0
     issues = 0
+
+    if path.suffix in (".yml", ".yaml"):
+        # CI workflow/action YAML has its own platform-fragile class: package
+        # uploads must not write into the docker-root-owned build root.
+        for line_num, message in _check_ci_tarball_into_build_root(text, path):
+            print(f"[platform-fragile] ci-tarball-into-build-root")
+            print(f"  at {path}:{line_num}")
+            print(f"  {message}")
+            print()
+            issues += 1
+        return issues
 
     # Single-line patterns.
     for line_num, raw in enumerate(text.splitlines(), start=1):
@@ -944,7 +1008,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--paths",
         nargs="*",
-        default=["src", "tests", "benchmarks"],
+        default=["src", "tests", "benchmarks", ".github"],
         help="Source directories to scan, relative to repo root.",
     )
     parser.add_argument(

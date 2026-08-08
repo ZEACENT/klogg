@@ -297,22 +297,55 @@ void RollingFileManager::cleanupOldBackups()
 
 bool RollingFileManager::openNewFile( bool truncate )
 {
-    // Snapshot existence before opening. Append mode auto-creates a missing
-    // file, so a caller that checked existence first would race this open.
-    const auto existedBeforeOpen = QFileInfo::exists( basePath_ );
     currentFile_.setFileName( basePath_ );
-    const auto mode = truncate ? ( QIODevice::WriteOnly | QIODevice::Truncate )
-                               : ( QIODevice::WriteOnly | QIODevice::Append );
-    if ( !currentFile_.open( mode ) ) {
-        LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
-        return false;
+
+    // A truncating open always starts a fresh file, regardless of whether the
+    // path already exists (FreshSave semantics).
+    if ( truncate ) {
+        if ( !currentFile_.open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+            LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
+            return false;
+        }
+        currentBytes_ = 0;
+        openedNewFile_ = true;
+        return true;
     }
-    currentBytes_ = truncate ? 0 : currentFile_.size();
-    // A truncating open always starts a fresh file; an append only does when
-    // the path did not exist yet. Callers use this (not their own pre-open
-    // existence check) to decide whether to replay captured content.
-    openedNewFile_ = truncate || !existedBeforeOpen;
-    return true;
+
+    // Append path: decide "is this a brand-new file" atomically with the open.
+    // NewOnly (O_EXCL) succeeds only when the path did not exist, so the result
+    // cannot race a pre-open QFileInfo::exists() probe. On success the file was
+    // created by this open.
+    if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+        currentBytes_ = 0;
+        openedNewFile_ = true;
+        return true;
+    }
+
+    // The path pre-existed (NewOnly failed with EEXIST). Append to it without
+    // creation (ExistingOnly): a plain Append would silently recreate the file
+    // if another process deleted it in the window since NewOnly failed, leaving
+    // openedNewFile_ = false for a file this open just created. Restore-mode
+    // callers gate capture replay on that flag, so the new file would be left
+    // empty and the buffered content lost.
+    if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::ExistingOnly | QIODevice::Append ) ) {
+        currentBytes_ = currentFile_.size();
+        openedNewFile_ = false;
+        return true;
+    }
+
+    // The ExistingOnly append failed, most likely because the path disappeared
+    // after NewOnly's EEXIST (deleted by another process). Recreate it
+    // atomically; the result now correctly reports a brand-new file. A second
+    // NewOnly failure means the path reappeared in the meantime (or a genuine
+    // open error) — surface it.
+    if ( currentFile_.open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+        currentBytes_ = 0;
+        openedNewFile_ = true;
+        return true;
+    }
+
+    LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
+    return false;
 }
 
 bool RollingFileManager::rotateInternal()

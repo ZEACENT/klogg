@@ -714,12 +714,28 @@ jobs:
       - uses: ./.github/actions/docker-package
         if: ${{ matrix.config.package != false }}
 
+# Package artifacts are uploaded as a single-file tarball, not the raw
+# multi-file directory. GitHub's artifact backend intermittently corrupts
+# multi-file zip64 archives ("No END header found" on extract, silent-empty
+# on macOS) — same failure class as the boost-root artifact flake (fe4859ca). Each package dir
+# is pre-packed into one tarball; the release/continuous jobs untar it back
+# into the expected directory layout after download.
+      - name: Package tarball for upload
+        if: ${{ matrix.config.package != false }}
+        shell: sh
+        run: |
+          # Write the tarball into $KLOGG_WORKSPACE (runner-owned), not
+          # $KLOGG_BUILD_ROOT: on Linux the build root is created by docker as
+          # root, so the host runner cannot create files inside it.
+          [ -n "$(find "$KLOGG_BUILD_ROOT/packages" -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
+          tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
+
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
   Mac:
@@ -892,11 +908,24 @@ jobs:
         #   notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
         #   notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
+# Upload packages as a single-file tarball to avoid GitHub's artifact backend
+# intermittently corrupting multi-file zip64 archives (the .app/.dSym tree
+# pushes this artifact over the corruption threshold — same class as fe4859ca).
+      - name: Package tarball for upload
+        if: ${{ matrix.config.package != false }}
+        shell: sh
+        run: |
+          # Write the tarball into $KLOGG_WORKSPACE (runner-owned), not
+          # $KLOGG_BUILD_ROOT: on Linux the build root is created by docker as
+          # root, so the host runner cannot create files inside it.
+          [ -n "$(find "$KLOGG_BUILD_ROOT/packages" -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
+          tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
+
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: warn
 
   Windows:
@@ -1259,12 +1288,30 @@ jobs:
           $script = Join-Path $env:GITHUB_WORKSPACE "packaging\windows\verify_ssl.ps1"
           & $script -ReleaseDir $releaseDir -QtVersion $env:KLOGG_QT
 
+# Upload packages as a single-file tarball to avoid GitHub's artifact backend
+# intermittently corrupting multi-file zip64 archives (same class as fe4859ca).
+      - name: Package tarball for upload
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
+        shell: pwsh
+        run: |
+          $tarName = "packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz"
+          # bsdtar's -C is unhappy with backslash paths; use forward slashes.
+          $pkgDir = (Join-Path $env:KLOGG_BUILD_ROOT "packages").Replace("\", "/")
+          # Write into $KLOGG_WORKSPACE (runner-owned): on Linux the build root
+          # is created by docker as root, so the host runner cannot write there.
+          $tarPath = (Join-Path $env:KLOGG_WORKSPACE $tarName).Replace("\", "/")
+          if (-not (Get-ChildItem -Path $pkgDir -Force | Select-Object -First 1)) {
+            Write-Error "packages directory is empty: $pkgDir"
+            exit 1
+          }
+          tar -czf $tarPath -C $pkgDir .
+
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
         if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
   ci-gate:
@@ -1321,6 +1368,18 @@ jobs:
         with:
           pattern: packages-*
           path: ./packages-all
+
+      # Package artifacts are uploaded as single-file tarballs; restore the
+      # per-artifact directory layout the cleanup below expects.
+      - name: Extract package tarballs
+        shell: sh
+        run: |
+          set -e
+          for t in $(find ./packages-all -name 'packages-*.tar.gz' -type f); do
+            echo "Extracting: $t"
+            tar -xzf "$t" -C "$(dirname "$t")"
+            rm -f "$t"
+          done
 
       - name: Clean up package artifacts
         shell: sh
