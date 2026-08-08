@@ -536,9 +536,18 @@ jobs:
         if: ${{ matrix.config.sanitizer == 'thread' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # DOCKER_BUILD_SUMMARY=0 (env on both build-push steps below) stops
+      # docker/build-push-action from uploading the per-leg
+      # "<owner>~<repo>~<id>.dockerbuild" build-record/provenance artifact.
+      # Those records are never consumed here, and because they are not zips
+      # they broke the unfiltered cross-run download in ci-release (run
+      # 31241902650, "No END header found"). The ci-release download is now
+      # name-filtered as well; this removes the useless artifact at the source.
       - name: Build cached TSan Qt container
         if: ${{ matrix.config.sanitizer == 'thread' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_SUMMARY: "0"
         with:
           context: ${{ matrix.config.container_root }}
           load: true
@@ -553,6 +562,8 @@ jobs:
       - name: Build cached Linux container
         if: ${{ matrix.config.sanitizer != 'thread' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_SUMMARY: "0"
         with:
           context: ${{ matrix.config.container_root }}
           load: true
@@ -796,7 +807,11 @@ jobs:
             arch: x64
             label: intel-qt6-first-party-tsan
             package_tag: tsan
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            # KLOGG_CI_LIGHT_DEBUG=ON (-g1 instead of -g): same treatment as the
+            # asan-ubsan leg and the Linux tsan leg. Line tables suffice to
+            # symbolize TSan reports, and the smaller DWARF shrinks both compile
+            # time (vectorscan dominates) and the ccache entry footprint.
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: thread
             package: false
 
@@ -825,7 +840,24 @@ jobs:
 
       - name: Brew deps
         run: |
-          brew install ragel
+          # ccache is a build dep on macOS too: the sanitizer legs rebuild
+          # vectorscan + tbb + kf5archive from source (all pinned third-party
+          # deps) on every run, which the run-31240298189 timeline shows is
+          # the critical path (~11 min of a 27-30 min build). A warm ccache
+          # collapses that to near zero. brew install is idempotent and fast
+          # (~1s) when the formula is already present.
+          brew install ragel ccache
+
+      - name: Restore ccache for the macOS build
+        id: restore-ccache
+        uses: actions/cache/restore@v4
+        with:
+          # Same keying strategy as the Linux legs: stable label key +
+          # restore-keys prefix so a PR restores master's warm cache, and the
+          # run_id-suffixed save key refreshes it on master pushes only.
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ matrix.config.label }}-ccache-v1
+          restore-keys: ${{ matrix.config.label }}-ccache-v1-
 
       - uses: actions/download-artifact@v4
         with:
@@ -862,6 +894,17 @@ jobs:
           # all of which support AVX2 / NEON.  Use GENERIC_CPU=OFF to enable
           # hardware-specific optimizations (AVX2 for Intel, NEON for ARM64).
           echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=OFF -DKLOGG_USE_SENTRY=OFF -DCMAKE_INSTALL_PREFIX=/usr -DFETCHCONTENT_FULLY_DISCONNECTED=ON ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
+
+      - name: Enable ccache compiler launcher
+        shell: sh
+        run: |
+          # Same pattern as the Linux legs (see "Enable ccache compiler
+          # launcher" there). CCACHE_BASEDIR strips the workspace prefix from
+          # debug info so a cache entry restored under a different runner
+          # workspace path still hits.
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
       
       - name: Set sanitizer env
         if: ${{ matrix.config.sanitizer }}
@@ -874,6 +917,20 @@ jobs:
           echo "TSAN_OPTIONS=halt_on_error=1" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-build
+
+      - name: Show ccache statistics
+        shell: sh
+        run: ccache -s 2>/dev/null || echo "ccache stats unavailable"
+
+      - name: Save ccache for the macOS build
+        if: ${{ success() && github.event_name == 'push' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # run_id-suffixed save key (same as Linux): refreshes the shared
+          # cache on each master push while the label-ccache-v1- restore-keys
+          # prefix keeps PR restores hitting the most recent master entry.
+          key: ${{ matrix.config.label }}-ccache-v1-${{ github.run_id }}
 
       - name: Verify ASan/UBSan-instrumented test binaries
         if: ${{ matrix.config.sanitizer == 'address-undefined' }}
