@@ -27,6 +27,15 @@ jobs:
         workflow: ci-build.yml
         workflow_conclusion: success
         check_artifacts: true
+        # Download only the artifacts the release consumes. Without a filter,
+        # dawidd6 downloads ALL run artifacts, including the
+        # "<owner>~<repo>~<id>.dockerbuild" build records that
+        # docker/build-push-action uploads alongside the docker `type=gha`
+        # cache (added in 1ddee61d). Those are gzipped OCI tarballs, not
+        # zips, so dawidd6's unzip step fails the release with "Invalid or
+        # unsupported zip format. No END header found" (run 31241902650).
+        name: '^(packages-.*|klogg_version)$'
+        name_is_regexp: true
 
     - name: Download artifacts for CI workflow with provided run id
       if: ${{ github.event.inputs.ci-run-id }}
@@ -34,6 +43,9 @@ jobs:
       with:
         workflow: ci-build.yml
         run_id: ${{ github.event.inputs.ci-run-id }}
+        # Same filter as the default-path download above; keep both in sync.
+        name: '^(packages-.*|klogg_version)$'
+        name_is_regexp: true
 
     # Package artifacts are uploaded as single-file tarballs (not raw
     # multi-file directories) to avoid GitHub's artifact backend intermittently

@@ -958,6 +958,69 @@ def _check_ci_tarball_into_build_root(text: str, path: Path) -> list[tuple[int, 
     return findings
 
 
+def _check_unfiltered_cross_run_artifact_download(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag workflow YAML steps that download artifacts from another workflow
+    run without restricting which artifacts they fetch.
+
+    Release run 31241902650 failed with "Invalid or unsupported zip format.
+    No END header found" because ci-release.yml used
+    dawidd6/action-download-artifact with no ``name`` filter, so it pulled
+    every artifact of the source CI run. Since 1ddee61d added docker
+    ``type=gha`` layer caching, docker/build-push-action also uploads a
+    ``<owner>~<repo>~<id>.dockerbuild`` build-record artifact per build leg;
+    those are gzipped OCI tarballs, not zips, and dawidd6 aborts when its
+    unzip step reaches one.
+
+    Any cross-run download step (``workflow:`` / ``run_id:`` inputs — i.e. it
+    can see artifacts produced by OTHER jobs, not just the current one) must
+    set an explicit artifact selector:
+      - dawidd6/action-download-artifact: ``name:`` (optionally with
+        ``name_is_regexp: true``)
+      - actions/download-artifact@v4: ``name:`` or ``pattern:``
+    """
+    findings: list[tuple[int, str]] = []
+    lines = text.splitlines()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "uses:" in line and (
+            "dawidd6/action-download-artifact" in line
+            or "actions/download-artifact" in line
+        ):
+            # Scan the step block (until the next step or a dedent to column 0)
+            # for a cross-run marker and for an artifact selector.
+            block: list[str] = []
+            j = i + 1
+            while j < len(lines) and not (
+                lines[j].lstrip().startswith("- ")
+                and (len(lines[j]) - len(lines[j].lstrip())) <= 6
+            ):
+                block.append(lines[j])
+                j += 1
+            joined = "\n".join(block)
+            cross_run = "workflow:" in joined or "run_id:" in joined
+            has_selector = any(
+                b.lstrip().startswith(("name:", "pattern:")) for b in block
+            )
+            if cross_run and not has_selector:
+                findings.append(
+                    (
+                        i + 1,
+                        "cross-run artifact download without a name:/pattern: "
+                        "filter fetches every artifact of the source run, "
+                        "including docker/build-push-action *.dockerbuild "
+                        "build records (not zips), which breaks the unzip "
+                        "step (release run 31241902650). Add a restrictive "
+                        "name:/pattern: filter.",
+                    )
+                )
+            i = j
+        else:
+            i += 1
+    return findings
+
+
 def lint_file(path: Path) -> int:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -967,13 +1030,21 @@ def lint_file(path: Path) -> int:
 
     if path.suffix in (".yml", ".yaml"):
         # CI workflow/action YAML has its own platform-fragile class: package
-        # uploads must not write into the docker-root-owned build root.
-        for line_num, message in _check_ci_tarball_into_build_root(text, path):
-            print(f"[platform-fragile] ci-tarball-into-build-root")
-            print(f"  at {path}:{line_num}")
-            print(f"  {message}")
-            print()
-            issues += 1
+        # uploads must not write into the docker-root-owned build root, and
+        # cross-run artifact downloads must be name-filtered.
+        for rule_name, check in (
+            ("ci-tarball-into-build-root", _check_ci_tarball_into_build_root),
+            (
+                "unfiltered-cross-run-artifact-download",
+                _check_unfiltered_cross_run_artifact_download,
+            ),
+        ):
+            for line_num, message in check(text, path):
+                print(f"[platform-fragile] {rule_name}")
+                print(f"  at {path}:{line_num}")
+                print(f"  {message}")
+                print()
+                issues += 1
         return issues
 
     # Single-line patterns.
