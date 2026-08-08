@@ -724,16 +724,18 @@ jobs:
         if: ${{ matrix.config.package != false }}
         shell: sh
         run: |
-          cd "$KLOGG_BUILD_ROOT"
-          [ -n "$(find ./packages -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
-          tar -czf "packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C ./packages .
+          # Write the tarball into $KLOGG_WORKSPACE (runner-owned), not
+          # $KLOGG_BUILD_ROOT: on Linux the build root is created by docker as
+          # root, so the host runner cannot create files inside it.
+          [ -n "$(find "$KLOGG_BUILD_ROOT/packages" -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
+          tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
 
 # Final upload of all packages
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
   Mac:
@@ -913,15 +915,17 @@ jobs:
         if: ${{ matrix.config.package != false }}
         shell: sh
         run: |
-          cd "$KLOGG_BUILD_ROOT"
-          [ -n "$(find ./packages -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
-          tar -czf "packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C ./packages .
+          # Write the tarball into $KLOGG_WORKSPACE (runner-owned), not
+          # $KLOGG_BUILD_ROOT: on Linux the build root is created by docker as
+          # root, so the host runner cannot create files inside it.
+          [ -n "$(find "$KLOGG_BUILD_ROOT/packages" -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
+          tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
 
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: warn
 
   Windows:
@@ -1293,7 +1297,9 @@ jobs:
           $tarName = "packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz"
           # bsdtar's -C is unhappy with backslash paths; use forward slashes.
           $pkgDir = (Join-Path $env:KLOGG_BUILD_ROOT "packages").Replace("\", "/")
-          $tarPath = (Join-Path $env:KLOGG_BUILD_ROOT $tarName).Replace("\", "/")
+          # Write into $KLOGG_WORKSPACE (runner-owned): on Linux the build root
+          # is created by docker as root, so the host runner cannot write there.
+          $tarPath = (Join-Path $env:KLOGG_WORKSPACE $tarName).Replace("\", "/")
           if (-not (Get-ChildItem -Path $pkgDir -Force | Select-Object -First 1)) {
             Write-Error "packages directory is empty: $pkgDir"
             exit 1
@@ -1305,7 +1311,7 @@ jobs:
         if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
-          path: '${{ env.KLOGG_BUILD_ROOT }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
+          path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
   ci-gate:
