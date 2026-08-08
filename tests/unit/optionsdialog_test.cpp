@@ -319,32 +319,57 @@ TEST_CASE( "ConfigurationScope restores the persisted configuration on disk" )
     // later Configuration::getSynced() (which reloads from disk on every call)
     // observes the leaked test configuration and the suite becomes
     // order-dependent.
-    SavedSearches::getSynced();
-    RecentFiles::getSynced();
-
-    // Normalize to a known baseline first so the assertions below are
-    // deterministic regardless of what earlier tests left in the shared store.
-    Configuration::get().setStyle( StyleManager::ModernKey );
-    Configuration::get().setThemeMode( ThemeMode::Light );
-    Configuration::get().setLanguage( QStringLiteral( "baseline_lang" ) );
+    //
+    // Pre-seed a distinct persisted state so any baseline leak is observable:
+    // this case must hand the store back exactly as it found it, not as an
+    // artificial baseline normalized for its own assertions.
+    Configuration::get().setStyle( StyleManager::DarkStyleKey );
+    Configuration::get().setThemeMode( ThemeMode::Dark );
+    Configuration::get().setLanguage( QStringLiteral( "preseed_lang" ) );
     Configuration::get().save();
 
-    const auto originalStyle = Configuration::getSynced().style();
-    const auto originalThemeMode = Configuration::getSynced().themeMode();
-    const auto originalLanguage = Configuration::getSynced().language();
-
     {
-        ConfigurationScope configScope;
+        // Outer scope snapshots the TRUE pre-test persisted state, so the
+        // baseline normalization below is itself rolled back on disk when this
+        // case exits. Without it, the baseline write escapes to the shared
+        // QSettings store and a later Configuration::getSynced() observes it —
+        // the order-dependence this test exists to prevent.
+        ConfigurationScope testIsolation;
 
-        // Simulate the OptionsDialog Apply path: mutate and persist.
-        Configuration::get().setStyle( StyleManager::DarkStyleKey );
-        Configuration::get().setThemeMode( ThemeMode::Auto );
-        Configuration::get().setLanguage( QStringLiteral( "test_language" ) );
+        SavedSearches::getSynced();
+        RecentFiles::getSynced();
+
+        // Normalize to a known baseline first so the assertions below are
+        // deterministic regardless of what earlier tests left in the shared
+        // store.
+        Configuration::get().setStyle( StyleManager::ModernKey );
+        Configuration::get().setThemeMode( ThemeMode::Light );
+        Configuration::get().setLanguage( QStringLiteral( "baseline_lang" ) );
         Configuration::get().save();
+
+        const auto originalStyle = Configuration::getSynced().style();
+        const auto originalThemeMode = Configuration::getSynced().themeMode();
+        const auto originalLanguage = Configuration::getSynced().language();
+
+        {
+            ConfigurationScope configScope;
+
+            // Simulate the OptionsDialog Apply path: mutate and persist.
+            Configuration::get().setStyle( StyleManager::DarkStyleKey );
+            Configuration::get().setThemeMode( ThemeMode::Auto );
+            Configuration::get().setLanguage( QStringLiteral( "test_language" ) );
+            Configuration::get().save();
+        }
+
+        // The disk-backed snapshot must be restored, not the leaked values
+        // above.
+        REQUIRE( Configuration::getSynced().style() == originalStyle );
+        REQUIRE( Configuration::getSynced().themeMode() == originalThemeMode );
+        REQUIRE( Configuration::getSynced().language() == originalLanguage );
     }
 
-    // The disk-backed snapshot must be restored, not the leaked values above.
-    REQUIRE( Configuration::getSynced().style() == originalStyle );
-    REQUIRE( Configuration::getSynced().themeMode() == originalThemeMode );
-    REQUIRE( Configuration::getSynced().language() == originalLanguage );
+    // The pre-test seed, not the artificial baseline, must be what persists.
+    REQUIRE( Configuration::getSynced().style() == StyleManager::DarkStyleKey );
+    REQUIRE( Configuration::getSynced().themeMode() == ThemeMode::Dark );
+    REQUIRE( Configuration::getSynced().language() == QStringLiteral( "preseed_lang" ) );
 }
