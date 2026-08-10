@@ -53,3 +53,26 @@ TEST_CASE( "ContainerIndex tracks the Qt container size type", "[containers]" )
     const QString text = QStringLiteral( "xy" );
     REQUIRE( text.at( klogg::ContainerIndex{ 1 } ) == QLatin1Char( 'y' ) );
 }
+
+TEST_CASE( "ContainerIndex arithmetic stays the same type (no narrowing)", "[containers]" )
+{
+    // The whole point of ContainerIndex is that a chain of QByteArray/QString
+    // index arithmetic never changes type. Using `auto` for an intermediate
+    // (e.g. a binary search `mid = low + (high-low)/2`) deduces qsizetype on
+    // Qt 6, and assigning that back to a ContainerIndex narrows on Qt 5
+    // (-Werror=conversion). Pin that the arithmetic result IS ContainerIndex so
+    // such a chain stays same-type. NOTE: this applies to QByteArray/QString
+    // receivers; a QStringView receiver is qsizetype-native on BOTH Qt versions
+    // and must use plain qsizetype instead (see wrappedstring.h).
+    static_assert(
+        std::is_same_v<klogg::ContainerIndex,
+                       decltype( std::declval<klogg::ContainerIndex>()
+                                 + ( std::declval<klogg::ContainerIndex>()
+                                     - std::declval<klogg::ContainerIndex>() ) / 2 )>,
+        "ContainerIndex + (ContainerIndex - ContainerIndex) / 2 must stay ContainerIndex" );
+
+    const klogg::ContainerIndex low = 1;
+    const klogg::ContainerIndex high = 10;
+    const klogg::ContainerIndex mid = low + ( high - low ) / 2;
+    REQUIRE( mid == 5 );
+}

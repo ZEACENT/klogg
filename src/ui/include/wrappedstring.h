@@ -86,18 +86,19 @@ public:
                 }
 
                 // Binary search for the maximum number of characters that fit.
-                // ContainerIndex (not a raw qsizetype): it is passed to
-                // QStringView::left/mid, which take int on Qt 5 -- a raw
-                // qsizetype would narrow and trip -Werror=conversion on the
-                // Qt 5 Linux CI legs. ContainerIndex IS the container's size
-                // type on every Qt version, so no narrowing can occur.
-                const auto maxChars = lineToWrap.size();
-                klogg::ContainerIndex low = 1;
-                auto high = maxChars;
-                klogg::ContainerIndex fitCount = 1;
+                // WrappedStringPart is a QStringView, which is qsizetype-native
+                // on BOTH Qt 5 (>= 5.8) and Qt 6 -- so the search indices are
+                // plain qsizetype and NEVER narrow when passed to its left/mid.
+                // (Do NOT use klogg::ContainerIndex here: that tracks
+                // QByteArray::size(), int on Qt 5, and would narrow against a
+                // QStringView receiver -- the exact Qt 5 CI break.)
+                const qsizetype maxChars = lineToWrap.size();
+                qsizetype low = 1;
+                qsizetype high = maxChars;
+                qsizetype fitCount = 1;
 
                 while ( low <= high ) {
-                    auto mid = low + ( high - low ) / 2;
+                    const qsizetype mid = low + ( high - low ) / 2;
                     auto candidate = lineToWrap.left( mid );
                     int candidateWidth = textWidthFn( candidate );
                     if ( candidateWidth <= availablePixelWidth ) {
@@ -114,10 +115,10 @@ public:
                 auto lastSpaceIt = std::find_if( fittingPart.rbegin(), fittingPart.rend(),
                                                  []( QChar c ) { return c.isSpace(); } );
                 if ( lastSpaceIt != fittingPart.rend() ) {
-                    // std::distance yields ptrdiff_t; cast into the adaptive
-                    // ContainerIndex so the .left/.mid call below does not
-                    // narrow on Qt 5.
-                    const auto spacePos = static_cast<klogg::ContainerIndex>(
+                    // std::distance yields ptrdiff_t; cast to qsizetype (the
+                    // QStringView receiver's native index type on both Qt 5/6)
+                    // so the .left/.mid call below does not narrow.
+                    const auto spacePos = static_cast<qsizetype>(
                         std::distance( fittingPart.begin(), lastSpaceIt.base() ) );
                     wrappedLines_.push_back( lineToWrap.left( spacePos ) );
                     lineToWrap = lineToWrap.mid( spacePos );
