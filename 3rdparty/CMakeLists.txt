@@ -1,5 +1,25 @@
 set(QAPPLICATION_CLASS QApplication)
 
+# First-party-only sanitizers: the root CMakeLists adds sanitizer COMPILE flags
+# at directory scope before this subdirectory is added, which would instrument
+# every vendored dependency (vectorscan/uchardet/tbb/efsw/...). Instrumenting
+# them is what makes the sanitizer CI legs the slowest (ASan+UBSan on
+# vectorscan's NFA/codegen TUs dominates the build), and klogg only needs its
+# own code checked. Strip the sanitizer COMPILE flags for this directory so
+# 3rdparty builds uninstrumented; the directory-wide sanitizer LINK flags stay,
+# which is exactly the supported partial-instrumentation model (first-party
+# TUs instrumented, sanitizer runtime still linked into the final binaries).
+if(KLOGG_ANY_SANITIZER AND NOT MSVC)
+  get_directory_property(_klogg_3rdparty_compile_options COMPILE_OPTIONS)
+  set(_klogg_3rdparty_sanitized_options)
+  foreach(_klogg_opt IN LISTS _klogg_3rdparty_compile_options)
+    if(NOT _klogg_opt MATCHES "fsanitize")
+      list(APPEND _klogg_3rdparty_sanitized_options "${_klogg_opt}")
+    endif()
+  endforeach()
+  set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_klogg_3rdparty_sanitized_options}")
+endif()
+
 include(CPM)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/MsvcAsanDependencies.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_pinned_source.cmake)
@@ -31,12 +51,9 @@ set(_klogg_simdutf_options
     "SIMDUTF_TOOLS OFF"
     "SIMDUTF_BENCHMARKS OFF"
 )
-if(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
-  list(APPEND _klogg_simdutf_options "SIMDUTF_SANITIZE ON")
-endif()
-if(ENABLE_SANITIZER_UNDEFINED_BEHAVIOR AND NOT MSVC)
-  list(APPEND _klogg_simdutf_options "SIMDUTF_SANITIZE_UNDEFINED ON")
-endif()
+# First-party-only sanitizers: do NOT turn on simdutf's own sanitizer options.
+# The sanitizer CI legs only need klogg's own code checked; compiling vendored
+# simdutf under ASan/UBSan is part of what makes those legs the slowest.
 cpmaddpackage(
   NAME simdutf
   GITHUB_REPOSITORY simdutf/simdutf
@@ -473,6 +490,12 @@ set(_klogg_tbb_options
     "TBB_EXAMPLES OFF"
     "TBB_STRICT OFF"
 )
+# TBB stays instrumented: the thread library must carry sanitizer annotations
+# (TBB_SANITIZE) or TSan/ASan lose visibility into its synchronization and
+# allocator paths and report false positives on first-party code. This is the
+# one vendored runtime library where instrumentation is a correctness
+# requirement, not just overhead. (The heavy compile-time offenders --
+# vectorscan/uchardet/efsw -- are NOT instrumented; see the top of this file.)
 if(ENABLE_SANITIZER_THREAD)
   list(APPEND _klogg_tbb_options "TBB_SANITIZE thread")
 elseif(ENABLE_SANITIZER_ADDRESS AND NOT MSVC)
