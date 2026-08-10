@@ -85,11 +85,16 @@ public:
                     break;
                 }
 
-                // Binary search for the maximum number of characters that fit
-                auto maxChars = lineToWrap.size();
-                auto low = static_cast<qsizetype>( 1 );
+                // Binary search for the maximum number of characters that fit.
+                // ContainerIndex (not a raw qsizetype): it is passed to
+                // QStringView::left/mid, which take int on Qt 5 -- a raw
+                // qsizetype would narrow and trip -Werror=conversion on the
+                // Qt 5 Linux CI legs. ContainerIndex IS the container's size
+                // type on every Qt version, so no narrowing can occur.
+                const auto maxChars = lineToWrap.size();
+                klogg::ContainerIndex low = 1;
                 auto high = maxChars;
-                qsizetype fitCount = 1;
+                klogg::ContainerIndex fitCount = 1;
 
                 while ( low <= high ) {
                     auto mid = low + ( high - low ) / 2;
@@ -109,7 +114,11 @@ public:
                 auto lastSpaceIt = std::find_if( fittingPart.rbegin(), fittingPart.rend(),
                                                  []( QChar c ) { return c.isSpace(); } );
                 if ( lastSpaceIt != fittingPart.rend() ) {
-                    auto spacePos = std::distance( fittingPart.begin(), lastSpaceIt.base() );
+                    // std::distance yields ptrdiff_t; cast into the adaptive
+                    // ContainerIndex so the .left/.mid call below does not
+                    // narrow on Qt 5.
+                    const auto spacePos = static_cast<klogg::ContainerIndex>(
+                        std::distance( fittingPart.begin(), lastSpaceIt.base() ) );
                     wrappedLines_.push_back( lineToWrap.left( spacePos ) );
                     lineToWrap = lineToWrap.mid( spacePos );
                 }

@@ -441,9 +441,11 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
                             f"QStringView). This narrows qsizetype->int and "
                             f"trips -Werror=conversion on the Qt 5 Linux CI "
                             f"builds (invisible on Qt 6 / macOS). Use the "
-                            f"adaptive LineLength/LineColumn types, or "
+                            f"adaptive klogg::ContainerIndex (containers.h: "
+                            f"int on Qt 5 / qsizetype on Qt 6, never narrows), "
+                            f"LineLength/LineColumn for line semantics, or "
                             f"static_cast<int>(...) with a documented size "
-                            f"bound. (PR #48 CI failure: ensureMarkLines.)",
+                            f"bound. (PR #48/#56 CI failures.)",
                         )
                     )
                     break  # one report per call is enough

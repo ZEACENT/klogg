@@ -23,12 +23,24 @@
 #include <mimalloc.h>
 #include <vector>
 
+#include <QByteArray>
+
 #include <type_safe/narrow_cast.hpp>
 #include <type_traits>
 
 namespace klogg {
 template <typename T>
 using vector = std::vector<T, mi_stl_allocator<T>>;
+
+// Qt-version-adaptive container index: int on Qt 5, qsizetype on Qt 6 (it IS
+// the container's size() return type). Indexing a Qt container (at/value/
+// operator[]) with ContainerIndex never narrows, which eliminates the class of
+// "-Werror=conversion: qsizetype -> int" failures that only compile-fail on the
+// Qt 5 Linux CI legs and stay invisible on a Qt 6 dev machine (PR #48, PR #56).
+// Use it for any index/loop counter that is passed back into a Qt
+// string/container API; use klogg::isize when an explicit signed int bound is
+// intended instead.
+using ContainerIndex = decltype( QByteArray{}.size() );
 
 template <class C>
 constexpr auto ssize( const C& c )
