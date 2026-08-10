@@ -207,11 +207,19 @@ class FolderSearchResults : public AbstractLogData {
     QString headerText( klogg::folder::FileId fileId ) const;
     QString marksGroupHeader( size_t marksGroupIndex ) const;
     QString readMatchLine( klogg::folder::FileId fileId, size_t matchIndex ) const;
-    // Fetch the text of a marked source line by (filePath, localLine) using a
-    // cached per-file line-offset index (marked non-match lines have no
-    // MatchRecord offset). Results are cached per (filePath, localLine).
+    // Fetch the text of a marked source line by (filePath, localLine) (marked
+    // non-match lines have no MatchRecord offset). Byte-newline-safe encodings
+    // (UTF-8 / single-byte, the common case) seek to the line and read just it,
+    // scaling to any file size; multi-byte/stateful codecs use the (capped)
+    // whole-file decoded-line cache.
     QString readMarkLine( const QString& filePath, LineNumber localLine, QTextCodec* codec ) const;
     void ensureMarkLines( const QString& filePath, QTextCodec* codec ) const;
+    // True iff raw byte 0x0A unambiguously marks a line boundary in `codec`
+    // (UTF-8 and single-byte/ASCII-superset codecs; NOT UTF-16/32, Shift-JIS,
+    // GBK, Big5, EUC, ISO-2022). Gates the seek-based mark-line read.
+    static bool codecIsByteNewlineSafe( QTextCodec* codec );
+    QString readMarkLineSeek( const QString& filePath, LineNumber localLine,
+                              QTextCodec* codec ) const;
     QTextCodec* codecForFile( const QString& filePath ) const;
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
     const VisibleRow* visibleRowAt( LineNumber line ) const;
@@ -241,17 +249,17 @@ class FolderSearchResults : public AbstractLogData {
     // Marks-only groups (files with marks but no match group), rebuilt each
     // rebuildVisibleRows. Indexed by FileId = groups_.size() + index.
     std::vector<MarksGroup> marksGroups_;
-    // Per-file decoded line text for on-demand marked-line fetch (marked
-    // non-match lines have no MatchRecord offset). Built lazily by reading the
-    // whole file, decoding with codecForFile and splitting on '\n' (correct for
-    // all encodings incl. UTF-16), cached. Key is filePath + null + codec name;
-    // a marks-only file (nullptr codec / UTF-8 default) and a later match-group
-    // file (scanned codec, e.g. Shift-JIS) get separate cache entries to avoid
-    // mojibake from a stale encoding mismatch. kMarkLineCacheCap is a PER-FILE
-    // cap (huge files skip -> empty mark text, no main-thread stall); there is
-    // no cache-wide memory budget. Persists across searches (file-intrinsic);
-    // invalidated on encoding-override change. A transient open failure is NOT
-    // cached so a later fetch can retry. Guarded by fileIoMutex_.
+    // Whole-file decoded line cache, used ONLY for multi-byte/stateful codecs
+    // (UTF-16/32, Shift-JIS, ...) whose line boundaries a byte scan cannot find.
+    // Key is filePath + null + codec name; a marks-only file (nullptr codec /
+    // UTF-8 default) and a later match-group file (scanned codec) get separate
+    // entries to avoid mojibake from a stale encoding mismatch. Files over the
+    // PER-FILE kMarkLineCacheCap (16 MiB) with such a codec cache an EMPTY list
+    // (marked-line text unavailable rather than a main-thread O(file) decode).
+    // Byte-newline-safe files never populate this for text fetch (seek path).
+    // Persists across searches (file-intrinsic); invalidated on
+    // encoding-override change. A transient open failure is NOT cached so a
+    // later fetch can retry. Guarded by fileIoMutex_.
     mutable QHash<QString, std::vector<QString>> markLineCache_;
     // Per-file display-encoding overrides (Encoding-menu picks), consulted by
     // readMatchLine before the scan-time detected sourceCodec.
