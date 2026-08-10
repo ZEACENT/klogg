@@ -524,6 +524,36 @@ TEST_CASE( "FolderSearchResults decodes with the per-file encoding override", "[
     REQUIRE( layoutSpy.count() == 2 );
 }
 
+TEST_CASE( "FolderSearchResults byte-newline-safe codec gate is an allowlist", "[folder][marks]" )
+{
+    // codecIsByteNewlineSafe gates the seek-based mark-line read. It must be an
+    // ALLOWLIST: only UTF-8 / known stateless single-byte codecs qualify, and
+    // any stateful or unlisted codec returns false so it stays on the whole-file
+    // decode path. A denylist would let an unlisted codec with a non-ASCII (or
+    // multi-byte) newline encoding silently mis-seek.
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe( nullptr ) ); // UTF-8 default
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-8" ) ) );
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe(
+        QTextCodec::codecForName( "ISO 8859-1" ) ) );
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe(
+        QTextCodec::codecForName( "windows-1251" ) ) );
+
+    // Stateful / multi-byte / unlisted codecs must NOT be treated as
+    // byte-newline-safe.
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-16LE" ) ) );
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-16" ) ) );
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-32" ) ) );
+    if ( auto* sjis = QTextCodec::codecForName( "Shift-JIS" ) ) {
+        REQUIRE_FALSE( FolderSearchResults::codecIsByteNewlineSafe( sjis ) );
+    }
+    if ( auto* gbk = QTextCodec::codecForName( "GBK" ) ) {
+        REQUIRE_FALSE( FolderSearchResults::codecIsByteNewlineSafe( gbk ) );
+    }
+}
+
 TEST_CASE( "FolderSearchResults getters are race-free against streaming and concurrent readers",
            "[folder]" )
 {

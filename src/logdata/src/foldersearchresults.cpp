@@ -24,6 +24,8 @@
 
 #include <algorithm>
 
+#include "containers.h"
+
 namespace {
 
 // Composite cache key: filePath + null separator + codec name. The codec for a
@@ -478,14 +480,17 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
         UniqueLock lock( dataMutex_ );
         encodingOverrides_.insert( filePath, encoding );
         // Cached whole-file decoded mark lines (only multi-byte/stateful codecs
-        // use that path) were decoded with the old codec; drop every entry for
-        // this file (keys are filePath + NUL + codecName) so the next fetch
-        // re-decodes with the override. The seek path needs no invalidation.
-        // Lock order dataMutex_ -> fileIoMutex_.
+        // use that path) and cached seek-path mark text were decoded with the
+        // old codec; drop every entry for this file (keys are filePath + NUL +
+        // ...) so the next fetch re-decodes with the override. Lock order
+        // dataMutex_ -> fileIoMutex_.
         std::lock_guard<std::mutex> io( fileIoMutex_ );
         const QString prefix = filePath + QChar::Null;
         for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
             it = it.key().startsWith( prefix ) ? markLineCache_.erase( it ) : std::next( it );
+        }
+        for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+            it = it.key().startsWith( prefix ) ? markTextCache_.erase( it ) : std::next( it );
         }
     }
     Q_EMIT layoutChanged();
@@ -502,11 +507,16 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
         UniqueLock lock( dataMutex_ );
         removed = encodingOverrides_.remove( filePath ) != 0;
         if ( removed ) {
-            // Same composite-key sweep as setEncodingOverrideForFile.
+            // Same composite-key sweep as setEncodingOverrideForFile (both the
+            // whole-file line cache and the seek-path text cache).
             std::lock_guard<std::mutex> io( fileIoMutex_ );
             const QString prefix = filePath + QChar::Null;
             for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
                 it = it.key().startsWith( prefix ) ? markLineCache_.erase( it )
+                                                   : std::next( it );
+            }
+            for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+                it = it.key().startsWith( prefix ) ? markTextCache_.erase( it )
                                                    : std::next( it );
             }
         }
@@ -1047,13 +1057,16 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
 
 bool FolderSearchResults::codecIsByteNewlineSafe( QTextCodec* codec )
 {
-    // True iff the raw byte 0x0A unambiguously marks a line boundary in this
-    // encoding, so a seek-based byte scan finds the same lines the codec would.
-    // Holds for UTF-8 and every single-byte / ASCII-superset codec (0x0A is a
-    // self-synchronizing LF there). Fails for UTF-16/UTF-32 (a 0x0A byte can be
-    // one half of a multi-byte unit) and for stateful/double-byte codecs where
-    // 0x0A may be a trail byte (e.g. some Shift-JIS/GBK sequences) -- those stay
-    // on the whole-file decode path. codec == nullptr means "UTF-8 default".
+    // ALLOWLIST: true only for encodings where the raw byte 0x0A unambiguously
+    // marks a line boundary, so a seek-based byte scan finds the same lines the
+    // codec would. Anything not enumerated returns false and stays on the
+    // whole-file decode path -- a denylist would let an unlisted codec with a
+    // non-ASCII newline encoding (or a stateful one we forgot) silently
+    // mis-seek, so the safe default is "not byte-newline-safe".
+    //
+    // Qualifies: nullptr (UTF-8 default), UTF-8 (0x0A never appears inside a
+    // multi-byte sequence), and the stateless single-byte / ASCII-superset
+    // codecs (each byte is one code unit and 0x0A is LF).
     if ( codec == nullptr ) {
         return true;
     }
@@ -1061,11 +1074,30 @@ bool FolderSearchResults::codecIsByteNewlineSafe( QTextCodec* codec )
         return true;
     }
     const QByteArray name = codec->name().toUpper();
-    return !name.startsWith( "UTF-16" ) && !name.startsWith( "UTF-32" )
-           && !name.startsWith( "SHIFT" )     // Shift-JIS / Shift_JIS
-           && !name.startsWith( "GB" )        // GBK / GB2312 / GB18030
-           && !name.startsWith( "BIG5" ) && !name.startsWith( "EUC" )
-           && !name.startsWith( "JIS" ) && !name.startsWith( "ISO-2022" );
+    static const QByteArrayList kAllowed = {
+        // ISO-8859 single-byte family.
+        QByteArrayLiteral( "ISO-8859-1" ),  QByteArrayLiteral( "ISO-8859-2" ),
+        QByteArrayLiteral( "ISO-8859-3" ),  QByteArrayLiteral( "ISO-8859-4" ),
+        QByteArrayLiteral( "ISO-8859-5" ),  QByteArrayLiteral( "ISO-8859-6" ),
+        QByteArrayLiteral( "ISO-8859-7" ),  QByteArrayLiteral( "ISO-8859-8" ),
+        QByteArrayLiteral( "ISO-8859-9" ),  QByteArrayLiteral( "ISO-8859-10" ),
+        QByteArrayLiteral( "ISO-8859-13" ), QByteArrayLiteral( "ISO-8859-14" ),
+        QByteArrayLiteral( "ISO-8859-15" ), QByteArrayLiteral( "ISO-8859-16" ),
+        QByteArrayLiteral( "ISO 8859-1" ), // Qt's spaced alias for Latin-1.
+        // Windows single-byte code pages.
+        QByteArrayLiteral( "WINDOWS-1250" ), QByteArrayLiteral( "WINDOWS-1251" ),
+        QByteArrayLiteral( "WINDOWS-1252" ), QByteArrayLiteral( "WINDOWS-1253" ),
+        QByteArrayLiteral( "WINDOWS-1254" ), QByteArrayLiteral( "WINDOWS-1255" ),
+        QByteArrayLiteral( "WINDOWS-1256" ), QByteArrayLiteral( "WINDOWS-1257" ),
+        QByteArrayLiteral( "WINDOWS-1258" ),
+        // Other common single-byte encodings.
+        QByteArrayLiteral( "KOI8-R" ),  QByteArrayLiteral( "KOI8-U" ),
+        QByteArrayLiteral( "CP866" ),   QByteArrayLiteral( "IBM866" ),
+        QByteArrayLiteral( "APPLE ROMAN" ), QByteArrayLiteral( "MACINTOSH" ),
+        QByteArrayLiteral( "US-ASCII" ), QByteArrayLiteral( "ASCII" ),
+        QByteArrayLiteral( "LATIN1" ), QByteArrayLiteral( "LATIN-1" ),
+    };
+    return kAllowed.contains( name );
 }
 
 QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumber localLine,
@@ -1079,6 +1111,17 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
     // trailing CR/LF stripped. Caller has released dataMutex_; takes only
     // fileIoMutex_.
     std::lock_guard<std::mutex> io( fileIoMutex_ );
+
+    // Resolved-text cache: the view re-fetches every visible mark row on each
+    // repaint, so without caching a mark near the end of a large file would
+    // rescan from byte 0 every frame. Keyed by file+codec+line.
+    const QString textKey
+        = markCacheKey( filePath, codec ) + QChar::Null + QString::number( localLine.get() );
+    const auto cached = markTextCache_.constFind( textKey );
+    if ( cached != markTextCache_.cend() ) {
+        return cached.value();
+    }
+
     QFile file( filePath );
     if ( !file.open( QIODevice::ReadOnly ) ) {
         return {};
@@ -1099,7 +1142,11 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
             if ( chunk.isEmpty() ) {
                 return {}; // EOF before the target line: no such line.
             }
-            for ( qsizetype i = 0; i < chunk.size(); ++i ) {
+            // int (not qsizetype) index: Qt 5's QByteArray::at takes int and the
+            // build is -Werror=conversion, so a qsizetype index fails the Qt 5
+            // Linux CI legs. kScanChunk (64 KiB) always fits in int.
+            const int chunkLen = klogg::isize( chunk );
+            for ( int i = 0; i < chunkLen; ++i ) {
                 if ( chunk.at( i ) == '\n' ) {
                     ++seen;
                     if ( seen == target ) {
@@ -1121,8 +1168,12 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
     while ( lineBytes.endsWith( '\n' ) || lineBytes.endsWith( '\r' ) ) {
         lineBytes.chop( 1 );
     }
-    return codec != nullptr ? codec->toUnicode( lineBytes )
-                            : QString::fromUtf8( lineBytes );
+    const QString text = codec != nullptr ? codec->toUnicode( lineBytes )
+                                          : QString::fromUtf8( lineBytes );
+    // Cache only a successfully-read line; a read past EOF returns above without
+    // caching so a file that later grows can be retried.
+    markTextCache_.insert( textKey, text );
+    return text;
 }
 
 QString FolderSearchResults::readMarkLine( const QString& filePath, LineNumber localLine,

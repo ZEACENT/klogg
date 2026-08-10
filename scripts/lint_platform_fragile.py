@@ -250,8 +250,11 @@ def _extract_call_args(code: str, open_paren_pos: int) -> str:
 # (QStringView is the exception: it has been qsizetype-native since Qt 5.8, so
 # its indexOf/mid/left/right never narrow. QStringRef, like QString, takes int
 # on Qt 5 and IS flagged.)
+# `.at(i)` / `.value(i)` join the list: QString/QByteArray::at and value take
+# int on Qt 5 (PR #56 CI failure: FolderSearchResults::readMarkLineSeek indexed
+# QByteArray::at with a qsizetype loop counter).
 _QT_INT_API_RE = re.compile(
-    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove)\s*\("
+    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove|at|value)\s*\("
 )
 _QSIZETYPE_DECL_RE = re.compile(r"\b(?:const\s+)?qsizetype\s+(\w+)\b")
 # `using <Alias> = QStringView;` -- the wrappedstring.h code uses this idiom.
@@ -371,7 +374,8 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
     on the macOS / Ubuntu-24.04 Qt 6 builds developers run locally, so it only
     surfaces in the Linux CI matrix. PR #48 failed CI this way in
     FolderSearchResults::ensureMarkLines (qsizetype loop indices passed to
-    QString::indexOf / QString::mid).
+    QString::indexOf / QString::mid); PR #56 failed the same way with a
+    qsizetype loop counter passed to QByteArray::at.
 
     QStringView is excluded: it has been qsizetype-native since Qt 5.8, so its
     indexOf/mid/left/right do not narrow on Qt 5. Code behind a Qt-6-only
