@@ -216,6 +216,38 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
     return group.matches[ row->matchIndex ].role == klogg::folder::RecordRole::Match;
 }
 
+FolderSearchResults::MarkLineTextStatus
+FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
+{
+    QString filePath;
+    QTextCodec* codec = nullptr;
+    {
+        SharedLock lock( dataMutex_ );
+        const auto* row = visibleRowAt( visibleIndex );
+        // Non-mark rows read text from MatchRecord byte offsets -- never capped.
+        if ( row == nullptr || !row->isMarkRow ) {
+            return MarkLineTextStatus::Available;
+        }
+        filePath = row->markFilePath;
+        codec = codecForFile( filePath );
+    }
+    // Byte-newline-safe files read by seek: text is always fetchable, any size.
+    if ( codecIsByteNewlineSafe( codec ) ) {
+        return MarkLineTextStatus::Available;
+    }
+    // Stateful codec: text comes from the whole-file cache. Populate it (a
+    // transient open failure caches nothing and would otherwise flip the status
+    // to Unavailable spuriously), then report Unavailable only when the cached
+    // entry is present-but-empty -- the over-cap signature ensureMarkLines logs.
+    ensureMarkLines( filePath, codec );
+    std::lock_guard<std::mutex> io( fileIoMutex_ );
+    const auto it = markLineCache_.constFind( markCacheKey( filePath, codec ) );
+    if ( it != markLineCache_.cend() && it->empty() ) {
+        return MarkLineTextStatus::Unavailable;
+    }
+    return MarkLineTextStatus::Available;
+}
+
 klogg::folder::FileId FolderSearchResults::fileIdForLine( LineNumber visibleIndex ) const
 {
     SharedLock lock( dataMutex_ );
@@ -974,7 +1006,15 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
         // being permanently recorded as "no mark text".
         return;
     }
-    constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
+    // Over-cap with a stateful codec: cache an EMPTY list and LOG it. The empty
+    // entry is what markLineTextStatus keys on to report Unavailable -- callers
+    // must never treat "cached but empty" as "the line is empty" (that silent
+    // conflation was the original blank-marked-row defect).
+    if ( file.size() > kMarkLineCacheCap ) {
+        LOG_WARNING << "FolderSearchResults: mark-line text unavailable for" << filePath
+                    << "-- file size" << file.size() << "exceeds kMarkLineCacheCap ("
+                    << kMarkLineCacheCap << ") with a stateful codec";
+    }
     if ( file.size() <= kMarkLineCacheCap ) {
         const QByteArray bytes = file.readAll();
         const QString text

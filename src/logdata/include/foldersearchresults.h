@@ -24,6 +24,7 @@
 #include <QSet>
 #include <QString>
 #include <QTextCodec>
+#include <QtGlobal>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -153,6 +154,25 @@ class FolderSearchResults : public AbstractLogData {
     // Rebuild + emit layoutChanged. Called by the widget when marks change while
     // the Marks filter is active (the visible set depends on marks).
     void refreshForMarksChange();
+
+    // Per-file size cap for the whole-file decoded mark-line cache. Exposed so
+    // tests build fixtures relative to the SAME constant (a cap change keeps
+    // over-cap tests on the over-cap side). Only multi-byte/stateful codecs
+    // (UTF-16/32, Shift-JIS, ...) use the whole-file path; byte-newline-safe
+    // files read marked lines by seek and are unaffected by this cap.
+    static constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
+
+    // Whether a Data row's source-line text can be produced. A row is
+    // Unavailable when its text cannot be fetched by design -- currently only
+    // a marked line in a file over kMarkLineCacheCap with a multi-byte/stateful
+    // codec (the whole-file decode cache is skipped there to avoid a main-thread
+    // O(file) stall, and the seek path cannot locate line boundaries). Lets the
+    // view distinguish "text unavailable" from "the line is empty" instead of
+    // silently rendering a blank row (the original 16 MiB marked-row defect).
+    enum class MarkLineTextStatus { Available, Unavailable };
+    // Status for a visible row. Returns Available for any non-mark row (their
+    // text comes from MatchRecord byte offsets, never capped).
+    MarkLineTextStatus markLineTextStatus( LineNumber visibleIndex ) const;
 
   Q_SIGNALS:
     // Emitted whenever the visible-row layout changes (new results, collapse

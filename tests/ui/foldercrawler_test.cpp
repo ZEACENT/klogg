@@ -767,16 +767,18 @@ TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line tex
     // The mark row must render the real source line text -- single-file parity
     // (LogFilteredData mark rows read the line from the shared source data).
     //
-    // The file must exceed the 16 MiB mark-line whole-file cache cap: with a
-    // small fixture the decoded-line cache covers every line and the bug does
-    // not reproduce. The user hit this on a 51 MiB log.
+    // The file must exceed the whole-file mark-line cache cap: with a small
+    // fixture the decoded-line cache covers every line and the bug does not
+    // reproduce. The user hit this on a 51 MiB log. The size derives from the
+    // SAME kMarkLineCacheCap constant the production cap uses, so a cap change
+    // keeps this fixture on the over-cap side.
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
     // line 3 = the match ("ERROR hit"); line 4 = the following non-match line.
     QByteArray bytes( "line0\nline1\nline2\nERROR hit\nfollow line (not a match)\nline5\n" );
-    // Pad past 16 MiB so the whole-file decoded-line cache refuses the file.
+    // Pad past the cap so the whole-file decoded-line cache refuses the file.
     const QByteArray filler( "filler line to push the file past the cache cap\n" );
-    while ( bytes.size() <= ( 16LL << 20 ) ) {
+    while ( bytes.size() <= FolderSearchResults::kMarkLineCacheCap ) {
         bytes.append( filler );
     }
     bytes.append( "tail\n" );
