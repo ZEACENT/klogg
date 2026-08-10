@@ -242,9 +242,9 @@ FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
     // to Unavailable spuriously), then report Unavailable only when the cached
     // entry is present-but-empty -- the over-cap signature ensureMarkLines logs.
     ensureMarkLines( filePath, codec );
-    std::lock_guard<std::mutex> io( fileIoMutex_ );
-    const auto it = markLineCache_.constFind( markCacheKey( filePath, codec ) );
-    if ( it != markLineCache_.cend() && it->empty() ) {
+    std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
+    const auto cacheIt = markLineCache_.constFind( markCacheKey( filePath, codec ) );
+    if ( cacheIt != markLineCache_.cend() && cacheIt->empty() ) {
         return MarkLineTextStatus::Unavailable;
     }
     return MarkLineTextStatus::Available;
@@ -1110,7 +1110,7 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
     // bug this replaces). Decoded with the resolved codec (or UTF-8 default),
     // trailing CR/LF stripped. Caller has released dataMutex_; takes only
     // fileIoMutex_.
-    std::lock_guard<std::mutex> io( fileIoMutex_ );
+    std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
 
     // Resolved-text cache: the view re-fetches every visible mark row on each
     // repaint, so without caching a mark near the end of a large file would

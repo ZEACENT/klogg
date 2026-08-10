@@ -25,6 +25,7 @@
 #include <QString>
 #include <QTextCodec>
 #include <QtGlobal>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -169,7 +170,9 @@ class FolderSearchResults : public AbstractLogData {
     // O(file) stall, and the seek path cannot locate line boundaries). Lets the
     // view distinguish "text unavailable" from "the line is empty" instead of
     // silently rendering a blank row (the original 16 MiB marked-row defect).
-    enum class MarkLineTextStatus { Available, Unavailable };
+    // std::uint8_t base: two states need only 1 byte (clang-tidy
+    // performance-enum-size).
+    enum class MarkLineTextStatus : std::uint8_t { Available, Unavailable };
     // Status for a visible row. Returns Available for any non-mark row (their
     // text comes from MatchRecord byte offsets, never capped).
     MarkLineTextStatus markLineTextStatus( LineNumber visibleIndex ) const;
