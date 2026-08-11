@@ -252,6 +252,11 @@ class FolderSearchResults : public AbstractLogData {
     void ensureMarkLines( const QString& filePath, QTextCodec* codec ) const;
     QString readMarkLineSeek( const QString& filePath, LineNumber localLine,
                               QTextCodec* codec ) const;
+    // Lock-free body of markLineTextStatus: the caller passes the row identity
+    // (filePath + codec) captured UNDER dataMutex_, so the status decision
+    // cannot drift to a different row when a streaming commit reshuffles
+    // visible rows between the capture and the check. Takes only fileIoMutex_.
+    MarkLineTextStatus markLineTextStatusFor( const QString& filePath, QTextCodec* codec ) const;
     QTextCodec* codecForFile( const QString& filePath ) const;
     // Remove every markTextCache_ entry for filePath and subtract their decoded
     // bytes from markTextCacheBytes_ (keeps the aggregate budget accurate across
@@ -310,7 +315,11 @@ class FolderSearchResults : public AbstractLogData {
     // the running total exceeds kMarkTextCacheBudget the new text is returned
     // WITHOUT being cached (the mark row still renders; it just rescans next
     // repaint). kMarkTextCacheBytes_ tracks the cached UTF-16 payload bytes.
+    // The entry-count cap covers the opposite corner: many marked EMPTY/short
+    // lines cost ~0 payload bytes each, so the byte budget alone would let the
+    // key/node count (a full QString key per entry) grow with the mark count.
     static constexpr qint64 kMarkTextCacheBudget = 8LL << 20; // 8 MiB
+    static constexpr qint64 kMarkTextCacheMaxEntries = 100000;
     mutable QHash<QString, QString> markTextCache_;
     mutable qint64 markTextCacheBytes_ = 0;
     // Per-file display-encoding overrides (Encoding-menu picks), consulted by
