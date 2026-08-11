@@ -54,6 +54,7 @@
 #include "streaminglogdata.h"
 
 #include "crawlerwidget.h"
+#include "platform/platform_input.h"
 #include "shortcuts.h"
 
 static const qint64 SL_NB_LINES = 100LL;
@@ -991,17 +992,8 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         auto* const viewport = crawler->filteredView_->viewport();
         const QPointF position{ viewport->rect().center() };
         const QPointF globalPosition = viewport->mapToGlobal( position.toPoint() );
-        const QPoint pixelDelta{ 0, yPixels };
-        const QPoint angleDelta{ 0, yAngle };
-#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
-        QWheelEvent wheelEvent{ position, globalPosition, pixelDelta, angleDelta,
-                                Qt::NoButton, Qt::NoModifier, phase, false,
-                                Qt::MouseEventNotSynthesized };
-#else
-        QWheelEvent wheelEvent{ position, globalPosition, pixelDelta, angleDelta,
-                                angleDelta.y(), Qt::Vertical, Qt::NoButton, Qt::NoModifier,
-                                phase, Qt::MouseEventNotSynthesized, false };
-#endif
+        QWheelEvent wheelEvent = klogg::platform::makeWheelEvent(
+            position, globalPosition, QPoint{ 0, yPixels }, QPoint{ 0, yAngle }, phase );
         QApplication::sendEvent( viewport, &wheelEvent );
         QTest::qWait( 20 );
     }

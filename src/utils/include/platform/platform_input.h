@@ -22,6 +22,8 @@
 
 #include <Qt>
 
+#include <QWheelEvent>
+
 namespace klogg::platform {
 
 // The platform-appropriate keyboard modifier for application-level shortcuts
@@ -46,6 +48,23 @@ constexpr auto shortcutModifierName = "Meta";
 #else
 constexpr auto shortcutModifierName = "Ctrl";
 #endif
+
+// Construct a wheel event, hiding the Qt version constructor split:
+// Qt < 5.14 only has the qt4Delta/qt4Orientation overloads (not yet marked
+// deprecated there), Qt >= 5.15 deprecates those (fatal with
+// WARNINGS_AS_ERRORS) and Qt 6 removes them.
+inline QWheelEvent makeWheelEvent( const QPointF& position, const QPointF& globalPosition,
+                                   const QPoint& pixelDelta, const QPoint& angleDelta,
+                                   Qt::ScrollPhase phase )
+{
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 14, 0 )
+    return { position, globalPosition, pixelDelta, angleDelta, Qt::NoButton, Qt::NoModifier,
+             phase, false, Qt::MouseEventNotSynthesized };
+#else
+    return { position, globalPosition, pixelDelta, angleDelta, angleDelta.y(), Qt::Vertical,
+             Qt::NoButton, Qt::NoModifier, phase };
+#endif
+}
 
 } // namespace klogg::platform
 
