@@ -24,6 +24,8 @@
 
 #include <algorithm>
 
+#include "containers.h"
+
 namespace {
 
 // Composite cache key: filePath + null separator + codec name. The codec for a
@@ -214,6 +216,38 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
     }
     const auto& group = groups_[ static_cast<size_t>( row->fileId ) ];
     return group.matches[ row->matchIndex ].role == klogg::folder::RecordRole::Match;
+}
+
+FolderSearchResults::MarkLineTextStatus
+FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
+{
+    QString filePath;
+    QTextCodec* codec = nullptr;
+    {
+        SharedLock lock( dataMutex_ );
+        const auto* row = visibleRowAt( visibleIndex );
+        // Non-mark rows read text from MatchRecord byte offsets -- never capped.
+        if ( row == nullptr || !row->isMarkRow ) {
+            return MarkLineTextStatus::Available;
+        }
+        filePath = row->markFilePath;
+        codec = codecForFile( filePath );
+    }
+    // Byte-newline-safe files read by seek: text is always fetchable, any size.
+    if ( codecIsByteNewlineSafe( codec ) ) {
+        return MarkLineTextStatus::Available;
+    }
+    // Stateful codec: text comes from the whole-file cache. Populate it (a
+    // transient open failure caches nothing and would otherwise flip the status
+    // to Unavailable spuriously), then report Unavailable only when the cached
+    // entry is present-but-empty -- the over-cap signature ensureMarkLines logs.
+    ensureMarkLines( filePath, codec );
+    std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
+    const auto cacheIt = markLineCache_.constFind( markCacheKey( filePath, codec ) );
+    if ( cacheIt != markLineCache_.cend() && cacheIt->empty() ) {
+        return MarkLineTextStatus::Unavailable;
+    }
+    return MarkLineTextStatus::Available;
 }
 
 klogg::folder::FileId FolderSearchResults::fileIdForLine( LineNumber visibleIndex ) const
@@ -445,10 +479,19 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
     {
         UniqueLock lock( dataMutex_ );
         encodingOverrides_.insert( filePath, encoding );
-        // Cached mark-line text was decoded with the old codec; drop it so the
-        // next fetch re-decodes with the override. Lock order dataMutex_ -> fileIoMutex_.
+        // Cached whole-file decoded mark lines (only multi-byte/stateful codecs
+        // use that path) and cached seek-path mark text were decoded with the
+        // old codec; drop every entry for this file (keys are filePath + NUL +
+        // ...) so the next fetch re-decodes with the override. Lock order
+        // dataMutex_ -> fileIoMutex_.
         std::lock_guard<std::mutex> io( fileIoMutex_ );
-        markLineCache_.remove( filePath );
+        const QString prefix = filePath + QChar::Null;
+        for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
+            it = it.key().startsWith( prefix ) ? markLineCache_.erase( it ) : std::next( it );
+        }
+        for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+            it = it.key().startsWith( prefix ) ? markTextCache_.erase( it ) : std::next( it );
+        }
     }
     Q_EMIT layoutChanged();
 }
@@ -464,8 +507,18 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
         UniqueLock lock( dataMutex_ );
         removed = encodingOverrides_.remove( filePath ) != 0;
         if ( removed ) {
+            // Same composite-key sweep as setEncodingOverrideForFile (both the
+            // whole-file line cache and the seek-path text cache).
             std::lock_guard<std::mutex> io( fileIoMutex_ );
-            markLineCache_.remove( filePath );
+            const QString prefix = filePath + QChar::Null;
+            for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
+                it = it.key().startsWith( prefix ) ? markLineCache_.erase( it )
+                                                   : std::next( it );
+            }
+            for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+                it = it.key().startsWith( prefix ) ? markTextCache_.erase( it )
+                                                   : std::next( it );
+            }
         }
     }
     if ( removed ) {
@@ -940,11 +993,15 @@ QTextCodec* FolderSearchResults::codecForFile( const QString& filePath ) const
 
 void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* codec ) const
 {
-    // Build the per-file decoded line cache: read the whole file, decode with
-    // `codec`, split on '\n'. Decoding BEFORE splitting makes this correct for
-    // all encodings (incl. UTF-16/UTF-32), unlike a raw byte scan. Capped: files
-    // larger than kMarkLineCacheCap skip (empty cache -> empty mark text) to
-    // avoid a main-thread stall on huge files. Caller does NOT hold fileIoMutex_.
+    // Whole-file decoded line cache. This is the CORRECTNESS fallback for
+    // multi-byte / stateful encodings (UTF-16, UTF-32, Shift-JIS, ...) where a
+    // byte-level '\n' scan cannot locate line boundaries, and for small files
+    // where one decode is cheapest. Files over kMarkLineCacheCap with such a
+    // codec insert an EMPTY cache (marked-line text unavailable -- a deliberate
+    // trade-off to avoid a main-thread O(file) decode). Single-byte / UTF-8
+    // files NEVER reach this path for text fetch: readMarkLine seeks to the
+    // line directly instead (see readMarkLineSeek), which scales to any file
+    // size. Caller does NOT hold fileIoMutex_.
     std::lock_guard<std::mutex> io( fileIoMutex_ );
     const QString cacheKey = markCacheKey( filePath, codec );
     if ( markLineCache_.contains( cacheKey ) ) {
@@ -959,7 +1016,15 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
         // being permanently recorded as "no mark text".
         return;
     }
-    constexpr qint64 kMarkLineCacheCap = 16LL << 20; // 16 MiB
+    // Over-cap with a stateful codec: cache an EMPTY list and LOG it. The empty
+    // entry is what markLineTextStatus keys on to report Unavailable -- callers
+    // must never treat "cached but empty" as "the line is empty" (that silent
+    // conflation was the original blank-marked-row defect).
+    if ( file.size() > kMarkLineCacheCap ) {
+        LOG_WARNING << "FolderSearchResults: mark-line text unavailable for" << filePath
+                    << "-- file size" << file.size() << "exceeds kMarkLineCacheCap ("
+                    << kMarkLineCacheCap << ") with a stateful codec";
+    }
     if ( file.size() <= kMarkLineCacheCap ) {
         const QByteArray bytes = file.readAll();
         const QString text
@@ -990,12 +1055,138 @@ void FolderSearchResults::ensureMarkLines( const QString& filePath, QTextCodec* 
     markLineCache_.insert( cacheKey, std::move( lines ) );
 }
 
+bool FolderSearchResults::codecIsByteNewlineSafe( QTextCodec* codec )
+{
+    // ALLOWLIST: true only for encodings where the raw byte 0x0A unambiguously
+    // marks a line boundary, so a seek-based byte scan finds the same lines the
+    // codec would. Anything not enumerated returns false and stays on the
+    // whole-file decode path -- a denylist would let an unlisted codec with a
+    // non-ASCII newline encoding (or a stateful one we forgot) silently
+    // mis-seek, so the safe default is "not byte-newline-safe".
+    //
+    // Qualifies: nullptr (UTF-8 default), UTF-8 (0x0A never appears inside a
+    // multi-byte sequence), and the stateless single-byte / ASCII-superset
+    // codecs (each byte is one code unit and 0x0A is LF).
+    if ( codec == nullptr ) {
+        return true;
+    }
+    if ( codec->mibEnum() == 106 ) { // UTF-8
+        return true;
+    }
+    const QByteArray name = codec->name().toUpper();
+    static const QByteArrayList kAllowed = {
+        // ISO-8859 single-byte family.
+        QByteArrayLiteral( "ISO-8859-1" ),  QByteArrayLiteral( "ISO-8859-2" ),
+        QByteArrayLiteral( "ISO-8859-3" ),  QByteArrayLiteral( "ISO-8859-4" ),
+        QByteArrayLiteral( "ISO-8859-5" ),  QByteArrayLiteral( "ISO-8859-6" ),
+        QByteArrayLiteral( "ISO-8859-7" ),  QByteArrayLiteral( "ISO-8859-8" ),
+        QByteArrayLiteral( "ISO-8859-9" ),  QByteArrayLiteral( "ISO-8859-10" ),
+        QByteArrayLiteral( "ISO-8859-13" ), QByteArrayLiteral( "ISO-8859-14" ),
+        QByteArrayLiteral( "ISO-8859-15" ), QByteArrayLiteral( "ISO-8859-16" ),
+        QByteArrayLiteral( "ISO 8859-1" ), // Qt's spaced alias for Latin-1.
+        // Windows single-byte code pages.
+        QByteArrayLiteral( "WINDOWS-1250" ), QByteArrayLiteral( "WINDOWS-1251" ),
+        QByteArrayLiteral( "WINDOWS-1252" ), QByteArrayLiteral( "WINDOWS-1253" ),
+        QByteArrayLiteral( "WINDOWS-1254" ), QByteArrayLiteral( "WINDOWS-1255" ),
+        QByteArrayLiteral( "WINDOWS-1256" ), QByteArrayLiteral( "WINDOWS-1257" ),
+        QByteArrayLiteral( "WINDOWS-1258" ),
+        // Other common single-byte encodings.
+        QByteArrayLiteral( "KOI8-R" ),  QByteArrayLiteral( "KOI8-U" ),
+        QByteArrayLiteral( "CP866" ),   QByteArrayLiteral( "IBM866" ),
+        QByteArrayLiteral( "APPLE ROMAN" ), QByteArrayLiteral( "MACINTOSH" ),
+        QByteArrayLiteral( "US-ASCII" ), QByteArrayLiteral( "ASCII" ),
+        QByteArrayLiteral( "LATIN1" ), QByteArrayLiteral( "LATIN-1" ),
+    };
+    return kAllowed.contains( name );
+}
+
+QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumber localLine,
+                                               QTextCodec* codec ) const
+{
+    // Seek-based per-line read for byte-newline-safe encodings: scan forward to
+    // the start of localLine, then read to the next '\n'. Only the target line's
+    // bytes are touched, so this scales to any file size (the whole-file cache
+    // silently returned empty text over its 16 MiB cap -- the blank-marked-row
+    // bug this replaces). Decoded with the resolved codec (or UTF-8 default),
+    // trailing CR/LF stripped. Caller has released dataMutex_; takes only
+    // fileIoMutex_.
+    std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
+
+    // Resolved-text cache: the view re-fetches every visible mark row on each
+    // repaint, so without caching a mark near the end of a large file would
+    // rescan from byte 0 every frame. Keyed by file+codec+line.
+    const QString textKey
+        = markCacheKey( filePath, codec ) + QChar::Null + QString::number( localLine.get() );
+    const auto cached = markTextCache_.constFind( textKey );
+    if ( cached != markTextCache_.cend() ) {
+        return cached.value();
+    }
+
+    QFile file( filePath );
+    if ( !file.open( QIODevice::ReadOnly ) ) {
+        return {};
+    }
+
+    const quint64 target = localLine.get();
+    if ( target > 0 ) {
+        // Stream past `target` newlines. Chunked reads bound memory; after the
+        // target newline is seen INSIDE a chunk, seek back to just past it --
+        // the buffered read already consumed the whole chunk, so without the
+        // reposition readLine() would start at the chunk end (mid-file).
+        constexpr qint64 kScanChunk = 1LL << 16; // 64 KiB
+        quint64 seen = 0;
+        bool found = false;
+        while ( !found ) {
+            const qint64 chunkStart = file.pos();
+            const QByteArray chunk = file.read( kScanChunk );
+            if ( chunk.isEmpty() ) {
+                return {}; // EOF before the target line: no such line.
+            }
+            // int (not qsizetype) index: Qt 5's QByteArray::at takes int and the
+            // build is -Werror=conversion, so a qsizetype index fails the Qt 5
+            // Linux CI legs. kScanChunk (64 KiB) always fits in int.
+            const int chunkLen = klogg::isize( chunk );
+            for ( int i = 0; i < chunkLen; ++i ) {
+                if ( chunk.at( i ) == '\n' ) {
+                    ++seen;
+                    if ( seen == target ) {
+                        if ( !file.seek( chunkStart + i + 1 ) ) {
+                            return {};
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    QByteArray lineBytes = file.readLine();
+    if ( lineBytes.isEmpty() && file.atEnd() ) {
+        return {}; // target line index is past the last line.
+    }
+    while ( lineBytes.endsWith( '\n' ) || lineBytes.endsWith( '\r' ) ) {
+        lineBytes.chop( 1 );
+    }
+    const QString text = codec != nullptr ? codec->toUnicode( lineBytes )
+                                          : QString::fromUtf8( lineBytes );
+    // Cache only a successfully-read line; a read past EOF returns above without
+    // caching so a file that later grows can be retried.
+    markTextCache_.insert( textKey, text );
+    return text;
+}
+
 QString FolderSearchResults::readMarkLine( const QString& filePath, LineNumber localLine,
                                            QTextCodec* codec ) const
 {
-    // Fetch the marked source line by line number from the cached decoded lines
-    // (marked non-match lines have no MatchRecord offset). Caller has released
-    // dataMutex_; only fileIoMutex_ is taken here.
+    // Fetch the marked source line by line number (marked non-match lines have
+    // no MatchRecord offset). Byte-newline-safe encodings (UTF-8 / single-byte,
+    // the common case) use a bounded seek read that scales to any file size;
+    // multi-byte/stateful codecs fall back to the (capped) whole-file decoded
+    // cache. Caller has released dataMutex_; only fileIoMutex_ is taken here.
+    if ( codecIsByteNewlineSafe( codec ) ) {
+        return readMarkLineSeek( filePath, localLine, codec );
+    }
     ensureMarkLines( filePath, codec );
     std::lock_guard<std::mutex> io( fileIoMutex_ );
     const auto it = markLineCache_.constFind( markCacheKey( filePath, codec ) );

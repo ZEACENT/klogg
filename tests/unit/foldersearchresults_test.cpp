@@ -287,6 +287,108 @@ TEST_CASE( "FolderSearchResults readMatchLine falls back to UTF-8 with no source
     REQUIRE( r.getLineString( 1_lnum ) == QString( "beta ERROR" ) );
 }
 
+TEST_CASE( "FolderSearchResults a marked UTF-16 line under the cache cap decodes correctly",
+           "[folder][marks]" )
+{
+    // The stateful-codec path (UTF-16) uses the whole-file decoded-line cache
+    // (a byte scan cannot find line boundaries in UTF-16). UNDER the cap the
+    // marked line must decode correctly and report Available.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = QDir( dir.path() ).absoluteFilePath( "utf16.log" );
+    {
+        QFile f( path );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        // BOM + "alpha\nbeta\ngamma\n" in UTF-16LE.
+        QByteArray bytes;
+        bytes.append( "\xFF\xFE", 2 );
+        for ( const QString& l : { QStringLiteral( "alpha" ), QStringLiteral( "beta" ),
+                                   QStringLiteral( "gamma" ) } ) {
+            for ( const QChar c : l ) {
+                bytes.append( static_cast<char>( c.unicode() & 0xFF ) );
+                bytes.append( static_cast<char>( ( c.unicode() >> 8 ) & 0xFF ) );
+            }
+            bytes.append( '\n' );
+            bytes.append( '\0' );
+        }
+        f.write( bytes );
+        f.close();
+    }
+
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = path;
+    g.sourceCodec = QTextCodec::codecForName( "UTF-16LE" );
+    // One real match so the group exists; the mark is on a different line.
+    g.matches.push_back( match( 0, 2, 12, 5, 5 ) ); // "alpha" (BOM at 0-1)
+    r.setResults( { g } );
+
+    // Mark line 2 ("gamma") -- not a match -> injected as a mark row.
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 2 );
+    r.setMarksStore( &marks );
+
+    // rows: [H0, D1(match line0), D2(mark row line2)].
+    REQUIRE( r.getNbLine() == 3_lcount );
+    const auto src = r.sourceForLine( 2_lnum );
+    REQUIRE( src.localLine == 2_lnum );
+    REQUIRE( r.markLineTextStatus( 2_lnum )
+             == FolderSearchResults::MarkLineTextStatus::Available );
+    REQUIRE( r.getLineString( 2_lnum ) == QStringLiteral( "gamma" ) );
+}
+
+TEST_CASE( "FolderSearchResults a marked line over the cache cap with a stateful codec "
+           "reports Unavailable instead of silently rendering empty",
+           "[folder][marks][regression]" )
+{
+    // Regression guard for the 16 MiB whole-file mark-line cache cap: a marked
+    // line in a file OVER the cap with a STATEFUL codec (UTF-16 -- the seek
+    // path cannot apply) has no text. The model must expose that as an explicit
+    // Unavailable state so the view can distinguish "text unavailable" from "the
+    // line is empty" -- silently rendering blank was the original defect. The
+    // fixture size derives from the SAME kMarkLineCacheCap constant the
+    // production cap uses, so a cap change keeps this test on the over-cap side.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = QDir( dir.path() ).absoluteFilePath( "big-utf16.log" );
+    {
+        QFile f( path );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray bytes;
+        bytes.append( "\xFF\xFE", 2 ); // BOM
+        // Build UTF-16LE filler without QTextCodec to keep the fixture simple.
+        QByteArray line;
+        for ( const QChar c : QStringLiteral( "filler line to push past the cap\n" ) ) {
+            line.append( static_cast<char>( c.unicode() & 0xFF ) );
+            line.append( static_cast<char>( ( c.unicode() >> 8 ) & 0xFF ) );
+        }
+        while ( bytes.size() <= FolderSearchResults::kMarkLineCacheCap ) {
+            bytes.append( line );
+        }
+        f.write( bytes );
+        f.close();
+    }
+
+    FolderSearchResults r;
+    klogg::folder::FileGroup g;
+    g.filePath = path;
+    g.sourceCodec = QTextCodec::codecForName( "UTF-16LE" );
+    g.matches.push_back( match( 0, 2, 12, 5, 5 ) );
+    r.setResults( { g } );
+
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 3 ); // a non-match filler line
+    r.setMarksStore( &marks );
+
+    REQUIRE( r.getNbLine() == 3_lcount ); // header + match + mark row
+    const auto src = r.sourceForLine( 2_lnum );
+    REQUIRE( src.localLine == 3_lnum );
+    // RED before the contract: over-cap mark text silently rendered as empty
+    // with no way to tell. Now it must report Unavailable.
+    REQUIRE( r.markLineTextStatus( 2_lnum )
+             == FolderSearchResults::MarkLineTextStatus::Unavailable );
+}
+
 TEST_CASE( "FolderSearchResults matchLinesForFile returns ascending local lines", "[folder]" )
 {
     FolderSearchResults r;
@@ -420,6 +522,36 @@ TEST_CASE( "FolderSearchResults decodes with the per-file encoding override", "[
     // No-op clear (nothing to remove) does not notify.
     r.clearEncodingOverrideForFile( path );
     REQUIRE( layoutSpy.count() == 2 );
+}
+
+TEST_CASE( "FolderSearchResults byte-newline-safe codec gate is an allowlist", "[folder][marks]" )
+{
+    // codecIsByteNewlineSafe gates the seek-based mark-line read. It must be an
+    // ALLOWLIST: only UTF-8 / known stateless single-byte codecs qualify, and
+    // any stateful or unlisted codec returns false so it stays on the whole-file
+    // decode path. A denylist would let an unlisted codec with a non-ASCII (or
+    // multi-byte) newline encoding silently mis-seek.
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe( nullptr ) ); // UTF-8 default
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-8" ) ) );
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe(
+        QTextCodec::codecForName( "ISO 8859-1" ) ) );
+    REQUIRE( FolderSearchResults::codecIsByteNewlineSafe(
+        QTextCodec::codecForName( "windows-1251" ) ) );
+
+    // Stateful / multi-byte / unlisted codecs must NOT be treated as
+    // byte-newline-safe.
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-16LE" ) ) );
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-16" ) ) );
+    REQUIRE_FALSE(
+        FolderSearchResults::codecIsByteNewlineSafe( QTextCodec::codecForName( "UTF-32" ) ) );
+    if ( auto* sjis = QTextCodec::codecForName( "Shift-JIS" ) ) {
+        REQUIRE_FALSE( FolderSearchResults::codecIsByteNewlineSafe( sjis ) );
+    }
+    if ( auto* gbk = QTextCodec::codecForName( "GBK" ) ) {
+        REQUIRE_FALSE( FolderSearchResults::codecIsByteNewlineSafe( gbk ) );
+    }
 }
 
 TEST_CASE( "FolderSearchResults getters are race-free against streaming and concurrent readers",

@@ -757,6 +757,79 @@ TEST_CASE( "FolderCrawlerWidget marks survive a filter change and show under Mar
     REQUIRE( widget.folderResults()->getNbLine() > 0_lcount );
 }
 
+TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line text",
+           "[folder][marks][regression]" )
+{
+    // Regression for: filter scan, click a result row (main view opens the file),
+    // select that line AND the following (non-matching) line, press M. Under
+    // "Marks and matches" the non-matching marked line is injected as a mark row;
+    // the user saw its gutter line number render but the row CONTENT was blank.
+    // The mark row must render the real source line text -- single-file parity
+    // (LogFilteredData mark rows read the line from the shared source data).
+    //
+    // The file must exceed the whole-file mark-line cache cap: with a small
+    // fixture the decoded-line cache covers every line and the bug does not
+    // reproduce. The user hit this on a 51 MiB log. The size derives from the
+    // SAME kMarkLineCacheCap constant the production cap uses, so a cap change
+    // keeps this fixture on the over-cap side.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    // line 3 = the match ("ERROR hit"); line 4 = the following non-match line.
+    QByteArray bytes( "line0\nline1\nline2\nERROR hit\nfollow line (not a match)\nline5\n" );
+    // Pad past the cap so the whole-file decoded-line cache refuses the file.
+    const QByteArray filler( "filler line to push the file past the cache cap\n" );
+    while ( bytes.size() <= FolderSearchResults::kMarkLineCacheCap ) {
+        bytes.append( filler );
+    }
+    bytes.append( "tail\n" );
+    const QString a = writeFile( dir, "a.log", bytes );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // header + 1 match
+
+    // Click the result row -> main view opens a.log at the matched line.
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    // Mark the matched line AND the following (non-matching) line with M.
+    widget.markMainViewLine( 3_lnum );
+    widget.markMainViewLine( 4_lnum );
+    REQUIRE( widget.isLineMarkedInFile( a, 3_lnum ) );
+    REQUIRE( widget.isLineMarkedInFile( a, 4_lnum ) );
+
+    // Under "Marks and matches" (the default), line 4 has no match record, so it
+    // appears as an injected mark row directly after the match row:
+    // [H0, D1(match line3), D2(mark row line4)].
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+    const auto src = widget.folderResults()->sourceForLine( 2_lnum );
+    REQUIRE( src.filePath == a );
+    REQUIRE( src.localLine == 4_lnum );
+
+    // RED before the fix: the row rendered with the line number in the gutter
+    // but EMPTY content. The mark row must show the real source line text.
+    REQUIRE( widget.folderResults()->getLineString( 2_lnum )
+             == QStringLiteral( "follow line (not a match)" ) );
+    REQUIRE( widget.folderResults()->getExpandedLineString( 2_lnum )
+             == QStringLiteral( "follow line (not a match)" ) );
+
+    // Same guarantee under the "Marks" visibility filter: header + both marks.
+    widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // header + 2 mark rows
+    const auto srcUnderMarks = widget.folderResults()->sourceForLine( 2_lnum );
+    REQUIRE( srcUnderMarks.localLine == 4_lnum );
+    REQUIRE( widget.folderResults()->getLineString( 2_lnum )
+             == QStringLiteral( "follow line (not a match)" ) );
+}
+
 TEST_CASE( "FolderCrawlerWidget a marked grep-context line stays visible under Marks",
            "[folder][marks][context]" )
 {

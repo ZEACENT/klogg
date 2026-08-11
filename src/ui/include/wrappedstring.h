@@ -85,14 +85,20 @@ public:
                     break;
                 }
 
-                // Binary search for the maximum number of characters that fit
-                auto maxChars = lineToWrap.size();
-                auto low = static_cast<qsizetype>( 1 );
-                auto high = maxChars;
+                // Binary search for the maximum number of characters that fit.
+                // WrappedStringPart is a QStringView, which is qsizetype-native
+                // on BOTH Qt 5 (>= 5.8) and Qt 6 -- so the search indices are
+                // plain qsizetype and NEVER narrow when passed to its left/mid.
+                // (Do NOT use klogg::ContainerIndex here: that tracks
+                // QByteArray::size(), int on Qt 5, and would narrow against a
+                // QStringView receiver -- the exact Qt 5 CI break.)
+                const qsizetype maxChars = lineToWrap.size();
+                qsizetype low = 1;
+                qsizetype high = maxChars;
                 qsizetype fitCount = 1;
 
                 while ( low <= high ) {
-                    auto mid = low + ( high - low ) / 2;
+                    const qsizetype mid = low + ( high - low ) / 2;
                     auto candidate = lineToWrap.left( mid );
                     int candidateWidth = textWidthFn( candidate );
                     if ( candidateWidth <= availablePixelWidth ) {
@@ -109,7 +115,11 @@ public:
                 auto lastSpaceIt = std::find_if( fittingPart.rbegin(), fittingPart.rend(),
                                                  []( QChar c ) { return c.isSpace(); } );
                 if ( lastSpaceIt != fittingPart.rend() ) {
-                    auto spacePos = std::distance( fittingPart.begin(), lastSpaceIt.base() );
+                    // std::distance yields ptrdiff_t; cast to qsizetype (the
+                    // QStringView receiver's native index type on both Qt 5/6)
+                    // so the .left/.mid call below does not narrow.
+                    const auto spacePos = static_cast<qsizetype>(
+                        std::distance( fittingPart.begin(), lastSpaceIt.base() ) );
                     wrappedLines_.push_back( lineToWrap.left( spacePos ) );
                     lineToWrap = lineToWrap.mid( spacePos );
                 }
