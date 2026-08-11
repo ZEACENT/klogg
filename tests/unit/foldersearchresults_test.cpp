@@ -387,6 +387,12 @@ TEST_CASE( "FolderSearchResults a marked line over the cache cap with a stateful
     // with no way to tell. Now it must report Unavailable.
     REQUIRE( r.markLineTextStatus( 2_lnum )
              == FolderSearchResults::MarkLineTextStatus::Unavailable );
+    // And the results view must render an explicit placeholder for the
+    // unavailable text, not a silent blank line (the user-facing symptom).
+    REQUIRE( r.getLineString( 2_lnum )
+             == FolderSearchResults::unavailableMarkLineText() );
+    REQUIRE( r.getExpandedLineString( 2_lnum )
+             == FolderSearchResults::unavailableMarkLineText() );
 }
 
 TEST_CASE( "FolderSearchResults matchLinesForFile returns ascending local lines", "[folder]" )

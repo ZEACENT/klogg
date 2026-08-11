@@ -253,8 +253,22 @@ def _extract_call_args(code: str, open_paren_pos: int) -> str:
 # `.at(i)` / `.value(i)` join the list: QString/QByteArray::at and value take
 # int on Qt 5 (PR #56 CI failure: FolderSearchResults::readMarkLineSeek indexed
 # QByteArray::at with a qsizetype loop counter).
-_QT_INT_API_RE = re.compile(
-    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove|at|value)\s*\("
+#
+# Two tiers (PR #56 review): indexOf/mid/left/right/truncate/chop/chopped/remove
+# are essentially only Qt string/sequence APIs, so they are checked on ANY
+# receiver. But .at/.value also exist on non-narrowing containers (QHash::value,
+# QMap::value, std::vector::at) where a qsizetype argument is correct on Qt 5, so
+# those two are only flagged when the receiver is a KNOWN int-indexed Qt type
+# (collected below) -- otherwise legitimate QHash/QMap/std::vector use would be
+# a false positive.
+_QT_INT_ONLY_API_RE = re.compile(
+    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove)\s*\("
+)
+_QT_INT_AMBIGUOUS_API_RE = re.compile(r"\.(?:at|value)\s*\(")
+# Receivers whose .at/.value take int on Qt 5 (string/sequence containers).
+_QT_INT_RECEIVER_TYPES = (
+    "QString", "QStringRef", "QByteArray", "QStringList", "QVector", "QList",
+    "QVarLengthArray", "QLatin1String",
 )
 _QSIZETYPE_DECL_RE = re.compile(r"\b(?:const\s+)?qsizetype\s+(\w+)\b")
 # `using <Alias> = QStringView;` -- the wrappedstring.h code uses this idiom.
@@ -418,39 +432,61 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
         for m in var_decl_re.finditer(code):
             qstrview_vars.add(m.group(2))
 
+    # Variables of a KNOWN int-indexed Qt string/sequence type. `.at/.value` are
+    # only flagged on these receivers (QHash/QMap::value and std::vector::at take
+    # a key/size_type that legitimately accepts qsizetype on Qt 5).
+    int_receiver_vars: set[str] = set()
+    int_type_alt = "|".join(re.escape(t) for t in _QT_INT_RECEIVER_TYPES)
+    int_var_decl_re = re.compile(rf"\b(?:const\s+)?(?:{int_type_alt})\s*[&*]?\s*(\w+)\b")
+    for line in lines:
+        code = _strip_line_comment(line)
+        for m in int_var_decl_re.finditer(code):
+            int_receiver_vars.add(m.group(1))
+
+    def report(line_no: int, name: str, receiver: str, args: str) -> None:
+        findings.append(
+            (
+                line_no,
+                f"qsizetype variable '{name}' is passed to a Qt "
+                f"string API (.indexOf/.mid/.left/...) that takes "
+                f"`int` on Qt 5 (receiver '{receiver}' is not a "
+                f"QStringView). This narrows qsizetype->int and "
+                f"trips -Werror=conversion on the Qt 5 Linux CI "
+                f"builds (invisible on Qt 6 / macOS). Use the "
+                f"adaptive klogg::ContainerIndex (containers.h: "
+                f"int on Qt 5 / qsizetype on Qt 6, never narrows), "
+                f"LineLength/LineColumn for line semantics, or "
+                f"static_cast<int>(...) with a documented size "
+                f"bound. (PR #48/#56 CI failures.)",
+            )
+        )
+
     for i, line in enumerate(lines, start=1):
         if i in qt6_lines or ALLOW_MARKER in line:
             continue
         code = _strip_line_comment(line)
-        for m in _QT_INT_API_RE.finditer(code):
-            args = _extract_call_args(code, m.end() - 1)
-            if not args:
-                continue
-            receiver = _extract_receiver(code, m.start())
-            # QStringView receiver: qsizetype-native on Qt 5, no narrowing.
-            if receiver in qstrview_types or receiver in qstrview_vars:
-                continue
-            for name in declared:
-                if re.search(r"\b" + re.escape(name) + r"\b", _strip_literals(args)):
-                    findings.append(
-                        (
-                            i,
-                            f"qsizetype variable '{name}' is passed to a Qt "
-                            f"string API (.indexOf/.mid/.left/...) that takes "
-                            f"`int` on Qt 5 (receiver '{receiver}' is not a "
-                            f"QStringView). This narrows qsizetype->int and "
-                            f"trips -Werror=conversion on the Qt 5 Linux CI "
-                            f"builds (invisible on Qt 6 / macOS). Use the "
-                            f"adaptive klogg::ContainerIndex (containers.h: "
-                            f"int on Qt 5 / qsizetype on Qt 6, never narrows), "
-                            f"LineLength/LineColumn for line semantics, or "
-                            f"static_cast<int>(...) with a documented size "
-                            f"bound. (PR #48/#56 CI failures.)",
-                        )
-                    )
-                    break  # one report per call is enough
-            if findings and findings[-1][0] == i:
-                break  # one report per line is enough
+        # (regex, require_known_int_receiver) pairs. indexOf/mid/... run on any
+        # receiver; at/value only on a known int-indexed Qt receiver.
+        for api_re, needs_int_receiver in (
+            (_QT_INT_ONLY_API_RE, False),
+            (_QT_INT_AMBIGUOUS_API_RE, True),
+        ):
+            for m in api_re.finditer(code):
+                args = _extract_call_args(code, m.end() - 1)
+                if not args:
+                    continue
+                receiver = _extract_receiver(code, m.start())
+                # QStringView receiver: qsizetype-native on Qt 5, no narrowing.
+                if receiver in qstrview_types or receiver in qstrview_vars:
+                    continue
+                if needs_int_receiver and receiver not in int_receiver_vars:
+                    continue
+                for name in declared:
+                    if re.search(r"\b" + re.escape(name) + r"\b", _strip_literals(args)):
+                        report(i, name, receiver, args)
+                        break  # one report per call is enough
+                if findings and findings[-1][0] == i:
+                    break  # one report per line is enough
     return findings
 
 

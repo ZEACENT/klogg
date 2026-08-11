@@ -218,6 +218,11 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
     return group.matches[ row->matchIndex ].role == klogg::folder::RecordRole::Match;
 }
 
+QString FolderSearchResults::unavailableMarkLineText()
+{
+    return QStringLiteral( "<marked line unavailable: file too large for this encoding>" );
+}
+
 FolderSearchResults::MarkLineTextStatus
 FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
 {
@@ -406,6 +411,13 @@ QString FolderSearchResults::doGetLineString( LineNumber line ) const
         const LineNumber localLine = row->markLocalLine;
         QTextCodec* const codec = codecForFile( filePath );
         lock.unlock();
+        // A mark row whose text is unavailable BY DESIGN (over-cap stateful
+        // codec) renders an explicit placeholder, not a silent blank line -- so
+        // the user can tell "text could not be loaded" apart from "the line is
+        // empty" (the original 16 MiB defect showed an unexplained blank row).
+        if ( markLineTextStatus( line ) == MarkLineTextStatus::Unavailable ) {
+            return unavailableMarkLineText();
+        }
         return readMarkLine( filePath, localLine, codec );
     }
     if ( row->kind == LineKind::Header ) {
@@ -489,9 +501,7 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
         for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
             it = it.key().startsWith( prefix ) ? markLineCache_.erase( it ) : std::next( it );
         }
-        for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
-            it = it.key().startsWith( prefix ) ? markTextCache_.erase( it ) : std::next( it );
-        }
+        clearMarkTextCacheForFile( filePath );
     }
     Q_EMIT layoutChanged();
 }
@@ -515,10 +525,7 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
                 it = it.key().startsWith( prefix ) ? markLineCache_.erase( it )
                                                    : std::next( it );
             }
-            for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
-                it = it.key().startsWith( prefix ) ? markTextCache_.erase( it )
-                                                   : std::next( it );
-            }
+            clearMarkTextCacheForFile( filePath );
         }
     }
     if ( removed ) {
@@ -973,6 +980,23 @@ QString FolderSearchResults::marksGroupHeader( size_t marksGroupIndex ) const
     return text;
 }
 
+void FolderSearchResults::clearMarkTextCacheForFile( const QString& filePath ) const
+{
+    // Caller holds fileIoMutex_. Subtract each removed entry's decoded bytes so
+    // the aggregate budget stays accurate.
+    const QString prefix = filePath + QChar::Null;
+    for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+        if ( it.key().startsWith( prefix ) ) {
+            markTextCacheBytes_
+                -= static_cast<qint64>( it.value().size() ) * qint64{ sizeof( QChar ) };
+            it = markTextCache_.erase( it );
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
 QTextCodec* FolderSearchResults::codecForFile( const QString& filePath ) const
 {
     // Caller holds dataMutex_ shared; reads encodingOverrides_ + groups_.
@@ -1171,8 +1195,15 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
     const QString text = codec != nullptr ? codec->toUnicode( lineBytes )
                                           : QString::fromUtf8( lineBytes );
     // Cache only a successfully-read line; a read past EOF returns above without
-    // caching so a file that later grows can be retried.
-    markTextCache_.insert( textKey, text );
+    // caching so a file that later grows can be retried. Honor the aggregate
+    // byte budget: once the cache holds kMarkTextCacheBudget of decoded text,
+    // return the line without caching it (the row still renders; it simply
+    // rescans on the next repaint) rather than growing without bound.
+    const qint64 textBytes = static_cast<qint64>( text.size() ) * qint64{ sizeof( QChar ) };
+    if ( markTextCacheBytes_ + textBytes <= kMarkTextCacheBudget ) {
+        markTextCache_.insert( textKey, text );
+        markTextCacheBytes_ += textBytes;
+    }
     return text;
 }
 

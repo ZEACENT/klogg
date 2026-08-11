@@ -22,8 +22,17 @@ if [[ -z "$QT5" || ! -f "$QT5/include/QtCore/qbytearray.h" ]]; then
     exit 0
 fi
 
-TS_DIR="$REPO_ROOT/cpm_cache/type_safe/71a1f33a7b982527e268b7782e28521750f87981"
-MI_DIR="$REPO_ROOT/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/include"
+# The cpm_cache dependency dirs are content-hash-named and change whenever a
+# pinned dependency is upgraded, so they must be discovered, not hardcoded
+# (hardcoding made this probe silently fail after a dep bump).
+TS_ROOT="$(find "$REPO_ROOT/cpm_cache/type_safe" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+MI_ROOT="$(find "$REPO_ROOT/cpm_cache/mimalloc" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+if [[ -z "$TS_ROOT" || -z "$MI_ROOT" ]]; then
+    echo "SKIP: cpm_cache type_safe/mimalloc not found (run a cmake configure first)" >&2
+    exit 0
+fi
+TS_DIR="$TS_ROOT"
+MI_DIR="$MI_ROOT/include"
 
 COMMON_FLAGS=(
     -std=gnu++17 -Werror=conversion -Wsign-conversion
