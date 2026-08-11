@@ -22,6 +22,7 @@
 
 #include <Qt>
 
+#include <QKeySequence>
 #include <QWheelEvent>
 
 namespace klogg::platform {
@@ -63,6 +64,21 @@ inline QWheelEvent makeWheelEvent( const QPointF& position, const QPointF& globa
 #else
     return { position, globalPosition, pixelDelta, angleDelta, angleDelta.y(), Qt::Vertical,
              Qt::NoButton, Qt::NoModifier, phase };
+#endif
+}
+
+// Return the combined key+modifiers integer of one chord of a key sequence,
+// hiding the Qt 5 (operator[] returns int) / Qt 6 (returns QKeyCombination)
+// API split.
+inline int keyChordToCombined( const QKeySequence& sequence, int chord )
+{
+    // operator[] takes uint on both Qt 5 and Qt 6; keep the caller's int
+    // chord at the boundary so -Wsign-conversion builds stay clean.
+    const auto index = static_cast<unsigned int>( chord );
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+    return sequence[ index ].toCombined();
+#else
+    return sequence[ index ];
 #endif
 }
 
