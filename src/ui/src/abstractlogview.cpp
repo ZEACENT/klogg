@@ -1194,6 +1194,11 @@ void AbstractLogView::scrollContentsBy( int dx, int /*dy*/ )
     else {
         firstLine_ = scrollPosition;
         lastLineAligned_ = false;
+        // Scrollbar drags, keyboard scrolling and selection jumps reach here
+        // without passing through wheelEvent or updateScrollBars; tension left
+        // over from a bottom pull would otherwise keep painting the
+        // pull-to-follow bar mid-list and swallow wheel events it cannot drain.
+        followElasticHook_.resetTension();
     }
 
     firstCol_ = ( firstCol_.get() - dx ) >= 0 ? LineColumn{ firstCol_.get() - dx } : 0_lcol;

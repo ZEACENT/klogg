@@ -3170,6 +3170,57 @@ SCENARIO( "Elastic pull-to-follow tension is released when filtered content coll
     }
 }
 
+SCENARIO( "Elastic pull-to-follow tension is released when scrolling away from the bottom",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_elastic_scrollaway_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+
+    GIVEN( "elastic tension engaged by pulling at the bottom of the filtered view" )
+    {
+        crawlerVisitor.settleFilteredVerticallyAtBottom();
+        crawlerVisitor.render();
+
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollBegin );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+
+        REQUIRE( crawlerVisitor.filteredFollowElasticSize() > 0 );
+
+        WHEN( "the user scrolls away from the bottom (scrollbar drag, keyboard, jump)" )
+        {
+            // Scrollbar value changes like this bypass both wheelEvent and
+            // updateScrollBars, so only scrollContentsBy can cancel the pull.
+            crawlerVisitor.scrollFilteredVerticallyToMiddle();
+            crawlerVisitor.render();
+
+            THEN( "the pull tension is cancelled" )
+            {
+                INFO( "elastic size=" << crawlerVisitor.filteredFollowElasticSize() );
+                REQUIRE( crawlerVisitor.filteredFollowElasticSize() == 0 );
+            }
+        }
+    }
+}
+
 SCENARIO( "Elastic hook hold/release pairing survives zero-delta gesture phases",
           "[ui][scrollbar][regression]" )
 {

@@ -78,7 +78,9 @@ class ElasticHook : public QObject {
         allowHook_ = allow;
         if ( !allow ) {
             hooked_ = false;
-            Q_EMIT hooked( false );
+            // this-> keeps cppcheck from misparsing the emission as a local
+            // declaration shadowing the hooked() signal.
+            Q_EMIT this->hooked( false );
         }
     }
 
