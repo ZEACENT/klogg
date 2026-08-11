@@ -218,6 +218,11 @@ bool FolderSearchResults::isMatchRow( LineNumber visibleIndex ) const
     return group.matches[ row->matchIndex ].role == klogg::folder::RecordRole::Match;
 }
 
+QString FolderSearchResults::unavailableMarkLineText()
+{
+    return QStringLiteral( "<marked line unavailable: file too large for this encoding>" );
+}
+
 FolderSearchResults::MarkLineTextStatus
 FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
 {
@@ -233,6 +238,12 @@ FolderSearchResults::markLineTextStatus( LineNumber visibleIndex ) const
         filePath = row->markFilePath;
         codec = codecForFile( filePath );
     }
+    return markLineTextStatusFor( filePath, codec );
+}
+
+FolderSearchResults::MarkLineTextStatus
+FolderSearchResults::markLineTextStatusFor( const QString& filePath, QTextCodec* codec ) const
+{
     // Byte-newline-safe files read by seek: text is always fetchable, any size.
     if ( codecIsByteNewlineSafe( codec ) ) {
         return MarkLineTextStatus::Available;
@@ -406,6 +417,16 @@ QString FolderSearchResults::doGetLineString( LineNumber line ) const
         const LineNumber localLine = row->markLocalLine;
         QTextCodec* const codec = codecForFile( filePath );
         lock.unlock();
+        // A mark row whose text is unavailable BY DESIGN (over-cap stateful
+        // codec) renders an explicit placeholder, not a silent blank line -- so
+        // the user can tell "text could not be loaded" apart from "the line is
+        // empty" (the original 16 MiB defect showed an unexplained blank row).
+        // The status is evaluated on the identity captured under the lock
+        // above: re-resolving the visible row here could race a streaming
+        // commit and attribute the placeholder to the wrong row.
+        if ( markLineTextStatusFor( filePath, codec ) == MarkLineTextStatus::Unavailable ) {
+            return unavailableMarkLineText();
+        }
         return readMarkLine( filePath, localLine, codec );
     }
     if ( row->kind == LineKind::Header ) {
@@ -489,9 +510,7 @@ void FolderSearchResults::setEncodingOverrideForFile( const QString& filePath,
         for ( auto it = markLineCache_.begin(); it != markLineCache_.end(); ) {
             it = it.key().startsWith( prefix ) ? markLineCache_.erase( it ) : std::next( it );
         }
-        for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
-            it = it.key().startsWith( prefix ) ? markTextCache_.erase( it ) : std::next( it );
-        }
+        clearMarkTextCacheForFile( filePath );
     }
     Q_EMIT layoutChanged();
 }
@@ -515,10 +534,7 @@ void FolderSearchResults::clearEncodingOverrideForFile( const QString& filePath 
                 it = it.key().startsWith( prefix ) ? markLineCache_.erase( it )
                                                    : std::next( it );
             }
-            for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
-                it = it.key().startsWith( prefix ) ? markTextCache_.erase( it )
-                                                   : std::next( it );
-            }
+            clearMarkTextCacheForFile( filePath );
         }
     }
     if ( removed ) {
@@ -973,6 +989,23 @@ QString FolderSearchResults::marksGroupHeader( size_t marksGroupIndex ) const
     return text;
 }
 
+void FolderSearchResults::clearMarkTextCacheForFile( const QString& filePath ) const
+{
+    // Caller holds fileIoMutex_. Subtract each removed entry's decoded bytes so
+    // the aggregate budget stays accurate.
+    const QString prefix = filePath + QChar::Null;
+    for ( auto it = markTextCache_.begin(); it != markTextCache_.end(); ) {
+        if ( it.key().startsWith( prefix ) ) {
+            markTextCacheBytes_
+                -= static_cast<qint64>( it.value().size() ) * qint64{ sizeof( QChar ) };
+            it = markTextCache_.erase( it );
+        }
+        else {
+            ++it;
+        }
+    }
+}
+
 QTextCodec* FolderSearchResults::codecForFile( const QString& filePath ) const
 {
     // Caller holds dataMutex_ shared; reads encodingOverrides_ + groups_.
@@ -1171,8 +1204,18 @@ QString FolderSearchResults::readMarkLineSeek( const QString& filePath, LineNumb
     const QString text = codec != nullptr ? codec->toUnicode( lineBytes )
                                           : QString::fromUtf8( lineBytes );
     // Cache only a successfully-read line; a read past EOF returns above without
-    // caching so a file that later grows can be retried.
-    markTextCache_.insert( textKey, text );
+    // caching so a file that later grows can be retried. Honor the aggregate
+    // byte budget AND the entry-count cap: empty/short lines cost ~0 payload
+    // bytes, so the byte budget alone would let the QString keys and QHash
+    // nodes grow with the mark count. Over the limit the line is returned
+    // without caching it (the row still renders; it simply rescans on the next
+    // repaint) rather than growing without bound.
+    const qint64 textBytes = static_cast<qint64>( text.size() ) * qint64{ sizeof( QChar ) };
+    if ( markTextCache_.size() < kMarkTextCacheMaxEntries
+         && markTextCacheBytes_ + textBytes <= kMarkTextCacheBudget ) {
+        markTextCache_.insert( textKey, text );
+        markTextCacheBytes_ += textBytes;
+    }
     return text;
 }
 

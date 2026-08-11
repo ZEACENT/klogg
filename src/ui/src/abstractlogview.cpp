@@ -1063,6 +1063,19 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         yDelta = pixelDelta.y();
     }
 
+    // Gesture-phase bookkeeping first and unconditionally: Qt delivers
+    // zero-delta ScrollBegin/ScrollEnd events (macOS trackpads), and the scroll
+    // range can collapse mid-gesture (e.g. a new search shrinking the content).
+    // Gating hold/release on deltas or scroll position used to strand the hook
+    // in the held state, freezing its tension indefinitely.
+    const auto scrollPhase = wheelEvent->phase();
+    if ( scrollPhase == Qt::ScrollBegin ) {
+        followElasticHook_.hold();
+    }
+    else if ( scrollPhase == Qt::ScrollEnd || scrollPhase == Qt::ScrollMomentum ) {
+        followElasticHook_.release();
+    }
+
     if ( yDelta == 0 ) {
         QAbstractScrollArea::wheelEvent( wheelEvent );
         return;
@@ -1083,19 +1096,9 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
 
     const auto allowFollowOnScroll = Configuration::get().allowFollowOnScroll();
     if ( verticalScrollBar()->maximum() > 0
-         && verticalScrollBar()->value() == verticalScrollBar()->maximum() ) {
-        if ( allowFollowOnScroll || yDelta > 0 ) {
-            // First see if we need to block the elastic (on Mac)
-            if ( wheelEvent->phase() == Qt::ScrollBegin ) {
-                followElasticHook_.hold();
-            }
-            else if ( wheelEvent->phase() == Qt::ScrollEnd
-                      || wheelEvent->phase() == Qt::ScrollMomentum ) {
-                followElasticHook_.release();
-            }
-
-            followElasticHook_.move( -yDelta );
-        }
+         && verticalScrollBar()->value() == verticalScrollBar()->maximum()
+         && ( allowFollowOnScroll || yDelta > 0 ) ) {
+        followElasticHook_.move( -yDelta );
 
         // LOG_DEBUG << "Elastic " << y_delta;
     }
@@ -1191,6 +1194,11 @@ void AbstractLogView::scrollContentsBy( int dx, int /*dy*/ )
     else {
         firstLine_ = scrollPosition;
         lastLineAligned_ = false;
+        // Scrollbar drags, keyboard scrolling and selection jumps reach here
+        // without passing through wheelEvent or updateScrollBars; tension left
+        // over from a bottom pull would otherwise keep painting the
+        // pull-to-follow bar mid-list and swallow wheel events it cannot drain.
+        followElasticHook_.resetTension();
     }
 
     firstCol_ = ( firstCol_.get() - dx ) >= 0 ? LineColumn{ firstCol_.get() - dx } : 0_lcol;
@@ -1279,37 +1287,28 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     const int effectiveHeight
         = textAreaCache_.actual_height_ > 0 ? textAreaCache_.actual_height_ : wholeHeight;
 
-    drawingTopOffset_ = -pullToFollowHeight;
-    int drawingTopPosition = drawingTopOffset_;
-    // Keep pull-to-follow within viewport to avoid blank/gray regions.
-    int drawingPullToFollowTopPosition
-        = std::min( drawingTopPosition + effectiveHeight, availableTextHeight );
-
+    int drawingTopPosition = 0;
     if ( shouldBottomAlignFrame() ) {
-        int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
+        const int hiddenHeightPx = std::max( 0, effectiveHeight - availableTextHeight );
         const bool wrappedContentOverflows
             = useTextWrap_ && textAreaCache_.actual_height_ > availableTextHeight;
         const bool contentFitsEmptyScrollRange
             = verticalScrollBar()->maximum() == 0 && !wrappedContentOverflows;
         drawingTopOffset_ = contentFitsEmptyScrollRange ? 0 : -hiddenHeightPx;
         drawingTopPosition = drawingTopOffset_;
-
-        const int heightForPullToFollow = ( useTextWrap_ && textAreaCache_.actual_height_ > 0 )
-            ? textAreaCache_.actual_height_
-            : effectiveHeight;
-        const int maxPullToFollowTop
-            = std::max( 0, availableTextHeight - pullToFollowHeight );
-        drawingPullToFollowTopPosition
-            = std::min( drawingTopPosition + heightForPullToFollow, maxPullToFollowTop );
     }
     else {
         drawingTopOffset_ = -pullToFollowHeight;
         drawingTopPosition = drawingTopOffset_;
-        const int maxPullToFollowTop
-            = std::max( 0, availableTextHeight - pullToFollowHeight );
-        drawingPullToFollowTopPosition
-            = std::min( drawingTopPosition + effectiveHeight, maxPullToFollowTop );
     }
+
+    // The pull-to-follow strip occupies the bottom pullToFollowHeight pixels of
+    // the text viewport; the stripe pixmap is taller and is clipped by the
+    // viewport edge. It must never be anchored to the content end: with content
+    // shorter than the viewport that floods the whole empty area below the last
+    // line with stripes, regardless of the actual pull length.
+    const int drawingPullToFollowTopPosition
+        = std::max( 0, availableTextHeight - pullToFollowHeight );
 
     devicePainter.drawPixmap( 0, drawingTopPosition, textAreaCache_.pixmap_ );
 
@@ -2937,6 +2936,16 @@ void AbstractLogView::updateScrollBars()
         // This prevents using incorrect column count (calculated with leftMarginPx_ = 0)
         // The horizontal scrollbar will be correctly calculated after the first paint event
         horizontalScrollBar()->setRange( 0, 0 );
+    }
+
+    // The pull-to-follow tension only has meaning while the view sits at the end
+    // of a scrollable range. Enforce that invariant here so a collapsing data set
+    // (new search, filter switch, truncation) or leaving the bottom can never
+    // strand residual tension -- a stale pull both paints the pull-to-follow bar
+    // over empty space and makes wheelEvent swallow scrolls it cannot drain.
+    if ( verticalScrollBar()->maximum() == 0
+         || verticalScrollBar()->value() < verticalScrollBar()->maximum() ) {
+        followElasticHook_.resetTension();
     }
 }
 

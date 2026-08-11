@@ -20,7 +20,7 @@ shadowFunction:*/src/versioncheck/src/versionchecker.cpp:205
 shadowFunction:*/src/versioncheck/src/versionchecker.cpp:266
 shadowFunction:*/src/versioncheck/src/versionchecker.cpp:271
 shadowFunction:*/src/ui/src/tabgroup.cpp:109
-shadowFunction:*/src/ui/include/viewtools.h:66
+shadowFunction:*/src/ui/include/viewtools.h:83
 returnByReference:*/src/ui/include/favoritefiles.h:37
 functionStatic:*/src/ui/src/iconloader.cpp:57
 functionStatic:*/src/ui/src/iconloader.cpp:62

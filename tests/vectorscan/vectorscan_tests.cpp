@@ -303,14 +303,16 @@ std::optional<AllocatorMode> parseAllocatorMode( const QString& value )
 std::vector<int> parseIndexes( const QString& value )
 {
     std::vector<int> indexes;
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    const auto parts = value.split( QLatin1Char( ',' ), Qt::SkipEmptyParts );
-#else
-    const auto parts = value.split( QLatin1Char( ',' ), QString::SkipEmptyParts );
-#endif
+    // Empty parts are filtered inline: SkipEmptyParts lives in different
+    // namespaces across the supported Qt range (QString:: vs Qt::), and
+    // version guards stay out of test code.
+    const auto parts = value.split( QLatin1Char( ',' ) );
 
     indexes.reserve( static_cast<size_t>( parts.size() ) );
     for ( const auto& part : parts ) {
+        if ( part.isEmpty() ) {
+            continue;
+        }
         bool ok = false;
         const auto index = part.toInt( &ok );
         if ( ok ) {

@@ -258,6 +258,113 @@ class QsizetypeConversionQStringViewDeclTest(unittest.TestCase):
         self.assertEqual(self._do_check(text), [])
 
 
+class QsizetypeConversionReceiverGatingTest(unittest.TestCase):
+    """PR #57 review: .remove() moved to the receiver-gated matcher
+    (QSet/QMap/QHash/QCache::remove take const Key& -- a qsizetype key does not
+    narrow), and the receiver declaration pattern must recognise
+    template-declared containers (QVector<int>, QList<T>, ...) and prefer
+    QStringList over the QString prefix."""
+
+    def _do_check(self, text: str) -> list:
+        return lint._check_qsizetype_to_int_conversion(
+            text, Path("test.cpp"))
+
+    def test_remove_on_qset_qsizetype_is_not_flagged(self):
+        text = (
+            "QSet<qsizetype> s;\n"
+            "qsizetype q = 0;\n"
+            "void f() { s.remove(q); }\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+    def test_remove_on_qmap_qsizetype_key_is_not_flagged(self):
+        text = (
+            "QMap<qsizetype, QString> m;\n"
+            "qsizetype q = 0;\n"
+            "void f() { m.remove(q); }\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+    def test_remove_on_declared_qstring_is_flagged(self):
+        text = (
+            "void f() {\n"
+            "    QString s;\n"
+            "    qsizetype q = 0;\n"
+            "    s.remove(q, 1);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_remove_on_undeclared_receiver_is_not_flagged(self):
+        # Member declared in a header: the gated check stays silent rather
+        # than guessing (recall trade-off documented at the matcher).
+        text = (
+            "qsizetype q = 0;\n"
+            "void f() { line.remove(q, 1); }\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+    def test_qvector_template_decl_at_is_flagged(self):
+        text = (
+            "void f() {\n"
+            "    QVector<int> values;\n"
+            "    qsizetype q = 0;\n"
+            "    values.at(q);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_qlist_template_decl_value_is_flagged(self):
+        text = (
+            "void f() {\n"
+            "    QList<QString> rows;\n"
+            "    qsizetype q = 0;\n"
+            "    rows.value(q);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_qvarlengtharray_two_param_decl_at_is_flagged(self):
+        text = (
+            "void f() {\n"
+            "    QVarLengthArray<char, 256> buf;\n"
+            "    qsizetype q = 0;\n"
+            "    buf.at(q);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_nested_template_decl_at_is_flagged(self):
+        text = (
+            "void f() {\n"
+            "    QVector<QPair<int, int>> pairs;\n"
+            "    qsizetype q = 0;\n"
+            "    pairs.at(q);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_qstringlist_decl_beats_qstring_prefix(self):
+        text = (
+            "void f() {\n"
+            "    QStringList values;\n"
+            "    qsizetype q = 0;\n"
+            "    values.at(q);\n"
+            "}\n"
+        )
+        self.assertEqual(len(self._do_check(text)), 1)
+
+    def test_iterator_decl_is_not_registered_as_receiver(self):
+        text = (
+            "void f() {\n"
+            "    QVector<int>::iterator it;\n"
+            "    qsizetype q = 0;\n"
+            "    it.value(q);\n"
+            "}\n"
+        )
+        self.assertEqual(self._do_check(text), [])
+
+
 class QStringListBraceAssignmentTest(unittest.TestCase):
     def check(self, text: str) -> list:
         return lint._check_qstringlist_brace_assignment(
@@ -299,6 +406,48 @@ class QStringListBraceAssignmentTest(unittest.TestCase):
         text = (
             "QStringList archAliases;\n"
             'archAliases = { QStringLiteral( "x64" ) }; '
+            "// lint-allow: platform-fragile\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+
+class QtVersionMacroInTestsTest(unittest.TestCase):
+    """Qt-version preprocessor guards are banned under tests/ (PR #57: the
+    open-coded QWheelEvent constructor guard failed every Qt 5.15 CI leg with
+    -Werror=deprecated-declarations). The split belongs in
+    src/utils/include/platform/."""
+
+    def check(self, text, name="tests/ui/crawlerwidget_test.cpp"):
+        return lint._check_qt_version_macro_in_tests(text, Path(name))
+
+    def test_qt_version_guard_in_test_is_flagged(self):
+        cases = [
+            "#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)",
+            "#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)",
+            "#elif QT_VERSION < QT_VERSION_CHECK(5, 15, 0)",
+            "#if QT_VERSION_MAJOR == 6",
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                findings = self.check(case + "\n")
+                self.assertEqual(len(findings), 1, f"Should flag: {case}")
+                self.assertEqual(findings[0][0], 1)
+
+    def test_guard_outside_tests_is_accepted(self):
+        # src/ legitimately guards 5.15+ APIs per CLAUDE.md.
+        text = "#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)\n"
+        self.assertEqual(self.check(text, name="src/ui/src/abstractlogview.cpp"), [])
+
+    def test_plain_code_and_comments_are_accepted(self):
+        text = (
+            "// #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) used to be here\n"
+            "const auto version = QT_VERSION_STR;\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_suppresses(self):
+        text = (
+            "#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0) "
             "// lint-allow: platform-fragile\n"
         )
         self.assertEqual(self.check(text), [])

@@ -11,6 +11,7 @@
 #include <catch2/catch.hpp>
 
 #include <configuration.h>
+#include <platform/platform_input.h>
 #include <shortcuts.h>
 
 // Simulate pressing the key CURRENTLY configured for `action` (defaults merged
@@ -28,12 +29,7 @@ inline void pressConfiguredShortcut( QWidget* target, const std::string& action 
     // every chord so multi-chord bindings actually fire. Single-chord
     // sequences (the common case) loop exactly once.
     for ( int chord = 0; chord < sequence.count(); ++chord ) {
-#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
-        const auto combined = sequence[ chord ].toCombined();
-#else
-        // Qt 5: QKeySequence::operator[] returns the int key+modifiers directly.
-        const int combined = sequence[ chord ];
-#endif
+        const auto combined = klogg::platform::keyChordToCombined( sequence, chord );
         const auto key = static_cast<Qt::Key>(
             combined & ~static_cast<int>( Qt::KeyboardModifierMask ) );
         const auto modifiers = static_cast<Qt::KeyboardModifiers>(

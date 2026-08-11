@@ -22,8 +22,45 @@ if [[ -z "$QT5" || ! -f "$QT5/include/QtCore/qbytearray.h" ]]; then
     exit 0
 fi
 
-TS_DIR="$REPO_ROOT/cpm_cache/type_safe/71a1f33a7b982527e268b7782e28521750f87981"
-MI_DIR="$REPO_ROOT/cpm_cache/mimalloc/c1a06fe29f85739efe873954591e60cfecba8d25/include"
+# The cpm_cache dependency dirs are content-hash-named and change whenever a
+# pinned dependency is upgraded, so they must be discovered, not hardcoded
+# (hardcoding made this probe silently fail after a dep bump). Nothing prunes
+# old hash dirs after an upgrade, so several candidates can coexist and
+# readdir order is unspecified: resolve the ACTIVE dir from the CMake
+# configure metadata (the tree the build actually compiles against), and only
+# fall back to the cache layout when it holds exactly one candidate.
+resolve_dep() {
+    local dep="$1" cache line dir d
+    local -a dirs=()
+    for cache in "$REPO_ROOT"/build_root/CMakeCache.txt "$REPO_ROOT"/build*/CMakeCache.txt; do
+        [[ -f "$cache" ]] || continue
+        line="$(grep -E "^CPM_PACKAGE_${dep}_SOURCE_DIR:[A-Z]+=" "$cache" | head -1 || true)"
+        if [[ -n "$line" ]]; then
+            dir="${line#*=}"
+            if [[ -d "$dir" ]]; then
+                printf '%s\n' "$dir"
+                return 0
+            fi
+        fi
+    done
+    while IFS= read -r d; do dirs+=("$d"); done \
+        < <(find "$REPO_ROOT/cpm_cache/$dep" -maxdepth 1 -mindepth 1 -type d 2>/dev/null)
+    if [[ "${#dirs[@]}" -ne 1 ]]; then
+        echo "ERROR: ${#dirs[@]} candidate dirs under cpm_cache/$dep (stale hash dirs after a dep bump?);" >&2
+        echo "       re-run cmake configure so CMakeCache names the active one, or prune the cache." >&2
+        return 1
+    fi
+    printf '%s\n' "${dirs[0]}"
+}
+
+if [[ ! -d "$REPO_ROOT/cpm_cache/type_safe" || ! -d "$REPO_ROOT/cpm_cache/mimalloc" ]]; then
+    echo "SKIP: cpm_cache type_safe/mimalloc not found (run a cmake configure first)" >&2
+    exit 0
+fi
+TS_ROOT="$(resolve_dep type_safe)"
+MI_ROOT="$(resolve_dep mimalloc)"
+TS_DIR="$TS_ROOT"
+MI_DIR="$MI_ROOT/include"
 
 COMMON_FLAGS=(
     -std=gnu++17 -Werror=conversion -Wsign-conversion

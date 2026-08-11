@@ -176,6 +176,9 @@ class FolderSearchResults : public AbstractLogData {
     // Status for a visible row. Returns Available for any non-mark row (their
     // text comes from MatchRecord byte offsets, never capped).
     MarkLineTextStatus markLineTextStatus( LineNumber visibleIndex ) const;
+    // The placeholder a mark row renders when its text is Unavailable, so the
+    // user sees an explicit marker instead of a silent blank line.
+    static QString unavailableMarkLineText();
 
     // True iff raw byte 0x0A unambiguously marks a line boundary in `codec`.
     // ALLOWLIST (not denylist): only nullptr (UTF-8 default), UTF-8 itself, and
@@ -249,7 +252,16 @@ class FolderSearchResults : public AbstractLogData {
     void ensureMarkLines( const QString& filePath, QTextCodec* codec ) const;
     QString readMarkLineSeek( const QString& filePath, LineNumber localLine,
                               QTextCodec* codec ) const;
+    // Lock-free body of markLineTextStatus: the caller passes the row identity
+    // (filePath + codec) captured UNDER dataMutex_, so the status decision
+    // cannot drift to a different row when a streaming commit reshuffles
+    // visible rows between the capture and the check. Takes only fileIoMutex_.
+    MarkLineTextStatus markLineTextStatusFor( const QString& filePath, QTextCodec* codec ) const;
     QTextCodec* codecForFile( const QString& filePath ) const;
+    // Remove every markTextCache_ entry for filePath and subtract their decoded
+    // bytes from markTextCacheBytes_ (keeps the aggregate budget accurate across
+    // encoding-override invalidation). Caller holds fileIoMutex_.
+    void clearMarkTextCacheForFile( const QString& filePath ) const;
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
     const VisibleRow* visibleRowAt( LineNumber line ) const;
 
@@ -294,11 +306,22 @@ class FolderSearchResults : public AbstractLogData {
     // The view re-fetches every visible mark row on each repaint; without this,
     // a mark near the end of a large file rescans from byte 0 every frame. Key
     // is filePath + null + codec name + null + localLine. Only seek-path reads
-    // populate it (whole-file path already caches all lines). Bounded by the
-    // number of marked lines per file. Invalidated alongside markLineCache_ on
-    // encoding-override change (same prefix sweep covers both). Guarded by
-    // fileIoMutex_.
+    // populate it (whole-file path already caches all lines). Invalidated
+    // alongside markLineCache_ on encoding-override change (same prefix sweep
+    // covers both). Guarded by fileIoMutex_.
+    //
+    // Aggregate byte budget: unbounded growth would let a user who marks many
+    // lines in a large file retain ~the whole file in decoded QStrings. When
+    // the running total exceeds kMarkTextCacheBudget the new text is returned
+    // WITHOUT being cached (the mark row still renders; it just rescans next
+    // repaint). kMarkTextCacheBytes_ tracks the cached UTF-16 payload bytes.
+    // The entry-count cap covers the opposite corner: many marked EMPTY/short
+    // lines cost ~0 payload bytes each, so the byte budget alone would let the
+    // key/node count (a full QString key per entry) grow with the mark count.
+    static constexpr qint64 kMarkTextCacheBudget = 8LL << 20; // 8 MiB
+    static constexpr qint64 kMarkTextCacheMaxEntries = 100000;
     mutable QHash<QString, QString> markTextCache_;
+    mutable qint64 markTextCacheBytes_ = 0;
     // Per-file display-encoding overrides (Encoding-menu picks), consulted by
     // readMatchLine before the scan-time detected sourceCodec.
     QHash<QString, QByteArray> encodingOverrides_;
