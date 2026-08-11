@@ -254,17 +254,18 @@ def _extract_call_args(code: str, open_paren_pos: int) -> str:
 # int on Qt 5 (PR #56 CI failure: FolderSearchResults::readMarkLineSeek indexed
 # QByteArray::at with a qsizetype loop counter).
 #
-# Two tiers (PR #56 review): indexOf/mid/left/right/truncate/chop/chopped/remove
+# Two tiers (PR #56 review): indexOf/mid/left/right/truncate/chop/chopped
 # are essentially only Qt string/sequence APIs, so they are checked on ANY
-# receiver. But .at/.value also exist on non-narrowing containers (QHash::value,
-# QMap::value, std::vector::at) where a qsizetype argument is correct on Qt 5, so
-# those two are only flagged when the receiver is a KNOWN int-indexed Qt type
-# (collected below) -- otherwise legitimate QHash/QMap/std::vector use would be
-# a false positive.
+# receiver. But .at/.value/.remove also exist on non-narrowing containers
+# (QHash::value, QMap::value, std::vector::at, and QSet/QMap/QHash/QCache::
+# remove(const Key&) -- a qsizetype key passes without narrowing) where a
+# qsizetype argument is correct on Qt 5, so those are only flagged when the
+# receiver is a KNOWN int-indexed Qt type (collected below) -- otherwise
+# legitimate QHash/QMap/std::vector use would be a false positive.
 _QT_INT_ONLY_API_RE = re.compile(
-    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped|remove)\s*\("
+    r"\.(?:indexOf|mid|left|right|truncate|chop|chopped)\s*\("
 )
-_QT_INT_AMBIGUOUS_API_RE = re.compile(r"\.(?:at|value)\s*\(")
+_QT_INT_AMBIGUOUS_API_RE = re.compile(r"\.(?:at|value|remove)\s*\(")
 # Receivers whose .at/.value take int on Qt 5 (string/sequence containers).
 _QT_INT_RECEIVER_TYPES = (
     "QString", "QStringRef", "QByteArray", "QStringList", "QVector", "QList",
@@ -432,12 +433,23 @@ def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int,
         for m in var_decl_re.finditer(code):
             qstrview_vars.add(m.group(2))
 
-    # Variables of a KNOWN int-indexed Qt string/sequence type. `.at/.value` are
-    # only flagged on these receivers (QHash/QMap::value and std::vector::at take
-    # a key/size_type that legitimately accepts qsizetype on Qt 5).
+    # Variables of a KNOWN int-indexed Qt string/sequence type. `.at/.value`
+    # are only flagged on these receivers (QHash/QMap::value and std::vector::at
+    # take a key/size_type that legitimately accepts qsizetype on Qt 5).
+    # Longest-first alternation: otherwise "QString" wins over "QStringList"
+    # and the captured "variable" becomes "List". The optional template-argument
+    # group admits QVector<int>/QList<T>/QVarLengthArray<char, 256> declarations
+    # (the character class excludes statement/block delimiters, so a single
+    # backtracking pass handles nested templates and C++11 ">>" closers).
     int_receiver_vars: set[str] = set()
-    int_type_alt = "|".join(re.escape(t) for t in _QT_INT_RECEIVER_TYPES)
-    int_var_decl_re = re.compile(rf"\b(?:const\s+)?(?:{int_type_alt})\s*[&*]?\s*(\w+)\b")
+    int_type_alt = "|".join(
+        re.escape(t) for t in sorted(_QT_INT_RECEIVER_TYPES, key=len, reverse=True)
+    )
+    int_var_decl_re = re.compile(
+        rf"\b(?:const\s+)?(?:{int_type_alt})"
+        rf"\s*(?:<[^;(){{}}]*>)?"
+        rf"\s*[&*]?\s*(\w+)\b"
+    )
     for line in lines:
         code = _strip_line_comment(line)
         for m in int_var_decl_re.finditer(code):
@@ -882,6 +894,42 @@ def _guard_at_line(lines: list[str], target: int) -> str | None:
     return None
 
 
+_QT_VERSION_GUARD_RE = re.compile(
+    r"#\s*(?:if|elif)\b[^\n]*\bQT_VERSION(?:_CHECK|_MAJOR)?\b"
+)
+
+
+def _check_qt_version_macro_in_tests(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag Qt-version preprocessor conditionals inside tests/.
+
+    Test (and business) code must not open-code Qt version splits: PR #57's
+    QWheelEvent constructor guard compiled on the developer's Qt 6 macOS build
+    but failed every Qt 5.15 CI leg with -Werror=deprecated-declarations
+    (Qt 5.12 only has the qt4Delta overloads, 5.14 added the new constructor,
+    5.15 deprecates the old ones, Qt 6 removes them). Version/API splits belong
+    in the platform abstraction layer (src/utils/include/platform/, e.g.
+    klogg::platform::makeWheelEvent); tests should express pure intent.
+    """
+    if "tests" not in path.parts or ALLOW_MARKER in text:
+        return []
+
+    findings: list[tuple[int, str]] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        if _QT_VERSION_GUARD_RE.search(_strip_line_comment(line)):
+            findings.append(
+                (
+                    i,
+                    "Qt-version preprocessor guards are not allowed in tests/: "
+                    "the split belongs in the platform abstraction layer "
+                    "(src/utils/include/platform/, e.g. "
+                    "klogg::platform::makeWheelEvent). A guard open-coded in a "
+                    "test compiled on Qt 6 but failed every Qt 5.15 CI leg with "
+                    "-Werror=deprecated-declarations (PR #57).",
+                )
+            )
+    return findings
+
+
 MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "unguarded-platform-helper",
@@ -922,6 +970,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qstringlist-brace-assignment",
         "check": _check_qstringlist_brace_assignment,
+    },
+    {
+        "name": "qt-version-macro-in-tests",
+        "check": _check_qt_version_macro_in_tests,
     },
 ]
 
