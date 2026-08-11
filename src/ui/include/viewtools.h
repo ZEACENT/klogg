@@ -52,6 +52,21 @@ class ElasticHook : public QObject {
         held_ = false;
     }
 
+    // Reset the transient gesture state (tension and hold), keeping the hooked
+    // status. Tension only has meaning while the view sits at the end of a
+    // scrollable range; callers reset it when that invariant no longer holds
+    // (content collapse, the view leaving the bottom, ...), so a stale pull can
+    // neither be painted nor swallow wheel events it can no longer drain.
+    void resetTension()
+    {
+        const auto oldPosition = position_;
+        position_ = 0;
+        held_ = false;
+        if ( oldPosition != 0 ) {
+            Q_EMIT lengthChanged();
+        }
+    }
+
     // Programmatically force the hook hooked or not.
     void hook( bool hooked )
     {
@@ -75,6 +90,11 @@ class ElasticHook : public QObject {
     bool isHooked() const
     {
         return hooked_;
+    }
+    // Whether the elastic is currently held (a scroll gesture is in progress).
+    bool isHeld() const
+    {
+        return held_;
     }
 
   protected:

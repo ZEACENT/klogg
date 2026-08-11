@@ -37,6 +37,8 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <QUuid>
+#include <QApplication>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <limits>
@@ -191,6 +193,21 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static int drawingTopOffset( const AbstractLogView* view )
     {
         return view->drawingTopOffset_;
+    }
+
+    static int followElasticSize( const AbstractLogView* view )
+    {
+        return view->followElasticHook_.size();
+    }
+
+    static bool followElasticHeld( const AbstractLogView* view )
+    {
+        return view->followElasticHook_.isHeld();
+    }
+
+    static bool followElasticHooked( const AbstractLogView* view )
+    {
+        return view->followElasticHook_.isHooked();
     }
 
     static int charHeight( const AbstractLogView* view )
@@ -958,6 +975,58 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->filteredView_->verticalScrollBar()->setValue(
             crawler->filteredView_->verticalScrollBar()->maximum() );
         QTest::qWait( 50 );
+    }
+
+    // Deliver a synthetic wheel event to the filtered view viewport, with the
+    // gesture phase and pixel delta a macOS trackpad would produce.
+    void sendFilteredWheelEvent( int yPixels, Qt::ScrollPhase phase )
+    {
+        sendFilteredWheelEvent( yPixels, yPixels * 8, phase );
+    }
+
+    // Same, with independent pixel and angle deltas (angle-delta-only with
+    // Qt::NoScrollPhase mimics a classic mouse wheel).
+    void sendFilteredWheelEvent( int yPixels, int yAngle, Qt::ScrollPhase phase )
+    {
+        auto* const viewport = crawler->filteredView_->viewport();
+        const QPointF position{ viewport->rect().center() };
+        const QPointF globalPosition = viewport->mapToGlobal( position.toPoint() );
+        const QPoint pixelDelta{ 0, yPixels };
+        const QPoint angleDelta{ 0, yAngle };
+#if QT_VERSION >= QT_VERSION_CHECK( 6, 0, 0 )
+        QWheelEvent wheelEvent{ position, globalPosition, pixelDelta, angleDelta,
+                                Qt::NoButton, Qt::NoModifier, phase, false,
+                                Qt::MouseEventNotSynthesized };
+#else
+        QWheelEvent wheelEvent{ position, globalPosition, pixelDelta, angleDelta,
+                                angleDelta.y(), Qt::Vertical, Qt::NoButton, Qt::NoModifier,
+                                phase, Qt::MouseEventNotSynthesized, false };
+#endif
+        QApplication::sendEvent( viewport, &wheelEvent );
+        QTest::qWait( 20 );
+    }
+
+    int filteredVerticalScrollValue() const
+    {
+        return crawler->filteredView_->verticalScrollBar()->value();
+    }
+
+    int filteredFollowElasticSize() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::followElasticSize(
+            crawler->filteredView_ );
+    }
+
+    bool filteredFollowElasticHeld() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::followElasticHeld(
+            crawler->filteredView_ );
+    }
+
+    bool filteredFollowElasticHooked() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::followElasticHooked(
+            crawler->filteredView_ );
     }
 
     void scrollMainVerticallyToBottom()
@@ -3038,6 +3107,191 @@ SCENARIO( "Elastic pull-to-follow hook does not activate when scroll range is em
                 // The hook is not active, so shouldBottomAlignFrame
                 // returns false when lastLineAligned_ is also false.
                 REQUIRE_FALSE( crawlerVisitor.filteredShouldBottomAlign() );
+            }
+        }
+    }
+}
+
+SCENARIO( "Elastic pull-to-follow tension is released when filtered content collapses",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_elastic_collapse_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    // Mirror mode gives a populated (scrollable) filtered view without a search.
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+
+    GIVEN( "elastic tension engaged by pulling at the bottom of the filtered view" )
+    {
+        crawlerVisitor.settleFilteredVerticallyAtBottom();
+        crawlerVisitor.render();
+
+        // A delta-bearing ScrollBegin engages hold(), then updates grow the tension.
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollBegin );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+
+        INFO( "elastic size=" << crawlerVisitor.filteredFollowElasticSize() );
+        REQUIRE( crawlerVisitor.filteredFollowElasticSize() > 0 );
+
+        WHEN( "the filtered content collapses to fit the viewport" )
+        {
+            crawlerVisitor.setSearchPattern( "LOGDATA long line 000042" );
+            crawlerVisitor.runSearch();
+
+            REQUIRE( waitUiState(
+                [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+            REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+            crawlerVisitor.render();
+
+            THEN( "the residual elastic tension is released" )
+            {
+                INFO( "elastic size=" << crawlerVisitor.filteredFollowElasticSize()
+                                      << " held=" << crawlerVisitor.filteredFollowElasticHeld() );
+                REQUIRE( crawlerVisitor.filteredFollowElasticSize() == 0 );
+                REQUIRE_FALSE( crawlerVisitor.filteredFollowElasticHeld() );
+            }
+
+            THEN( "the visible row is not pushed above the viewport by a stale pull offset" )
+            {
+                INFO( "drawingTopOffset=" << crawlerVisitor.filteredDrawingTopOffset() );
+                REQUIRE( crawlerVisitor.filteredDrawingTopOffset() == 0 );
+                REQUIRE( crawlerVisitor.filteredTopLine().get() == 0 );
+            }
+        }
+    }
+}
+
+SCENARIO( "Elastic hook hold/release pairing survives zero-delta gesture phases",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_elastic_phases_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+
+    crawlerVisitor.settleFilteredVerticallyAtBottom();
+    crawlerVisitor.render();
+
+    // macOS trackpad gestures begin and end with zero-delta phase events; the
+    // hold/release bookkeeping must not be skipped because of that.
+    crawlerVisitor.sendFilteredWheelEvent( 0, Qt::ScrollBegin );
+
+    INFO( "held after ScrollBegin=" << crawlerVisitor.filteredFollowElasticHeld() );
+    REQUIRE( crawlerVisitor.filteredFollowElasticHeld() );
+
+    crawlerVisitor.sendFilteredWheelEvent( 0, Qt::ScrollEnd );
+
+    INFO( "held after ScrollEnd=" << crawlerVisitor.filteredFollowElasticHeld() );
+    REQUIRE_FALSE( crawlerVisitor.filteredFollowElasticHeld() );
+}
+
+SCENARIO( "Filtered view wheel scrolling works after elastic pull, collapse and regrowth",
+          "[ui][scrollbar][regression]" )
+{
+    QTemporaryFile file{ "crawler_elastic_regrowth_XXXXXX" };
+    REQUIRE( generateLongLineDataFile( file ) );
+
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+
+    Session session;
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+    QTest::qWait( 200 );
+
+    crawlerVisitor.setTextWrap( false );
+    crawlerVisitor.resizeViews( 320, 120 );
+    crawlerVisitor.render();
+
+    GIVEN( "residual elastic tension after a pull whose scroll range then vanished" )
+    {
+        crawlerVisitor.settleFilteredVerticallyAtBottom();
+        crawlerVisitor.render();
+
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollBegin );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+        crawlerVisitor.sendFilteredWheelEvent( -40, Qt::ScrollUpdate );
+
+        REQUIRE( crawlerVisitor.filteredFollowElasticSize() > 0 );
+
+        // Collapse: search matches a single line.
+        crawlerVisitor.setSearchPattern( "LOGDATA long line 000042" );
+        crawlerVisitor.runSearch();
+        REQUIRE( waitUiState(
+            [ & ]() { return crawlerVisitor.getLogFilteredNbLines().get() == 1; } ) );
+        REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() == 0 );
+
+        // Regrow: clearing the search restores mirror mode (all lines).
+        crawlerVisitor.replaceSearchPattern( "" );
+        crawlerVisitor.runSearch();
+        REQUIRE( waitUiState( [ & ]() {
+            return crawlerVisitor.getLogFilteredNbLines().get() == SL_NB_LINES;
+        } ) );
+        REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
+        crawlerVisitor.render();
+
+        // Drain the queued search-completion signals (updateFilteredView at
+        // 100% restores the saved scroll position) so they cannot yank the
+        // scroll value back after the wheel event below.
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+        QCoreApplication::processEvents();
+        QTest::qWait( 50 );
+
+        // QAbstractScrollArea's base-class wheel handling only scrolls visible
+        // scroll bars, so the widget must actually be shown (offscreen).
+        crawlerVisitor.focusFilteredView();
+        crawlerVisitor.render();
+
+        WHEN( "the user scrolls the filtered view with the wheel" )
+        {
+            const auto valueBefore = crawlerVisitor.filteredVerticalScrollValue();
+            // Mouse-wheel style event: angle delta only, no gesture phase.
+            crawlerVisitor.sendFilteredWheelEvent( 0, -120, Qt::NoScrollPhase );
+
+            THEN( "the wheel event is not swallowed by the stale elastic state" )
+            {
+                INFO( "scroll value before=" << valueBefore << " after="
+                                             << crawlerVisitor.filteredVerticalScrollValue()
+                                             << " elastic size="
+                                             << crawlerVisitor.filteredFollowElasticSize() );
+                REQUIRE( crawlerVisitor.filteredVerticalScrollValue() > valueBefore );
             }
         }
     }
