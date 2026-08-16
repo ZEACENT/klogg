@@ -421,8 +421,13 @@ class FolderCrawlerWidget : public QWidget,
     // highlight); guards the StyleChange palette re-capture so the error
     // palette is never snapshotted as the "default".
     bool statusErrorActive_ = false;
-    // Encoding override applied via setEncoding (nullopt = auto-detect);
-    // reset when the main-view file changes (the override is per shown file).
+    // Encoding override applied via setEncoding (nullopt = auto-detect). The
+    // override belongs to the DISPLAYED file and resets at the swap point --
+    // when the new file actually replaces the displayed one (cache-hit swap or
+    // async completion in openFileInMainView), not when an open is merely
+    // requested: an async open leaves the previous file on screen for the
+    // whole load window, and canceling that open must find its override still
+    // pinned.
     std::optional<int> encodingMibOverride_;
     // View that had focus when the QuickFind bar opened (enteringQuickFind);
     // restored on exitingQuickFind. Mirrors CrawlerWidget::qfSavedFocus_.

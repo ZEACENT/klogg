@@ -1258,6 +1258,10 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
     QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
+    // The singleShot above is queued on the UI event loop; if it has not run
+    // by now (starved loop on a loaded CI runner) every subsequent deref is
+    // UB, so fail loudly instead of crashing through resize().
+    REQUIRE( mainWindow != nullptr );
     mainWindow->resize( 1600, 900 );
     mainWindow->show();
     QTest::qWait( 100 );
@@ -1416,6 +1420,162 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
                 // (filtered) view's selection must not be moved by it.
                 REQUIRE( folderWidget->filteredView()->getSelectedLinesText()
                          == selectedRowsBefore );
+            }
+        }
+    }
+}
+
+// Codex P1 (background-follow leak): the direct connection
+// FolderCrawlerWidget::followModeChanged -> MainWindow::changeFollowMode
+// (mainwindow.cpp:2328) has no currency guard. A HIDDEN folder tab can still
+// emit followModeChanged: its main view's selectAndDisplayLine unconditionally
+// calls disableFollow() -> followModeChanged(false) (abstractlogview.cpp:1970
+// -> 3563, relayed by foldercrawlerwidget.cpp:478). changeFollowMode unchecks
+// the shared followAction, and followAction::toggled dispatches followSet to
+// the CURRENT document (mainwindow.cpp:802) -- so a background folder event
+// silently kills the follow mode of a following file tab. This test pins the
+// expected behavior: only the current tab's follow transitions may touch the
+// shared action / other tabs' state.
+TEST_CASE( "Background folder tab must not change the current tab's follow state",
+           "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+    // Deterministic followAction enabled state (must precede MainWindow
+    // construction: the action reads anyFileWatchEnabled() at creation).
+    FileWatchConfigGuard fileWatchConfigGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-bg-follow-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    REQUIRE( mainWindow != nullptr );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+    auto* followAction = mainWindow->findChild<QAction*>( QStringLiteral( "followAction" ) );
+    REQUIRE( followAction != nullptr );
+
+    // 200 all-ERROR lines so every line matches the folder search below and
+    // the folder main view is comfortably scrollable once a.log is opened
+    // from a result row.
+    const auto tempDirPath = makeTestDir( "folderbgfollow" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    const auto logFilePath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
+    {
+        QFile f( logFilePath );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray payload;
+        for ( int i = 0; i < 200; ++i ) {
+            payload.append( "ERROR line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+    }
+    // A standalone file to open as the second (file) tab.
+    const auto standaloneFile = QDir( tempDirPath ).absoluteFilePath( "standalone.log" );
+    {
+        QFile f( standaloneFile );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray payload;
+        for ( int i = 0; i < 200; ++i ) {
+            payload.append( "standalone line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+    }
+
+    GIVEN( "a folder tab with follow armed, hidden behind a following file tab" )
+    {
+        runInUiThread( [ &mainWindow, tempDirPath ] {
+            mainWindow->openFolderByPath( tempDirPath );
+        } );
+        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        QTest::qWait( 200 );
+        auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->widget( 0 ) );
+        REQUIRE( folderWidget != nullptr );
+
+        // Open a.log in the folder main view from a result row. Results rows:
+        // group header at 0, then one data row per match -- row 1 is the
+        // first data row.
+        runInUiThread( [ folderWidget ] {
+            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
+        } );
+        REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+        runInUiThread( [ folderWidget ] {
+            folderWidget->selectResultRow( 1_lnum );
+        } );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        // The on-demand index + layout of the main-view file are async; wait
+        // until it is scrollable, then settle so the worker thread unwinds.
+        REQUIRE( waitUiState( [ & ] {
+            return folderWidget->mainView()->verticalScrollBar()->maximum() > 0;
+        } ) );
+        QTest::qWait( 200 );
+
+        // Arm the folder main view's follow FIRST so the later emission is a
+        // genuine "follow turned off" transition from the folder tab, and so
+        // the folder->MainWindow uplink (connected when the folder tab was
+        // current) has carried a real state before going background.
+        runInUiThread( [ folderWidget ] {
+            folderWidget->followSet( true );
+        } );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->mainView()->isFollowEnabled(); } ) );
+
+        // Open the standalone file as the SECOND tab; it becomes current.
+        runInUiThread( [ &mainWindow, standaloneFile ] {
+            mainWindow->loadInitialFile( standaloneFile, false );
+        } );
+        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+        auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 1 ) );
+        REQUIRE( crawler != nullptr );
+        // Let the file tab's background load finish (and its worker thread
+        // unwind) before driving follow / switching context.
+        REQUIRE( waitUiState( [ & ] { return crawler->isFirstLoadDone(); } ) );
+        QTest::qWait( 200 );
+
+        // Enable follow on the now-current file tab via the shared action.
+        runInUiThread( [ followAction ] {
+            followAction->trigger();
+        } );
+        REQUIRE( waitUiState( [ & ] { return crawler->isFollowEnabled(); } ) );
+        REQUIRE( followAction->isChecked() );
+
+        WHEN( "the hidden folder tab emits followModeChanged(false)" )
+        {
+            // selectAndDisplayLine -> disableFollow -> followModeChanged(false)
+            // on the folder main view, relayed to MainWindow over the
+            // unguarded direct connection -- all while the file tab is
+            // current.
+            runInUiThread( [ folderWidget ] {
+                folderWidget->mainView()->selectAndDisplayLine( 0_lnum );
+            } );
+            // Pump events so every queued leg of the emission has landed
+            // before the state is sampled.
+            QTest::qWait( 200 );
+
+            THEN( "the current file tab's follow state is untouched" )
+            {
+                // Without the currency guard in onFolderFollowModeChanged the
+                // hidden folder tab's emission would uncheck the shared
+                // followAction and toggled would dispatch followSet(false) to
+                // the CURRENT document -- both of these assertions flipped
+                // false before the guard existed.
+                REQUIRE( waitUiState( [ & ] { return crawler->isFollowEnabled(); } ) );
+                REQUIRE( followAction->isChecked() );
             }
         }
     }
