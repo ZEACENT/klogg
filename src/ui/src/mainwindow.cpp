@@ -76,6 +76,7 @@
 #include <QResource>
 #include <QScreen>
 #include <QShortcut>
+#include <QSignalBlocker>
 #include <QSortFilterProxyModel>
 #include <QStringListModel>
 #include <QTemporaryFile>
@@ -226,11 +227,11 @@ MainWindow::MainWindow( WindowSession session )
     // "current" crawlerwidget
 
     // Send actions to the crawlerwidget
-    signalMux_.connect( this, SIGNAL( followSet( bool ) ), SIGNAL( followSet( bool ) ) );
     signalMux_.connect( this, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-    // textWrapSet / goToLine / enteringQuickFind / exitingQuickFind are NOT
-    // mux-routed: they are dispatched polymorphically via currentDocument()
-    // (AbstractCrawlerWidget virtuals) so folder tabs receive them too.
+    // textWrapSet / goToLine / followSet / jumpToTop / enteringQuickFind /
+    // exitingQuickFind are NOT mux-routed: they are dispatched polymorphically
+    // via currentDocument() (AbstractCrawlerWidget virtuals) so folder tabs
+    // receive them too.
     connect( &quickFindWidget_, &QuickFindWidget::close, this, [ this ] {
         if ( auto* document = currentDocument() ) {
             document->exitingQuickFind();
@@ -795,10 +796,25 @@ void MainWindow::createActions()
     followAction->setObjectName( QStringLiteral( "followAction" ) );
     followAction->setCheckable( true );
     followAction->setEnabled( config.anyFileWatchEnabled() );
-    connect( followAction, &QAction::toggled, this, &MainWindow::followSet );
+    // Dispatched polymorphically so folder tabs follow the file shown in their
+    // main view too (single-file: the CrawlerWidget::followSet signal override
+    // fans out to both views, exactly as the old mux relay did).
+    connect( followAction, &QAction::toggled, this, [ this ]( bool checked ) {
+        if ( auto* document = currentDocument() ) {
+            document->followSet( checked );
+        }
+    } );
 
     goToTopAction = new QAction( tr( action::goToTopText ), this );
-    signalMux_.connect( goToTopAction, SIGNAL( triggered() ), SLOT( jumpToTop() ) );
+    goToTopAction->setObjectName( QStringLiteral( "goToTopAction" ) );
+    // Dispatched polymorphically (the goToLineAction precedent) so folder tabs
+    // top their main view (single-file: CrawlerWidget::jumpToTop tops both
+    // views).
+    connect( goToTopAction, &QAction::triggered, this, [ this ] {
+        if ( auto* document = currentDocument() ) {
+            document->jumpToTop();
+        }
+    } );
 
     textWrapAction = new QAction( tr( action::wrapText ), this );
     textWrapAction->setObjectName( QStringLiteral( "textWrapAction" ) );
@@ -2256,10 +2272,10 @@ void MainWindow::currentTabChanged( int index )
         else {
             // --- Folder tab (FolderCrawlerWidget) ---
             // The folder is NOT registered as the signalMux document: the mux
-            // routes file/live-source slots (reload/stopLoading/follow) the
-            // folder does not implement, and registering it would emit "No
-            // such slot" warnings. Document-level actions (goToLine, wrap,
-            // focus-search, quickfind lifecycle) reach the folder via
+            // routes file/live-source slots (reload/stopLoading) the folder
+            // does not implement, and registering it would emit "No such slot"
+            // warnings. Document-level actions (goToLine, go-to-top, follow,
+            // wrap, focus-search, quickfind lifecycle) reach the folder via
             // currentDocument() virtual dispatch instead; config/view option
             // changes (line numbers, font, overview) are delivered directly
             // to applyConfiguration via the connection below.
@@ -2305,6 +2321,12 @@ void MainWindow::currentTabChanged( int index )
                          &MainWindow::sendToScratchpad, Qt::UniqueConnection );
                 connect( folder_widget, &FolderCrawlerWidget::replaceDataInScratchpad, this,
                          &MainWindow::replaceDataInScratchpad, Qt::UniqueConnection );
+                // Follow-state uplink (single-file parity with the mux-routed
+                // CrawlerWidget::followModeChanged): the folder main view's
+                // follow changes (elastic-hook disengage on scroll-up, ...) keep
+                // the Follow action's checked state in sync.
+                connect( folder_widget, &FolderCrawlerWidget::followModeChanged, this,
+                         &MainWindow::changeFollowMode, Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.
@@ -2317,14 +2339,29 @@ void MainWindow::currentTabChanged( int index )
             const auto* view = dynamic_cast<const ViewInterface*>( widget );
             updateTitleBar( view != nullptr ? session_.getDisplayName( view ) : QString() );
 
-            disableFileSpecificActions();
+            {
+                // Block the forced uncheck inside disableFileSpecificActions:
+                // followAction::toggled is now dispatched to the CURRENT tab,
+                // which is already this folder widget, so an unguarded
+                // setChecked(false) would kill the folder main view's follow
+                // mode before its state can be synced back below.
+                const QSignalBlocker followActionBlocker( followAction );
+                disableFileSpecificActions();
+            }
             // A folder tab has a valid filesystem path (the folder), so Copy
             // Path and Open Containing Folder are meaningful (they operate on
             // the folder path via currentView()). Re-enable them; the other
-            // actions disabled above (follow, live-log save, disconnect/
-            // reconnect, open-in-editor) remain folder-inapplicable.
+            // actions disabled above (live-log save, disconnect/reconnect,
+            // open-in-editor) remain folder-inapplicable.
             copyPathToClipboardAction->setEnabled( true );
             openContainingFolderAction->setEnabled( true );
+
+            // Follow applies to the file shown in the folder main view: sync
+            // the checked state from it, mirroring updateMenuBarFromDocument's
+            // followAction->setChecked( crawler->isFollowEnabled() ) for file
+            // tabs.
+            followAction->setChecked( folder_widget != nullptr
+                                      && folder_widget->isFollowEnabled() );
 
             infoLine->hideGauge();
             // updateInfoLine now owns the folder info line: it shows the file

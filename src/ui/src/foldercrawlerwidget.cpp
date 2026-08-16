@@ -470,6 +470,14 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
                  refreshAllPanesForMarks();
              } );
 
+    // Follow-mode uplink (single-file parity with CrawlerWidget relaying its
+    // main view's followModeChanged, crawlerwidget.cpp:1409-1410): the view's
+    // follow-state changes (elastic-hook disengage on scroll-up, re-engage at
+    // the bottom) surface at widget level so MainWindow can keep the Follow
+    // action's checked state in sync.
+    connect( mainView_, &AbstractLogView::followModeChanged, this,
+             &FolderCrawlerWidget::followModeChanged );
+
     // Apply Configuration (font, line numbers, overview, view shortcuts) now
     // that both views + the toolbar exist. Also re-applied on every
     // MainWindow::optionsChanged (the folder's applyConfiguration is connected
@@ -1021,6 +1029,9 @@ void FolderCrawlerWidget::applyConfiguration()
     font.setBold( config.useBoldFont() );
 
     mainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
+    // Follow-mode parity with CrawlerWidget (crawlerwidget.cpp:866-867): the
+    // elastic pull-to-follow hook is only armed while file watching is on.
+    mainView_->allowFollowMode( config.anyFileWatchEnabled() );
     overview_.setVisible( config.isOverviewVisible() );
     mainView_->refreshOverview();
     // Re-feed the minimap when it just became visible: marks/matches changed
@@ -1230,6 +1241,64 @@ void FolderCrawlerWidget::textWrapSet( bool checked )
 bool FolderCrawlerWidget::isTextWrapEnabled() const
 {
     return mainView_->isTextWrapEnabled();
+}
+
+void FolderCrawlerWidget::jumpToTop()
+{
+    // Folder variation of CrawlerWidget::jumpToTop (crawlerwidget.cpp:352):
+    // top ONLY the main view. The results view is a cross-file static snapshot
+    // whose rows do not map to one document, so topping it is meaningless.
+    mainView_->selectAndDisplayLine( 0_lnum );
+}
+
+void FolderCrawlerWidget::followSet( bool checked )
+{
+    // Main view only (same rationale as jumpToTop): the results view is a
+    // static cross-file snapshot, follow mode does not apply to it.
+    mainView_->followSet( checked );
+}
+
+bool FolderCrawlerWidget::isFollowEnabled() const
+{
+    return mainView_ != nullptr && mainView_->isFollowEnabled();
+}
+
+void FolderCrawlerWidget::bindMainViewDataSignals()
+{
+    // Disconnect-before-rebind invariant: LRU-cached LogDatas keep their
+    // FileWatcher registration and keep re-indexing in the background as those
+    // files change on disk; without dropping the old connections, a hidden
+    // cached file's growth would still call mainView_->updateData() (and the
+    // truncation handler below would wipe marks for a file that is not shown).
+    disconnect( mainDataLoadingFinishedConn_ );
+    disconnect( mainDataLoadingProgressedConn_ );
+    disconnect( mainDataFileChangedConn_ );
+
+    if ( currentMainData_ == nullptr ) {
+        return;
+    }
+
+    // The per-file LogData re-indexes itself on file growth (FileWatcher ->
+    // LogData::fileChangedOnDisk), but unlike CrawlerWidget
+    // (crawlerwidget.cpp:1438-1444) nothing forwarded those notifications to
+    // the view -- follow mode set the flag yet the view never tracked the
+    // tail. Mirror the single-file wiring minimally: refresh/track on (re)index
+    // progress + finish, and on truncation clear that file's marks (mirrors
+    // CrawlerWidget::fileChangedHandler clearing all marks on Truncated).
+    mainDataLoadingFinishedConn_
+        = connect( currentMainData_.get(), &SearchableLogData::loadingFinished, this,
+                   [ this ]( LoadingStatus ) { mainView_->updateData(); } );
+    mainDataLoadingProgressedConn_
+        = connect( currentMainData_.get(), &SearchableLogData::loadingProgressed, this,
+                   [ this ]( int ) { mainView_->updateData(); } );
+    mainDataFileChangedConn_
+        = connect( currentMainData_.get(), &SearchableLogData::fileChanged, this,
+                   [ this ]( MonitoredFileStatus status ) {
+                       if ( status == MonitoredFileStatus::Truncated ) {
+                           folderMarks_.remove( currentMainFilePath_ );
+                           refreshAllPanesForMarks();
+                       }
+                   } );
 }
 
 void FolderCrawlerWidget::enteringQuickFind()
@@ -1774,6 +1843,13 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
 
     // Already showing this file -> just jump.
     if ( filePath == currentMainFilePath_ && currentMainData_ != nullptr ) {
+        // Re-selecting the CURRENT file supersedes any in-flight async open of
+        // a different file (the newest open request wins): abandon it like the
+        // async path below does, so its late completion cannot yank the view
+        // away from the file the user just re-confirmed.
+        disconnect( pendingMainDataConn_ );
+        pendingMainData_.reset();
+        pendingMainFilePath_.clear();
         lastMainViewLine_ = localLine;
         // select+announce (not just scroll) so the Ln: field and the selection
         // highlight track the clicked result -- parity with single-file, whose
@@ -1792,12 +1868,22 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     // so the LRU eviction policy keeps it resident.
     const auto it = mainViewCache_.find( filePath );
     if ( it != mainViewCache_.end() ) {
+        // This swap supersedes any in-flight async open of a different file:
+        // abandon it exactly like the async path below does (disconnect the
+        // one-shot connection FIRST, then drop the shared_ptr), so the
+        // abandoned load's late completion cannot clobber this swap.
+        disconnect( pendingMainDataConn_ );
+        pendingMainData_.reset();
+        pendingMainFilePath_.clear();
         mainViewCacheOrder_.splice( mainViewCacheOrder_.begin(), mainViewCacheOrder_,
                                     it.value().second );
         currentMainData_ = it.value().first;
         currentMainFilePath_ = filePath;
         lastMainViewLine_ = localLine;
         mainView_->setDataSource( currentMainData_.get() );
+        // Re-point the follow/refresh data-flow at the swapped-in file (the
+        // cached file's LogData keeps watching + re-indexing on disk changes).
+        bindMainViewDataSignals();
         // Re-apply the current search pattern so the swapped-in (cached) file
         // highlights its matches at first paint (idempotent: setDataSource does
         // not reset searchPattern_, this is the explicit parity guarantee).
@@ -1811,6 +1897,14 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     }
 
     // Not loaded yet -> index the file asynchronously, then swap + jump.
+    // Supersede any in-flight async open FIRST: disconnect its one-shot
+    // loadingFinished connection so the abandoned LogData can never run the
+    // completion lambda against THIS open's pending state, then overwrite the
+    // shared_ptr. The abandoned LogData is destroyed by the overwrite (nothing
+    // else retains it); its destructor unhooks it from the FileWatcher
+    // (logdata.cpp:102-115), so no re-index of the abandoned file can fire a
+    // stale completion either.
+    disconnect( pendingMainDataConn_ );
     pendingMainFilePath_ = filePath;
     pendingJumpLine_ = localLine;
     pendingJumpNLines_ = nLines;
@@ -1818,45 +1912,65 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     pendingJumpLen_ = nSymbols;
     pendingMainData_ = std::make_shared<LogData>();
 
-    connect( pendingMainData_.get(), &SearchableLogData::loadingFinished, this,
-             [ this ]( LoadingStatus ) {
-                 if ( pendingMainData_ == nullptr ) {
-                     return;
-                 }
-                 currentMainData_ = pendingMainData_;
-                 currentMainFilePath_ = pendingMainFilePath_;
-                 lastMainViewLine_ = pendingJumpLine_;
-                 cacheMainViewData( currentMainFilePath_, currentMainData_ );
+    // Store the connection so its lifetime is tied to the open it serves: the
+    // lambda self-disconnects on completion, and the supersede paths above
+    // disconnect it when a newer open replaces this one. A bare connect()
+    // would outlive the open -- the completed LogData goes into the LRU cache
+    // and keeps re-indexing on disk changes (self-registered FileWatcher), so
+    // its stale lambda would fire while ANOTHER file's open is in flight
+    // (pendingMainData_ non-null) and complete that open with this file's
+    // half-indexed state.
+    pendingMainDataConn_
+        = connect( pendingMainData_.get(), &SearchableLogData::loadingFinished, this,
+                   [ this ]( LoadingStatus ) {
+                       if ( pendingMainData_ == nullptr ) {
+                           return;
+                       }
+                       // Self-disconnect: the open this connection served is
+                       // completing right now, so its lifetime ends here
+                       // (disconnecting the currently-executing connection is
+                       // legal -- the slot runs to completion). From here on,
+                       // the only loadingFinished connections on this LogData
+                       // are the long-lived ones bindMainViewDataSignals
+                       // installs below.
+                       disconnect( pendingMainDataConn_ );
+                       currentMainData_ = pendingMainData_;
+                       currentMainFilePath_ = pendingMainFilePath_;
+                       lastMainViewLine_ = pendingJumpLine_;
+                       cacheMainViewData( currentMainFilePath_, currentMainData_ );
 
-                 // Sync the display codec to the indexer-detected encoding
-                 // BEFORE setDataSource renders, so a non-UTF-8 file decodes
-                 // correctly at first paint and the info line reports the right
-                 // encoding (parity with CrawlerWidget::updateEncoding, which
-                 // single-file calls from its own loadingFinished). Idempotent
-                 // for UTF-8 (detected == default codec -> no reload).
-                 applyDetectedEncoding();
-                 // Any override the user picked while this load was in flight
-                 // belonged to the previously displayed file: drop it so the
-                 // encoding menu does not check a codec the new file does not
-                 // actually use.
-                 encodingMibOverride_.reset();
+                       // Sync the display codec to the indexer-detected encoding
+                       // BEFORE setDataSource renders, so a non-UTF-8 file decodes
+                       // correctly at first paint and the info line reports the right
+                       // encoding (parity with CrawlerWidget::updateEncoding, which
+                       // single-file calls from its own loadingFinished). Idempotent
+                       // for UTF-8 (detected == default codec -> no reload).
+                       applyDetectedEncoding();
+                       // Any override the user picked while this load was in flight
+                       // belonged to the previously displayed file: drop it so the
+                       // encoding menu does not check a codec the new file does not
+                       // actually use.
+                       encodingMibOverride_.reset();
 
-                 mainView_->setDataSource( currentMainData_.get() );
-                 // Re-apply the current search pattern so the freshly-indexed
-                 // file highlights its matches at first paint. Runs on the main
-                 // thread (loadingFinished is a queued signal), so threading is
-                 // correct.
-                 mainView_->setSearchPattern( currentSearchPattern_ );
-                 selectInMainView( pendingJumpLine_, pendingJumpNLines_, pendingJumpCol_,
-                                   pendingJumpLen_ );
-                 // getNbLine() is only valid now that indexing finished: the
-                 // overview repoint MUST happen here, not at attachFile time.
-                 refreshFileOverview( pendingMainFilePath_ );
-                 Q_EMIT mainViewFileChanged();
+                       mainView_->setDataSource( currentMainData_.get() );
+                       // Re-point the follow/refresh data-flow at the freshly indexed
+                       // file (its LogData keeps watching + re-indexing on growth).
+                       bindMainViewDataSignals();
+                       // Re-apply the current search pattern so the freshly-indexed
+                       // file highlights its matches at first paint. Runs on the main
+                       // thread (loadingFinished is a queued signal), so threading is
+                       // correct.
+                       mainView_->setSearchPattern( currentSearchPattern_ );
+                       selectInMainView( pendingJumpLine_, pendingJumpNLines_,
+                                         pendingJumpCol_, pendingJumpLen_ );
+                       // getNbLine() is only valid now that indexing finished: the
+                       // overview repoint MUST happen here, not at attachFile time.
+                       refreshFileOverview( pendingMainFilePath_ );
+                       Q_EMIT mainViewFileChanged();
 
-                 pendingMainData_.reset();
-                 pendingMainFilePath_.clear();
-             } );
+                       pendingMainData_.reset();
+                       pendingMainFilePath_.clear();
+                   } );
 
     // The opened file's path/size/date surface in MainWindow's info line; keep
     // the toolbar status focused on search state (no path leak here).

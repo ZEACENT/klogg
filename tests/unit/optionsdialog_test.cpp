@@ -20,10 +20,12 @@
 #include <catch2/catch.hpp>
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QLabel>
 
+#include "highlighterset.h"
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
@@ -63,6 +65,29 @@ class ConfigurationScope {
     ThemeMode themeMode_;
     QString language_;
 };
+
+// Restore the process-wide HighlighterSetCollection quick-defaults when the
+// test ends, for the same reason ConfigurationScope exists: a REQUIRE abort
+// unwinds the stack, and updateConfigFromDialog() also persists the
+// collection, so the on-disk snapshot must be restored too.
+class QuickHighlighterDefaultsScope {
+  public:
+    QuickHighlighterDefaultsScope()
+        : defaults_( HighlighterSetCollection::get().quickHighlighterDefaults() )
+    {
+    }
+    ~QuickHighlighterDefaultsScope()
+    {
+        HighlighterSetCollection::get().setQuickHighlighterDefaults( defaults_ );
+        HighlighterSetCollection::get().save();
+    }
+
+    QuickHighlighterDefaultsScope( const QuickHighlighterDefaultsScope& ) = delete;
+    QuickHighlighterDefaultsScope& operator=( const QuickHighlighterDefaultsScope& ) = delete;
+
+  private:
+    QuickHighlighterDefaults defaults_;
+};
 } // namespace
 
 TEST_CASE( "Theme mode selector is disabled for the fixed Classic Dark style" )
@@ -72,6 +97,9 @@ TEST_CASE( "Theme mode selector is disabled for the fixed Classic Dark style" )
     // other UI tests do so get() does not throw.
     SavedSearches::getSynced();
     RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
 
     // The theme mode (Light/Dark/Auto) governs how "Modern" and "System"
     // adapt to the platform. "Classic Dark" is an inherently dark style, so
@@ -124,6 +152,9 @@ TEST_CASE( "Classic Dark pins the theme mode selector to Dark and restores it on
     // other UI tests do so get() does not throw.
     SavedSearches::getSynced();
     RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
 
     OptionsDialog dialog;
     dialog.show();
@@ -175,6 +206,9 @@ TEST_CASE( "Leaving Classic Dark restores a non-default theme mode selected befo
 {
     SavedSearches::getSynced();
     RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
 
     OptionsDialog dialog;
     dialog.show();
@@ -214,6 +248,9 @@ TEST_CASE( "Dialog initialized with Classic Dark shows the theme mode pinned to 
     // other UI tests do so get() does not throw.
     SavedSearches::getSynced();
     RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
 
     // Open the dialog as if the user had saved Classic Dark + Auto: the theme
     // selector must present itself pinned to Dark, not as the saved Auto mode.
@@ -261,6 +298,9 @@ TEST_CASE( "Applying the dialog while Classic Dark is pinned preserves the pre-p
 {
     SavedSearches::getSynced();
     RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
     ConfigurationScope configScope;
 
     // Deterministic start: saved as Classic Dark + Auto, so the dialog opens
@@ -338,6 +378,9 @@ TEST_CASE( "ConfigurationScope restores the persisted configuration on disk" )
 
         SavedSearches::getSynced();
         RecentFiles::getSynced();
+        // The dialog constructor also mirrors the color-label match defaults
+        // from HighlighterSetCollection; initialize it for the same reason.
+        HighlighterSetCollection::getSynced();
 
         // Normalize to a known baseline first so the assertions below are
         // deterministic regardless of what earlier tests left in the shared
@@ -372,4 +415,57 @@ TEST_CASE( "ConfigurationScope restores the persisted configuration on disk" )
     REQUIRE( Configuration::getSynced().style() == StyleManager::DarkStyleKey );
     REQUIRE( Configuration::getSynced().themeMode() == ThemeMode::Dark );
     REQUIRE( Configuration::getSynced().language() == QStringLiteral( "preseed_lang" ) );
+}
+
+TEST_CASE( "Color label match option defaults are configurable in the options dialog",
+           "[configuration]" )
+{
+    // updateDialogFromConfig() reads these persistables during construction;
+    // initialize them (and the highlighter collection) like the other tests do
+    // so get() does not throw.
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+    // The dialog constructor also mirrors the color-label match defaults from
+    // HighlighterSetCollection; initialize it for the same reason.
+    HighlighterSetCollection::getSynced();
+
+    // The Apply path writes and saves both the process-wide Configuration and
+    // the HighlighterSetCollection; the scope guards restore in-memory and
+    // on-disk state so serial sibling tests are unaffected.
+    ConfigurationScope configScope;
+    QuickHighlighterDefaultsScope defaultsScope;
+
+    // Seed known values (the product defaults: ignore case on, whole word
+    // off). HighlighterSetCollection stays the single source of truth; the
+    // dialog only mirrors it.
+    HighlighterSetCollection::get().setQuickHighlighterDefaults( { true, false } );
+
+    OptionsDialog dialog;
+    dialog.show();
+
+    auto* ignoreCaseCheckBox
+        = dialog.findChild<QCheckBox*>( QStringLiteral( "colorLabelsIgnoreCaseCheckBox" ) );
+    auto* wholeWordCheckBox
+        = dialog.findChild<QCheckBox*>( QStringLiteral( "colorLabelsWholeWordCheckBox" ) );
+    REQUIRE( ignoreCaseCheckBox != nullptr );
+    REQUIRE( wholeWordCheckBox != nullptr );
+
+    // Initial state mirrors the stored defaults.
+    REQUIRE( ignoreCaseCheckBox->isChecked() );
+    REQUIRE_FALSE( wholeWordCheckBox->isChecked() );
+
+    // Toggle both, then Apply. Do NOT touch the style/language combos: a
+    // style change pops a modal restart prompt that hangs offscreen.
+    ignoreCaseCheckBox->setChecked( false );
+    wholeWordCheckBox->setChecked( true );
+
+    // Same pattern as the theme-mode Apply test above: invoke the Apply slot
+    // directly because QAbstractButton::click() blocks on the offscreen
+    // platform.
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog",
+                                        Qt::DirectConnection ) );
+
+    const auto defaults = HighlighterSetCollection::get().quickHighlighterDefaults();
+    REQUIRE_FALSE( defaults.ignoreCase );
+    REQUIRE( defaults.wholeWord );
 }

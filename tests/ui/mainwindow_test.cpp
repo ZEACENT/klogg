@@ -29,6 +29,7 @@
 #include <QMenuBar>
 #include <QClipboard>
 #include <QLineEdit>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QTabBar>
 #include <QTemporaryDir>
@@ -81,6 +82,40 @@ struct TabGroupCleanupGuard {
     {
         clearPersistedTabGroups();
     }
+};
+
+// RAII save/restore of the file-watch flags gating followAction's enabled
+// state. MainWindow reads anyFileWatchEnabled() when the action is created
+// (and on every tab switch via disableFileSpecificActions), so the guard must
+// be installed before the window under test is constructed. Uses the
+// in-memory Configuration singleton so nothing leaks to disk or sibling tests.
+struct FileWatchConfigGuard {
+    FileWatchConfigGuard()
+        : config_( Configuration::get() )
+        , previousNative_( config_.nativeFileWatchEnabled() )
+        , previousPolling_( config_.pollingEnabled() )
+    {
+        // Force polling (not native): anyFileWatchEnabled() is native||polling,
+        // and polling is the watcher the test harness itself keeps enabled on
+        // every platform for determinism (qtests_main disables the flaky
+        // native efsw watcher on Windows -- re-arming it here would put these
+        // scenarios into exactly the configuration the harness avoids).
+        config_.setPollingEnabled( true );
+    }
+
+    ~FileWatchConfigGuard()
+    {
+        config_.setNativeFileWatchEnabled( previousNative_ );
+        config_.setPollingEnabled( previousPolling_ );
+    }
+
+    FileWatchConfigGuard( const FileWatchConfigGuard& ) = delete;
+    FileWatchConfigGuard& operator=( const FileWatchConfigGuard& ) = delete;
+
+  private:
+    Configuration& config_;
+    bool previousNative_;
+    bool previousPolling_;
 };
 
 struct SessionInfoWindowSnapshot {
@@ -1017,6 +1052,9 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folder]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
+    // Deterministic followAction enabled state (must precede MainWindow
+    // construction: the action reads anyFileWatchEnabled() at creation).
+    FileWatchConfigGuard fileWatchConfigGuard;
 
     auto appSession = std::make_shared<Session>();
     const auto windowId = QString( "folder-dispatch-%1" ).arg(
@@ -1098,7 +1136,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         auto* follow = mainWindow->findChild<QAction*>( QStringLiteral( "followAction" ) );
         auto* wrap = mainWindow->findChild<QAction*>( QStringLiteral( "textWrapAction" ) );
 
-        THEN( "document actions are enabled, file-only actions are not" )
+        THEN( "document actions are enabled" )
         {
             // The folder branch of currentTabChanged explicitly re-enables the
             // wrap toggle and syncs its checked state from the folder views.
@@ -1108,9 +1146,62 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
             // Go-to-line is routed polymorphically and stays available.
             REQUIRE( goToLine != nullptr );
             REQUIRE( goToLine->isEnabled() );
-            // Follow stays file/live-source-only.
+            // Follow applies to the file shown in the folder main view and
+            // stays available whenever file watching is enabled.
             REQUIRE( follow != nullptr );
-            REQUIRE_FALSE( follow->isChecked() );
+            REQUIRE( follow->isEnabled() );
+        }
+
+        AND_WHEN( "follow is toggled on for the folder tab" )
+        {
+            runInUiThread( [ follow ] {
+                follow->trigger();
+            } );
+
+            THEN( "the folder main view follows and the action shows it" )
+            {
+                // RED: today followSet is routed through the signal mux, whose
+                // current document is null for folder tabs, so the folder main
+                // view never enters follow mode.
+                REQUIRE( waitUiState( [ & ] {
+                    return folderWidget->mainView()->isFollowEnabled();
+                } ) );
+                REQUIRE( follow->isChecked() );
+            }
+
+            AND_WHEN( "switching to a file tab and back to the folder tab" )
+            {
+                const auto filePath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
+                runInUiThread( [ &mainWindow, filePath ] {
+                    mainWindow->loadInitialFile( filePath, false );
+                } );
+                REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
+                // Let the file tab's background load finish (and its worker
+                // thread unwind) before switching away / tearing down.
+                REQUIRE( waitUiState( [ & ] {
+                    auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 1 ) );
+                    return crawler != nullptr && crawler->isFirstLoadDone();
+                } ) );
+                QTest::qWait( 200 );
+
+                runInUiThread( [ tabArea ] {
+                    tabArea->setCurrentIndex( 0 );
+                } );
+                REQUIRE( waitUiState( [ & ] {
+                    return qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
+                           != nullptr;
+                } ) );
+                QTest::qWait( 200 );
+
+                THEN( "the follow action still reflects the folder main view" )
+                {
+                    // RED: today switching to a folder tab forces the action
+                    // unchecked (disableFileSpecificActions) instead of syncing
+                    // the checked state from the folder main view's follow mode.
+                    REQUIRE( waitUiState( [ & ] { return follow->isChecked(); } ) );
+                    REQUIRE( folderWidget->mainView()->isFollowEnabled() );
+                }
+            }
         }
     }
 
@@ -1141,6 +1232,191 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
             REQUIRE( waitUiState( [ & ] {
                 return QApplication::clipboard()->text() == QDir::toNativeSeparators( expectedPath );
             } ) );
+        }
+    }
+}
+
+// F9: "Go to top" and "Follow file" are document-level actions: on a folder
+// tab they must apply to the file shown in the folder MAIN view. Today both
+// are routed through the signal mux, whose current document is null for
+// folder tabs (signalMux_.setCurrentDocument( nullptr ) in currentTabChanged),
+// so they are silent no-ops there.
+SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
+          "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+    // Deterministic followAction enabled state (must precede MainWindow
+    // construction: the action reads anyFileWatchEnabled() at creation).
+    FileWatchConfigGuard fileWatchConfigGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-doc-actions-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    auto* goToTopAction = mainWindow->findChild<QAction*>( QStringLiteral( "goToTopAction" ) );
+    REQUIRE( goToTopAction != nullptr );
+    auto* followAction = mainWindow->findChild<QAction*>( QStringLiteral( "followAction" ) );
+    REQUIRE( followAction != nullptr );
+
+    // 200 matching lines so the folder main view is comfortably scrollable
+    // once the file is opened from a result row.
+    const auto tempDirPath = makeTestDir( "folderdocactions" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    const auto logFilePath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
+    {
+        QFile f( logFilePath );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray payload;
+        for ( int i = 0; i < 200; ++i ) {
+            payload.append( "ERROR line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+    }
+
+    GIVEN( "a folder tab with a file opened in the main view" )
+    {
+        runInUiThread( [ &mainWindow, tempDirPath ] {
+            mainWindow->openFolderByPath( tempDirPath );
+        } );
+        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        QTest::qWait( 200 );
+        auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
+        REQUIRE( folderWidget != nullptr );
+
+        runInUiThread( [ folderWidget ] {
+            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
+        } );
+        REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
+        REQUIRE( folderWidget->filteredView() != nullptr );
+
+        // Results rows: group header at 0, then one data row per match. Row 2
+        // is a data row; selecting it in the results view opens its file in
+        // the main view (newSelection -> onResultSelected, the same path
+        // FolderCrawlerWidget::selectResultRow drives).
+        runInUiThread( [ folderWidget ] {
+            folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
+        } );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        // The on-demand index + layout of the main-view file are async: wait
+        // until the 200-line file is actually scrollable, then settle so the
+        // worker thread unwinds before the views are driven further.
+        REQUIRE( waitUiState( [ & ] {
+            return folderWidget->mainView()->verticalScrollBar()->maximum() > 0;
+        } ) );
+        QTest::qWait( 200 );
+
+        auto scrollMainViewToBottom = [ & ] {
+            runInUiThread( [ folderWidget ] {
+                auto* scrollBar = folderWidget->mainView()->verticalScrollBar();
+                scrollBar->setValue( scrollBar->maximum() );
+            } );
+            REQUIRE( waitUiState( [ & ] {
+                return folderWidget->mainView()->verticalScrollBar()->value() > 0;
+            } ) );
+        };
+
+        WHEN( "the go-to-top action is triggered" )
+        {
+            scrollMainViewToBottom();
+
+            runInUiThread( [ goToTopAction ] {
+                goToTopAction->trigger();
+            } );
+
+            THEN( "the folder main view scrolls back to the top" )
+            {
+                // RED: jumpToTop is mux-routed; the mux document is null on
+                // folder tabs, so the main view never scrolls.
+                REQUIRE( waitUiState( [ & ] {
+                    return folderWidget->mainView()->verticalScrollBar()->value() == 0;
+                } ) );
+            }
+        }
+
+        WHEN( "the go-to-top shortcut is pressed" )
+        {
+            scrollMainViewToBottom();
+
+            pressConfiguredShortcut( mainWindow.get(), ShortcutAction::MainWindowGoToTop );
+
+            THEN( "the folder main view scrolls back to the top" )
+            {
+                // RED: the shortcut fires the same mux-routed goToTopAction.
+                REQUIRE( waitUiState( [ & ] {
+                    return folderWidget->mainView()->verticalScrollBar()->value() == 0;
+                } ) );
+            }
+        }
+
+        WHEN( "the follow action is toggled on" )
+        {
+            REQUIRE( waitUiState( [ & ] { return followAction->isEnabled(); } ) );
+
+            runInUiThread( [ followAction ] {
+                followAction->trigger();
+            } );
+
+            THEN( "the folder main view enters follow mode" )
+            {
+                // RED: followSet is mux-routed; the mux document is null on
+                // folder tabs, so the main view's follow mode is never set.
+                REQUIRE( waitUiState( [ & ] {
+                    return folderWidget->mainView()->isFollowEnabled();
+                } ) );
+                REQUIRE( followAction->isChecked() );
+            }
+        }
+
+        WHEN( "the results view has focus and go-to-top is triggered" )
+        {
+            scrollMainViewToBottom();
+
+            runInUiThread( [ folderWidget ] {
+                folderWidget->filteredView()->setFocus( Qt::OtherFocusReason );
+            } );
+            REQUIRE( waitUiState( [ & ] {
+                return folderWidget->filteredView()->hasFocus();
+            } ) );
+
+            const auto selectedRowsBefore
+                = folderWidget->filteredView()->getSelectedLinesText();
+            REQUIRE_FALSE( selectedRowsBefore.isEmpty() );
+
+            runInUiThread( [ goToTopAction ] {
+                goToTopAction->trigger();
+            } );
+
+            THEN( "the main view scrolls to top and the results selection is untouched" )
+            {
+                // RED: same null-mux-document no-op regardless of which folder
+                // view holds focus.
+                REQUIRE( waitUiState( [ & ] {
+                    return folderWidget->mainView()->verticalScrollBar()->value() == 0;
+                } ) );
+                // The action targets the folder MAIN view only: the results
+                // (filtered) view's selection must not be moved by it.
+                REQUIRE( folderWidget->filteredView()->getSelectedLinesText()
+                         == selectedRowsBefore );
+            }
         }
     }
 }

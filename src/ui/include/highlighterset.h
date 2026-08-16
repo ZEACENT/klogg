@@ -174,12 +174,12 @@ struct QuickHighlighter {
 
 struct QuickLabelEntry {
     QString text;
-    bool ignoreCase = false;
+    bool ignoreCase = true;
     bool wholeWord = false;
 };
 
 struct QuickHighlighterDefaults {
-    bool ignoreCase = false;
+    bool ignoreCase = true;
     bool wholeWord = false;
 };
 

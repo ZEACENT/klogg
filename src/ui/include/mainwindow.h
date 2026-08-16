@@ -162,7 +162,8 @@ class MainWindow : public QMainWindow {
     void toggleMainLineNumbersVisibility( bool isVisible );
     void toggleFilteredLineNumbersVisibility( bool isVisible );
 
-    // Change the follow mode checkbox and send the followSet signal down
+    // Change the follow mode checkbox (the views report follow-state changes
+    // up; the action's toggled signal carries followSet down to the document)
     void changeFollowMode( bool follow );
 
     // Update the selection information displayed in the status bar.
@@ -199,8 +200,6 @@ class MainWindow : public QMainWindow {
   Q_SIGNALS:
     // Is emitted when new settings must be used
     void optionsChanged();
-    // Is emitted when the 'follow' option is enabled/disabled
-    void followSet( bool checked );
 
     void newWindow();
     void windowActivated();

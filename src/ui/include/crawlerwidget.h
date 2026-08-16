@@ -112,7 +112,7 @@ class CrawlerWidget : public QSplitter,
     QString encodingText() const;
 
     // Returns whether follow is enabled in this crawler
-    bool isFollowEnabled() const;
+    bool isFollowEnabled() const override;
 
     // Returns whether the initial file load has completed
     bool isFirstLoadDone() const;
@@ -134,7 +134,7 @@ class CrawlerWidget : public QSplitter,
 
     void focusSearchEdit() override;
     void goToLine() override;
-    void jumpToTop();
+    void jumpToTop() override;
 
     // Instructs the widget to reconfigure itself because Config() has changed.
     void applyConfiguration() override;
@@ -170,8 +170,10 @@ class CrawlerWidget : public QSplitter,
     // Sent to the client when the loading has finished
     // whether successful or not.
     void loadingFinished( LoadingStatus status );
-    // Sent when follow mode is enabled/disabled
-    void followSet( bool checked );
+    // Sent when follow mode is enabled/disabled. A signal overriding the
+    // AbstractCrawlerWidget virtual (the textWrapSet pattern below): MainWindow
+    // dispatches through the virtual, the emission fans out to both views.
+    void followSet( bool checked ) override;
     // Sent when text wrap mode is enabled/disabled
     void textWrapSet( bool checked ) override;
     // Sent up to the MainWindow to enable/disable the follow mode
