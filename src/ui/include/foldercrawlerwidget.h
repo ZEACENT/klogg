@@ -206,6 +206,13 @@ class FolderCrawlerWidget : public QWidget,
     void goToLine() override;
     void textWrapSet( bool checked ) override;
     bool isTextWrapEnabled() const override;
+    // View -> Go to top / Follow file, applied to the file shown in the MAIN
+    // view only: the results view is a cross-file static snapshot, so topping
+    // or following it is meaningless (the folder-specific variation of
+    // CrawlerWidget, which drives both views).
+    void jumpToTop() override;
+    void followSet( bool checked ) override;
+    bool isFollowEnabled() const override;
     void enteringQuickFind() override;
     void exitingQuickFind() override;
 
@@ -226,6 +233,12 @@ class FolderCrawlerWidget : public QWidget,
     // pane is created, switched, or closed) so MainWindow re-registers the
     // selector with the QuickFindMux instead of driving a stale/freed pane.
     void searchablesChanged();
+    // Emitted when the main view's follow mode changes (the view's elastic
+    // hook disengages on scroll-up, or re-engages at the bottom). Single-file
+    // parity with CrawlerWidget::followModeChanged: MainWindow direct-connects
+    // this to changeFollowMode so the Follow action's checked state tracks the
+    // view (single-file tabs reach that slot via SignalMux).
+    void followModeChanged( bool follow );
 
   protected:
     // ViewInterface (single-file APIs are no-ops in folder mode).
@@ -273,6 +286,12 @@ class FolderCrawlerWidget : public QWidget,
                              LinesCount nLines = LinesCount( 1 ),
                              LineColumn startCol = LineColumn( 0 ),
                              LineLength nSymbols = LineLength( 0 ) );
+    // (Re)bind the follow/refresh data-flow of the CURRENT currentMainData_ to
+    // the main view: the per-file LogData self-registers with FileWatcher and
+    // re-indexes on growth, but nothing else forwards those notifications to
+    // mainView_, so without this follow mode would set a flag and never track.
+    // Called on every main-view file swap (cache hit and async load).
+    void bindMainViewDataSignals();
     // Select (and display) a line or portion in the main view: whole-line jump
     // for plain row clicks, portion mirror for drag selections (parity with
     // single-file jumpToMatchingLine).
@@ -429,6 +448,14 @@ class FolderCrawlerWidget : public QWidget,
     std::shared_ptr<LogData> placeholderData_;
     std::shared_ptr<LogData> currentMainData_;
     QString currentMainFilePath_;
+    // Connections bound by bindMainViewDataSignals to the CURRENT
+    // currentMainData_. Stored so they can be disconnected before rebinding:
+    // LRU-cached LogDatas keep their FileWatcher registration, so stale
+    // connections would fire mainView_->updateData() (and the truncation
+    // handler) for files that are no longer shown.
+    QMetaObject::Connection mainDataLoadingFinishedConn_;
+    QMetaObject::Connection mainDataLoadingProgressedConn_;
+    QMetaObject::Connection mainDataFileChangedConn_;
     // The last line opened/announced in the main view (jump target). Tracked so
     // MainWindow can restore "Ln: x/y" when switching back to this folder tab.
     LineNumber lastMainViewLine_ = 0_lnum;
@@ -445,6 +472,19 @@ class FolderCrawlerWidget : public QWidget,
     // Pending async load (file clicked before its index finished building).
     std::shared_ptr<LogData> pendingMainData_;
     QString pendingMainFilePath_;
+    // The one-shot loadingFinished connection of the CURRENT pendingMainData_.
+    // Its lifetime is tied to the open it serves: the lambda self-disconnects
+    // when the open completes, and any newer open (async supersede or cached
+    // swap) disconnects it before replacing/abandoning the pending state.
+    // Without this the connection would outlive its open: the completed
+    // LogData moves into the LRU cache and keeps re-indexing on disk changes
+    // (self-registered FileWatcher), so its stale lambda would fire while a
+    // DIFFERENT file's open is in flight (pendingMainData_ non-null) and run
+    // the completion body with the wrong file's half-indexed state --
+    // clobbering currentMainData_/currentMainFilePath_ and consuming the
+    // pending jump, so the real completion early-returns and the new file's
+    // jump/overview/encoding are never applied with the final index state.
+    QMetaObject::Connection pendingMainDataConn_;
     LineNumber pendingJumpLine_ = 0_lnum;
     // Portion to mirror into the main view once the pending file is open
     // (plain row clicks use the defaults -> whole-line selection).

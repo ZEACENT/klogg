@@ -3493,3 +3493,306 @@ TEST_CASE( "FolderCrawlerWidget results view scrolls wrapped overflow beyond the
     using Access = AbstractLogView::access_by<FolderViewTestAccess>;
     REQUIRE( Access::drawingTopOffset( filteredView ) < 0 );
 }
+
+TEST_CASE( "FolderCrawlerWidget jumpToTop dispatch tops the main view only", "[folder]" )
+{
+    // The AbstractCrawlerWidget::jumpToTop hook is what MainWindow's
+    // goToTopAction dispatches to on a folder tab. It must scroll the folder
+    // MAIN view back to the top (the results view is a cross-file static
+    // snapshot and is intentionally left alone).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 200, { 0, 100 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    // The on-demand index + layout are async: wait until the 200-line file is
+    // actually scrollable, then settle so the worker thread unwinds.
+    REQUIRE( waitFor(
+        [ & ]() { return widget.mainView()->verticalScrollBar()->maximum() > 0; } ) );
+    QTest::qWait( 200 );
+
+    auto* const scrollBar = widget.mainView()->verticalScrollBar();
+    scrollBar->setValue( scrollBar->maximum() );
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->verticalScrollBar()->value() > 0; } ) );
+
+    static_cast<AbstractCrawlerWidget*>( &widget )->jumpToTop();
+
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->verticalScrollBar()->value() == 0; } ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget followSet dispatch toggles follow on the main view",
+           "[folder]" )
+{
+    // The AbstractCrawlerWidget::followSet hook is what MainWindow's
+    // followAction dispatches to on a folder tab. Both directions must reach
+    // the folder main view (and isFollowEnabled must report it back so
+    // MainWindow can sync the action's checked state).
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    auto* const document = static_cast<AbstractCrawlerWidget*>( &widget );
+    REQUIRE_FALSE( document->isFollowEnabled() );
+
+    document->followSet( true );
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->isFollowEnabled(); } ) );
+    REQUIRE( document->isFollowEnabled() );
+
+    document->followSet( false );
+    REQUIRE( waitFor( [ & ]() { return !widget.mainView()->isFollowEnabled(); } ) );
+    REQUIRE_FALSE( document->isFollowEnabled() );
+}
+
+TEST_CASE( "FolderCrawlerWidget re-emits the main view's followModeChanged", "[folder]" )
+{
+    // MainWindow direct-connects FolderCrawlerWidget::followModeChanged to
+    // changeFollowMode (single-file tabs reach that slot via the SignalMux) so
+    // the Follow action unchecks when the user scrolls away from the tail.
+    // The view emits followModeChanged(false) from disableFollow -- scrolling
+    // up while follow is on -- which is the state change driven here.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR here\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    bool fired = false;
+    bool followValue = true;
+    QObject::connect( &widget, &FolderCrawlerWidget::followModeChanged, &widget,
+                      [ & ]( bool follow ) {
+                          fired = true;
+                          followValue = follow;
+                      } );
+
+    widget.mainView()->followSet( true );
+    REQUIRE( widget.mainView()->isFollowEnabled() );
+
+    // Scrolling up while following disengages follow (the scrollbar's
+    // actionTriggered -> disableFollow path, abstractlogview.cpp:414-423);
+    // triggerAction emits actionTriggered even when the value cannot move.
+    widget.mainView()->verticalScrollBar()->triggerAction(
+        QAbstractSlider::SliderSingleStepSub );
+
+    REQUIRE( waitFor( [ & ]() { return fired; } ) );
+    REQUIRE_FALSE( followValue );
+}
+
+TEST_CASE( "FolderCrawlerWidget follow tracks the tail when the file grows", "[folder]" )
+{
+    // The follow DATA FLOW: the folder main view's per-file LogData
+    // self-registers with FileWatcher and re-indexes on growth, but follow
+    // only tracks if the view is refreshed -- bindMainViewDataSignals forwards
+    // the current file's loadingFinished/loadingProgressed to
+    // mainView_->updateData(). RED without it: the flag is set, the view never
+    // moves, and the top line stays put when the file grows.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 200, { 0, 100 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    REQUIRE( waitFor(
+        [ & ]() { return widget.mainView()->verticalScrollBar()->maximum() > 0; } ) );
+    QTest::qWait( 200 );
+
+    // Enable follow through the same dispatch MainWindow uses; the view jumps
+    // to the bottom of the 200-line file.
+    static_cast<AbstractCrawlerWidget*>( &widget )->followSet( true );
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->isFollowEnabled(); } ) );
+    LineNumber topBefore = 0_lnum;
+    REQUIRE( waitFor( [ & ]() {
+        topBefore = widget.mainView()->getTopLine();
+        return topBefore.get() > 0;
+    } ) );
+
+    // Grow the file on disk. The deterministic seam is the FileWatcher the
+    // LogData registered with at indexingFinished (logdata.cpp:242): native
+    // watch on Linux/macOS, 1s polling on Windows (qtests_main.cpp) -- the
+    // generous waitFor timeout covers both.
+    {
+        QFile f( a );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
+        QByteArray payload;
+        for ( int i = 0; i < 100; ++i ) {
+            payload.append( "appended line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+        f.flush();
+    }
+
+    // Follow + refresh => the view tracks the new tail: the top line moves
+    // down past its previous at-bottom position.
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->getTopLine() > topBefore; },
+                      15000 ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending open",
+           "[folder][regression]" )
+{
+    // Regression for the stale pending-load connection in openFileInMainView:
+    // the one-shot loadingFinished connect() stayed attached to the LogData for
+    // its whole lifetime. After file A's open completed, A's LogData went into
+    // the LRU cache and kept re-indexing on disk changes (self-registered
+    // FileWatcher; the follow data-flow makes these re-indexes routine). When
+    // such a re-index finished while a DIFFERENT file B's async open was in
+    // flight, A's stale lambda saw pendingMainData_ != nullptr and ran the
+    // completion body with B's half-indexed state: the jump landed on a
+    // not-yet-indexed B, the next progress-driven updateData cropped the
+    // out-of-range selection away (abstractlogview.cpp:1825, Selection::crop
+    // clears a selected line beyond the indexed range), and B's real
+    // completion early-returned without re-jumping -- so B ended up displayed
+    // with NO selection at the clicked match line. The fix ties the pending
+    // connection's lifetime to the open it serves (self-disconnect on
+    // completion + disconnect on supersede), so A's re-index can no longer
+    // complete B's open.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR in a\npadding\n" ) );
+    // B is deliberately large so its async index stays in flight long enough
+    // for A's watcher-triggered re-index to complete inside the pending window
+    // (the stale lambda can only clobber while pendingMainData_ is non-null).
+    // The match sits near the END of B so the premature jump targets a line
+    // far beyond whatever prefix of B is indexed when the clobber lands.
+    constexpr int bLines = 2000000;
+    constexpr int bMatchLine = bLines - 10;
+    const QString b = makeFile( dir, "b.log", bLines, { bMatchLine } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    // Wait for the folder scan to COMPLETE (not merely start): searchActive_
+    // flips synchronously inside searchFor(), so waiting for it to become
+    // true returns immediately with an empty results model, and the
+    // matchRowForFile lookups below would find no rows. The scan streams all
+    // ~26MB of B: generous budget for loaded CI.
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); }, 30000 ) );
+
+    // Resolve each file's match row dynamically: group headers shift row
+    // indices, and a hardcoded row would silently select the wrong file.
+    const auto matchRowForFile = [ & ]( const QString& path ) -> LineNumber {
+        const auto total = widget.folderResults()->getNbLine().get();
+        for ( uint64_t i = 0; i < total; ++i ) {
+            const LineNumber row{ i };
+            if ( widget.folderResults()->lineKind( row ) == LineKind::Data
+                 && widget.folderResults()->sourceForLine( row ).filePath == path ) {
+                return row;
+            }
+        }
+        FAIL( "matchRowForFile: no matching result row found for the requested file" );
+        return 0_lnum; // unreachable; FAIL aborts the test case
+    };
+
+    // Open A first (uncached -> async path): after completion A is cached,
+    // bound, and -- before the fix -- still carrying its stale pending lambda.
+    widget.selectResultRow( matchRowForFile( a ) );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
+
+    const LineNumber bRow = matchRowForFile( b );
+    const LineNumber bLocalLine = widget.folderResults()->sourceForLine( bRow ).localLine;
+    REQUIRE( bLocalLine.get() == static_cast<uint64_t>( bMatchLine ) );
+
+    // Append to A on disk and IMMEDIATELY start B's open, then keep nudging A
+    // while B indexes, so at least one re-index of A completes inside B's
+    // pending window regardless of watcher latency (native watcher on
+    // Linux/macOS, 1s polling on Windows -- B's size keeps the window wide on
+    // native watchers; under 1s polling the clobber may not be exercised, but
+    // the healthy end state asserted below must hold either way).
+    const auto appendLine = []( const QString& path ) {
+        QFile f( path );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
+        f.write( "nudge\n" );
+        f.flush();
+    };
+    appendLine( a );
+    widget.selectResultRow( bRow );
+    QElapsedTimer openBudget;
+    openBudget.start();
+    while ( widget.currentMainFilePath() != b && openBudget.elapsed() < 30000 ) {
+        QTest::qWait( 100 );
+        appendLine( a );
+    }
+    REQUIRE( widget.currentMainFilePath() == b );
+
+    // Wait for B's index to actually FINISH (currentMainViewInfo reads the
+    // live indexed line count), then settle so the queued loadingFinished
+    // side effects (pre-fix: the selection crop) have landed.
+    REQUIRE( waitFor(
+        [ & ]() {
+            const auto info = widget.currentMainViewInfo();
+            return info.has_value() && info->path == b
+                   && info->nbLines >= static_cast<uint64_t>( bLines );
+        },
+        30000 ) );
+    QTest::qWait( 200 );
+
+    // The jump must have selected the clicked match line. RED before the fix:
+    // the premature jump selected bLocalLine while B was still mostly
+    // unindexed, the next progress-driven updateData cropped the out-of-range
+    // selection to nothing, and B's real completion early-returned.
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const auto selected = Access::selectedLines( widget.mainView() );
+    INFO( "selection must hold exactly the clicked match line, got "
+          << selected.size() << " line(s)" );
+    REQUIRE( selected.size() == 1 );
+    REQUIRE( selected.front() == bLocalLine );
+
+    // B's follow data-flow must be bound (bindMainViewDataSignals at B's real
+    // completion): enable follow through the same dispatch MainWindow uses,
+    // grow B on disk, and the view must track the tail -- mirrors the
+    // follow-tail test above (same FileWatcher seam, same 15s budget for the
+    // 1s polling watcher on Windows).
+    static_cast<AbstractCrawlerWidget*>( &widget )->followSet( true );
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->isFollowEnabled(); } ) );
+    LineNumber topBefore = 0_lnum;
+    REQUIRE( waitFor( [ & ]() {
+        topBefore = widget.mainView()->getTopLine();
+        return topBefore.get() > 0;
+    } ) );
+
+    {
+        QFile f( b );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
+        QByteArray payload;
+        for ( int i = 0; i < 100; ++i ) {
+            payload.append( "appended line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+        f.flush();
+    }
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->getTopLine() > topBefore; },
+                      15000 ) );
+}

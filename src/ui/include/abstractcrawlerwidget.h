@@ -93,6 +93,19 @@ class AbstractCrawlerWidget : public ViewInterface {
     {
         return false;
     }
+    // Scroll to the top of the document (View -> Go to top). Folder tabs top
+    // only their main view: the results view is a cross-file static snapshot,
+    // so topping it is meaningless. Default no-op.
+    virtual void jumpToTop() {}
+    // Toggle follow mode for the tab's document (View -> Follow file). Folder
+    // tabs follow the file shown in their main view only (same rationale as
+    // jumpToTop). Default no-op.
+    virtual void followSet( bool /*checked*/ ) {}
+    // True if follow mode is on (drives the Follow action's checked state).
+    virtual bool isFollowEnabled() const
+    {
+        return false;
+    }
     // QuickFind bar lifecycle: save (entering) and restore (exiting) the view
     // focus. Default no-op.
     virtual void enteringQuickFind() {}
