@@ -22,6 +22,8 @@
 
 #include <memory>
 
+#include <QString>
+
 class SearchableLogData;
 class LogFilteredData;
 class SavedSearches;

@@ -241,6 +241,11 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     {
         return view->selection_.getLines();
     }
+
+    static const AbstractLogData* logData( const AbstractLogView* view )
+    {
+        return view->logData_;
+    }
 };
 
 TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
@@ -3636,10 +3641,15 @@ TEST_CASE( "FolderCrawlerWidget follow tracks the tail when the file grows", "[f
         return topBefore.get() > 0;
     } ) );
 
-    // Grow the file on disk. The deterministic seam is the FileWatcher the
-    // LogData registered with at indexingFinished (logdata.cpp:242): native
-    // watch on Linux/macOS, 1s polling on Windows (qtests_main.cpp) -- the
-    // generous waitFor timeout covers both.
+    // Grow the file on disk, then deliver the change notification through the
+    // same entry point the FileWatcher uses (queued FileWatcher::fileChanged ->
+    // LogData::fileChangedOnDisk, logdata.cpp:71-72). Invoking the slot
+    // directly keeps the test deterministic: watcher timing (1s polling on
+    // Windows/macOS, efsw on Linux) is too slow on loaded CI runners, and the
+    // watcher -> LogData leg is already covered by the LogData growth unit
+    // tests; what this test pins is the widget wiring this change adds
+    // (bindMainViewDataSignals -> mainView_->updateData() -> follow tracks the
+    // tail).
     {
         QFile f( a );
         REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
@@ -3650,6 +3660,12 @@ TEST_CASE( "FolderCrawlerWidget follow tracks the tail when the file grows", "[f
         f.write( payload );
         f.flush();
     }
+
+    auto* mainData = const_cast<AbstractLogData*>(
+        AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) );
+    REQUIRE( mainData != nullptr );
+    QMetaObject::invokeMethod( mainData, "fileChangedOnDisk", Qt::QueuedConnection,
+                               Q_ARG( QString, widget.currentMainFilePath() ) );
 
     // Follow + refresh => the view tracks the new tail: the top line moves
     // down past its previous at-bottom position.
