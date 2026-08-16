@@ -165,6 +165,17 @@ class LogData : public SearchableLogData {
     QMetaObject::Connection workerIndexingFinishedConnection_;
     QMetaObject::Connection workerCheckFileChangesFinishedConnection_;
     bool shuttingDown_{ false };
+
+    // Set when this instance has actually handed its file to the FileWatcher
+    // singleton (only on successful indexing). The destructor consults it to
+    // deregister exactly the files this instance registered: FileWatcher is a
+    // process-wide singleton that outlives every LogData, and in the serial
+    // integration-test binary an unbalanced addFile leaves dead temp paths in
+    // the watch list, so the 1s polling timer keeps generating cross-test
+    // file-changed traffic for files that no longer exist. Calling removeFile
+    // for a file that was never added is equally undesirable because
+    // EfswFileWatcher logs "The file is not watched" for unknown paths.
+    bool fileWatcherRegistered_{ false };
 };
 
 #endif

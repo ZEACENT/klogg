@@ -1209,17 +1209,27 @@ jobs:
             exit 1
           }
 
-      - name: Configure crash dumps for x86 integration tests
-        if: ${{ matrix.config.arch == 'x86' }}
+      - name: Configure crash dumps for Windows test binaries
         shell: pwsh
         run: |
+          # Every Windows leg (x86 and x64) gets WER LocalDumps so a hard crash
+          # in either test binary leaves an analyzable dump. DumpType=2 (full)
+          # with DumpCount=10 bounds the retained set to the 10 most recent
+          # dumps; the dump directory is only uploaded on test failure below.
           $dumpDir = Join-Path $env:GITHUB_WORKSPACE "build_root\crash_dumps"
           New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
 
-          $regPath = "HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\klogg_itests.exe"
-          reg add "$regPath" /v DumpFolder /t REG_EXPAND_SZ /d "$dumpDir" /f
-          reg add "$regPath" /v DumpCount /t REG_DWORD /d 10 /f
-          reg add "$regPath" /v DumpType /t REG_DWORD /d 2 /f
+          foreach ($exe in @("klogg_itests.exe", "klogg_tests.exe")) {
+            $regPath = "HKCU\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\$exe"
+            reg add "$regPath" /v DumpFolder /t REG_EXPAND_SZ /d "$dumpDir" /f
+            reg add "$regPath" /v DumpCount /t REG_DWORD /d 10 /f
+            reg add "$regPath" /v DumpType /t REG_DWORD /d 2 /f
+          }
+
+          # Pre-create the symbol downstream store used by _NT_SYMBOL_PATH (set
+          # in the agent-run-tests action) so dbghelp can cache OS/CRT symbols
+          # when backward-cpp/StackWalker symbolizes crash stacks.
+          New-Item -ItemType Directory -Force -Path "C:\symbols" | Out-Null
 
       - name: Stage MSVC AddressSanitizer runtime next to test binaries
         if: ${{ matrix.config.sanitizer == 'address' }}
@@ -1257,8 +1267,8 @@ jobs:
         id: run-tests
         continue-on-error: true
 
-      - name: Collect x86 diagnostics on test failure
-        if: ${{ matrix.config.arch == 'x86' && steps.run-tests.outcome == 'failure' }}
+      - name: Collect Windows diagnostics on test failure
+        if: ${{ steps.run-tests.outcome == 'failure' }}
         shell: pwsh
         run: |
           $workspace = $env:GITHUB_WORKSPACE
@@ -1275,9 +1285,11 @@ jobs:
             Copy-Item $dumpDir -Destination (Join-Path $diagRoot "crash_dumps") -Recurse -Force
           }
 
-          $itestsPdb = Join-Path $workspace "build_root\output\klogg_itests.pdb"
-          if ( Test-Path $itestsPdb ) {
-            Copy-Item $itestsPdb -Destination $diagRoot -Force
+          foreach ($name in @("klogg_itests.pdb", "klogg_tests.pdb")) {
+            $pdb = Join-Path $workspace "build_root\output\$name"
+            if ( Test-Path $pdb ) {
+              Copy-Item $pdb -Destination $diagRoot -Force
+            }
           }
 
           $timeRange = (Get-Date).AddHours(-2)
@@ -1288,11 +1300,14 @@ jobs:
             Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |
             Format-List | Out-File -FilePath (Join-Path $diagRoot "eventlog_system.txt") -Width 300
 
-      - name: Upload x86 diagnostics artifact
-        if: ${{ matrix.config.arch == 'x86' && steps.run-tests.outcome == 'failure' }}
+      - name: Upload Windows diagnostics artifact
+        if: ${{ steps.run-tests.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86-test-diagnostics
+          # Use label (defined on every config, including the asan leg which
+          # has no artifacts_id) so the diagnostics artifact name is unique per
+          # leg; artifacts_id would render as an empty segment on asan.
+          name: windows-${{ matrix.config.label }}-test-diagnostics
           path: '${{ github.workspace }}\build_root\diagnostics\**\*'
           if-no-files-found: warn
 
