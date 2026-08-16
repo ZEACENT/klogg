@@ -51,6 +51,7 @@
 #include "encodings.h"
 #include "fontutils.h"
 #include "highlighteredit.h"
+#include "highlighterset.h"
 #include "ioslogprocesstransport.h"
 #include "log.h"
 #include "logger.h"
@@ -739,6 +740,13 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     logicalCombiningCheckBox->setChecked( config.isSearchLogicalCombiningDefault() );
     autoRefreshCheckBox->setChecked( config.isSearchAutoRefreshDefault() );
 
+    // Color label match defaults live in HighlighterSetCollection (the single
+    // source of truth shared with the context-menu toggles), not in
+    // Configuration; the dialog only mirrors them.
+    const auto colorLabelDefaults = HighlighterSetCollection::get().quickHighlighterDefaults();
+    colorLabelsIgnoreCaseCheckBox->setChecked( colorLabelDefaults.ignoreCase );
+    colorLabelsWholeWordCheckBox->setChecked( colorLabelDefaults.wholeWord );
+
     // Polling
     nativeFileWatchCheckBox->setChecked( config.nativeFileWatchEnabled() );
     fastModificationDetectionCheckBox->setChecked( config.fastModificationDetection() );
@@ -901,6 +909,13 @@ void OptionsDialog::resetGeneralDefaults()
     autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
     showAllFilteredWhenEmptyCheckBox->setChecked(
         defaults.showAllInFilteredViewWhenSearchEmpty() );
+
+    // Compiled defaults (ignore case on, whole word off) come from the
+    // QuickHighlighterDefaults struct itself, not from the stored collection.
+    const QuickHighlighterDefaults defaultColorLabelDefaults;
+    colorLabelsIgnoreCaseCheckBox->setChecked( defaultColorLabelDefaults.ignoreCase );
+    colorLabelsWholeWordCheckBox->setChecked( defaultColorLabelDefaults.wholeWord );
+
     searchHistorySpinBox->setValue( defaultSavedSearches.historySize() );
 
     loadLastSessionCheckBox->setChecked( defaults.loadLastSession() );
@@ -1258,6 +1273,14 @@ void OptionsDialog::updateConfigFromDialog()
     auto& recentFiles = RecentFiles::get();
     recentFiles.setFilesHistoryMaxItems( filesHistoryMaxItemsSpinBox->value() );
     recentFiles.save();
+
+    // Same non-Configuration-persistable pattern as SavedSearches/RecentFiles
+    // above: HighlighterSetCollection owns the color-label match defaults.
+    auto& highlighterSetCollection = HighlighterSetCollection::get();
+    highlighterSetCollection.setQuickHighlighterDefaults(
+        { colorLabelsIgnoreCaseCheckBox->isChecked(),
+          colorLabelsWholeWordCheckBox->isChecked() } );
+    highlighterSetCollection.save();
 
     if ( restartAppMessage ) {
         QMessageBox::warning(

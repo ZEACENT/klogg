@@ -550,6 +550,14 @@ void HighlighterSetCollection::saveToStorage( QSettings& settings ) const
     settings.beginGroup( "quick_defaults" );
     settings.setValue( "ignore_case", quickHighlighterDefaults_.ignoreCase );
     settings.setValue( "whole_word", quickHighlighterDefaults_.wholeWord );
+    // Any state written by this build is post-flip by definition, so stamp
+    // the one-shot migration marker alongside the values. Without this the
+    // marker only ever appears when retrieveFromStorage runs the migration
+    // against a pre-flip store: a fresh install's first save (e.g. the user
+    // unchecking ignore-case in OptionsDialog) would leave the marker absent,
+    // and the next retrieve would re-run the migration and wipe that
+    // deliberate ignore_case=false exactly once.
+    settings.setValue( "ignore_case_default_migrated", true );
     settings.endGroup();
     settings.endGroup();
 }
@@ -601,10 +609,25 @@ void HighlighterSetCollection::retrieveFromStorage( QSettings& settings )
             settings.endArray();
 
             settings.beginGroup( "quick_defaults" );
+            // One-shot migration (pre-flip installs): the quick color-label
+            // ignore-case default used to be false and was persisted by
+            // routine saves of the collection, so the case-sensitive behavior
+            // silently stuck forever. The compiled default is now ON (the
+            // convention of the search/quick-find ignore-case defaults, which
+            // are also ON); drop the stale key once so the new default
+            // applies. A deliberate post-migration choice sticks because the
+            // marker suppresses re-migration; saveToStorage also stamps the
+            // marker, so any state last written by a post-flip build is never
+            // re-migrated. whole_word is untouched: its default is unchanged,
+            // so an explicit stored choice must survive.
+            if ( !settings.value( "ignore_case_default_migrated", false ).toBool() ) {
+                settings.remove( "ignore_case" );
+                settings.setValue( "ignore_case_default_migrated", true );
+            }
             quickHighlighterDefaults_.ignoreCase
-                = settings.value( "ignore_case", false ).toBool();
+                = settings.value( "ignore_case", QuickHighlighterDefaults{}.ignoreCase ).toBool();
             quickHighlighterDefaults_.wholeWord
-                = settings.value( "whole_word", false ).toBool();
+                = settings.value( "whole_word", QuickHighlighterDefaults{}.wholeWord ).toBool();
             settings.endGroup();
         }
         else {

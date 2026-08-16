@@ -264,8 +264,108 @@ SCENARIO( "quick color label defaults persist in highlighter settings", "[colorl
         THEN( "the product defaults are used" )
         {
             const auto defaults = loadedCollection.quickHighlighterDefaults();
-            CHECK_FALSE( defaults.ignoreCase );
+            CHECK( defaults.ignoreCase );
             CHECK_FALSE( defaults.wholeWord );
+        }
+    }
+}
+
+SCENARIO( "flipped ignore-case default reaches existing installs exactly once", "[colorlabels]" )
+{
+    QTemporaryDir temporaryDir;
+    REQUIRE( temporaryDir.isValid() );
+
+    const auto settingsPath = temporaryDir.filePath( QStringLiteral( "highlighters.ini" ) );
+
+    // Migration contract for the GREEN implementation: on retrieve,
+    // HighlighterSetCollection must sweep the stale
+    // HighlighterSetCollection/quick_defaults/ignore_case key exactly once (so
+    // the new compiled default ignoreCase=true applies to installs that
+    // persisted the old false default) and stamp the marker key
+    // HighlighterSetCollection/quick_defaults/ignore_case_default_migrated
+    // (inside the quick_defaults group) so a deliberate post-migration choice
+    // is never swept again. Mirrors the perf.useBlockScan one-shot migration
+    // in Configuration::retrieveFromStorage.
+    GIVEN( "an ini from an install that persisted the old ignore-case default" )
+    {
+        QSettings settings{ settingsPath, QSettings::IniFormat };
+        settings.setValue( QStringLiteral( "HighlighterSetCollection/version" ), 3 );
+        settings.setValue(
+            QStringLiteral( "HighlighterSetCollection/quick_defaults/ignore_case" ), false );
+        settings.setValue(
+            QStringLiteral( "HighlighterSetCollection/quick_defaults/whole_word" ), true );
+        settings.sync();
+
+        WHEN( "a fresh collection retrieves from it" )
+        {
+            HighlighterSetCollection loadedCollection;
+            loadedCollection.retrieveFromStorage( settings );
+
+            THEN( "the new default applies, the explicit whole-word choice is kept, and the "
+                  "marker is stamped" )
+            {
+                const auto defaults = loadedCollection.quickHighlighterDefaults();
+                CHECK( defaults.ignoreCase );
+                CHECK( defaults.wholeWord );
+
+                CHECK( settings
+                           .value( QStringLiteral( "HighlighterSetCollection/quick_defaults/"
+                                                   "ignore_case_default_migrated" ),
+                                   false )
+                           .toBool() );
+            }
+        }
+    }
+
+    GIVEN( "an ini where the migration already ran and ignore-case was set to false" )
+    {
+        QSettings settings{ settingsPath, QSettings::IniFormat };
+        settings.setValue( QStringLiteral( "HighlighterSetCollection/version" ), 3 );
+        settings.setValue(
+            QStringLiteral( "HighlighterSetCollection/quick_defaults/ignore_case" ), false );
+        settings.setValue( QStringLiteral( "HighlighterSetCollection/quick_defaults/"
+                                           "ignore_case_default_migrated" ),
+                           true );
+        settings.sync();
+
+        WHEN( "a fresh collection retrieves from it" )
+        {
+            HighlighterSetCollection loadedCollection;
+            loadedCollection.retrieveFromStorage( settings );
+
+            THEN( "the deliberate post-migration choice sticks" )
+            {
+                CHECK_FALSE( loadedCollection.quickHighlighterDefaults().ignoreCase );
+            }
+        }
+    }
+
+    GIVEN( "a fresh install whose first persisted state is a deliberate ignore-case=false" )
+    {
+        // Fresh-install regression: the marker used to be stamped only inside
+        // retrieveFromStorage (and only when a pre-existing version key made
+        // the migration block reachable), so the first save of a post-flip
+        // build left it absent and the NEXT retrieve re-ran the migration,
+        // wiping the deliberate false exactly once. saveToStorage now stamps
+        // the marker: anything it writes is post-flip by definition.
+        HighlighterSetCollection savedCollection;
+        savedCollection.setQuickHighlighterDefaults( { false, false } );
+
+        QSettings settings{ settingsPath, QSettings::IniFormat };
+        savedCollection.saveToStorage( settings );
+        settings.sync();
+
+        WHEN( "a fresh collection retrieves from it" )
+        {
+            HighlighterSetCollection loadedCollection;
+            loadedCollection.retrieveFromStorage( settings );
+
+            THEN( "the deliberate choice survives the save/retrieve round-trip" )
+            {
+                const auto defaults = loadedCollection.quickHighlighterDefaults();
+                CHECK_FALSE( defaults.ignoreCase );
+                CHECK_FALSE( defaults.wholeWord );
+            }
         }
     }
 }

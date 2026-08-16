@@ -51,6 +51,7 @@
 #include "adblogcatdialog.h"
 #include "commandargumenttokenizer.h"
 #include "configuration.h"
+#include "highlighterset.h"
 #include "ioslogprocesstransport.h"
 #include "livesourcetransport.h"
 #include "optionsdialog.h"
@@ -110,6 +111,10 @@ class ScopedOptionsDialogConfigurationGuard {
         : config_( Configuration::getSynced() )
         , savedSearches_( SavedSearches::getSynced() )
         , recentFiles_( RecentFiles::getSynced() )
+        // OptionsDialog mirrors and (on Apply) persists the color-label match
+        // defaults through HighlighterSetCollection, so snapshot it alongside
+        // the other non-Configuration persistables the dialog touches.
+        , highlighterSets_( HighlighterSetCollection::getSynced() )
     {
         REQUIRE( snapshotDir_.isValid() );
         snapshotPath_ = snapshotDir_.filePath( QStringLiteral( "settings.ini" ) );
@@ -118,6 +123,7 @@ class ScopedOptionsDialogConfigurationGuard {
         config_.saveToStorage( snapshot );
         savedSearches_.saveToStorage( snapshot );
         recentFiles_.saveToStorage( snapshot );
+        highlighterSets_.saveToStorage( snapshot );
         snapshot.sync();
     }
 
@@ -132,12 +138,16 @@ class ScopedOptionsDialogConfigurationGuard {
 
         recentFiles_.retrieveFromStorage( snapshot );
         recentFiles_.save();
+
+        highlighterSets_.retrieveFromStorage( snapshot );
+        highlighterSets_.save();
     }
 
   private:
     Configuration& config_;
     SavedSearches& savedSearches_;
     RecentFiles& recentFiles_;
+    HighlighterSetCollection& highlighterSets_;
     QTemporaryDir snapshotDir_;
     QString snapshotPath_;
 };
@@ -964,8 +974,13 @@ TEST_CASE( "OptionsDialog loads and persists adb settings" )
     ScopedAdbConfigurationGuard configGuard;
     auto& savedSearches = SavedSearches::getSynced();
     auto& recentFiles = RecentFiles::getSynced();
+    // OptionsDialog also reads the color-label match defaults from
+    // HighlighterSetCollection during construction; initialize the persistable
+    // like the two above so get() does not throw.
+    auto& highlighterSets = HighlighterSetCollection::getSynced();
     Q_UNUSED( savedSearches );
     Q_UNUSED( recentFiles );
+    Q_UNUSED( highlighterSets );
     auto& config = Configuration::getSynced();
     config.setAdbExecutable( QStringLiteral( "/initial/adb" ) );
     config.setAdbLogcatExtraArgs( QStringLiteral( "-v brief" ) );
@@ -1198,8 +1213,13 @@ TEST_CASE( "OptionsDialog adb detect button fills the executable field with the 
     ScopedAdbConfigurationGuard configGuard;
     auto& savedSearches = SavedSearches::getSynced();
     auto& recentFiles = RecentFiles::getSynced();
+    // OptionsDialog also reads the color-label match defaults from
+    // HighlighterSetCollection during construction; initialize the persistable
+    // like the two above so get() does not throw.
+    auto& highlighterSets = HighlighterSetCollection::getSynced();
     Q_UNUSED( savedSearches );
     Q_UNUSED( recentFiles );
+    Q_UNUSED( highlighterSets );
     auto& config = Configuration::getSynced();
     config.setAdbExecutable( QString{} );
     config.save();
