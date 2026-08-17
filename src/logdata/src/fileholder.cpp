@@ -1,7 +1,5 @@
 #include "fileholder.h"
 
-#include <filewatcher.h>
-
 #ifdef Q_OS_WIN
 #include <fcntl.h>
 #include <windows.h>
@@ -78,14 +76,14 @@ FileHolder::~FileHolder()
 {
     LOG_INFO << "destroy file holder "  << reinterpret_cast<void*>(this) << " for " << file_name_;
 
-    try {
-        // Remove the current file from the watch list
-        if ( attached_file_ ) {
-            FileWatcher::getFileWatcher().removeFile( file_name_ );
-        }
-    } catch ( const std::exception& e ) {
-        LOG_ERROR << "Failed to destroy FileHolder: " << e.what();
-    }
+    // FileWatcher deregistration is owned by LogData (~LogData, guarded by its
+    // fileWatcherRegistered_ flag) and must NOT be repeated here: this dtor
+    // used to call removeFile whenever an inner QFile existed, which both
+    // double-removed successfully watched files (the second removeFile hits
+    // EfswFileWatcher's "The file is not watched" warning) and removed files
+    // that were never registered at all (interrupted/failed indexing reaches
+    // here with an open handle but no addFile). LogData is the only owner of
+    // FileHolder and the only component that knows whether addFile happened.
 }
 
 FileId FileHolder::getFileId()

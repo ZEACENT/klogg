@@ -402,6 +402,10 @@ TEST_CASE( "FolderCrawlerWidget selecting a result opens the source file", "[fol
 
     REQUIRE( waitFor( [ & ]() { return !widget.currentMainFilePath().isEmpty(); } ) );
     REQUIRE( widget.currentMainFilePath() == a );
+    // Settle after the load completes before teardown (CLAUDE.md
+    // close-after-load pattern): the indexer worker may still be unwinding
+    // after the main-thread completion signal fires.
+    QTest::qWait( 200 );
 }
 
 TEST_CASE( "FolderCrawlerWidget main view mark-navigation is safe without filtered data",
@@ -3811,4 +3815,179 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
     }
     REQUIRE( waitFor( [ & ]() { return widget.mainView()->getTopLine() > topBefore; },
                       15000 ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget canceling a pending open keeps the displayed file's encoding override",
+           "[folder]" )
+{
+    // Regression for the reset PLACEMENT in openFileInMainView: the encoding
+    // override is wiped at the START of an async open (the
+    // `encodingMibOverride_.reset()` ahead of the cache/pending branches),
+    // while the previously opened file is still the one displayed. Sequence:
+    // A is displayed with an explicit override; the user clicks uncached B
+    // (async open starts, the override is wiped while A is still on screen);
+    // the user re-clicks A's row before B finishes (the same-file fast path
+    // abandons B's pending open and keeps A). A never stopped being the
+    // displayed file, yet encodingMib() reports nullopt, so the Encoding menu
+    // falls back to "Auto-detect" for a file the user explicitly pinned. The
+    // override belongs to the DISPLAYED file and must die at the swap point
+    // (when the new file actually replaces it), not when an open is merely
+    // requested.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 200, { 0 } );
+    const QString b = makeFile( dir, "b.log", 200, { 0 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    // Resolve each file's match row dynamically (group headers shift row
+    // indices); the same lookup the other multi-file tests use.
+    const auto matchRowForFile = [ & ]( const QString& path ) -> LineNumber {
+        const auto total = widget.folderResults()->getNbLine().get();
+        for ( uint64_t i = 0; i < total; ++i ) {
+            const LineNumber row{ i };
+            if ( widget.folderResults()->lineKind( row ) == LineKind::Data
+                 && widget.folderResults()->sourceForLine( row ).filePath == path ) {
+                return row;
+            }
+        }
+        FAIL( "matchRowForFile: no matching result row found for the requested file" );
+        return 0_lnum; // unreachable; FAIL aborts the test case
+    };
+
+    // Open A (uncached -> async) and pin an explicit encoding override on it.
+    // ISO 8859-1 (Latin-1): the ASCII fixture decodes fine under it, and it
+    // differs from the detected UTF-8 so the override is a real state change.
+    constexpr int latin1Mib = 4;
+    widget.selectResultRow( matchRowForFile( a ) );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 ); // settle per CLAUDE.md
+    widget.setEncoding( latin1Mib );
+    REQUIRE( widget.encodingMib().has_value() );
+    REQUIRE( *widget.encodingMib() == latin1Mib );
+
+    // Click B (uncached -> async open starts) and IMMEDIATELY re-click A, with
+    // NO event-loop turn in between: B's loadingFinished is a queued signal,
+    // so B's open is still pending when A's row is clicked, and the same-file
+    // fast path cancels it (A is still currentMainFilePath_). This is the
+    // cancel-a-pending-open sequence from the bug report, made deterministic.
+    widget.selectResultRow( matchRowForFile( b ) );
+    widget.selectResultRow( matchRowForFile( a ) );
+    REQUIRE( widget.currentMainFilePath() == a );
+
+    // The displayed file never changed, so its override must still be pinned.
+    // RED: the reset at the start of B's open already wiped it (nullopt).
+    REQUIRE( widget.encodingMib().has_value() );
+    REQUIRE( *widget.encodingMib() == latin1Mib );
+
+    // Settle so any late/queued side effects of the canceled open land, then
+    // re-assert: the override must survive the full unwind of the cancel, not
+    // just the synchronous fast path.
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+    REQUIRE( widget.encodingMib().has_value() );
+    REQUIRE( *widget.encodingMib() == latin1Mib );
+}
+
+TEST_CASE( "FolderCrawlerWidget follow growth refreshes the overview line count", "[folder]" )
+{
+    // Regression for the follow data-flow in bindMainViewDataSignals: its
+    // loadingFinished lambda calls only mainView_->updateData(), so when the
+    // followed file grows, the Overview model keeps the OPEN-TIME total in
+    // linesInFile_ (set once by refreshFileOverview). Single-file refreshes it
+    // on every loadingFinished (CrawlerWidget::loadingFinishedHandler,
+    // crawlerwidget.cpp:934: overview_.updateData( logData_->getNbLine() )).
+    // A stale total skews every Overview mapping that divides by linesInFile_:
+    // the viewport box (getViewLines), click-to-jump (fileLineFromY), and the
+    // match/mark tick positions (yFromFileLine) all compress into the
+    // pre-growth range, so the grown tail has no minimap presence.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 200, { 0, 100 } );
+
+    FolderCrawlerWidget widget;
+    widget.resize( 800, 600 );
+    widget.show();
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    REQUIRE( waitFor(
+        [ & ]() { return widget.mainView()->verticalScrollBar()->maximum() > 0; } ) );
+    QTest::qWait( 200 ); // settle per CLAUDE.md
+
+    // The overview follows Configuration (default visible); refreshFileOverview
+    // no-ops when hidden, which would make the baseline below meaningless.
+    REQUIRE( widget.overview()->isVisible() );
+
+    // Overview exposes no getter for its total line count (linesInFile_ is
+    // private), but the total is recoverable EXACTLY through the public
+    // coordinate mapping: fileLineFromY(y) = y * linesInFile_ / height_
+    // (overview.cpp, unclamped), so after updateView(H) the readout
+    // fileLineFromY(H) == linesInFile_ for any H > 0 (the *H and /H cancel in
+    // exact integer math). updateView also lifts the model out of its initial
+    // zero height so the division is always defined.
+    const auto overviewLinesInFile = []( FolderCrawlerWidget& w ) -> uint64_t {
+        Overview* const ov = w.overview();
+        REQUIRE( ov != nullptr );
+        ov->updateView( 1000 );
+        return ov->fileLineFromY( 1000 ).get();
+    };
+
+    // Baseline: the open-time total (refreshFileOverview ->
+    // overview_.updateData( currentMainData_->getNbLine() )).
+    REQUIRE( overviewLinesInFile( widget ) == uint64_t{ 200 } );
+
+    // Enable follow through the same dispatch MainWindow uses (same as the
+    // follow-tail test): the view jumps to the bottom of the 200-line file.
+    static_cast<AbstractCrawlerWidget*>( &widget )->followSet( true );
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->isFollowEnabled(); } ) );
+    LineNumber topBefore = 0_lnum;
+    REQUIRE( waitFor( [ & ]() {
+        topBefore = widget.mainView()->getTopLine();
+        return topBefore.get() > 0;
+    } ) );
+
+    // Grow the file by 100 lines, then deliver the change notification through
+    // the same entry point the FileWatcher uses (queued FileWatcher::fileChanged
+    // -> LogData::fileChangedOnDisk). Invoking the slot directly keeps the test
+    // deterministic -- watcher timing (1s polling on Windows/macOS, efsw on
+    // Linux) is too slow on loaded CI runners; what this test pins is that the
+    // follow completion refreshes the OVERVIEW, not only the view.
+    {
+        QFile f( a );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
+        QByteArray payload;
+        for ( int i = 0; i < 100; ++i ) {
+            payload.append( "appended line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+        f.flush();
+    }
+
+    auto* mainData = const_cast<AbstractLogData*>(
+        AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) );
+    REQUIRE( mainData != nullptr );
+    QMetaObject::invokeMethod( mainData, "fileChangedOnDisk", Qt::QueuedConnection,
+                               Q_ARG( QString, widget.currentMainFilePath() ) );
+
+    // Wait for the re-index + view refresh to land (follow tracking the new
+    // tail proves the re-index's loadingFinished fired through
+    // bindMainViewDataSignals), then settle so every queued side effect of
+    // that completion has run before reading the overview.
+    REQUIRE( waitFor( [ & ]() { return widget.mainView()->getTopLine() > topBefore; },
+                      15000 ) );
+    QTest::qWait( 200 );
+
+    // The overview total must track the grown file (300 lines), like
+    // single-file. RED: linesInFile_ stays at the open-time 200 -- nothing in
+    // the folder follow data-flow calls Overview::updateData on growth.
+    REQUIRE( overviewLinesInFile( widget ) == uint64_t{ 300 } );
 }

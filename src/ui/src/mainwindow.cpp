@@ -2324,9 +2324,16 @@ void MainWindow::currentTabChanged( int index )
                 // Follow-state uplink (single-file parity with the mux-routed
                 // CrawlerWidget::followModeChanged): the folder main view's
                 // follow changes (elastic-hook disengage on scroll-up, ...) keep
-                // the Follow action's checked state in sync.
+                // the Follow action's checked state in sync. Routed through the
+                // currency-guarded onFolderFollowModeChanged (same precedent as
+                // onFolderSearchablesChanged): the folder widget stays alive in
+                // the tab widget while hidden, and an async main-view open
+                // completing in the background emits followModeChanged via
+                // selectInMainView -> disableFollow -- an unguarded connection
+                // would uncheck the shared followAction, whose toggled dispatch
+                // then kills the CURRENT tab's follow mode.
                 connect( folder_widget, &FolderCrawlerWidget::followModeChanged, this,
-                         &MainWindow::changeFollowMode, Qt::UniqueConnection );
+                         &MainWindow::onFolderFollowModeChanged, Qt::UniqueConnection );
             }
 
             // Routes to the folder via the connection above.
@@ -3234,6 +3241,21 @@ void MainWindow::onFolderSearchablesChanged()
     }
     // Rebuild the mux's searchable registry from the folder's live panes.
     quickFindMux_.registerSelector( folderWidget );
+}
+
+void MainWindow::onFolderFollowModeChanged( bool follow )
+{
+    auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( sender() );
+    // Only the CURRENT tab owns the shared followAction: a background
+    // folder's follow transition (async open completing -> selectInMainView
+    // -> disableFollow) must not uncheck the action, whose toggled dispatch
+    // would otherwise kill the current document's follow mode. Same guard
+    // shape as onFolderSearchablesChanged.
+    if ( folderWidget == nullptr
+         || dynamic_cast<AbstractCrawlerWidget*>( folderWidget ) != currentDocument() ) {
+        return;
+    }
+    changeFollowMode( follow );
 }
 
 // Update the top info line from the session

@@ -37,6 +37,7 @@
 #include <QSplitter>
 #include <QToolButton>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "qtcompat/qtcompat.h"
@@ -489,6 +490,20 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
 
 FolderCrawlerWidget::~FolderCrawlerWidget()
 {
+    // Interrupt the folder search engine BEFORE member destruction begins.
+    // engine_ is QObject-owned, so ~FolderSearchEngine (which joins the worker
+    // thread) only runs later, inside ~QObject -- AFTER our members have been
+    // destroyed. Joining alone would let an in-flight scan run to completion
+    // against half-destroyed state: the worker streams fileGroupReady/
+    // searchProgressed signals whose slots read panes_ and the results models.
+    // interrupt() makes the scan wind down between files instead, so the
+    // eventual join returns promptly with the widget's state still intact.
+    // Same discipline as the QuickFind join below: stop the background work
+    // before the members it reads are released.
+    if ( engine_ != nullptr ) {
+        engine_->interrupt();
+    }
+
     // Join every view's in-flight QuickFind worker BEFORE the data-source members
     // are released. A FolderFilteredView's QuickFind worker is a QThreadPool task
     // that holds a `const AbstractLogData&` into the pane's FolderSearchResults
@@ -1287,7 +1302,23 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
     // CrawlerWidget::fileChangedHandler clearing all marks on Truncated).
     mainDataLoadingFinishedConn_
         = connect( currentMainData_.get(), &SearchableLogData::loadingFinished, this,
-                   [ this ]( LoadingStatus ) { mainView_->updateData(); } );
+                   [ this ]( LoadingStatus ) {
+                       mainView_->updateData();
+                       // Single-file parity (CrawlerWidget::loadingFinishedHandler,
+                       // crawlerwidget.cpp:934 refreshes overview_ on every
+                       // loadingFinished): when the followed file grows, the
+                       // Overview's linesInFile_ must track the new total or
+                       // every mapping that divides by it (viewport box,
+                       // click-to-jump, match/mark tick positions) compresses
+                       // into the pre-growth range. Visibility-guarded like
+                       // refreshFileOverview; the finished-only cadence matches
+                       // single-file, and append-only growth does not change
+                       // match/mark ticks, so the heavier refreshFileOverview
+                       // (re-collecting matches + marks) is unnecessary here.
+                       if ( overview_.isVisible() ) {
+                           overview_.updateData( currentMainData_->getNbLine() );
+                       }
+                   } );
     mainDataLoadingProgressedConn_
         = connect( currentMainData_.get(), &SearchableLogData::loadingProgressed, this,
                    [ this ]( int ) { mainView_->updateData(); } );
@@ -1858,12 +1889,6 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         return;
     }
 
-    // A different file is about to be shown: the encoding override belongs to
-    // the previously displayed file, so it resets to auto-detect (the new
-    // file's detected codec). Mirrors single-file, where the override lives
-    // and dies with the one document in the tab.
-    encodingMibOverride_.reset();
-
     // Cached (recently opened) -> swap instantly. Promote to most-recently-used
     // so the LRU eviction policy keeps it resident.
     const auto it = mainViewCache_.find( filePath );
@@ -1879,6 +1904,16 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                                     it.value().second );
         currentMainData_ = it.value().first;
         currentMainFilePath_ = filePath;
+        // The encoding override belongs to the DISPLAYED file and dies at the
+        // swap point: now that the cached file has replaced it, reset to
+        // auto-detect (the swapped-in file keeps the codec it was cached
+        // with). Mirrors single-file, where the override lives and dies with
+        // the one document in the tab. This must NOT happen any earlier (e.g.
+        // at open-request time): an async open leaves the previously opened
+        // file on screen for the whole load window, and canceling that open
+        // (re-clicking the displayed file's row) must find its override still
+        // pinned -- an early reset would silently drop it to auto-detect.
+        encodingMibOverride_.reset();
         lastMainViewLine_ = localLine;
         mainView_->setDataSource( currentMainData_.get() );
         // Re-point the follow/refresh data-flow at the swapped-in file (the
@@ -1922,7 +1957,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     // half-indexed state.
     pendingMainDataConn_
         = connect( pendingMainData_.get(), &SearchableLogData::loadingFinished, this,
-                   [ this ]( LoadingStatus ) {
+                   [ this ]( LoadingStatus status ) {
                        if ( pendingMainData_ == nullptr ) {
                            return;
                        }
@@ -1934,6 +1969,34 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                        // are the long-lived ones bindMainViewDataSignals
                        // installs below.
                        disconnect( pendingMainDataConn_ );
+                       if ( status != LoadingStatus::Successful ) {
+                           // Defensive (no test: there is no deterministic way
+                           // to force an indexer exception). Unreadable or
+                           // deleted files still report Successful with 0 lines
+                           // -- the indexer treats them as empty
+                           // (logdataworker.cpp:616-637) -- so this guard only
+                           // covers the indexer-exception Interrupted path. Do
+                           // NOT promote the failed load: keep the previous
+                           // file displayed (a failed FIRST open leaves the
+                           // placeholder, a supported state), drop the pending
+                           // state, and skip caching/jumping/emitting.
+                           LOG_WARNING << "FolderCrawlerWidget: open of "
+                                       << pendingMainFilePath_ << " finished with status "
+                                       << static_cast<int>( status ) << "; keeping the "
+                                          "previously displayed file";
+                           // Defer the LogData destruction past the current
+                           // emission: this lambda runs inside
+                           // LogData::indexingFinished's Q_EMIT, and resetting
+                           // the last shared_ptr ref here would free the object
+                           // whose indexingFinished epilogue
+                           // (finishOperationAndStartNext, logdata.cpp:286) is
+                           // still on the stack.
+                           auto abandonedData = std::move( pendingMainData_ );
+                           pendingMainFilePath_.clear();
+                           QTimer::singleShot( 0, this,
+                                               [ abandonedData ]() mutable { abandonedData.reset(); } );
+                           return;
+                       }
                        currentMainData_ = pendingMainData_;
                        currentMainFilePath_ = pendingMainFilePath_;
                        lastMainViewLine_ = pendingJumpLine_;

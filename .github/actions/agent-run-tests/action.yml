@@ -4,6 +4,16 @@ runs:
   using: "composite"
   steps:
 
+    - name: Configure Windows symbol path for crash stacks
+      if: runner.os == 'Windows'
+      shell: sh
+      run: |
+        # backward-cpp (StackWalker/dbghelp) builds its symbol search path from
+        # _NT_SYMBOL_PATH. Point it at the Microsoft public symbol server with
+        # a local downstream store so crash stacks printed on test failure can
+        # resolve OS/CRT frames instead of bare addresses.
+        echo "_NT_SYMBOL_PATH=SRV*C:\symbols*https://msdl.microsoft.com/download/symbols" >> "$GITHUB_ENV"
+
     - name: test
       shell: sh
       run: |

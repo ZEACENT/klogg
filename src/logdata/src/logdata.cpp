@@ -39,6 +39,7 @@
 // This file implements LogData, the content of a log file.
 
 #include <algorithm>
+#include <exception>
 #include <limits>
 #include <numeric>
 #include <qregularexpression.h>
@@ -112,6 +113,32 @@ LogData::~LogData()
     // A queued file-changed or worker callback may already be posted for this
     // object. Purge them before this instance is destroyed.
     QCoreApplication::removePostedEvents( this );
+
+    // Deregister from the FileWatcher singleton. The watcher outlives every
+    // LogData (it is never destroyed), so without this the watch list would
+    // keep every file ever opened for the lifetime of the process; in the
+    // serial integration-test binary that means dead temp paths piling up and
+    // the polling timer emitting cross-test file-changed traffic.
+    //
+    // The removal is keyed on actual registration (fileWatcherRegistered_ is
+    // only set after a successful indexing) because EfswFileWatcher::removeFile
+    // logs a warning for unknown paths. removeFile() itself is safe here: it
+    // only posts a task to the watcher's SerialExecutor, which is alive for
+    // the whole process and serializes this behind the matching addFile.
+    //
+    // Known limitation (pre-existing): if two LogData instances watch the same
+    // file, addFile dedups to a single watch entry, so the first destructor
+    // removes the watch for both. Opening the same file in two tabs therefore
+    // loses change notifications on the surviving tab. That trade-off predates
+    // this guard and is preferable to leaking an entry per closed tab.
+    if ( fileWatcherRegistered_ ) {
+        fileWatcherRegistered_ = false;
+        try {
+            FileWatcher::getFileWatcher().removeFile( indexingFileName_ );
+        } catch ( const std::exception& error ) {
+            LOG_ERROR << "Failed to deregister file from watcher: " << error.what();
+        }
+    }
 }
 
 void LogData::setPrefilter( const QString& prefilterPattern )
@@ -240,6 +267,9 @@ void LogData::indexingFinished( LoadingStatus status )
 
     if ( status == LoadingStatus::Successful ) {
         FileWatcher::getFileWatcher().addFile( indexingFileName_ );
+        // Paired with the guarded removeFile in ~LogData; the flag, not the
+        // FileHolder state, is the source of truth for watcher registration.
+        fileWatcherRegistered_ = true;
 
         // Update the modified date/time if the file exists
         lastModifiedDate_ = QDateTime();

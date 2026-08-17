@@ -260,6 +260,10 @@ class MainWindow : public QMainWindow {
     // Re-registers the folder tab's QuickFind selector with the mux when the
     // folder's searchable set changes (pane create/switch/close).
     void onFolderSearchablesChanged();
+    // Currency-guarded uplink for a folder tab's followModeChanged: only the
+    // CURRENT tab may drive the shared followAction (a hidden folder still
+    // emits when its async main-view open completes in the background).
+    void onFolderFollowModeChanged( bool follow );
     // Disable every file-specific menu action (used for folder / no-tab states).
     void disableFileSpecificActions();
     void showInfoLabels( bool show );
