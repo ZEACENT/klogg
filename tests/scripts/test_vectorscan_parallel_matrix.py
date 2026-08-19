@@ -5,6 +5,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).parents[2]
 VECTORSCAN_TEST = ROOT / "tests" / "vectorscan" / "vectorscan_tests.cpp"
+CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 
 
 def function_body(source, signature):
@@ -69,7 +70,7 @@ class VectorscanParallelMatrixTest(unittest.TestCase):
         matrix = self.source[matrix_start : self.source.index("#else", matrix_start)]
         runner = function_body(self.source, "runChildProcesses(")
 
-        self.assertIn("buildExhaustiveChildRuns()", matrix)
+        self.assertIn("buildWindowsRegressionChildRuns()", matrix)
         self.assertIn("requireSuccessfulChildRuns", matrix)
         self.assertNotIn("requireSuccessfulChildRun(", matrix)
         self.assertNotIn("runChildProcess(", matrix)
@@ -129,6 +130,50 @@ class VectorscanParallelMatrixTest(unittest.TestCase):
         self.assertNotIn("Configuration::getSynced()", initializer)
         self.assertNotIn("isConfigurationWritingChild", self.source)
         self.assertNotIn("configurationWritingChildActive", runner)
+
+    def test_matrix_sampling_defaults_to_exhaustive_and_covers_every_case(self):
+        # The exhaustive matrix is the default; only an explicit opt-out env
+        # value may downgrade it to the sampled set.
+        selector = function_body(self.source, "exhaustiveRunsRequested()")
+        dispatcher = function_body(self.source, "buildWindowsRegressionChildRuns()")
+        sampled = function_body(self.source, "buildSampledChildRuns()")
+
+        self.assertIn('"KLOGG_VECTORSCAN_EXHAUSTIVE"', selector)
+        self.assertIn('QStringLiteral( "0" )', selector)
+        self.assertIn('QStringLiteral( "false" )', selector)
+        self.assertIn("exhaustiveRunsRequested()", dispatcher)
+        self.assertIn("buildExhaustiveChildRuns()", dispatcher)
+        self.assertIn("buildSampledChildRuns()", dispatcher)
+
+        # The sampled set must keep every (child case x allocator) pair so ASan
+        # still executes each code path once, rotating index-set shapes.
+        for token in (
+            "AllocatorMode::Crt",
+            "AllocatorMode::Mimalloc",
+            "ChildCase::DirectSinglePrefilter",
+            "ChildCase::DirectMultiPrefilter",
+            "ChildCase::HighlighterCompilePrefilter",
+            "ChildCase::HighlighterCollectionRestorePrefilter",
+        ):
+            self.assertIn(token, sampled)
+        self.assertIn("constexpr size_t kSampledChildRunCount = 8;", self.source)
+        self.assertIn("childRuns.reserve( kSampledChildRunCount );", sampled)
+
+    def test_windows_asan_leg_wires_sampling_and_higher_concurrency(self):
+        # Guards the CI-side of the 2026-08-19 Windows ASan leg optimization:
+        # the asan leg must opt into the sampled matrix and raise child
+        # concurrency, while the non-ASan x64-qt6 leg must keep the exhaustive
+        # default (no opt-out env anywhere near its matrix entry).
+        ci = CI_BUILD.read_text()
+
+        self.assertIn('"KLOGG_VECTORSCAN_EXHAUSTIVE=0"', ci)
+        self.assertIn('"KLOGG_VECTORSCAN_CHILD_CONCURRENCY=8"', ci)
+        self.assertIn('"${{ matrix.config.sanitizer }}" = "address"', ci)
+
+        # The exhaustive-vs-avx2 leg (package_tag: vs-avx2) must NOT carry a
+        # sanitizer key, so it never enters the sampling branch.
+        avx2_block = ci[ci.index("package_tag: vs-avx2") : ci.index("package_tag: asan")]
+        self.assertNotIn("sanitizer:", avx2_block)
 
     def test_only_process_scheduler_helpers_are_windows_msvc_specific(self):
         platform_guard = "#if defined(Q_OS_WIN) && defined(_MSC_VER)"

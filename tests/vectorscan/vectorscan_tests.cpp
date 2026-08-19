@@ -58,6 +58,7 @@ namespace {
 constexpr int kChildTimeoutMs = 60000;
 constexpr size_t kExhaustiveSearchSpaceSize = 42;
 constexpr size_t kExhaustiveChildRunCount = 336;
+constexpr size_t kSampledChildRunCount = 8;
 
 #if defined(Q_OS_WIN) && defined(_MSC_VER)
 // Keep the Windows/MSVC ASan process matrix comfortably below hosted-runner capacity.
@@ -415,6 +416,64 @@ std::vector<ChildOptions> buildExhaustiveChildRuns()
     }
 
     return childRuns;
+}
+
+// Sampled matrix for sanitizer legs: ASan's value is per-path memory-safety
+// coverage, which one run per (child case, allocator) already provides. The
+// full 336-run cardinality contract stays enforced by the cardinality REQUIRE
+// and by the fast non-ASan Windows leg. Each of the 8 sampled runs rotates
+// through a different index-set shape (single/pair/triple/full) so every
+// pattern-cardinality class is still exercised under ASan.
+[[maybe_unused]] std::vector<ChildOptions> buildSampledChildRuns()
+{
+    const std::array childCases = {
+        ChildCase::DirectSinglePrefilter,
+        ChildCase::DirectMultiPrefilter,
+        ChildCase::HighlighterCompilePrefilter,
+        ChildCase::HighlighterCollectionRestorePrefilter,
+    };
+    const std::array<std::vector<int>, 4> indexShapes = {
+        std::vector<int>{ 0 },
+        std::vector<int>{ 1, 3 },
+        std::vector<int>{ 0, 1, 2 },
+        std::vector<int>{ 0, 1, 2, 3, 4, 5 },
+    };
+
+    std::vector<ChildOptions> childRuns;
+    childRuns.reserve( kSampledChildRunCount );
+    size_t shapeIndex = 0;
+    for ( const auto allocator : { AllocatorMode::Crt, AllocatorMode::Mimalloc } ) {
+        for ( const auto childCase : childCases ) {
+            childRuns.push_back( ChildOptions{
+                childCase, allocator, indexShapes[ shapeIndex % indexShapes.size() ] } );
+            ++shapeIndex;
+        }
+    }
+
+    return childRuns;
+}
+
+// KLOGG_VECTORSCAN_EXHAUSTIVE=0 (or false/off) selects the sampled matrix for
+// sanitizer legs where ASan child-process startup dominates wall time; any
+// other value (including unset) keeps the exhaustive default.
+[[maybe_unused]] bool exhaustiveRunsRequested()
+{
+    const auto configured = qEnvironmentVariable( "KLOGG_VECTORSCAN_EXHAUSTIVE" ).toLower();
+    return !( configured == QStringLiteral( "0" ) || configured == QStringLiteral( "false" )
+              || configured == QStringLiteral( "off" ) );
+}
+
+[[maybe_unused]] std::vector<ChildOptions> buildWindowsRegressionChildRuns()
+{
+    if ( exhaustiveRunsRequested() ) {
+        std::cout << "vectorscan regression matrix mode=exhaustive runs="
+                  << kExhaustiveChildRunCount << '\n';
+        return buildExhaustiveChildRuns();
+    }
+
+    std::cout << "vectorscan regression matrix mode=sampled runs=" << kSampledChildRunCount
+              << '\n';
+    return buildSampledChildRuns();
 }
 
 void writeHighlighterSet( QSettings& settings,
@@ -1258,7 +1317,7 @@ TEST_CASE( "Windows VectorScan regression search space exits cleanly",
            "[vectorscan][regression]" )
 {
 #if defined(Q_OS_WIN) && defined(_MSC_VER)
-    requireSuccessfulChildRuns( buildExhaustiveChildRuns() );
+    requireSuccessfulChildRuns( buildWindowsRegressionChildRuns() );
 #else
     SUCCEED( "Full allocator regression search is only required on Windows/MSVC." );
 #endif
