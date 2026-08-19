@@ -307,6 +307,24 @@ cpmaddpackage(
   EXCLUDE_FROM_ALL
   YES
 )
+
+# GCC 15 (Ubuntu 26.04) removed the transitive <cstdint> include that
+# robin_hood.h relied on for uint64_t/uint32_t; without it the resolute build
+# fails with "'uint32_t' does not name a type" (e.g. booleanevaluator.cpp).
+if(robin_hood_ADDED)
+  execute_process(
+    COMMAND
+      ${CMAKE_COMMAND}
+      -DREPO_DIR=${robin_hood_SOURCE_DIR}
+      -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_robin_hood_cstdint.patch
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+    RESULT_VARIABLE _robin_hood_patch_result
+  )
+  if(NOT _robin_hood_patch_result EQUAL 0)
+    message(FATAL_ERROR "Failed to apply robin_hood cstdint patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_robin_hood_cstdint.patch")
+  endif()
+endif()
+
 if(NOT TARGET robin_hood)
   message("Adding imported target for robin_hood")
   add_library(robin_hood INTERFACE)
@@ -602,6 +620,24 @@ if(KLOGG_USE_SENTRY)
     EXCLUDE_FROM_ALL
     YES
   )
+
+  # GCC 15 (Ubuntu 26.04) removed a transitive <cstdint> include that
+  # crashpad's util/file/filesystem.h relied on for uint64_t; without it the
+  # resolute build fails with "'uint64_t' does not name a type". crashpad is a
+  # submodule of sentry-native, so the patch targets the submodule root.
+  if(sentry_ADDED)
+    execute_process(
+      COMMAND
+        ${CMAKE_COMMAND}
+        -DREPO_DIR=${sentry_SOURCE_DIR}/external/crashpad
+        -DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_sentry_crashpad_cstdint.patch
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/apply_git_patch.cmake
+      RESULT_VARIABLE _sentry_patch_result
+    )
+    if(NOT _sentry_patch_result EQUAL 0)
+      message(FATAL_ERROR "Failed to apply Sentry crashpad cstdint patch: ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_sentry_crashpad_cstdint.patch")
+    endif()
+  endif()
 
   if(WIN32)
     set_target_properties(crashpad_handler PROPERTIES OUTPUT_NAME "klogg_crashpad_handler.exe")

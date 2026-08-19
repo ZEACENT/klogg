@@ -222,9 +222,6 @@ endif()
 include(Sanitizers)
 enable_sanitizers(project_options)
 
-# allow for static analysis options
-include(StaticAnalyzers)
-
 ucm_print_flags()
 
 if(APPLE)
@@ -325,6 +322,12 @@ set(BUILD_SHARED_LIBS OFF)
 add_custom_target(ci_build)
 
 add_subdirectory(3rdparty)
+# Static analysis options are scoped to the project's own targets: enabled
+# AFTER third-party is added so vendored subprojects (CPM deps, Vectorscan,
+# Sentry's mini_chromium/crashpad) are not analyzed. Newer cppcheck (2.19+ on
+# Ubuntu 26.04) fails on their Chromium-style macros (BUILDFLAG(...), #error
+# guards), which otherwise fails the build as a compile step.
+include(StaticAnalyzers)
 add_subdirectory(src)
 if(${KLOGG_BUILD_BENCHMARKS})
   add_subdirectory(benchmarks)

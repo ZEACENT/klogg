@@ -436,6 +436,25 @@ jobs:
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
             package: true
 
+          - os: ubuntu_resolute
+            os_version: 26.04
+            arch: x64
+            label: ubuntu-26.04-deb
+            package_tag: vs-gen
+            check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
+            cpack_gen: DEB
+            artifacts_id: resolute
+            package_suffix: deb
+            # Ubuntu 24.10+ dropped the t64 time_t-transition suffix from the
+            # Qt6 packages (libqt6gui6t64 -> libqt6gui6), so the Noble-built
+            # deb is installable only on 24.04. Resolute carries the current
+            # (unsuffixed) names; building there yields the deb for 26.04 LTS.
+            check_container: ubuntu:26.04
+            container_root: docker/ubuntu26.04
+            container: variar/klogg_ubuntu26.04
+            cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
+            package: true
+
           - os: ubuntu_appimage
             os_version: 20.04
             arch: x64
@@ -1548,6 +1567,7 @@ jobs:
             ### Linux
             - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
             - Ubuntu 24.04 (Noble, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb)
+            - Ubuntu 26.04 (Resolute, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb)
             - AppImage (Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage)
 
             ### macOS

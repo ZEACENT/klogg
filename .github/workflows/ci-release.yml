@@ -92,6 +92,11 @@ jobs:
         else
           echo "Warning: ./packages-noble-vs-gen/klogg_noble_vs-gen.debug.xz not found, skipping"
         fi
+        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz ]; then
+          xz -d ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz
+        else
+          echo "Warning: ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz not found, skipping"
+        fi
         if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug.xz ]; then
           xz -d ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug.xz
         else
@@ -129,6 +134,11 @@ jobs:
         else
           echo "Warning: ./packages-noble-vs-gen debug files not found, skipping"
         fi
+        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ] && [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen ]; then
+          sentry-cli upload-dif ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug  ./packages-resolute-vs-gen/klogg_resolute_vs-gen
+        else
+          echo "Warning: ./packages-resolute-vs-gen debug files not found, skipping"
+        fi
         if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ] && [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen ]; then
           sentry-cli upload-dif ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug  ./packages-appimage-vs-gen/klogg_appimage_vs-gen
         else
@@ -162,6 +172,7 @@ jobs:
       run: |
         rm -rf ./packages-jammy-vs-gen/klogg_jammy_vs-gen
         rm -rf ./packages-noble-vs-gen/klogg_noble_vs-gen
+        rm -rf ./packages-resolute-vs-gen/klogg_resolute_vs-gen
         rm -rf ./packages-appimage-vs-gen/klogg_appimage_vs-gen
         if [ -d ./packages-macos-intel-qt6-vs-gen/klogg-x64.app ]; then
           rm -rf ./packages-macos-intel-qt6-vs-gen/klogg-x64.app
@@ -175,6 +186,9 @@ jobs:
         fi
         if [ -f ./packages-noble-vs-gen/klogg_noble_vs-gen.debug ]; then
           mv ./packages-noble-vs-gen/klogg_noble_vs-gen.debug ./linux-debug
+        fi
+        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ]; then
+          mv ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ./linux-debug
         fi
         if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ]; then
           mv ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ./linux-debug
@@ -202,6 +216,9 @@ jobs:
         fi
         if [ -d ./packages-noble-vs-gen ] && [ -n "$(ls -A ./packages-noble-vs-gen/* 2>/dev/null)" ]; then
           sha256sum --binary ./packages-noble-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
+        fi
+        if [ -d ./packages-resolute-vs-gen ] && [ -n "$(ls -A ./packages-resolute-vs-gen/* 2>/dev/null)" ]; then
+          sha256sum --binary ./packages-resolute-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
         fi
         if [ -d ./packages-appimage-vs-gen ] && [ -n "$(ls -A ./packages-appimage-vs-gen/* 2>/dev/null)" ]; then
           sha256sum --binary ./packages-appimage-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
@@ -231,6 +248,7 @@ jobs:
           ### Linux
           - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
           - Ubuntu 24.04 (Noble, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb)
+          - Ubuntu 26.04 (Resolute, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb)
           - AppImage (Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage)
 
           ### macOS
@@ -242,6 +260,7 @@ jobs:
           ./packages-windows-x64-qt6-vs-avx2/*
           ./packages-jammy-vs-gen/*
           ./packages-noble-vs-gen/*
+          ./packages-resolute-vs-gen/*
           ./packages-appimage-vs-gen/*
           ./packages-bin/*
           ./linux-debug/*
