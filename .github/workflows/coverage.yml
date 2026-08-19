@@ -23,6 +23,11 @@ jobs:
   coverage:
     name: "Line/branch coverage ratchet"
     runs-on: ubuntu-24.04
+    # Historical full-run ceiling is ~22 min (cold cache); 45 min leaves
+    # headroom while bounding runner-side apt/network hangs that would
+    # otherwise sit in_progress forever (2026-08-19: two jobs spent 30+ min
+    # stuck in apt-get on dead mirror connections).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +50,10 @@ jobs:
 
       - name: Install gcc-13 and gcovr
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-13 g++-13 gcovr libxkbcommon-dev libxkbcommon-x11-dev
+          # Explicit timeouts/retries: apt's default can hold a dead mirror
+          # TCP connection open for tens of minutes (seen 2026-08-19).
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y gcc-13 g++-13 gcovr libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Prepare compiler env
         run: |
