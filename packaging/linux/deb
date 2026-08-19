@@ -7,3 +7,4 @@ apt install reprepro
 gpg --import private.pgp
 reprepro --basedir /klogg/website/public/deb/jammy/ includedeb jammy klogg-22.06.0.1289-jammy-vs-gen.deb
 reprepro --basedir /klogg/website/public/deb/noble/ includedeb noble klogg-22.06.0.1289-noble-vs-gen.deb
+reprepro --basedir /klogg/website/public/deb/resolute/ includedeb resolute klogg-22.06.0.1289-resolute-vs-gen.deb
