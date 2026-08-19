@@ -20,13 +20,17 @@ DEB_NAME=$(basename "$DEB_ABS")
 test -f "$DEB_ABS" || { echo "error: deb not found: $DEB_ABS" >&2; exit 2; }
 
 echo "==> installing $DEB_NAME on $BASE (apt + offscreen klogg -v)"
-docker run --rm -v "$(dirname "$DEB_ABS")":/usr/local \
+# $DEB_NAME is passed as a positional parameter ($1) instead of being
+# interpolated into the bash -c script: a filename containing shell syntax
+# must stay literal data, never executable code. The mount is read-only —
+# the container only reads the deb (apt/klogg write to the container FS).
+docker run --rm -v "$(dirname "$DEB_ABS")":/usr/local:ro \
   "$BASE" /bin/bash -c '
     for attempt in 1 2 3; do
       apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break
       if [ "$attempt" = 3 ]; then exit 1; fi
       sleep $((attempt * 10))
     done
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "/usr/local/'"$DEB_NAME"'"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "/usr/local/$1"
     QT_QPA_PLATFORM=offscreen klogg -v
-  '
+  ' verify_ubuntu_deb "$DEB_NAME"
