@@ -1425,6 +1425,114 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
     }
 }
 
+// Field repro: on a folder tab, clicking a search result whose file lives at a
+// very long (deeply nested, non-ASCII) path left the toolbar PathLine blank.
+// Pins two observable contracts of updateInfoLine's folder branch:
+//   1. the label's text is the main-view file's full path (data layer), and
+//   2. the label stays visible in the toolbar (a QLabel without wordWrap has
+//      minimumSizeHint == sizeHint == full text width; a path wider than the
+//      toolbar can overflow the widget into the toolbar's extension popup,
+//      which renders as a blank path bar).
+SCENARIO( "Folder tab info line shows the main-view file path for a long nested path",
+          "[ui][folder]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+    FileWatchConfigGuard fileWatchConfigGuard;
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "folder-infoline-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+
+    QTest::qWait( 100 );
+    REQUIRE( mainWindow != nullptr );
+    mainWindow->resize( 1600, 900 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
+                            std::forward<decltype( func )>( func ) );
+        QTest::qWait( 100 );
+    };
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+
+    auto* toolBar = mainWindow->findChild<QToolBar*>();
+    REQUIRE( toolBar != nullptr );
+    auto* filePathLabel = toolBar->findChild<PathLine*>();
+    REQUIRE( filePathLabel != nullptr );
+
+    // Field-report shape: an ordinary folder root with the matched file buried
+    // in deep non-ASCII directories, so the full path (both byte count and
+    // rendered width) far exceeds the toolbar's available label width.
+    const auto tempDirPath = makeTestDir( "folderinfoline" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+    const auto deepDir
+        = QDir( tempDirPath )
+              .filePath( QStringLiteral(
+                  "测试机进入相册点击快捷翻胶囊测试机已显示有图片但设备空间首页显示未连接且拔插APP显示未连接"
+                  "/2026-08-15_11-38-20@interconnection/common/ap_log/2026-08-15_11-36-51" ) );
+    REQUIRE( QDir{}.mkpath( deepDir ) );
+    const auto logFilePath = QDir( deepDir ).filePath( "android_log_20260815113820.log" );
+    {
+        QFile f( logFilePath );
+        REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray payload;
+        for ( int i = 0; i < 20; ++i ) {
+            payload.append( "ERROR line " + QByteArray::number( i ) + "\n" );
+        }
+        f.write( payload );
+    }
+
+    GIVEN( "a folder tab where a result click opens the long-path file" )
+    {
+        runInUiThread( [ &mainWindow, tempDirPath ] {
+            mainWindow->openFolderByPath( tempDirPath );
+        } );
+        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        QTest::qWait( 200 );
+        auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
+        REQUIRE( folderWidget != nullptr );
+
+        runInUiThread( [ folderWidget ] {
+            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
+        } );
+        REQUIRE( waitUiState( [&] { return !folderWidget->isSearchActive(); } ) );
+        REQUIRE( folderWidget->filteredView() != nullptr );
+
+        // Row 0 is the group header, row 2 a data row: selecting it opens the
+        // file in the main view (newSelection -> onResultSelected).
+        runInUiThread( [ folderWidget ] {
+            folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
+        } );
+        REQUIRE( waitUiState(
+            [&] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        // The main-view index completes async; mainViewFileChanged (fired at
+        // its completion) is what re-runs updateInfoLine, so settle the event
+        // loop before asserting the label.
+        QTest::qWait( 200 );
+
+        THEN( "the toolbar path line shows the file path" )
+        {
+            INFO( "currentMainFilePath: " << folderWidget->currentMainFilePath().toStdString() );
+            INFO( "label text: '" << filePathLabel->text().toStdString() << "'" );
+            REQUIRE( filePathLabel->text()
+                     == QDir::toNativeSeparators( logFilePath ) );
+        }
+
+        THEN( "the toolbar path line stays visible" )
+        {
+            INFO( "label visible: " << filePathLabel->isVisible() );
+            REQUIRE( filePathLabel->isVisible() );
+        }
+    }
+}
+
 // Codex P1 (background-follow leak): the direct connection
 // FolderCrawlerWidget::followModeChanged -> MainWindow::changeFollowMode
 // (mainwindow.cpp:2328) has no currency guard. A HIDDEN folder tab can still
