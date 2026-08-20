@@ -1478,6 +1478,13 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
                   "测试机进入相册点击快捷翻胶囊测试机已显示有图片但设备空间首页显示未连接且拔插APP显示未连接"
                   "/2026-08-15_11-38-20@interconnection/common/ap_log/2026-08-15_11-36-51" ) );
     REQUIRE( QDir{}.mkpath( deepDir ) );
+    // Locale guard: under a non-UTF-8 locale (e.g. the CI TSan container's
+    // default POSIX), some Qt builds transcode file names via the locale
+    // codec and silently DROP the non-ASCII bytes -- mkpath then creates a
+    // directory literally named "APP", and every later path comparison fails
+    // through a 10s waitUiState timeout (PR #62 TSan leg). Fail here with a
+    // message that names the cause instead.
+    REQUIRE( QDir( deepDir ).exists() );
     const auto logFilePath = QDir( deepDir ).filePath( "android_log_20260815113820.log" );
     {
         QFile f( logFilePath );
