@@ -23,6 +23,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUuid>
@@ -457,6 +458,67 @@ TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )
     REQUIRE( logData.getFileSize() > 0 );
     REQUIRE( logData.getLastModifiedDate().isValid() );
     REQUIRE( logData.getNbLine().get() == 2 );
+}
+
+TEST_CASE( "StreamingLogData getFileSize reflects the bound output file when the capture window trims" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    // Line-count window only: the capture store trims old lines while the
+    // bound output file (no rolling limit) keeps every line ever written.
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 16;
+    limits.maxTotalLines = 5;
+    logData.setCaptureLimits( limits );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "live.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+
+    loadingSpy.clear();
+    for ( int i = 0; i < 20; ++i ) {
+        logData.appendUtf8( QStringLiteral( "stream-%1\n" ).arg( i ).toUtf8() );
+    }
+    REQUIRE( loadingSpy.safeWait() );
+
+    // The rolling window retains only the tail, but the tab's path points at
+    // the bound file — its size must match what a single-file open shows.
+    const auto onDiskSize = QFileInfo( outputPath ).size();
+    REQUIRE( onDiskSize > 0 );
+    CHECK( logData.getFileSize() == onDiskSize );
+}
+
+TEST_CASE( "StreamingLogData getFileSize reflects a restored bound file when the capture is empty",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+    QFile previous( outputPath );
+    REQUIRE( previous.open( QIODevice::WriteOnly ) );
+    REQUIRE( previous.write( QByteArrayLiteral( "old-1\nold-2\nold-3\n" ) ) > 0 );
+    previous.close();
+
+    const auto onDiskSize = QFileInfo( outputPath ).size();
+    REQUIRE( onDiskSize > 0 );
+
+    // Restart with a wiped capture (fresh captureId): the capture store is
+    // empty, but the restored binding points at the previously saved file.
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine().get() == 0 );
+
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip,
+                                      OutputBindMode::Restore ) );
+
+    // Capture stats report 0 bytes; the tab must show the file's real size.
+    CHECK( logData.getFileSize() == onDiskSize );
 }
 
 TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
