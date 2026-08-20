@@ -301,6 +301,16 @@ qint64 StreamingLogData::getFileSize() const
 
 QDateTime StreamingLogData::getLastModifiedDate() const
 {
+    // Symmetric with getFileSize(): the bound output file's on-disk mtime is
+    // what a single-file open of the same path reports, so both tabs show the
+    // same "modified on" timestamp.
+    const auto boundPath = boundOutputFile();
+    if ( !boundPath.isEmpty() ) {
+        QFileInfo boundInfo( boundPath );
+        if ( boundInfo.exists() ) {
+            return boundInfo.lastModified();
+        }
+    }
     return captureStore_.stats().lastModified;
 }
 

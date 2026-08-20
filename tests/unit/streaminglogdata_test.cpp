@@ -21,9 +21,12 @@
 
 #include <QDir>
 #include <QCoreApplication>
+#include <QDate>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QTime>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUuid>
@@ -519,6 +522,44 @@ TEST_CASE( "StreamingLogData getFileSize reflects a restored bound file when the
 
     // Capture stats report 0 bytes; the tab must show the file's real size.
     CHECK( logData.getFileSize() == onDiskSize );
+}
+
+TEST_CASE( "StreamingLogData getLastModifiedDate reflects a restored bound file when the capture is empty",
+           "[live-save-restore]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    // Pin the file's mtime far in the past so the on-disk timestamp is
+    // unmistakably different from any capture-store timestamp.
+    const QDateTime pinnedTime( QDate( 2020, 1, 1 ), QTime( 12, 0, 0 ) );
+
+    const auto outputPath = QDir( tempDir.path() ).filePath( QStringLiteral( "saved.log" ) );
+    {
+        QFile previous( outputPath );
+        REQUIRE( previous.open( QIODevice::WriteOnly ) );
+        REQUIRE( previous.write( QByteArrayLiteral( "old-1\nold-2\n" ) ) > 0 );
+        REQUIRE( previous.flush() );
+        // Flush before pinning: a buffered write committed at close() would
+        // bump the mtime past the pinned value.
+        REQUIRE( previous.setFileTime( pinnedTime, QFileDevice::FileModificationTime ) );
+        previous.close();
+    }
+    REQUIRE( QFileInfo( outputPath ).lastModified() == pinnedTime );
+
+    // Restart with a wiped capture (fresh captureId): the capture store is
+    // empty, but the restored binding points at the previously saved file.
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+    REQUIRE( logData.getNbLine().get() == 0 );
+
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip,
+                                      OutputBindMode::Restore ) );
+
+    // The tab's "modified on" must come from the bound file, matching what a
+    // single-file open of the same path shows.
+    CHECK( logData.getLastModifiedDate() == pinnedTime );
 }
 
 TEST_CASE( "Streaming live search coalesces rapid updateSearch requests" )
