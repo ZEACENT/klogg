@@ -48,7 +48,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 
     // Restart the flush timer if new data arrives while an output file is bound
     // but the timer is stopped (e.g. after finishInput from a reconnect cycle).
-    if ( !outputFlushTimer_.isActive() && !boundOutputFile_.isEmpty() ) {
+    if ( !outputFlushTimer_.isActive() && !boundOutputFile().isEmpty() ) {
         startOutputFlushTimer();
     }
 
@@ -171,14 +171,15 @@ void StreamingLogData::clearCapture()
         cachedRawBatches_.clear();
         cachedRawBytes_ = 0;
     }
-    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundOutputFile_.isEmpty() ) {
-        openDisplayOutputFile( boundOutputFile_ );
+    const auto boundPath = boundOutputFile();
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundPath.isEmpty() ) {
+        openDisplayOutputFile( boundPath );
     }
 
     // clear() internally rebinds the output file if one was bound.
     // Only restart the timer if it was running before the clear,
     // so a clearCapture after finishInput does not revive the timer.
-    if ( timerWasActive && !boundOutputFile_.isEmpty() ) {
+    if ( timerWasActive && !boundOutputFile().isEmpty() ) {
         startOutputFlushTimer();
     }
 
@@ -230,7 +231,10 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
         closeDisplayOutputFile();
         result = captureStore_.bindOutputFile( outputPath, preserveExisting );
-        boundOutputFile_ = result ? outputPath : QString{};
+        {
+            const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+            boundOutputFile_ = result ? outputPath : QString{};
+        }
     }
     else {
         captureStore_.bindOutputFile( QString{} );
@@ -245,6 +249,7 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
 
 QString StreamingLogData::boundOutputFile() const
 {
+    const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
     return boundOutputFile_;
 }
 
@@ -276,11 +281,36 @@ std::unique_ptr<LogFilteredData> StreamingLogData::getNewFilteredData() const
 
 qint64 StreamingLogData::getFileSize() const
 {
+    // A bound output file is what the tab's path points at and what a
+    // single-file open of the same path would index: report its true on-disk
+    // size so both views agree. The capture store's byte counter is a
+    // rolling-window watermark — trimming subtracts from it while the bound
+    // file keeps every byte, and a Restore binding carries pre-restart
+    // content the (volatile) capture never saw.
+    const auto boundPath = boundOutputFile();
+    if ( !boundPath.isEmpty() ) {
+        QFileInfo boundInfo( boundPath );
+        if ( boundInfo.exists() ) {
+            return boundInfo.size();
+        }
+    }
+    // No file bound (pure in-memory capture) or the bound file is gone:
+    // the retained capture bytes are the only meaningful size.
     return captureStore_.stats().fileSize;
 }
 
 QDateTime StreamingLogData::getLastModifiedDate() const
 {
+    // Symmetric with getFileSize(): the bound output file's on-disk mtime is
+    // what a single-file open of the same path reports, so both tabs show the
+    // same "modified on" timestamp.
+    const auto boundPath = boundOutputFile();
+    if ( !boundPath.isEmpty() ) {
+        QFileInfo boundInfo( boundPath );
+        if ( boundInfo.exists() ) {
+            return boundInfo.lastModified();
+        }
+    }
     return captureStore_.stats().lastModified;
 }
 
@@ -467,20 +497,24 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool pr
 {
     const auto outputPathCopy = outputPath;
     closeDisplayOutputFile();
-    boundOutputFile_ = outputPathCopy;
+    {
+        const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+        boundOutputFile_ = outputPathCopy;
+    }
 
-    if ( boundOutputFile_.isEmpty() ) {
+    if ( outputPathCopy.isEmpty() ) {
         return true;
     }
 
-    QDir().mkpath( QFileInfo( boundOutputFile_ ).absolutePath() );
+    QDir().mkpath( QFileInfo( outputPathCopy ).absolutePath() );
 
     // Use CaptureStore's rolling settings for the display file
-    rollingDisplayOutput_ = RollingFileManager( boundOutputFile_, rollingMaxFileSize_,
+    rollingDisplayOutput_ = RollingFileManager( outputPathCopy, rollingMaxFileSize_,
                                                  rollingBackupCount_ );
     // FreshSave truncates and dumps the current capture; Restore opens
     // append-only so existing on-disk content is preserved.
     if ( !rollingDisplayOutput_.open( /*truncate=*/!preserveExisting ) ) {
+        const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
         boundOutputFile_.clear();
         return false;
     }
@@ -503,6 +537,7 @@ void StreamingLogData::closeDisplayOutputFile()
 {
     rollingDisplayOutput_.close();
     rollingDisplayOutput_ = RollingFileManager();
+    const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
     boundOutputFile_.clear();
 }
 

@@ -1190,6 +1190,18 @@ jobs:
           # to the affected test process instead of weakening the whole leg.
           echo "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1" >> $GITHUB_ENV
 
+          if [ "${{ matrix.config.sanitizer }}" = "address" ]; then
+            # The vectorscan regression matrix spawns one ASan-instrumented
+            # child process per run; per-child ASan runtime + Qt startup
+            # (~7s) dominated this leg (610s of a 30-minute job). Sample the
+            # matrix for memory-safety coverage — the full 336-run exhaustive
+            # cardinality stays enforced on the non-ASan vs-avx2 leg (~16s
+            # there) — and oversubscribe the 4-vCPU runner: child runs are
+            # process-spawn/I-O-bound, not pure CPU.
+            echo "KLOGG_VECTORSCAN_EXHAUSTIVE=0" >> $GITHUB_ENV
+            echo "KLOGG_VECTORSCAN_CHILD_CONCURRENCY=8" >> $GITHUB_ENV
+          fi
+
       - uses: ./.github/actions/agent-build
 
       - name: Verify vectorscan config in CMake cache (x64)

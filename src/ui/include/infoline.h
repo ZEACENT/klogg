@@ -60,6 +60,7 @@ class InfoLine : public QLabel {
   protected:
     void paintEvent( QPaintEvent* paintEvent ) override;
     void contextMenuEvent( QContextMenuEvent* event ) override;
+    QSize minimumSizeHint() const override;
 
   private:
     // The original palette of the QLabel

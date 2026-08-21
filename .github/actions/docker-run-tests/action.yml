@@ -6,5 +6,10 @@ runs:
     - name: test
       shell: sh
       run: |
-        docker run --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env ASAN_OPTIONS --env UBSAN_OPTIONS --env TSAN_OPTIONS --env LSAN_OPTIONS -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/$KLOGG_BUILD_ROOT && ctest --verbose"
+        # LANG=C.UTF-8: match the de-facto Linux desktop environment. Under the
+        # containers' default POSIX locale, vanilla-built Qt5 (the qt5-tsan
+        # runtime) transcodes file names via the locale codec and silently
+        # drops non-ASCII bytes, mangling non-ASCII path fixtures (PR #62 TSan
+        # leg: a CJK directory was created on disk as "APP").
+        docker run --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env LANG=C.UTF-8 --env ASAN_OPTIONS --env UBSAN_OPTIONS --env TSAN_OPTIONS --env LSAN_OPTIONS -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/$KLOGG_BUILD_ROOT && ctest --verbose"
 

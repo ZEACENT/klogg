@@ -55,6 +55,23 @@ InfoLine::InfoLine()
     setTextInteractionFlags( Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard );
 }
 
+// A QLabel without wordWrap reports minimumSizeHint == sizeHint -- the full
+// text width. Hosted in a QToolBar (the main window's path line), any text
+// wider than the toolbar's free space then overflows the whole label into the
+// toolbar's extension popup: the label is HIDDEN and the path bar renders
+// blank (field repro: long non-ASCII paths from folder-search result clicks).
+// Only the height is load-bearing for the toolbar row; the width may shrink
+// freely so QToolBarLayout always keeps the label on-screen, clipping the
+// text instead of hiding it. Same physics applies to the CrawlerWidget search
+// info line hosted in an QHBoxLayout: a full-width minimum there forces the
+// search line's minimum width to the text width.
+QSize InfoLine::minimumSizeHint() const
+{
+    QSize hint = QLabel::minimumSizeHint();
+    hint.setWidth( 0 );
+    return hint;
+}
+
 void InfoLine::displayGauge( int completion )
 {
     if ( !origPalette_ ) {

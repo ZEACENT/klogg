@@ -118,6 +118,10 @@ class StreamingLogData : public SearchableLogData {
     QTimer loadingFinishedTimer_;
     QTimer outputFlushTimer_;
     QString boundOutputFile_;
+    // getFileSize() reads the bound path from search worker threads while the
+    // main thread rebinds it; guard the QString (implicitly shared, not
+    // thread-safe against concurrent writes).
+    mutable std::mutex boundOutputFileMutex_;
     RollingFileManager rollingDisplayOutput_;
     qint64 rollingMaxFileSize_ = 0;
     int rollingBackupCount_ = 0;
