@@ -220,7 +220,7 @@ void scheduleOverwriteFavoriteAcceptance( QObject* context, const QString& targe
                                           int targetOccurrence = 0 )
 {
     QTimer::singleShot( 0, Qt::PreciseTimer, context,
-                        [ context, targetName, &result, beforeAccept, targetOccurrence ] {
+                        [ targetName, &result, beforeAccept, targetOccurrence ] {
                             auto* const dialog
                                 = qobject_cast<QDialog*>( QApplication::activeModalWidget() );
                             if ( dialog == nullptr
@@ -270,19 +270,6 @@ void scheduleOverwriteFavoriteAcceptance( QObject* context, const QString& targe
                             overwrite->setChecked( true );
                             existing->setCurrentIndex( targetIndex );
                             beforeAccept();
-
-                            QObject::connect(
-                                dialog, &QDialog::finished, context,
-                                [ context, &result ] {
-                                    QTimer::singleShot(
-                                        1, Qt::PreciseTimer, context, [ &result ] {
-                                            if ( auto* const followup = qobject_cast<QDialog*>(
-                                                     QApplication::activeModalWidget() ) ) {
-                                                result.followupDialogFound = true;
-                                                followup->accept();
-                                            }
-                                        } );
-                                } );
                             ok->click();
                         } );
 }
@@ -1041,9 +1028,13 @@ TEST_CASE( "SearchToolbar overwrite preserves the selected duplicate-name target
     [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
         [ &modal ]( klogg::ui::MessageKind kind, QWidget*, const QString&, const QString& ) {
             if ( kind == klogg::ui::MessageKind::Warning ) {
-                modal.followupDialogFound = true;
                 modal.conflictWarningFound = true;
             }
+        } };
+    [[maybe_unused]] const klogg::ui::ScopedDialogHandler dialogHandler{
+        [ &modal ]( QDialog& ) {
+            modal.followupDialogFound = true;
+            return QDialog::Accepted;
         } };
     scheduleOverwriteFavoriteAcceptance( &first, QStringLiteral( "Duplicate" ), modal, [] {}, 1 );
     first.favoriteFilterButton()->click();

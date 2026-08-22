@@ -89,7 +89,7 @@ PredefinedFiltersCollection::LoadResult PredefinedFiltersCollection::readFromSet
     }
 
     const int size = settings.beginReadArray( QLatin1String( FiltersArray ) );
-    if ( size != declaredSize || size > MaximumFilterCount ) {
+    if ( size != declaredSize ) {
         settings.endArray();
         settings.endGroup();
         return { LoadStatus::MalformedFile, {} };

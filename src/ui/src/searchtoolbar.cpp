@@ -568,7 +568,7 @@ void SearchToolbar::saveCurrentSearchAsFavorite()
 
     const auto displayedFavorite = *existing;
     FilterDiffDialog diffDialog( existing->name, displayedFavorite, currentText, useRegex, this );
-    if ( diffDialog.exec() != QDialog::Accepted ) {
+    if ( klogg::ui::execDialog( diffDialog ) != QDialog::Accepted ) {
         return;
     }
 

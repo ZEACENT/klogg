@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include <QDialog>
 #include <QMessageBox>
 
 namespace klogg::ui {
@@ -24,9 +25,20 @@ struct HandlerEntry {
     MessageHandler handler;
 };
 
+struct DialogHandlerEntry {
+    std::uint64_t token = 0;
+    DialogHandler handler;
+};
+
 std::vector<HandlerEntry>& handlerStack()
 {
     static thread_local std::vector<HandlerEntry> handlers;
+    return handlers;
+}
+
+std::vector<DialogHandlerEntry>& dialogHandlerStack()
+{
+    static thread_local std::vector<DialogHandlerEntry> handlers;
     return handlers;
 }
 
@@ -63,6 +75,13 @@ void information( QWidget* parent, const QString& title, const QString& text )
     present( MessageKind::Information, parent, title, text );
 }
 
+int execDialog( QDialog& dialog )
+{
+    auto handler = dialogHandlerStack().empty() ? DialogHandler{}
+                                                : dialogHandlerStack().back().handler;
+    return handler ? handler( dialog ) : dialog.exec();
+}
+
 ScopedMessageHandler::ScopedMessageHandler( MessageHandler handler )
     : token_( nextToken() )
 {
@@ -72,6 +91,23 @@ ScopedMessageHandler::ScopedMessageHandler( MessageHandler handler )
 ScopedMessageHandler::~ScopedMessageHandler()
 {
     auto& handlers = handlerStack();
+    const auto entry = std::find_if( handlers.begin(), handlers.end(), [ this ]( const auto& item ) {
+        return item.token == token_;
+    } );
+    if ( entry != handlers.end() ) {
+        handlers.erase( entry );
+    }
+}
+
+ScopedDialogHandler::ScopedDialogHandler( DialogHandler handler )
+    : token_( nextToken() )
+{
+    dialogHandlerStack().push_back( { token_, std::move( handler ) } );
+}
+
+ScopedDialogHandler::~ScopedDialogHandler()
+{
+    auto& handlers = dialogHandlerStack();
     const auto entry = std::find_if( handlers.begin(), handlers.end(), [ this ]( const auto& item ) {
         return item.token == token_;
     } );

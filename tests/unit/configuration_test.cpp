@@ -24,8 +24,11 @@
 #include <QUuid>
 
 #include "configuration.h"
+#include "shortcuts.h"
 
 namespace {
+constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
+
 QString makeTestDir( const QString& prefix )
 {
     const auto dirPath = QDir::cleanPath( QDir::currentPath() + QDir::separator()
@@ -34,6 +37,48 @@ QString makeTestDir( const QString& prefix )
                                           + QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     QDir{}.mkpath( dirPath );
     return dirPath;
+}
+
+QStringList legacyFindNextBindings()
+{
+    QStringList bindings;
+    for ( const auto& key : QKeySequence::keyBindings( QKeySequence::FindNext ) ) {
+        const auto portable = key.toString( QKeySequence::PortableText );
+        if ( !portable.isEmpty() && !bindings.contains( portable ) ) {
+            bindings.push_back( portable );
+        }
+    }
+
+    const auto commandG = QKeySequence( commandShortcutModifier() + QStringLiteral( "+G" ) )
+                              .toString( QKeySequence::PortableText );
+    if ( !commandG.isEmpty() && !bindings.contains( commandG ) ) {
+        bindings.push_back( commandG );
+    }
+    return bindings;
+}
+
+QStringList materializedShortcutSlots( QStringList bindings )
+{
+    bindings = bindings.mid( 0, 2 );
+    while ( bindings.size() < 2 ) {
+        bindings.push_back( QString{} );
+    }
+    return bindings;
+}
+
+void writeShortcutArray( QSettings& settings,
+                         const std::map<std::string, QStringList>& shortcuts )
+{
+    settings.beginWriteArray( QStringLiteral( "shortcuts" ) );
+    int index = 0;
+    for ( const auto& [ action, keys ] : shortcuts ) {
+        settings.setArrayIndex( index );
+        settings.setValue( QStringLiteral( "action" ), QString::fromStdString( action ) );
+        settings.setValue( QStringLiteral( "keys" ), keys );
+        ++index;
+    }
+    settings.endArray();
+    settings.sync();
 }
 } // namespace
 
@@ -331,4 +376,147 @@ TEST_CASE( "Configuration migrates stale perf.useBlockScan=false from pre-#41 in
     Configuration config2;
     config2.retrieveFromStorage( migratedSettings );
     REQUIRE_FALSE( config2.useBlockScan() );
+}
+
+TEST_CASE( "Configuration migrates persisted legacy Ctrl+G shortcut defaults" )
+{
+    const auto dirPath = makeTestDir( "configuration_shortcut_migration" );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration.ini" );
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+        writeShortcutArray(
+            settings,
+            { { ShortcutAction::LogViewJumpToLine,
+                materializedShortcutSlots(
+                    { commandShortcutModifier() + QStringLiteral( "+L" ) } ) },
+              { ShortcutAction::LogViewQfForward,
+                materializedShortcutSlots( legacyFindNextBindings() ) } } );
+    }
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+        Configuration migrated;
+        migrated.retrieveFromStorage( settings );
+
+        CHECK( migrated.shortcuts().count( ShortcutAction::LogViewJumpToLine ) == 0 );
+        CHECK( migrated.shortcuts().count( ShortcutAction::LogViewQfForward ) == 0 );
+        REQUIRE( settings.value( CtrlGDefaultsMigrationMarker, false ).toBool() );
+    }
+
+    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
+    Configuration restored;
+    restored.retrieveFromStorage( restoredSettings );
+    CHECK( restored.shortcuts().count( ShortcutAction::LogViewJumpToLine ) == 0 );
+    CHECK( restored.shortcuts().count( ShortcutAction::LogViewQfForward ) == 0 );
+}
+
+TEST_CASE( "Configuration migrates pre-platform-modifier Ctrl shortcut defaults" )
+{
+    const auto dirPath = makeTestDir( "configuration_literal_ctrl_shortcut_migration" );
+    QSettings settings( QDir{ dirPath }.filePath( "configuration.ini" ), QSettings::IniFormat );
+    writeShortcutArray(
+        settings,
+        { { ShortcutAction::LogViewJumpToLine,
+            materializedShortcutSlots( { QStringLiteral( "Ctrl+L" ) } ) },
+          { ShortcutAction::LogViewQfForward,
+            materializedShortcutSlots( { QStringLiteral( "Ctrl+G" ) } ) } } );
+
+    Configuration migrated;
+    migrated.retrieveFromStorage( settings );
+
+    CHECK( migrated.shortcuts().count( ShortcutAction::LogViewJumpToLine ) == 0 );
+    CHECK( migrated.shortcuts().count( ShortcutAction::LogViewQfForward ) == 0 );
+}
+
+TEST_CASE( "Configuration migrates legacy shortcut mapping format selectively" )
+{
+    const auto dirPath = makeTestDir( "configuration_shortcut_mapping_migration" );
+    QSettings settings( QDir{ dirPath }.filePath( "configuration.ini" ), QSettings::IniFormat );
+    QVariantMap legacyMapping;
+    legacyMapping.insert(
+        QString::fromLatin1( ShortcutAction::LogViewJumpToLine ),
+        materializedShortcutSlots( { commandShortcutModifier() + QStringLiteral( "+L" ) } ) );
+    legacyMapping.insert( QString::fromLatin1( ShortcutAction::LogViewQfForward ),
+                          materializedShortcutSlots( legacyFindNextBindings() ) );
+    const auto customAction = QString::fromLatin1( ShortcutAction::MainWindowOpenFile );
+    const auto customKeys = materializedShortcutSlots( { QStringLiteral( "Alt+O" ) } );
+    legacyMapping.insert( customAction, customKeys );
+    settings.setValue( QStringLiteral( "shortcuts.mapping" ), legacyMapping );
+    settings.sync();
+
+    Configuration migrated;
+    migrated.retrieveFromStorage( settings );
+
+    CHECK( migrated.shortcuts().count( ShortcutAction::LogViewJumpToLine ) == 0 );
+    CHECK( migrated.shortcuts().count( ShortcutAction::LogViewQfForward ) == 0 );
+    REQUIRE( migrated.shortcuts().count( ShortcutAction::MainWindowOpenFile ) == 1 );
+    CHECK( migrated.shortcuts().at( ShortcutAction::MainWindowOpenFile ) == customKeys );
+    CHECK_FALSE( settings.contains( QStringLiteral( "shortcuts.mapping" ) ) );
+    CHECK( settings.value( CtrlGDefaultsMigrationMarker, false ).toBool() );
+}
+
+TEST_CASE( "Configuration shortcut migration preserves custom bindings" )
+{
+    const auto dirPath = makeTestDir( "configuration_custom_shortcuts" );
+    QSettings settings( QDir{ dirPath }.filePath( "configuration.ini" ), QSettings::IniFormat );
+    const std::map<std::string, QStringList> custom{
+        { ShortcutAction::LogViewJumpToLine,
+          materializedShortcutSlots( { QStringLiteral( "Alt+L" ) } ) },
+        { ShortcutAction::LogViewQfForward,
+          materializedShortcutSlots( { QStringLiteral( "F6" ) } ) },
+    };
+    writeShortcutArray( settings, custom );
+
+    Configuration restored;
+    restored.retrieveFromStorage( settings );
+
+    CHECK( restored.shortcuts() == custom );
+    CHECK( settings.value( CtrlGDefaultsMigrationMarker, false ).toBool() );
+}
+
+TEST_CASE( "Configuration shortcut migration marker preserves deliberate legacy-looking bindings" )
+{
+    const auto dirPath = makeTestDir( "configuration_marked_shortcuts" );
+    QSettings settings( QDir{ dirPath }.filePath( "configuration.ini" ), QSettings::IniFormat );
+    const std::map<std::string, QStringList> deliberate{
+        { ShortcutAction::LogViewJumpToLine,
+          materializedShortcutSlots( { QStringLiteral( "Ctrl+L" ) } ) },
+        { ShortcutAction::LogViewQfForward,
+          materializedShortcutSlots( { QStringLiteral( "Ctrl+G" ) } ) },
+    };
+    writeShortcutArray( settings, deliberate );
+    settings.setValue( CtrlGDefaultsMigrationMarker, true );
+    settings.sync();
+
+    Configuration restored;
+    restored.retrieveFromStorage( settings );
+
+    CHECK( restored.shortcuts() == deliberate );
+}
+
+TEST_CASE( "Configuration save stamps Ctrl+G shortcut migration marker" )
+{
+    const auto dirPath = makeTestDir( "configuration_saved_shortcuts" );
+    const auto settingsPath = QDir{ dirPath }.filePath( "configuration.ini" );
+    const std::map<std::string, QStringList> deliberate{
+        { ShortcutAction::LogViewJumpToLine,
+          materializedShortcutSlots( { QStringLiteral( "Ctrl+L" ) } ) },
+        { ShortcutAction::LogViewQfForward,
+          materializedShortcutSlots( { QStringLiteral( "Ctrl+G" ) } ) },
+    };
+
+    {
+        QSettings settings( settingsPath, QSettings::IniFormat );
+        Configuration saved;
+        saved.setShortcuts( deliberate );
+        saved.saveToStorage( settings );
+        settings.sync();
+        REQUIRE( settings.value( CtrlGDefaultsMigrationMarker, false ).toBool() );
+    }
+
+    QSettings settings( settingsPath, QSettings::IniFormat );
+    Configuration restored;
+    restored.retrieveFromStorage( settings );
+    CHECK( restored.shortcuts() == deliberate );
 }

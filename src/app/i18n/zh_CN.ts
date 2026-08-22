@@ -699,12 +699,12 @@
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1854"/>
         <source>Filter favorites changed while the import was being applied. Try again.</source>
-        <translation>应用导入时筛选收藏已发生更改。请重试。</translation>
+        <translation>应用导入时筛选器收藏已发生更改。请重试。</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1860"/>
         <source>Unable to save filter favorites. Try again.</source>
-        <translation>无法保存筛选收藏。请重试。</translation>
+        <translation>无法保存筛选器收藏。请重试。</translation>
     </message>
 </context>
 <context>
@@ -1239,7 +1239,7 @@
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="204"/>
         <source>Unable to save filter favorites. Try again.</source>
-        <translation>无法保存筛选收藏。请重试。</translation>
+        <translation>无法保存筛选器收藏。请重试。</translation>
     </message>
 </context>
 <context>
@@ -2311,12 +2311,12 @@
     <message>
         <location filename="../../ui/src/searchtoolbar.cpp" line="530"/>
         <source>Unable to save filter favorites. Try again.</source>
-        <translation>无法保存筛选收藏。请重试。</translation>
+        <translation>无法保存筛选器收藏。请重试。</translation>
     </message>
     <message>
         <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
         <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
-        <translation>名为“%1”的收藏已存在。请选择其他名称。</translation>
+        <translation>名为“%1”的筛选器收藏已存在。请选择其他名称。</translation>
     </message>
 </context>
 </TS>

@@ -167,7 +167,7 @@ QList<QKeySequence> ShortcutAction::shortcutKeys( const std::string& action,
 
 const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
 {
-    static ShortcutList defaultShortcutKeys = {
+    static ShortcutList shortcuts = {
         {
             MainWindowNewWindow,
             {
@@ -777,5 +777,5 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
     };
-    return defaultShortcutKeys;
+    return shortcuts;
 }
