@@ -11,6 +11,7 @@ add_executable(klogg_tests
     configuration_test.cpp
     encodingdetector_test.cpp
     droppathclassification_test.cpp
+    filterfavoritesmodel_test.cpp
     recentfolders_test.cpp
     highlighter_vectorscan_test.cpp
     linehighlight_compose_test.cpp

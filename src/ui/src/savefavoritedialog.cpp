@@ -31,6 +31,7 @@ SaveFavoriteDialog::SaveFavoriteDialog(
     : QDialog( parent )
     , existingFilters_( existingFilters )
 {
+    setObjectName( QStringLiteral( "SaveFavoriteDialog" ) );
     setWindowTitle( tr( "Save Favorite" ) );
     setMinimumWidth( 400 );
 
@@ -42,15 +43,19 @@ SaveFavoriteDialog::SaveFavoriteDialog(
     // Create new section
     auto* createNewLayout = new QHBoxLayout();
     createNewRadio_ = new QRadioButton( tr( "Create new:" ), this );
+    createNewRadio_->setObjectName( QStringLiteral( "createNewFavoriteRadioButton" ) );
     createNewRadio_->setChecked( true );
     newNameEdit_ = new QLineEdit( defaultName, this );
+    newNameEdit_->setObjectName( QStringLiteral( "favoriteNameLineEdit" ) );
     createNewLayout->addWidget( createNewRadio_ );
     createNewLayout->addWidget( newNameEdit_, 1 );
 
     // Overwrite existing section
     auto* overwriteLayout = new QHBoxLayout();
     overwriteRadio_ = new QRadioButton( tr( "Overwrite existing:" ), this );
+    overwriteRadio_->setObjectName( QStringLiteral( "overwriteFavoriteRadioButton" ) );
     existingCombo_ = new QComboBox( this );
+    existingCombo_->setObjectName( QStringLiteral( "existingFavoriteComboBox" ) );
     existingCombo_->setEnabled( false );
 
     for ( const auto& filter : existingFilters_ ) {
@@ -76,6 +81,7 @@ SaveFavoriteDialog::SaveFavoriteDialog(
     // Button box
     auto* buttonBox
         = new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this );
+    buttonBox->setObjectName( QStringLiteral( "saveFavoriteButtonBox" ) );
     layout->addWidget( buttonBox );
 
     connect( buttonBox, &QDialogButtonBox::accepted, this, &QDialog::accept );

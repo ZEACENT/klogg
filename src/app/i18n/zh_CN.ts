@@ -16,18 +16,18 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="572"/>
-        <source>&amp;Copy this line</source>
+        <source>&amp;Copy This Line</source>
         <translation>拷贝当前行(&amp;C)</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="573"/>
-        <source>Copy this line with line number</source>
+        <source>Copy This Line with Line Number</source>
         <translation type="unfinished">拷贝当前行并附加行号</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="585"/>
         <location filename="../../ui/src/abstractlogview.cpp" line="2020"/>
-        <source>Copy with line numbers</source>
+        <source>Copy with Line Numbers</source>
         <translation type="unfinished">拷贝并附加行号</translation>
     </message>
     <message>
@@ -52,17 +52,17 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2028"/>
-        <source>Save to file</source>
-        <translation>保存到文件</translation>
+        <source>Save to File...</source>
+        <translation>保存到文件...</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2032"/>
-        <source>Save selected to file</source>
-        <translation>保存选中内容到文件</translation>
+        <source>Save Selected to File...</source>
+        <translation>保存选中内容到文件...</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2039"/>
-        <source>Find &amp;next</source>
+        <source>Find &amp;Next</source>
         <translation>查找下一个(&amp;n)</translation>
     </message>
     <message>
@@ -72,7 +72,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2045"/>
-        <source>Find &amp;previous</source>
+        <source>Find &amp;Previous</source>
         <translation>查找上一个(&amp;p)</translation>
     </message>
     <message>
@@ -87,7 +87,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2051"/>
-        <source>&amp;Replace search</source>
+        <source>&amp;Replace Search</source>
         <translation type="unfinished">替换(&amp;R)</translation>
     </message>
     <message>
@@ -97,7 +97,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2056"/>
-        <source>&amp;Add to search</source>
+        <source>&amp;Add to Search</source>
         <translation type="unfinished">添加到搜索(&amp;A)</translation>
     </message>
     <message>
@@ -107,7 +107,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2061"/>
-        <source>&amp;Exclude from search</source>
+        <source>&amp;Exclude from Search</source>
         <translation>从搜索中排除所选内容(&amp;E)</translation>
     </message>
     <message>
@@ -117,42 +117,42 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2066"/>
-        <source>Set search start</source>
+        <source>Set Search Start</source>
         <translation>设置搜索起点</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2070"/>
-        <source>Set search end</source>
+        <source>Set Search End</source>
         <translation>设置搜索终点</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2074"/>
-        <source>Clear search limits</source>
+        <source>Clear Search Limits</source>
         <translation type="unfinished">清除搜索限制</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2078"/>
-        <source>Set selection start</source>
+        <source>Set Selection Start</source>
         <translation>设置选择起点</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2082"/>
-        <source>Set selection end</source>
+        <source>Set Selection End</source>
         <translation>设置选择终点</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2086"/>
-        <source>Save splitter position</source>
+        <source>Save Splitter Position</source>
         <translation type="unfinished">设置为默认窗口分割线位置</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2090"/>
-        <source>Send to scratchpad</source>
+        <source>Send to Scratchpad</source>
         <translation>追加到暂存器</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2094"/>
-        <source>Replace scratchpad</source>
+        <source>Replace Scratchpad</source>
         <translation>替换暂存器</translation>
     </message>
     <message>
@@ -162,8 +162,28 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2100"/>
-        <source>Color labels</source>
+        <source>Color Labels</source>
         <translation type="unfinished">颜色标签</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="658"/>
+        <source>Ignore Case</source>
+        <translation>忽略大小写</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="662"/>
+        <source>Whole Word</source>
+        <translation>全词匹配</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2596"/>
+        <source>Add Line Mark</source>
+        <translation>标记当前行</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2599"/>
+        <source>Delete Line Mark</source>
+        <translation>删除行标记</translation>
     </message>
 </context>
 <context>
@@ -487,24 +507,9 @@
         <translation>关闭klogg并产生诊断性的崩溃信息。是否继续？</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="871"/>
-        <source>Open window</source>
-        <translation>打开窗口</translation>
-    </message>
-    <message>
         <location filename="../../ui/src/mainwindow.cpp" line="196"/>
         <source>klogg - scratchpad</source>
         <translation type="unfinished">klogg - 暂存器</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="740"/>
-        <source>Open Recent</source>
-        <translation type="unfinished">最近打开文件</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="872"/>
-        <source>Quit</source>
-        <translation>退出</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="924"/>
@@ -680,6 +685,16 @@
         <location filename="../../ui/src/mainwindow.cpp" line="2071"/>
         <source>Remove from favorites</source>
         <translation>从收藏中移除</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1813"/>
+        <source>Unable to import filter favorites from the selected file.</source>
+        <translation>无法从所选文件导入筛选器收藏。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1842"/>
+        <source>Unable to export filter favorites to the selected file.</source>
+        <translation>无法将筛选器收藏导出到所选文件。</translation>
     </message>
 </context>
 <context>
@@ -1074,17 +1089,17 @@
     <name>PathLine</name>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="39"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation type="unfinished">拷贝完整路径</translation>
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="40"/>
-        <source>Copy file name</source>
+        <source>Copy File Name</source>
         <translation type="unfinished">拷贝文件名</translation>
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="41"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation type="unfinished">打开包含此文件的文件夹</translation>
     </message>
     <message>
@@ -1094,8 +1109,21 @@
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="45"/>
-        <source>Select all</source>
+        <source>Select All</source>
         <translation type="unfinished">选择全部</translation>
+    </message>
+</context>
+<context>
+    <name>InfoLine</name>
+    <message>
+        <location filename="../../ui/src/infoline.cpp" line="120"/>
+        <source>Copy</source>
+        <translation>复制</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/infoline.cpp" line="122"/>
+        <source>Select All</source>
+        <translation>全选</translation>
     </message>
 </context>
 <context>
@@ -1165,18 +1193,38 @@
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="289"/>
-        <source>Predefined filters (*.conf);;All files (*)</source>
-        <translation type="unfinished">预定义过滤器 (*.conf);;全部文件 (*)</translation>
+        <source>Filter favorites (*.conf);;All files (*)</source>
+        <translation>筛选器收藏 (*.conf);;所有文件 (*)</translation>
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="305"/>
-        <source>Export predefined filters</source>
-        <translation type="unfinished">导出预定义的过滤器</translation>
+        <source>Export filter favorites</source>
+        <translation>导出筛选器收藏</translation>
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="306"/>
-        <source>Predefined filters (*.conf)</source>
-        <translation type="unfinished">预定义过滤器 (*.conf)</translation>
+        <source>Filter favorites (*.conf)</source>
+        <translation>筛选器收藏 (*.conf)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="190"/>
+        <source>klogg</source>
+        <translation>klogg</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="191"/>
+        <source>Filter favorites changed outside this dialog. Reopen the dialog and try again.</source>
+        <translation>筛选器收藏已在此对话框外发生更改。请重新打开对话框后重试。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="322"/>
+        <source>Unable to import filter favorites from the selected file.</source>
+        <translation>无法从所选文件导入筛选器收藏。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="349"/>
+        <source>Unable to export filter favorites to the selected file.</source>
+        <translation>无法将筛选器收藏导出到所选文件。</translation>
     </message>
 </context>
 <context>
@@ -1604,55 +1652,145 @@
     <name>TabbedCrawlerWidget</name>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="180"/>
-        <source>Close this</source>
+        <source>Close This</source>
         <translation>关闭</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="181"/>
-        <source>Close others</source>
+        <source>Close Others</source>
         <translation>关闭其他标签页</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="182"/>
-        <source>Close to the left</source>
+        <source>Close to the Left</source>
         <translation>关闭左侧标签页</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="183"/>
-        <source>Close to the right</source>
+        <source>Close to the Right</source>
         <translation>关闭右侧标签页</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="184"/>
-        <source>Close all</source>
+        <source>Close All</source>
         <translation>关闭所有标签页</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="186"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation>拷贝完整路径</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="187"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation>打开包含此文件的文件夹</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="189"/>
-        <source>Rename tab</source>
-        <translation>重命名标签页</translation>
+        <source>Rename Tab...</source>
+        <translation>重命名标签页...</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="190"/>
-        <source>Reset tab name</source>
+        <source>Reset Tab Name</source>
         <translation>恢复标签页名称</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="835"/>
+        <source>Add to Group</source>
+        <translation>添加到分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="842"/>
+        <source>Remove from Group</source>
+        <translation>从分组中移除</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="848"/>
+        <source>Group</source>
+        <translation>分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1061"/>
+        <source>New Group...</source>
+        <translation>新建分组...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1070"/>
+        <source>New Tab Group</source>
+        <translation>新建标签页分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1070"/>
+        <source>Group name:</source>
+        <translation>分组名称：</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1071"/>
+        <source>New Group</source>
+        <translation>新分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1078"/>
+        <source>Choose Group Color</source>
+        <translation>选择分组颜色</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1195"/>
+        <source>Group: %1 (click to collapse/expand)</source>
+        <translation>分组：%1（单击以折叠/展开）</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1318"/>
+        <source>%1&#xa;Group: %2</source>
+        <translation>%1&#xa;分组：%2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1335"/>
+        <source>[%1] %2</source>
+        <translation>[%1] %2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1363"/>
+        <source>Expand Group</source>
+        <translation>展开分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1363"/>
+        <source>Collapse Group</source>
+        <translation>折叠分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1371"/>
+        <source>Rename Group...</source>
+        <translation>重命名分组...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1374"/>
+        <source>Rename Group</source>
+        <translation>重命名分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1382"/>
+        <source>Change Color...</source>
+        <translation>更改颜色...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1393"/>
+        <source>Ungroup All</source>
+        <translation>取消全部分组</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1399"/>
+        <source>Close All in Group</source>
+        <translation>关闭分组内所有标签页</translation>
     </message>
 </context>
 <context>
     <name>klogg::mainwindow::action</name>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="29"/>
-        <source>&amp;New window</source>
+        <source>&amp;New Window</source>
         <translation>新建窗口(&amp;N)</translation>
     </message>
     <message>
@@ -1727,7 +1865,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="44"/>
-        <source>Go to line...</source>
+        <source>Go to Line...</source>
         <translation>跳转到行...</translation>
     </message>
     <message>
@@ -1747,7 +1885,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="49"/>
-        <source>Clear file...</source>
+        <source>Clear File...</source>
         <translation>清除文件内容...</translation>
     </message>
     <message>
@@ -1757,7 +1895,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="51"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation type="unfinished">打开包含此文件的文件夹</translation>
     </message>
     <message>
@@ -1767,7 +1905,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="54"/>
-        <source>Open in editor</source>
+        <source>Open in Editor</source>
         <translation>在编辑器中打开</translation>
     </message>
     <message>
@@ -1777,7 +1915,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="56"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation>拷贝完整路径</translation>
     </message>
     <message>
@@ -1787,7 +1925,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="59"/>
-        <source>Open from clipboard</source>
+        <source>Open from Clipboard</source>
         <translation>从剪贴板打开</translation>
     </message>
     <message>
@@ -1807,17 +1945,17 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="63"/>
-        <source>Matches &amp;overview</source>
+        <source>Matches &amp;Overview</source>
         <translation type="unfinished">匹配预览(&amp;o)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="64"/>
-        <source>Line &amp;numbers in main view</source>
+        <source>Line &amp;Numbers in Main View</source>
         <translation type="unfinished">主视图中的行号(&amp;n)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="66"/>
-        <source>Line &amp;numbers in filtered view</source>
+        <source>Line &amp;Numbers in Filtered View</source>
         <translation type="unfinished">过滤视图中的行号(&amp;n)</translation>
     </message>
     <message>
@@ -1827,7 +1965,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="68"/>
-        <source>&amp;Wrap text</source>
+        <source>&amp;Wrap Text</source>
         <translation type="unfinished">文本换行(&amp;W)</translation>
     </message>
     <message>
@@ -1852,7 +1990,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="73"/>
-        <source>Configure &amp;highlighters...</source>
+        <source>Configure &amp;Highlighters...</source>
         <translation type="unfinished">配置高亮显示(&amp;h)...</translation>
     </message>
     <message>
@@ -1862,8 +2000,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="75"/>
-        <source>&amp;Documentation...</source>
-        <translation>文档(&amp;D)...</translation>
+        <source>&amp;Documentation</source>
+        <translation>文档(&amp;D)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="76"/>
@@ -1892,8 +2030,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="81"/>
-        <source>Report issue...</source>
-        <translation>报告问题...</translation>
+        <source>Report Issue</source>
+        <translation>报告问题</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="82"/>
@@ -1902,7 +2040,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="89"/>
-        <source>Generate crash dump</source>
+        <source>Generate Crash Dump</source>
         <translation>生成崩溃报告</translation>
     </message>
     <message>
@@ -1922,23 +2060,23 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="93"/>
-        <source>Add to favorites</source>
-        <translation>加入收藏</translation>
+        <source>Add Current File to Favorites</source>
+        <translation>将当前文件加入收藏</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="94"/>
-        <source>Remove from favorites...</source>
-        <translation>从收藏中移除...</translation>
+        <source>Remove Current File from Favorites</source>
+        <translation>从收藏中移除当前文件</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="95"/>
-        <source>Switch to opened file...</source>
+        <source>Switch to Opened File...</source>
         <translation>切换到已打开文件...</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="96"/>
-        <source>Predefined filters...</source>
-        <translation type="unfinished">预定义的过滤器...</translation>
+        <source>Filter Favorites...</source>
+        <translation>筛选器收藏...</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="98"/>
@@ -1954,6 +2092,76 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="101"/>
         <source>Automatically detect the file&apos;s encoding</source>
         <translation>自动检测文件的编码</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="38"/>
+        <source>Open Folder...</source>
+        <translation>打开文件夹...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="41"/>
+        <source>Open ADB Logcat...</source>
+        <translation>打开 ADB Logcat...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="44"/>
+        <source>Open iOS Log Stream...</source>
+        <translation>打开 iOS 日志流...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="67"/>
+        <source>Without ANSI Sequences...</source>
+        <translation>不含 ANSI 序列...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="71"/>
+        <source>With ANSI Sequences...</source>
+        <translation>包含 ANSI 序列...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="74"/>
+        <source>Disconnect Source</source>
+        <translation>断开源连接</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="77"/>
+        <source>Reconnect Source</source>
+        <translation>重新连接源</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="96"/>
+        <source>Go to &amp;Top</source>
+        <translation>转到顶部(&amp;T)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="114"/>
+        <source>Check for New Version</source>
+        <translation>检查新版本</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="121"/>
+        <source>Add Current File</source>
+        <translation>添加当前文件</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="122"/>
+        <source>Remove Favorite File...</source>
+        <translation>移除收藏文件...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="127"/>
+        <source>Import Filter Favorites...</source>
+        <translation>导入筛选器收藏...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="130"/>
+        <source>Export Filter Favorites...</source>
+        <translation>导出筛选器收藏...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="133"/>
+        <source>Merge Tabs...</source>
+        <translation>合并标签页...</translation>
     </message>
 </context>
 <context>
@@ -1975,7 +2183,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="15"/>
-        <source>Opened files</source>
+        <source>Opened Files</source>
         <translation>已打开文件</translation>
     </message>
     <message>
@@ -1990,8 +2198,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="18"/>
-        <source>F&amp;avorites</source>
-        <translation>收藏(&amp;F)</translation>
+        <source>F&amp;avorite Files</source>
+        <translation>收藏文件(&amp;F)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="19"/>
@@ -2002,6 +2210,21 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="20"/>
         <source>E&amp;ncoding</source>
         <translation>编码(&amp;E)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="13"/>
+        <source>Open Recent</source>
+        <translation type="unfinished">最近打开文件</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="14"/>
+        <source>Open Recent Fol&amp;der</source>
+        <translation>最近打开文件夹(&amp;D)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="16"/>
+        <source>Save Live Log As</source>
+        <translation>实时日志另存为</translation>
     </message>
 </context>
 <context>
@@ -2018,6 +2241,62 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="26"/>
         <source>klogg log viewer</source>
         <translation>Klogg 日志阅读器</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="30"/>
+        <source>Open Window</source>
+        <translation>打开窗口</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="31"/>
+        <source>Quit</source>
+        <translation>退出</translation>
+    </message>
+</context>
+<context>
+    <name>HighlightersMenu</name>
+    <message>
+        <location filename="../../ui/src/highlightersmenu.cpp" line="49"/>
+        <source>None</source>
+        <translation>无</translation>
+    </message>
+</context>
+<context>
+    <name>SearchToolbar</name>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="113"/>
+        <source>Clear Search History</source>
+        <translation>清空搜索历史</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="115"/>
+        <source>Edit Search History...</source>
+        <translation>编辑搜索历史...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="118"/>
+        <source>Add to Filter Favorites...</source>
+        <translation>添加到筛选器收藏...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="511"/>
+        <source>klogg</source>
+        <translation>klogg</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="512"/>
+        <source>Favorite &quot;%1&quot; changed while the save dialog was open. Try again.</source>
+        <translation>筛选器收藏“%1”在保存对话框打开期间发生了更改。请重试。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="539"/>
+        <source>Favorite &quot;%1&quot; already exists with the same content.</source>
+        <translation>筛选器收藏“%1”已存在，且内容相同。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="540"/>
+        <source>Favorite &quot;%1&quot; already has the same content.</source>
+        <translation>筛选器收藏“%1”的内容已相同。</translation>
     </message>
 </context>
 </TS>

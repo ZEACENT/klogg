@@ -38,63 +38,51 @@
 
 #include "predefinedfilters.h"
 
-#include <algorithm>
-
-#include <QCollator>
+#include <QFileInfo>
 #include <QSettings>
 
 #include "log.h"
-
-namespace {
-void sortFilters( PredefinedFiltersCollection::Collection& filters )
-{
-    QCollator collator;
-    collator.setCaseSensitivity( Qt::CaseInsensitive );
-    collator.setNumericMode( true );
-
-    std::stable_sort( filters.begin(), filters.end(),
-                      [ &collator ]( const PredefinedFilter& left,
-                                     const PredefinedFilter& right ) {
-                          return collator.compare( left.name, right.name ) < 0;
-                      } );
-}
-} // namespace
 
 void PredefinedFiltersCollection::retrieveFromStorage( QSettings& settings )
 {
     LOG_DEBUG << "PredefinedFiltersCollection::retrieveFromStorage";
 
-    if ( settings.contains( "PredefinedFiltersCollection/version" ) ) {
-        settings.beginGroup( "PredefinedFiltersCollection" );
-        if ( settings.value( "version" ).toInt() <= PredefinedFiltersCollection_VERSION ) {
-            filters_.clear();
-
-            int size = settings.beginReadArray( "filters" );
-
-            filters_.reserve( size );
-            for ( int i = 0; i < size; ++i ) {
-                settings.setArrayIndex( i );
-
-                filters_.push_back( { settings.value( "name" ).toString(),
-                                      settings.value( "filter" ).toString(),
-                                      settings.value( "regex", true ).toBool() } );
-            }
-            settings.endArray();
-            sortFilters( filters_ );
-        }
-        else {
-            LOG_ERROR << "Unknown version of PredefinedFiltersCollection, ignoring it...";
-        }
-        settings.endGroup();
+    filters_.clear();
+    if ( !settings.contains( "PredefinedFiltersCollection/version" ) ) {
+        return;
     }
+
+    settings.beginGroup( "PredefinedFiltersCollection" );
+    bool versionIsValid = false;
+    const int version = settings.value( "version" ).toInt( &versionIsValid );
+    if ( !versionIsValid || version < 1 ) {
+        LOG_ERROR << "Invalid version of PredefinedFiltersCollection, ignoring it...";
+        settings.endGroup();
+        return;
+    }
+    if ( version > PredefinedFiltersCollection_VERSION ) {
+        LOG_ERROR << "Unknown version of PredefinedFiltersCollection, ignoring it...";
+        settings.endGroup();
+        return;
+    }
+
+    const int size = settings.beginReadArray( "filters" );
+    filters_.reserve( size );
+    for ( int i = 0; i < size; ++i ) {
+        settings.setArrayIndex( i );
+
+        filters_.push_back( { settings.value( "name" ).toString(),
+                              settings.value( "filter" ).toString(),
+                              settings.value( "regex", true ).toBool() } );
+    }
+    settings.endArray();
+    settings.endGroup();
 }
 
 void PredefinedFiltersCollection::saveToStorage( QSettings& settings ) const
 {
     LOG_DEBUG << "PredefinedFiltersCollection::saveToStorage";
 
-    auto sortedFilters = filters_;
-    sortFilters( sortedFilters );
     settings.beginGroup( "PredefinedFiltersCollection" );
     settings.setValue( "version", PredefinedFiltersCollection_VERSION );
 
@@ -102,7 +90,7 @@ void PredefinedFiltersCollection::saveToStorage( QSettings& settings ) const
 
     settings.beginWriteArray( "filters" );
     int arrayIndex = 0;
-    for ( const auto& filter : sortedFilters ) {
+    for ( const auto& filter : filters_ ) {
         settings.setArrayIndex( arrayIndex );
         settings.setValue( "name", filter.name );
         settings.setValue( "filter", filter.pattern );
@@ -118,7 +106,6 @@ void PredefinedFiltersCollection::saveToStorage(
     const PredefinedFiltersCollection::Collection& filters )
 {
     filters_ = filters;
-    sortFilters( filters_ );
     this->save();
 }
 
@@ -136,16 +123,84 @@ PredefinedFiltersCollection::Collection PredefinedFiltersCollection::getSyncedFi
 void PredefinedFiltersCollection::setFilters( const Collection& filters )
 {
     filters_ = filters;
-    sortFilters( filters_ );
+}
+
+PredefinedFiltersCollection::LoadResult PredefinedFiltersCollection::tryLoadFromFile(
+    const QString& file )
+{
+    const QFileInfo fileInfo( file );
+    if ( !fileInfo.exists() || !fileInfo.isFile() ) {
+        return { LoadStatus::MissingFile, {} };
+    }
+
+    QSettings settings{ file, QSettings::IniFormat };
+    settings.sync();
+    if ( settings.status() != QSettings::NoError ) {
+        return { LoadStatus::MalformedFile, {} };
+    }
+
+    settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
+    if ( !settings.contains( QStringLiteral( "version" ) ) ) {
+        settings.endGroup();
+        return { LoadStatus::MalformedFile, {} };
+    }
+
+    bool versionValid = false;
+    const int version = settings.value( QStringLiteral( "version" ) ).toInt( &versionValid );
+    if ( !versionValid || version <= 0 ) {
+        settings.endGroup();
+        return { LoadStatus::MalformedFile, {} };
+    }
+    if ( version > PredefinedFiltersCollection_VERSION ) {
+        settings.endGroup();
+        return { LoadStatus::UnsupportedVersion, {} };
+    }
+
+    bool sizeValid = false;
+    const int declaredSize
+        = settings.value( QStringLiteral( "filters/size" ) ).toInt( &sizeValid );
+    if ( !settings.contains( QStringLiteral( "filters/size" ) ) || !sizeValid
+         || declaredSize < 0 ) {
+        settings.endGroup();
+        return { LoadStatus::MalformedFile, {} };
+    }
+
+    Collection filters;
+    const int size = settings.beginReadArray( QStringLiteral( "filters" ) );
+    if ( size != declaredSize ) {
+        settings.endArray();
+        settings.endGroup();
+        return { LoadStatus::MalformedFile, {} };
+    }
+
+    filters.reserve( size );
+    for ( int index = 0; index < size; ++index ) {
+        settings.setArrayIndex( index );
+        if ( !settings.contains( QStringLiteral( "name" ) )
+             || !settings.contains( QStringLiteral( "filter" ) ) ) {
+            settings.endArray();
+            settings.endGroup();
+            return { LoadStatus::MalformedFile, {} };
+        }
+
+        filters.push_back( { settings.value( QStringLiteral( "name" ) ).toString(),
+                             settings.value( QStringLiteral( "filter" ) ).toString(),
+                             settings.value( QStringLiteral( "regex" ), true ).toBool() } );
+    }
+    settings.endArray();
+    settings.endGroup();
+
+    if ( settings.status() != QSettings::NoError ) {
+        return { LoadStatus::MalformedFile, {} };
+    }
+    return { LoadStatus::Success, filters };
 }
 
 PredefinedFiltersCollection::Collection PredefinedFiltersCollection::loadFromFile(
     const QString& file )
 {
-    QSettings settings{ file, QSettings::IniFormat };
-    PredefinedFiltersCollection collection;
-    collection.retrieveFromStorage( settings );
-    return collection.getFilters();
+    const auto result = tryLoadFromFile( file );
+    return result.status == LoadStatus::Success ? result.filters : Collection{};
 }
 
 bool PredefinedFiltersCollection::saveToFile(
@@ -155,5 +210,6 @@ bool PredefinedFiltersCollection::saveToFile(
     PredefinedFiltersCollection collection;
     collection.setFilters( filters );
     collection.saveToStorage( settings );
-    return true;
+    settings.sync();
+    return settings.status() == QSettings::NoError;
 }

@@ -44,8 +44,11 @@ void FavoriteFiles::add( const QString& path )
 
 void FavoriteFiles::remove( const QString& path )
 {
-    auto existingFile = std::find_if( files_.begin(), files_.end(), FullPathComparator( path ) );
-    files_.erase( existingFile );
+    const auto existingFile
+        = std::find_if( files_.begin(), files_.end(), FullPathComparator( path ) );
+    if ( existingFile != files_.end() ) {
+        files_.erase( existingFile );
+    }
 }
 
 std::vector<DisplayFilePath> FavoriteFiles::favorites() const

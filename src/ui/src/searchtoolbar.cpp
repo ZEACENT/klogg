@@ -28,12 +28,14 @@
 #include <QCompleter>
 #include <QContextMenuEvent>
 #include <QCursor>
+#include <QDialog>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QStringListModel>
 #include <QToolButton>
@@ -42,7 +44,10 @@
 
 #include "configuration.h"
 #include "dispatch_to.h"
+#include "filterdiffdialog.h"
+#include "filterfavoritesmodel.h"
 #include "predefinedfilterscombobox.h"
+#include "savefavoritedialog.h"
 #include "savedsearches.h"
 
 SearchToolbar::SearchToolbar( QWidget* parent, SavedSearches* savedSearches )
@@ -105,9 +110,13 @@ void SearchToolbar::setupWidgets()
     searchLineEdit_->installEventFilter( this );
     searchLineEdit_->lineEdit()->installEventFilter( this );
 
-    QAction* clearSearchHistoryAction = new QAction( tr( "Clear search history" ), this );
-    QAction* editSearchHistoryAction = new QAction( tr( "Edit search history" ), this );
-    QAction* addFavoriteFilterAction = new QAction( tr( "Add to favorites" ), this );
+    QAction* clearSearchHistoryAction = new QAction( tr( "Clear Search History" ), this );
+    clearSearchHistoryAction->setObjectName( QStringLiteral( "clearSearchHistoryAction" ) );
+    QAction* editSearchHistoryAction = new QAction( tr( "Edit Search History..." ), this );
+    editSearchHistoryAction->setObjectName( QStringLiteral( "editSearchHistoryAction" ) );
+    QAction* addFavoriteFilterAction
+        = new QAction( tr( "Add to Filter Favorites..." ), this );
+    addFavoriteFilterAction->setObjectName( QStringLiteral( "addFavoriteFilterAction" ) );
 
     searchLineContextMenu_ = searchLineEdit_->lineEdit()->createStandardContextMenu();
     searchLineContextMenu_->addSeparator();
@@ -170,15 +179,15 @@ void SearchToolbar::setupWidgets()
 
     setLayout( layout );
 
-    // Wire the context-menu / favorite actions to our signals.
+    // Favorite persistence is common to every host; history remains host-specific.
     connect( addFavoriteFilterAction, &QAction::triggered, this,
-             [ this ]() { Q_EMIT saveFavoriteRequested(); } );
+             &SearchToolbar::saveCurrentSearchAsFavorite );
     connect( clearSearchHistoryAction, &QAction::triggered, this,
              [ this ]() { Q_EMIT clearHistoryRequested(); } );
     connect( editSearchHistoryAction, &QAction::triggered, this,
              [ this ]() { Q_EMIT editHistoryRequested(); } );
     connect( favoriteFilterButton_, &QToolButton::clicked, this,
-             [ this ]() { Q_EMIT saveFavoriteRequested(); } );
+             &SearchToolbar::saveCurrentSearchAsFavorite );
     connect( searchLineEdit_, &QWidget::customContextMenuRequested, this,
              [ this ]() { searchLineContextMenu_->exec( QCursor::pos() ); } );
 }
@@ -421,6 +430,139 @@ void SearchToolbar::recordSearch()
     savedSearches_->addRecent( pattern );
     searches.save();
     setItems( savedSearches_->recentSearches() );
+}
+
+void SearchToolbar::saveCurrentSearchAsFavorite()
+{
+    const auto currentText = currentSearchText().trimmed();
+    if ( currentText.isEmpty() ) {
+        return;
+    }
+
+    auto& model = FilterFavoritesModel::instance();
+    model.synchronizeFromStorage();
+    const auto dialogFavorites = model.favorites();
+    const auto useRegex = isUseRegexp();
+
+    SaveFavoriteDialog dialog( currentText, dialogFavorites, this );
+    if ( dialog.exec() != QDialog::Accepted ) {
+        return;
+    }
+
+    const auto favoriteName = dialog.favoriteName();
+    if ( favoriteName.isEmpty() ) {
+        return;
+    }
+
+    const bool isCreateNew = dialog.isCreateNew();
+    QString targetName = favoriteName;
+    PredefinedFilter selectedFavorite{};
+    const PredefinedFilter* selectedIdentity = nullptr;
+    if ( !isCreateNew ) {
+        const int selectedIndex = dialog.selectedExistingIndex();
+        if ( selectedIndex < 0 || selectedIndex >= dialogFavorites.size() ) {
+            return;
+        }
+        selectedFavorite = dialogFavorites.at( selectedIndex );
+        selectedIdentity = &selectedFavorite;
+        targetName = selectedFavorite.name;
+    }
+
+    const auto countByName = []( const auto& favorites, const QString& name ) {
+        int count = 0;
+        for ( const auto& favorite : favorites ) {
+            if ( favorite.name.compare( name, Qt::CaseInsensitive ) == 0 ) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    const auto findStableTarget = []( auto& favorites, const QString& name,
+                                      const PredefinedFilter* identity ) {
+        auto onlyNameMatch = favorites.end();
+        auto exactIdentityMatch = favorites.end();
+        int nameMatchCount = 0;
+        int identityMatchCount = 0;
+
+        for ( auto candidate = favorites.begin(); candidate != favorites.end(); ++candidate ) {
+            if ( candidate->name.compare( name, Qt::CaseInsensitive ) != 0 ) {
+                continue;
+            }
+
+            ++nameMatchCount;
+            onlyNameMatch = candidate;
+            if ( identity != nullptr && candidate->pattern == identity->pattern
+                 && candidate->useRegex == identity->useRegex ) {
+                ++identityMatchCount;
+                exactIdentityMatch = candidate;
+            }
+        }
+
+        if ( nameMatchCount == 1 ) {
+            return onlyNameMatch;
+        }
+        if ( identityMatchCount == 1 ) {
+            return exactIdentityMatch;
+        }
+        return favorites.end();
+    };
+    const auto warnConflict = [ this, &targetName ] {
+        QMessageBox::warning(
+            this, tr( "klogg" ),
+            tr( "Favorite \"%1\" changed while the save dialog was open. Try again." )
+                .arg( targetName ) );
+    };
+
+    // The modal can remain open while another window or process changes the
+    // collection. Merge the requested target against the latest snapshot so
+    // unrelated concurrent favorites are retained.
+    model.synchronizeFromStorage();
+    auto favorites = model.favorites();
+    const int nameMatchCount = countByName( favorites, targetName );
+    auto existing = findStableTarget( favorites, targetName, selectedIdentity );
+
+    if ( isCreateNew && nameMatchCount == 0 ) {
+        favorites.push_back( { favoriteName, currentText, useRegex } );
+        model.replaceFavorites( favorites );
+        return;
+    }
+
+    if ( existing == favorites.end() ) {
+        warnConflict();
+        return;
+    }
+
+    if ( existing->pattern == currentText && existing->useRegex == useRegex ) {
+        QMessageBox::information(
+            this, tr( "klogg" ),
+            isCreateNew
+                ? tr( "Favorite \"%1\" already exists with the same content." ).arg( existing->name )
+                : tr( "Favorite \"%1\" already has the same content." ).arg( existing->name ) );
+        return;
+    }
+
+    const auto displayedFavorite = *existing;
+    FilterDiffDialog diffDialog( existing->name, displayedFavorite, currentText, useRegex, this );
+    if ( diffDialog.exec() != QDialog::Accepted ) {
+        return;
+    }
+
+    // A second modal was open. Re-read once more and only overwrite the exact
+    // target the user reviewed; retain concurrent changes to other favorites.
+    model.synchronizeFromStorage();
+    favorites = model.favorites();
+    existing = findStableTarget( favorites, targetName, &displayedFavorite );
+    if ( existing == favorites.end()
+         || existing->name.compare( displayedFavorite.name, Qt::CaseInsensitive ) != 0
+         || existing->pattern != displayedFavorite.pattern
+         || existing->useRegex != displayedFavorite.useRegex ) {
+        warnConflict();
+        return;
+    }
+
+    existing->pattern = currentText;
+    existing->useRegex = useRegex;
+    model.replaceFavorites( favorites );
 }
 
 void SearchToolbar::loadIcons()

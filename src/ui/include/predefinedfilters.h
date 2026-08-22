@@ -51,10 +51,33 @@ struct PredefinedFilter {
     bool useRegex;
 };
 
+inline bool operator==( const PredefinedFilter& left, const PredefinedFilter& right )
+{
+    return left.name == right.name && left.pattern == right.pattern
+           && left.useRegex == right.useRegex;
+}
+
+inline bool operator!=( const PredefinedFilter& left, const PredefinedFilter& right )
+{
+    return !( left == right );
+}
+
 // Represents collection of filters read from settings file.
 class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCollection> {
   public:
     using Collection = QList<PredefinedFilter>;
+
+    enum class LoadStatus {
+        Success,
+        MissingFile,
+        MalformedFile,
+        UnsupportedVersion,
+    };
+
+    struct LoadResult {
+        LoadStatus status;
+        Collection filters;
+    };
 
     static const char* persistableName()
     {
@@ -64,6 +87,7 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     Collection getSyncedFilters();
     Collection getFilters() const;
     void setFilters( const Collection& filters );
+    static LoadResult tryLoadFromFile( const QString& file );
     static Collection loadFromFile( const QString& file );
     static bool saveToFile( const QString& file, const Collection& filters );
 

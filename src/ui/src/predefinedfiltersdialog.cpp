@@ -40,6 +40,7 @@
 
 #include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QMessageBox>
 #include <QTimer>
 #include <QToolButton>
 #include <qboxlayout.h>
@@ -47,7 +48,7 @@
 #include <qglobal.h>
 #include <qwidget.h>
 
-#include "dispatch_to.h"
+#include "filterfavoritesmodel.h"
 #include "iconloader.h"
 #include "log.h"
 #include "predefinedfilters.h"
@@ -87,7 +88,10 @@ PredefinedFiltersDialog::PredefinedFiltersDialog( QWidget* parent )
 {
     setupUi( this );
 
-    populateFiltersTable( PredefinedFiltersCollection::getSynced().getFilters() );
+    auto& favoritesModel = FilterFavoritesModel::instance();
+    favoritesModel.synchronizeFromStorage();
+    baseFavorites_ = favoritesModel.favorites();
+    populateFiltersTable( baseFavorites_ );
 
     connect( addFilterButton, &QToolButton::clicked, this, &PredefinedFiltersDialog::addFilter );
     connect( removeFilterButton, &QToolButton::clicked, this,
@@ -105,7 +109,7 @@ PredefinedFiltersDialog::PredefinedFiltersDialog( QWidget* parent )
     connect( filtersTableWidget, &QTableWidget::currentCellChanged, this,
              &PredefinedFiltersDialog::onCurrentCellChanged );
 
-    dispatchToMainThread( [ this ] {
+    QTimer::singleShot( 0, this, [ this ] {
         IconLoader iconLoader( this );
 
         addFilterButton->setIcon( iconLoader.load( "icons8-plus" ) );
@@ -177,9 +181,21 @@ void PredefinedFiltersDialog::populateFiltersTable(
     updateButtons();
 }
 
-void PredefinedFiltersDialog::saveSettings() const
+bool PredefinedFiltersDialog::saveSettings()
 {
-    PredefinedFiltersCollection::getSynced().saveToStorage( readFiltersTable() );
+    auto& favoritesModel = FilterFavoritesModel::instance();
+    favoritesModel.synchronizeFromStorage();
+    if ( favoritesModel.favorites() != baseFavorites_ ) {
+        QMessageBox::warning(
+            this, tr( "klogg" ),
+            tr( "Filter favorites changed outside this dialog. Reopen the dialog and try again." ) );
+        return false;
+    }
+
+    const auto updatedFavorites = readFiltersTable();
+    favoritesModel.replaceFavorites( updatedFavorites );
+    baseFavorites_ = updatedFavorites;
+    return true;
 }
 
 PredefinedFiltersCollection::Collection PredefinedFiltersDialog::readFiltersTable() const
@@ -259,7 +275,7 @@ void PredefinedFiltersDialog::moveFilterDown()
 
 void PredefinedFiltersDialog::swapFilters( int currentRow, int newRow, int selectedColumn )
 {
-    dispatchToMainThread( [ this, currentRow, newRow, selectedColumn ] {
+    QTimer::singleShot( 0, this, [ this, currentRow, newRow, selectedColumn ] {
         for ( int column = 0; column < filtersTableWidget->columnCount(); ++column ) {
             auto currentUseRegex = static_cast<CenteredCheckbox*>(
                 filtersTableWidget->cellWidget( currentRow, column ) );
@@ -294,8 +310,20 @@ void PredefinedFiltersDialog::importFilters()
         return;
     }
 
+    importFiltersFromFile( file );
+}
+
+void PredefinedFiltersDialog::importFiltersFromFile( const QString& file )
+{
     LOG_DEBUG << "Loading predefined filters from " << file;
-    populateFiltersTable( PredefinedFiltersCollection::loadFromFile( file ) );
+    const auto result = PredefinedFiltersCollection::tryLoadFromFile( file );
+    if ( result.status != PredefinedFiltersCollection::LoadStatus::Success ) {
+        QMessageBox::warning( this, tr( "klogg" ),
+                              tr( "Unable to import filter favorites from the selected file." ) );
+        return;
+    }
+
+    populateFiltersTable( result.filters );
 }
 
 void PredefinedFiltersDialog::exportFilters()
@@ -311,7 +339,15 @@ void PredefinedFiltersDialog::exportFilters()
         file += ".conf";
     }
 
-    PredefinedFiltersCollection::saveToFile( file, readFiltersTable() );
+    exportFiltersToFile( file );
+}
+
+void PredefinedFiltersDialog::exportFiltersToFile( const QString& file )
+{
+    if ( !PredefinedFiltersCollection::saveToFile( file, readFiltersTable() ) ) {
+        QMessageBox::warning( this, tr( "klogg" ),
+                              tr( "Unable to export filter favorites to the selected file." ) );
+    }
 }
 
 void PredefinedFiltersDialog::resolveStandardButton( QAbstractButton* button )
@@ -330,13 +366,12 @@ void PredefinedFiltersDialog::resolveStandardButton( QAbstractButton* button )
         break;
 
     case QDialogButtonBox::AcceptRole:
-        saveSettings();
-        accept();
+        if ( saveSettings() ) {
+            accept();
+        }
         break;
     default:
         LOG_ERROR << "PredefinedFiltersDialog::resolveStandardButton unhandled role: " << role;
         return;
     }
-
-    Q_EMIT optionsChanged();
 }

@@ -16,18 +16,18 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="572"/>
-        <source>&amp;Copy this line</source>
+        <source>&amp;Copy This Line</source>
         <translation>複製此行(&amp;C)</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="573"/>
-        <source>Copy this line with line number</source>
+        <source>Copy This Line with Line Number</source>
         <translation>複製此行並附加行號</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="585"/>
         <location filename="../../ui/src/abstractlogview.cpp" line="2020"/>
-        <source>Copy with line numbers</source>
+        <source>Copy with Line Numbers</source>
         <translation>複製並附加行號</translation>
     </message>
     <message>
@@ -52,17 +52,17 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2028"/>
-        <source>Save to file</source>
-        <translation>儲存到檔案</translation>
+        <source>Save to File...</source>
+        <translation>儲存到檔案...</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2032"/>
-        <source>Save selected to file</source>
-        <translation>儲存選取內容到檔案</translation>
+        <source>Save Selected to File...</source>
+        <translation>儲存選取內容到檔案...</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2039"/>
-        <source>Find &amp;next</source>
+        <source>Find &amp;Next</source>
         <translation>尋找下一個(&amp;n)</translation>
     </message>
     <message>
@@ -72,7 +72,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2045"/>
-        <source>Find &amp;previous</source>
+        <source>Find &amp;Previous</source>
         <translation>尋找上一個(&amp;p)</translation>
     </message>
     <message>
@@ -87,7 +87,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2051"/>
-        <source>&amp;Replace search</source>
+        <source>&amp;Replace Search</source>
         <translation>取代(&amp;R)</translation>
     </message>
     <message>
@@ -97,7 +97,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2056"/>
-        <source>&amp;Add to search</source>
+        <source>&amp;Add to Search</source>
         <translation>新增到搜尋(&amp;A)</translation>
     </message>
     <message>
@@ -107,7 +107,7 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2061"/>
-        <source>&amp;Exclude from search</source>
+        <source>&amp;Exclude from Search</source>
         <translation>從搜尋中排除所選內容(&amp;E)</translation>
     </message>
     <message>
@@ -117,42 +117,42 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2066"/>
-        <source>Set search start</source>
+        <source>Set Search Start</source>
         <translation>設定搜尋起點</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2070"/>
-        <source>Set search end</source>
+        <source>Set Search End</source>
         <translation>設定搜尋終點</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2074"/>
-        <source>Clear search limits</source>
+        <source>Clear Search Limits</source>
         <translation>清除搜尋限制</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2078"/>
-        <source>Set selection start</source>
+        <source>Set Selection Start</source>
         <translation>設定選取起點</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2082"/>
-        <source>Set selection end</source>
+        <source>Set Selection End</source>
         <translation>設定選取終點</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2086"/>
-        <source>Save splitter position</source>
+        <source>Save Splitter Position</source>
         <translation>儲存分隔線位置</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2090"/>
-        <source>Send to scratchpad</source>
+        <source>Send to Scratchpad</source>
         <translation>傳送到便條</translation>
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2094"/>
-        <source>Replace scratchpad</source>
+        <source>Replace Scratchpad</source>
         <translation>取代便條</translation>
     </message>
     <message>
@@ -162,8 +162,28 @@
     </message>
     <message>
         <location filename="../../ui/src/abstractlogview.cpp" line="2100"/>
-        <source>Color labels</source>
+        <source>Color Labels</source>
         <translation>顏色標籤</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="658"/>
+        <source>Ignore Case</source>
+        <translation>忽略大小寫</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="662"/>
+        <source>Whole Word</source>
+        <translation>全字匹配</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2596"/>
+        <source>Add Line Mark</source>
+        <translation>新增行標記</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/abstractlogview.cpp" line="2599"/>
+        <source>Delete Line Mark</source>
+        <translation>刪除行標記</translation>
     </message>
 </context>
 <context>
@@ -487,24 +507,9 @@
         <translation>關閉 klogg 並產生診斷性的當機記錄。是否繼續？</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="871"/>
-        <source>Open window</source>
-        <translation>開啟視窗</translation>
-    </message>
-    <message>
         <location filename="../../ui/src/mainwindow.cpp" line="196"/>
         <source>klogg - scratchpad</source>
         <translation>klogg - 便條</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="740"/>
-        <source>Open Recent</source>
-        <translation>最近開啟檔案</translation>
-    </message>
-    <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="872"/>
-        <source>Quit</source>
-        <translation>退出</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="924"/>
@@ -680,6 +685,16 @@
         <location filename="../../ui/src/mainwindow.cpp" line="2071"/>
         <source>Remove from favorites</source>
         <translation>從書籤中移除</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1813"/>
+        <source>Unable to import filter favorites from the selected file.</source>
+        <translation>無法從所選檔案匯入篩選器書籤。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1842"/>
+        <source>Unable to export filter favorites to the selected file.</source>
+        <translation>無法將篩選器書籤匯出到所選檔案。</translation>
     </message>
 </context>
 <context>
@@ -1074,17 +1089,17 @@
     <name>PathLine</name>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="39"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation>複製完整路徑</translation>
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="40"/>
-        <source>Copy file name</source>
+        <source>Copy File Name</source>
         <translation>複製檔案名稱</translation>
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="41"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation>開啟包含此檔案的資料夾</translation>
     </message>
     <message>
@@ -1094,7 +1109,20 @@
     </message>
     <message>
         <location filename="../../ui/src/pathline.cpp" line="45"/>
-        <source>Select all</source>
+        <source>Select All</source>
+        <translation>全選</translation>
+    </message>
+</context>
+<context>
+    <name>InfoLine</name>
+    <message>
+        <location filename="../../ui/src/infoline.cpp" line="120"/>
+        <source>Copy</source>
+        <translation>複製</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/infoline.cpp" line="122"/>
+        <source>Select All</source>
         <translation>全選</translation>
     </message>
 </context>
@@ -1165,18 +1193,38 @@
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="289"/>
-        <source>Predefined filters (*.conf);;All files (*)</source>
-        <translation>預設篩選器 (*.conf);;所有檔案 (*)</translation>
+        <source>Filter favorites (*.conf);;All files (*)</source>
+        <translation>篩選器書籤 (*.conf);;所有檔案 (*)</translation>
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="305"/>
-        <source>Export predefined filters</source>
-        <translation>匯出預設篩選器</translation>
+        <source>Export filter favorites</source>
+        <translation>匯出篩選器書籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="306"/>
-        <source>Predefined filters (*.conf)</source>
-        <translation>預設篩選器 (*.conf)</translation>
+        <source>Filter favorites (*.conf)</source>
+        <translation>篩選器書籤 (*.conf)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="190"/>
+        <source>klogg</source>
+        <translation>klogg</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="191"/>
+        <source>Filter favorites changed outside this dialog. Reopen the dialog and try again.</source>
+        <translation>篩選器書籤已在此對話框外變更。請重新開啟對話框後再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="322"/>
+        <source>Unable to import filter favorites from the selected file.</source>
+        <translation>無法從所選檔案匯入篩選器書籤。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="349"/>
+        <source>Unable to export filter favorites to the selected file.</source>
+        <translation>無法將篩選器書籤匯出到所選檔案。</translation>
     </message>
 </context>
 <context>
@@ -1604,55 +1652,145 @@
     <name>TabbedCrawlerWidget</name>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="180"/>
-        <source>Close this</source>
+        <source>Close This</source>
         <translation>關閉此標籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="181"/>
-        <source>Close others</source>
+        <source>Close Others</source>
         <translation>關閉其他標籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="182"/>
-        <source>Close to the left</source>
+        <source>Close to the Left</source>
         <translation>關閉左側標籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="183"/>
-        <source>Close to the right</source>
+        <source>Close to the Right</source>
         <translation>關閉右側標籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="184"/>
-        <source>Close all</source>
+        <source>Close All</source>
         <translation>全部關閉</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="186"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation>複製完整路徑</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="187"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation>開啟所在資料夾</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="189"/>
-        <source>Rename tab</source>
-        <translation>重新命名標籤</translation>
+        <source>Rename Tab...</source>
+        <translation>重新命名標籤...</translation>
     </message>
     <message>
         <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="190"/>
-        <source>Reset tab name</source>
+        <source>Reset Tab Name</source>
         <translation>重設標籤名稱</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="835"/>
+        <source>Add to Group</source>
+        <translation>加入群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="842"/>
+        <source>Remove from Group</source>
+        <translation>從群組中移除</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="848"/>
+        <source>Group</source>
+        <translation>群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1061"/>
+        <source>New Group...</source>
+        <translation>新增群組...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1070"/>
+        <source>New Tab Group</source>
+        <translation>新增標籤頁群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1070"/>
+        <source>Group name:</source>
+        <translation>群組名稱：</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1071"/>
+        <source>New Group</source>
+        <translation>新群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1078"/>
+        <source>Choose Group Color</source>
+        <translation>選擇群組顏色</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1195"/>
+        <source>Group: %1 (click to collapse/expand)</source>
+        <translation>群組：%1（按一下以收合/展開）</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1318"/>
+        <source>%1&#xa;Group: %2</source>
+        <translation>%1&#xa;群組：%2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1335"/>
+        <source>[%1] %2</source>
+        <translation>[%1] %2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1363"/>
+        <source>Expand Group</source>
+        <translation>展開群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1363"/>
+        <source>Collapse Group</source>
+        <translation>收合群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1371"/>
+        <source>Rename Group...</source>
+        <translation>重新命名群組...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1374"/>
+        <source>Rename Group</source>
+        <translation>重新命名群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1382"/>
+        <source>Change Color...</source>
+        <translation>變更顏色...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1393"/>
+        <source>Ungroup All</source>
+        <translation>取消所有群組</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/tabbedcrawlerwidget.cpp" line="1399"/>
+        <source>Close All in Group</source>
+        <translation>關閉群組中的所有標籤頁</translation>
     </message>
 </context>
 <context>
     <name>klogg::mainwindow::action</name>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="29"/>
-        <source>&amp;New window</source>
+        <source>&amp;New Window</source>
         <translation>開新視窗(&amp;N)</translation>
     </message>
     <message>
@@ -1727,7 +1865,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="44"/>
-        <source>Go to line...</source>
+        <source>Go to Line...</source>
         <translation>跳至行數...</translation>
     </message>
     <message>
@@ -1747,7 +1885,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="49"/>
-        <source>Clear file...</source>
+        <source>Clear File...</source>
         <translation>清除檔案內容...</translation>
     </message>
     <message>
@@ -1757,7 +1895,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="51"/>
-        <source>Open containing folder</source>
+        <source>Open Containing Folder</source>
         <translation>開啟所在資料夾</translation>
     </message>
     <message>
@@ -1767,7 +1905,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="54"/>
-        <source>Open in editor</source>
+        <source>Open in Editor</source>
         <translation>在編輯器中開啟</translation>
     </message>
     <message>
@@ -1777,7 +1915,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="56"/>
-        <source>Copy full path</source>
+        <source>Copy Full Path</source>
         <translation>複製完整路徑</translation>
     </message>
     <message>
@@ -1787,7 +1925,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="59"/>
-        <source>Open from clipboard</source>
+        <source>Open from Clipboard</source>
         <translation>從剪貼簿開啟</translation>
     </message>
     <message>
@@ -1807,17 +1945,17 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="63"/>
-        <source>Matches &amp;overview</source>
+        <source>Matches &amp;Overview</source>
         <translation>符合項目概覽(&amp;o)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="64"/>
-        <source>Line &amp;numbers in main view</source>
+        <source>Line &amp;Numbers in Main View</source>
         <translation>主檢視中的行號(&amp;n)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="66"/>
-        <source>Line &amp;numbers in filtered view</source>
+        <source>Line &amp;Numbers in Filtered View</source>
         <translation>篩選檢視中的行號(&amp;n)</translation>
     </message>
     <message>
@@ -1827,7 +1965,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="68"/>
-        <source>&amp;Wrap text</source>
+        <source>&amp;Wrap Text</source>
         <translation>文字換行(&amp;W)</translation>
     </message>
     <message>
@@ -1852,7 +1990,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="73"/>
-        <source>Configure &amp;highlighters...</source>
+        <source>Configure &amp;Highlighters...</source>
         <translation>設定醒目提示(&amp;h)...</translation>
     </message>
     <message>
@@ -1862,8 +2000,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="75"/>
-        <source>&amp;Documentation...</source>
-        <translation>文件(&amp;D)...</translation>
+        <source>&amp;Documentation</source>
+        <translation>文件(&amp;D)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="76"/>
@@ -1892,8 +2030,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="81"/>
-        <source>Report issue...</source>
-        <translation>回報問題...</translation>
+        <source>Report Issue</source>
+        <translation>回報問題</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="82"/>
@@ -1902,7 +2040,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="89"/>
-        <source>Generate crash dump</source>
+        <source>Generate Crash Dump</source>
         <translation>產生當機報告</translation>
     </message>
     <message>
@@ -1922,23 +2060,23 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="93"/>
-        <source>Add to favorites</source>
-        <translation>加入書籤</translation>
+        <source>Add Current File to Favorites</source>
+        <translation>將目前檔案加入書籤</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="94"/>
-        <source>Remove from favorites...</source>
-        <translation>從書籤中移除...</translation>
+        <source>Remove Current File from Favorites</source>
+        <translation>從書籤中移除目前檔案</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="95"/>
-        <source>Switch to opened file...</source>
+        <source>Switch to Opened File...</source>
         <translation>切換到已開啟檔案...</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="96"/>
-        <source>Predefined filters...</source>
-        <translation>預設篩選器...</translation>
+        <source>Filter Favorites...</source>
+        <translation>篩選器書籤...</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="98"/>
@@ -1954,6 +2092,76 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="101"/>
         <source>Automatically detect the file&apos;s encoding</source>
         <translation>自動偵測檔案的編碼</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="38"/>
+        <source>Open Folder...</source>
+        <translation>開啟資料夾...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="41"/>
+        <source>Open ADB Logcat...</source>
+        <translation>開啟 ADB Logcat...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="44"/>
+        <source>Open iOS Log Stream...</source>
+        <translation>開啟 iOS 日誌串流...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="67"/>
+        <source>Without ANSI Sequences...</source>
+        <translation>不含 ANSI 序列...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="71"/>
+        <source>With ANSI Sequences...</source>
+        <translation>包含 ANSI 序列...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="74"/>
+        <source>Disconnect Source</source>
+        <translation>中斷來源連線</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="77"/>
+        <source>Reconnect Source</source>
+        <translation>重新連線來源</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="96"/>
+        <source>Go to &amp;Top</source>
+        <translation>移至頂端(&amp;T)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="114"/>
+        <source>Check for New Version</source>
+        <translation>檢查新版本</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="121"/>
+        <source>Add Current File</source>
+        <translation>加入目前檔案</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="122"/>
+        <source>Remove Favorite File...</source>
+        <translation>移除書籤檔案...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="127"/>
+        <source>Import Filter Favorites...</source>
+        <translation>匯入篩選器書籤...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="130"/>
+        <source>Export Filter Favorites...</source>
+        <translation>匯出篩選器書籤...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="133"/>
+        <source>Merge Tabs...</source>
+        <translation>合併標籤頁...</translation>
     </message>
 </context>
 <context>
@@ -1975,7 +2183,7 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="15"/>
-        <source>Opened files</source>
+        <source>Opened Files</source>
         <translation>已開啟檔案</translation>
     </message>
     <message>
@@ -1990,8 +2198,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="18"/>
-        <source>F&amp;avorites</source>
-        <translation>書籤(&amp;F)</translation>
+        <source>F&amp;avorite Files</source>
+        <translation>書籤檔案(&amp;F)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="19"/>
@@ -2002,6 +2210,21 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="20"/>
         <source>E&amp;ncoding</source>
         <translation>編碼(&amp;E)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="13"/>
+        <source>Open Recent</source>
+        <translation>最近開啟檔案</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="14"/>
+        <source>Open Recent Fol&amp;der</source>
+        <translation>最近開啟資料夾(&amp;D)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="16"/>
+        <source>Save Live Log As</source>
+        <translation>即時日誌另存為</translation>
     </message>
 </context>
 <context>
@@ -2018,6 +2241,62 @@
         <location filename="../../ui/src/mainwindowtext.cpp" line="26"/>
         <source>klogg log viewer</source>
         <translation>Klogg 日誌檢視器</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="30"/>
+        <source>Open Window</source>
+        <translation>開啟視窗</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindowtext.cpp" line="31"/>
+        <source>Quit</source>
+        <translation>退出</translation>
+    </message>
+</context>
+<context>
+    <name>HighlightersMenu</name>
+    <message>
+        <location filename="../../ui/src/highlightersmenu.cpp" line="49"/>
+        <source>None</source>
+        <translation>無</translation>
+    </message>
+</context>
+<context>
+    <name>SearchToolbar</name>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="113"/>
+        <source>Clear Search History</source>
+        <translation>清除搜尋歷史</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="115"/>
+        <source>Edit Search History...</source>
+        <translation>編輯搜尋歷史...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="118"/>
+        <source>Add to Filter Favorites...</source>
+        <translation>加入篩選器書籤...</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="511"/>
+        <source>klogg</source>
+        <translation>klogg</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="512"/>
+        <source>Favorite &quot;%1&quot; changed while the save dialog was open. Try again.</source>
+        <translation>篩選器書籤「%1」在儲存對話框開啟期間已變更。請再試一次。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="539"/>
+        <source>Favorite &quot;%1&quot; already exists with the same content.</source>
+        <translation>篩選器書籤「%1」已存在，且內容相同。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="540"/>
+        <source>Favorite &quot;%1&quot; already has the same content.</source>
+        <translation>篩選器書籤「%1」已有相同內容。</translation>
     </message>
 </context>
 </TS>

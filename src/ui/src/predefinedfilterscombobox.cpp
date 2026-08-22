@@ -38,84 +38,199 @@
 
 #include "predefinedfilterscombobox.h"
 
-#include <QStandardItemModel>
-#include <qabstractitemview.h>
+#include <QAbstractItemView>
+#include <QFontMetrics>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QStyle>
+#include <QStyledItemDelegate>
+#include <QStyleOptionComboBox>
+#include <QStyleOptionViewItem>
 
-#include "log.h"
+#include <algorithm>
+
+#include "filterfavoritesmodel.h"
 #include "qtcompat/qtcompat.h"
 
-constexpr int PatternRole = Qt::UserRole + 1;
-constexpr int RegexRole = PatternRole + 1;
+namespace {
+constexpr int MaximumClosedWidthInEms = 24;
+constexpr int PopupTextHorizontalPadding = 12;
+
+class FullTextItemDelegate final : public QStyledItemDelegate {
+  public:
+    explicit FullTextItemDelegate( QObject* parent )
+        : QStyledItemDelegate( parent )
+    {
+    }
+
+    QSize sizeHint( const QStyleOptionViewItem& option,
+                    const QModelIndex& index ) const override
+    {
+        QStyleOptionViewItem textOption( option );
+        initStyleOption( &textOption, index );
+
+        auto hint = QStyledItemDelegate::sizeHint( option, index );
+        const int fullTextWidth
+            = QFontMetrics( textOption.font ).horizontalAdvance( textOption.text );
+        hint.setWidth( std::max( hint.width(), fullTextWidth + PopupTextHorizontalPadding ) );
+        return hint;
+    }
+};
+}
 
 PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     : QComboBox( parent )
-    , model_( new QStandardItemModel(this) )
 {
     setFocusPolicy( Qt::ClickFocus );
-    populatePredefinedFilters();
+    setSizeAdjustPolicy( QComboBox::AdjustToMinimumContentsLengthWithIcon );
+    setSizePolicy( QSizePolicy::Fixed, QSizePolicy::Minimum );
+
+    auto& favoritesModel = FilterFavoritesModel::instance();
+    favoritesModel.synchronizeFromStorage();
+    setModel( &favoritesModel );
+    view()->setItemDelegate( new FullTextItemDelegate( view() ) );
 
     connect( this, QOverload<int>::of( &QComboBox::activated ), this,
-             [ this ]( int ) { collectFilters(); } );
+             &PredefinedFiltersComboBox::collectFilter );
+    connect( model(), &QAbstractItemModel::modelReset, this,
+             &PredefinedFiltersComboBox::resetSelection );
 
-    QPalette palette = this->palette();
-    palette.setColor( QPalette::Base, palette.color( QPalette::Window ) );
-    view()->setPalette( palette );
-
+    QPalette popupPalette = palette();
+    popupPalette.setColor( QPalette::Base, popupPalette.color( QPalette::Window ) );
+    view()->setPalette( popupPalette );
     view()->setTextElideMode( Qt::ElideNone );
-    setSizeAdjustPolicy( QComboBox::AdjustToContents );
+    view()->setHorizontalScrollBarPolicy( Qt::ScrollBarAsNeeded );
+    view()->setHorizontalScrollMode( QAbstractItemView::ScrollPerPixel );
 
-klogg::qtcompat::setPlaceholderText( this, tr( "Filter favorites" ) );
+    klogg::qtcompat::setPlaceholderText( this, tr( "Filter favorites" ) );
+    resetSelection();
 }
 
-void PredefinedFiltersComboBox::populatePredefinedFilters()
-{
-    model_->clear();
-    const auto filters = filtersCollection_.getSyncedFilters();
-
-    insertFilters( filters );
-
-    this->setModel( model_ );
-    setCurrentIndex( -1 );
-}
-
-void PredefinedFiltersComboBox::updateSearchPattern( const QString newSearchPattern, bool useLogicalCombining )
+void PredefinedFiltersComboBox::updateSearchPattern( const QString newSearchPattern,
+                                                     bool useLogicalCombining )
 {
     Q_UNUSED( newSearchPattern );
     Q_UNUSED( useLogicalCombining );
-    QSignalBlocker blocker( this );
-    setCurrentIndex( -1 );
+    resetSelection();
 }
 
-void PredefinedFiltersComboBox::insertFilters(
-    const PredefinedFiltersCollection::Collection& filters )
+QSize PredefinedFiltersComboBox::sizeHint() const
 {
-    for ( const auto& filter : filters ) {
-        auto* item = new QStandardItem( filter.name );
+    return closedSizeHint();
+}
 
-        item->setData( filter.pattern, PatternRole );
-        item->setData( filter.useRegex, RegexRole );
+QSize PredefinedFiltersComboBox::minimumSizeHint() const
+{
+    return closedSizeHint();
+}
 
-        model_->insertRow( model_->rowCount(), item );
+void PredefinedFiltersComboBox::showPopup()
+{
+    FilterFavoritesModel::instance().synchronizeFromStorage();
+
+    view()->setTextElideMode( Qt::ElideNone );
+    view()->setHorizontalScrollBarPolicy( Qt::ScrollBarAsNeeded );
+    view()->setHorizontalScrollMode( QAbstractItemView::ScrollPerPixel );
+
+    QStyleOptionViewItem itemOption;
+    itemOption.initFrom( view() );
+    itemOption.font = view()->font();
+
+    int contentWidth = 0;
+    for ( int row = 0; row < model()->rowCount( rootModelIndex() ); ++row ) {
+        const auto index = model()->index( row, modelColumn(), rootModelIndex() );
+        if ( index.isValid() ) {
+            contentWidth
+                = std::max( contentWidth,
+                            view()->itemDelegate()->sizeHint( itemOption, index ).width() );
+        }
     }
-}
 
-void PredefinedFiltersComboBox::collectFilters()
-{
-    if ( ignoreCollecting_ ) {
+    const int frameWidth = style()->pixelMetric( QStyle::PM_DefaultFrameWidth, nullptr, this );
+    const int scrollbarWidth
+        = count() > maxVisibleItems()
+            ? style()->pixelMetric( QStyle::PM_ScrollBarExtent, nullptr, view() )
+            : 0;
+    const int desiredWidth
+        = std::max( width(), contentWidth + scrollbarWidth + 2 * frameWidth );
+
+    const QPoint popupAnchor = mapToGlobal( rect().center() );
+    QScreen* screen = QGuiApplication::screenAt( popupAnchor );
+    if ( screen == nullptr ) {
+        screen = QGuiApplication::primaryScreen();
+    }
+
+    QComboBox::showPopup();
+
+    QWidget* const popup = view()->window();
+    if ( popup == nullptr ) {
         return;
     }
 
-    QList<PredefinedFilter> selectedPatterns;
-    const auto item = model_->item( currentIndex() );
-    if ( !item || currentIndex() < 0 ) {
+    const auto updateHorizontalScrollRange = [ this, contentWidth ] {
+        view()->doItemsLayout();
+        auto* const scrollBar = view()->horizontalScrollBar();
+        const int viewportWidth = view()->viewport()->width();
+        scrollBar->setPageStep( viewportWidth );
+        scrollBar->setRange( 0, std::max( 0, contentWidth - viewportWidth ) );
+    };
+
+    if ( screen == nullptr ) {
+        popup->resize( desiredWidth, popup->height() );
+        updateHorizontalScrollRange();
         return;
     }
 
-    selectedPatterns.append(
-        { item->text(), item->data( PatternRole ).toString(), item->data( RegexRole ).toBool() } );
+    const QRect available = screen->availableGeometry();
+    const int popupWidth = std::min( desiredWidth, available.width() );
+    const int popupHeight = std::min( popup->height(), available.height() );
+    QRect popupGeometry = popup->geometry();
+    popupGeometry.setSize( QSize( popupWidth, popupHeight ) );
+    popupGeometry.moveLeft( std::max(
+        available.left(),
+        std::min( popupGeometry.left(), available.right() - popupWidth + 1 ) ) );
+    popupGeometry.moveTop( std::max(
+        available.top(),
+        std::min( popupGeometry.top(), available.bottom() - popupHeight + 1 ) ) );
+    popup->setGeometry( popupGeometry );
+    updateHorizontalScrollRange();
+}
 
-    Q_EMIT filterChanged( selectedPatterns );
+QSize PredefinedFiltersComboBox::closedSizeHint() const
+{
+    const QString placeholder = tr( "Filter favorites" );
+    const QFontMetrics metrics( font() );
+    const int maximumTextWidth
+        = metrics.horizontalAdvance( QString( MaximumClosedWidthInEms, QLatin1Char( 'M' ) ) );
+    const QSize textSize( std::min( metrics.horizontalAdvance( placeholder ), maximumTextWidth ),
+                          metrics.height() );
 
+    QStyleOptionComboBox option;
+    initStyleOption( &option );
+    option.currentText = placeholder;
+    option.currentIcon = {};
+    return style()->sizeFromContents( QStyle::CT_ComboBox, &option, textSize, this );
+}
+
+void PredefinedFiltersComboBox::collectFilter( int index )
+{
+    const QModelIndex modelIndex = model()->index( index, modelColumn(), rootModelIndex() );
+    if ( modelIndex.isValid() ) {
+        QList<PredefinedFilter> selectedFilters;
+        selectedFilters.append(
+            { model()->data( modelIndex, FilterFavoritesModel::NameRole ).toString(),
+              model()->data( modelIndex, FilterFavoritesModel::PatternRole ).toString(),
+              model()->data( modelIndex, FilterFavoritesModel::RegexRole ).toBool() } );
+        Q_EMIT filterChanged( selectedFilters );
+    }
+
+    resetSelection();
+}
+
+void PredefinedFiltersComboBox::resetSelection()
+{
     QSignalBlocker blocker( this );
     setCurrentIndex( -1 );
 }

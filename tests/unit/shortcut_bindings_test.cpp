@@ -21,10 +21,35 @@
 
 #include <QKeySequence>
 #include <QString>
+#include <QToolButton>
 
 #include <algorithm>
 
+#include "quickfindwidget.h"
 #include "shortcuts.h"
+
+namespace {
+QKeySequence normalizedRuntimeSequence( const QKeySequence& sequence )
+{
+    return QKeySequence( sequence.toString( QKeySequence::NativeText ), QKeySequence::NativeText );
+}
+
+bool isExactRuntimeMatch( const QKeySequence& left, const QKeySequence& right )
+{
+    const auto normalizedLeft = normalizedRuntimeSequence( left );
+    const auto normalizedRight = normalizedRuntimeSequence( right );
+    return normalizedLeft.matches( normalizedRight ) == QKeySequence::ExactMatch
+           && normalizedRight.matches( normalizedLeft ) == QKeySequence::ExactMatch;
+}
+
+bool containsExactRuntimeMatch( const QStringList& bindings, const QKeySequence& expected )
+{
+    return std::any_of( bindings.cbegin(), bindings.cend(), [ &expected ]( const auto& binding ) {
+        return isExactRuntimeMatch(
+            QKeySequence( binding, QKeySequence::PortableText ), expected );
+    } );
+}
+} // namespace
 
 TEST_CASE( "Shortcut bindings: disconnect and reconnect source have defaults" )
 {
@@ -178,6 +203,66 @@ TEST_CASE( "Shortcut bindings: open from clipboard does not steal text paste" )
     }
 }
 
+TEST_CASE( "Shortcut bindings: Go to Line is the only normalized Ctrl+G runtime owner" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+    const auto ctrlG = QKeySequence( QStringLiteral( "Ctrl+G" ), QKeySequence::PortableText );
+
+    const auto jumpToLine = shortcuts.find( ShortcutAction::LogViewJumpToLine );
+    REQUIRE( jumpToLine != shortcuts.end() );
+    CHECK( jumpToLine->second.keySequence
+           == QStringList{ ctrlG.toString( QKeySequence::PortableText ) } );
+
+    std::vector<std::string> ctrlGOwners;
+    for ( const auto& [ action, shortcut ] : shortcuts ) {
+        if ( containsExactRuntimeMatch( shortcut.keySequence, ctrlG ) ) {
+            ctrlGOwners.push_back( action );
+        }
+    }
+
+    REQUIRE( ctrlGOwners.size() == 1 );
+    CHECK( ctrlGOwners.front() == ShortcutAction::LogViewJumpToLine );
+
+    const auto findNext = shortcuts.find( ShortcutAction::LogViewQfForward );
+    REQUIRE( findNext != shortcuts.end() );
+    REQUIRE_FALSE( findNext->second.keySequence.isEmpty() );
+    CHECK_FALSE( containsExactRuntimeMatch( findNext->second.keySequence, ctrlG ) );
+
+    const auto f3 = QKeySequence( Qt::Key_F3 );
+    CHECK( containsExactRuntimeMatch( findNext->second.keySequence, f3 ) );
+
+    for ( auto left = findNext->second.keySequence.cbegin();
+          left != findNext->second.keySequence.cend(); ++left ) {
+        for ( auto right = std::next( left ); right != findNext->second.keySequence.cend();
+              ++right ) {
+            CHECK_FALSE( isExactRuntimeMatch(
+                QKeySequence( *left, QKeySequence::PortableText ),
+                QKeySequence( *right, QKeySequence::PortableText ) ) );
+        }
+    }
+}
+
+TEST_CASE( "QuickFind next button uses the first safe Find Next binding" )
+{
+    const auto& shortcuts = ShortcutAction::defaultShortcutList();
+    const auto findNext = shortcuts.find( ShortcutAction::LogViewQfForward );
+    REQUIRE( findNext != shortcuts.end() );
+    REQUIRE_FALSE( findNext->second.keySequence.isEmpty() );
+
+    QuickFindWidget quickFind;
+    const auto buttons = quickFind.findChildren<QToolButton*>();
+    const auto nextButton = std::find_if( buttons.cbegin(), buttons.cend(), []( const auto* button ) {
+        return button->text() == QStringLiteral( "Next" );
+    } );
+    REQUIRE( nextButton != buttons.cend() );
+
+    const auto ctrlG = QKeySequence( QStringLiteral( "Ctrl+G" ), QKeySequence::PortableText );
+    CHECK_FALSE( isExactRuntimeMatch( ( *nextButton )->shortcut(), ctrlG ) );
+    CHECK( isExactRuntimeMatch(
+        ( *nextButton )->shortcut(),
+        QKeySequence( findNext->second.keySequence.front(), QKeySequence::PortableText ) ) );
+}
+
 TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shortcuts" )
 {
     const auto& shortcuts = ShortcutAction::defaultShortcutList();
@@ -204,8 +289,8 @@ TEST_CASE( "Shortcut bindings: no duplicate key bindings across all default shor
                                 commandShortcutModifier() + "+Shift+8",
                                 commandShortcutModifier() + "+Shift+9",
                                 commandShortcutModifier() + "+Shift+D",
-                                commandShortcutModifier() + "+Shift+R",
-                                "Ctrl+Tab", "Ctrl+Shift+Tab" };
+                                commandShortcutModifier() + "+Shift+R", "Ctrl+Tab",
+                                "Ctrl+Shift+Tab" };
 
     for ( const auto& key : keysToCheck ) {
         DYNAMIC_SECTION( "Key " << key.toStdString() << " has at most one binding" )

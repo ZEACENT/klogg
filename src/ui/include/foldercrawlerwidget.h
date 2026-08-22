@@ -308,11 +308,7 @@ class FolderCrawlerWidget : public QWidget,
     // loaded into currentMainData_. Folder mode uses an explicit match-line list
     // (no LogFilteredData), so this is a pure else-branch on the Overview.
     void refreshFileOverview( const QString& filePath );
-    // Filter favorites + predefined filters (mirror CrawlerWidget; the host owns
-    // the dialogs + the shared PredefinedFiltersCollection persistence).
-    void saveAsFavorite();
     void updatePredefinedFiltersWidget();
-    void reloadPredefinedFilters() const;
     // Search-history context-menu actions (parity with CrawlerWidget): the
     // toolbar emits clearHistoryRequested / editHistoryRequested; the host owns
     // the shared SavedSearches + dialogs.

@@ -25,7 +25,6 @@
 #include <QDir>
 #include <QFontMetrics>
 #include <QInputDialog>
-#include <QMessageBox>
 #include <QSpinBox>
 #include <QStringListModel>
 #include <QTextCodec>
@@ -47,7 +46,6 @@
 #include "abstractlogview.h"
 #include "configuration.h"
 #include "crawlershortcuts.h"
-#include "filterdiffdialog.h"
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
 #include "foldersearchresults.h"
@@ -58,7 +56,6 @@
 #include "overviewwidget.h"
 #include "predefinedfilters.h"
 #include "predefinedfilterscombobox.h"
-#include "savefavoritedialog.h"
 #include "quickfindpattern.h"
 #include "regularexpression.h"
 #include "regularexpressionpattern.h"
@@ -398,11 +395,8 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
             }
         }
     } );
-    // Filter favorites + predefined filters mirror CrawlerWidget: the host owns
-    // the dialogs/persistence; selecting a predefined filter applies its pattern
-    // (+regex) to the toolbar so the next search uses it.
-    connect( searchToolbar_, &SearchToolbar::saveFavoriteRequested, this,
-             &FolderCrawlerWidget::saveAsFavorite );
+    // Selecting a predefined filter applies its pattern (+regex) to the toolbar
+    // so the next search uses it.
     // Predefined-filter dropdown selection: update the predefined-filters state
     // only (must NOT toggle auto-refresh tracking). Mirrors
     // crawlerwidget.cpp:1348-1349; without this the combo's currentIndex is not
@@ -484,8 +478,6 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     // MainWindow::optionsChanged (the folder's applyConfiguration is connected
     // to optionsChanged by MainWindow::currentTabChanged).
     applyConfiguration();
-    // Populate the predefined-filters combo from the shared collection.
-    reloadPredefinedFilters();
 }
 
 FolderCrawlerWidget::~FolderCrawlerWidget()
@@ -931,97 +923,10 @@ void FolderCrawlerWidget::unmarkMainViewLine( LineNumber line )
     refreshAllPanesForMarks();
 }
 
-void FolderCrawlerWidget::saveAsFavorite()
-{
-    // Mirrors CrawlerWidget::saveAsFavorite: folder search uses the same shared
-    // PredefinedFiltersCollection + dialogs as single-file, so saved favorites
-    // are available across tab kinds. (The duplication is a candidate for
-    // extraction into SearchToolbar.)
-    const auto currentText = searchToolbar_->currentSearchText().trimmed();
-    if ( currentText.isEmpty() ) {
-        return;
-    }
-
-    auto filters = PredefinedFiltersCollection::getSynced().getFilters();
-    const auto useRegex = searchToolbar_->isUseRegexp();
-
-    SaveFavoriteDialog dialog( currentText, filters, this );
-    if ( dialog.exec() != QDialog::Accepted ) {
-        return;
-    }
-
-    const auto trimmedName = dialog.favoriteName();
-    if ( trimmedName.isEmpty() ) {
-        return;
-    }
-
-    if ( dialog.isCreateNew() ) {
-        auto existing = std::find_if(
-            filters.begin(), filters.end(), [ &trimmedName ]( const auto& filter ) {
-                return filter.name.compare( trimmedName, Qt::CaseInsensitive ) == 0;
-            } );
-
-        if ( existing != filters.end() ) {
-            const auto isSamePattern = ( existing->pattern == currentText );
-            const auto isSameRegex = ( existing->useRegex == useRegex );
-            if ( isSamePattern && isSameRegex ) {
-                QMessageBox::information(
-                    this, tr( "klogg" ),
-                    tr( "Favorite \"%1\" already exists with the same content." ).arg( trimmedName ) );
-                return;
-            }
-
-            FilterDiffDialog diffDialog( trimmedName, *existing, currentText, useRegex, this );
-            if ( diffDialog.exec() != QDialog::Accepted ) {
-                return;
-            }
-
-            existing->pattern = currentText;
-            existing->useRegex = useRegex;
-        }
-        else {
-            filters.push_back( { trimmedName, currentText, useRegex } );
-        }
-    }
-    else {
-        const int index = dialog.selectedExistingIndex();
-        if ( index < 0 || index >= filters.size() ) {
-            return;
-        }
-
-        auto& existing = filters[ index ];
-
-        const auto isSamePattern = ( existing.pattern == currentText );
-        const auto isSameRegex = ( existing.useRegex == useRegex );
-        if ( isSamePattern && isSameRegex ) {
-            QMessageBox::information(
-                this, tr( "klogg" ),
-                tr( "Favorite \"%1\" already has the same content." ).arg( existing.name ) );
-            return;
-        }
-
-        FilterDiffDialog diffDialog( existing.name, existing, currentText, useRegex, this );
-        if ( diffDialog.exec() != QDialog::Accepted ) {
-            return;
-        }
-
-        existing.pattern = currentText;
-        existing.useRegex = useRegex;
-    }
-
-    PredefinedFiltersCollection::getSynced().saveToStorage( filters );
-    reloadPredefinedFilters();
-}
-
 void FolderCrawlerWidget::updatePredefinedFiltersWidget()
 {
     searchToolbar_->predefinedFilters()->updateSearchPattern( searchToolbar_->currentSearchText(),
                                                               searchToolbar_->isBoolean() );
-}
-
-void FolderCrawlerWidget::reloadPredefinedFilters() const
-{
-    searchToolbar_->predefinedFilters()->populatePredefinedFilters();
 }
 
 void FolderCrawlerWidget::applyConfiguration()
@@ -1062,12 +967,6 @@ void FolderCrawlerWidget::applyConfiguration()
             pane->view->updateFont( font );
         }
     }
-
-    // Re-sync the predefined-filters combo from the shared collection, mirroring
-    // CrawlerWidget::applyConfiguration (crawlerwidget.cpp:866). A filter saved
-    // via another tab (or the options dialog) must appear here on the next
-    // optionsChanged broadcast without restarting klogg.
-    reloadPredefinedFilters();
 
     registerShortcuts();
 }

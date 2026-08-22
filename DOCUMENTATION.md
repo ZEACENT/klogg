@@ -87,7 +87,7 @@ view mode to show either only the lines matching search pattern or only marked l
 
 Marks also appear as blue lines in the match overview.
 
-It is possible to quickly jump to a specific line using `Ctrl+L` shortcut.
+It is possible to quickly jump to a specific line using the `Ctrl+G` shortcut.
 
 *klogg* uses Vectorscan library to perform regular expressions search. Vectorscan is very
 fast, but it doesn't support some patterns, most notably any lookahead is not supported
@@ -129,10 +129,10 @@ download the file to a temporary directory and open it from there.
 *klogg* saves a history of recent opened files. Up to 5 recent files are
 available from the `File` menu.
 
-#### Favorites
+#### Favorite Files
 
-Opened files can be added to the `Favorites` menu either from
-`Favorites->Add to Favorites` or from the toolbar.
+Opened files can be added to the `Favorite Files` menu using
+`Favorite Files -> Add Current File` or the toolbar.
 
 This menu is used to provide fast access to files that are opened less
 often and don't end up in the recent files section.
@@ -146,7 +146,7 @@ exploring.
 #### Switching between opened files
 
 Switching from one opened file to another can be done from the
-`View->Opened files` menu or by using the `Ctrl+Shift+O` shortcut 
+`View -> Opened Files` menu or by using the `Ctrl+Shift+O` shortcut
 which displays special dialogue to choose between opened files.
 
 ### Encodings

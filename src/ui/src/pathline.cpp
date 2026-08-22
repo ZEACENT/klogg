@@ -39,13 +39,13 @@ void PathLine::contextMenuEvent( QContextMenuEvent* event )
 {
     QMenu menu( this );
 
-    auto copyFullPath = menu.addAction( tr( "Copy full path" ) );
-    auto copyFileName = menu.addAction( tr( "Copy file name" ) );
-    auto openContainingFolder = menu.addAction( tr( "Open containing folder" ) );
+    auto copyFullPath = menu.addAction( tr( "Copy Full Path" ) );
+    auto copyFileName = menu.addAction( tr( "Copy File Name" ) );
+    auto openContainingFolder = menu.addAction( tr( "Open Containing Folder" ) );
     menu.addSeparator();
     auto copySelection = menu.addAction( tr( "Copy" ) );
     menu.addSeparator();
-    auto selectAll = menu.addAction( tr( "Select all" ) );
+    auto selectAll = menu.addAction( tr( "Select All" ) );
 
     connect( copyFullPath, &QAction::triggered, this,
              [ this ]( auto ) { sendTextToClipboard( this->path_ ); } );
