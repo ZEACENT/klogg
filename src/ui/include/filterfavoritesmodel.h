@@ -20,6 +20,8 @@
 #ifndef FILTERFAVORITESMODEL_H
 #define FILTERFAVORITESMODEL_H
 
+#include <cstdint>
+
 #include <QAbstractListModel>
 #include <QByteArray>
 #include <QHash>
@@ -33,7 +35,9 @@ class FilterFavoritesModel final : public QAbstractListModel {
   public:
     using Collection = PredefinedFiltersCollection::Collection;
 
-    enum Roles {
+    // Qt model roles are consumed by int-based APIs and switch statements.
+    // NOLINTNEXTLINE(cppcoreguidelines-use-enum-class)
+    enum Roles : std::uint16_t {
         NameRole = Qt::UserRole + 1,
         PatternRole,
         RegexRole,
@@ -41,8 +45,11 @@ class FilterFavoritesModel final : public QAbstractListModel {
 
     static FilterFavoritesModel& instance();
 
+    using CommitResult = PredefinedFiltersCollection::CommitResult;
+
     Collection favorites() const;
-    void replaceFavorites( const Collection& favorites );
+    CommitResult replaceFavorites( const Collection& favorites );
+    CommitResult replaceFavorites( const Collection& expected, const Collection& favorites );
     void synchronizeFromStorage();
 
     int rowCount( const QModelIndex& parent = QModelIndex{} ) const override;
@@ -51,6 +58,7 @@ class FilterFavoritesModel final : public QAbstractListModel {
 
   private:
     explicit FilterFavoritesModel( QObject* parent = nullptr );
+    void publishFavorites( const Collection& favorites );
 
     Collection favorites_;
 };

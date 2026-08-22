@@ -696,6 +696,16 @@
         <source>Unable to export filter favorites to the selected file.</source>
         <translation>Unable to export filter favorites to the selected file.</translation>
     </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1854"/>
+        <source>Filter favorites changed while the import was being applied. Try again.</source>
+        <translation>Filter favorites changed while the import was being applied. Try again.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1860"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>Unable to save filter favorites. Try again.</translation>
+    </message>
 </context>
 <context>
     <name>OptionsDialog</name>
@@ -1225,6 +1235,11 @@
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="349"/>
         <source>Unable to export filter favorites to the selected file.</source>
         <translation>Unable to export filter favorites to the selected file.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="204"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>Unable to save filter favorites. Try again.</translation>
     </message>
 </context>
 <context>
@@ -2213,8 +2228,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="13"/>
-        <source>Open Recent</source>
-        <translation>Open Recent</translation>
+        <source>Open &amp;Recent</source>
+        <translation>Open &amp;Recent</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="14"/>
@@ -2289,14 +2304,19 @@
         <translation>Favorite &quot;%1&quot; changed while the save dialog was open. Try again.</translation>
     </message>
     <message>
-        <location filename="../../ui/src/searchtoolbar.cpp" line="539"/>
-        <source>Favorite &quot;%1&quot; already exists with the same content.</source>
-        <translation>Favorite &quot;%1&quot; already exists with the same content.</translation>
-    </message>
-    <message>
         <location filename="../../ui/src/searchtoolbar.cpp" line="540"/>
         <source>Favorite &quot;%1&quot; already has the same content.</source>
         <translation>Favorite &quot;%1&quot; already has the same content.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="530"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>Unable to save filter favorites. Try again.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
+        <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
+        <translation>A favorite named &quot;%1&quot; already exists. Choose a different name.</translation>
     </message>
 </context>
 </TS>

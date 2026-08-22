@@ -10,7 +10,7 @@ using namespace klogg::mainwindow;
 
 // menu
 const char* menu::fileTitle = QT_TR_NOOP( "&File" );
-const char* menu::recentFilesTitle = QT_TR_NOOP( "Open Recent" );
+const char* menu::recentFilesTitle = QT_TR_NOOP( "Open &Recent" );
 const char* menu::recentFoldersTitle = QT_TR_NOOP( "Open Recent Fol&der" );
 const char* menu::editTitle = QT_TR_NOOP( "&Edit" );
 const char* menu::saveCurrentLiveLogTitle = QT_TR_NOOP( "Save Live Log As" );

@@ -38,32 +38,44 @@ FilterFavoritesModel::Collection FilterFavoritesModel::favorites() const
     return favorites_;
 }
 
-void FilterFavoritesModel::replaceFavorites( const Collection& favorites )
+FilterFavoritesModel::CommitResult FilterFavoritesModel::replaceFavorites(
+    const Collection& favorites )
 {
-    if ( favorites_ != favorites ) {
-        beginResetModel();
-        favorites_ = favorites;
-        endResetModel();
-    }
+    return replaceFavorites( favorites_, favorites );
+}
 
-    // The caller's collection is authoritative. Do not synchronize the model
-    // away from it when another process changed storage; only inspect storage
-    // and repair it when needed. An identical model+store remains a no-op.
-    const auto storedFavorites = PredefinedFiltersCollection::getSynced().getFilters();
-    if ( storedFavorites != favorites ) {
-        PredefinedFiltersCollection::get().saveToStorage( favorites );
+FilterFavoritesModel::CommitResult FilterFavoritesModel::replaceFavorites(
+    const Collection& expected, const Collection& favorites )
+{
+    const auto result = PredefinedFiltersCollection::commit( expected, favorites );
+    switch ( result.status ) {
+    case PredefinedFiltersCollection::CommitStatus::Success:
+    case PredefinedFiltersCollection::CommitStatus::Unchanged:
+    case PredefinedFiltersCollection::CommitStatus::Conflict:
+    case PredefinedFiltersCollection::CommitStatus::WriteError:
+        publishFavorites( result.storedFilters );
+        break;
+    case PredefinedFiltersCollection::CommitStatus::InvalidReplacement:
+    case PredefinedFiltersCollection::CommitStatus::LockError:
+    case PredefinedFiltersCollection::CommitStatus::StorageError:
+        break;
     }
+    return result;
 }
 
 void FilterFavoritesModel::synchronizeFromStorage()
 {
-    const auto storedFavorites = PredefinedFiltersCollection::getSynced().getFilters();
-    if ( favorites_ == storedFavorites ) {
+    publishFavorites( PredefinedFiltersCollection::getSynced().getFilters() );
+}
+
+void FilterFavoritesModel::publishFavorites( const Collection& favorites )
+{
+    if ( favorites_ == favorites ) {
         return;
     }
 
     beginResetModel();
-    favorites_ = storedFavorites;
+    favorites_ = favorites;
     endResetModel();
 }
 

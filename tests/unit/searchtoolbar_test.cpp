@@ -41,7 +41,6 @@
 #include <QGuiApplication>
 #include <QLineEdit>
 #include <QMap>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScreen>
@@ -67,6 +66,7 @@
 #include "regularexpression.h"
 #include "regularexpressionpattern.h"
 #include "searchtoolbar.h"
+#include "uimessage.h"
 
 namespace {
 // Helper: drive the widget through the Qt event loop so queued autoRun searches
@@ -93,7 +93,6 @@ class FilterFavoritesRestoreGuard final {
 
     explicit FilterFavoritesRestoreGuard( const Collection& initialFavorites )
         : model_( FilterFavoritesModel::instance() )
-        , savedModelFavorites_( model_.favorites() )
     {
         auto& settings = PersistentInfo::getSettings( app_settings{} );
         settings.sync();
@@ -114,10 +113,6 @@ class FilterFavoritesRestoreGuard final {
 
     ~FilterFavoritesRestoreGuard()
     {
-        // Restore the process-wide observable model, then put the settings group
-        // back byte-for-byte logically (all keys and values, including order).
-        model_.replaceFavorites( savedModelFavorites_ );
-
         auto& settings = PersistentInfo::getSettings( app_settings{} );
         settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
         settings.remove( QString{} );
@@ -129,6 +124,7 @@ class FilterFavoritesRestoreGuard final {
 
         auto& collection = PredefinedFiltersCollection::getSynced();
         collection.setFilters( savedStoredFavorites_ );
+        model_.synchronizeFromStorage();
     }
 
     FilterFavoritesRestoreGuard( const FilterFavoritesRestoreGuard& ) = delete;
@@ -138,7 +134,6 @@ class FilterFavoritesRestoreGuard final {
 
   private:
     FilterFavoritesModel& model_;
-    Collection savedModelFavorites_;
     Collection savedStoredFavorites_;
     QMap<QString, QVariant> savedSettingsValues_;
 };
@@ -276,50 +271,22 @@ void scheduleOverwriteFavoriteAcceptance( QObject* context, const QString& targe
                             existing->setCurrentIndex( targetIndex );
                             beforeAccept();
 
-                            QTimer::singleShot( 0, Qt::PreciseTimer, context, [ &result ] {
-                                auto* const active = QApplication::activeModalWidget();
-                                if ( auto* const warning = qobject_cast<QMessageBox*>( active ) ) {
-                                    result.followupDialogFound = true;
-                                    result.conflictWarningFound = true;
-                                    warning->accept();
-                                    return;
-                                }
-                                if ( auto* const followup = qobject_cast<QDialog*>( active ) ) {
-                                    result.followupDialogFound = true;
-                                    followup->accept();
-                                }
-                            } );
+                            QObject::connect(
+                                dialog, &QDialog::finished, context,
+                                [ context, &result ] {
+                                    QTimer::singleShot(
+                                        1, Qt::PreciseTimer, context, [ &result ] {
+                                            if ( auto* const followup = qobject_cast<QDialog*>(
+                                                     QApplication::activeModalWidget() ) ) {
+                                                result.followupDialogFound = true;
+                                                followup->accept();
+                                            }
+                                        } );
+                                } );
                             ok->click();
                         } );
 }
 } // namespace
-
-TEST_CASE( "SearchToolbar favorites guard restores model and storage independently",
-           "[searchtoolbar][filter-favorites]" )
-{
-    FilterFavoritesRestoreGuard outerGuard( {} );
-    auto& model = outerGuard.model();
-    const auto modelBefore
-        = oneFavorite( QStringLiteral( "Memory" ), QStringLiteral( "memory-pattern" ) );
-    const auto storageBefore
-        = oneFavorite( QStringLiteral( "Storage" ), QStringLiteral( "storage-pattern" ) );
-    model.replaceFavorites( modelBefore );
-    replaceStoredFavorites( storageBefore );
-
-    {
-        FilterFavoritesRestoreGuard innerGuard(
-            oneFavorite( QStringLiteral( "Inner" ), QStringLiteral( "inner-pattern" ) ) );
-        innerGuard.model().replaceFavorites( {} );
-        replaceStoredFavorites( oneFavorite( QStringLiteral( "Temporary" ),
-                                             QStringLiteral( "temporary-pattern" ) ) );
-    }
-
-    requireFavorite( model.favorites(), QStringLiteral( "Memory" ),
-                     QStringLiteral( "memory-pattern" ), false );
-    const auto stored = PredefinedFiltersCollection::getSynced().getFilters();
-    requireFavorite( stored, QStringLiteral( "Storage" ),
-                     QStringLiteral( "storage-pattern" ), false );
-}
 
 TEST_CASE( "SearchToolbar constructs with null SavedSearches (folder mode)",
            "[searchtoolbar]" )
@@ -896,6 +863,38 @@ TEST_CASE( "SearchToolbar star and context action persist a favorite across tool
     SECTION( "Add to Filter Favorites action" ) { exerciseSave( true ); }
 }
 
+TEST_CASE( "SearchToolbar reports duplicate names separately from concurrency conflicts",
+           "[searchtoolbar][filter-favorites]" )
+{
+    const auto initial
+        = oneFavorite( QStringLiteral( "Duplicate" ), QStringLiteral( "old-pattern" ) );
+    FilterFavoritesRestoreGuard restore( initial );
+    auto& model = restore.model();
+    SearchToolbar toolbar( nullptr, nullptr );
+    toolbar.show();
+    REQUIRE( processEventsUntil( [ & ] { return toolbar.isVisible(); } ) );
+    toolbar.searchLineEdit()->setEditText( QStringLiteral( "new-pattern" ) );
+
+    FavoriteModalResult modal;
+    QString warningText;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ &warningText ]( klogg::ui::MessageKind kind, QWidget*, const QString&,
+                          const QString& text ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                warningText = text;
+            }
+        } };
+    scheduleCreateFavoriteAcceptance( &toolbar, QStringLiteral( "duplicate" ), modal );
+    toolbar.favoriteFilterButton()->click();
+
+    REQUIRE( modal.error.isEmpty() );
+    REQUIRE( modal.saveDialogFound );
+    REQUIRE( warningText.contains( QStringLiteral( "already exists" ) ) );
+    REQUIRE_FALSE( warningText.contains( QStringLiteral( "changed while" ) ) );
+    REQUIRE( model.favorites() == initial );
+    REQUIRE( PredefinedFiltersCollection::getSynced().getFilters() == initial );
+}
+
 TEST_CASE( "SearchToolbar favorite creation merges concurrent unrelated favorites",
            "[searchtoolbar][filter-favorites]" )
 {
@@ -959,6 +958,13 @@ TEST_CASE( "SearchToolbar warns when an overwrite target vanishes during the mod
     const FilterFavoritesModel::Collection concurrent{
         { QStringLiteral( "Unrelated" ), QStringLiteral( "unrelated-pattern" ), false } };
     FavoriteModalResult modal;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ &modal ]( klogg::ui::MessageKind kind, QWidget*, const QString&, const QString& ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                modal.followupDialogFound = true;
+                modal.conflictWarningFound = true;
+            }
+        } };
     scheduleOverwriteFavoriteAcceptance(
         &first, QStringLiteral( "Target" ), modal,
         [ & ] { replaceStoredFavorites( concurrent ); } );
@@ -979,6 +985,42 @@ TEST_CASE( "SearchToolbar warns when an overwrite target vanishes during the mod
     REQUIRE( QApplication::activeModalWidget() == nullptr );
 }
 
+TEST_CASE( "SearchToolbar does not rebind a vanished duplicate-name overwrite target",
+           "[searchtoolbar][filter-favorites]" )
+{
+    FilterFavoritesModel::Collection initial{
+        { QStringLiteral( "Duplicate" ), QStringLiteral( "first-pattern" ), false },
+        { QStringLiteral( "duplicate" ), QStringLiteral( "second-pattern" ), true },
+        { QStringLiteral( "Unrelated" ), QStringLiteral( "unrelated-pattern" ), false } };
+    FilterFavoritesRestoreGuard restore( initial );
+    auto& model = restore.model();
+    SearchToolbar toolbar( nullptr, nullptr );
+    toolbar.show();
+    REQUIRE( processEventsUntil( [ & ] { return toolbar.isVisible(); } ) );
+    toolbar.searchLineEdit()->setEditText( QStringLiteral( "replacement-pattern" ) );
+
+    const FilterFavoritesModel::Collection concurrent{
+        initial.at( 0 ), initial.at( 2 ) };
+    FavoriteModalResult modal;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ &modal ]( klogg::ui::MessageKind kind, QWidget*, const QString&, const QString& ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                modal.followupDialogFound = true;
+                modal.conflictWarningFound = true;
+            }
+        } };
+    scheduleOverwriteFavoriteAcceptance(
+        &toolbar, QStringLiteral( "Duplicate" ), modal,
+        [ & ] { replaceStoredFavorites( concurrent ); }, 1 );
+    toolbar.favoriteFilterButton()->click();
+
+    REQUIRE( modal.error.isEmpty() );
+    REQUIRE( modal.saveDialogFound );
+    REQUIRE( modal.conflictWarningFound );
+    REQUIRE( model.favorites() == concurrent );
+    REQUIRE( PredefinedFiltersCollection::getSynced().getFilters() == concurrent );
+}
+
 TEST_CASE( "SearchToolbar overwrite preserves the selected duplicate-name target",
            "[searchtoolbar][filter-favorites]" )
 {
@@ -996,6 +1038,13 @@ TEST_CASE( "SearchToolbar overwrite preserves the selected duplicate-name target
     first.searchLineEdit()->setEditText( QStringLiteral( "replacement-pattern" ) );
 
     FavoriteModalResult modal;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ &modal ]( klogg::ui::MessageKind kind, QWidget*, const QString&, const QString& ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                modal.followupDialogFound = true;
+                modal.conflictWarningFound = true;
+            }
+        } };
     scheduleOverwriteFavoriteAcceptance( &first, QStringLiteral( "Duplicate" ), modal, [] {}, 1 );
     first.favoriteFilterButton()->click();
 

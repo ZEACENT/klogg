@@ -2588,22 +2588,32 @@ void AbstractLogView::createMenu()
     // No text as this action title depends on the type of selection
     connect( copyAction_, &QAction::triggered, this, [ this ]( auto ) { this->copy(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     copyWithLineNumbersAction_ = new QAction( tr( "Copy with Line Numbers" ), this );
     // No text as this action title depends on the type of selection
     connect( copyWithLineNumbersAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->copyWithLineNumbers(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     markAction_ = new QAction( tr( "Add Line Mark" ), this );
     connect( markAction_, &QAction::triggered, this, [ this ]( auto ) { this->markSelected(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     deleteMarkAction_ = new QAction( tr( "Delete Line Mark" ), this );
     connect( deleteMarkAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->deleteMarksSelected(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     saveToFileAction_ = new QAction( tr( "Save to File..." ), this );
     connect( saveToFileAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->saveToFile(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     saveSelectedToFileAction_ = new QAction( tr( "Save Selected to File..." ), this );
     connect( saveSelectedToFileAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->saveSelectedToFile(); } );
@@ -2611,64 +2621,90 @@ void AbstractLogView::createMenu()
     // For '#' and '*', shortcuts doesn't seem to work but
     // at least it displays them in the menu, we manually handle those keys
     // as keys event anyway (in keyPressEvent).
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     findNextAction_ = new QAction( tr( "Find &Next" ), this );
     findNextAction_->setShortcut( Qt::Key_Asterisk );
     findNextAction_->setStatusTip( tr( "Find the next occurrence" ) );
     connect( findNextAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->findNextSelected(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     findPreviousAction_ = new QAction( tr( "Find &Previous" ), this );
     findPreviousAction_->setShortcut( tr( "/" ) );
     findPreviousAction_->setStatusTip( tr( "Find the previous occurrence" ) );
     connect( findPreviousAction_, &QAction::triggered,
              [ this ]( auto ) { this->findPreviousSelected(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     replaceSearchAction_ = new QAction( tr( "&Replace Search" ), this );
     replaceSearchAction_->setStatusTip( tr( "Replace the search expression with the selection" ) );
     connect( replaceSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->replaceSearch(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     addToSearchAction_ = new QAction( tr( "&Add to Search" ), this );
     addToSearchAction_->setStatusTip( tr( "Add the selection to the current search" ) );
     connect( addToSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->addToSearch(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     excludeFromSearchAction_ = new QAction( tr( "&Exclude from Search" ), this );
     excludeFromSearchAction_->setStatusTip( tr( "Excludes the selection from search" ) );
     connect( excludeFromSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->excludeFromSearch(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     setSearchStartAction_ = new QAction( tr( "Set Search Start" ), this );
     setSearchStartAction_->setObjectName( QStringLiteral( "setSearchStartAction" ) );
     connect( setSearchStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSearchStart(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     setSearchEndAction_ = new QAction( tr( "Set Search End" ), this );
     setSearchEndAction_->setObjectName( QStringLiteral( "setSearchEndAction" ) );
     connect( setSearchEndAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSearchEnd(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     clearSearchLimitAction_ = new QAction( tr( "Clear Search Limits" ), this );
     clearSearchLimitAction_->setObjectName( QStringLiteral( "clearSearchLimitAction" ) );
     connect( clearSearchLimitAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->clearSearchLimits(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     setSelectionStartAction_ = new QAction( tr( "Set Selection Start" ), this );
     connect( setSelectionStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionStart(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     setSelectionEndAction_ = new QAction( tr( "Set Selection End" ), this );
     connect( setSelectionEndAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionEnd(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     saveDefaultSplitterSizesAction_ = new QAction( tr( "Save Splitter Position" ), this );
     connect( saveDefaultSplitterSizesAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT saveDefaultSplitterSizes(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     sendToScratchpadAction_ = new QAction( tr( "Send to Scratchpad" ), this );
     connect( sendToScratchpadAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT sendSelectionToScratchpad(); } );
 
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     replaceInScratchpadAction_ = new QAction( tr( "Replace Scratchpad" ), this );
     connect( replaceInScratchpadAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );

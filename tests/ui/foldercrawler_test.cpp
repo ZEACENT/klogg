@@ -2253,7 +2253,7 @@ TEST_CASE( "Folder log-view context menu uses app Title Case and semantic ellips
         popupFinished = true;
         menu->close();
     } );
-    QTimer::singleShot( 250, Qt::PreciseTimer, view, [ & ] {
+    QTimer::singleShot( 250, Qt::PreciseTimer, view, [ & ] { // lint-allow: platform-fragile
         if ( !popupFinished ) {
             popupError = QStringLiteral( "Folder log-view context menu watchdog expired" );
             popupFinished = true;

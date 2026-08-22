@@ -420,7 +420,7 @@ TEST_CASE( "TabbedCrawlerWidget context menu uses app Title Case and semantic el
         popupFinished = true;
         menu->close();
     } );
-    QTimer::singleShot( 250, Qt::PreciseTimer, &tabWidget, [ & ] {
+    QTimer::singleShot( 250, Qt::PreciseTimer, &tabWidget, [ & ] { // lint-allow: platform-fragile
         if ( !popupFinished ) {
             popupError = QStringLiteral( "Tabbed context menu watchdog expired" );
             popupFinished = true;

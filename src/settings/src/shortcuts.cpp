@@ -60,7 +60,7 @@ QStringList uniqueKeyBindings( const QStringList& bindings )
 namespace {
 QKeySequence normalizedRuntimeSequence( const QKeySequence& sequence )
 {
-    return QKeySequence( sequence.toString( QKeySequence::NativeText ), QKeySequence::NativeText );
+    return { sequence.toString( QKeySequence::NativeText ), QKeySequence::NativeText };
 }
 
 bool isExactRuntimeMatch( const QKeySequence& left, const QKeySequence& right )
@@ -98,9 +98,9 @@ QStringList findNextShortcutBindings()
         }
     }
 
-    const auto f3 = QKeySequence( Qt::Key_F3 );
-    if ( !containsExactRuntimeMatch( safeBindings, f3 ) ) {
-        safeBindings.push_back( f3.toString( QKeySequence::PortableText ) );
+    const auto f3Sequence = QKeySequence( Qt::Key_F3 );
+    if ( !containsExactRuntimeMatch( safeBindings, f3Sequence ) ) {
+        safeBindings.push_back( f3Sequence.toString( QKeySequence::PortableText ) );
     }
 
     return safeBindings;

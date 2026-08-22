@@ -90,6 +90,8 @@ PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     auto& favoritesModel = FilterFavoritesModel::instance();
     favoritesModel.synchronizeFromStorage();
     setModel( &favoritesModel );
+    // QAbstractItemView takes ownership of the delegate.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     view()->setItemDelegate( new FullTextItemDelegate( view() ) );
 
     connect( this, QOverload<int>::of( &QComboBox::activated ), this,

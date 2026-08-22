@@ -696,6 +696,16 @@
         <source>Unable to export filter favorites to the selected file.</source>
         <translation>無法將篩選器書籤匯出到所選檔案。</translation>
     </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1854"/>
+        <source>Filter favorites changed while the import was being applied. Try again.</source>
+        <translation>套用匯入時篩選收藏已發生變更。請重試。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="1860"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>無法儲存篩選收藏。請重試。</translation>
+    </message>
 </context>
 <context>
     <name>OptionsDialog</name>
@@ -1225,6 +1235,11 @@
         <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="349"/>
         <source>Unable to export filter favorites to the selected file.</source>
         <translation>無法將篩選器書籤匯出到所選檔案。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/predefinedfiltersdialog.cpp" line="204"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>無法儲存篩選收藏。請重試。</translation>
     </message>
 </context>
 <context>
@@ -2213,8 +2228,8 @@
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="13"/>
-        <source>Open Recent</source>
-        <translation>最近開啟檔案</translation>
+        <source>Open &amp;Recent</source>
+        <translation>最近開啟檔案(&amp;R)</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindowtext.cpp" line="14"/>
@@ -2289,14 +2304,19 @@
         <translation>篩選器書籤「%1」在儲存對話框開啟期間已變更。請再試一次。</translation>
     </message>
     <message>
-        <location filename="../../ui/src/searchtoolbar.cpp" line="539"/>
-        <source>Favorite &quot;%1&quot; already exists with the same content.</source>
-        <translation>篩選器書籤「%1」已存在，且內容相同。</translation>
-    </message>
-    <message>
         <location filename="../../ui/src/searchtoolbar.cpp" line="540"/>
         <source>Favorite &quot;%1&quot; already has the same content.</source>
         <translation>篩選器書籤「%1」已有相同內容。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="530"/>
+        <source>Unable to save filter favorites. Try again.</source>
+        <translation>無法儲存篩選收藏。請重試。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
+        <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
+        <translation>名為「%1」的收藏已存在。請選擇其他名稱。</translation>
     </message>
 </context>
 </TS>

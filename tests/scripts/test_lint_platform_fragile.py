@@ -182,6 +182,175 @@ class TestPrivateCurrentCrawlerTest(unittest.TestCase):
             )
 
 
+class TestQMessageBoxInTests(unittest.TestCase):
+    def check(self, text, name="tests/ui/example_test.cpp"):
+        return lint._check_qmessagebox_in_tests(text, Path(name))
+
+    def test_executable_references_are_flagged(self):
+        cases = [
+            'QMessageBox::critical( parent, "failure", error );\n',
+            "QMessageBox messageBox;\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0][0], 1)
+
+    def test_line_and_block_comments_are_ignored(self):
+        text = (
+            "// QMessageBox::critical( parent, title, error );\n"
+            "/* QMessageBox box;\n"
+            "   QMessageBox::warning( parent, title, error ); */\n"
+            "doThing(); // QMessageBox::information( parent, title, text );\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_production_code_is_allowed(self):
+        text = 'QMessageBox::warning( parent, "warning", text );\n'
+        self.assertEqual(
+            self.check(text, name="src/ui/src/optionsdialog.cpp"), []
+        )
+
+    def test_allow_marker_suppresses_only_its_line(self):
+        allowed = (
+            'QMessageBox::warning( parent, "warning", text ); '
+            '// lint-allow: platform-fragile\n'
+        )
+        self.assertEqual(self.check(allowed), [])
+
+        text = allowed + 'QMessageBox::critical( parent, "failure", text );\n'
+        findings = self.check(text)
+        self.assertEqual([line for line, _ in findings], [2])
+
+    def test_includes_strings_and_other_qt_code_are_clean(self):
+        text = (
+            "#include <QMessageBox>\n"
+            'const auto documentation = "QMessageBox::warning";\n'
+            'const auto raw = R"tag(QMessageBox::critical // not code)tag";\n'
+            'const auto multiline = R"tag(first line\n'
+            'QMessageBox::warning is still literal\n'
+            ')tag";\n'
+            "const auto mask = 0xFFFF'FFFF; // QMessageBox::warning\n"
+            "QTimer::singleShot( 0, receiver, callback );\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+
+class TestWatchdogTimerInCatchTests(unittest.TestCase):
+    def check(self, text, name="tests/ui/example_test.cpp"):
+        return lint._check_nonzero_watchdog_timer(text, Path(name))
+
+    def test_nonzero_timer_with_watchdog_literal_is_flagged(self):
+        text = (
+            'TEST_CASE( "loads", "[ui]" )\n'
+            "{\n"
+            "    QTimer::singleShot( 30'000, [] {\n"
+            '        FAIL( "watchdog expired" );\n'
+            "    } );\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_comments_do_not_create_a_watchdog_pair(self):
+        marker_in_comment = (
+            'TEST_CASE( "timer", "[ui]" ) {\n'
+            "    QTimer::singleShot( 25, receiver, callback );\n"
+            '    // FAIL( "watchdog expired" );\n'
+            "}\n"
+        )
+        timer_in_comment = (
+            'TEST_CASE( "marker", "[ui]" ) {\n'
+            "    // QTimer::singleShot( 25, receiver, callback );\n"
+            '    FAIL( "watchdog expired" );\n'
+            "}\n"
+        )
+        self.assertEqual(self.check(marker_in_comment), [])
+        self.assertEqual(self.check(timer_in_comment), [])
+
+    def test_zero_delay_or_unrelated_nonzero_timers_are_clean(self):
+        zero_delay = (
+            'TEST_CASE( "dispatch", "[ui]" ) {\n'
+            "    QTimer::singleShot( 0, receiver, callback );\n"
+            '    INFO( "watchdog expired" );\n'
+            "}\n"
+        )
+        unrelated = (
+            'TEST_CASE( "timer", "[ui]" ) {\n'
+            "    QTimer::singleShot( 25, receiver, callback );\n"
+            '    INFO( "ordinary timeout" );\n'
+            "}\n"
+        )
+        templated_zero = (
+            'TEST_CASE( "dispatch", "[ui]" ) {\n'
+            "    QTimer::singleShot( std::chrono::duration<int, std::milli>{ 0 }, [] {\n"
+            '        FAIL( "watchdog expired" );\n'
+            "    } );\n"
+            "}\n"
+        )
+        character_literal = (
+            'TEST_CASE( "watchdog", "[ui]" ) {\n'
+            "    QTimer::singleShot( 25, [] {\n"
+            "        const auto close = ')';\n"
+            '        FAIL( "watchdog expired" );\n'
+            "    } );\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(zero_delay), [])
+        self.assertEqual(self.check(unrelated), [])
+        self.assertEqual(self.check(templated_zero), [])
+        self.assertEqual(len(self.check(character_literal)), 1)
+
+    def test_timer_and_marker_in_different_test_cases_are_clean(self):
+        text = (
+            'TEST_CASE( "timer", "[ui]" ) {\n'
+            "    QTimer::singleShot( 25, receiver, callback );\n"
+            "}\n"
+            'TEST_CASE( "marker", "[ui]" ) {\n'
+            '    FAIL( "watchdog expired" );\n'
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_suppresses_only_its_timer(self):
+        text = (
+            'TEST_CASE( "watchdog", "[ui]" ) {\n'
+            '    QTimer::singleShot( 25, receiver, [] { FAIL( "watchdog expired" ); } ); '
+            "// lint-allow: platform-fragile\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+        text += (
+            'SCENARIO( "second watchdog", "[ui]" ) {\n'
+            '    QTimer::singleShot( 50, receiver, [] { FAIL( "watchdog expired" ); } );\n'
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual([line for line, _ in findings], [5])
+
+    def test_marker_outside_timer_call_is_clean(self):
+        text = (
+            'TEST_CASE( "timer", "[ui]" ) {\n'
+            "    QTimer::singleShot( 25, receiver, callback );\n"
+            "}\n"
+            'void helper() { FAIL( "watchdog expired" ); }\n'
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_catch_case_macro_variants_are_checked(self):
+        for macro in ("SCENARIO", "TEST_CASE_METHOD", "TEMPLATE_TEST_CASE"):
+            with self.subTest(macro=macro):
+                text = (
+                    f'{macro}( "watchdog", "[ui]" ) {{\n'
+                    '    QTimer::singleShot( 25, receiver, [] { FAIL( "watchdog expired" ); } );\n'
+                    "}\n"
+                )
+                self.assertEqual(len(self.check(text)), 1)
+
+
 class Qt6IfReTest(unittest.TestCase):
     """_QT6_IF_RE must match Qt-6-only guards (>= 6, > 5) but NOT Qt-5
     guards (e.g. < QT_VERSION_CHECK(6, 0, 0))."""

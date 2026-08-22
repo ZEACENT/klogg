@@ -40,7 +40,6 @@
 
 #include <QDialogButtonBox>
 #include <QFileDialog>
-#include <QMessageBox>
 #include <QTimer>
 #include <QToolButton>
 #include <qboxlayout.h>
@@ -52,6 +51,7 @@
 #include "iconloader.h"
 #include "log.h"
 #include "predefinedfilters.h"
+#include "uimessage.h"
 
 class CenteredCheckbox : public QWidget {
   public:
@@ -184,18 +184,28 @@ void PredefinedFiltersDialog::populateFiltersTable(
 bool PredefinedFiltersDialog::saveSettings()
 {
     auto& favoritesModel = FilterFavoritesModel::instance();
-    favoritesModel.synchronizeFromStorage();
-    if ( favoritesModel.favorites() != baseFavorites_ ) {
-        QMessageBox::warning(
+    const auto updatedFavorites = readFiltersTable();
+    const auto result = favoritesModel.replaceFavorites( baseFavorites_, updatedFavorites );
+
+    switch ( result.status ) {
+    case PredefinedFiltersCollection::CommitStatus::Success:
+    case PredefinedFiltersCollection::CommitStatus::Unchanged:
+        baseFavorites_ = result.storedFilters;
+        return true;
+    case PredefinedFiltersCollection::CommitStatus::Conflict:
+        klogg::ui::warning(
             this, tr( "klogg" ),
             tr( "Filter favorites changed outside this dialog. Reopen the dialog and try again." ) );
         return false;
+    case PredefinedFiltersCollection::CommitStatus::InvalidReplacement:
+    case PredefinedFiltersCollection::CommitStatus::LockError:
+    case PredefinedFiltersCollection::CommitStatus::StorageError:
+    case PredefinedFiltersCollection::CommitStatus::WriteError:
+        klogg::ui::warning( this, tr( "klogg" ),
+                            tr( "Unable to save filter favorites. Try again." ) );
+        return false;
     }
-
-    const auto updatedFavorites = readFiltersTable();
-    favoritesModel.replaceFavorites( updatedFavorites );
-    baseFavorites_ = updatedFavorites;
-    return true;
+    return false;
 }
 
 PredefinedFiltersCollection::Collection PredefinedFiltersDialog::readFiltersTable() const
@@ -214,7 +224,7 @@ PredefinedFiltersCollection::Collection PredefinedFiltersDialog::readFiltersTabl
         const auto value = filtersTableWidget->item( i, 1 )->text();
 
         const auto useRegexCheckbox
-            = static_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( i, 2 ) );
+            = dynamic_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( i, 2 ) );
         const auto useRegex = useRegexCheckbox ? useRegexCheckbox->isChecked() : false;
 
         if ( !name.isEmpty() && !value.isEmpty() ) {
@@ -275,29 +285,32 @@ void PredefinedFiltersDialog::moveFilterDown()
 
 void PredefinedFiltersDialog::swapFilters( int currentRow, int newRow, int selectedColumn )
 {
-    QTimer::singleShot( 0, this, [ this, currentRow, newRow, selectedColumn ] {
-        for ( int column = 0; column < filtersTableWidget->columnCount(); ++column ) {
-            auto currentUseRegex = static_cast<CenteredCheckbox*>(
-                filtersTableWidget->cellWidget( currentRow, column ) );
-            auto newUseRegex = static_cast<CenteredCheckbox*>(
-                filtersTableWidget->cellWidget( newRow, column ) );
+    if ( currentRow < 0 || currentRow >= filtersTableWidget->rowCount() || newRow < 0
+         || newRow >= filtersTableWidget->rowCount() ) {
+        return;
+    }
 
-            if ( currentUseRegex && newUseRegex ) {
-                const auto currentCheckState = currentUseRegex->isChecked();
-                const auto newCheckState = newUseRegex->isChecked();
-                currentUseRegex->setChecked( newCheckState );
-                newUseRegex->setChecked( currentCheckState );
-            }
-            else {
-                auto currentItem = filtersTableWidget->takeItem( currentRow, column );
-                auto newItem = filtersTableWidget->takeItem( newRow, column );
+    for ( int column = 0; column < filtersTableWidget->columnCount(); ++column ) {
+        auto currentUseRegex
+            = dynamic_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( currentRow, column ) );
+        auto newUseRegex
+            = dynamic_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( newRow, column ) );
 
-                filtersTableWidget->setItem( newRow, column, currentItem );
-                filtersTableWidget->setItem( currentRow, column, newItem );
-            }
+        if ( currentUseRegex && newUseRegex ) {
+            const auto currentCheckState = currentUseRegex->isChecked();
+            const auto newCheckState = newUseRegex->isChecked();
+            currentUseRegex->setChecked( newCheckState );
+            newUseRegex->setChecked( currentCheckState );
         }
-        filtersTableWidget->setCurrentCell( newRow, selectedColumn );
-    } );
+        else {
+            auto currentItem = filtersTableWidget->takeItem( currentRow, column );
+            auto newItem = filtersTableWidget->takeItem( newRow, column );
+
+            filtersTableWidget->setItem( newRow, column, currentItem );
+            filtersTableWidget->setItem( currentRow, column, newItem );
+        }
+    }
+    filtersTableWidget->setCurrentCell( newRow, selectedColumn );
 }
 
 void PredefinedFiltersDialog::importFilters()
@@ -318,7 +331,7 @@ void PredefinedFiltersDialog::importFiltersFromFile( const QString& file )
     LOG_DEBUG << "Loading predefined filters from " << file;
     const auto result = PredefinedFiltersCollection::tryLoadFromFile( file );
     if ( result.status != PredefinedFiltersCollection::LoadStatus::Success ) {
-        QMessageBox::warning( this, tr( "klogg" ),
+        klogg::ui::warning( this, tr( "klogg" ),
                               tr( "Unable to import filter favorites from the selected file." ) );
         return;
     }
@@ -345,7 +358,7 @@ void PredefinedFiltersDialog::exportFilters()
 void PredefinedFiltersDialog::exportFiltersToFile( const QString& file )
 {
     if ( !PredefinedFiltersCollection::saveToFile( file, readFiltersTable() ) ) {
-        QMessageBox::warning( this, tr( "klogg" ),
+        klogg::ui::warning( this, tr( "klogg" ),
                               tr( "Unable to export filter favorites to the selected file." ) );
     }
 }

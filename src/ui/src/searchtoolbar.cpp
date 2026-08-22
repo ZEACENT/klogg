@@ -35,11 +35,11 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QMenu>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QStringListModel>
 #include <QToolButton>
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 #include "configuration.h"
@@ -49,6 +49,7 @@
 #include "predefinedfilterscombobox.h"
 #include "savefavoritedialog.h"
 #include "savedsearches.h"
+#include "uimessage.h"
 
 SearchToolbar::SearchToolbar( QWidget* parent, SavedSearches* savedSearches )
     : QWidget( parent )
@@ -110,11 +111,11 @@ void SearchToolbar::setupWidgets()
     searchLineEdit_->installEventFilter( this );
     searchLineEdit_->lineEdit()->installEventFilter( this );
 
-    QAction* clearSearchHistoryAction = new QAction( tr( "Clear Search History" ), this );
+    auto* clearSearchHistoryAction = new QAction( tr( "Clear Search History" ), this );
     clearSearchHistoryAction->setObjectName( QStringLiteral( "clearSearchHistoryAction" ) );
-    QAction* editSearchHistoryAction = new QAction( tr( "Edit Search History..." ), this );
+    auto* editSearchHistoryAction = new QAction( tr( "Edit Search History..." ), this );
     editSearchHistoryAction->setObjectName( QStringLiteral( "editSearchHistoryAction" ) );
-    QAction* addFavoriteFilterAction
+    auto* addFavoriteFilterAction
         = new QAction( tr( "Add to Filter Favorites..." ), this );
     addFavoriteFilterAction->setObjectName( QStringLiteral( "addFavoriteFilterAction" ) );
 
@@ -498,19 +499,36 @@ void SearchToolbar::saveCurrentSearchAsFavorite()
             }
         }
 
-        if ( nameMatchCount == 1 ) {
-            return onlyNameMatch;
+        if ( identity != nullptr ) {
+            return identityMatchCount == 1 ? exactIdentityMatch : favorites.end();
         }
-        if ( identityMatchCount == 1 ) {
-            return exactIdentityMatch;
-        }
-        return favorites.end();
+        return nameMatchCount == 1 ? onlyNameMatch : favorites.end();
     };
     const auto warnConflict = [ this, &targetName ] {
-        QMessageBox::warning(
+        klogg::ui::warning(
             this, tr( "klogg" ),
             tr( "Favorite \"%1\" changed while the save dialog was open. Try again." )
                 .arg( targetName ) );
+    };
+    const auto commitFavorites = [ this, &model, &warnConflict ](
+                                     const auto& expected, const auto& replacement ) {
+        const auto result = model.replaceFavorites( expected, replacement );
+        switch ( result.status ) {
+        case PredefinedFiltersCollection::CommitStatus::Success:
+        case PredefinedFiltersCollection::CommitStatus::Unchanged:
+            return true;
+        case PredefinedFiltersCollection::CommitStatus::Conflict:
+            warnConflict();
+            return false;
+        case PredefinedFiltersCollection::CommitStatus::InvalidReplacement:
+        case PredefinedFiltersCollection::CommitStatus::LockError:
+        case PredefinedFiltersCollection::CommitStatus::StorageError:
+        case PredefinedFiltersCollection::CommitStatus::WriteError:
+            klogg::ui::warning( this, tr( "klogg" ),
+                                tr( "Unable to save filter favorites. Try again." ) );
+            return false;
+        }
+        return false;
     };
 
     // The modal can remain open while another window or process changes the
@@ -521,9 +539,18 @@ void SearchToolbar::saveCurrentSearchAsFavorite()
     const int nameMatchCount = countByName( favorites, targetName );
     auto existing = findStableTarget( favorites, targetName, selectedIdentity );
 
-    if ( isCreateNew && nameMatchCount == 0 ) {
+    if ( isCreateNew ) {
+        if ( nameMatchCount != 0 ) {
+            klogg::ui::warning(
+                this, tr( "klogg" ),
+                tr( "A favorite named \"%1\" already exists. Choose a different name." )
+                    .arg( favoriteName ) );
+            return;
+        }
+
+        const auto expectedFavorites = favorites;
         favorites.push_back( { favoriteName, currentText, useRegex } );
-        model.replaceFavorites( favorites );
+        commitFavorites( expectedFavorites, favorites );
         return;
     }
 
@@ -533,11 +560,9 @@ void SearchToolbar::saveCurrentSearchAsFavorite()
     }
 
     if ( existing->pattern == currentText && existing->useRegex == useRegex ) {
-        QMessageBox::information(
+        klogg::ui::information(
             this, tr( "klogg" ),
-            isCreateNew
-                ? tr( "Favorite \"%1\" already exists with the same content." ).arg( existing->name )
-                : tr( "Favorite \"%1\" already has the same content." ).arg( existing->name ) );
+            tr( "Favorite \"%1\" already has the same content." ).arg( existing->name ) );
         return;
     }
 
@@ -560,9 +585,11 @@ void SearchToolbar::saveCurrentSearchAsFavorite()
         return;
     }
 
-    existing->pattern = currentText;
-    existing->useRegex = useRegex;
-    model.replaceFavorites( favorites );
+    const int existingIndex = static_cast<int>( std::distance( favorites.begin(), existing ) );
+    const auto expectedFavorites = favorites;
+    favorites[ existingIndex ].pattern = currentText;
+    favorites[ existingIndex ].useRegex = useRegex;
+    commitFavorites( expectedFavorites, favorites );
 }
 
 void SearchToolbar::loadIcons()

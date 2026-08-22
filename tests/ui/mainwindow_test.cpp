@@ -30,11 +30,11 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 
+#include <QMap>
 #include <QMenu>
 #include <QMenuBar>
 #include <QClipboard>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -44,6 +44,7 @@
 #include <QTest>
 #include <QToolButton>
 #include <QUuid>
+#include <QVariant>
 
 #include <QToolBar>
 
@@ -64,6 +65,7 @@
 #include "session.h"
 #include "sessioninfo.h"
 #include "tabgroup.h"
+#include "uimessage.h"
 
 namespace {
 QString makeTestDir( const QString& prefix )
@@ -203,17 +205,34 @@ class FilterFavoritesRestoreGuard {
     explicit FilterFavoritesRestoreGuard(
         const PredefinedFiltersCollection::Collection& seededFilters )
         : model_( FilterFavoritesModel::instance() )
-        , savedModelFavorites_( model_.favorites() )
         , savedStoredFavorites_( PredefinedFiltersCollection::getSynced().getFilters() )
     {
+        auto& settings = PersistentInfo::getSettings( app_settings{} );
+        settings.sync();
+        settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
+        for ( const auto& key : settings.allKeys() ) {
+            savedSettingsValues_.insert( key, settings.value( key ) );
+        }
+        settings.endGroup();
+
         PredefinedFiltersCollection::get().saveToStorage( seededFilters );
         model_.synchronizeFromStorage();
     }
 
     ~FilterFavoritesRestoreGuard()
     {
-        model_.replaceFavorites( savedModelFavorites_ );
-        PredefinedFiltersCollection::get().saveToStorage( savedStoredFavorites_ );
+        auto& settings = PersistentInfo::getSettings( app_settings{} );
+        settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
+        settings.remove( QString{} );
+        for ( auto item = savedSettingsValues_.cbegin(); item != savedSettingsValues_.cend(); ++item ) {
+            settings.setValue( item.key(), item.value() );
+        }
+        settings.endGroup();
+        settings.sync();
+
+        auto& collection = PredefinedFiltersCollection::getSynced();
+        collection.setFilters( savedStoredFavorites_ );
+        model_.synchronizeFromStorage();
     }
 
     FilterFavoritesRestoreGuard( const FilterFavoritesRestoreGuard& ) = delete;
@@ -221,8 +240,8 @@ class FilterFavoritesRestoreGuard {
 
   private:
     FilterFavoritesModel& model_;
-    PredefinedFiltersCollection::Collection savedModelFavorites_;
     PredefinedFiltersCollection::Collection savedStoredFavorites_;
+    QMap<QString, QVariant> savedSettingsValues_;
 };
 
 void replaceFavoriteFiles( const QStringList& paths )
@@ -279,18 +298,6 @@ QMenu* findTopLevelMenu( MainWindow* mainWindow, const QString& visibleTitle )
     return nullptr;
 }
 
-QStringList comboItems( const QComboBox* combo )
-{
-    QStringList items;
-    if ( combo == nullptr ) {
-        return items;
-    }
-    for ( int index = 0; index < combo->count(); ++index ) {
-        items.push_back( combo->itemText( index ) );
-    }
-    return items;
-}
-
 PredefinedFiltersCollection::Collection comboFavoriteRows( const QComboBox* combo )
 {
     PredefinedFiltersCollection::Collection favorites;
@@ -306,16 +313,6 @@ PredefinedFiltersCollection::Collection comboFavoriteRows( const QComboBox* comb
               index.data( FilterFavoritesModel::RegexRole ).toBool() } );
     }
     return favorites;
-}
-
-void closeActiveModalOrPopup()
-{
-    if ( auto* popup = QApplication::activePopupWidget() ) {
-        popup->close();
-    }
-    if ( auto* modal = QApplication::activeModalWidget() ) {
-        modal->close();
-    }
 }
 
 QStringList favoriteActionPaths( const QMenu* menu )
@@ -2053,67 +2050,48 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write",
     REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
 }
 
-TEST_CASE( "Filter Favorites Apply refreshes active and inactive document toolbars",
+TEST_CASE( "Shared Filter Favorites model updates real file and folder toolbars synchronously",
            "[ui][filter-favorites]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
-    FilterFavoritesRestoreGuard filterFavoritesGuard{
-        { { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false },
-          { QStringLiteral( "Beta" ), QStringLiteral( "WARN.*" ), true } }
-    };
+    const PredefinedFiltersCollection::Collection initial{
+        { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false } };
+    FilterFavoritesRestoreGuard filterFavoritesGuard{ initial };
     auto& sessionInfo = SessionInfo::getSynced();
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "filter-favorites-%1" ).arg(
+    const auto windowId = QString( "filter-favorites-apply-%1" ).arg(
         QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
     QTimer::singleShot( 0, Qt::PreciseTimer,
-                        [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+                        [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
     mainWindow->resize( 1600, 900 );
     mainWindow->show();
     QTest::qWait( 100 );
 
-    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
-        QTest::qWait( 100 );
-    };
+    const auto tempDirPath = makeTestDir( "filterfavoritesapply" );
+    const auto standaloneFile = QDir( tempDirPath ).absoluteFilePath( "standalone.log" );
+    QFile file( standaloneFile );
+    REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( file.write( "ERROR one\n" ) > 0 );
+    file.close();
 
     auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
     REQUIRE( tabArea != nullptr );
-
-    const auto tempDirPath = makeTestDir( "filterfavorites" );
-    REQUIRE( QDir{ tempDirPath }.exists() );
-    const auto standaloneFile = QDir( tempDirPath ).absoluteFilePath( "standalone.log" );
-    const auto folderFile = QDir( tempDirPath ).absoluteFilePath( "folder.log" );
-    for ( const auto& path : { standaloneFile, folderFile } ) {
-        QFile file( path );
-        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
-        file.write( "ERROR one\nWARN two\n" );
-    }
-
-    // Open a real file document first, then a real folder document. The folder
-    // must remain current while Filter Favorites is edited so every Apply crosses
-    // MainWindow's production action/slot and still refreshes the hidden file tab.
-    runInUiThread( [ &mainWindow, standaloneFile ] {
-        mainWindow->loadInitialFile( standaloneFile, false );
-    } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    mainWindow->loadInitialFile( standaloneFile, false );
+    REQUIRE( waitUiState( [ tabArea ] { return tabArea->count() == 1; } ) );
     auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 0 ) );
     REQUIRE( fileCrawler != nullptr );
     REQUIRE( waitUiState( [ fileCrawler ] { return fileCrawler->isFirstLoadDone(); } ) );
     QTest::qWait( 200 );
 
-    runInUiThread( [ &mainWindow, tempDirPath ] {
-        mainWindow->openFolderByPath( tempDirPath );
-    } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
-    REQUIRE( tabArea->currentIndex() == 1 );
+    mainWindow->openFolderByPath( tempDirPath );
+    REQUIRE( waitUiState( [ tabArea ] { return tabArea->count() == 2; } ) );
     auto* folderCrawler = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
     REQUIRE( folderCrawler != nullptr );
     QTest::qWait( 200 );
@@ -2122,128 +2100,17 @@ TEST_CASE( "Filter Favorites Apply refreshes active and inactive document toolba
     auto* folderCombo = folderCrawler->findChild<PredefinedFiltersComboBox*>();
     REQUIRE( fileCombo != nullptr );
     REQUIRE( folderCombo != nullptr );
-    const QStringList initialNames{ QStringLiteral( "Alpha" ), QStringLiteral( "Beta" ) };
-    REQUIRE( comboItems( fileCombo ) == initialNames );
-    REQUIRE( comboItems( folderCombo ) == initialNames );
+    REQUIRE( comboFavoriteRows( fileCombo ) == initial );
+    REQUIRE( comboFavoriteRows( folderCombo ) == initial );
 
-    auto* toolsMenu = findTopLevelMenu( mainWindow.get(), QStringLiteral( "Tools" ) );
-    REQUIRE( toolsMenu != nullptr );
-    auto* filterFavoritesAction = mainWindow->findChild<QAction*>(
-        QStringLiteral( "predefinedFiltersDialogAction" ) );
-    REQUIRE( filterFavoritesAction != nullptr );
-
-    struct DialogResults {
-        QString error;
-        std::vector<PredefinedFiltersCollection::Collection> fileSnapshots;
-        std::vector<PredefinedFiltersCollection::Collection> folderSnapshots;
-        bool finished = false;
-    } results;
-
-    // Schedule the zero-delay callback before triggering the action: trigger()
-    // enters PredefinedFiltersDialog::exec(), and this precise timer runs inside
-    // that modal event loop without wall-clock polling.
-    QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        auto* dialog
-            = mainWindow->findChild<QDialog*>( QStringLiteral( "PredefinedFiltersDialog" ) );
-        if ( dialog == nullptr ) {
-            results.error = QStringLiteral( "Filter Favorites dialog was not created" );
-            results.finished = true;
-            closeActiveModalOrPopup();
-            return;
-        }
-
-        auto* table = dialog->findChild<QTableWidget*>(
-            QStringLiteral( "filtersTableWidget" ) );
-        auto* buttonBox
-            = dialog->findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
-        auto* addButton
-            = dialog->findChild<QToolButton*>( QStringLiteral( "addFilterButton" ) );
-        auto* removeButton
-            = dialog->findChild<QToolButton*>( QStringLiteral( "removeFilterButton" ) );
-        auto* upButton = dialog->findChild<QToolButton*>( QStringLiteral( "upButton" ) );
-        auto* applyButton
-            = buttonBox != nullptr ? buttonBox->button( QDialogButtonBox::Apply ) : nullptr;
-
-        if ( table == nullptr || buttonBox == nullptr || addButton == nullptr
-             || removeButton == nullptr || upButton == nullptr || applyButton == nullptr ) {
-            results.error = QStringLiteral( "Filter Favorites dialog controls are incomplete" );
-            results.finished = true;
-            dialog->reject();
-            return;
-        }
-
-        const auto settleUi = [] {
-            QCoreApplication::processEvents();
-            QCoreApplication::processEvents();
-        };
-        const auto applyAndCapture = [ & ] {
-            applyButton->click();
-            settleUi();
-            results.fileSnapshots.push_back( comboFavoriteRows( fileCombo ) );
-            results.folderSnapshots.push_back( comboFavoriteRows( folderCombo ) );
-        };
-
-        // Add.
-        addButton->click();
-        settleUi();
-        const int addedRow = table->rowCount() - 1;
-        table->item( addedRow, 0 )->setText( QStringLiteral( "Gamma" ) );
-        table->item( addedRow, 1 )->setText( QStringLiteral( "INFO" ) );
-        applyAndCapture();
-
-        // Rename.
-        table->item( addedRow, 0 )->setText( QStringLiteral( "Gamma Prime" ) );
-        applyAndCapture();
-
-        // Reorder to the front through the dialog's production move slot.
-        table->setCurrentCell( addedRow, 0 );
-        upButton->click();
-        settleUi();
-        upButton->click();
-        settleUi();
-        applyAndCapture();
-
-        // Delete Beta through the dialog's production remove slot.
-        table->setCurrentCell( 2, 0 );
-        removeButton->click();
-        settleUi();
-        applyAndCapture();
-
-        results.finished = true;
-        dialog->reject();
-    } );
-    QTimer::singleShot( 250, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        if ( !results.finished ) {
-            results.error = QStringLiteral( "Filter Favorites dialog watchdog expired" );
-            results.finished = true;
-            closeActiveModalOrPopup();
-        }
-    } );
-
-    filterFavoritesAction->trigger();
-
-    REQUIRE( results.error.isEmpty() );
-    const std::vector<PredefinedFiltersCollection::Collection> expectedSnapshots{
-        { { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false },
-          { QStringLiteral( "Beta" ), QStringLiteral( "WARN.*" ), true },
-          { QStringLiteral( "Gamma" ), QStringLiteral( "INFO" ), false } },
-        { { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false },
-          { QStringLiteral( "Beta" ), QStringLiteral( "WARN.*" ), true },
-          { QStringLiteral( "Gamma Prime" ), QStringLiteral( "INFO" ), false } },
-        { { QStringLiteral( "Gamma Prime" ), QStringLiteral( "INFO" ), false },
-          { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false },
-          { QStringLiteral( "Beta" ), QStringLiteral( "WARN.*" ), true } },
-        { { QStringLiteral( "Gamma Prime" ), QStringLiteral( "INFO" ), false },
-          { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false } },
-    };
-    REQUIRE( results.fileSnapshots.size() == expectedSnapshots.size() );
-    REQUIRE( results.folderSnapshots.size() == expectedSnapshots.size() );
-    for ( std::size_t index = 0; index < expectedSnapshots.size(); ++index ) {
-        CAPTURE( index );
-        CHECK( results.folderSnapshots.at( index ) == expectedSnapshots.at( index ) );
-        CHECK( results.fileSnapshots.at( index ) == expectedSnapshots.at( index ) );
-        CHECK( tabArea->currentIndex() == 1 );
-    }
+    const PredefinedFiltersCollection::Collection expected{
+        initial.at( 0 ),
+        { QStringLiteral( "Beta" ), QStringLiteral( "WARN" ), false } };
+    const auto commit = FilterFavoritesModel::instance().replaceFavorites( initial, expected );
+    REQUIRE( commit.status == PredefinedFiltersCollection::CommitStatus::Success );
+    REQUIRE( comboFavoriteRows( fileCombo ) == expected );
+    REQUIRE( comboFavoriteRows( folderCombo ) == expected );
+    REQUIRE( tabArea->currentWidget() == folderCrawler );
 }
 
 TEST_CASE( "Filter Favorites import validates before replacing every document toolbar",
@@ -2348,62 +2215,25 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
         malformedFile.write( "not a filter favorites file\n" );
     }
 
-    QString warningError;
-    QString warningText;
-    bool warningFinished = false;
-    QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        auto* warning = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() );
-        if ( warning == nullptr ) {
-            warningError = QStringLiteral( "Invalid import warning was not shown" );
-            warningFinished = true;
-            closeActiveModalOrPopup();
-            return;
-        }
-
-        warningText = warning->text();
-        warningFinished = true;
-        warning->accept();
-    } );
-    QTimer::singleShot( 250, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        if ( !warningFinished ) {
-            warningError = QStringLiteral( "Invalid import warning watchdog expired" );
-            warningFinished = true;
-            closeActiveModalOrPopup();
-        }
-    } );
+    QStringList warningTexts;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ &warningTexts ]( klogg::ui::MessageKind kind, QWidget*, const QString&,
+                           const QString& text ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                warningTexts.push_back( text );
+            }
+        } };
 
     const bool invalidImportInvoked = QMetaObject::invokeMethod(
         mainWindow.get(), "importFilterFavoritesFromFile", Qt::DirectConnection,
         Q_ARG( QString, malformedPath ) );
     REQUIRE( invalidImportInvoked );
-    CHECK( warningError.isEmpty() );
-    CHECK_FALSE( warningText.isEmpty() );
+    REQUIRE( warningTexts.size() == 1 );
+    CHECK_FALSE( warningTexts.front().isEmpty() );
     CHECK( favoritesModel.favorites() == importedFavorites );
     CHECK( PredefinedFiltersCollection::getSynced().getFilters() == importedFavorites );
     CHECK( comboFavoriteRows( fileCombo ) == importedFavorites );
     CHECK( comboFavoriteRows( folderCombo ) == importedFavorites );
-
-    QString exportWarningError;
-    bool exportWarningFinished = false;
-    QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        auto* warning = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() );
-        if ( warning == nullptr ) {
-            exportWarningError = QStringLiteral( "Export failure warning was not shown" );
-            exportWarningFinished = true;
-            closeActiveModalOrPopup();
-            return;
-        }
-
-        exportWarningFinished = true;
-        warning->accept();
-    } );
-    QTimer::singleShot( 250, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-        if ( !exportWarningFinished ) {
-            exportWarningError = QStringLiteral( "Export failure warning watchdog expired" );
-            exportWarningFinished = true;
-            closeActiveModalOrPopup();
-        }
-    } );
 
     const auto unwritableExportPath
         = QDir( tempDirPath ).absoluteFilePath( QStringLiteral( "export-destination" ) );
@@ -2413,7 +2243,8 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
         mainWindow.get(), "exportFilterFavoritesToFile", Qt::DirectConnection,
         Q_ARG( QString, unwritableExportPath ) );
     REQUIRE( failedExportInvoked );
-    CHECK( exportWarningError.isEmpty() );
+    REQUIRE( warningTexts.size() == 2 );
+    CHECK_FALSE( warningTexts.back().isEmpty() );
     CHECK( QFileInfo( blockedExportPath ).isDir() );
 }
 

@@ -38,6 +38,149 @@ from typing import Iterable
 ALLOW_MARKER = "lint-allow: platform-fragile"
 
 
+def _strip_cpp_comments(text: str) -> str:
+    """Blank C++ line and block comments while preserving literals and lines."""
+    output: list[str] = []
+    state = "code"
+    escaped = False
+    raw_terminator = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        next_ch = text[i + 1] if i + 1 < len(text) else ""
+
+        if state == "line-comment":
+            if ch == "\n":
+                output.append(ch)
+                state = "code"
+            else:
+                output.append(" ")
+        elif state == "block-comment":
+            if ch == "*" and next_ch == "/":
+                output.extend((" ", " "))
+                state = "code"
+                i += 1
+            else:
+                output.append(ch if ch == "\n" else " ")
+        elif state == "raw-string":
+            if text.startswith(raw_terminator, i):
+                output.extend(raw_terminator)
+                i += len(raw_terminator) - 1
+                state = "code"
+            else:
+                output.append(ch)
+        elif state in ("string", "character"):
+            output.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (state == "string" and ch == '"') or (
+                state == "character" and ch == "'"
+            ):
+                state = "code"
+        elif ch == "/" and next_ch == "/":
+            output.extend((" ", " "))
+            state = "line-comment"
+            i += 1
+        elif ch == "/" and next_ch == "*":
+            output.extend((" ", " "))
+            state = "block-comment"
+            i += 1
+        else:
+            raw_open = -1
+            if ch == "R" and next_ch == '"':
+                candidate_open = text.find("(", i + 2, min(len(text), i + 19))
+                if candidate_open >= 0:
+                    delimiter = text[i + 2 : candidate_open]
+                    if not any(char.isspace() or char in "()\\" for char in delimiter):
+                        raw_open = candidate_open
+
+            if raw_open >= 0:
+                output.extend(text[i : raw_open + 1])
+                raw_terminator = ")" + text[i + 2 : raw_open] + '"'
+                state = "raw-string"
+                i = raw_open
+            else:
+                output.append(ch)
+                if ch == '"':
+                    state = "string"
+                    escaped = False
+                elif ch == "'" and not (
+                    i > 0
+                    and i + 1 < len(text)
+                    and text[i - 1].isalnum()
+                    and text[i + 1].isalnum()
+                ):
+                    state = "character"
+                    escaped = False
+        i += 1
+
+    return "".join(output)
+
+
+def _strip_cpp_literals(text: str) -> str:
+    """Blank C++ string/character literals while preserving code and lines."""
+    output: list[str] = []
+    state = "code"
+    escaped = False
+    raw_terminator = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        next_ch = text[i + 1] if i + 1 < len(text) else ""
+
+        if state == "raw-string":
+            if text.startswith(raw_terminator, i):
+                output.extend(" " * len(raw_terminator))
+                i += len(raw_terminator) - 1
+                state = "code"
+            else:
+                output.append("\n" if ch == "\n" else " ")
+        elif state in ("string", "character"):
+            output.append("\n" if ch == "\n" else " ")
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (state == "string" and ch == '"') or (
+                state == "character" and ch == "'"
+            ):
+                state = "code"
+        else:
+            raw_open = -1
+            if ch == "R" and next_ch == '"':
+                candidate_open = text.find("(", i + 2, min(len(text), i + 19))
+                if candidate_open >= 0:
+                    delimiter = text[i + 2 : candidate_open]
+                    if not any(char.isspace() or char in "()\\" for char in delimiter):
+                        raw_open = candidate_open
+
+            if raw_open >= 0:
+                output.extend(" " * (raw_open - i + 1))
+                raw_terminator = ")" + text[i + 2 : raw_open] + '"'
+                state = "raw-string"
+                i = raw_open
+            elif ch == '"':
+                output.append(" ")
+                state = "string"
+                escaped = False
+            elif ch == "'" and not (
+                i > 0
+                and i + 1 < len(text)
+                and text[i - 1].isalnum()
+                and text[i + 1].isalnum()
+            ):
+                output.append(" ")
+                state = "character"
+                escaped = False
+            else:
+                output.append(ch)
+        i += 1
+
+    return "".join(output)
+
+
 def _strip_line_comment(line: str) -> str:
     """Return the code portion of a C++ line: everything before an
     unquoted ``//`` comment.
@@ -232,10 +375,11 @@ def _extract_call_args(code: str, open_paren_pos: int) -> str:
     is recognised as passing ``start`` (the nested QLatin1Char call would defeat
     a naive ``[^)]*`` capture).
     """
+    masked = _strip_cpp_literals(_strip_cpp_comments(code))
     depth = 0
     start = open_paren_pos + 1
-    for i in range(start, len(code)):
-        ch = code[i]
+    for i in range(start, len(masked)):
+        ch = masked[i]
         if ch == "(":
             depth += 1
         elif ch == ")":
@@ -376,6 +520,114 @@ def _strip_literals(s: str) -> str:
             out.append(ch)
             i += 1
     return "".join(out)
+
+
+def _check_qmessagebox_in_tests(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag executable QMessageBox references under tests/.
+
+    Modal message boxes block headless/offscreen test runs. Includes and text in
+    comments or string literals are harmless and intentionally ignored.
+    """
+    if "tests" not in path.parts:
+        return []
+
+    findings: list[tuple[int, str]] = []
+    source_lines = text.splitlines()
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    for line_num, line in enumerate(code.splitlines(), start=1):
+        if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
+            continue
+        if re.match(r"^\s*#\s*include\b", line):
+            continue
+        if re.search(r"\bQMessageBox\b", line):
+            findings.append(
+                (
+                    line_num,
+                    "Do not execute QMessageBox code in tests/: modal dialogs can "
+                    "block indefinitely on headless/offscreen CI runners. Exercise "
+                    "the underlying action or inject a non-modal test seam instead.",
+                )
+            )
+    return findings
+
+
+_WATCHDOG_LITERAL_RE = re.compile(
+    r'"(?:\\.|[^"\\])*watchdog expired(?:\\.|[^"\\])*"'
+)
+_ZERO_DELAY_RE = re.compile(
+    r"(?:0(?:[uUlL]*|ns|us|ms|s|min|h)"
+    r"|std::chrono::(?:nano|micro|milli)?seconds[({]0[)}])"
+)
+
+
+def _first_call_argument(arguments: str) -> str:
+    """Return the first top-level argument from a balanced call body."""
+    masked = _strip_cpp_literals(_strip_cpp_comments(arguments))
+    depth = 0
+    angle_depth = 0
+    previous_significant = ""
+    for index, ch in enumerate(masked):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}" and depth > 0:
+            depth -= 1
+        elif ch == "<" and depth == 0 and (
+            previous_significant.isalnum() or previous_significant in "_:>"
+        ):
+            angle_depth += 1
+        elif ch == ">" and angle_depth > 0:
+            angle_depth -= 1
+        elif ch == "," and depth == 0 and angle_depth == 0:
+            return arguments[:index]
+
+        if not ch.isspace():
+            previous_significant = ch
+    return arguments
+
+
+def _is_zero_timer_delay(expression: str) -> bool:
+    compact = re.sub(r"[\s']", "", expression)
+    if re.fullmatch(r"std::chrono::duration<[^>]+>[({]0[)}]", compact):
+        return True
+    return bool(_ZERO_DELAY_RE.fullmatch(compact))
+
+
+def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag nonzero singleShot callbacks that implement wall-clock failures.
+
+    Requiring the ``watchdog expired`` marker inside the timer call binds the
+    diagnostic to one execution scope without guessing Catch macro boundaries.
+    Zero-delay dispatch and unrelated timers remain allowed.
+    """
+    if "tests" not in path.parts:
+        return []
+
+    source_lines = text.splitlines()
+    code = _strip_cpp_comments(text)
+    findings: list[tuple[int, str]] = []
+    timer_re = re.compile(r"\bQTimer\s*::\s*singleShot\s*\(")
+
+    for timer_match in timer_re.finditer(code):
+        arguments = _extract_call_args(code, timer_match.end() - 1)
+        if not arguments or not _WATCHDOG_LITERAL_RE.search(arguments):
+            continue
+        delay = _first_call_argument(arguments)
+        if _is_zero_timer_delay(delay):
+            continue
+        line_num = code[: timer_match.start()].count("\n") + 1
+        if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
+            continue
+        findings.append(
+            (
+                line_num,
+                "A nonzero QTimer::singleShot callback reports 'watchdog expired'. "
+                "Wall-clock watchdogs make test success depend on CI runner speed; "
+                "wait on a deterministic state/signal or invoke the dispatch path "
+                "directly instead.",
+            )
+        )
+
+    return findings
 
 
 def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int, str]]:
@@ -974,6 +1226,14 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qt-version-macro-in-tests",
         "check": _check_qt_version_macro_in_tests,
+    },
+    {
+        "name": "qmessagebox-in-tests",
+        "check": _check_qmessagebox_in_tests,
+    },
+    {
+        "name": "nonzero-watchdog-timer",
+        "check": _check_nonzero_watchdog_timer,
     },
 ]
 
