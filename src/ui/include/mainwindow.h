@@ -139,7 +139,9 @@ class MainWindow : public QMainWindow {
     void editHighlighters();
     void editPredefinedFilters( const QString& newFilter = {} );
     void importFilterFavorites();
+    void importFilterFavoritesFromFile( const QString& file );
     void exportFilterFavorites();
+    void exportFilterFavoritesToFile( QString file );
     void mergeTabs();
     std::vector<QString> showMergeFilesDialog( const QStringList& filePaths );
     bool executeMerge( const std::vector<QString>& filesToMerge );
@@ -380,6 +382,8 @@ class MainWindow : public QMainWindow {
     std::map<QString, QShortcut*> shortcuts_;
 
     QSystemTrayIcon* trayIcon_;
+    QAction* trayOpenWindowAction_;
+    QAction* trayQuitAction_;
 
     QIcon mainIcon_;
 

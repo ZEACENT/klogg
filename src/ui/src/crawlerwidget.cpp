@@ -63,7 +63,6 @@
 #include <QKeySequence>
 #include <QLineEdit>
 #include <QListView>
-#include <QMessageBox>
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QStringListModel>
@@ -79,12 +78,10 @@
 #include "crawlershortcuts.h"
 #include "dispatch_to.h"
 #include "filewatcher.h"
-#include "filterdiffdialog.h"
 #include "fontutils.h"
 #include "infoline.h"
 #include "predefinedfilters.h"
 #include "quickfindpattern.h"
-#include "savefavoritedialog.h"
 #include "savedsearches.h"
 #include "shortcuts.h"
 
@@ -250,11 +247,6 @@ bool CrawlerWidget::isFirstLoadDone() const
 bool CrawlerWidget::isTextWrapEnabled() const
 {
     return logMainView_->isTextWrapEnabled();
-}
-
-void CrawlerWidget::reloadPredefinedFilters() const
-{
-    searchToolbar_->predefinedFilters()->populatePredefinedFilters();
 }
 
 QString CrawlerWidget::encodingText() const
@@ -538,89 +530,6 @@ void CrawlerWidget::editSearchHistory()
     updateSearchCombo();
 }
 
-void CrawlerWidget::saveAsFavorite()
-{
-    const auto currentText = searchToolbar_->currentSearchText().trimmed();
-    if ( currentText.isEmpty() ) {
-        return;
-    }
-
-    auto filters = PredefinedFiltersCollection::getSynced().getFilters();
-    const auto useRegex = searchToolbar_->isUseRegexp();
-
-    SaveFavoriteDialog dialog( currentText, filters, this );
-    if ( dialog.exec() != QDialog::Accepted ) {
-        return;
-    }
-
-    const auto trimmedName = dialog.favoriteName();
-    if ( trimmedName.isEmpty() ) {
-        return;
-    }
-
-    if ( dialog.isCreateNew() ) {
-        // Check if a filter with this name already exists
-        auto existing = std::find_if(
-            filters.begin(), filters.end(), [ &trimmedName ]( const auto& filter ) {
-                return filter.name.compare( trimmedName, Qt::CaseInsensitive ) == 0;
-            } );
-
-        if ( existing != filters.end() ) {
-            const auto isSamePattern = ( existing->pattern == currentText );
-            const auto isSameRegex = ( existing->useRegex == useRegex );
-            if ( isSamePattern && isSameRegex ) {
-                QMessageBox::information(
-                    this, tr( "klogg" ),
-                    tr( "Favorite \"%1\" already exists with the same content." )
-                        .arg( trimmedName ) );
-                return;
-            }
-
-            // Show diff dialog for confirmation
-            FilterDiffDialog diffDialog( trimmedName, *existing, currentText, useRegex, this );
-            if ( diffDialog.exec() != QDialog::Accepted ) {
-                return;
-            }
-
-            existing->pattern = currentText;
-            existing->useRegex = useRegex;
-        }
-        else {
-            filters.push_back( { trimmedName, currentText, useRegex } );
-        }
-    }
-    else {
-        // Overwriting an existing filter
-        const int index = dialog.selectedExistingIndex();
-        if ( index < 0 || index >= filters.size() ) {
-            return;
-        }
-
-        auto& existing = filters[ index ];
-
-        const auto isSamePattern = ( existing.pattern == currentText );
-        const auto isSameRegex = ( existing.useRegex == useRegex );
-        if ( isSamePattern && isSameRegex ) {
-            QMessageBox::information(
-                this, tr( "klogg" ),
-                tr( "Favorite \"%1\" already has the same content." ).arg( existing.name ) );
-            return;
-        }
-
-        // Show diff dialog for confirmation
-        FilterDiffDialog diffDialog( existing.name, existing, currentText, useRegex, this );
-        if ( diffDialog.exec() != QDialog::Accepted ) {
-            return;
-        }
-
-        existing.pattern = currentText;
-        existing.useRegex = useRegex;
-    }
-
-    PredefinedFiltersCollection::getSynced().saveToStorage( filters );
-    reloadPredefinedFilters();
-}
-
 // When receiving the 'newDataAvailable' signal from LogFilteredData
 void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
                                         LineNumber initialPosition,
@@ -885,7 +794,6 @@ void CrawlerWidget::applyConfiguration()
         changeDataStatus( DataStatus::OLD_DATA );
     }
 
-    reloadPredefinedFilters();
     applyEmptyFilterBehavior();
 }
 
@@ -1367,13 +1275,11 @@ void CrawlerWidget::setup()
     connect( searchToolbar_, &SearchToolbar::autoRefreshChanged, this,
              &CrawlerWidget::searchRefreshChanged );
 
-    // Context-menu / favorite actions (host owns the dialogs / persistence).
+    // Search-history dialogs remain host-specific.
     connect( searchToolbar_, &SearchToolbar::clearHistoryRequested, this,
              &CrawlerWidget::clearSearchHistory );
     connect( searchToolbar_, &SearchToolbar::editHistoryRequested, this,
              &CrawlerWidget::editSearchHistory );
-    connect( searchToolbar_, &SearchToolbar::saveFavoriteRequested, this,
-             &CrawlerWidget::saveAsFavorite );
 
     // Predefined filters combo is owned by the toolbar; connect its filterChanged.
     connect( searchToolbar_->predefinedFilters(), &PredefinedFiltersComboBox::filterChanged, this,

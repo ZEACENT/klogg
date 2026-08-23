@@ -87,6 +87,53 @@ class ChangedClangTidyTest(unittest.TestCase):
         self.assertIn("--line-filter=[{\"name\":\"src/example.H\",\"lines\":[[3,3]]}]", command)
         self.assertIn("-extra-arg=-nostdinc++", command)
 
+    def test_fast_option_is_opt_in(self):
+        required = ["--base", "HEAD", "--build-dir", "build_root"]
+        self.assertFalse(MODULE.parse_arguments(required).fast)
+        self.assertTrue(MODULE.parse_arguments([*required, "--fast"]).fast)
+
+    def test_fast_header_analysis_skips_translation_unit_fan_out(self):
+        with mock.patch.object(MODULE, "run_header_pass") as fan_out, mock.patch.object(
+            MODULE, "run_direct_header_pass", return_value=(0, "direct\n")
+        ) as direct:
+            result = MODULE.run_changed_header_passes(
+                pathlib.Path("/usr/bin/clang-tidy"),
+                pathlib.Path("/workspace/build"),
+                [pathlib.Path("/workspace/src/example.cpp")],
+                [pathlib.Path("/workspace/src/example.h")],
+                '[{"name":"src/example.h","lines":[[3,3]]}]',
+                4,
+                ["-nostdinc++"],
+                {"PATH": "/usr/bin"},
+                fast=True,
+            )
+
+        self.assertEqual(result, (0, "direct\n"))
+        fan_out.assert_not_called()
+        direct.assert_called_once()
+
+    def test_default_header_analysis_preserves_fan_out_and_direct_pass(self):
+        with mock.patch.object(
+            MODULE, "run_header_pass", return_value=(0, "fan-out\n")
+        ) as fan_out, mock.patch.object(
+            MODULE, "run_direct_header_pass", return_value=(0, "direct\n")
+        ) as direct:
+            result = MODULE.run_changed_header_passes(
+                pathlib.Path("/usr/bin/clang-tidy"),
+                pathlib.Path("/workspace/build"),
+                [pathlib.Path("/workspace/src/example.cpp")],
+                [pathlib.Path("/workspace/src/example.h")],
+                '[{"name":"src/example.h","lines":[[3,3]]}]',
+                4,
+                [],
+                {"PATH": "/usr/bin"},
+                fast=False,
+            )
+
+        self.assertEqual(result, (0, "fan-out\ndirect\n"))
+        fan_out.assert_called_once()
+        direct.assert_called_once()
+
     def test_source_regex_accepts_uppercase_extensions(self):
         self.assertRegex("src/example.CPP", MODULE.SOURCE_FILE_RE)
 

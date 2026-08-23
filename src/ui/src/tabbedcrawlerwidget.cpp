@@ -821,14 +821,14 @@ void CrawlerTabBar::syncTabButtonGeometry()
 void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
 {
     QMenu menu( this );
-    auto closeThis = menu.addAction( tr( "Close this" ) );
-    auto closeOthers = menu.addAction( tr( "Close others" ) );
-    auto closeLeft = menu.addAction( tr( "Close to the left" ) );
-    auto closeRight = menu.addAction( tr( "Close to the right" ) );
-    auto closeAll = menu.addAction( tr( "Close all" ) );
+    auto closeThis = menu.addAction( tr( "Close This" ) );
+    auto closeOthers = menu.addAction( tr( "Close Others" ) );
+    auto closeLeft = menu.addAction( tr( "Close to the Left" ) );
+    auto closeRight = menu.addAction( tr( "Close to the Right" ) );
+    auto closeAll = menu.addAction( tr( "Close All" ) );
     menu.addSeparator();
-    auto copyFullPath = menu.addAction( tr( "Copy full path" ) );
-    auto openContainingFolder = menu.addAction( tr( "Open containing folder" ) );
+    auto copyFullPath = menu.addAction( tr( "Copy Full Path" ) );
+    auto openContainingFolder = menu.addAction( tr( "Open Containing Folder" ) );
     menu.addSeparator();
 
     // Tab grouping submenu
@@ -850,8 +850,8 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
     }
 
     menu.addSeparator();
-    auto renameTab = menu.addAction( tr( "Rename tab" ) );
-    auto resetTabName = menu.addAction( tr( "Reset tab name" ) );
+    auto renameTab = menu.addAction( tr( "Rename Tab..." ) );
+    auto resetTabName = menu.addAction( tr( "Reset Tab Name" ) );
 
     connect( closeThis, &QAction::triggered, [ tab, this ] { Q_EMIT tabCloseRequested( tab ); } );
 

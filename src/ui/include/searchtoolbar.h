@@ -160,13 +160,15 @@ class SearchToolbar : public QWidget {
     void matchCaseChanged( bool matchCase );
     // "auto-refresh" toggle changed (forwarded to the host).
     void autoRefreshChanged( bool isRefreshing );
-    // Context-menu / favorite actions (host owns the dialogs / persistence).
+    // Search-history actions remain host-specific; favorite saving is owned here.
     void clearHistoryRequested();
     void editHistoryRequested();
-    void saveFavoriteRequested();
 
   protected:
     bool eventFilter( QObject* watched, QEvent* event ) override;
+
+  private Q_SLOTS:
+    void saveCurrentSearchAsFavorite();
 
   private:
     void setupWidgets();

@@ -40,6 +40,8 @@
 #ifndef PREDEFINEDFILTERS_H_
 #define PREDEFINEDFILTERS_H_
 
+#include <cstdint>
+
 #include <QList>
 #include <QString>
 
@@ -51,10 +53,51 @@ struct PredefinedFilter {
     bool useRegex;
 };
 
+inline bool operator==( const PredefinedFilter& left, const PredefinedFilter& right )
+{
+    return left.name == right.name && left.pattern == right.pattern
+           && left.useRegex == right.useRegex;
+}
+
+inline bool operator!=( const PredefinedFilter& left, const PredefinedFilter& right )
+{
+    return !( left == right );
+}
+
 // Represents collection of filters read from settings file.
 class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCollection> {
   public:
     using Collection = QList<PredefinedFilter>;
+
+    // The editor materializes each favorite as table items plus a checkbox widget.
+    static constexpr int MaximumFilterCount = 1000;
+
+    enum class LoadStatus : std::uint8_t {
+        Success,
+        MissingFile,
+        MalformedFile,
+        UnsupportedVersion,
+    };
+
+    struct LoadResult {
+        LoadStatus status;
+        Collection filters;
+    };
+
+    enum class CommitStatus : std::uint8_t {
+        Success,
+        Unchanged,
+        Conflict,
+        InvalidReplacement,
+        LockError,
+        StorageError,
+        WriteError,
+    };
+
+    struct CommitResult {
+        CommitStatus status;
+        Collection storedFilters;
+    };
 
     static const char* persistableName()
     {
@@ -64,8 +107,10 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     Collection getSyncedFilters();
     Collection getFilters() const;
     void setFilters( const Collection& filters );
+    static LoadResult tryLoadFromFile( const QString& file );
     static Collection loadFromFile( const QString& file );
     static bool saveToFile( const QString& file, const Collection& filters );
+    static CommitResult commit( const Collection& expected, const Collection& replacement );
 
     void retrieveFromStorage( QSettings& settings );
     void saveToStorage( QSettings& settings ) const;
@@ -73,6 +118,14 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
 
   private:
     static constexpr int PredefinedFiltersCollection_VERSION = 2;
+
+    static LoadResult readFromSettings( QSettings& settings, bool missingIsSuccess );
+    static CommitResult commitToSettings( QSettings& settings, const QString& lockFile,
+                                          const Collection& expected,
+                                          const Collection& replacement );
+    static QString storageLockFilePath( const QSettings& settings );
+
+    friend struct PredefinedFiltersCollectionTestAccess;
 
     Collection filters_;
 };

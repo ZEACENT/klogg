@@ -249,8 +249,6 @@ class CrawlerWidget : public QSplitter,
     void clearSearchHistory();
     void editSearchHistory();
 
-    // Save current search as a favorite filter
-    void saveAsFavorite();
     void setSearchPatternFromPredefinedFilters( const QList<PredefinedFilter>& filters );
 
     // Called when there was activity in the views
@@ -334,9 +332,6 @@ class CrawlerWidget : public QSplitter,
     void changeTopViewSize( int32_t delta );
     void updatePredefinedFiltersWidget();
     void applyEmptyFilterBehavior();
-
-    // Reload predefined filters after changing settings
-    void reloadPredefinedFilters() const;
 
     void resetStateOnSearchPatternChanges();
 

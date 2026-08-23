@@ -99,6 +99,7 @@
 #include "folderenumeration.h"
 #include "dispatch_to.h"
 #include "downloader.h"
+#include "filterfavoritesmodel.h"
 #include "encodings.h"
 #include "favoritefiles.h"
 #include "highlightersdialog.h"
@@ -124,6 +125,7 @@
 #include "styles.h"
 #include "tabgroup.h"
 #include "tabbedcrawlerwidget.h"
+#include "uimessage.h"
 
 namespace {
 
@@ -180,7 +182,7 @@ class ScopedMainWindowShortcutSuspender {
 
   private:
     struct ActionShortcuts {
-        QAction* action;
+        QAction* action = nullptr;
         QList<QKeySequence> shortcuts;
     };
 
@@ -430,7 +432,10 @@ void MainWindow::reTranslateUI()
         return QApplication::translate( "klogg::mainwindow::menu", text );
     };
     fileMenu->setTitle( transMenu( menu::fileTitle ) );
+    recentFilesMenu->setTitle( transMenu( menu::recentFilesTitle ) );
+    recentFoldersMenu->setTitle( transMenu( menu::recentFoldersTitle ) );
     editMenu->setTitle( transMenu( menu::editTitle ) );
+    saveCurrentLiveLogMenu->setTitle( transMenu( menu::saveCurrentLiveLogTitle ) );
     viewMenu->setTitle( transMenu( menu::viewTitle ) );
     openedFilesMenu->setTitle( transMenu( menu::openedFilesTitle ) );
     toolsMenu->setTitle( transMenu( menu::toolsTitle ) );
@@ -451,10 +456,12 @@ void MainWindow::reTranslateUI()
 
     openAction->setText( transAction( action::openText ) );
     openAction->setStatusTip( transAction( action::openStatusTip ) );
-    openAdbLogcatAction->setText( tr( "Open ADB Logcat..." ) );
-    openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
-    openIosLogStreamAction->setText( tr( "Open iOS Log Stream..." ) );
-    openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
+    openFolderAction->setText( transAction( action::openFolderText ) );
+    openFolderAction->setStatusTip( transAction( action::openFolderStatusTip ) );
+    openAdbLogcatAction->setText( transAction( action::openAdbLogcatText ) );
+    openAdbLogcatAction->setStatusTip( transAction( action::openAdbLogcatStatusTip ) );
+    openIosLogStreamAction->setText( transAction( action::openIosLogStreamText ) );
+    openIosLogStreamAction->setStatusTip( transAction( action::openIosLogStreamStatusTip ) );
 
     recentFilesCleanup->setText( transAction( action::recentFilesCleanupText ) );
     recentFoldersCleanup->setText( transAction( action::recentFoldersCleanupText ) );
@@ -482,17 +489,18 @@ void MainWindow::reTranslateUI()
 
     clearLogAction->setText( transAction( action::clearLogText ) );
     clearLogAction->setStatusTip( transAction( action::clearLogStatusTip ) );
-    saveCurrentLiveLogMenu->setTitle( tr( "Save Live Log As" ) );
-    saveCurrentLiveLogStripAnsiAction->setText( tr( "Without ANSI Sequences..." ) );
+    saveCurrentLiveLogStripAnsiAction->setText(
+        transAction( action::saveCurrentLiveLogStripAnsiText ) );
     saveCurrentLiveLogStripAnsiAction->setStatusTip(
-        tr( "Persist the current live capture to a file after removing ANSI sequences" ) );
-    saveCurrentLiveLogPreserveAnsiAction->setText( tr( "With ANSI Sequences..." ) );
+        transAction( action::saveCurrentLiveLogStripAnsiStatusTip ) );
+    saveCurrentLiveLogPreserveAnsiAction->setText(
+        transAction( action::saveCurrentLiveLogPreserveAnsiText ) );
     saveCurrentLiveLogPreserveAnsiAction->setStatusTip(
-        tr( "Persist the current live capture to a file without modifying ANSI sequences" ) );
-    disconnectSourceAction->setText( tr( "Disconnect Source" ) );
-    disconnectSourceAction->setStatusTip( tr( "Stop streaming from the current live source" ) );
-    reconnectSourceAction->setText( tr( "Reconnect Source" ) );
-    reconnectSourceAction->setStatusTip( tr( "Reconnect the current live source" ) );
+        transAction( action::saveCurrentLiveLogPreserveAnsiStatusTip ) );
+    disconnectSourceAction->setText( transAction( action::disconnectSourceText ) );
+    disconnectSourceAction->setStatusTip( transAction( action::disconnectSourceStatusTip ) );
+    reconnectSourceAction->setText( transAction( action::reconnectSourceText ) );
+    reconnectSourceAction->setStatusTip( transAction( action::reconnectSourceStatusTip ) );
 
     openContainingFolderAction->setText( transAction( action::openContainingFolderText ) );
     openContainingFolderAction->setStatusTip(
@@ -517,6 +525,7 @@ void MainWindow::reTranslateUI()
         transAction( action::lineNumbersVisibleInFilteredText ) );
 
     followAction->setText( transAction( action::followText ) );
+    goToTopAction->setText( transAction( action::goToTopText ) );
     textWrapAction->setText( transAction( action::wrapText ) );
     reloadAction->setText( transAction( action::reloadText ) );
     stopAction->setText( transAction( action::stopText ) );
@@ -549,13 +558,12 @@ void MainWindow::reTranslateUI()
     showScratchPadAction->setText( transAction( action::showScratchPadText ) );
     showScratchPadAction->setStatusTip( transAction( action::showScratchPadStatusTip ) );
 
-    auto curFavoritesIconText = addToFavoritesAction->data().toBool()
-                                    ? transAction( action::addToFavoritesText )
-                                    : transAction( action::removeFromFavoritesText );
-    addToFavoritesAction->setText( curFavoritesIconText );
-    addToFavoritesMenuAction->setText( transAction( action::addToFavoritesText ) );
-
-    removeFromFavoritesAction->setText( transAction( action::removeFromFavoritesText ) );
+    const auto currentFileFavoriteText = addToFavoritesAction->data().toBool()
+                                             ? transAction( action::addToFavoritesText )
+                                             : transAction( action::removeFromFavoritesText );
+    addToFavoritesAction->setText( currentFileFavoriteText );
+    addToFavoritesMenuAction->setText( transAction( action::addCurrentFileText ) );
+    removeFromFavoritesAction->setText( transAction( action::removeFavoriteFileText ) );
 
     selectOpenFileAction->setText( transAction( action::selectOpenFileText ) );
 
@@ -568,10 +576,16 @@ void MainWindow::reTranslateUI()
     exportFilterFavoritesAction->setText( transAction( action::exportFilterFavoritesText ) );
     exportFilterFavoritesAction->setStatusTip(
         transAction( action::exportFilterFavoritesStatusTip ) );
+    mergeTabsAction->setText( transAction( action::mergeTabsText ) );
+    mergeTabsAction->setStatusTip( transAction( action::mergeTabsStatusTip ) );
 
     // trayIcon
-    trayIcon_->setToolTip( QApplication::translate( "klogg::mainwindow::trayicon",
-                                                    klogg::mainwindow::trayicon::trayiconTip ) );
+    const auto transTrayIcon = []( const char* text ) -> auto {
+        return QApplication::translate( "klogg::mainwindow::trayicon", text );
+    };
+    trayIcon_->setToolTip( transTrayIcon( trayicon::trayiconTip ) );
+    trayOpenWindowAction_->setText( transTrayIcon( trayicon::openWindowText ) );
+    trayQuitAction_->setText( transTrayIcon( trayicon::quitText ) );
 }
 
 int MainWindow::installLanguage( QString lang )
@@ -622,20 +636,30 @@ void MainWindow::createActions()
     newWindowAction->setVisible( config.allowMultipleWindows() );
 
     openAction = new QAction( tr( action::openText ), this );
+    openAction->setObjectName( QStringLiteral( "openAction" ) );
     openAction->setStatusTip( tr( action::openStatusTip ) );
     connect( openAction, &QAction::triggered, [ this ]( auto ) { this->open(); } );
 
-    openFolderAction = new QAction( tr( "Open Folder..." ), this );
-    openFolderAction->setStatusTip( tr( "Search every file in a folder (like grep -EIrn)" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    openFolderAction = new QAction( tr( action::openFolderText ), this );
+    openFolderAction->setObjectName( QStringLiteral( "openFolderAction" ) );
+    openFolderAction->setStatusTip( tr( action::openFolderStatusTip ) );
     connect( openFolderAction, &QAction::triggered, [ this ]( auto ) { this->openFolder(); } );
 
-    openAdbLogcatAction = new QAction( tr( "Open ADB Logcat..." ), this );
-    openAdbLogcatAction->setStatusTip( tr( "Open Android logcat as a live source" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    openAdbLogcatAction = new QAction( tr( action::openAdbLogcatText ), this );
+    openAdbLogcatAction->setObjectName( QStringLiteral( "openAdbLogcatAction" ) );
+    openAdbLogcatAction->setStatusTip( tr( action::openAdbLogcatStatusTip ) );
     connect( openAdbLogcatAction, &QAction::triggered, this,
              [ this ]( auto ) { this->openAdbLogcat(); } );
 
-    openIosLogStreamAction = new QAction( tr( "Open iOS Log Stream..." ), this );
-    openIosLogStreamAction->setStatusTip( tr( "Open iOS device logs as a live source" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    openIosLogStreamAction = new QAction( tr( action::openIosLogStreamText ), this );
+    openIosLogStreamAction->setObjectName( QStringLiteral( "openIosLogStreamAction" ) );
+    openIosLogStreamAction->setStatusTip( tr( action::openIosLogStreamStatusTip ) );
 #ifndef Q_OS_MAC
     openIosLogStreamAction->setVisible( false );
 #endif
@@ -715,35 +739,48 @@ void MainWindow::createActions()
     clearLogAction->setStatusTip( tr( action::clearLogStatusTip ) );
     connect( clearLogAction, &QAction::triggered, this, [ this ]( auto ) { this->clearLog(); } );
 
-    saveCurrentLiveLogMenu = new QMenu( tr( "Save Live Log As" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveCurrentLiveLogMenu = new QMenu( tr( menu::saveCurrentLiveLogTitle ), this );
     saveCurrentLiveLogMenu->setObjectName( QStringLiteral( "saveCurrentLiveLogMenu" ) );
-    saveCurrentLiveLogStripAnsiAction = new QAction( tr( "Without ANSI Sequences..." ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveCurrentLiveLogStripAnsiAction
+        = new QAction( tr( action::saveCurrentLiveLogStripAnsiText ), this );
     saveCurrentLiveLogStripAnsiAction->setObjectName(
         QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) );
     saveCurrentLiveLogStripAnsiAction->setStatusTip(
-        tr( "Persist the current live capture to a file after removing ANSI sequences" ) );
+        tr( action::saveCurrentLiveLogStripAnsiStatusTip ) );
     connect( saveCurrentLiveLogStripAnsiAction, &QAction::triggered, this,
              [ this ]( auto ) { this->saveCurrentLiveLog( LiveLogSaveAnsiMode::Strip ); } );
 
-    saveCurrentLiveLogPreserveAnsiAction = new QAction( tr( "With ANSI Sequences..." ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveCurrentLiveLogPreserveAnsiAction
+        = new QAction( tr( action::saveCurrentLiveLogPreserveAnsiText ), this );
     saveCurrentLiveLogPreserveAnsiAction->setObjectName(
         QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) );
     saveCurrentLiveLogPreserveAnsiAction->setStatusTip(
-        tr( "Persist the current live capture to a file without modifying ANSI sequences" ) );
+        tr( action::saveCurrentLiveLogPreserveAnsiStatusTip ) );
     connect( saveCurrentLiveLogPreserveAnsiAction, &QAction::triggered, this,
              [ this ]( auto ) { this->saveCurrentLiveLog( LiveLogSaveAnsiMode::Preserve ); } );
     saveCurrentLiveLogMenu->addAction( saveCurrentLiveLogStripAnsiAction );
     saveCurrentLiveLogMenu->addAction( saveCurrentLiveLogPreserveAnsiAction );
     saveCurrentLiveLogMenu->setEnabled( false );
 
-    disconnectSourceAction = new QAction( tr( "Disconnect Source" ), this );
-    disconnectSourceAction->setStatusTip(
-        tr( "Stop streaming from the current live source" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    disconnectSourceAction = new QAction( tr( action::disconnectSourceText ), this );
+    disconnectSourceAction->setObjectName( QStringLiteral( "disconnectSourceAction" ) );
+    disconnectSourceAction->setStatusTip( tr( action::disconnectSourceStatusTip ) );
     connect( disconnectSourceAction, &QAction::triggered, this,
              [ this ]( auto ) { this->disconnectCurrentSource(); } );
 
-    reconnectSourceAction = new QAction( tr( "Reconnect Source" ), this );
-    reconnectSourceAction->setStatusTip( tr( "Reconnect the current live source" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    reconnectSourceAction = new QAction( tr( action::reconnectSourceText ), this );
+    reconnectSourceAction->setObjectName( QStringLiteral( "reconnectSourceAction" ) );
+    reconnectSourceAction->setStatusTip( tr( action::reconnectSourceStatusTip ) );
     connect( reconnectSourceAction, &QAction::triggered, this,
              [ this ]( auto ) { this->reconnectCurrentSource(); } );
 
@@ -764,11 +801,13 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->copyFullPath(); } );
 
     openClipboardAction = new QAction( tr( action::openClipboardText ), this );
+    openClipboardAction->setObjectName( QStringLiteral( "openClipboardAction" ) );
     openClipboardAction->setStatusTip( tr( action::openClipboardStatusTip ) );
     connect( openClipboardAction, &QAction::triggered, this,
              [ this ]( auto ) { this->openClipboard(); } );
 
     openUrlAction = new QAction( tr( action::openUrlText ), this );
+    openUrlAction->setObjectName( QStringLiteral( "openUrlAction" ) );
     openUrlAction->setStatusTip( tr( action::openUrlStatusTip ) );
     connect( openUrlAction, &QAction::triggered, this, [ this ]( auto ) { this->openUrl(); } );
 
@@ -856,6 +895,7 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->editHighlighters(); } );
 
     showDocumentationAction = new QAction( tr( action::showDocumentationText ), this );
+    showDocumentationAction->setObjectName( QStringLiteral( "showDocumentationAction" ) );
     showDocumentationAction->setStatusTip( tr( action::showDocumentationStatusTip ) );
     connect( showDocumentationAction, &QAction::triggered, this,
              [ this ]( auto ) { this->documentation(); } );
@@ -869,6 +909,7 @@ void MainWindow::createActions()
     connect( aboutQtAction, &QAction::triggered, this, [ this ]( auto ) { this->aboutQt(); } );
 
     reportIssueAction = new QAction( tr( action::reportIssueText ), this );
+    reportIssueAction->setObjectName( QStringLiteral( "reportIssueAction" ) );
     reportIssueAction->setStatusTip( tr( action::reportIssueStatusTip ) );
     connect( reportIssueAction, &QAction::triggered, this,
              []( auto ) { IssueReporter::reportIssue( IssueTemplate::Bug ); } );
@@ -888,8 +929,11 @@ void MainWindow::createActions()
     connect( showScratchPadAction, &QAction::triggered, this,
              [ this ]( auto ) { this->showScratchPad(); } );
 
-    mergeTabsAction = new QAction( tr( "Merge Tabs..." ), this );
-    mergeTabsAction->setStatusTip( tr( "Merge selected tabs into a single view" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    mergeTabsAction = new QAction( tr( action::mergeTabsText ), this );
+    mergeTabsAction->setObjectName( QStringLiteral( "mergeTabsAction" ) );
+    mergeTabsAction->setStatusTip( tr( action::mergeTabsStatusTip ) );
     connect( mergeTabsAction, &QAction::triggered, this,
              [ this ]( auto ) { this->mergeTabs(); } );
 
@@ -903,15 +947,22 @@ void MainWindow::createActions()
     connect( openedFilesGroup, &QActionGroup::triggered, this, &MainWindow::switchToOpenedFile );
 
     addToFavoritesAction = new QAction( tr( action::addToFavoritesText ), this );
+    addToFavoritesAction->setObjectName( QStringLiteral( "addToFavoritesAction" ) );
     addToFavoritesAction->setData( true );
     connect( addToFavoritesAction, &QAction::triggered, this,
              [ this ]( auto ) { this->addToFavorites(); } );
 
-    addToFavoritesMenuAction = new QAction( tr( action::addToFavoritesText ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    addToFavoritesMenuAction = new QAction( tr( action::addCurrentFileText ), this );
+    addToFavoritesMenuAction->setObjectName( QStringLiteral( "addToFavoritesMenuAction" ) );
     connect( addToFavoritesMenuAction, &QAction::triggered, this,
              [ this ]( auto ) { this->addToFavorites(); } );
 
-    removeFromFavoritesAction = new QAction( tr( action::removeFromFavoritesText ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    removeFromFavoritesAction = new QAction( tr( action::removeFavoriteFileText ), this );
+    removeFromFavoritesAction->setObjectName( QStringLiteral( "removeFromFavoritesAction" ) );
     connect( removeFromFavoritesAction, &QAction::triggered, this,
              [ this ]( auto ) { this->removeFromFavorites(); } );
 
@@ -920,16 +971,20 @@ void MainWindow::createActions()
              [ this ]( auto ) { this->selectOpenedFile(); } );
 
     predefinedFiltersDialogAction = new QAction( tr( action::predefinedFiltersDialogText ), this );
+    predefinedFiltersDialogAction->setObjectName(
+        QStringLiteral( "predefinedFiltersDialogAction" ) );
     predefinedFiltersDialogAction->setStatusTip( tr( action::predefinedFiltersDialogStatusTip ) );
     connect( predefinedFiltersDialogAction, &QAction::triggered, this,
              [ this ]( auto ) { this->editPredefinedFilters(); } );
 
     importFilterFavoritesAction = new QAction( tr( action::importFilterFavoritesText ), this );
+    importFilterFavoritesAction->setObjectName( QStringLiteral( "importFilterFavoritesAction" ) );
     importFilterFavoritesAction->setStatusTip( tr( action::importFilterFavoritesStatusTip ) );
     connect( importFilterFavoritesAction, &QAction::triggered, this,
              [ this ]( auto ) { this->importFilterFavorites(); } );
 
     exportFilterFavoritesAction = new QAction( tr( action::exportFilterFavoritesText ), this );
+    exportFilterFavoritesAction->setObjectName( QStringLiteral( "exportFilterFavoritesAction" ) );
     exportFilterFavoritesAction->setStatusTip( tr( action::exportFilterFavoritesStatusTip ) );
     connect( exportFilterFavoritesAction, &QAction::triggered, this,
              [ this ]( auto ) { this->exportFilterFavorites(); } );
@@ -1025,6 +1080,7 @@ void MainWindow::createMenus()
     using namespace klogg::mainwindow;
 
     fileMenu = menuBar()->addMenu( tr( menu::fileTitle ) );
+    fileMenu->setObjectName( QStringLiteral( "fileMenu" ) );
     fileMenu->setToolTipsVisible( true );
     fileMenu->addAction( newWindowAction );
     fileMenu->addAction( openAction );
@@ -1033,7 +1089,8 @@ void MainWindow::createMenus()
     fileMenu->addAction( openIosLogStreamAction );
     fileMenu->addAction( openClipboardAction );
     fileMenu->addAction( openUrlAction );
-    recentFilesMenu = fileMenu->addMenu( tr( "Open Recent" ) );
+    recentFilesMenu = fileMenu->addMenu( tr( menu::recentFilesTitle ) );
+    recentFilesMenu->setObjectName( QStringLiteral( "recentFilesMenu" ) );
     for ( auto i = 0u; i < recentFileActions.size(); ++i ) {
         recentFilesMenu->addAction( recentFileActions[ i ] );
     }
@@ -1041,7 +1098,8 @@ void MainWindow::createMenus()
     recentFilesMenu->addAction( recentFilesCleanup );
     recentFilesMenu->setEnabled( false );
 
-    recentFoldersMenu = fileMenu->addMenu( tr( "Open Recent Fol&der" ) );
+    recentFoldersMenu = fileMenu->addMenu( tr( menu::recentFoldersTitle ) );
+    recentFoldersMenu->setObjectName( QStringLiteral( "recentFoldersMenu" ) );
     for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
         recentFoldersMenu->addAction( recentFolderActions[ i ] );
     }
@@ -1060,6 +1118,7 @@ void MainWindow::createMenus()
     fileMenu->addAction( exitAction );
 
     editMenu = menuBar()->addMenu( tr( menu::editTitle ) );
+    editMenu->setObjectName( QStringLiteral( "editMenu" ) );
     editMenu->addAction( copyAction );
     editMenu->addAction( selectAllAction );
     editMenu->addSeparator();
@@ -1078,7 +1137,9 @@ void MainWindow::createMenus()
     editMenu->setEnabled( false );
 
     viewMenu = menuBar()->addMenu( tr( menu::viewTitle ) );
+    viewMenu->setObjectName( QStringLiteral( "viewMenu" ) );
     openedFilesMenu = viewMenu->addMenu( tr( menu::openedFilesTitle ) );
+    openedFilesMenu->setObjectName( QStringLiteral( "openedFilesMenu" ) );
     viewMenu->addSeparator();
     viewMenu->addAction( overviewVisibleAction );
     viewMenu->addSeparator();
@@ -1093,8 +1154,10 @@ void MainWindow::createMenus()
     viewMenu->addAction( reloadAction );
 
     toolsMenu = menuBar()->addMenu( tr( menu::toolsTitle ) );
+    toolsMenu->setObjectName( QStringLiteral( "toolsMenu" ) );
 
     highlightersMenu = new HighlightersMenu( tr( menu::highlightersTitle ), menuBar() );
+    highlightersMenu->setObjectName( QStringLiteral( "highlightersMenu" ) );
     menuBar()->addMenu( highlightersMenu );
     highlightersMenu->setApplyChange( [ this ]() {
         auto crawler = currentCrawlerWidget();
@@ -1116,9 +1179,12 @@ void MainWindow::createMenus()
     menuBar()->addSeparator();
 
     favoritesMenu = menuBar()->addMenu( tr( menu::favoritesTitle ) );
+    favoritesMenu->setObjectName( QStringLiteral( "favoritesMenu" ) );
     favoritesMenu->setToolTipsVisible( true );
+    connect( favoritesMenu, &QMenu::aboutToShow, this, &MainWindow::updateFavoritesMenu );
 
     helpMenu = menuBar()->addMenu( tr( menu::helpTitle ) );
+    helpMenu->setObjectName( QStringLiteral( "helpMenu" ) );
     helpMenu->addAction( showDocumentationAction );
     helpMenu->addSeparator();
     helpMenu->addAction( checkForNewVersionAction );
@@ -1185,15 +1251,24 @@ void MainWindow::createTrayIcon()
 {
     trayIcon_ = new QSystemTrayIcon( this );
 
-    QMenu* trayMenu = new QMenu( this );
-    QAction* openWindowAction = new QAction( tr( "Open window" ), this );
-    QAction* quitAction = new QAction( tr( "Quit" ), this );
+    // QObject parentage owns this menu.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* trayMenu = new QMenu( this );
+    trayMenu->setObjectName( QStringLiteral( "trayMenu" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    trayOpenWindowAction_ = new QAction( tr( klogg::mainwindow::trayicon::openWindowText ), this );
+    trayOpenWindowAction_->setObjectName( QStringLiteral( "trayOpenWindowAction" ) );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    trayQuitAction_ = new QAction( tr( klogg::mainwindow::trayicon::quitText ), this );
+    trayQuitAction_->setObjectName( QStringLiteral( "trayQuitAction" ) );
 
-    trayMenu->addAction( openWindowAction );
-    trayMenu->addAction( quitAction );
+    trayMenu->addAction( trayOpenWindowAction_ );
+    trayMenu->addAction( trayQuitAction_ );
 
-    connect( openWindowAction, &QAction::triggered, this, &QMainWindow::show );
-    connect( quitAction, &QAction::triggered, [ this ] {
+    connect( trayOpenWindowAction_, &QAction::triggered, this, &QMainWindow::show );
+    connect( trayQuitAction_, &QAction::triggered, [ this ] {
         this->isCloseFromTray_ = true;
         this->close();
     } );
@@ -1746,11 +1821,7 @@ void MainWindow::editHighlighters()
 void MainWindow::editPredefinedFilters( const QString& newFilter )
 {
     PredefinedFiltersDialog dialog( newFilter, this );
-
-    signalMux_.connect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
-
     dialog.exec();
-    signalMux_.disconnect( &dialog, SIGNAL( optionsChanged() ), SLOT( applyConfiguration() ) );
 }
 
 void MainWindow::importFilterFavorites()
@@ -1759,30 +1830,65 @@ void MainWindow::importFilterFavorites()
         = QFileDialog::getOpenFileName( this, tr( "Select file to import" ), "",
                                         tr( "Filter favorites (*.conf);;All files (*)" ) );
 
-    if ( file.isEmpty() ) {
+    if ( !file.isEmpty() ) {
+        importFilterFavoritesFromFile( file );
+    }
+}
+
+void MainWindow::importFilterFavoritesFromFile( const QString& file )
+{
+    const auto result = PredefinedFiltersCollection::tryLoadFromFile( file );
+    if ( result.status != PredefinedFiltersCollection::LoadStatus::Success ) {
+        klogg::ui::warning( this, tr( "klogg" ),
+                            tr( "Unable to import filter favorites from the selected file." ) );
         return;
     }
 
-    const auto filters = PredefinedFiltersCollection::loadFromFile( file );
-    PredefinedFiltersCollection::getSynced().saveToStorage( filters );
-    Q_EMIT optionsChanged();
+    auto& favoritesModel = FilterFavoritesModel::instance();
+    favoritesModel.synchronizeFromStorage();
+    const auto expected = favoritesModel.favorites();
+    const auto commitResult = favoritesModel.replaceFavorites( expected, result.filters );
+    switch ( commitResult.status ) {
+    case PredefinedFiltersCollection::CommitStatus::Success:
+    case PredefinedFiltersCollection::CommitStatus::Unchanged:
+        return;
+    case PredefinedFiltersCollection::CommitStatus::Conflict:
+        klogg::ui::warning(
+            this, tr( "klogg" ),
+            tr( "Filter favorites changed while the import was being applied. Try again." ) );
+        return;
+    case PredefinedFiltersCollection::CommitStatus::InvalidReplacement:
+    case PredefinedFiltersCollection::CommitStatus::LockError:
+    case PredefinedFiltersCollection::CommitStatus::StorageError:
+    case PredefinedFiltersCollection::CommitStatus::WriteError:
+        klogg::ui::warning( this, tr( "klogg" ),
+                            tr( "Unable to save filter favorites. Try again." ) );
+        return;
+    }
 }
 
 void MainWindow::exportFilterFavorites()
 {
-    auto file = QFileDialog::getSaveFileName( this, tr( "Export filter favorites" ), "",
-                                              tr( "Filter favorites (*.conf)" ) );
+    const auto file = QFileDialog::getSaveFileName( this, tr( "Export filter favorites" ), "",
+                                                    tr( "Filter favorites (*.conf)" ) );
 
-    if ( file.isEmpty() ) {
-        return;
+    if ( !file.isEmpty() ) {
+        exportFilterFavoritesToFile( file );
     }
+}
 
+void MainWindow::exportFilterFavoritesToFile( QString file )
+{
     if ( !file.endsWith( ".conf" ) ) {
         file += ".conf";
     }
 
-    PredefinedFiltersCollection::saveToFile( file,
-                                             PredefinedFiltersCollection::getSynced().getFilters() );
+    auto& favoritesModel = FilterFavoritesModel::instance();
+    favoritesModel.synchronizeFromStorage();
+    if ( !PredefinedFiltersCollection::saveToFile( file, favoritesModel.favorites() ) ) {
+        klogg::ui::warning( this, tr( "klogg" ),
+                            tr( "Unable to export filter favorites to the selected file." ) );
+    }
 }
 
 // Opens the 'Options' modal dialog box
@@ -3404,6 +3510,8 @@ void MainWindow::updateFavoritesMenu()
 
     for ( const auto& file : favorites ) {
         auto action = favoritesMenu->addAction( file.displayName() );
+        action->setObjectName( QStringLiteral( "favoriteFileAction" ) );
+        action->setMenuRole( QAction::NoRole );
 
         action->setActionGroup( favoritesGroup );
         action->setToolTip( file.nativeFullPath() );
@@ -3415,18 +3523,20 @@ void MainWindow::addToFavorites()
 {
     if ( const auto crawler = currentCrawlerWidget();
          crawler != nullptr && session_.getDocumentKind( crawler ) == DocumentKind::File ) {
-        auto& favorites = FavoriteFiles::get();
+        auto& favorites = FavoriteFiles::getSynced();
         const auto path = session_.getAssociatedPath( crawler );
+        const auto currentFavorites = favorites.favorites();
+        const auto isFavorite = std::any_of( currentFavorites.cbegin(), currentFavorites.cend(),
+                                             FullPathComparator( path ) );
 
-        if ( addToFavoritesAction->data().toBool() ) {
-            favorites.add( path );
+        if ( isFavorite ) {
+            favorites.remove( path );
         }
         else {
-            favorites.remove( path );
+            favorites.add( path );
         }
 
         favorites.save();
-
         updateFavoritesMenu();
     }
 }

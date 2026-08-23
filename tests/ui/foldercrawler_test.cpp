@@ -25,6 +25,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <QApplication>
 #include <QBoxLayout>
 #include <QByteArray>
 #include <QClipboard>
@@ -43,6 +44,7 @@
 #include <QSplitter>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QToolButton>
 
 #include <algorithm>
@@ -55,6 +57,7 @@
 #include "abstractcrawlerwidget.h"
 #include "abstractlogview.h"
 #include "configuration.h"
+#include "filterfavoritesmodel.h"
 #include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
 #include "foldersearchresults.h"
@@ -162,28 +165,27 @@ struct ConfigGuard {
     }
 };
 
-// RAII save/restore of the shared PredefinedFiltersCollection (a Persistable ->
-// QSettings on disk). A failed REQUIRE throws, so the restore must run on stack
-// unwinding; otherwise a test filter leaks into the user's real settings. The
-// ctor also strips any leftover test filter from prior failed runs so this test
-// (and siblings) start from a clean slate.
-struct PredefinedFiltersGuard {
+// RAII save/restore through the observable favorites model. replaceFavorites
+// persists as well as resetting every attached combo, so tests exercise the same
+// production update path without relying on applyConfiguration side effects.
+struct FilterFavoritesGuard {
+    FilterFavoritesModel& model = FilterFavoritesModel::instance();
     PredefinedFiltersCollection::Collection saved;
-    explicit PredefinedFiltersGuard( const QString& testName )
+
+    explicit FilterFavoritesGuard( const QString& testName )
     {
-        auto& c = PredefinedFiltersCollection::getSynced();
-        saved = c.getSyncedFilters();
-        saved.erase( std::remove_if( saved.begin(), saved.end(),
-                                     [ &testName ]( const PredefinedFilter& f ) {
-                                         return f.name == testName;
-                                     } ),
-                     saved.end() );
-        c.saveToStorage( saved ); // clean slate for construction
+        model.synchronizeFromStorage();
+        saved = model.favorites();
+        auto initial = saved;
+        initial.erase( std::remove_if( initial.begin(), initial.end(),
+                                      [ &testName ]( const PredefinedFilter& favorite ) {
+                                          return favorite.name == testName;
+                                      } ),
+                       initial.end() );
+        model.replaceFavorites( initial );
     }
-    ~PredefinedFiltersGuard()
-    {
-        PredefinedFiltersCollection::getSynced().saveToStorage( saved );
-    }
+
+    ~FilterFavoritesGuard() { model.replaceFavorites( saved ); }
 };
 } // namespace
 
@@ -1809,34 +1811,28 @@ TEST_CASE( "FolderCrawlerWidget clearHistoryRequested clears the shared search h
     REQUIRE( ss.recentSearches().isEmpty() );
 }
 
-TEST_CASE( "FolderCrawlerWidget applyConfiguration repopulates predefined filters",
-           "[folder]" )
+TEST_CASE( "FolderCrawlerWidget observes shared favorite model changes", "[folder]" )
 {
-    // applyConfiguration must re-sync the predefined-filters combo from the
-    // shared collection (parity with CrawlerWidget, crawlerwidget.cpp:866), so a
-    // filter saved after construction appears after optionsChanged. Currently
-    // the folder's applyConfiguration skips reloadPredefinedFilters (RED).
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
     const QString a = writeFile( dir, "a.log", QByteArray( "ERROR one\n" ) );
 
-    // RAII: strips any leftover test filter and restores the user's real
-    // collection on scope exit (even if a REQUIRE throws). Must be constructed
-    // BEFORE the widget so the ctor's reloadPredefinedFilters reads a clean
-    // store.
     const QString testName = QStringLiteral( "zzz_late_filter_test" );
-    PredefinedFiltersGuard guard{ testName };
+    FilterFavoritesGuard guard{ testName };
 
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a } );
 
-    REQUIRE( widget.searchToolbar()->predefinedFilters()->findText( testName ) < 0 );
+    auto* const combo = widget.searchToolbar()->predefinedFilters();
+    REQUIRE( combo->model() == &guard.model );
+    REQUIRE( combo->findText( testName ) < 0 );
 
-    PredefinedFiltersCollection::getSynced().saveToStorage(
-        { { testName, QStringLiteral( "WARN" ), false } } );
+    auto favorites = guard.model.favorites();
+    favorites.push_back( { testName, QStringLiteral( "WARN" ), false } );
+    guard.model.replaceFavorites( favorites );
 
-    widget.applyConfiguration();
-    REQUIRE( widget.searchToolbar()->predefinedFilters()->findText( testName ) >= 0 );
+    REQUIRE( combo->findText( testName ) >= 0 );
+    REQUIRE( combo->currentIndex() == -1 );
 }
 
 
@@ -2171,30 +2167,125 @@ TEST_CASE( "FolderCrawlerWidget hides search-limit actions its search cannot hon
 
     FolderCrawlerWidget widget;
     widget.setFolder( dir.path(), QStringList{ a } );
-    widget.show();
-    QTest::qWait( 100 );
 
-    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
-    const auto searchLimitsActionsVisible = []( const AbstractLogView* view ) {
-        const auto* menu = Access::popupMenu( view );
-        if ( menu == nullptr ) {
-            return false;
+    const auto requireSearchLimitsHidden = []( const AbstractLogView* view ) {
+        const QStringList objectNames{
+            QStringLiteral( "setSearchStartAction" ),
+            QStringLiteral( "setSearchEndAction" ),
+            QStringLiteral( "clearSearchLimitAction" ),
+        };
+        for ( const auto& objectName : objectNames ) {
+            auto* const action = view->findChild<QAction*>( objectName );
+            INFO( "Search-limit action objectName=" << objectName.toStdString() );
+            REQUIRE( action != nullptr );
+            CHECK_FALSE( action->isVisible() );
         }
-        bool anyVisible = false;
-        const auto actions = menu->actions();
-        for ( const auto* action : actions ) {
-            if ( action->text().startsWith( QStringLiteral( "Set search st" ) )
-                 || action->text().startsWith( QStringLiteral( "Clear search limits" ) ) ) {
-                anyVisible = anyVisible || action->isVisible();
-            }
-        }
-        return anyVisible;
     };
 
     REQUIRE( widget.mainView() != nullptr );
     REQUIRE( widget.filteredView() != nullptr );
-    REQUIRE_FALSE( searchLimitsActionsVisible( widget.mainView() ) );
-    REQUIRE_FALSE( searchLimitsActionsVisible( widget.filteredView() ) );
+    requireSearchLimitsHidden( widget.mainView() );
+    requireSearchLimitsHidden( widget.filteredView() );
+}
+
+TEST_CASE( "Folder log-view context menu uses app Title Case and semantic ellipses",
+           "[folder][menu]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "line0\nERROR a\nline2\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.resize( 800, 600 );
+    widget.show();
+    QCoreApplication::processEvents();
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ] { return !widget.isSearchActive(); } ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    view->selectAndDisplayLine( 1_lnum );
+    view->ensureLineMapFresh();
+
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+    const int charHeight = Access::charHeight( view );
+    REQUIRE( charHeight > 0 );
+    const QPoint menuPoint{ Access::bulletZoneWidth( view ) + 20,
+                            Access::drawingTopOffset( view ) + charHeight + charHeight / 2 };
+    REQUIRE( view->lineAtYForTest( menuPoint.y() ) == 1_lnum );
+
+    QStringList actionTexts;
+    QString popupError;
+    bool popupObserved = false;
+    bool popupFinished = false;
+    QTimer::singleShot( 0, Qt::PreciseTimer, view, [ & ] {
+        auto* const menu = Access::popupMenu( view );
+        if ( menu == nullptr || !menu->isVisible() ) {
+            popupError = QStringLiteral( "Folder log-view context menu was not visible" );
+            popupFinished = true;
+            if ( menu != nullptr ) {
+                menu->close();
+            }
+            if ( auto* popup = QApplication::activePopupWidget() ) {
+                popup->close();
+            }
+            return;
+        }
+
+        popupObserved = true;
+        std::function<void( const QMenu* )> collectMenuTexts;
+        collectMenuTexts = [ &actionTexts, &collectMenuTexts ]( const QMenu* currentMenu ) {
+            for ( const auto* action : currentMenu->actions() ) {
+                if ( action->isSeparator() ) {
+                    continue;
+                }
+
+                auto text = action->text();
+                text.remove( QLatin1Char( '&' ) );
+                actionTexts.push_back( text );
+                if ( action->menu() != nullptr ) {
+                    collectMenuTexts( action->menu() );
+                }
+            }
+        };
+        collectMenuTexts( menu );
+        popupFinished = true;
+        menu->close();
+    } );
+    QTimer::singleShot( 250, Qt::PreciseTimer, view, [ & ] { // lint-allow: platform-fragile
+        if ( !popupFinished ) {
+            popupError = QStringLiteral( "Folder log-view context menu watchdog expired" );
+            popupFinished = true;
+            if ( auto* menu = Access::popupMenu( view ) ) {
+                menu->close();
+            }
+            if ( auto* popup = QApplication::activePopupWidget() ) {
+                popup->close();
+            }
+        }
+    } );
+
+    QTest::mouseClick( view->viewport(), Qt::RightButton, Qt::NoModifier, menuPoint );
+    REQUIRE( popupError.isEmpty() );
+    REQUIRE( popupObserved );
+
+    const QStringList expectedTexts{
+        QStringLiteral( "Save to File..." ),
+        QStringLiteral( "Save Selected to File..." ),
+        QStringLiteral( "Find Next" ),
+        QStringLiteral( "Find Previous" ),
+        QStringLiteral( "Set Search Start" ),
+        QStringLiteral( "Set Search End" ),
+        QStringLiteral( "Clear Search Limits" ),
+        QStringLiteral( "Color Labels" ),
+        QStringLiteral( "Ignore Case" ),
+        QStringLiteral( "Whole Word" ),
+    };
+    for ( const auto& expectedText : expectedTexts ) {
+        CAPTURE( expectedText );
+        CHECK( actionTexts.contains( expectedText ) );
+    }
 }
 
 TEST_CASE( "FolderCrawlerWidget mirrors a portion selection into the main view",

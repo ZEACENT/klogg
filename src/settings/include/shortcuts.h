@@ -168,4 +168,9 @@ private:
 // actions that should use the platform's primary modifier key.
 QString commandShortcutModifier();
 
+// Returns the platform Find Next bindings after runtime normalization, excluding
+// the literal Ctrl+G binding reserved for Go to Line. Duplicate bindings are
+// removed and F3 is always present as a fallback.
+QStringList findNextShortcutBindings();
+
 #endif

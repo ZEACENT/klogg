@@ -43,7 +43,6 @@
 #include <QDialog>
 
 #include "predefinedfilters.h"
-#include "predefinedfiltersdialog.h"
 #include "ui_predefinedfiltersdialog.h"
 
 class PredefinedFiltersDialog : public QDialog, public Ui::PredefinedFiltersDialog {
@@ -62,14 +61,13 @@ class PredefinedFiltersDialog : public QDialog, public Ui::PredefinedFiltersDial
 
     void exportFilters();
     void importFilters();
+    void exportFiltersToFile( const QString& file );
+    void importFiltersFromFile( const QString& file );
 
     void resolveStandardButton( QAbstractButton* button );
 
     void onCurrentCellChanged( int currentRow, int currentColumn, int previousRow,
                                int previousColumn );
-
-  Q_SIGNALS:
-    void optionsChanged();
 
   private:
     void addFilterRow( const QString& newFilter );
@@ -77,11 +75,13 @@ class PredefinedFiltersDialog : public QDialog, public Ui::PredefinedFiltersDial
 
     void swapFilters( int currentRow, int newRow, int column );
 
-    void saveSettings() const;
+    bool saveSettings();
     PredefinedFiltersCollection::Collection readFiltersTable() const;
 
     void updateButtons();
     void updateUpDownButtons( int currentRow );
+
+    PredefinedFiltersCollection::Collection baseFavorites_;
 };
 
 #endif

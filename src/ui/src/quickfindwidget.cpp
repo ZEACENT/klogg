@@ -55,6 +55,7 @@
 #include "iconloader.h"
 #include "qfnotifications.h"
 #include "savedsearches.h"
+#include "shortcuts.h"
 
 #include "quickfindwidget.h"
 
@@ -109,7 +110,9 @@ QuickFindWidget::QuickFindWidget( QWidget* parent )
 
     nextButton_
         = setupToolButton( QLatin1String( "Next" ), QLatin1String( "arrowdown" ) );
-    nextButton_->setShortcut( QKeySequence::FindNext );
+    const auto findNextBindings = findNextShortcutBindings();
+    nextButton_->setShortcut(
+        QKeySequence( findNextBindings.front(), QKeySequence::PortableText ) );
     layout->addWidget( nextButton_ );
 
     notificationText_ = new QLabel( "" );

@@ -38,8 +38,10 @@
 
 #include <algorithm>
 #include <mutex>
+#include <utility>
 
 #include <QFontInfo>
+#include <QList>
 #include <QKeySequence>
 #include <qcolor.h>
 #include <qglobal.h>
@@ -55,10 +57,104 @@ namespace {
 std::once_flag fontInitFlag;
 static const Configuration DefaultConfiguration = {};
 
+constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
+
 int clampLineSpacingPercent( int percent )
 {
     return std::clamp( percent, Configuration::MinLineSpacingPercent,
                        Configuration::MaxLineSpacingPercent );
+}
+
+QStringList normalizedShortcutBindings( QStringList bindings )
+{
+    for ( auto& binding : bindings ) {
+        binding = QKeySequence( binding, QKeySequence::PortableText )
+                      .toString( QKeySequence::PortableText );
+    }
+    while ( !bindings.isEmpty() && bindings.back().isEmpty() ) {
+        bindings.removeLast();
+    }
+    return bindings;
+}
+
+QStringList legacyFindNextBindings( const QString& commandModifier )
+{
+    QStringList bindings;
+    for ( const auto& key : QKeySequence::keyBindings( QKeySequence::FindNext ) ) {
+        const auto portable = key.toString( QKeySequence::PortableText );
+        if ( !portable.isEmpty() && !bindings.contains( portable ) ) {
+            bindings.push_back( portable );
+        }
+    }
+
+    const auto commandG = QKeySequence( commandModifier + QStringLiteral( "+G" ),
+                                        QKeySequence::PortableText )
+                              .toString( QKeySequence::PortableText );
+    if ( !commandG.isEmpty() && !bindings.contains( commandG ) ) {
+        bindings.push_back( commandG );
+    }
+    return bindings;
+}
+
+bool matchesLegacyJumpToLineDefault( const QStringList& bindings )
+{
+    const auto normalized = normalizedShortcutBindings( bindings );
+    return normalized
+               == normalizedShortcutBindings(
+                   { commandShortcutModifier() + QStringLiteral( "+L" ) } )
+           || normalized == normalizedShortcutBindings( { QStringLiteral( "Ctrl+L" ) } );
+}
+
+bool matchesLegacyFindNextDefault( const QStringList& bindings )
+{
+    const auto normalized = normalizedShortcutBindings( bindings );
+    const auto platformBindings = legacyFindNextBindings( commandShortcutModifier() );
+    const auto literalCtrlBindings = legacyFindNextBindings( QStringLiteral( "Ctrl" ) );
+    const QList<QStringList> candidates{
+        platformBindings,
+        platformBindings.mid( 0, 2 ),
+        literalCtrlBindings,
+        literalCtrlBindings.mid( 0, 2 ),
+        { commandShortcutModifier() + QStringLiteral( "+G" ) },
+        { QStringLiteral( "Ctrl+G" ) },
+    };
+
+    return std::any_of( candidates.cbegin(), candidates.cend(), [ &normalized ]( auto candidate ) {
+        return normalized == normalizedShortcutBindings( std::move( candidate ) );
+    } );
+}
+
+bool migrateLegacyCtrlGDefaults( ShortcutAction::ConfiguredShortcuts& shortcuts )
+{
+    bool changed = false;
+    const auto eraseIfLegacy = [ &shortcuts, &changed ]( const std::string& action,
+                                                        const auto& isLegacy ) {
+        const auto found = shortcuts.find( action );
+        if ( found != shortcuts.end() && isLegacy( found->second ) ) {
+            shortcuts.erase( found );
+            changed = true;
+        }
+    };
+
+    eraseIfLegacy( ShortcutAction::LogViewJumpToLine, matchesLegacyJumpToLineDefault );
+    eraseIfLegacy( ShortcutAction::LogViewQfForward, matchesLegacyFindNextDefault );
+    return changed;
+}
+
+void writeShortcutArray( QSettings& settings,
+                         const ShortcutAction::ConfiguredShortcuts& shortcuts )
+{
+    settings.remove( QStringLiteral( "shortcuts" ) );
+    settings.beginWriteArray( QStringLiteral( "shortcuts" ) );
+    int shortcutIndex = 0;
+    for ( const auto& mapping : shortcuts ) {
+        settings.setArrayIndex( shortcutIndex );
+        settings.setValue( QStringLiteral( "action" ),
+                           QString::fromStdString( mapping.first ) );
+        settings.setValue( QStringLiteral( "keys" ), mapping.second );
+        ++shortcutIndex;
+    }
+    settings.endArray();
 }
 
 } // namespace
@@ -399,8 +495,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
                         []( auto v ) { return v.toInt(); } );
     }
 
+    bool loadedLegacyShortcutMapping = false;
     if ( settings.contains( "shortcuts.mapping" ) ) {
         shortcuts_.clear();
+        loadedLegacyShortcutMapping = true;
 
         const auto mapping = settings.value( "shortcuts.mapping" ).toMap();
         for ( auto keys = mapping.begin(); keys != mapping.end(); ++keys ) {
@@ -427,6 +525,24 @@ void Configuration::retrieveFromStorage( QSettings& settings )
         }
     }
     settings.endArray();
+
+    // Preferences used to materialize the old defaults as explicit overrides.
+    // Drop only exact legacy values so Ctrl+G reaches the new compiled default;
+    // rewrite before stamping the marker so stale array entries cannot return.
+    const bool ctrlGDefaultsAlreadyMigrated
+        = settings.value( CtrlGDefaultsMigrationMarker, false ).toBool();
+    const bool migratedCtrlGDefaults
+        = !ctrlGDefaultsAlreadyMigrated && migrateLegacyCtrlGDefaults( shortcuts_ );
+    if ( loadedLegacyShortcutMapping || migratedCtrlGDefaults ) {
+        writeShortcutArray( settings, shortcuts_ );
+    }
+    if ( !ctrlGDefaultsAlreadyMigrated ) {
+        settings.setValue( CtrlGDefaultsMigrationMarker, true );
+    }
+    if ( loadedLegacyShortcutMapping || migratedCtrlGDefaults
+         || !ctrlGDefaultsAlreadyMigrated ) {
+        settings.sync();
+    }
 
     settings.beginGroup( "dark" );
     for ( auto& color : darkPalette_ ) {
@@ -533,15 +649,8 @@ void Configuration::saveToStorage( QSettings& settings ) const
 
     settings.setValue( "defaultView.splitterSizes", serializedSplitterSizes );
 
-    settings.beginWriteArray( "shortcuts" );
-    auto shortcutIndex = 0;
-    for ( const auto& mapping : shortcuts_ ) {
-        settings.setArrayIndex( shortcutIndex );
-        settings.setValue( "action", QString::fromStdString( mapping.first ) );
-        settings.setValue( "keys", mapping.second );
-        shortcutIndex++;
-    }
-    settings.endArray();
+    writeShortcutArray( settings, shortcuts_ );
+    settings.setValue( CtrlGDefaultsMigrationMarker, true );
 
     settings.beginGroup( "dark" );
     for ( const auto& color : darkPalette_ ) {

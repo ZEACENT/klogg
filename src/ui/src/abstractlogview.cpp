@@ -533,8 +533,8 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         }
 
         if ( selection_.isSingleLine() ) {
-            copyAction_->setText( tr( "&Copy this line" ) );
-            copyWithLineNumbersAction_->setText( tr( "Copy this line with line number" ) );
+            copyAction_->setText( tr( "&Copy This Line" ) );
+            copyWithLineNumbersAction_->setText( tr( "Copy This Line with Line Number" ) );
 
             setSearchStartAction_->setEnabled( true );
             setSearchEndAction_->setEnabled( true );
@@ -546,7 +546,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             copyAction_->setText( tr( "&Copy" ) );
             copyAction_->setStatusTip( tr( "Copy the selection" ) );
 
-            copyWithLineNumbersAction_->setText( tr( "Copy with line numbers" ) );
+            copyWithLineNumbersAction_->setText( tr( "Copy with Line Numbers" ) );
 
             setSearchStartAction_->setEnabled( false );
             setSearchEndAction_->setEnabled( false );
@@ -655,11 +655,11 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
             colorLabelsMenu_->addSeparator();
 
-            auto ignoreCaseAction = colorLabelsMenu_->addAction( tr( "Ignore case" ) );
+            auto ignoreCaseAction = colorLabelsMenu_->addAction( tr( "Ignore Case" ) );
             ignoreCaseAction->setCheckable( true );
             ignoreCaseAction->setChecked( quickHighlighterDefaults.ignoreCase );
 
-            auto wholeWordAction = colorLabelsMenu_->addAction( tr( "Whole word" ) );
+            auto wholeWordAction = colorLabelsMenu_->addAction( tr( "Whole Word" ) );
             wholeWordAction->setCheckable( true );
             wholeWordAction->setChecked( quickHighlighterDefaults.wholeWord );
 
@@ -2588,85 +2588,124 @@ void AbstractLogView::createMenu()
     // No text as this action title depends on the type of selection
     connect( copyAction_, &QAction::triggered, this, [ this ]( auto ) { this->copy(); } );
 
-    copyWithLineNumbersAction_ = new QAction( tr( "Copy with line numbers" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    copyWithLineNumbersAction_ = new QAction( tr( "Copy with Line Numbers" ), this );
     // No text as this action title depends on the type of selection
     connect( copyWithLineNumbersAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->copyWithLineNumbers(); } );
 
-    markAction_ = new QAction( tr( "Add line mark" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    markAction_ = new QAction( tr( "Add Line Mark" ), this );
     connect( markAction_, &QAction::triggered, this, [ this ]( auto ) { this->markSelected(); } );
 
-    deleteMarkAction_ = new QAction( tr( "Delete line mark" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    deleteMarkAction_ = new QAction( tr( "Delete Line Mark" ), this );
     connect( deleteMarkAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->deleteMarksSelected(); } );
 
-    saveToFileAction_ = new QAction( tr( "Save to file" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveToFileAction_ = new QAction( tr( "Save to File..." ), this );
     connect( saveToFileAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->saveToFile(); } );
 
-    saveSelectedToFileAction_ = new QAction( tr( "Save selected to file" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveSelectedToFileAction_ = new QAction( tr( "Save Selected to File..." ), this );
     connect( saveSelectedToFileAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->saveSelectedToFile(); } );
 
     // For '#' and '*', shortcuts doesn't seem to work but
     // at least it displays them in the menu, we manually handle those keys
     // as keys event anyway (in keyPressEvent).
-    findNextAction_ = new QAction( tr( "Find &next" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    findNextAction_ = new QAction( tr( "Find &Next" ), this );
     findNextAction_->setShortcut( Qt::Key_Asterisk );
     findNextAction_->setStatusTip( tr( "Find the next occurrence" ) );
     connect( findNextAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->findNextSelected(); } );
 
-    findPreviousAction_ = new QAction( tr( "Find &previous" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    findPreviousAction_ = new QAction( tr( "Find &Previous" ), this );
     findPreviousAction_->setShortcut( tr( "/" ) );
     findPreviousAction_->setStatusTip( tr( "Find the previous occurrence" ) );
     connect( findPreviousAction_, &QAction::triggered,
              [ this ]( auto ) { this->findPreviousSelected(); } );
 
-    replaceSearchAction_ = new QAction( tr( "&Replace search" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    replaceSearchAction_ = new QAction( tr( "&Replace Search" ), this );
     replaceSearchAction_->setStatusTip( tr( "Replace the search expression with the selection" ) );
     connect( replaceSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->replaceSearch(); } );
 
-    addToSearchAction_ = new QAction( tr( "&Add to search" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    addToSearchAction_ = new QAction( tr( "&Add to Search" ), this );
     addToSearchAction_->setStatusTip( tr( "Add the selection to the current search" ) );
     connect( addToSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->addToSearch(); } );
 
-    excludeFromSearchAction_ = new QAction( tr( "&Exclude from search" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    excludeFromSearchAction_ = new QAction( tr( "&Exclude from Search" ), this );
     excludeFromSearchAction_->setStatusTip( tr( "Excludes the selection from search" ) );
     connect( excludeFromSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->excludeFromSearch(); } );
 
-    setSearchStartAction_ = new QAction( tr( "Set search start" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    setSearchStartAction_ = new QAction( tr( "Set Search Start" ), this );
+    setSearchStartAction_->setObjectName( QStringLiteral( "setSearchStartAction" ) );
     connect( setSearchStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSearchStart(); } );
 
-    setSearchEndAction_ = new QAction( tr( "Set search end" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    setSearchEndAction_ = new QAction( tr( "Set Search End" ), this );
+    setSearchEndAction_->setObjectName( QStringLiteral( "setSearchEndAction" ) );
     connect( setSearchEndAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSearchEnd(); } );
 
-    clearSearchLimitAction_ = new QAction( tr( "Clear search limits" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    clearSearchLimitAction_ = new QAction( tr( "Clear Search Limits" ), this );
+    clearSearchLimitAction_->setObjectName( QStringLiteral( "clearSearchLimitAction" ) );
     connect( clearSearchLimitAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->clearSearchLimits(); } );
 
-    setSelectionStartAction_ = new QAction( tr( "Set selection start" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    setSelectionStartAction_ = new QAction( tr( "Set Selection Start" ), this );
     connect( setSelectionStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionStart(); } );
 
-    setSelectionEndAction_ = new QAction( tr( "Set selection end" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    setSelectionEndAction_ = new QAction( tr( "Set Selection End" ), this );
     connect( setSelectionEndAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionEnd(); } );
 
-    saveDefaultSplitterSizesAction_ = new QAction( tr( "Save splitter position" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    saveDefaultSplitterSizesAction_ = new QAction( tr( "Save Splitter Position" ), this );
     connect( saveDefaultSplitterSizesAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT saveDefaultSplitterSizes(); } );
 
-    sendToScratchpadAction_ = new QAction( tr( "Send to scratchpad" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    sendToScratchpadAction_ = new QAction( tr( "Send to Scratchpad" ), this );
     connect( sendToScratchpadAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT sendSelectionToScratchpad(); } );
 
-    replaceInScratchpadAction_ = new QAction( tr( "Replace scratchpad" ), this );
+    // QObject parentage owns this action.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    replaceInScratchpadAction_ = new QAction( tr( "Replace Scratchpad" ), this );
     connect( replaceInScratchpadAction_, &QAction::triggered, this,
              [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
@@ -2675,7 +2714,7 @@ void AbstractLogView::createMenu()
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ), popupMenu_ );
     popupMenu_->addMenu( highlightersMenu_ );
-    colorLabelsMenu_ = popupMenu_->addMenu( tr( "Color labels" ) );
+    colorLabelsMenu_ = popupMenu_->addMenu( tr( "Color Labels" ) );
 
     popupMenu_->addSeparator();
     popupMenu_->addAction( markAction_ );

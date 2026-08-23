@@ -19,9 +19,12 @@
 
 #include <catch2/catch.hpp>
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#include <QMenu>
 #include <QTabBar>
+#include <QTimer>
 #include <QTranslator>
 #include <QTest>
 #include <QWidget>
@@ -376,6 +379,80 @@ TEST_CASE( "TabbedCrawlerWidget cycles tabs with Ctrl+PageDown/PageUp shortcuts"
 
     QTest::keyClick( &tabWidget, Qt::Key_PageUp, Qt::ControlModifier );
     REQUIRE( tabWidget.currentIndex() == 2 );
+}
+
+TEST_CASE( "TabbedCrawlerWidget context menu uses app Title Case and semantic ellipses" )
+{
+    TabbedCrawlerWidget tabWidget;
+    tabWidget.resize( 640, 240 );
+
+    for ( int i = 0; i < 3; ++i ) {
+        auto* crawler = new DummyCrawlerWidget();
+        tabWidget.addCrawler( crawler, QStringLiteral( "file:///tmp/klogg-menu-%1.log" ).arg( i ),
+                              QStringLiteral( "Tab %1" ).arg( i ),
+                              QStringLiteral( "/tmp/klogg-menu-%1.log" ).arg( i ) );
+    }
+
+    tabWidget.show();
+    QCoreApplication::processEvents();
+
+    QStringList actionTexts;
+    QString popupError;
+    bool popupObserved = false;
+    bool popupFinished = false;
+    QTimer::singleShot( 0, Qt::PreciseTimer, &tabWidget, [ & ] {
+        auto* const menu = qobject_cast<QMenu*>( QApplication::activePopupWidget() );
+        if ( menu == nullptr ) {
+            popupError = QStringLiteral( "Tabbed context menu was not active" );
+            popupFinished = true;
+            if ( auto* popup = QApplication::activePopupWidget() ) {
+                popup->close();
+            }
+            return;
+        }
+
+        popupObserved = true;
+        for ( const auto* action : menu->actions() ) {
+            if ( !action->isSeparator() ) {
+                actionTexts.push_back( action->text() );
+            }
+        }
+        popupFinished = true;
+        menu->close();
+    } );
+    QTimer::singleShot( 250, Qt::PreciseTimer, &tabWidget, [ & ] { // lint-allow: platform-fragile
+        if ( !popupFinished ) {
+            popupError = QStringLiteral( "Tabbed context menu watchdog expired" );
+            popupFinished = true;
+            if ( auto* popup = QApplication::activePopupWidget() ) {
+                popup->close();
+            }
+        }
+    } );
+
+    const auto invoked
+        = QMetaObject::invokeMethod( &tabWidget, "showContextMenu", Qt::DirectConnection,
+                                     Q_ARG( int, 1 ),
+                                     Q_ARG( QPoint, tabWidget.mapToGlobal( QPoint( 20, 20 ) ) ) );
+    REQUIRE( invoked );
+    REQUIRE( popupError.isEmpty() );
+    REQUIRE( popupObserved );
+
+    const QStringList expectedTexts{
+        QStringLiteral( "Close This" ),
+        QStringLiteral( "Close Others" ),
+        QStringLiteral( "Close to the Left" ),
+        QStringLiteral( "Close to the Right" ),
+        QStringLiteral( "Close All" ),
+        QStringLiteral( "Copy Full Path" ),
+        QStringLiteral( "Open Containing Folder" ),
+        QStringLiteral( "Rename Tab..." ),
+        QStringLiteral( "Reset Tab Name" ),
+    };
+    for ( const auto& expectedText : expectedTexts ) {
+        CAPTURE( expectedText );
+        CHECK( actionTexts.contains( expectedText ) );
+    }
 }
 
 TEST_CASE( "TabbedCrawlerWidget does not handle Ctrl+Tab in keyPressEvent" )

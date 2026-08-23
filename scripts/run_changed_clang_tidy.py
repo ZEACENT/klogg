@@ -274,7 +274,50 @@ def run_direct_header_pass(
     return status, "".join(outputs)
 
 
-def main() -> int:
+def run_changed_header_passes(
+    clang_tidy: Path,
+    build_dir: Path,
+    units: list[Path],
+    headers: list[Path],
+    line_filter: str,
+    jobs: int,
+    extra_arguments: list[str],
+    environment: dict[str, str],
+    *,
+    fast: bool,
+) -> tuple[int, str]:
+    """Analyze changed header lines, optionally skipping all-TU fan-out."""
+    status = 0
+    outputs: list[str] = []
+
+    if not fast:
+        fan_out_status, fan_out_output = run_header_pass(
+            clang_tidy,
+            build_dir,
+            units,
+            line_filter,
+            jobs,
+            extra_arguments,
+            environment,
+        )
+        status = status or fan_out_status
+        outputs.append(fan_out_output)
+
+    direct_status, direct_output = run_direct_header_pass(
+        clang_tidy,
+        build_dir,
+        headers,
+        line_filter,
+        jobs,
+        extra_arguments,
+        environment,
+    )
+    status = status or direct_status
+    outputs.append(direct_output)
+    return status, "".join(outputs)
+
+
+def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True, help="base commit to diff against")
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -288,7 +331,19 @@ def main() -> int:
         help="additional compiler argument forwarded to clang-tidy; repeat as needed",
     )
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "analyze changed sources and headers directly, skipping the "
+            "changed-header fan-out through every translation unit"
+        ),
+    )
+    return parser.parse_args(arguments)
+
+
+def main() -> int:
+    args = parse_arguments()
 
     root = Path(__file__).resolve().parents[1]
     build_dir = args.build_dir.resolve()
@@ -361,29 +416,19 @@ def main() -> int:
         return 1
     if header_filter:
         line_filter = json.dumps(header_filter, separators=(",", ":"))
-        header_status, header_output = run_header_pass(
+        header_status, header_output = run_changed_header_passes(
             clang_tidy,
             build_dir,
             units,
-            line_filter,
-            args.jobs,
-            args.extra_arg,
-            environment,
-        )
-        status = status or header_status
-        output_parts.append(header_output)
-
-        direct_status, direct_output = run_direct_header_pass(
-            clang_tidy,
-            build_dir,
             [(root / path).resolve() for path in live_header_paths],
             line_filter,
             args.jobs,
             args.extra_arg,
             environment,
+            fast=args.fast,
         )
-        status = status or direct_status
-        output_parts.append(direct_output)
+        status = status or header_status
+        output_parts.append(header_output)
 
     output = "".join(output_parts)
     if output:

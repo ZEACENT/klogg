@@ -7,7 +7,10 @@ namespace klogg {
 namespace mainwindow {
 namespace menu {
 extern const char* fileTitle;
+extern const char* recentFilesTitle;
+extern const char* recentFoldersTitle;
 extern const char* editTitle;
+extern const char* saveCurrentLiveLogTitle;
 extern const char* viewTitle;
 // openedFilesTitle is the submenu of view menu
 extern const char* openedFilesTitle;
@@ -24,6 +27,8 @@ extern const char* toolbarTitle;
 
 namespace trayicon {
 extern const char* trayiconTip;
+extern const char* openWindowText;
+extern const char* quitText;
 }
 
 namespace action {
@@ -31,6 +36,12 @@ extern const char* newWindowText;
 extern const char* newWindowStatusTip;
 extern const char* openText;
 extern const char* openStatusTip;
+extern const char* openFolderText;
+extern const char* openFolderStatusTip;
+extern const char* openAdbLogcatText;
+extern const char* openAdbLogcatStatusTip;
+extern const char* openIosLogStreamText;
+extern const char* openIosLogStreamStatusTip;
 extern const char* recentFilesCleanupText;
 extern const char* recentFoldersCleanupText;
 extern const char* closeText;
@@ -49,6 +60,14 @@ extern const char* findText;
 extern const char* findStatusTip;
 extern const char* clearLogText;
 extern const char* clearLogStatusTip;
+extern const char* saveCurrentLiveLogStripAnsiText;
+extern const char* saveCurrentLiveLogStripAnsiStatusTip;
+extern const char* saveCurrentLiveLogPreserveAnsiText;
+extern const char* saveCurrentLiveLogPreserveAnsiStatusTip;
+extern const char* disconnectSourceText;
+extern const char* disconnectSourceStatusTip;
+extern const char* reconnectSourceText;
+extern const char* reconnectSourceStatusTip;
 extern const char* openContainingFolderText;
 extern const char* openContainingFolderStatusTip;
 extern const char* openInEditorText;
@@ -87,6 +106,8 @@ extern const char* showScratchPadText;
 extern const char* showScratchPadStatusTip;
 extern const char* addToFavoritesText;
 extern const char* removeFromFavoritesText;
+extern const char* addCurrentFileText;
+extern const char* removeFavoriteFileText;
 extern const char* selectOpenFileText;
 extern const char* predefinedFiltersDialogText;
 extern const char* predefinedFiltersDialogStatusTip;
@@ -94,6 +115,8 @@ extern const char* importFilterFavoritesText;
 extern const char* importFilterFavoritesStatusTip;
 extern const char* exportFilterFavoritesText;
 extern const char* exportFilterFavoritesStatusTip;
+extern const char* mergeTabsText;
+extern const char* mergeTabsStatusTip;
 extern const char* autoEncodingText;
 extern const char* autoEncodingStatusTip;
 } // namespace action

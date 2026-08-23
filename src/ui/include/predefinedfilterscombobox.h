@@ -44,8 +44,6 @@
 
 #include "predefinedfilters.h"
 
-class QStandardItemModel;
-
 class PredefinedFiltersComboBox final : public QComboBox {
     Q_OBJECT
 
@@ -58,21 +56,19 @@ class PredefinedFiltersComboBox final : public QComboBox {
     PredefinedFiltersComboBox& operator=( const PredefinedFiltersComboBox& other ) = delete;
     PredefinedFiltersComboBox& operator=( PredefinedFiltersComboBox&& other ) = delete;
 
-    void populatePredefinedFilters();
     void updateSearchPattern( const QString newSearchPattern, bool useLogicalCombining );
 
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+    void showPopup() override;
+
   Q_SIGNALS:
-    void filterChanged( const QList<PredefinedFilter>& selectedFilters);
+    void filterChanged( const QList<PredefinedFilter>& selectedFilters );
 
   private:
-    void insertFilters( const PredefinedFiltersCollection::Collection& filters );
-    void collectFilters();
-
-  private:
-    PredefinedFiltersCollection filtersCollection_;
-
-    QStandardItemModel* model_;
-    bool ignoreCollecting_{false};
+    QSize closedSizeHint() const;
+    void collectFilter( int index );
+    void resetSelection();
 };
 
 #endif

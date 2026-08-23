@@ -17,6 +17,7 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <algorithm>
 #include <functional>
 
 #include <QApplication>
@@ -54,6 +55,55 @@ QStringList uniqueKeyBindings( const QStringList& bindings )
         }
     }
     return uniqueBindings;
+}
+
+namespace {
+QKeySequence normalizedRuntimeSequence( const QKeySequence& sequence )
+{
+    return { sequence.toString( QKeySequence::NativeText ), QKeySequence::NativeText };
+}
+
+bool isExactRuntimeMatch( const QKeySequence& left, const QKeySequence& right )
+{
+    const auto normalizedLeft = normalizedRuntimeSequence( left );
+    const auto normalizedRight = normalizedRuntimeSequence( right );
+    return normalizedLeft.matches( normalizedRight ) == QKeySequence::ExactMatch
+           && normalizedRight.matches( normalizedLeft ) == QKeySequence::ExactMatch;
+}
+
+bool containsExactRuntimeMatch( const QStringList& bindings, const QKeySequence& expected )
+{
+    return std::any_of( bindings.cbegin(), bindings.cend(), [ &expected ]( const auto& binding ) {
+        return isExactRuntimeMatch(
+            QKeySequence( binding, QKeySequence::PortableText ), expected );
+    } );
+}
+} // namespace
+
+QStringList findNextShortcutBindings()
+{
+    const auto reservedCtrlG
+        = QKeySequence( QStringLiteral( "Ctrl+G" ), QKeySequence::PortableText );
+    QStringList safeBindings;
+
+    for ( const auto& binding : QKeySequence::keyBindings( QKeySequence::FindNext ) ) {
+        if ( binding.isEmpty() || isExactRuntimeMatch( binding, reservedCtrlG )
+             || containsExactRuntimeMatch( safeBindings, binding ) ) {
+            continue;
+        }
+
+        const auto portableBinding = binding.toString( QKeySequence::PortableText );
+        if ( !portableBinding.isEmpty() ) {
+            safeBindings.push_back( portableBinding );
+        }
+    }
+
+    const auto f3Sequence = QKeySequence( Qt::Key_F3 );
+    if ( !containsExactRuntimeMatch( safeBindings, f3Sequence ) ) {
+        safeBindings.push_back( f3Sequence.toString( QKeySequence::PortableText ) );
+    }
+
+    return safeBindings;
 }
 
 QStringList ShortcutAction::defaultShortcutKeys( const std::string& action )
@@ -117,7 +167,7 @@ QList<QKeySequence> ShortcutAction::shortcutKeys( const std::string& action,
 
 const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
 {
-    static ShortcutList defaultShortcutKeys = {
+    static ShortcutList shortcuts = {
         {
             MainWindowNewWindow,
             {
@@ -556,14 +606,14 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             LogViewJumpToLine,
             {
                 QApplication::tr( "Jump to line" ),
-                QStringList{ commandShortcutModifier() + "+L" },
+                QStringList{ QStringLiteral( "Ctrl+G" ) },
             },
         },
         {
             LogViewQfForward,
             {
                 QApplication::tr( "Main view: find next" ),
-                uniqueKeyBindings( getKeyBindings( QKeySequence::FindNext ) << commandShortcutModifier() + "+G" ),
+                findNextShortcutBindings(),
             },
         },
         {
@@ -727,5 +777,5 @@ const ShortcutAction::ShortcutList& ShortcutAction::defaultShortcutList()
             },
         },
     };
-    return defaultShortcutKeys;
+    return shortcuts;
 }

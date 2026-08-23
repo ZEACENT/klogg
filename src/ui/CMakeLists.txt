@@ -10,6 +10,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/devicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/filterfavoritesmodel.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/folderenumeration.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/folderfilteredview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/foldercrawlerwidget.h
@@ -57,6 +58,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/tabbedcrawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/tabgroup.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/tabgroupdropresolver.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/uimessage.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewinterface.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/viewtools.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/scratchpad.h
@@ -90,6 +92,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/filterfavoritesmodel.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderenumeration.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/folderfilteredview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/foldercrawlerwidget.cpp
@@ -133,6 +136,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabbedcrawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabgroup.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tabgroupdropresolver.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/uimessage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/viewtools.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/scratchpad.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/searchtoolbar.cpp
