@@ -48,6 +48,7 @@
 #include <exception>
 
 #include <iterator>
+#include <optional>
 #include <qaction.h>
 #include <qapplication.h>
 
@@ -138,6 +139,28 @@ void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
 constexpr int SessionPersistenceDebounceMs = 750;
 
 static constexpr auto ClipboardMaxTry = 5;
+
+std::optional<const char*> filterFavoritesImportWarningSource(
+    PredefinedFiltersCollection::LoadStatus status )
+{
+    using LoadStatus = PredefinedFiltersCollection::LoadStatus;
+    switch ( status ) {
+    case LoadStatus::Success:
+        return std::nullopt;
+    case LoadStatus::MissingFile:
+        return QT_TRANSLATE_NOOP( "MainWindow",
+                                  "The selected filter favorites file does not exist." );
+    case LoadStatus::MalformedFile:
+        return QT_TRANSLATE_NOOP( "MainWindow",
+                                  "The selected file is not a valid filter favorites file." );
+    case LoadStatus::UnsupportedVersion:
+        return QT_TRANSLATE_NOOP(
+            "MainWindow",
+            "The selected filter favorites file was created by a newer version of klogg." );
+    }
+
+    Q_UNREACHABLE();
+}
 
 class ScopedMainWindowShortcutSuspender {
   public:
@@ -1838,9 +1861,9 @@ void MainWindow::importFilterFavorites()
 void MainWindow::importFilterFavoritesFromFile( const QString& file )
 {
     const auto result = PredefinedFiltersCollection::tryLoadFromFile( file );
-    if ( result.status != PredefinedFiltersCollection::LoadStatus::Success ) {
-        klogg::ui::warning( this, tr( "klogg" ),
-                            tr( "Unable to import filter favorites from the selected file." ) );
+    if ( const auto warningSource = filterFavoritesImportWarningSource( result.status );
+         warningSource.has_value() ) {
+        klogg::ui::warning( this, tr( "klogg" ), tr( *warningSource ) );
         return;
     }
 

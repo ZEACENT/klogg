@@ -687,9 +687,19 @@
         <translation>This will shutdown klogg and generate diagnostic crash dump. Continue?</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="1813"/>
-        <source>Unable to import filter favorites from the selected file.</source>
-        <translation>Unable to import filter favorites from the selected file.</translation>
+        <location filename="../../ui/src/mainwindow.cpp" line="151"/>
+        <source>The selected filter favorites file does not exist.</source>
+        <translation>The selected filter favorites file does not exist.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="154"/>
+        <source>The selected file is not a valid filter favorites file.</source>
+        <translation>The selected file is not a valid filter favorites file.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="157"/>
+        <source>The selected filter favorites file was created by a newer version of klogg.</source>
+        <translation>The selected filter favorites file was created by a newer version of klogg.</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1842"/>
@@ -1139,9 +1149,9 @@
 <context>
     <name>PredefinedFiltersComboBox</name>
     <message>
-        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="108"/>
-        <source>Predefined filters</source>
-        <translation>Predefined filters</translation>
+        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="85"/>
+        <source>Filter favorites</source>
+        <translation>Filter favorites</translation>
     </message>
 </context>
 <context>

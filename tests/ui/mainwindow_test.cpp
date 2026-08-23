@@ -2248,6 +2248,100 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
     CHECK( QFileInfo( blockedExportPath ).isDir() );
 }
 
+TEST_CASE( "Filter Favorites import maps every load status to explicit warning behavior",
+           "[ui][filter-favorites][import]" )
+{
+    TabGroupCleanupGuard tabGroupCleanupGuard;
+    FilterFavoritesRestoreGuard filterFavoritesGuard{ {} };
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
+
+    auto appSession = std::make_shared<Session>();
+    const auto windowId = QString( "filter-favorites-import-errors-%1" ).arg(
+        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    WindowSession windowSession{ appSession, windowId, 0 };
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, Qt::PreciseTimer,
+                        [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTest::qWait( 100 );
+    REQUIRE( mainWindow != nullptr );
+
+    const auto tempDirPath = makeTestDir( "filterfavoritesimporterrors" );
+    REQUIRE( QDir{ tempDirPath }.exists() );
+
+    const auto validPath = QDir( tempDirPath ).absoluteFilePath( "valid.conf" );
+    const PredefinedFiltersCollection::Collection importedFavorites{
+        { QStringLiteral( "Imported" ), QStringLiteral( "pattern" ), false } };
+    REQUIRE( PredefinedFiltersCollection::saveToFile( validPath, importedFavorites ) );
+
+    const auto missingPath = QDir( tempDirPath ).absoluteFilePath( "missing.conf" );
+    REQUIRE_FALSE( QFileInfo::exists( missingPath ) );
+
+    const auto malformedPath = QDir( tempDirPath ).absoluteFilePath( "malformed.conf" );
+    {
+        QFile malformedFile( malformedPath );
+        REQUIRE( malformedFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        REQUIRE( malformedFile.write( "not a filter favorites file\n" ) > 0 );
+    }
+
+    const auto unsupportedPath = QDir( tempDirPath ).absoluteFilePath( "future.conf" );
+    {
+        QFile unsupportedFile( unsupportedPath );
+        REQUIRE( unsupportedFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        REQUIRE( unsupportedFile.write( "[PredefinedFiltersCollection]\nversion=999\n" ) > 0 );
+    }
+
+    QStringList warningTitles;
+    QStringList warningTexts;
+    [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+        [ & ]( klogg::ui::MessageKind kind, QWidget*, const QString& title,
+               const QString& text ) {
+            if ( kind == klogg::ui::MessageKind::Warning ) {
+                warningTitles.push_back( title );
+                warningTexts.push_back( text );
+            }
+        } };
+
+    using LoadStatus = PredefinedFiltersCollection::LoadStatus;
+    struct ImportCase {
+        QString path;
+        LoadStatus expectedStatus;
+        QString expectedWarning;
+    };
+    const QList<ImportCase> cases{
+        { validPath, LoadStatus::Success, {} },
+        { missingPath, LoadStatus::MissingFile,
+          QStringLiteral( "The selected filter favorites file does not exist." ) },
+        { malformedPath, LoadStatus::MalformedFile,
+          QStringLiteral( "The selected file is not a valid filter favorites file." ) },
+        { unsupportedPath, LoadStatus::UnsupportedVersion,
+          QStringLiteral(
+              "The selected filter favorites file was created by a newer version of klogg." ) },
+    };
+
+    for ( const auto& importCase : cases ) {
+        CHECK( PredefinedFiltersCollection::tryLoadFromFile( importCase.path ).status
+               == importCase.expectedStatus );
+        const auto warningCountBefore = warningTexts.size();
+        const bool invoked = QMetaObject::invokeMethod(
+            mainWindow.get(), "importFilterFavoritesFromFile", Qt::DirectConnection,
+            Q_ARG( QString, importCase.path ) );
+        REQUIRE( invoked );
+
+        if ( importCase.expectedWarning.isEmpty() ) {
+            CHECK( warningTexts.size() == warningCountBefore );
+        }
+        else {
+            REQUIRE( warningTexts.size() == warningCountBefore + 1 );
+            CHECK( warningTitles.back() == QStringLiteral( "klogg" ) );
+            CHECK( warningTexts.back() == importCase.expectedWarning );
+        }
+    }
+
+    CHECK( FilterFavoritesModel::instance().favorites() == importedFavorites );
+}
+
 TEST_CASE( "FavoriteFiles removal is idempotent", "[ui][favorite-files]" )
 {
     const auto tempDirPath = makeTestDir( "favoritefilesremove" );

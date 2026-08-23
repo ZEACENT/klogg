@@ -41,6 +41,7 @@
 #define PREDEFINEDFILTERSCOMBOBOX_H_
 
 #include <QComboBox>
+#include <QString>
 
 #include "predefinedfilters.h"
 
@@ -56,7 +57,7 @@ class PredefinedFiltersComboBox final : public QComboBox {
     PredefinedFiltersComboBox& operator=( const PredefinedFiltersComboBox& other ) = delete;
     PredefinedFiltersComboBox& operator=( PredefinedFiltersComboBox&& other ) = delete;
 
-    void updateSearchPattern( const QString newSearchPattern, bool useLogicalCombining );
+    void clearCurrentSelection();
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -68,7 +69,8 @@ class PredefinedFiltersComboBox final : public QComboBox {
   private:
     QSize closedSizeHint() const;
     void collectFilter( int index );
-    void resetSelection();
+
+    const QString placeholderText_;
 };
 
 #endif

@@ -925,8 +925,7 @@ void FolderCrawlerWidget::unmarkMainViewLine( LineNumber line )
 
 void FolderCrawlerWidget::updatePredefinedFiltersWidget()
 {
-    searchToolbar_->predefinedFilters()->updateSearchPattern( searchToolbar_->currentSearchText(),
-                                                              searchToolbar_->isBoolean() );
+    searchToolbar_->predefinedFilters()->clearCurrentSelection();
 }
 
 void FolderCrawlerWidget::applyConfiguration()

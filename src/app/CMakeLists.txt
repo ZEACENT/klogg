@@ -15,6 +15,7 @@ add_custom_command(
 set(TS_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/i18n/en.ts
   ${CMAKE_CURRENT_SOURCE_DIR}/i18n/zh_CN.ts
+  ${CMAKE_CURRENT_SOURCE_DIR}/i18n/zh_TW.ts
 )
 
 find_package(Qt${QT_VERSION_MAJOR}LinguistTools REQUIRED)
@@ -37,7 +38,7 @@ add_custom_target(lupdate
 
 include(TranslationUtils)
 add_app_translations_resource(KLOGG_I18N_RES ${QM_FILES})
-add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN)
+add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN zh_TW)
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h
                  ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc 

@@ -687,9 +687,19 @@
         <translation>從書籤中移除</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="1813"/>
-        <source>Unable to import filter favorites from the selected file.</source>
-        <translation>無法從所選檔案匯入篩選器書籤。</translation>
+        <location filename="../../ui/src/mainwindow.cpp" line="151"/>
+        <source>The selected filter favorites file does not exist.</source>
+        <translation>所選的篩選器書籤檔案不存在。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="154"/>
+        <source>The selected file is not a valid filter favorites file.</source>
+        <translation>所選檔案不是有效的篩選器書籤檔案。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="157"/>
+        <source>The selected filter favorites file was created by a newer version of klogg.</source>
+        <translation>所選的篩選器書籤檔案是由較新版本的 klogg 建立。</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1842"/>
@@ -1139,9 +1149,9 @@
 <context>
     <name>PredefinedFiltersComboBox</name>
     <message>
-        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="108"/>
-        <source>Predefined filters</source>
-        <translation>預設篩選器</translation>
+        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="85"/>
+        <source>Filter favorites</source>
+        <translation>篩選器書籤</translation>
     </message>
 </context>
 <context>

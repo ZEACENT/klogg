@@ -82,6 +82,7 @@ class FullTextItemDelegate final : public QStyledItemDelegate {
 
 PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     : QComboBox( parent )
+    , placeholderText_( tr( "Filter favorites" ) )
 {
     setFocusPolicy( Qt::ClickFocus );
     setSizeAdjustPolicy( QComboBox::AdjustToMinimumContentsLengthWithIcon );
@@ -97,7 +98,7 @@ PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     connect( this, QOverload<int>::of( &QComboBox::activated ), this,
              &PredefinedFiltersComboBox::collectFilter );
     connect( model(), &QAbstractItemModel::modelReset, this,
-             &PredefinedFiltersComboBox::resetSelection );
+             &PredefinedFiltersComboBox::clearCurrentSelection );
 
     QPalette popupPalette = palette();
     popupPalette.setColor( QPalette::Base, popupPalette.color( QPalette::Window ) );
@@ -106,16 +107,8 @@ PredefinedFiltersComboBox::PredefinedFiltersComboBox( QWidget* parent )
     view()->setHorizontalScrollBarPolicy( Qt::ScrollBarAsNeeded );
     view()->setHorizontalScrollMode( QAbstractItemView::ScrollPerPixel );
 
-    klogg::qtcompat::setPlaceholderText( this, tr( "Filter favorites" ) );
-    resetSelection();
-}
-
-void PredefinedFiltersComboBox::updateSearchPattern( const QString newSearchPattern,
-                                                     bool useLogicalCombining )
-{
-    Q_UNUSED( newSearchPattern );
-    Q_UNUSED( useLogicalCombining );
-    resetSelection();
+    klogg::qtcompat::setPlaceholderText( this, placeholderText_ );
+    clearCurrentSelection();
 }
 
 QSize PredefinedFiltersComboBox::sizeHint() const
@@ -202,16 +195,15 @@ void PredefinedFiltersComboBox::showPopup()
 
 QSize PredefinedFiltersComboBox::closedSizeHint() const
 {
-    const QString placeholder = tr( "Filter favorites" );
     const QFontMetrics metrics( font() );
     const int maximumTextWidth
         = metrics.horizontalAdvance( QString( MaximumClosedWidthInEms, QLatin1Char( 'M' ) ) );
-    const QSize textSize( std::min( metrics.horizontalAdvance( placeholder ), maximumTextWidth ),
+    const QSize textSize( std::min( metrics.horizontalAdvance( placeholderText_ ), maximumTextWidth ),
                           metrics.height() );
 
     QStyleOptionComboBox option;
     initStyleOption( &option );
-    option.currentText = placeholder;
+    option.currentText = placeholderText_;
     option.currentIcon = {};
     return style()->sizeFromContents( QStyle::CT_ComboBox, &option, textSize, this );
 }
@@ -228,10 +220,10 @@ void PredefinedFiltersComboBox::collectFilter( int index )
         Q_EMIT filterChanged( selectedFilters );
     }
 
-    resetSelection();
+    clearCurrentSelection();
 }
 
-void PredefinedFiltersComboBox::resetSelection()
+void PredefinedFiltersComboBox::clearCurrentSelection()
 {
     QSignalBlocker blocker( this );
     setCurrentIndex( -1 );
