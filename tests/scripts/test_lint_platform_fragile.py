@@ -351,6 +351,84 @@ class TestWatchdogTimerInCatchTests(unittest.TestCase):
                 self.assertEqual(len(self.check(text)), 1)
 
 
+class TestInstrumentedPerformanceBudget(unittest.TestCase):
+    def check(self, text, name="tests/unit/capturestore_test.cpp"):
+        return lint._check_uninstrumented_performance_budget(text, Path(name))
+
+    def test_unguarded_budget_assertion_is_flagged(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    QElapsedTimer timer;\n"
+            "    timer.start();\n"
+            "    appendLargeBatch();\n"
+            "    const auto elapsedMs = timer.elapsed();\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 7)
+
+    def test_optimized_non_sanitized_guard_is_accepted(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_unoptimized_guard_does_not_count_as_release_only(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && !defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_non_budget_latency_contract_is_not_flagged(self):
+        text = (
+            'TEST_CASE( "async scheduling returns promptly" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureScheduling();\n"
+            "    CHECK( elapsedMs < 200 );\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_guard_text_in_comment_does_not_cover_assertion(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    // KLOGG_SANITIZER_BUILD should be handled someday.\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_non_test_file_is_ignored(self):
+        text = "CHECK( elapsedMs < 2000 );\n"
+        self.assertEqual(self.check(text, name="src/logdata/src/capturestore.cpp"), [])
+
+    def test_current_capturestore_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "capturestore_test.cpp"
+        self.assertEqual(
+            lint._check_uninstrumented_performance_budget(
+                path.read_text(encoding="utf-8", errors="replace"), path
+            ),
+            [],
+        )
+
+
 class Qt6IfReTest(unittest.TestCase):
     """_QT6_IF_RE must match Qt-6-only guards (>= 6, > 5) but NOT Qt-5
     guards (e.g. < QT_VERSION_CHECK(6, 0, 0))."""

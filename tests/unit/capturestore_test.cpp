@@ -2891,7 +2891,12 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     REQUIRE( store.lineAt( LineNumber( lineCount - 1 ), QTextCodec::codecForName( "UTF-8" ),
                            QRegularExpression{} )
              == QStringLiteral( "line-999999" ) );
+    CAPTURE( elapsedMs );
+    // Instrumented and unoptimized builds validate correctness above without
+    // turning hosted-runner speed into a performance regression signal.
+#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     CHECK( elapsedMs < 2000 );
+#endif
 }
 
 TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata overhead" )
@@ -2920,20 +2925,15 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
                            QRegularExpression{} )
              == QStringLiteral( "m-999999" ) );
     REQUIRE( store.stats().memoryBytes == data.size() );
-    // The per-line metadata budget is calibrated for optimised builds
-    // (RelWithDebInfo/Release legs, where NDEBUG is defined and -O2 is in
-    // effect).  The coverage leg builds with -O0 + gcov instrumentation,
-    // which runs the 1M-line append many times slower; give it the same
-    // generous budget the linear-time sibling test uses so the assertion
-    // stays a release-only regression guard rather than an instrumentation
-    // wall-clock trip wire. Sanitizer legs instrument allocator dependencies
-    // as well; Debug does not define NDEBUG, while RelWithDebInfo does.
-#if defined( KLOGG_SANITIZER_BUILD ) || !defined( NDEBUG )
-    constexpr int MetadataOverheadBudgetMs = 2000;
-#else
+    CAPTURE( elapsedMs );
+    // Sanitizers, coverage, and Debug instrumentation deliberately distort
+    // allocator/container timings. Keep every correctness assertion above on
+    // those legs, but enforce the wall-clock regression budget only where the
+    // optimized implementation itself is being measured.
+#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 200;
-#endif
     CHECK( elapsedMs < MetadataOverheadBudgetMs );
+#endif
 }
 
 TEST_CASE( "CaptureStore batched output defers flush below threshold" )

@@ -630,6 +630,93 @@ def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]
     return findings
 
 
+_PERFORMANCE_ASSERTION_RE = re.compile(
+    r"\b(?:CHECK|REQUIRE)\s*\(\s*elapsedMs\s*<\s*"
+    r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))\s*\)"
+)
+_CATCH_CASE_RE = re.compile(
+    r"\b(?:TEST_CASE|SCENARIO|TEST_CASE_METHOD|TEMPLATE_TEST_CASE)\s*\("
+)
+_SANITIZER_EXCLUSION_RE = re.compile(
+    r"^\s*#\s*(?:if\s+.*!\s*defined\s*\(\s*KLOGG_SANITIZER_BUILD\s*\)"
+    r"|ifndef\s+KLOGG_SANITIZER_BUILD)"
+)
+_NDEBUG_DEFINED_RE = re.compile(r"defined\s*\(\s*NDEBUG\s*\)")
+_NDEBUG_IFDEF_RE = re.compile(r"^\s*#\s*ifdef\s+NDEBUG\b")
+
+
+def _requires_optimized_build(guard_line: str) -> bool:
+    if _NDEBUG_IFDEF_RE.search(guard_line):
+        return True
+    for match in _NDEBUG_DEFINED_RE.finditer(guard_line):
+        if not guard_line[: match.start()].rstrip().endswith("!"):
+            return True
+    return False
+
+
+def _check_uninstrumented_performance_budget(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Require strict performance budgets to exclude instrumented builds.
+
+    Absolute wall-clock limits in algorithmic performance tests are useful on
+    optimized builds, but TSan/ASan, coverage, and Debug instrumentation distort
+    those timings and make hosted-runner load decide whether CI passes. The
+    correctness assertions still run everywhere; only the performance budget is
+    gated.
+    """
+    if "tests" not in path.parts:
+        return []
+
+    source_lines = text.splitlines()
+    code_lines = _strip_cpp_literals(_strip_cpp_comments(text)).splitlines()
+    findings: list[tuple[int, str]] = []
+
+    for line_num, line in enumerate(code_lines, start=1):
+        if not _PERFORMANCE_ASSERTION_RE.search(line):
+            continue
+        if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
+            continue
+
+        case_start = 1
+        for candidate in range(line_num, 0, -1):
+            if _CATCH_CASE_RE.search(source_lines[candidate - 1]):
+                case_start = candidate
+                break
+
+        case_header = " ".join(
+            source_lines[case_start - 1 : min(line_num, case_start + 3)]
+        )
+        if "budget" not in case_header.lower():
+            continue
+
+        guard_lines = [
+            _strip_line_comment(source_lines[index - 1])
+            for index in range(case_start, line_num)
+        ]
+        excludes_sanitizers = any(
+            _SANITIZER_EXCLUSION_RE.search(guard_line) for guard_line in guard_lines
+        )
+        requires_optimized = any(
+            _requires_optimized_build(guard_line) for guard_line in guard_lines
+        )
+        if excludes_sanitizers and requires_optimized:
+            continue
+
+        findings.append(
+            (
+                line_num,
+                "Strict wall-clock performance budgets must run only in optimized "
+                "non-sanitized builds. TSan/ASan, coverage, and Debug instrumentation "
+                "make hosted-runner speed part of the result. Keep correctness checks "
+                "on every build, and guard the timing assertion with "
+                "#if !defined(KLOGG_SANITIZER_BUILD) && defined(NDEBUG).",
+            )
+        )
+
+    return findings
+
+
 def _check_qsizetype_to_int_conversion(text: str, path: Path) -> list[tuple[int, str]]:
     """Flag a `qsizetype`-typed variable passed as an argument to a Qt
     string/container API that takes `int` on Qt 5.
@@ -1234,6 +1321,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "nonzero-watchdog-timer",
         "check": _check_nonzero_watchdog_timer,
+    },
+    {
+        "name": "uninstrumented-performance-budget",
+        "check": _check_uninstrumented_performance_budget,
     },
 ]
 

@@ -548,9 +548,12 @@ class SanitizerConfigurationTest(unittest.TestCase):
         self.assertNotRegex(command, r"(?:-D|/D)KLOGG_(?:SANITIZER|A|M|UB|T)SAN_BUILD")
         self.assertNotIn("KLOGG_MSVC_ASAN", command)
 
-    def test_capturestore_budget_uses_the_propagated_contract(self):
+    def test_capturestore_performance_budgets_exclude_instrumented_builds(self):
         capturestore_test = CAPTURESTORE_TEST.read_text()
-        self.assertIn("#if defined( KLOGG_SANITIZER_BUILD )", capturestore_test)
+        release_only_guard = (
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )"
+        )
+        self.assertGreaterEqual(capturestore_test.count(release_only_guard), 2)
         self.assertNotIn("#if defined( __has_feature )", capturestore_test)
 
     def test_legacy_msvc_link_flag_path_is_executable(self):
