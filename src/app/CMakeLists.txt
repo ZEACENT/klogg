@@ -51,6 +51,8 @@ set(KLOGG_UI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
     ${DOCUMENTATION_RESOURCE}
     ${ICON_FILE}
+    ${COPYING_FILE}
+    ${NOTICE_FILE}
 )
 
 set(KLOGG_GREP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/klogg_grep.cpp)
@@ -66,7 +68,60 @@ add_executable(klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
 add_executable(klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
 add_executable(klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES})
 
+add_dependencies(klogg klogg_adb_helper)
+add_dependencies(klogg_portable klogg_adb_helper)
+if(KLOGG_ADB_HELPER_AVAILABLE)
+  function(klogg_stage_adb_helper target_name)
+    add_custom_command(
+      TARGET ${target_name}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
+      VERBATIM
+    )
+    if(APPLE)
+      add_custom_command(
+        TARGET ${target_name}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_RELEASE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        VERBATIM
+      )
+    endif()
+  endfunction()
+  klogg_stage_adb_helper(klogg)
+  klogg_stage_adb_helper(klogg_portable)
+
+  add_custom_target(klogg_stage_adb_helpers ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
+    DEPENDS klogg klogg_adb_helper
+    VERBATIM
+  )
+  if(APPLE)
+    add_custom_command(
+      TARGET klogg_stage_adb_helpers
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_RELEASE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      VERBATIM
+    )
+  elseif(WIN32)
+    add_dependencies(klogg_stage_adb_helpers klogg_portable)
+    add_custom_command(
+      TARGET klogg_stage_adb_helpers
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg_portable>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg_portable>/helpers"
+      VERBATIM
+    )
+  endif()
+endif()
+
 add_dependencies(ci_build klogg klogg_grep)
+if(TARGET klogg_stage_adb_helpers)
+  add_dependencies(ci_build klogg_stage_adb_helpers)
+endif()
 
 if(WIN32)
   add_dependencies(ci_build klogg_portable)
@@ -105,6 +160,15 @@ elseif(APPLE)
   # so there is no install step that needs rpath manipulation.
   set_target_properties(klogg PROPERTIES SKIP_INSTALL_RPATH ON)
   set_target_properties(klogg_portable PROPERTIES SKIP_INSTALL_RPATH ON)
+  if(KLOGG_ENABLE_IOS_NATIVE_STACK)
+    # The imported thin stack exists only in the producer/download workspace.
+    # Suppress CMake's automatic build-directory rpaths and add only the final
+    # app-relative closure path; macdeployqt resolves and stages Qt separately.
+    set_target_properties(klogg PROPERTIES SKIP_BUILD_RPATH ON)
+    target_link_options(
+      klogg PRIVATE "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
+    )
+  endif()
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
   set_source_files_properties(${COPYING_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)

@@ -64,6 +64,10 @@
 
 class QAction;
 class QActionGroup;
+class AdbLiveServices;
+namespace klogg::livecapture::ios {
+class IosLiveServices;
+}
 class Session;
 class RecentFiles;
 class HighlightersMenu;
@@ -76,6 +80,14 @@ class MainWindow : public QMainWindow {
 
   public:
     explicit MainWindow( WindowSession session );
+    MainWindow( WindowSession session, AdbLiveServices& adbLiveServices );
+    MainWindow( WindowSession session, AdbLiveServices& adbLiveServices,
+                klogg::livecapture::ios::IosLiveServices& iosLiveServices );
+
+    const klogg::livecapture::ios::IosLiveServices* iosLiveServices() const noexcept
+    {
+        return iosLiveServices_;
+    }
 
     // Re-install the geometry stored in config file
     // (should be done before 'Widget::show()')
@@ -210,6 +222,8 @@ class MainWindow : public QMainWindow {
     void checkForNewVersionRequested();
 
   private:
+    MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
+                klogg::livecapture::ios::IosLiveServices* iosLiveServices = nullptr );
     void createActions();
     void loadIcons();
     void createMenus();
@@ -285,11 +299,9 @@ class MainWindow : public QMainWindow {
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
 
-    void startReconnectCountdown( CrawlerWidget* crawler, int delayMs );
-    void stopReconnectCountdown();
-    void updateReconnectCountdown();
-
     WindowSession session_;
+    AdbLiveServices* adbLiveServices_{ nullptr };
+    klogg::livecapture::ios::IosLiveServices* iosLiveServices_{ nullptr };
     QString loadingFileName;
 
     std::array<QAction*, MAX_RECENT_FILES> recentFileActions;
@@ -413,14 +425,8 @@ class MainWindow : public QMainWindow {
     bool suspendSessionPersistence_ = false;
     bool shutdownInProgress_ = false;
 
-    // Reconnect countdown state
-    QTimer* reconnectCountdownTimer_ = nullptr;
-
     // Debounce timer for session persistence (see scheduleSessionPersistence).
     QTimer sessionPersistenceTimer_;
-    CrawlerWidget* reconnectCountdownCrawler_ = nullptr;
-    qint64 reconnectCountdownEndMs_ = 0;
-    qint64 reconnectCountdownTotalMs_ = 0;
 
     std::once_flag screenChangesConnect_;
 };

@@ -34,7 +34,7 @@ jobs:
         # cache (added in 1ddee61d). Those are gzipped OCI tarballs, not
         # zips, so dawidd6's unzip step fails the release with "Invalid or
         # unsupported zip format. No END header found" (run 31241902650).
-        name: '^(packages-.*|klogg_version)$'
+        name: '^(packages-.*|klogg_version|adb-helper-legal-assets)$'
         name_is_regexp: true
 
     - name: Download artifacts for CI workflow with provided run id
@@ -44,7 +44,7 @@ jobs:
         workflow: ci-build.yml
         run_id: ${{ github.event.inputs.ci-run-id }}
         # Same filter as the default-path download above; keep both in sync.
-        name: '^(packages-.*|klogg_version)$'
+        name: '^(packages-.*|klogg_version|adb-helper-legal-assets)$'
         name_is_regexp: true
 
     # Package artifacts are uploaded as single-file tarballs (not raw
@@ -52,14 +52,93 @@ jobs:
     # corrupting multi-file zip64 archives ("No END header found" on extract).
     # Restore the ./packages-*/ directory layout the steps below expect.
     - name: Extract package tarballs
+      shell: bash
+      run: |
+        set -euo pipefail
+        while IFS= read -r -d '' t; do
+          echo "Extracting: $t"
+          staging=$(mktemp -d)
+          python3 scripts/extract_verified_tar.py --archive "$t" --destination "$staging"
+          cp -a "$staging"/. "$(dirname "$t")"/
+          rm -rf "$staging" "$t"
+        done < <(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f -print0)
+
+    - name: Require package qualification receipts before publication
       shell: sh
       run: |
-        set -e
-        for t in $(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f); do
-          echo "Extracting: $t"
-          tar -xzf "$t" -C "$(dirname "$t")"
-          rm -f "$t"
+        set -eu
+        required="
+          packages-jammy-vs-gen/adb-helper-deb-package-verification.json
+          packages-noble-vs-gen/adb-helper-deb-package-verification.json
+          packages-resolute-vs-gen/adb-helper-deb-package-verification.json
+          packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
+          packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-signing-receipt.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-notarization-receipt.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-signing-receipt.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-notarization-receipt.json
+        "
+        for receipt in $required; do
+          test -f "$receipt" || { echo "Missing release qualification receipt: $receipt"; exit 1; }
         done
+        python3 - <<'PY'
+        import hashlib, json, pathlib
+        package_receipts = [
+            pathlib.Path("packages-jammy-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-noble-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-resolute-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-appimage-vs-gen/adb-helper-appimage-package-verification.json"),
+            pathlib.Path("packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json"),
+            pathlib.Path("packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json"),
+            pathlib.Path("packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json"),
+        ]
+        for path in package_receipts:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            if receipt.get("receipt_kind") != "package-verification":
+                raise SystemExit(f"invalid package qualification receipt kind: {path}")
+            if receipt.get("release_qualified") is not True:
+                raise SystemExit(f"package is not evidence-qualified for release: {path}")
+            required = set(receipt.get("required_receipts", []))
+            verified = set(receipt.get("verified_receipts", []))
+            if not required or not required.issubset(verified):
+                raise SystemExit(f"package qualification receipt is incomplete: {path}")
+            packages = receipt.get("packages")
+            if not isinstance(packages, list) or not packages:
+                raise SystemExit(f"package qualification receipt has no final package hashes: {path}")
+            for package in packages:
+                name = package.get("name") if isinstance(package, dict) else None
+                if not isinstance(name, str) or pathlib.PurePath(name).name != name:
+                    raise SystemExit(f"unsafe qualified package name in {path}: {name}")
+                published = path.parent / name
+                if not published.is_file():
+                    raise SystemExit(f"qualified package is missing: {published}")
+                actual = hashlib.sha256(published.read_bytes()).hexdigest()
+                if package.get("sha256") != actual:
+                    raise SystemExit(f"qualified package hash mismatch: {published}")
+        for package_dir in ("packages-macos-intel-qt6-vs-gen", "packages-macos-arm-qt6-vs-arm64"):
+            directory = pathlib.Path(package_dir)
+            dmgs = list(directory.glob("*.dmg"))
+            if len(dmgs) != 1:
+                raise SystemExit(f"expected one qualified DMG in {directory}, got {len(dmgs)}")
+            dmg_hash = hashlib.sha256(dmgs[0].read_bytes()).hexdigest()
+            qualification_path = directory / "adb-helper-dmg-package-verification.json"
+            qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+            if qualification.get("package_sha256") != dmg_hash:
+                raise SystemExit(f"macOS qualification receipt is not bound to published DMG: {qualification_path}")
+            for name in ("signing", "notarization"):
+                path = directory / f"adb-helper-{name}-receipt.json"
+                receipt = json.loads(path.read_text(encoding="utf-8"))
+                if receipt.get("receipt_kind") != name or receipt.get("status") != "passed":
+                    raise SystemExit(f"invalid macOS {name} receipt: {path}")
+                if receipt.get("package_sha256", receipt.get("dmg_sha256")) != dmg_hash:
+                    raise SystemExit(f"macOS {name} receipt is not bound to published DMG: {path}")
+                if receipt.get("signed_helper_sha256") != qualification.get("helper_sha256"):
+                    raise SystemExit(f"macOS {name} receipt is not bound to qualified helper: {path}")
+                if receipt.get("source_helper_sha256") != qualification.get("source_helper_sha256"):
+                    raise SystemExit(f"macOS {name} receipt is not bound to source-built helper: {path}")
+        PY
 
     - name: Initialize version
       run: echo "KLOGG_VERSION=`cat klogg_version/klogg_version.txt`" >> $GITHUB_ENV
@@ -164,7 +243,6 @@ jobs:
       if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-windows-x86-qt5-QTRegex/klogg-$KLOGG_VERSION-x86-Qt5-QTRegex-pdb.zip 
         sentry-cli upload-dif ./packages-windows-x64-qt6-vs-avx2/klogg-$KLOGG_VERSION-x64-Qt6-vs-avx2-pdb.zip
 
     - name: Cleanup release artifacts
@@ -206,10 +284,22 @@ jobs:
         mkdir ./packages-bin
         mv ./packages-appimage-vs-gen/klogg_deps.tar.xz ./packages-bin/klogg-$KLOGG_VERSION-vs-gen-deps.tar.xz
         mv ./klogg_version/klogg_version.txt ./packages-bin
+        test -d ./adb-helper-legal-assets || { echo "Required adb-helper legal/source assets are missing"; exit 1; }
+        (cd ./adb-helper-legal-assets && sha256sum --check --strict ./*.sha256)
+        cp ./adb-helper-legal-assets/adb-helper-source-archive.tar.gz ./packages-bin/
+        cp ./adb-helper-legal-assets/adb-helper-licenses.tar.gz ./packages-bin/
+        cp ./adb-helper-legal-assets/adb-helper-notices.tar.gz ./packages-bin/
+        cp ./adb-helper-legal-assets/adb-helper-sbom.spdx.json ./packages-bin/
+        cp ./adb-helper-legal-assets/ADB-HELPER-SOURCE-OFFER.txt ./packages-bin/
+        cp ./adb-helper-legal-assets/adb-helper-source-manifest.json ./packages-bin/
+        cp ./adb-helper-legal-assets/*.sha256 ./packages-bin/
 
+    # Required adb-helper release asset kinds: source-archive, licenses, notices,
+    # sbom, source-offer, and source-manifest.
     - name: Prepare checksums
       shell: sh
       run: |
+        sha256sum --binary ./packages-bin/adb-helper-* ./packages-bin/ADB-HELPER-* > ./packages-bin/adb-helper-release-sha256.txt
         sha256sum --binary ./packages-bin/* > ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
         if [ -d ./packages-jammy-vs-gen ] && [ -n "$(ls -A ./packages-jammy-vs-gen/* 2>/dev/null)" ]; then
           sha256sum --binary ./packages-jammy-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
@@ -242,8 +332,6 @@ jobs:
           ### Windows
           - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
           - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
-          - Windows x86 (Qt 5, QT Regex engine): [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe)
-          - Windows x86 (Qt 5, QT Regex engine) portable: [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip)
 
           ### Linux
           - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
@@ -256,7 +344,6 @@ jobs:
           - Apple Silicon (ARM64, Vectorscan): [klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg)
         prerelease: false
         files: |
-          ./packages-windows-x86-qt5-QTRegex/*
           ./packages-windows-x64-qt6-vs-avx2/*
           ./packages-jammy-vs-gen/*
           ./packages-noble-vs-gen/*
@@ -272,7 +359,7 @@ jobs:
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
         DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
-      uses: Ilshidur/action-discord@master
+      uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
       with:
         args: 'New release v${{ env.KLOGG_VERSION }} has been published!'
 

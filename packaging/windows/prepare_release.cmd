@@ -9,6 +9,31 @@ xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg_portable.pdb %KLOGG_WORK
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg.exe %KLOGG_WORKSPACE%\release\ /y
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg.pdb %KLOGG_WORKSPACE%\release\ /y
 
+if not exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\helpers\adb.exe (
+    echo ERROR: source-built ADB helper missing from output\helpers\adb.exe
+    exit /b 1
+)
+md %KLOGG_WORKSPACE%\release\helpers 2>nul
+xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\helpers\* %KLOGG_WORKSPACE%\release\helpers\ /s /e /y
+if not exist %KLOGG_WORKSPACE%\release\helpers\adb.exe (
+    echo ERROR: failed to stage source-built ADB helper at release\helpers\adb.exe
+    exit /b 1
+)
+if not exist %KLOGG_WORKSPACE%\release\helpers\AdbWinApi.dll (
+    echo ERROR: private ADB runtime missing from release\helpers\AdbWinApi.dll
+    exit /b 1
+)
+if not exist %KLOGG_WORKSPACE%\release\helpers\AdbWinUsbApi.dll (
+    echo ERROR: private ADB runtime missing from release\helpers\AdbWinUsbApi.dll
+    exit /b 1
+)
+if not exist %KLOGG_WORKSPACE%\release\helpers\libusb-1.0.dll (
+    echo ERROR: private ADB runtime missing from release\helpers\libusb-1.0.dll
+    exit /b 1
+)
+md %KLOGG_WORKSPACE%\release\adb-helper-assets 2>nul
+xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\adb-helper-release\* %KLOGG_WORKSPACE%\release\adb-helper-assets\ /s /e /y
+
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg_crashpad_handler.exe %KLOGG_WORKSPACE%\release\ /y
 
 echo "Copying TBB libraries..."

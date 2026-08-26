@@ -1,0 +1,71 @@
+From: klogg maintainers <noreply@klogg.dev>
+Date: Mon, 24 Aug 2026 00:00:00 +0000
+Subject: [PATCH] syslog: report terminal capture worker errors
+
+Expose an additive raw-capture entry point with a terminal callback. Natural
+receive failures are reported before the worker exits; intentional stop is
+suppressed after the one-shot client's parent is detached.
+
+---
+diff --git a/include/libimobiledevice/syslog_relay.h b/include/libimobiledevice/syslog_relay.h
+index 0f6487a..f1066f9 100644
+--- a/include/libimobiledevice/syslog_relay.h
++++ b/include/libimobiledevice/syslog_relay.h
+@@ -52,4 +52,7 @@ typedef syslog_relay_client_private *syslog_relay_client_t; /**< The client hand
+ typedef void (*syslog_relay_receive_cb_t)(char c, void *user_data);
+
++/** Reports why the capture worker terminated. */
++typedef void (*syslog_relay_terminal_cb_t)(syslog_relay_error_t error, void *user_data);
++
+ /* Interface */
+
+@@ -132,4 +135,7 @@ LIBIMOBILEDEVICE_API syslog_relay_error_t syslog_relay_start_capture(syslog_rela
+ LIBIMOBILEDEVICE_API syslog_relay_error_t syslog_relay_start_capture_raw(syslog_relay_client_t client, syslog_relay_receive_cb_t callback, void* user_data);
+
++/** Starts raw capture and reports terminal worker errors. */
++LIBIMOBILEDEVICE_API syslog_relay_error_t syslog_relay_start_capture_raw_with_error(syslog_relay_client_t client, syslog_relay_receive_cb_t callback, syslog_relay_terminal_cb_t terminal_callback, void* user_data);
++
+ /**
+  * Stops capturing the syslog of the device.
+diff --git a/src/syslog_relay.c b/src/syslog_relay.c
+index 9f4296e..6b403d2 100644
+--- a/src/syslog_relay.c
++++ b/src/syslog_relay.c
+@@ -34,4 +34,5 @@ struct syslog_relay_worker_thread {
+ 	syslog_relay_client_t client;
+ 	syslog_relay_receive_cb_t cbfunc;
++	syslog_relay_terminal_cb_t terminal_callback;
+ 	void *user_data;
+ 	int is_raw;
+@@ -168,4 +169,7 @@ void *syslog_relay_worker(void *arg)
+
+ 	if (srwt) {
++		if (srwt->terminal_callback && srwt->client->parent && ret != SYSLOG_RELAY_E_SUCCESS) {
++			srwt->terminal_callback(ret, srwt->user_data);
++		}
+ 		free(srwt);
+ 	}
+@@ -193,4 +197,5 @@ syslog_relay_error_t syslog_relay_start_capture(syslog_relay_client_t client, sy
+ 		srwt->client = client;
+ 		srwt->cbfunc = callback;
++		srwt->terminal_callback = NULL;
+ 		srwt->user_data = user_data;
+ 		srwt->is_raw = 0;
+@@ -205,4 +210,9 @@ syslog_relay_error_t syslog_relay_start_capture(syslog_relay_client_t client, sy
+
+ syslog_relay_error_t syslog_relay_start_capture_raw(syslog_relay_client_t client, syslog_relay_receive_cb_t callback, void* user_data)
++{
++	return syslog_relay_start_capture_raw_with_error(client, callback, NULL, user_data);
++}
++
++syslog_relay_error_t syslog_relay_start_capture_raw_with_error(syslog_relay_client_t client, syslog_relay_receive_cb_t callback, syslog_relay_terminal_cb_t terminal_callback, void* user_data)
+ {
+ 	if (!client || !callback)
+@@ -221,4 +231,5 @@ syslog_relay_error_t syslog_relay_start_capture_raw(syslog_relay_client_t client
+ 		srwt->client = client;
+ 		srwt->cbfunc = callback;
++		srwt->terminal_callback = terminal_callback;
+ 		srwt->user_data = user_data;
+ 		srwt->is_raw = 1;
+--
+2.50.1

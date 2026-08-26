@@ -2,43 +2,61 @@
 #define ADBLOGCATDIALOG_H
 
 #include <QDialog>
-#include <QFutureWatcher>
+#include <QList>
 
-#include "adbdeviceinfo.h"
+#include <optional>
+
+#include "adbdevicelistprovider.h"
+#include "adbinfrastructuremanager.h"
 #include "adblogcatsource.h"
 
+class AdbTrackedDeviceProvider;
 class QComboBox;
 class QDialogButtonBox;
 class QCheckBox;
 class QLabel;
-class QLineEdit;
 class QPushButton;
 class QSpinBox;
 
 class AdbLogcatDialog : public QDialog {
     Q_OBJECT
 
-  public:
+public:
     explicit AdbLogcatDialog( QWidget* parent = nullptr );
+    explicit AdbLogcatDialog(
+        DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation discoveryOperation,
+        QWidget* parent = nullptr );
+    AdbLogcatDialog( AdbTrackedDeviceProvider& provider, QString explicitDeviceSerial,
+                     QWidget* parent = nullptr );
 
     AdbLogcatSessionData sessionData() const;
 
-  private Q_SLOTS:
+private Q_SLOTS:
     void refreshDevices();
 
-  private:
+private:
+    AdbLogcatDialog( DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation discoveryOperation,
+                     AdbTrackedDeviceProvider* trackedProvider, QString explicitDeviceSerial,
+                     QWidget* parent );
+    void initializeUi();
     void updateAcceptState();
     void loadSettings();
     void saveSettings() const;
-    // Populates the device combo from the async refresh result.
-    void onDevicesEnumerated();
+    void applyDiscoveryResult( DeviceDiscoveryResult<AdbDeviceInfo> result );
+    void applyTrackedSnapshot( const DeviceDiscoveryResult<AdbDeviceInfo>& result );
+    void populateDevices( const QList<AdbDeviceInfo>& devices,
+                          const std::optional<klogg::livecapture::LiveSourceError>& error );
 
-  private:
-    QFutureWatcher<QList<AdbDeviceInfo>>* deviceRefreshWatcher_ = nullptr;
-    QLineEdit* adbExecutableEdit_ = nullptr;
+private:
+    DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation discoveryOperation_;
+    AdbTrackedDeviceProvider* trackedProvider_{ nullptr };
+    klogg::livecapture::adb::AdbInfrastructureLease infrastructureLease_;
+    DeviceDiscoveryCoordinator<AdbDeviceInfo> discoveryCoordinator_;
+    klogg::livecapture::Generation latestTrackedGeneration_{ 0 };
+    QString requestedDeviceSerial_;
+    unsigned pendingRefreshCount_{ 0 };
     QPushButton* refreshButton_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
-    QLineEdit* extraArgsEdit_ = nullptr;
     QCheckBox* ansiOutputCheckBox_ = nullptr;
     QCheckBox* autoReconnectCheckBox_ = nullptr;
     QSpinBox* maxAttemptsSpinBox_ = nullptr;

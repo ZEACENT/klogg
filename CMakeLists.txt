@@ -321,6 +321,9 @@ set(BUILD_SHARED_LIBS OFF)
 
 add_custom_target(ci_build)
 
+# The app/package build never downloads ADB. It consumes only a source-built,
+# hash-verified helper artifact produced by the explicit prefetch/superbuild jobs.
+add_subdirectory(packaging/adb)
 add_subdirectory(3rdparty)
 # Static analysis options are scoped to the project's own targets: enabled
 # AFTER third-party is added so vendored subprojects (CPM deps, Vectorscan,
@@ -418,6 +421,8 @@ if(UNIX)
 
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/klogg.desktop DESTINATION share/applications)
 
+    # Source-built ADB helper CPack install DESTINATION bin/helpers is defined
+    # centrally in packaging/adb/CMakeLists.txt for DEB and AppImage parity.
     set(CPACK_GENERATOR DEB)
 
     #deb

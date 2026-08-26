@@ -28,13 +28,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QJsonDocument>
 
+#include <QClipboard>
+#include <QLineEdit>
 #include <QMap>
 #include <QMenu>
 #include <QMenuBar>
-#include <QClipboard>
-#include <QLineEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -53,10 +52,11 @@
 #include "adblogcatsource.h"
 #include "capturestore.h"
 #include "crawlerwidget.h"
-#include "foldercrawlerwidget.h"
 #include "favoritefiles.h"
 #include "filterfavoritesmodel.h"
+#include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
+#include "livelogsession.h"
 #include "log.h"
 #include "mainwindow.h"
 #include "persistentinfo.h"
@@ -70,10 +70,9 @@
 namespace {
 QString makeTestDir( const QString& prefix )
 {
-    const auto dirPath = QDir::cleanPath( QDir::currentPath() + QDir::separator()
-                                          + QLatin1String( "test_tmp" ) + QDir::separator()
-                                          + prefix + QLatin1Char( '_' )
-                                          + QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto dirPath = QDir::cleanPath(
+        QDir::currentPath() + QDir::separator() + QLatin1String( "test_tmp" ) + QDir::separator()
+        + prefix + QLatin1Char( '_' ) + QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     QDir{}.mkpath( dirPath );
     return dirPath;
 }
@@ -126,7 +125,7 @@ struct FileWatchConfigGuard {
     FileWatchConfigGuard( const FileWatchConfigGuard& ) = delete;
     FileWatchConfigGuard& operator=( const FileWatchConfigGuard& ) = delete;
 
-  private:
+private:
     Configuration& config_;
     bool previousNative_;
     bool previousPolling_;
@@ -140,7 +139,7 @@ struct SessionInfoWindowSnapshot {
 };
 
 class SessionInfoRestoreGuard {
-  public:
+public:
     explicit SessionInfoRestoreGuard( SessionInfo& sessionInfo )
         : sessionInfo_{ sessionInfo }
     {
@@ -179,7 +178,7 @@ class SessionInfoRestoreGuard {
         sessionInfo_.save();
     }
 
-  private:
+private:
     SessionInfo& sessionInfo_;
     std::vector<SessionInfoWindowSnapshot> snapshots_;
 };
@@ -201,7 +200,7 @@ QToolButton* findGroupChipButton( QTabBar* tabBar, int tabIndex )
 }
 
 class FilterFavoritesRestoreGuard {
-  public:
+public:
     explicit FilterFavoritesRestoreGuard(
         const PredefinedFiltersCollection::Collection& seededFilters )
         : model_( FilterFavoritesModel::instance() )
@@ -224,7 +223,8 @@ class FilterFavoritesRestoreGuard {
         auto& settings = PersistentInfo::getSettings( app_settings{} );
         settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
         settings.remove( QString{} );
-        for ( auto item = savedSettingsValues_.cbegin(); item != savedSettingsValues_.cend(); ++item ) {
+        for ( auto item = savedSettingsValues_.cbegin(); item != savedSettingsValues_.cend();
+              ++item ) {
             settings.setValue( item.key(), item.value() );
         }
         settings.endGroup();
@@ -238,7 +238,7 @@ class FilterFavoritesRestoreGuard {
     FilterFavoritesRestoreGuard( const FilterFavoritesRestoreGuard& ) = delete;
     FilterFavoritesRestoreGuard& operator=( const FilterFavoritesRestoreGuard& ) = delete;
 
-  private:
+private:
     FilterFavoritesModel& model_;
     PredefinedFiltersCollection::Collection savedStoredFavorites_;
     QMap<QString, QVariant> savedSettingsValues_;
@@ -257,7 +257,7 @@ void replaceFavoriteFiles( const QStringList& paths )
 }
 
 class FavoriteFilesRestoreGuard {
-  public:
+public:
     explicit FavoriteFilesRestoreGuard( const QStringList& seededPaths )
     {
         for ( const auto& favorite : FavoriteFiles::getSynced().favorites() ) {
@@ -274,7 +274,7 @@ class FavoriteFilesRestoreGuard {
     FavoriteFilesRestoreGuard( const FavoriteFilesRestoreGuard& ) = delete;
     FavoriteFilesRestoreGuard& operator=( const FavoriteFilesRestoreGuard& ) = delete;
 
-  private:
+private:
     QStringList savedPaths_;
 };
 
@@ -307,10 +307,9 @@ PredefinedFiltersCollection::Collection comboFavoriteRows( const QComboBox* comb
 
     for ( int row = 0; row < combo->model()->rowCount(); ++row ) {
         const auto index = combo->model()->index( row, 0 );
-        favorites.push_back(
-            { index.data( FilterFavoritesModel::NameRole ).toString(),
-              index.data( FilterFavoritesModel::PatternRole ).toString(),
-              index.data( FilterFavoritesModel::RegexRole ).toBool() } );
+        favorites.push_back( { index.data( FilterFavoritesModel::NameRole ).toString(),
+                               index.data( FilterFavoritesModel::PatternRole ).toString(),
+                               index.data( FilterFavoritesModel::RegexRole ).toBool() } );
     }
     return favorites;
 }
@@ -338,7 +337,7 @@ SCENARIO( "Main window tests", "[ui]" )
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<SafeQSignalSpy> activateSpy;
     std::unique_ptr<SafeQSignalSpy> exitSpy;
-    QTimer::singleShot( 0, [&] {
+    QTimer::singleShot( 0, [ & ] {
         LOG_INFO << "Initialize main window";
         mainWindow.reset( new MainWindow( windowSession ) );
         exitSpy.reset( new SafeQSignalSpy( mainWindow.get(), SIGNAL( exitRequested() ) ) );
@@ -350,9 +349,8 @@ SCENARIO( "Main window tests", "[ui]" )
     QTest::qWait( 100 );
     REQUIRE( activateSpy->safeWait() );
 
-    auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -367,13 +365,13 @@ SCENARIO( "Main window tests", "[ui]" )
         auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
         REQUIRE( tabArea != nullptr );
 
-        auto* saveLiveLogMenu = mainWindow->findChild<QMenu*>(
-            QStringLiteral( "saveCurrentLiveLogMenu" ) );
+        auto* saveLiveLogMenu
+            = mainWindow->findChild<QMenu*>( QStringLiteral( "saveCurrentLiveLogMenu" ) );
         REQUIRE( saveLiveLogMenu != nullptr );
         REQUIRE_FALSE( saveLiveLogMenu->isEnabled() );
-        REQUIRE( mainWindow->findChild<QAction*>(
-                     QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) )
-                 != nullptr );
+        REQUIRE(
+            mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) )
+            != nullptr );
         REQUIRE( mainWindow->findChild<QAction*>(
                      QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) )
                  != nullptr );
@@ -396,8 +394,7 @@ SCENARIO( "Main window tests", "[ui]" )
             }
         }
 
-        QAction* closeAction = mainWindow->findChild<QAction*>(
-            QStringLiteral( "closeAction" ) );
+        QAction* closeAction = mainWindow->findChild<QAction*>( QStringLiteral( "closeAction" ) );
         REQUIRE( closeAction != nullptr );
 
         // Find exitAction: it's the last action in the File menu (first menu in menu bar)
@@ -423,19 +420,19 @@ SCENARIO( "Main window tests", "[ui]" )
 
         WHEN( "Load file" )
         {
-            runInUiThread( [&mainWindow, testFilePath] {
+            runInUiThread( [ &mainWindow, testFilePath ] {
                 LOG_INFO << "Load file";
                 mainWindow->loadInitialFile( testFilePath, false );
             } );
 
             THEN( "Path line has file name" )
             {
-                REQUIRE(
-                    waitUiState( [&] { return filePathLabel->text().contains( "klogg.conf" ); } ) );
+                REQUIRE( waitUiState(
+                    [ & ] { return filePathLabel->text().contains( "klogg.conf" ); } ) );
 
                 AND_THEN( "Has one tab" )
                 {
-                    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+                    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
                 }
             }
 
@@ -447,8 +444,8 @@ SCENARIO( "Main window tests", "[ui]" )
                 // runners the worker thread may still hold heap references or
                 // unwind simdutf-internal state after isFirstLoadDone() returns
                 // true, corrupting malloc and causing SIGSEGV on teardown.
-                REQUIRE( waitUiState( [&] {
-                    auto* crawler = qobject_cast<CrawlerWidget*>(tabArea->currentWidget());
+                REQUIRE( waitUiState( [ & ] {
+                    auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->currentWidget() );
                     return crawler != nullptr && crawler->isFirstLoadDone();
                 } ) );
 
@@ -458,18 +455,18 @@ SCENARIO( "Main window tests", "[ui]" )
                 // tab during that window causes use-after-free.
                 QTest::qWait( 200 );
 
-                runInUiThread( [closeAction] {
+                runInUiThread( [ closeAction ] {
                     LOG_INFO << "Close tab";
                     closeAction->trigger();
                 } );
 
                 THEN( "Has no tabs" )
                 {
-                    REQUIRE( waitUiState( [&] { return tabArea->count() == 0; } ) );
+                    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 0; } ) );
 
                     AND_THEN( "Path label empty" )
                     {
-                        REQUIRE( waitUiState( [&] { return filePathLabel->text().isEmpty(); } ) );
+                        REQUIRE( waitUiState( [ & ] { return filePathLabel->text().isEmpty(); } ) );
                     }
                 }
             }
@@ -482,21 +479,20 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
     TabGroupCleanupGuard tabGroupCleanupGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "tab-group-chip-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "tab-group-chip-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->resize( 1600, 900 );
     mainWindow->show();
     QTest::qWait( 100 );
 
-    auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -515,13 +511,13 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
         testFile.write( "line\n" );
     }
 
-    runInUiThread( [&mainWindow, firstFilePath, secondFilePath] {
+    runInUiThread( [ &mainWindow, firstFilePath, secondFilePath ] {
         mainWindow->loadInitialFile( firstFilePath, false );
         mainWindow->loadInitialFile( secondFilePath, false );
     } );
 
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
-    REQUIRE( waitUiState( [&] { return tabBar->count() == 2 && tabBar->isVisible(); } ) );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
+    REQUIRE( waitUiState( [ & ] { return tabBar->count() == 2 && tabBar->isVisible(); } ) );
 
     QString groupId;
     runInUiThread( [ &groupId, firstFilePath ] {
@@ -557,8 +553,8 @@ SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
 
     const int singleLetterWidth = verifyGroupChipName( "C" );
 
-    const auto renameGroupAndVerify = [ &runInUiThread, &groupId, &verifyGroupChipName ](
-                                          const QString& groupName ) -> int {
+    const auto renameGroupAndVerify
+        = [ &runInUiThread, &groupId, &verifyGroupChipName ]( const QString& groupName ) -> int {
         runInUiThread( [ &groupId, groupName ] {
             auto& groupManager = TabGroupManager::get();
             groupManager.renameGroup( groupId, groupName );
@@ -592,8 +588,7 @@ static QString writeTestFile( const QString& dirPath, const QString& name,
 static QByteArray readMergedFile( Session& session, const std::vector<QString>& sources,
                                   const QString& tempDir )
 {
-    auto* view = session.openMerged(
-        sources, []() { return new CrawlerWidget(); }, tempDir );
+    auto* view = session.openMerged( sources, []() { return new CrawlerWidget(); }, tempDir );
     REQUIRE( view != nullptr );
 
     const auto mergedPath = session.getFilename( view );
@@ -720,8 +715,7 @@ SCENARIO( "Session::openMerged produces correct merged file", "[session][merge]"
 
         WHEN( "They are merged" )
         {
-            const auto merged
-                = readMergedFile( *appSession, { file1, file2, file3 }, tempDirPath );
+            const auto merged = readMergedFile( *appSession, { file1, file2, file3 }, tempDirPath );
 
             THEN( "Separator newline added only between f2 and f3" )
             {
@@ -760,8 +754,8 @@ SCENARIO( "MainWindow close keeps persisted open files for session restore", "[u
     auto& sessionInfo = SessionInfo::getSynced();
     auto windowIds = sessionInfo.windows();
     const auto windowId = windowIds.isEmpty()
-                              ? QString( "close-session-%1" ).arg(
-                                    QUuid::createUuid().toString( QUuid::WithoutBraces ) )
+                              ? QString( "close-session-%1" )
+                                    .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) )
                               : windowIds.front();
 
     if ( windowIds.isEmpty() ) {
@@ -784,15 +778,14 @@ SCENARIO( "MainWindow close keeps persisted open files for session restore", "[u
     config.save();
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->show();
     QTest::qWait( 100 );
 
-    auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -808,12 +801,14 @@ SCENARIO( "MainWindow close keeps persisted open files for session restore", "[u
         testFile.write( "line\n" );
     }
 
-    runInUiThread( [&mainWindow, testFilePath] { mainWindow->loadInitialFile( testFilePath, false ); } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
-    REQUIRE( waitUiState( [&] { return SessionInfo::getSynced().openFiles( windowId ).size() == 1; } ) );
+    runInUiThread(
+        [ &mainWindow, testFilePath ] { mainWindow->loadInitialFile( testFilePath, false ); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
+    REQUIRE( waitUiState(
+        [ & ] { return SessionInfo::getSynced().openFiles( windowId ).size() == 1; } ) );
 
-    runInUiThread( [&mainWindow] { mainWindow->close(); } );
-    REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
+    runInUiThread( [ &mainWindow ] { mainWindow->close(); } );
+    REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
 
     const auto persistedOpenFiles = SessionInfo::getSynced().openFiles( windowId );
     REQUIRE( persistedOpenFiles.size() == 1 );
@@ -829,8 +824,8 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     auto& sessionInfo = SessionInfo::getSynced();
     auto windowIds = sessionInfo.windows();
     const auto windowId = windowIds.isEmpty()
-                              ? QString( "close-adb-session-%1" ).arg(
-                                    QUuid::createUuid().toString( QUuid::WithoutBraces ) )
+                              ? QString( "close-adb-session-%1" )
+                                    .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) )
                               : windowIds.front();
 
     if ( windowIds.isEmpty() ) {
@@ -842,8 +837,8 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
         }
     }
 
-    const auto captureId = QString( "adb_capture_%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto captureId
+        = QString( "adb_capture_%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     QString capturePath;
     {
         CaptureStore captureStore( captureId );
@@ -861,8 +856,12 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
         captureId,
         QString{},
     };
-    const auto sourceSpec = QString::fromUtf8(
-        QJsonDocument( adbSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
+    // Persisted through the typed session spec, exactly what current klogg
+    // writes. The default process backend persists as the transitional
+    // legacy_process discriminator (without any raw command fields), which
+    // must keep restoring during the Task 6 migration.
+    const auto sourceSpec = klogg::livelog::serializeSpec(
+        klogg::livelog::sessionSpecFromSessionData( adbSessionData ) );
 
     sessionInfo.setOpenFiles(
         windowId, { SessionInfo::OpenFile( adbSessionData.documentId(), 0, {}, "adb_logcat",
@@ -878,26 +877,33 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     config.save();
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->show();
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
     auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
     REQUIRE( tabArea != nullptr );
 
-    runInUiThread( [&mainWindow] { mainWindow->reloadSession(); } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow ] { mainWindow->reloadSession(); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
+    auto* disconnectAction
+        = mainWindow->findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
+    auto* reconnectAction
+        = mainWindow->findChild<QAction*>( QStringLiteral( "reconnectSourceAction" ) );
+    REQUIRE( disconnectAction != nullptr );
+    REQUIRE( reconnectAction != nullptr );
+    CHECK_FALSE( disconnectAction->isEnabled() );
+    CHECK_FALSE( reconnectAction->isEnabled() );
 
-    runInUiThread( [&mainWindow] { mainWindow->close(); } );
-    REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
+    runInUiThread( [ &mainWindow ] { mainWindow->close(); } );
+    REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
 
     REQUIRE( QDir{ capturePath }.exists() );
     const auto persistedOpenFiles = SessionInfo::getSynced().openFiles( windowId );
@@ -908,15 +914,14 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     config.save();
 }
 
-SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
-          "[ui][session][ios]" )
+SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )
 {
     auto appSession = std::make_shared<Session>();
     auto& sessionInfo = SessionInfo::getSynced();
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
     const auto windowIds = sessionInfo.windows();
-    const auto windowId = QString( "restore-ios-session-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "restore-ios-session-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
 
     sessionInfo.add( windowId );
     for ( const auto& existingWindowId : windowIds ) {
@@ -932,8 +937,11 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
         QString{},
         LiveLogSourceType::IosLogStream,
     };
-    const auto sourceSpec = QString::fromUtf8(
-        QJsonDocument( iosSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
+    // Persisted through the typed session spec (native backend; the recorded
+    // pymobiledevice3 executable is deliberately not carried into the new
+    // schema). Restores as a disconnected native tab.
+    const auto sourceSpec = klogg::livelog::serializeSpec(
+        klogg::livelog::sessionSpecFromSessionData( iosSessionData ) );
 
     sessionInfo.setOpenFiles(
         windowId, { SessionInfo::OpenFile( iosSessionData.documentId(), 0, {},
@@ -945,23 +953,22 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state",
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->show();
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
     auto tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
     REQUIRE( tabArea != nullptr );
 
-    runInUiThread( [&mainWindow] { mainWindow->reloadSession(); } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow ] { mainWindow->reloadSession(); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     REQUIRE( tabArea->tabText( 0 ) == QStringLiteral( "iPhone Test" ) );
 
     mainWindow->close();
@@ -991,8 +998,8 @@ SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][sessio
         QDir{ parentAsFile }.filePath( "capture.log" ),
     };
 
-    auto* view = appSession->openAdbLogcat( adbSessionData, []() { return new CrawlerWidget(); },
-                                            false );
+    auto* view
+        = appSession->openAdbLogcat( adbSessionData, []() { return new CrawlerWidget(); }, false );
     REQUIRE( view != nullptr );
 
     REQUIRE( appSession->getAssociatedPath( view ).isEmpty() );
@@ -1011,27 +1018,25 @@ SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][sessio
 // drives the real path (Session::openFolder + MainWindow::openFolderByPath +
 // TabbedCrawlerWidget::addCrawler, which calls setCurrentIndex -> the crash
 // site) and asserts it stays alive.
-SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
-          "[ui][folder]" )
+SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close", "[ui][folder]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-tab-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId
+        = QString( "folder-tab-%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->resize( 1600, 900 );
     mainWindow->show();
     QTest::qWait( 100 );
 
-    auto runInUiThread = [uiObject = mainWindow.get()]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+    auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1074,13 +1079,12 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
         {
             // addCrawler -> setCurrentIndex -> currentTabChanged: the original
             // crash site (static_cast<CrawlerWidget*> on a FolderCrawlerWidget).
-            runInUiThread( [ &mainWindow, tempDirPath ] {
-                mainWindow->openFolderByPath( tempDirPath );
-            } );
+            runInUiThread(
+                [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
 
             THEN( "The folder tab is added without crashing" )
             {
-                REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+                REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
                 // Settle so currentTabChanged fully applies its folder fallback
                 // (signal routing is async on some platforms).
                 QTest::qWait( 200 );
@@ -1098,17 +1102,14 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 
                     THEN( "Both tabs coexist and file tab is current" )
                     {
-                        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+                        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
                         QTest::qWait( 200 );
-                        REQUIRE( qobject_cast<CrawlerWidget*>(
-                                     tabArea->currentWidget() )
+                        REQUIRE( qobject_cast<CrawlerWidget*>( tabArea->currentWidget() )
                                  != nullptr );
 
                         AND_WHEN( "Switching back to the folder tab (index 0)" )
                         {
-                            runInUiThread( [ tabArea ] {
-                                tabArea->setCurrentIndex( 0 );
-                            } );
+                            runInUiThread( [ tabArea ] { tabArea->setCurrentIndex( 0 ); } );
 
                             THEN( "No crash and folder tab is current" )
                             {
@@ -1124,9 +1125,7 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 
                                 AND_WHEN( "Switching back to the file tab (index 1)" )
                                 {
-                                    runInUiThread( [ tabArea ] {
-                                        tabArea->setCurrentIndex( 1 );
-                                    } );
+                                    runInUiThread( [ tabArea ] { tabArea->setCurrentIndex( 1 ); } );
 
                                     THEN( "No crash and file tab is current" )
                                     {
@@ -1147,7 +1146,7 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
                                             } );
 
                                             REQUIRE( waitUiState(
-                                                [&] { return tabArea->count() == 1; } ) );
+                                                [ & ] { return tabArea->count() == 1; } ) );
                                             QTest::qWait( 200 );
                                             // Remaining tab is the file tab.
                                             REQUIRE( qobject_cast<CrawlerWidget*>(
@@ -1165,25 +1164,21 @@ SCENARIO( "Folder tab in MainWindow does not crash on open/switch/close",
 
         WHEN( "A folder tab is opened as the only tab and then closed" )
         {
-            runInUiThread( [ &mainWindow, tempDirPath ] {
-                mainWindow->openFolderByPath( tempDirPath );
-            } );
-            REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+            runInUiThread(
+                [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+            REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
             QTest::qWait( 200 );
-            REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
-                     != nullptr );
+            REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() ) != nullptr );
 
             // closeTab on the folder current tab exercises the folder close
             // branch (BEFORE the CrawlerWidget assert) and then the no-tab-left
             // else branch in currentTabChanged. Triggered via closeAction
             // (closeTab is a private slot).
-            runInUiThread( [ closeAction ] {
-                closeAction->trigger();
-            } );
+            runInUiThread( [ closeAction ] { closeAction->trigger(); } );
 
             THEN( "No assert-abort and no tabs remain" )
             {
-                REQUIRE( waitUiState( [&] { return tabArea->count() == 0; } ) );
+                REQUIRE( waitUiState( [ & ] { return tabArea->count() == 0; } ) );
                 QTest::qWait( 200 );
             }
         }
@@ -1200,12 +1195,12 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
     FileWatchConfigGuard fileWatchConfigGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-dispatch-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "folder-dispatch-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->resize( 1600, 900 );
@@ -1213,8 +1208,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1229,10 +1223,8 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         f.write( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" );
     }
 
-    runInUiThread( [ &mainWindow, tempDirPath ] {
-        mainWindow->openFolderByPath( tempDirPath );
-    } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     QTest::qWait( 200 );
     auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
     REQUIRE( folderWidget != nullptr );
@@ -1244,18 +1236,14 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
 
         // State-agnostic: the default wrap state comes from the machine's
         // saved Configuration, so drive both directions.
-        runInUiThread( [ wrapAction ] {
-            wrapAction->setChecked( true );
-        } );
+        runInUiThread( [ wrapAction ] { wrapAction->setChecked( true ); } );
 
         THEN( "the folder views wrap and unwrap" )
         {
             REQUIRE( waitUiState( [ & ] { return folderWidget->isTextWrapEnabled(); } ) );
             REQUIRE( folderWidget->mainView()->isTextWrapEnabled() );
 
-            runInUiThread( [ wrapAction ] {
-                wrapAction->setChecked( false );
-            } );
+            runInUiThread( [ wrapAction ] { wrapAction->setChecked( false ); } );
             REQUIRE( waitUiState( [ & ] { return !folderWidget->isTextWrapEnabled(); } ) );
             REQUIRE_FALSE( folderWidget->mainView()->isTextWrapEnabled() );
         }
@@ -1265,8 +1253,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
     {
         THEN( "the folder search input gains focus" )
         {
-            pressConfiguredShortcut( mainWindow.get(),
-                                     ShortcutAction::MainWindowFocusSearchInput );
+            pressConfiguredShortcut( mainWindow.get(), ShortcutAction::MainWindowFocusSearchInput );
             REQUIRE( waitUiState( [ & ] {
                 return folderWidget->searchToolbar()->searchLineEdit()->lineEdit()->hasFocus();
             } ) );
@@ -1297,27 +1284,23 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
 
         AND_WHEN( "follow is toggled on for the folder tab" )
         {
-            runInUiThread( [ follow ] {
-                follow->trigger();
-            } );
+            runInUiThread( [ follow ] { follow->trigger(); } );
 
             THEN( "the folder main view follows and the action shows it" )
             {
                 // RED: today followSet is routed through the signal mux, whose
                 // current document is null for folder tabs, so the folder main
                 // view never enters follow mode.
-                REQUIRE( waitUiState( [ & ] {
-                    return folderWidget->mainView()->isFollowEnabled();
-                } ) );
+                REQUIRE(
+                    waitUiState( [ & ] { return folderWidget->mainView()->isFollowEnabled(); } ) );
                 REQUIRE( follow->isChecked() );
             }
 
             AND_WHEN( "switching to a file tab and back to the folder tab" )
             {
                 const auto filePath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
-                runInUiThread( [ &mainWindow, filePath ] {
-                    mainWindow->loadInitialFile( filePath, false );
-                } );
+                runInUiThread(
+                    [ &mainWindow, filePath ] { mainWindow->loadInitialFile( filePath, false ); } );
                 REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
                 // Let the file tab's background load finish (and its worker
                 // thread unwind) before switching away / tearing down.
@@ -1327,9 +1310,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
                 } ) );
                 QTest::qWait( 200 );
 
-                runInUiThread( [ tabArea ] {
-                    tabArea->setCurrentIndex( 0 );
-                } );
+                runInUiThread( [ tabArea ] { tabArea->setCurrentIndex( 0 ); } );
                 REQUIRE( waitUiState( [ & ] {
                     return qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() )
                            != nullptr;
@@ -1348,32 +1329,28 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         }
     }
 
-    WHEN( "a result file is open and Copy Path is triggered" )    {
+    WHEN( "a result file is open and Copy Path is triggered" )
+    {
         // The info line shows the file in the folder main view; Copy Path must
         // agree with it (not blindly copy the folder path).
-        auto* copyPath = mainWindow->findChild<QAction*>(
-            QStringLiteral( "copyPathToClipboardAction" ) );
+        auto* copyPath
+            = mainWindow->findChild<QAction*>( QStringLiteral( "copyPathToClipboardAction" ) );
         REQUIRE( copyPath != nullptr );
 
-        runInUiThread( [ folderWidget ] {
-            folderWidget->searchFor( "ERROR" );
-        } );
+        runInUiThread( [ folderWidget ] { folderWidget->searchFor( "ERROR" ); } );
         REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
 
         const auto expectedPath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
-        runInUiThread( [ folderWidget ] {
-            folderWidget->selectResultRow( 1_lnum );
-        } );
-        REQUIRE( waitUiState(
-            [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
+        runInUiThread( [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
+        REQUIRE(
+            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
 
         THEN( "the clipboard holds the main-view file path" )
         {
-            runInUiThread( [ copyPath ] {
-                copyPath->trigger();
-            } );
+            runInUiThread( [ copyPath ] { copyPath->trigger(); } );
             REQUIRE( waitUiState( [ & ] {
-                return QApplication::clipboard()->text() == QDir::toNativeSeparators( expectedPath );
+                return QApplication::clipboard()->text()
+                       == QDir::toNativeSeparators( expectedPath );
             } ) );
         }
     }
@@ -1384,8 +1361,7 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
 // are routed through the signal mux, whose current document is null for
 // folder tabs (signalMux_.setCurrentDocument( nullptr ) in currentTabChanged),
 // so they are silent no-ops there.
-SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
-          "[ui][folder]" )
+SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file", "[ui][folder]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
     // Deterministic followAction enabled state (must precede MainWindow
@@ -1393,12 +1369,12 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
     FileWatchConfigGuard fileWatchConfigGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-doc-actions-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "folder-doc-actions-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     // The singleShot above is queued on the UI event loop; if it has not run
@@ -1410,8 +1386,7 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1440,17 +1415,14 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
 
     GIVEN( "a folder tab with a file opened in the main view" )
     {
-        runInUiThread( [ &mainWindow, tempDirPath ] {
-            mainWindow->openFolderByPath( tempDirPath );
-        } );
-        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        runInUiThread(
+            [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
         QTest::qWait( 200 );
         auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
         REQUIRE( folderWidget != nullptr );
 
-        runInUiThread( [ folderWidget ] {
-            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
-        } );
+        runInUiThread( [ folderWidget ] { folderWidget->searchFor( QStringLiteral( "ERROR" ) ); } );
         REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
         REQUIRE( folderWidget->filteredView() != nullptr );
 
@@ -1458,17 +1430,15 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
         // is a data row; selecting it in the results view opens its file in
         // the main view (newSelection -> onResultSelected, the same path
         // FolderCrawlerWidget::selectResultRow drives).
-        runInUiThread( [ folderWidget ] {
-            folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
-        } );
-        REQUIRE( waitUiState(
-            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        runInUiThread(
+            [ folderWidget ] { folderWidget->filteredView()->selectAndDisplayLine( 2_lnum ); } );
+        REQUIRE(
+            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
         // The on-demand index + layout of the main-view file are async: wait
         // until the 200-line file is actually scrollable, then settle so the
         // worker thread unwinds before the views are driven further.
-        REQUIRE( waitUiState( [ & ] {
-            return folderWidget->mainView()->verticalScrollBar()->maximum() > 0;
-        } ) );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->mainView()->verticalScrollBar()->maximum() > 0; } ) );
         QTest::qWait( 200 );
 
         auto scrollMainViewToBottom = [ & ] {
@@ -1476,18 +1446,15 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
                 auto* scrollBar = folderWidget->mainView()->verticalScrollBar();
                 scrollBar->setValue( scrollBar->maximum() );
             } );
-            REQUIRE( waitUiState( [ & ] {
-                return folderWidget->mainView()->verticalScrollBar()->value() > 0;
-            } ) );
+            REQUIRE( waitUiState(
+                [ & ] { return folderWidget->mainView()->verticalScrollBar()->value() > 0; } ) );
         };
 
         WHEN( "the go-to-top action is triggered" )
         {
             scrollMainViewToBottom();
 
-            runInUiThread( [ goToTopAction ] {
-                goToTopAction->trigger();
-            } );
+            runInUiThread( [ goToTopAction ] { goToTopAction->trigger(); } );
 
             THEN( "the folder main view scrolls back to the top" )
             {
@@ -1518,17 +1485,14 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
         {
             REQUIRE( waitUiState( [ & ] { return followAction->isEnabled(); } ) );
 
-            runInUiThread( [ followAction ] {
-                followAction->trigger();
-            } );
+            runInUiThread( [ followAction ] { followAction->trigger(); } );
 
             THEN( "the folder main view enters follow mode" )
             {
                 // RED: followSet is mux-routed; the mux document is null on
                 // folder tabs, so the main view's follow mode is never set.
-                REQUIRE( waitUiState( [ & ] {
-                    return folderWidget->mainView()->isFollowEnabled();
-                } ) );
+                REQUIRE(
+                    waitUiState( [ & ] { return folderWidget->mainView()->isFollowEnabled(); } ) );
                 REQUIRE( followAction->isChecked() );
             }
         }
@@ -1540,17 +1504,12 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
             runInUiThread( [ folderWidget ] {
                 folderWidget->filteredView()->setFocus( Qt::OtherFocusReason );
             } );
-            REQUIRE( waitUiState( [ & ] {
-                return folderWidget->filteredView()->hasFocus();
-            } ) );
+            REQUIRE( waitUiState( [ & ] { return folderWidget->filteredView()->hasFocus(); } ) );
 
-            const auto selectedRowsBefore
-                = folderWidget->filteredView()->getSelectedLinesText();
+            const auto selectedRowsBefore = folderWidget->filteredView()->getSelectedLinesText();
             REQUIRE_FALSE( selectedRowsBefore.isEmpty() );
 
-            runInUiThread( [ goToTopAction ] {
-                goToTopAction->trigger();
-            } );
+            runInUiThread( [ goToTopAction ] { goToTopAction->trigger(); } );
 
             THEN( "the main view scrolls to top and the results selection is untouched" )
             {
@@ -1583,12 +1542,12 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
     FileWatchConfigGuard fileWatchConfigGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-infoline-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "folder-infoline-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
@@ -1597,8 +1556,7 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1618,7 +1576,8 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
     const auto deepDir
         = QDir( tempDirPath )
               .filePath( QStringLiteral(
-                  "测试机进入相册点击快捷翻胶囊测试机已显示有图片但设备空间首页显示未连接且拔插APP显示未连接"
+                  "测试机进入相册点击快捷翻胶囊测试机已显示有图片但设备空间首页显示未连接且拔插APP"
+                  "显示未连接"
                   "/2026-08-15_11-38-20@interconnection/common/ap_log/2026-08-15_11-36-51" ) );
     REQUIRE( QDir{}.mkpath( deepDir ) );
     // Locale guard: under a non-UTF-8 locale (e.g. the CI TSan container's
@@ -1641,27 +1600,23 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
 
     GIVEN( "a folder tab where a result click opens the long-path file" )
     {
-        runInUiThread( [ &mainWindow, tempDirPath ] {
-            mainWindow->openFolderByPath( tempDirPath );
-        } );
-        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        runInUiThread(
+            [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
         QTest::qWait( 200 );
         auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
         REQUIRE( folderWidget != nullptr );
 
-        runInUiThread( [ folderWidget ] {
-            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
-        } );
-        REQUIRE( waitUiState( [&] { return !folderWidget->isSearchActive(); } ) );
+        runInUiThread( [ folderWidget ] { folderWidget->searchFor( QStringLiteral( "ERROR" ) ); } );
+        REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
         REQUIRE( folderWidget->filteredView() != nullptr );
 
         // Row 0 is the group header, row 2 a data row: selecting it opens the
         // file in the main view (newSelection -> onResultSelected).
-        runInUiThread( [ folderWidget ] {
-            folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
-        } );
-        REQUIRE( waitUiState(
-            [&] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        runInUiThread(
+            [ folderWidget ] { folderWidget->filteredView()->selectAndDisplayLine( 2_lnum ); } );
+        REQUIRE(
+            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
         // The main-view index completes async; mainViewFileChanged (fired at
         // its completion) is what re-runs updateInfoLine, so settle the event
         // loop before asserting the label.
@@ -1671,8 +1626,7 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
         {
             INFO( "currentMainFilePath: " << folderWidget->currentMainFilePath().toStdString() );
             INFO( "label text: '" << filePathLabel->text().toStdString() << "'" );
-            REQUIRE( filePathLabel->text()
-                     == QDir::toNativeSeparators( logFilePath ) );
+            REQUIRE( filePathLabel->text() == QDir::toNativeSeparators( logFilePath ) );
         }
 
         THEN( "the toolbar path line stays visible" )
@@ -1694,8 +1648,7 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
 // silently kills the follow mode of a following file tab. This test pins the
 // expected behavior: only the current tab's follow transitions may touch the
 // shared action / other tabs' state.
-TEST_CASE( "Background folder tab must not change the current tab's follow state",
-           "[ui][folder]" )
+TEST_CASE( "Background folder tab must not change the current tab's follow state", "[ui][folder]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
     // Deterministic followAction enabled state (must precede MainWindow
@@ -1703,12 +1656,12 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
     FileWatchConfigGuard fileWatchConfigGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-bg-follow-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "folder-bg-follow-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
@@ -1717,8 +1670,7 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1756,10 +1708,9 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
 
     GIVEN( "a folder tab with follow armed, hidden behind a following file tab" )
     {
-        runInUiThread( [ &mainWindow, tempDirPath ] {
-            mainWindow->openFolderByPath( tempDirPath );
-        } );
-        REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+        runInUiThread(
+            [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
         QTest::qWait( 200 );
         auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->widget( 0 ) );
         REQUIRE( folderWidget != nullptr );
@@ -1767,37 +1718,29 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
         // Open a.log in the folder main view from a result row. Results rows:
         // group header at 0, then one data row per match -- row 1 is the
         // first data row.
-        runInUiThread( [ folderWidget ] {
-            folderWidget->searchFor( QStringLiteral( "ERROR" ) );
-        } );
+        runInUiThread( [ folderWidget ] { folderWidget->searchFor( QStringLiteral( "ERROR" ) ); } );
         REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
-        runInUiThread( [ folderWidget ] {
-            folderWidget->selectResultRow( 1_lnum );
-        } );
-        REQUIRE( waitUiState(
-            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        runInUiThread( [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
+        REQUIRE(
+            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
         // The on-demand index + layout of the main-view file are async; wait
         // until it is scrollable, then settle so the worker thread unwinds.
-        REQUIRE( waitUiState( [ & ] {
-            return folderWidget->mainView()->verticalScrollBar()->maximum() > 0;
-        } ) );
+        REQUIRE( waitUiState(
+            [ & ] { return folderWidget->mainView()->verticalScrollBar()->maximum() > 0; } ) );
         QTest::qWait( 200 );
 
         // Arm the folder main view's follow FIRST so the later emission is a
         // genuine "follow turned off" transition from the folder tab, and so
         // the folder->MainWindow uplink (connected when the folder tab was
         // current) has carried a real state before going background.
-        runInUiThread( [ folderWidget ] {
-            folderWidget->followSet( true );
-        } );
-        REQUIRE( waitUiState(
-            [ & ] { return folderWidget->mainView()->isFollowEnabled(); } ) );
+        runInUiThread( [ folderWidget ] { folderWidget->followSet( true ); } );
+        REQUIRE( waitUiState( [ & ] { return folderWidget->mainView()->isFollowEnabled(); } ) );
 
         // Open the standalone file as the SECOND tab; it becomes current.
         runInUiThread( [ &mainWindow, standaloneFile ] {
             mainWindow->loadInitialFile( standaloneFile, false );
         } );
-        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
         auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 1 ) );
         REQUIRE( crawler != nullptr );
         // Let the file tab's background load finish (and its worker thread
@@ -1806,9 +1749,7 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
         QTest::qWait( 200 );
 
         // Enable follow on the now-current file tab via the shared action.
-        runInUiThread( [ followAction ] {
-            followAction->trigger();
-        } );
+        runInUiThread( [ followAction ] { followAction->trigger(); } );
         REQUIRE( waitUiState( [ & ] { return crawler->isFollowEnabled(); } ) );
         REQUIRE( followAction->isChecked() );
 
@@ -1818,9 +1759,8 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
             // on the folder main view, relayed to MainWindow over the
             // unguarded direct connection -- all while the file tab is
             // current.
-            runInUiThread( [ folderWidget ] {
-                folderWidget->mainView()->selectAndDisplayLine( 0_lnum );
-            } );
+            runInUiThread(
+                [ folderWidget ] { folderWidget->mainView()->selectAndDisplayLine( 0_lnum ); } );
             // Pump events so every queued leg of the emission has landed
             // before the state is sampled.
             QTest::qWait( 200 );
@@ -1847,12 +1787,12 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
     TabGroupCleanupGuard tabGroupCleanupGuard;
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "folder-qf-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId
+        = QString( "folder-qf-%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->resize( 1600, 900 );
@@ -1860,8 +1800,7 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -1876,18 +1815,14 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
         f.write( "line0\nERROR alpha\nline2\nERROR beta\nline4\n" );
     }
 
-    runInUiThread( [ &mainWindow, tempDirPath ] {
-        mainWindow->openFolderByPath( tempDirPath );
-    } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     QTest::qWait( 200 );
     auto* folderWidget = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
     REQUIRE( folderWidget != nullptr );
 
     // Search, snapshot pane 0 (keep-results) and search again in a fresh pane.
-    runInUiThread( [ folderWidget ] {
-        folderWidget->searchFor( "ERROR" );
-    } );
+    runInUiThread( [ folderWidget ] { folderWidget->searchFor( "ERROR" ); } );
     REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
     runInUiThread( [ folderWidget ] {
         folderWidget->searchToolbar()->setKeepResultsChecked( true );
@@ -1903,11 +1838,10 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
             // The pane-1 view was never registered at tab activation (only the
             // original pane-0 view was); its changeQuickFind signal must reach
             // the mux after the pane lifecycle re-registration.
-            Q_EMIT folderWidget->filteredView()->changeQuickFind(
-                QStringLiteral( "beta" ), QuickFindMux::Forward );
+            Q_EMIT folderWidget->filteredView()->changeQuickFind( QStringLiteral( "beta" ),
+                                                                  QuickFindMux::Forward );
             REQUIRE( waitUiState( [ & ] {
-                return appSession->quickFindPattern()->getPattern()
-                       == QStringLiteral( "beta" );
+                return appSession->quickFindPattern()->getPattern() == QStringLiteral( "beta" );
             } ) );
         }
     }
@@ -1922,18 +1856,16 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
         // the disconnect on the freed view is benign-in-practice in this run,
         // so only an ASAN build would catch it. The functional assertions
         // below verify QuickFind follows the surviving pane.
-        runInUiThread( [ folderWidget ] {
-            Q_EMIT folderWidget->resultsTabs()->tabCloseRequested( 0 );
-        } );
+        runInUiThread(
+            [ folderWidget ] { Q_EMIT folderWidget->resultsTabs()->tabCloseRequested( 0 ); } );
         REQUIRE( waitUiState( [ & ] { return folderWidget->paneCount() == 1; } ) );
 
         THEN( "QuickFind still follows the surviving pane" )
         {
-            Q_EMIT folderWidget->filteredView()->changeQuickFind(
-                QStringLiteral( "gamma" ), QuickFindMux::Forward );
+            Q_EMIT folderWidget->filteredView()->changeQuickFind( QStringLiteral( "gamma" ),
+                                                                  QuickFindMux::Forward );
             REQUIRE( waitUiState( [ & ] {
-                return appSession->quickFindPattern()->getPattern()
-                       == QStringLiteral( "gamma" );
+                return appSession->quickFindPattern()->getPattern() == QStringLiteral( "gamma" );
             } ) );
         }
     }
@@ -1951,10 +1883,9 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
             REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
             f.write( "line0\nERROR delta\n" );
         }
-        runInUiThread( [ &mainWindow, tempDirPath2 ] {
-            mainWindow->openFolderByPath( tempDirPath2 );
-        } );
-        REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+        runInUiThread(
+            [ &mainWindow, tempDirPath2 ] { mainWindow->openFolderByPath( tempDirPath2 ); } );
+        REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
         QTest::qWait( 200 );
         auto* foreground = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
         REQUIRE( foreground != nullptr );
@@ -1962,25 +1893,21 @@ SCENARIO( "Folder QuickFind re-registers on pane changes", "[ui][folder]" )
 
         // Drive the BACKGROUND folder's pane lifecycle: pane 1 is active from
         // the keep-results setup, so switching to 0 emits searchablesChanged.
-        runInUiThread( [ folderWidget ] {
-            folderWidget->resultsTabs()->setCurrentIndex( 0 );
-        } );
+        runInUiThread( [ folderWidget ] { folderWidget->resultsTabs()->setCurrentIndex( 0 ); } );
         QTest::qWait( 200 );
 
         THEN( "the mux stays with the foreground document" )
         {
-            Q_EMIT foreground->filteredView()->changeQuickFind(
-                QStringLiteral( "delta" ), QuickFindMux::Forward );
+            Q_EMIT foreground->filteredView()->changeQuickFind( QStringLiteral( "delta" ),
+                                                                QuickFindMux::Forward );
             REQUIRE( waitUiState( [ & ] {
-                return appSession->quickFindPattern()->getPattern()
-                       == QStringLiteral( "delta" );
+                return appSession->quickFindPattern()->getPattern() == QStringLiteral( "delta" );
             } ) );
         }
     }
 }
 
-SCENARIO( "Tab switches coalesce session persistence into a debounced write",
-          "[ui][session]" )
+SCENARIO( "Tab switches coalesce session persistence into a debounced write", "[ui][session]" )
 {
     // Regression test for the tab-switch stall: currentTabChanged used to end
     // with an unconditional persistSessionState() -- a full session rewrite +
@@ -1990,20 +1917,19 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write",
     // switch". Persistence is now debounced: frequent triggers coalesce into a
     // single write; closeEvent still flushes synchronously.
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "tab-debounce-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId
+        = QString( "tab-debounce-%1" ).arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
-    QTimer::singleShot( 0, [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
 
     QTest::qWait( 100 );
     mainWindow->show();
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -2021,11 +1947,11 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write",
     runInUiThread( [ &mainWindow, tempDirPath ] {
         mainWindow->loadInitialFile( QDir{ tempDirPath }.filePath( "a.log" ), false );
     } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     runInUiThread( [ &mainWindow, tempDirPath ] {
         mainWindow->loadInitialFile( QDir{ tempDirPath }.filePath( "b.log" ), false );
     } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
 
     // Let any setup-triggered persistence fire and settle (the debounce
     // interval is sub-second), then start counting from a quiet baseline.
@@ -2040,29 +1966,29 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write",
     REQUIRE( saveCount.load() == 0 );
 
     // ...both switches coalesce into exactly one debounced write...
-    REQUIRE( waitUiState( [&] { return saveCount.load() == 1; } ) );
+    REQUIRE( waitUiState( [ & ] { return saveCount.load() == 1; } ) );
 
     // ...and there is no write storm behind it.
     QTest::qWait( 400 );
     REQUIRE( saveCount.load() == 1 );
 
     runInUiThread( [ &mainWindow ] { mainWindow->close(); } );
-    REQUIRE( waitUiState( [&] { return !mainWindow->isVisible(); } ) );
+    REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
 }
 
 TEST_CASE( "Shared Filter Favorites model updates real file and folder toolbars synchronously",
            "[ui][filter-favorites]" )
 {
     TabGroupCleanupGuard tabGroupCleanupGuard;
-    const PredefinedFiltersCollection::Collection initial{
-        { QStringLiteral( "Alpha" ), QStringLiteral( "ERROR" ), false } };
+    const PredefinedFiltersCollection::Collection initial{ { QStringLiteral( "Alpha" ),
+                                                             QStringLiteral( "ERROR" ), false } };
     FilterFavoritesRestoreGuard filterFavoritesGuard{ initial };
     auto& sessionInfo = SessionInfo::getSynced();
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "filter-favorites-apply-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "filter-favorites-apply-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
@@ -2104,8 +2030,8 @@ TEST_CASE( "Shared Filter Favorites model updates real file and folder toolbars 
     REQUIRE( comboFavoriteRows( folderCombo ) == initial );
 
     const PredefinedFiltersCollection::Collection expected{
-        initial.at( 0 ),
-        { QStringLiteral( "Beta" ), QStringLiteral( "WARN" ), false } };
+        initial.at( 0 ), { QStringLiteral( "Beta" ), QStringLiteral( "WARN" ), false }
+    };
     const auto commit = FilterFavoritesModel::instance().replaceFavorites( initial, expected );
     REQUIRE( commit.status == PredefinedFiltersCollection::CommitStatus::Success );
     REQUIRE( comboFavoriteRows( fileCombo ) == expected );
@@ -2126,13 +2052,13 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "filter-favorites-import-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "filter-favorites-import-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
     QTimer::singleShot( 0, Qt::PreciseTimer,
-                        [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+                        [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
     mainWindow->resize( 1600, 900 );
@@ -2140,8 +2066,7 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
     QTest::qWait( 100 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
 
@@ -2157,18 +2082,15 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
 
     auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
     REQUIRE( tabArea != nullptr );
-    runInUiThread( [ &mainWindow, standaloneFile ] {
-        mainWindow->loadInitialFile( standaloneFile, false );
-    } );
+    runInUiThread(
+        [ &mainWindow, standaloneFile ] { mainWindow->loadInitialFile( standaloneFile, false ); } );
     REQUIRE( waitUiState( [ tabArea ] { return tabArea->count() == 1; } ) );
     auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 0 ) );
     REQUIRE( fileCrawler != nullptr );
     REQUIRE( waitUiState( [ fileCrawler ] { return fileCrawler->isFirstLoadDone(); } ) );
     QTest::qWait( 200 );
 
-    runInUiThread( [ &mainWindow, tempDirPath ] {
-        mainWindow->openFolderByPath( tempDirPath );
-    } );
+    runInUiThread( [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
     REQUIRE( waitUiState( [ tabArea ] { return tabArea->count() == 2; } ) );
     auto* folderCrawler = qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() );
     REQUIRE( folderCrawler != nullptr );
@@ -2198,9 +2120,9 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
     REQUIRE( favoritesModel.favorites() == initialFavorites );
     QSignalSpy resetSpy( &favoritesModel, &QAbstractItemModel::modelReset );
 
-    const bool validImportInvoked = QMetaObject::invokeMethod(
-        mainWindow.get(), "importFilterFavoritesFromFile", Qt::DirectConnection,
-        Q_ARG( QString, importPath ) );
+    const bool validImportInvoked
+        = QMetaObject::invokeMethod( mainWindow.get(), "importFilterFavoritesFromFile",
+                                     Qt::DirectConnection, Q_ARG( QString, importPath ) );
     REQUIRE( validImportInvoked );
     CHECK( resetSpy.count() == 2 );
     CHECK( favoritesModel.favorites() == importedFavorites );
@@ -2222,11 +2144,12 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
             if ( kind == klogg::ui::MessageKind::Warning ) {
                 warningTexts.push_back( text );
             }
-        } };
+        }
+    };
 
-    const bool invalidImportInvoked = QMetaObject::invokeMethod(
-        mainWindow.get(), "importFilterFavoritesFromFile", Qt::DirectConnection,
-        Q_ARG( QString, malformedPath ) );
+    const bool invalidImportInvoked
+        = QMetaObject::invokeMethod( mainWindow.get(), "importFilterFavoritesFromFile",
+                                     Qt::DirectConnection, Q_ARG( QString, malformedPath ) );
     REQUIRE( invalidImportInvoked );
     REQUIRE( warningTexts.size() == 1 );
     CHECK_FALSE( warningTexts.front().isEmpty() );
@@ -2239,9 +2162,9 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
         = QDir( tempDirPath ).absoluteFilePath( QStringLiteral( "export-destination" ) );
     const auto blockedExportPath = unwritableExportPath + QStringLiteral( ".conf" );
     REQUIRE( QDir{}.mkpath( blockedExportPath ) );
-    const bool failedExportInvoked = QMetaObject::invokeMethod(
-        mainWindow.get(), "exportFilterFavoritesToFile", Qt::DirectConnection,
-        Q_ARG( QString, unwritableExportPath ) );
+    const bool failedExportInvoked
+        = QMetaObject::invokeMethod( mainWindow.get(), "exportFilterFavoritesToFile",
+                                     Qt::DirectConnection, Q_ARG( QString, unwritableExportPath ) );
     REQUIRE( failedExportInvoked );
     REQUIRE( warningTexts.size() == 2 );
     CHECK_FALSE( warningTexts.back().isEmpty() );
@@ -2257,8 +2180,8 @@ TEST_CASE( "Filter Favorites import maps every load status to explicit warning b
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "filter-favorites-import-errors-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "filter-favorites-import-errors-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
@@ -2272,7 +2195,8 @@ TEST_CASE( "Filter Favorites import maps every load status to explicit warning b
 
     const auto validPath = QDir( tempDirPath ).absoluteFilePath( "valid.conf" );
     const PredefinedFiltersCollection::Collection importedFavorites{
-        { QStringLiteral( "Imported" ), QStringLiteral( "pattern" ), false } };
+        { QStringLiteral( "Imported" ), QStringLiteral( "pattern" ), false }
+    };
     REQUIRE( PredefinedFiltersCollection::saveToFile( validPath, importedFavorites ) );
 
     const auto missingPath = QDir( tempDirPath ).absoluteFilePath( "missing.conf" );
@@ -2295,13 +2219,13 @@ TEST_CASE( "Filter Favorites import maps every load status to explicit warning b
     QStringList warningTitles;
     QStringList warningTexts;
     [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
-        [ & ]( klogg::ui::MessageKind kind, QWidget*, const QString& title,
-               const QString& text ) {
+        [ & ]( klogg::ui::MessageKind kind, QWidget*, const QString& title, const QString& text ) {
             if ( kind == klogg::ui::MessageKind::Warning ) {
                 warningTitles.push_back( title );
                 warningTexts.push_back( text );
             }
-        } };
+        }
+    };
 
     using LoadStatus = PredefinedFiltersCollection::LoadStatus;
     struct ImportCase {
@@ -2324,9 +2248,9 @@ TEST_CASE( "Filter Favorites import maps every load status to explicit warning b
         CHECK( PredefinedFiltersCollection::tryLoadFromFile( importCase.path ).status
                == importCase.expectedStatus );
         const auto warningCountBefore = warningTexts.size();
-        const bool invoked = QMetaObject::invokeMethod(
-            mainWindow.get(), "importFilterFavoritesFromFile", Qt::DirectConnection,
-            Q_ARG( QString, importCase.path ) );
+        const bool invoked
+            = QMetaObject::invokeMethod( mainWindow.get(), "importFilterFavoritesFromFile",
+                                         Qt::DirectConnection, Q_ARG( QString, importCase.path ) );
         REQUIRE( invoked );
 
         if ( importCase.expectedWarning.isEmpty() ) {
@@ -2376,20 +2300,19 @@ TEST_CASE( "Favorite Files menu has stable commands and refreshes on show", "[ui
     FavoriteFilesRestoreGuard favoriteFilesGuard{ { firstFavorite } };
 
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "favorite-files-menu-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "favorite-files-menu-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
     QTimer::singleShot( 0, Qt::PreciseTimer,
-                        [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+                        [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
     mainWindow->show();
     QTest::qWait( 100 );
 
-    auto* favoritesMenu
-        = mainWindow->findChild<QMenu*>( QStringLiteral( "favoritesMenu" ) );
+    auto* favoritesMenu = mainWindow->findChild<QMenu*>( QStringLiteral( "favoritesMenu" ) );
     auto* addCurrentFileAction
         = mainWindow->findChild<QAction*>( QStringLiteral( "addToFavoritesMenuAction" ) );
     auto* removeFavoriteFileAction
@@ -2430,16 +2353,13 @@ TEST_CASE( "Favorite Files menu has stable commands and refreshes on show", "[ui
     CHECK( dynamicFavoriteActionCount == 1 );
 
     auto runInUiThread = [ uiObject = mainWindow.get() ]( auto&& func ) {
-        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject,
-                            std::forward<decltype( func )>( func ) );
+        QTimer::singleShot( 0, Qt::PreciseTimer, uiObject, std::forward<decltype( func )>( func ) );
         QTest::qWait( 100 );
     };
     auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
     REQUIRE( tabArea != nullptr );
-    runInUiThread( [ &mainWindow, tempDirPath ] {
-        mainWindow->openFolderByPath( tempDirPath );
-    } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 1; } ) );
+    runInUiThread( [ &mainWindow, tempDirPath ] { mainWindow->openFolderByPath( tempDirPath ); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabArea->currentWidget() ) != nullptr );
     QTest::qWait( 200 );
 
@@ -2472,7 +2392,7 @@ TEST_CASE( "Favorite Files menu has stable commands and refreshes on show", "[ui
     runInUiThread( [ &mainWindow, replacementFavorite ] {
         mainWindow->loadInitialFile( replacementFavorite, false );
     } );
-    REQUIRE( waitUiState( [&] { return tabArea->count() == 2; } ) );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 2; } ) );
     auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabArea->currentWidget() );
     REQUIRE( fileCrawler != nullptr );
     REQUIRE( waitUiState( [ fileCrawler ] { return fileCrawler->isFirstLoadDone(); } ) );
@@ -2508,13 +2428,13 @@ TEST_CASE( "File and Help menu labels use the public wording contract", "[ui][me
     auto& sessionInfo = SessionInfo::getSynced();
     SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
     auto appSession = std::make_shared<Session>();
-    const auto windowId = QString( "main-menu-text-%1" ).arg(
-        QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto windowId = QString( "main-menu-text-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     WindowSession windowSession{ appSession, windowId, 0 };
 
     std::unique_ptr<MainWindow> mainWindow;
     QTimer::singleShot( 0, Qt::PreciseTimer,
-                        [&] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+                        [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
     QTest::qWait( 100 );
     REQUIRE( mainWindow != nullptr );
 
@@ -2524,17 +2444,14 @@ TEST_CASE( "File and Help menu labels use the public wording contract", "[ui][me
     REQUIRE( helpMenu != nullptr );
 
     auto* openFile = mainWindow->findChild<QAction*>( QStringLiteral( "openAction" ) );
-    auto* openFolder
-        = mainWindow->findChild<QAction*>( QStringLiteral( "openFolderAction" ) );
-    auto* openAdb
-        = mainWindow->findChild<QAction*>( QStringLiteral( "openAdbLogcatAction" ) );
+    auto* openFolder = mainWindow->findChild<QAction*>( QStringLiteral( "openFolderAction" ) );
+    auto* openAdb = mainWindow->findChild<QAction*>( QStringLiteral( "openAdbLogcatAction" ) );
     auto* openClipboard
         = mainWindow->findChild<QAction*>( QStringLiteral( "openClipboardAction" ) );
     auto* openUrl = mainWindow->findChild<QAction*>( QStringLiteral( "openUrlAction" ) );
     auto* documentation
         = mainWindow->findChild<QAction*>( QStringLiteral( "showDocumentationAction" ) );
-    auto* reportIssue
-        = mainWindow->findChild<QAction*>( QStringLiteral( "reportIssueAction" ) );
+    auto* reportIssue = mainWindow->findChild<QAction*>( QStringLiteral( "reportIssueAction" ) );
     auto* goToTop = mainWindow->findChild<QAction*>( QStringLiteral( "goToTopAction" ) );
     auto* trayIcon = mainWindow->findChild<QSystemTrayIcon*>();
 
@@ -2551,8 +2468,7 @@ TEST_CASE( "File and Help menu labels use the public wording contract", "[ui][me
     CHECK( visibleMenuText( openFile->text() ) == QStringLiteral( "Open..." ) );
     CHECK( visibleMenuText( openFolder->text() ) == QStringLiteral( "Open Folder..." ) );
     CHECK( visibleMenuText( openAdb->text() ) == QStringLiteral( "Open ADB Logcat..." ) );
-    CHECK( visibleMenuText( openClipboard->text() )
-           == QStringLiteral( "Open from Clipboard" ) );
+    CHECK( visibleMenuText( openClipboard->text() ) == QStringLiteral( "Open from Clipboard" ) );
     CHECK( visibleMenuText( openUrl->text() ) == QStringLiteral( "Open from URL..." ) );
     CHECK( visibleMenuText( documentation->text() ) == QStringLiteral( "Documentation" ) );
     CHECK( visibleMenuText( reportIssue->text() ) == QStringLiteral( "Report Issue" ) );

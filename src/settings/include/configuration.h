@@ -65,7 +65,7 @@ static constexpr int MAX_RECENT_FILES = 25;
 
 // Configuration class containing everything in the "Settings" dialog
 class Configuration final : public Persistable<Configuration> {
-  public:
+public:
     static constexpr int MinLineSpacingPercent = 100;
     static constexpr int DefaultLineSpacingPercent = 120;
     static constexpr int MaxLineSpacingPercent = 200;
@@ -410,24 +410,6 @@ class Configuration final : public Persistable<Configuration> {
         verifySslPeers_ = verify;
     }
 
-    QString adbExecutable() const
-    {
-        return adbExecutable_;
-    }
-    void setAdbExecutable( QString adbExecutable )
-    {
-        adbExecutable_ = std::move( adbExecutable );
-    }
-
-    QString adbLogcatExtraArgs() const
-    {
-        return adbLogcatExtraArgs_;
-    }
-    void setAdbLogcatExtraArgs( QString adbLogcatExtraArgs )
-    {
-        adbLogcatExtraArgs_ = std::move( adbLogcatExtraArgs );
-    }
-
     bool adbLogcatAnsiOutputEnabled() const
     {
         return adbLogcatAnsiOutputEnabled_;
@@ -435,24 +417,6 @@ class Configuration final : public Persistable<Configuration> {
     void setAdbLogcatAnsiOutputEnabled( bool enabled )
     {
         adbLogcatAnsiOutputEnabled_ = enabled;
-    }
-
-    QString iosLogExecutable() const
-    {
-        return iosLogExecutable_;
-    }
-    void setIosLogExecutable( QString iosLogExecutable )
-    {
-        iosLogExecutable_ = std::move( iosLogExecutable );
-    }
-
-    QString iosLogExtraArgs() const
-    {
-        return iosLogExtraArgs_;
-    }
-    void setIosLogExtraArgs( QString iosLogExtraArgs )
-    {
-        iosLogExtraArgs_ = std::move( iosLogExtraArgs );
     }
 
     bool iosLogAnsiOutputEnabled() const
@@ -686,7 +650,8 @@ class Configuration final : public Persistable<Configuration> {
         defaultEncodingMib_ = mib;
     }
 
-    std::map<QString, QString> darkPalette() const {
+    std::map<QString, QString> darkPalette() const
+    {
         return darkPalette_;
     }
 
@@ -694,7 +659,7 @@ class Configuration final : public Persistable<Configuration> {
     void saveToStorage( QSettings& settings ) const;
     void retrieveFromStorage( QSettings& settings );
 
-  private:
+private:
     // Configuration settings
     mutable QFont mainFont_ = klogg::platform::defaultMainFont();
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
@@ -757,11 +722,7 @@ class Configuration final : public Persistable<Configuration> {
     bool extractArchivesAlways_ = false;
 
     bool verifySslPeers_ = true;
-    QString adbExecutable_;
-    QString adbLogcatExtraArgs_;
     bool adbLogcatAnsiOutputEnabled_ = true;
-    QString iosLogExecutable_;
-    QString iosLogExtraArgs_;
     bool iosLogAnsiOutputEnabled_ = true;
 
     // Whether to automatically attempt reconnection when a live source
@@ -823,23 +784,23 @@ class Configuration final : public Persistable<Configuration> {
     // Dark theme palette aligned with the Modern theme tokens.
     // FilteredView uses Base color, keep it close to Window for consistency.
     std::map<QString, QString> darkPalette_ = {
-        {"Window", "#0F1115"},            // Main window background
-        {"WindowText", "#E6E9EF"},        // Primary text
-        {"Base", "#151821"},              // Text input / view background
-        {"AlternateBase", "#1B1F2A"},     // Alternate rows
-        {"ToolTipBase", "#1A1F2B"},       // Tooltip background
-        {"ToolTipText", "#E6E9EF"},       // Tooltip text
-        {"Text", "#E6E9EF"},              // Main text color
-        {"Button", "#1A1F2B"},            // Button background
-        {"ButtonText", "#E6E9EF"},        // Button text
-        {"Link", "#5B8CFF"},              // Link color
-        {"Highlight", "#23314D"},         // Selection background
-        {"HighlightedText", "#EAF2FF"},   // Selection text
-        {"ActiveButton", "#222939"},      // Active button background
-        {"DisabledButtonText", "#7C8596"}, // Disabled button text
-        {"DisabledWindowText", "#7C8596"}, // Disabled window text
-        {"DisabledText", "#7C8596"},       // Disabled text
-        {"DisabledLight", "#1A1F2B"},      // Disabled light
+        { "Window", "#0F1115" },             // Main window background
+        { "WindowText", "#E6E9EF" },         // Primary text
+        { "Base", "#151821" },               // Text input / view background
+        { "AlternateBase", "#1B1F2A" },      // Alternate rows
+        { "ToolTipBase", "#1A1F2B" },        // Tooltip background
+        { "ToolTipText", "#E6E9EF" },        // Tooltip text
+        { "Text", "#E6E9EF" },               // Main text color
+        { "Button", "#1A1F2B" },             // Button background
+        { "ButtonText", "#E6E9EF" },         // Button text
+        { "Link", "#5B8CFF" },               // Link color
+        { "Highlight", "#23314D" },          // Selection background
+        { "HighlightedText", "#EAF2FF" },    // Selection text
+        { "ActiveButton", "#222939" },       // Active button background
+        { "DisabledButtonText", "#7C8596" }, // Disabled button text
+        { "DisabledWindowText", "#7C8596" }, // Disabled window text
+        { "DisabledText", "#7C8596" },       // Disabled text
+        { "DisabledLight", "#1A1F2B" },      // Disabled light
     };
 };
 

@@ -1,0 +1,87 @@
+diff --git a/host/windows/usb/api/adb_api_instance.h b/host/windows/usb/api/adb_api_instance.h
+index d5e7ef1..e2e3170 100644
+--- a/host/windows/usb/api/adb_api_instance.h
++++ b/host/windows/usb/api/adb_api_instance.h
+@@ -46,6 +46,8 @@
+      decremented.
+   So, at the end, this object destroys itself when refcount drops to zero.
+ */
++typedef void* ADBAPIINSTANCEHANDLE;
++
+ class AdbApiInstance {
+  public:
+   /** \brief Constructs the object
+diff --git a/host/windows/usb/winusb/adb_winusb_interface.h b/host/windows/usb/winusb/adb_winusb_interface.h
+index 2311fd1..3d05328 100644
+--- a/host/windows/usb/winusb/adb_winusb_interface.h
++++ b/host/windows/usb/winusb/adb_winusb_interface.h
+@@ -23,6 +23,7 @@
+ */
+ 
+ #include "..\api\adb_interface.h"
++#include <winusb.h>
+ 
+ /** \brief Encapsulates an interface on our USB device that is accessible
+   via WinUsb API.
+diff --git a/klogg/CMakeLists.txt b/klogg/CMakeLists.txt
+new file mode 100644
+index 0000000..097a924
+--- /dev/null
++++ b/klogg/CMakeLists.txt
+@@ -0,0 +1,56 @@
++cmake_minimum_required(VERSION 3.20)
++project(klogg_adbwinapi LANGUAGES CXX RC)
++
++if(NOT WIN32)
++  message(FATAL_ERROR "AdbWinApi and AdbWinUsbApi are native Windows libraries")
++endif()
++
++set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
++set(_usb_root "${CMAKE_CURRENT_LIST_DIR}/../host/windows/usb")
++
++set(_adbwinapi_sources
++  "${_usb_root}/api/AdbWinApi.cpp"
++  "${_usb_root}/api/AdbWinApi.def"
++  "${_usb_root}/api/AdbWinApi.rc"
++  "${_usb_root}/api/adb_api.cpp"
++  "${_usb_root}/api/adb_api_instance.cpp"
++  "${_usb_root}/api/adb_endpoint_object.cpp"
++  "${_usb_root}/api/adb_helper_routines.cpp"
++  "${_usb_root}/api/adb_interface.cpp"
++  "${_usb_root}/api/adb_interface_enum.cpp"
++  "${_usb_root}/api/adb_io_completion.cpp"
++  "${_usb_root}/api/adb_legacy_endpoint_object.cpp"
++  "${_usb_root}/api/adb_legacy_interface.cpp"
++  "${_usb_root}/api/adb_legacy_io_completion.cpp"
++  "${_usb_root}/api/adb_object_handle.cpp"
++  "${_usb_root}/api/stdafx.cpp")
++
++add_library(AdbWinApi SHARED ${_adbwinapi_sources})
++target_compile_definitions(AdbWinApi PRIVATE
++  ADBWIN_EXPORTS _CRT_NON_CONFORMING_SWPRINTFS _CRT_SECURE_NO_WARNINGS
++  _UNICODE UNICODE NTDDI_VERSION=NTDDI_WIN10
++  _WIN32_WINNT=_WIN32_WINNT_WIN10 WINVER=_WIN32_WINNT_WIN10)
++target_include_directories(AdbWinApi PRIVATE "${_usb_root}/api")
++target_link_libraries(AdbWinApi PRIVATE setupapi)
++
++set(_adbwinusbapi_sources
++  "${_usb_root}/winusb/AdbWinUsbApi.cpp"
++  "${_usb_root}/winusb/AdbWinUsbApi.def"
++  "${_usb_root}/winusb/AdbWinUsbApi.rc"
++  "${_usb_root}/winusb/adb_winusb_endpoint_object.cpp"
++  "${_usb_root}/winusb/adb_winusb_interface.cpp"
++  "${_usb_root}/winusb/adb_winusb_io_completion.cpp"
++  "${_usb_root}/winusb/stdafx.cpp")
++
++add_library(AdbWinUsbApi SHARED ${_adbwinusbapi_sources})
++target_compile_definitions(AdbWinUsbApi PRIVATE
++  ADBWIN_EXPORTS _CRT_NON_CONFORMING_SWPRINTFS _CRT_SECURE_NO_WARNINGS
++  _UNICODE UNICODE NTDDI_VERSION=NTDDI_WIN10
++  _WIN32_WINNT=_WIN32_WINNT_WIN10 WINVER=_WIN32_WINNT_WIN10)
++target_include_directories(AdbWinUsbApi PRIVATE
++  "${_usb_root}/api" "${_usb_root}/winusb")
++target_link_libraries(AdbWinUsbApi PRIVATE AdbWinApi winusb)
++
++install(TARGETS AdbWinApi AdbWinUsbApi
++  RUNTIME DESTINATION bin
++  ARCHIVE DESTINATION lib)

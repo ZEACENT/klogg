@@ -26,10 +26,16 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     scheduleLoadingFinished();
 
     outputFlushTimer_.setInterval( 1000 );
-    connect( &outputFlushTimer_, &QTimer::timeout, this, [this] {
-        rollingDisplayOutput_.flush();
+    connect( &outputFlushTimer_, &QTimer::timeout, this, [ this ] {
+        if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
+             && rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
+            closeDisplayOutputFile();
+            reportCaptureOutputFailure(
+                QStringLiteral( "The bound capture output could not be flushed." ) );
+        }
         if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
             captureStore_.flush();
+            checkPreservedOutputState();
         }
     } );
 
@@ -59,6 +65,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 #endif
 
     const auto appendResult = captureStore_.appendUtf8( data );
+    checkPreservedOutputState();
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING
     const auto t2 = std::chrono::steady_clock::now();
@@ -116,6 +123,7 @@ void StreamingLogData::finishInput()
     stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
     const auto appendResult = captureStore_.finishInput();
+    checkPreservedOutputState();
 
     // finishInput() can rotate+trim the Preserve-mode output via the single-line
     // commit path (commitLine -> appendOutputBytes). Handle it exactly like
@@ -139,7 +147,11 @@ void StreamingLogData::finishInput()
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
         scheduleLoadingFinished();
     }
-    rollingDisplayOutput_.flush();
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
+         && rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
+        closeDisplayOutputFile();
+        reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be flushed." ) );
+    }
 }
 
 CaptureStore::TrimResult StreamingLogData::consumeTrimResult()
@@ -213,6 +225,7 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
     if ( outputPath.isEmpty() ) {
         closeDisplayOutputFile();
         captureStore_.bindOutputFile( QString{} );
+        reportCaptureOutputHealthy();
         return true;
     }
 
@@ -242,6 +255,7 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
     }
 
     if ( !outputPath.isEmpty() && result ) {
+        reportCaptureOutputHealthy();
         startOutputFlushTimer();
     }
     return result;
@@ -529,7 +543,10 @@ bool StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool pr
         return false;
     }
 
-    rollingDisplayOutput_.flush();
+    if ( !rollingDisplayOutput_.flush() ) {
+        closeDisplayOutputFile();
+        return false;
+    }
     return true;
 }
 
@@ -556,6 +573,8 @@ bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount c
         const auto written = rollingDisplayOutput_.write( outputLine );
         if ( written <= 0 ) {
             closeDisplayOutputFile();
+            reportCaptureOutputFailure(
+                QStringLiteral( "The bound capture output could not be written." ) );
             return false;
         }
 
@@ -565,8 +584,39 @@ bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount c
         Q_UNUSED( sizeBefore );
     }
 
-    rollingDisplayOutput_.flush();
+    if ( !rollingDisplayOutput_.flush() ) {
+        closeDisplayOutputFile();
+        reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be flushed." ) );
+        return false;
+    }
     return true;
+}
+
+void StreamingLogData::reportCaptureOutputHealthy()
+{
+    if ( !captureOutputDegraded_ ) {
+        return;
+    }
+    captureOutputDegraded_ = false;
+    Q_EMIT captureOutputChanged( true, QString{} );
+}
+
+void StreamingLogData::reportCaptureOutputFailure( const QString& detail )
+{
+    if ( captureOutputDegraded_ ) {
+        return;
+    }
+    captureOutputDegraded_ = true;
+    Q_EMIT captureOutputChanged( false, detail );
+}
+
+void StreamingLogData::checkPreservedOutputState()
+{
+    if ( outputSaveAnsiMode_ != LiveLogSaveAnsiMode::Preserve
+         || boundOutputFile().isEmpty() || !captureStore_.boundOutputFile().isEmpty() ) {
+        return;
+    }
+    reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be written." ) );
 }
 
 void StreamingLogData::writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult )

@@ -31,10 +31,9 @@ constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
 
 QString makeTestDir( const QString& prefix )
 {
-    const auto dirPath = QDir::cleanPath( QDir::currentPath() + QDir::separator()
-                                          + QLatin1String( "test_tmp" ) + QDir::separator()
-                                          + prefix + QLatin1Char( '_' )
-                                          + QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto dirPath = QDir::cleanPath(
+        QDir::currentPath() + QDir::separator() + QLatin1String( "test_tmp" ) + QDir::separator()
+        + prefix + QLatin1Char( '_' ) + QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     QDir{}.mkpath( dirPath );
     return dirPath;
 }
@@ -66,8 +65,7 @@ QStringList materializedShortcutSlots( QStringList bindings )
     return bindings;
 }
 
-void writeShortcutArray( QSettings& settings,
-                         const std::map<std::string, QStringList>& shortcuts )
+void writeShortcutArray( QSettings& settings, const std::map<std::string, QStringList>& shortcuts )
 {
     settings.beginWriteArray( QStringLiteral( "shortcuts" ) );
     int index = 0;
@@ -161,61 +159,44 @@ TEST_CASE( "Configuration clamps line spacing percent to supported bounds" )
     REQUIRE( restoredConfig.lineSpacingPercent() == Configuration::MaxLineSpacingPercent );
 }
 
-TEST_CASE( "Configuration stores and restores adb defaults" )
+TEST_CASE( "Configuration scrubs retired live process settings and stamps migration" )
 {
-    const auto dirPath = makeTestDir( "configuration_adb" );
+    const auto dirPath = makeTestDir( "configuration_live_process_retirement" );
     REQUIRE( QDir{ dirPath }.exists() );
-    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-adb.ini" );
+    const auto settingsPath
+        = QDir{ dirPath }.filePath( "configuration-live-process-retirement.ini" );
+    QSettings settings( settingsPath, QSettings::IniFormat );
+    settings.setValue( QStringLiteral( "adb.executable" ),
+                       QStringLiteral( "/opt/android/platform-tools/adb" ) );
+    settings.setValue( QStringLiteral( "adb.logcatExtraArgs" ),
+                       QStringLiteral( "-v threadtime *:I" ) );
+    settings.setValue( QStringLiteral( "iosLog.executable" ),
+                       QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
+    settings.setValue( QStringLiteral( "iosLog.extraArgs" ),
+                       QStringLiteral( "--match SpringBoard" ) );
+    settings.setValue( QStringLiteral( "adb.logcatAnsiOutput" ), true );
+    settings.setValue( QStringLiteral( "iosLog.ansiOutput" ), true );
+    settings.sync();
 
-    {
-        QSettings settings( settingsPath, QSettings::IniFormat );
-
-        Configuration config;
-        config.setAdbExecutable( QStringLiteral( "/opt/android/platform-tools/adb" ) );
-        config.setAdbLogcatExtraArgs( QStringLiteral( "-v threadtime *:I" ) );
-        config.saveToStorage( settings );
-        settings.sync();
-        REQUIRE( settings.status() == QSettings::NoError );
-    }
-
-    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
     Configuration restoredConfig;
-    restoredConfig.retrieveFromStorage( restoredSettings );
+    restoredConfig.retrieveFromStorage( settings );
+    settings.sync();
 
-    REQUIRE( restoredConfig.adbExecutable()
-             == QStringLiteral( "/opt/android/platform-tools/adb" ) );
-    REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
-}
+    CHECK_FALSE( settings.contains( QStringLiteral( "adb.executable" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "adb.logcatExtraArgs" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "iosLog.executable" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "iosLog.extraArgs" ) ) );
+    CHECK( settings.value( QStringLiteral( "liveSource.legacyProcessSettingsRetired" ) ).toBool() );
+    CHECK( restoredConfig.adbLogcatAnsiOutputEnabled() );
+    CHECK( restoredConfig.iosLogAnsiOutputEnabled() );
 
-TEST_CASE( "Configuration stores and restores iOS log defaults" )
-{
-    const auto dirPath = makeTestDir( "configuration_ios_log" );
-    REQUIRE( QDir{ dirPath }.exists() );
-    const auto settingsPath = QDir{ dirPath }.filePath( "configuration-ios-log.ini" );
-
-    {
-        QSettings settings( settingsPath, QSettings::IniFormat );
-
-        Configuration config;
-        config.setIosLogExecutable( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
-        config.setIosLogExtraArgs( QStringLiteral( "--no-color --match SpringBoard" ) );
-        config.setIosLogAnsiOutputEnabled( true );
-        config.setAdbLogcatAnsiOutputEnabled( true );
-        config.saveToStorage( settings );
-        settings.sync();
-        REQUIRE( settings.status() == QSettings::NoError );
-    }
-
-    QSettings restoredSettings( settingsPath, QSettings::IniFormat );
-    Configuration restoredConfig;
-    restoredConfig.retrieveFromStorage( restoredSettings );
-
-    REQUIRE( restoredConfig.iosLogExecutable()
-             == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
-    REQUIRE( restoredConfig.iosLogExtraArgs()
-             == QStringLiteral( "--no-color --match SpringBoard" ) );
-    REQUIRE( restoredConfig.iosLogAnsiOutputEnabled() );
-    REQUIRE( restoredConfig.adbLogcatAnsiOutputEnabled() );
+    restoredConfig.saveToStorage( settings );
+    settings.sync();
+    CHECK_FALSE( settings.contains( QStringLiteral( "adb.executable" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "adb.logcatExtraArgs" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "iosLog.executable" ) ) );
+    CHECK_FALSE( settings.contains( QStringLiteral( "iosLog.extraArgs" ) ) );
+    CHECK( settings.value( QStringLiteral( "liveSource.legacyProcessSettingsRetired" ) ).toBool() );
 }
 
 TEST_CASE( "Configuration defaults auto-reconnect to disabled" )
@@ -385,13 +366,12 @@ TEST_CASE( "Configuration migrates persisted legacy Ctrl+G shortcut defaults" )
 
     {
         QSettings settings( settingsPath, QSettings::IniFormat );
-        writeShortcutArray(
-            settings,
-            { { ShortcutAction::LogViewJumpToLine,
-                materializedShortcutSlots(
-                    { commandShortcutModifier() + QStringLiteral( "+L" ) } ) },
-              { ShortcutAction::LogViewQfForward,
-                materializedShortcutSlots( legacyFindNextBindings() ) } } );
+        writeShortcutArray( settings,
+                            { { ShortcutAction::LogViewJumpToLine,
+                                materializedShortcutSlots(
+                                    { commandShortcutModifier() + QStringLiteral( "+L" ) } ) },
+                              { ShortcutAction::LogViewQfForward,
+                                materializedShortcutSlots( legacyFindNextBindings() ) } } );
     }
 
     {
@@ -415,12 +395,11 @@ TEST_CASE( "Configuration migrates pre-platform-modifier Ctrl shortcut defaults"
 {
     const auto dirPath = makeTestDir( "configuration_literal_ctrl_shortcut_migration" );
     QSettings settings( QDir{ dirPath }.filePath( "configuration.ini" ), QSettings::IniFormat );
-    writeShortcutArray(
-        settings,
-        { { ShortcutAction::LogViewJumpToLine,
-            materializedShortcutSlots( { QStringLiteral( "Ctrl+L" ) } ) },
-          { ShortcutAction::LogViewQfForward,
-            materializedShortcutSlots( { QStringLiteral( "Ctrl+G" ) } ) } } );
+    writeShortcutArray( settings,
+                        { { ShortcutAction::LogViewJumpToLine,
+                            materializedShortcutSlots( { QStringLiteral( "Ctrl+L" ) } ) },
+                          { ShortcutAction::LogViewQfForward,
+                            materializedShortcutSlots( { QStringLiteral( "Ctrl+G" ) } ) } } );
 
     Configuration migrated;
     migrated.retrieveFromStorage( settings );

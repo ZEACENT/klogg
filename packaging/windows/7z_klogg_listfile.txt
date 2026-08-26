@@ -1,6 +1,11 @@
 .\release\*.dll
 .\release\klogg_portable.exe
 .\release\klogg_crashpad_handler.exe
+.\release\helpers\adb.exe
+.\release\helpers\AdbWinApi.dll
+.\release\helpers\AdbWinUsbApi.dll
+.\release\helpers\libusb-1.0.dll
+.\release\adb-helper-assets\*
 .\release\documentation.html
 .\release\COPYING
 .\release\NOTICE

@@ -5,6 +5,8 @@
 #include <QList>
 #include <QString>
 
+#include "devicediscovery.h"
+
 struct IosDeviceInfo {
     QString udid;
     QString displayName;
@@ -16,5 +18,8 @@ struct IosDeviceInfo {
 QString stripAnsiSequences( const QString& text );
 QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output );
 QList<IosDeviceInfo> parsePymobiledeviceSimpleDeviceList( const QByteArray& output );
+DeviceDiscoveryResult<IosDeviceInfo>
+parsePymobiledeviceDeviceDiscovery( klogg::livecapture::Generation generation,
+                                    const QByteArray& output );
 
 #endif // IOSDEVICEPARSER_H

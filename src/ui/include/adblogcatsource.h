@@ -1,61 +1,37 @@
 #ifndef ADBLOGCATSOURCE_H
 #define ADBLOGCATSOURCE_H
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 
-#include <QJsonObject>
 #include <QObject>
-#include <QTimer>
 
+#include "adblogcatsessiondata.h"
 #include "livesourcetransport.h"
-#include "streaminglogdata.h"
 
 class StreamingLogData;
-
-enum class LiveLogSourceType {
-    AdbLogcat,
-    IosLogStream,
-};
-
-struct AdbLogcatSessionData {
-    QString adbExecutable;
-    QString deviceSerial;
-    QString deviceDescription;
-    QString extraArgs;
-    QString captureId;
-    QString boundOutputFile;
-    LiveLogSourceType sourceType = LiveLogSourceType::AdbLogcat;
-    bool ansiOutputEnabled = false;
-    bool autoReconnectEnabled = false;
-    int maxReconnectAttempts = 0; // 0 = unlimited
-    qint64 captureMaxFileSize = 0; // bytes, 0 = unlimited
-    int captureBackupCount = 0; // 0 = keep all rotated files
-    // Mode used when the bound output file was last saved / rebound. Persisted
-    // so a session restore reopens the file in the same mode and appends
-    // format-consistent data (Strip-stripped vs Preserve-raw bytes). Kept last
-    // so existing positional aggregate initializers keep mapping correctly.
-    LiveLogSaveAnsiMode outputAnsiMode = LiveLogSaveAnsiMode::Strip;
-
-    QString displayName() const;
-    QString documentId() const;
-    QString associatedPath() const;
-    QString persistedSourceType() const;
-    bool isValid() const;
-
-    QJsonObject toJson() const;
-    static QString persistedSourceType( LiveLogSourceType sourceType );
-    static bool isPersistedSourceType( const QString& sourceType );
-    static AdbLogcatSessionData fromJson( const QString& json );
-};
 
 class AdbLogcatSource : public QObject {
     Q_OBJECT
 
-  public:
+public:
     enum class State { Disconnected, Connected, Error };
     Q_ENUM( State )
 
+    using BytesCallback = std::function<void( LiveSourceTransport::Generation, const QByteArray& )>;
+    using StateCallback
+        = std::function<void( LiveSourceTransport::Generation, LiveSourceTransport::State )>;
+    using FailureCallback = std::function<void( LiveSourceTransport::Generation,
+                                                klogg::livecapture::LiveSourceError )>;
+    using ControlCallback = std::function<void()>;
+
     AdbLogcatSource( AdbLogcatSessionData sessionData, std::shared_ptr<StreamingLogData> logData,
+                     QObject* parent = nullptr );
+    AdbLogcatSource( AdbLogcatSessionData sessionData, std::shared_ptr<StreamingLogData> logData,
+                     const LiveSourceTransportFactory& transportFactory,
                      QObject* parent = nullptr );
     ~AdbLogcatSource() override;
 
@@ -70,49 +46,62 @@ class AdbLogcatSource : public QObject {
     const AdbLogcatSessionData& sessionData() const;
     State state() const;
     QString lastError() const;
+    bool isTransportAvailable() const;
+    bool isReadOnlyCompatibility() const;
 
-  Q_SIGNALS:
-    void stateChanged( AdbLogcatSource::State state );
-    void errorOccurred( const QString& error );
-    void reconnectAttemptStarted( int attempt );
+    void setControllerCallbacks( BytesCallback bytes, StateCallback state,
+                                 FailureCallback failure, ControlCallback stop = {},
+                                 ControlCallback restart = {} );
+    void invalidateTransportGeneration( LiveSourceTransport::Generation generation );
+    void cancelTransport( LiveSourceTransport::Generation generation );
+    void openTransport( LiveSourceTransport::Generation generation,
+                        const LiveSourceTransportConfig& config );
+    void appendTransportBytes( LiveSourceTransport::Generation generation,
+                               const QByteArray& bytes );
 
-  public:
-    static constexpr int InitialReconnectDelayMs = 1000;
-    static constexpr int MaxReconnectDelayMs = 30000;
-
-    void setAutoReconnectEnabled( bool enabled );
-    void setAutoReconnectMaxAttempts( int maxAttempts );
-    bool isAutoReconnectActive() const;
-    int reconnectAttempt() const;
-    int reconnectRemainingMs() const;
-    void cancelAutoReconnect();
     void setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
                            qint64 maxTotalLines = 0 );
 
-  private:
-    void setState( State state );
-    void setStateFromTransport( LiveSourceTransport::State state );
-    void scheduleReconnect();
-    void attemptReconnect();
+Q_SIGNALS:
+    void stateChanged( AdbLogcatSource::State state );
+    void errorOccurred( const QString& error );
+    void clearFailed( const QString& error );
+    void captureOutputChanged( bool healthy, const QString& detail );
 
-  private:
+private:
+    using Generation = LiveSourceTransport::Generation;
+    using ClearRequestId = LiveSourceTransport::ClearRequestId;
+
+    Generation nextGeneration();
+    ClearRequestId nextClearRequestId();
+    void startTransport();
+    void wireTransport();
+    void retireTransport();
+    void setState( State state );
+    void setStateFromTransport( Generation generation, LiveSourceTransport::State state );
+    void finishClear( Generation generation, ClearRequestId requestId, bool succeeded,
+                      const QString& error );
+
     AdbLogcatSessionData sessionData_;
     std::shared_ptr<StreamingLogData> logData_;
+    const LiveSourceTransportFactory* transportFactory_{ nullptr };
     std::unique_ptr<LiveSourceTransport> transport_;
+    std::vector<std::unique_ptr<LiveSourceTransport>> retiredTransports_;
     State state_{ State::Disconnected };
     QString lastError_;
-    bool manualDisconnect_ = false;
-
-    // Auto-reconnect state. Defaults to disabled: the user's setting is applied
-    // via setAutoReconnectEnabled() before the first connect. A true default
-    // armed the reconnect timer during the construction-to-registration window
-    // with the wrong (unlimited) setting.
-    bool autoReconnectEnabled_ = false;
-    int autoReconnectMaxAttempts_ = 0; // 0 = unlimited
-    int reconnectAttempt_ = 0;
-    bool reconnectionProven_ = false; // set when first stdout data arrives
-    bool reconnectingActive_ = false; // true while async connectTransport is in-flight
-    QTimer reconnectTimer_;
+    bool connecting_ = false;
+    Generation generationCounter_{ 0 };
+    std::optional<Generation> activeGeneration_;
+    ClearRequestId clearRequestCounter_{ 0 };
+    std::optional<Generation> pendingClearGeneration_;
+    std::optional<ClearRequestId> pendingClearRequestId_;
+    bool restartAfterClear_ = false;
+    BytesCallback controllerBytes_;
+    StateCallback controllerState_;
+    FailureCallback controllerFailure_;
+    ControlCallback controllerStop_;
+    ControlCallback controllerRestart_;
+    bool retiredCleanupScheduled_{ false };
 };
 
 #endif

@@ -1,0 +1,70 @@
+/*
+ * Copyright (C) 2026
+ *
+ * This file is part of klogg.
+ *
+ * klogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * klogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#define CATCH_CONFIG_RUNNER
+#include <catch2/catch.hpp>
+
+#include <QCoreApplication>
+#include <QDir>
+
+#include <logger.h>
+
+#include "capturestore.h"
+#include <persistentinfo.h>
+
+// Session restore touches the persistables (SessionInfo, SavedSearches); keep
+// every read/write inside the test sandbox exactly like tests_main.cpp does
+// for klogg_tests.
+const bool PersistentInfo::ForcePortable = true;
+
+namespace {
+void configureTestTempDir()
+{
+    const auto tempDir = QDir::cleanPath( QDir::currentPath() + QDir::separator()
+                                          + QLatin1String( "test_tmp" ) + QDir::separator()
+                                          + QLatin1String( "livelog_restore_arming" ) );
+
+    QDir tempDirectory{ tempDir };
+    if ( tempDirectory.exists() ) {
+        tempDirectory.removeRecursively();
+    }
+
+    QDir{}.mkpath( tempDir );
+
+    const auto tempDirUtf8 = QDir::toNativeSeparators( tempDir ).toUtf8();
+    qputenv( "TMP", tempDirUtf8 );
+    qputenv( "TEMP", tempDirUtf8 );
+    qputenv( "TMPDIR", tempDirUtf8 );
+}
+} // namespace
+
+int main( int argc, char* argv[] )
+{
+    // A core application is enough: the restore-arming contracts drive the
+    // session layer through fake views and recording transports, never a
+    // widget, so no GUI platform plugin is needed.
+    QCoreApplication a( argc, argv );
+
+    logging::enableLogging( true, logging::LogLevel::Warning );
+    configureTestTempDir();
+
+    const auto result = Catch::Session().run( argc, argv );
+    CaptureStore::shutdownBackgroundWorkers();
+    return result;
+}

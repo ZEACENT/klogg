@@ -716,6 +716,14 @@
         <source>Unable to save filter favorites. Try again.</source>
         <translation>Unable to save filter favorites. Try again.</translation>
     </message>
+    <message>
+        <source>Live log sessions</source>
+        <translation>Live log sessions</translation>
+    </message>
+    <message>
+        <source>Live log source error</source>
+        <translation>Live log source error</translation>
+    </message>
 </context>
 <context>
     <name>OptionsDialog</name>
@@ -1103,6 +1111,18 @@
         <location filename="../../ui/src/optionsdialog.cpp" line="690"/>
         <source>Secondary shortcut</source>
         <translation>Secondary shortcut</translation>
+    </message>
+    <message>
+        <source>Keep all</source>
+        <translation>Keep all</translation>
+    </message>
+    <message>
+        <source>Number of old capture files to keep when rolling. Older files beyond this count are automatically deleted. Set to 0 to keep all rotated files.</source>
+        <translation>Number of old capture files to keep when rolling. Older files beyond this count are automatically deleted. Set to 0 to keep all rotated files.</translation>
+    </message>
+    <message>
+        <source>Number of backup capture files to retain during rotation. Older files beyond this count are deleted. Set to 0 to keep all rotated files.</source>
+        <translation>Number of backup capture files to retain during rotation. Older files beyond this count are deleted. Set to 0 to keep all rotated files.</translation>
     </message>
 </context>
 <context>
@@ -2327,6 +2347,92 @@
         <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
         <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
         <translation>A favorite named &quot;%1&quot; already exists. Choose a different name.</translation>
+    </message>
+</context>
+<context>
+    <name>klogg::livelog::messages</name>
+    <message>
+        <source>The saved live-log session payload is not a valid session object.</source>
+        <translation>The saved live-log session payload is not a valid session object.</translation>
+    </message>
+    <message>
+        <source>This live log session was saved with a custom executable or free-form command line arguments, which this version of klogg no longer restores for security reasons. Please reopen the source (File &gt; Open Android Logcat / Open iOS Log Stream) to recreate the session with a built-in transport.</source>
+        <translation>This live log session was saved with a custom executable or free-form command line arguments, which this version of klogg no longer restores for security reasons. Please reopen the source (File &gt; Open Android Logcat / Open iOS Log Stream) to recreate the session with a built-in transport.</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has a malformed schema version; it cannot be restored safely.</source>
+        <translation>The saved live-log session has a malformed schema version; it cannot be restored safely.</translation>
+    </message>
+    <message>
+        <source>This session was written by a newer version of klogg (schema %1); it cannot be restored by this version.</source>
+        <translation>This session was written by a newer version of klogg (schema %1); it cannot be restored by this version.</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has an unrecognized source type; it cannot be restored safely.</source>
+        <translation>The saved live-log session has an unrecognized source type; it cannot be restored safely.</translation>
+    </message>
+    <message>
+        <source>This session predates transport selection and was migrated once to the built-in transport.</source>
+        <translation>This session predates transport selection and was migrated once to the built-in transport.</translation>
+    </message>
+    <message>
+        <source>Saved Android transport &#x27;%1&#x27; is not recognized; using the built-in smart socket transport.</source>
+        <translation>Saved Android transport &#x27;%1&#x27; is not recognized; using the built-in smart socket transport.</translation>
+    </message>
+    <message>
+        <source>Saved iOS transport &#x27;%1&#x27; is not recognized; using the built-in native transport.</source>
+        <translation>Saved iOS transport &#x27;%1&#x27; is not recognized; using the built-in native transport.</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has no usable capture identifier; it cannot be restored.</source>
+        <translation>The saved live-log session has no usable capture identifier; it cannot be restored.</translation>
+    </message>
+    <message>
+        <source>New sessions cannot use compatibility process transports. Choose a device detected by the built-in services.</source>
+        <translation>New sessions cannot use compatibility process transports. Choose a device detected by the built-in services.</translation>
+    </message>
+    <message>
+        <source>A detected device is required before the session can run or start on restore.</source>
+        <translation>A detected device is required before the session can run or start on restore.</translation>
+    </message>
+    <message>
+        <source>The session has no usable capture identifier.</source>
+        <translation>The session has no usable capture identifier.</translation>
+    </message>
+    <message>
+        <source>The saved Android process filter must be a non-negative PID.</source>
+        <translation>The saved Android process filter must be a non-negative PID.</translation>
+    </message>
+    <message>
+        <source>The saved Android buffers, priority, or filter expression is invalid.</source>
+        <translation>The saved Android buffers, priority, or filter expression is invalid.</translation>
+    </message>
+    <message>
+        <source>Saved iOS level, category, subsystem, and JSON options are not supported by the native stream yet.</source>
+        <translation>Saved iOS level, category, subsystem, and JSON options are not supported by the native stream yet.</translation>
+    </message>
+    <message>
+        <source>This session uses a compatibility transport and opens read-only; reconnect it through the built-in services to stream again.</source>
+        <translation>This session uses a compatibility transport and opens read-only; reconnect it through the built-in services to stream again.</translation>
+    </message>
+    <message>
+        <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
+        <translation>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</translation>
+    </message>
+    <message>
+        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
+        <translation>The saved live-log transport is unavailable; reopen the source through the built-in services.</translation>
+    </message>
+</context>
+<context>
+    <name>AdbLogcatSource</name>
+    <message>
+        <source>This compatibility session is read-only.</source>
+        <translation>This compatibility session is read-only.</translation>
+    </message>
+    <message>
+        <source>Live log transport is unavailable.</source>
+        <translation>Live log transport is unavailable.</translation>
     </message>
 </context>
 </TS>

@@ -1,0 +1,141 @@
+name: Build locked source ADB helper
+description: Build the complete ADB client/server from the prefetched immutable source closure
+inputs:
+  target:
+    description: Locked target from adb-helper.lock.json
+    required: true
+  source-root:
+    description: Extracted and verified source closure
+    required: true
+  release-assets-root:
+    description: Verified legal, SBOM, source, and source-offer assets
+    required: true
+  artifact-root:
+    description: Output directory for the helper closure and receipt
+    required: true
+  container-image:
+    description: Digest-bound Linux helper toolchain image; empty for native macOS and Windows builds
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Verify locked native ADB build toolchain
+      if: ${{ !startsWith(inputs.target, 'linux-') }}
+      shell: bash
+      run: |
+        python3 scripts/verify_adb_helper_toolchain.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --target "${{ inputs.target }}"
+
+    - name: Build Linux helper in digest-bound disconnected toolchain
+      if: ${{ startsWith(inputs.target, 'linux-') }}
+      shell: bash
+      env:
+        FETCHCONTENT_FULLY_DISCONNECTED: "ON"
+        FETCHCONTENT_UPDATES_DISCONNECTED: "ON"
+      run: |
+        set -euo pipefail
+        test -n "${{ inputs.container-image }}" || {
+          echo "::error::locked Linux helper container image is required"
+          exit 1
+        }
+        docker pull "${{ inputs.container-image }}"
+        docker run --rm --network none \
+          --entrypoint /bin/bash \
+          -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+          -v "$RUNNER_TEMP:$RUNNER_TEMP" \
+          -w "$GITHUB_WORKSPACE" \
+          -e GITHUB_WORKSPACE \
+          -e RUNNER_TEMP \
+          -e FETCHCONTENT_FULLY_DISCONNECTED=ON \
+          -e FETCHCONTENT_UPDATES_DISCONNECTED=ON \
+          "${{ inputs.container-image }}" -lc '
+            python3 scripts/verify_adb_helper_toolchain.py \
+              --lock packaging/adb/adb-helper.lock.json \
+              --target "${{ inputs.target }}" \
+              --containerized \
+              --container-image "${{ inputs.container-image }}" &&
+            python3 scripts/build_adb_helper.py \
+              --repository-root "$GITHUB_WORKSPACE" \
+              --lock "$GITHUB_WORKSPACE/packaging/adb/adb-helper.lock.json" \
+              --source-root "${{ inputs.source-root }}" \
+              --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
+              --target "${{ inputs.target }}" \
+              --artifact-root "${{ inputs.artifact-root }}" \
+              --release-assets-root "${{ inputs.release-assets-root }}"
+          '
+
+    - name: Build native macOS helper from prefetched sources
+      if: ${{ startsWith(inputs.target, 'macos-') }}
+      shell: bash
+      env:
+        FETCHCONTENT_FULLY_DISCONNECTED: "ON"
+        FETCHCONTENT_UPDATES_DISCONNECTED: "ON"
+      run: |
+        set -euo pipefail
+        python3 scripts/build_adb_helper.py \
+          --repository-root "$GITHUB_WORKSPACE" \
+          --lock "$GITHUB_WORKSPACE/packaging/adb/adb-helper.lock.json" \
+          --source-root "${{ inputs.source-root }}" \
+          --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
+          --target "${{ inputs.target }}" \
+          --artifact-root "${{ inputs.artifact-root }}" \
+          --release-assets-root "${{ inputs.release-assets-root }}"
+
+    - name: Build native Windows helper from prefetched sources
+      if: ${{ inputs.target == 'windows-x86_64' }}
+      shell: msys2 {0}
+      env:
+        FETCHCONTENT_FULLY_DISCONNECTED: "ON"
+        FETCHCONTENT_UPDATES_DISCONNECTED: "ON"
+      run: |
+        set -euo pipefail
+        python3 scripts/build_adb_helper.py \
+          --repository-root "$GITHUB_WORKSPACE" \
+          --lock "$GITHUB_WORKSPACE/packaging/adb/adb-helper.lock.json" \
+          --source-root "${{ inputs.source-root }}" \
+          --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
+          --target "${{ inputs.target }}" \
+          --artifact-root "${{ inputs.artifact-root }}" \
+          --release-assets-root "${{ inputs.release-assets-root }}"
+
+    - name: Smoke and verify source-built ADB artifact
+      shell: bash
+      run: |
+        set -euo pipefail
+        helper_name=adb
+        if [ "${{ inputs.target }}" = "windows-x86_64" ]; then helper_name=adb.exe; fi
+        python3 scripts/smoke_adb_helper.py \
+          --adb "${{ inputs.artifact-root }}/helpers/${helper_name}" \
+          --port 0 \
+          --timeout-seconds 15 \
+          --json-output "${{ inputs.artifact-root }}/package-smoke.json"
+        python3 scripts/verify_adb_helper_artifact.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --receipt "${{ inputs.artifact-root }}/receipt.json" \
+          --binary-smoke-receipt "${{ inputs.artifact-root }}/package-smoke.json" \
+          --package-root "${{ inputs.artifact-root }}" \
+          --release-root "${{ inputs.release-assets-root }}" \
+          --helper-path "helpers/${helper_name}" \
+          --expected-target "${{ inputs.target }}" \
+          --package-verification-receipt "${{ inputs.artifact-root }}/package-verification.json" \
+          --require-lock-binding
+
+    - name: Generate SHA256SUMS for target-bound artifact
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - "${{ inputs.artifact-root }}" <<'PY'
+        import hashlib, pathlib, sys
+        root = pathlib.Path(sys.argv[1])
+        files = sorted(path for path in (root / "helpers").iterdir() if path.is_file())
+        files.extend(root / name for name in (
+            "receipt.json", "smoke.json", "package-smoke.json", "package-verification.json"
+        ))
+        lines = []
+        for path in files:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{digest}  {path.relative_to(root).as_posix()}")
+        (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY

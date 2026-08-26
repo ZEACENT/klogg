@@ -6,6 +6,9 @@
 
 #include <utility>
 
+#include <QPointer>
+#include <QTimer>
+
 namespace {
 
 using ui::internal::splitCommandArguments;
@@ -55,24 +58,27 @@ IosDeviceListProvider* IosLogProcessTransport::deviceListProvider() const
     return deviceProvider_.get();
 }
 
-bool IosLogProcessTransport::clearRemote( QString* error )
+void IosLogProcessTransport::clearRemoteAsync( Generation generation, ClearRequestId requestId )
 {
-    if ( error ) {
-        *error = tr( "iOS live logs cannot be cleared remotely." );
-    }
-    return false;
+    const QPointer<IosLogProcessTransport> self( this );
+    QTimer::singleShot( 0, this, [ self, generation, requestId ] {
+        if ( self ) {
+            Q_EMIT self->clearRemoteFinished(
+                generation, requestId, false,
+                IosLogProcessTransport::tr( "iOS live logs cannot be cleared remotely." ) );
+        }
+    } );
 }
 
-bool IosLogProcessTransport::connectTransport()
+void IosLogProcessTransport::prepareStreamingSession()
 {
     ptyPrefixStripped_ = false;
     pendingPrefixProbe_.clear();
-    return ProcessLiveSourceTransport::connectTransport();
 }
 
 ProcessLiveSourceTransport::Command IosLogProcessTransport::streamingCommand() const
 {
-    const auto innerCommand = Command{ normalizedExecutable(), streamArguments() };
+    auto innerCommand = Command{ normalizedExecutable(), streamArguments() };
 
 #ifdef Q_OS_MAC
     // pymobiledevice3 checks isatty() in addition to the --color flag; when

@@ -716,6 +716,14 @@
         <source>Unable to save filter favorites. Try again.</source>
         <translation>無法儲存篩選器書籤。請重試。</translation>
     </message>
+    <message>
+        <source>Live log sessions</source>
+        <translation>即時日誌會話</translation>
+    </message>
+    <message>
+        <source>Live log source error</source>
+        <translation>即時日誌來源錯誤</translation>
+    </message>
 </context>
 <context>
     <name>OptionsDialog</name>
@@ -1103,6 +1111,18 @@
         <location filename="../../ui/src/optionsdialog.cpp" line="690"/>
         <source>Secondary shortcut</source>
         <translation>次要快捷鍵</translation>
+    </message>
+    <message>
+        <source>Keep all</source>
+        <translation>保留全部</translation>
+    </message>
+    <message>
+        <source>Number of old capture files to keep when rolling. Older files beyond this count are automatically deleted. Set to 0 to keep all rotated files.</source>
+        <translation>滾動時保留的舊擷取檔案數量。超過此數量的舊檔案將自動刪除。設為 0 可保留所有滾動檔案。</translation>
+    </message>
+    <message>
+        <source>Number of backup capture files to retain during rotation. Older files beyond this count are deleted. Set to 0 to keep all rotated files.</source>
+        <translation>滾動期間保留的擷取備份檔案數量。超過此數量的舊檔案將被刪除。設為 0 可保留所有滾動檔案。</translation>
     </message>
 </context>
 <context>
@@ -2327,6 +2347,92 @@
         <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
         <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
         <translation>名為「%1」的篩選器書籤已存在。請選擇其他名稱。</translation>
+    </message>
+</context>
+<context>
+    <name>klogg::livelog::messages</name>
+    <message>
+        <source>The saved live-log session payload is not a valid session object.</source>
+        <translation>儲存的即時日誌工作階段承載內容不是有效的工作階段物件。</translation>
+    </message>
+    <message>
+        <source>This live log session was saved with a custom executable or free-form command line arguments, which this version of klogg no longer restores for security reasons. Please reopen the source (File &gt; Open Android Logcat / Open iOS Log Stream) to recreate the session with a built-in transport.</source>
+        <translation>此即時日誌工作階段使用自訂執行檔或自由格式命令列引數儲存；基於安全考量，此版本的 klogg 不再還原此類工作階段。請重新開啟日誌來源（檔案 &gt; 開啟 Android Logcat / 開啟 iOS 日誌串流），以使用內建傳輸重新建立工作階段。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has a malformed schema version; it cannot be restored safely.</source>
+        <translation>儲存的即時日誌工作階段的結構描述版本格式錯誤，無法安全還原。</translation>
+    </message>
+    <message>
+        <source>This session was written by a newer version of klogg (schema %1); it cannot be restored by this version.</source>
+        <translation>此工作階段由較新版本的 klogg 寫入（結構描述 %1），目前版本無法還原。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has an unrecognized source type; it cannot be restored safely.</source>
+        <translation>儲存的即時日誌工作階段包含無法辨識的來源類型，無法安全還原。</translation>
+    </message>
+    <message>
+        <source>This session predates transport selection and was migrated once to the built-in transport.</source>
+        <translation>此工作階段早於傳輸選擇功能，已一次性移轉至內建傳輸。</translation>
+    </message>
+    <message>
+        <source>Saved Android transport &#x27;%1&#x27; is not recognized; using the built-in smart socket transport.</source>
+        <translation>無法辨識儲存的 Android 傳輸「%1」；將使用內建智慧型通訊端傳輸。</translation>
+    </message>
+    <message>
+        <source>Saved iOS transport &#x27;%1&#x27; is not recognized; using the built-in native transport.</source>
+        <translation>無法辨識儲存的 iOS 傳輸「%1」；將使用內建原生傳輸。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has no usable capture identifier; it cannot be restored.</source>
+        <translation>儲存的即時日誌工作階段沒有可用的擷取識別碼，無法還原。</translation>
+    </message>
+    <message>
+        <source>New sessions cannot use compatibility process transports. Choose a device detected by the built-in services.</source>
+        <translation>新工作階段不能使用相容性程序傳輸。請選擇內建服務偵測到的裝置。</translation>
+    </message>
+    <message>
+        <source>A detected device is required before the session can run or start on restore.</source>
+        <translation>工作階段需要選擇已偵測到的裝置，才能執行或在還原時啟動。</translation>
+    </message>
+    <message>
+        <source>The session has no usable capture identifier.</source>
+        <translation>工作階段沒有可用的擷取識別碼。</translation>
+    </message>
+    <message>
+        <source>The saved Android process filter must be a non-negative PID.</source>
+        <translation>儲存的 Android 程序篩選器必須是非負 PID。</translation>
+    </message>
+    <message>
+        <source>The saved Android buffers, priority, or filter expression is invalid.</source>
+        <translation>儲存的 Android 緩衝區、優先順序或篩選運算式無效。</translation>
+    </message>
+    <message>
+        <source>Saved iOS level, category, subsystem, and JSON options are not supported by the native stream yet.</source>
+        <translation>原生串流尚不支援儲存的 iOS 層級、類別、子系統與 JSON 選項。</translation>
+    </message>
+    <message>
+        <source>This session uses a compatibility transport and opens read-only; reconnect it through the built-in services to stream again.</source>
+        <translation>此工作階段使用相容性傳輸並以唯讀方式開啟；請透過內建服務重新連線以繼續串流。</translation>
+    </message>
+    <message>
+        <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
+        <translation>已有另一個即時日誌工作階段使用此擷取識別碼；無法在不覆寫擷取儲存空間的情況下還原已儲存的工作階段。</translation>
+    </message>
+    <message>
+        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
+        <translation>已儲存的即時日誌傳輸無法使用；請透過內建服務重新開啟日誌來源。</translation>
+    </message>
+</context>
+<context>
+    <name>AdbLogcatSource</name>
+    <message>
+        <source>This compatibility session is read-only.</source>
+        <translation>此相容性工作階段為唯讀。</translation>
+    </message>
+    <message>
+        <source>Live log transport is unavailable.</source>
+        <translation>即時日誌傳輸無法使用。</translation>
     </message>
 </context>
 </TS>

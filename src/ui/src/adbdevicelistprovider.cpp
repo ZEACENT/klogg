@@ -7,32 +7,26 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- *
- * klogg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "adbdevicelistprovider.h"
 
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
 
 #include "commandargumenttokenizer.h"
-#include "log.h"
 
 namespace {
 
+using klogg::livecapture::ErrorCategory;
+using klogg::livecapture::ErrorScope;
+using klogg::livecapture::Generation;
+using klogg::livecapture::LiveSourceError;
+using klogg::livecapture::RetryPolicy;
 using ui::internal::expandTildePath;
 
-// See AdbDeviceListProvider::detectAdbExecutable for rationale and probe order.
 QString findAdbAtKnownLocation()
 {
     const auto env = QProcessEnvironment::systemEnvironment();
@@ -49,13 +43,12 @@ QString findAdbAtKnownLocation()
             candidates.append( QDir::cleanPath( dir + QLatin1Char( '/' ) + exe ) );
         }
     };
-    const auto appendEnvDir
-        = [ &env, &appendDir ]( const char* envVar, const QString& suffix ) {
-              const auto value = env.value( QString::fromLatin1( envVar ) );
-              if ( !value.isEmpty() ) {
-                  appendDir( value + suffix );
-              }
-          };
+    const auto appendEnvDir = [ &env, &appendDir ]( const char* envVar, const QString& suffix ) {
+        const auto value = env.value( QString::fromLatin1( envVar ) );
+        if ( !value.isEmpty() ) {
+            appendDir( value + suffix );
+        }
+    };
 
     appendEnvDir( "ANDROID_SDK_ROOT", QStringLiteral( "/platform-tools" ) );
     appendEnvDir( "ANDROID_HOME", QStringLiteral( "/platform-tools" ) );
@@ -93,52 +86,108 @@ bool waitForFinishedOrKill( QProcess& process, int timeoutMs )
     return false;
 }
 
-QList<AdbDeviceInfo> enumerateAdbDevices( const QString& adbExecutable, QString* error )
+AdbDeviceState deviceStateFromText( const QString& state )
+{
+    if ( state == QStringLiteral( "device" ) ) {
+        return AdbDeviceState::Online;
+    }
+    if ( state == QStringLiteral( "unauthorized" ) ) {
+        return AdbDeviceState::Unauthorized;
+    }
+    if ( state == QStringLiteral( "offline" ) ) {
+        return AdbDeviceState::Offline;
+    }
+    return AdbDeviceState::Other;
+}
+
+std::string utf8String( const QString& value )
+{
+    const auto utf8 = value.toUtf8();
+    return { utf8.constData(), static_cast<std::size_t>( utf8.size() ) };
+}
+
+LiveSourceError discoveryError( ErrorCategory category, RetryPolicy retryPolicy, const char* code,
+                                const char* message, const QString& nativeDetail )
+{
+    return LiveSourceError{ category,    code,    ErrorScope::Service,
+                            retryPolicy, message, utf8String( nativeDetail ) };
+}
+
+DeviceDiscoveryResult<AdbDeviceInfo> enumerateAdbDevices( Generation generation,
+                                                          const QString& adbExecutable )
 {
     QProcess process;
     process.start( AdbDeviceListProvider::normalizedExecutable( adbExecutable ),
                    { QStringLiteral( "devices" ), QStringLiteral( "-l" ) } );
     if ( !process.waitForStarted( 3000 ) ) {
-        if ( error ) {
-            *error = process.errorString();
-        }
-        return {};
+        return { generation,
+                 {},
+                 discoveryError(
+                     ErrorCategory::Configuration, RetryPolicy::Never, "adb-executable-not-found",
+                     "adb could not be started; configure the ADB executable and retry.",
+                     process.errorString() ) };
     }
 
     if ( !waitForFinishedOrKill( process, 5000 ) ) {
-        if ( error ) {
-            *error = QObject::tr( "Timed out waiting for adb devices output" );
-        }
-        return {};
+        return { generation,
+                 {},
+                 discoveryError( ErrorCategory::Backend, RetryPolicy::Immediate,
+                                 "adb-device-list-timeout",
+                                 "Timed out waiting for adb devices output; retry discovery.",
+                                 process.errorString() ) };
     }
 
     if ( process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0 ) {
-        if ( error ) {
-            const auto stdErr = QString::fromUtf8( process.readAllStandardError() ).trimmed();
-            *error = stdErr.isEmpty() ? process.errorString() : stdErr;
-        }
-        return {};
+        const auto stdErr = QString::fromUtf8( process.readAllStandardError() ).trimmed();
+        return { generation,
+                 {},
+                 discoveryError( ErrorCategory::Backend, RetryPolicy::Immediate,
+                                 "adb-device-list-command-failed",
+                                 "adb device discovery failed; verify the ADB service and retry.",
+                                 stdErr.isEmpty() ? process.errorString() : stdErr ) };
     }
 
+    return parseAdbDeviceDiscovery( generation, process.readAllStandardOutput() );
+}
+
+QString errorText( const LiveSourceError& error )
+{
+    if ( !error.nativeDetail.empty() ) {
+        return QString::fromUtf8( error.nativeDetail.data(),
+                                  static_cast<int>( error.nativeDetail.size() ) );
+    }
+    return QString::fromUtf8( error.message.data(), static_cast<int>( error.message.size() ) );
+}
+
+} // namespace
+
+QList<AdbDeviceInfo> parseAdbDeviceListOutput( const QByteArray& output )
+{
     QList<AdbDeviceInfo> devices;
-    const auto lines = QString::fromUtf8( process.readAllStandardOutput() ).split( '\n' );
+    bool headerSeen = false;
+    const auto lines = QString::fromUtf8( output ).split( '\n' );
     for ( auto line : lines ) {
         line = line.trimmed();
-        if ( line.isEmpty() || line.startsWith( QStringLiteral( "List of devices attached" ) ) ) {
+        if ( line == QStringLiteral( "List of devices attached" ) ) {
+            headerSeen = true;
+            continue;
+        }
+        if ( !headerSeen || line.isEmpty() ) {
             continue;
         }
 
         const auto parts = line.simplified().split( ' ' );
-        if ( parts.size() < 2 || parts[ 1 ] != QStringLiteral( "device" ) ) {
+        if ( parts.size() < 2 ) {
             continue;
         }
 
-        const auto serial = parts.front();
+        const auto& serial = parts.front();
+        const auto& state = parts.at( 1 );
         QString model;
         QString device;
         QString product;
-        for ( auto i = 2; i < parts.size(); ++i ) {
-            const auto& part = parts[ i ];
+        for ( decltype( parts.size() ) i = 2; i < parts.size(); ++i ) {
+            const auto& part = parts.at( i );
             if ( part.startsWith( QStringLiteral( "model:" ) ) ) {
                 model = part.mid( 6 ).replace( '_', ' ' );
             }
@@ -150,7 +199,7 @@ QList<AdbDeviceInfo> enumerateAdbDevices( const QString& adbExecutable, QString*
             }
         }
 
-        QString description = model;
+        auto description = model;
         if ( description.isEmpty() ) {
             description = device;
         }
@@ -161,19 +210,42 @@ QList<AdbDeviceInfo> enumerateAdbDevices( const QString& adbExecutable, QString*
             description = serial;
         }
 
-        devices.push_back( AdbDeviceInfo{ serial,
-                                          QStringLiteral( "%1 (%2)" ).arg( description, serial ),
-                                          line } );
+        const auto displayName = state == QStringLiteral( "device" )
+                                     ? QStringLiteral( "%1 (%2)" ).arg( description, serial )
+                                     : QStringLiteral( "%1 [%2]" ).arg( serial, state );
+        devices.push_back(
+            AdbDeviceInfo{ serial, displayName, line, deviceStateFromText( state ), state } );
     }
 
     return devices;
 }
 
-} // namespace
+DeviceDiscoveryResult<AdbDeviceInfo> parseAdbDeviceDiscovery( Generation generation,
+                                                              const QByteArray& output )
+{
+    const auto lines = QString::fromUtf8( output ).split( '\n' );
+    const auto hasHeader = std::any_of( lines.cbegin(), lines.cend(), []( const QString& line ) {
+        return line.trimmed() == QStringLiteral( "List of devices attached" );
+    } );
+    if ( !hasHeader ) {
+        return { generation,
+                 {},
+                 discoveryError(
+                     ErrorCategory::Backend, RetryPolicy::Immediate,
+                     "adb-device-list-protocol-error",
+                     "The ADB discovery service returned an invalid response; retry discovery.",
+                     QStringLiteral( "Expected the adb device-list header." ) ) };
+    }
+
+    return { generation, parseAdbDeviceListOutput( output ), std::nullopt };
+}
 
 AdbDeviceListProvider::AdbDeviceListProvider( QString adbExecutable, QObject* parent )
     : DeviceListProviderBase(
-          [ adbExecutable ] { return enumerateAdbDevices( adbExecutable, nullptr ); }, parent )
+          [ adbExecutable ]( Generation generation ) {
+              return enumerateAdbDevices( generation, adbExecutable );
+          },
+          parent )
     , adbExecutable_( std::move( adbExecutable ) )
 {
 }
@@ -201,10 +273,14 @@ QString AdbDeviceListProvider::normalizedExecutable( const QString& adbExecutabl
 bool AdbDeviceListProvider::deviceMatches( const AdbDeviceInfo& device,
                                            const QString& deviceId ) const
 {
-    return device.serial == deviceId;
+    return device.serial == deviceId && device.isOnline();
 }
 
 QList<AdbDeviceInfo> AdbDeviceListProvider::doListDevices( QString* error ) const
 {
-    return enumerateAdbDevices( adbExecutable_, error );
+    auto result = enumerateAdbDevices( Generation{ 0 }, adbExecutable_ );
+    if ( error ) {
+        *error = result.error ? errorText( *result.error ) : QString{};
+    }
+    return std::move( result.devices );
 }

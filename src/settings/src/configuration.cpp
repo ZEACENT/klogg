@@ -41,8 +41,8 @@
 #include <utility>
 
 #include <QFontInfo>
-#include <QList>
 #include <QKeySequence>
+#include <QList>
 #include <qcolor.h>
 #include <qglobal.h>
 #include <qvariant.h>
@@ -58,6 +58,7 @@ std::once_flag fontInitFlag;
 static const Configuration DefaultConfiguration = {};
 
 constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
+constexpr auto LegacyProcessSettingsRetiredMarker = "liveSource.legacyProcessSettingsRetired";
 
 int clampLineSpacingPercent( int percent )
 {
@@ -87,9 +88,9 @@ QStringList legacyFindNextBindings( const QString& commandModifier )
         }
     }
 
-    const auto commandG = QKeySequence( commandModifier + QStringLiteral( "+G" ),
-                                        QKeySequence::PortableText )
-                              .toString( QKeySequence::PortableText );
+    const auto commandG
+        = QKeySequence( commandModifier + QStringLiteral( "+G" ), QKeySequence::PortableText )
+              .toString( QKeySequence::PortableText );
     if ( !commandG.isEmpty() && !bindings.contains( commandG ) ) {
         bindings.push_back( commandG );
     }
@@ -127,30 +128,28 @@ bool matchesLegacyFindNextDefault( const QStringList& bindings )
 bool migrateLegacyCtrlGDefaults( ShortcutAction::ConfiguredShortcuts& shortcuts )
 {
     bool changed = false;
-    const auto eraseIfLegacy = [ &shortcuts, &changed ]( const std::string& action,
-                                                        const auto& isLegacy ) {
-        const auto found = shortcuts.find( action );
-        if ( found != shortcuts.end() && isLegacy( found->second ) ) {
-            shortcuts.erase( found );
-            changed = true;
-        }
-    };
+    const auto eraseIfLegacy
+        = [ &shortcuts, &changed ]( const std::string& action, const auto& isLegacy ) {
+              const auto found = shortcuts.find( action );
+              if ( found != shortcuts.end() && isLegacy( found->second ) ) {
+                  shortcuts.erase( found );
+                  changed = true;
+              }
+          };
 
     eraseIfLegacy( ShortcutAction::LogViewJumpToLine, matchesLegacyJumpToLineDefault );
     eraseIfLegacy( ShortcutAction::LogViewQfForward, matchesLegacyFindNextDefault );
     return changed;
 }
 
-void writeShortcutArray( QSettings& settings,
-                         const ShortcutAction::ConfiguredShortcuts& shortcuts )
+void writeShortcutArray( QSettings& settings, const ShortcutAction::ConfiguredShortcuts& shortcuts )
 {
     settings.remove( QStringLiteral( "shortcuts" ) );
     settings.beginWriteArray( QStringLiteral( "shortcuts" ) );
     int shortcutIndex = 0;
     for ( const auto& mapping : shortcuts ) {
         settings.setArrayIndex( shortcutIndex );
-        settings.setValue( QStringLiteral( "action" ),
-                           QString::fromStdString( mapping.first ) );
+        settings.setValue( QStringLiteral( "action" ), QString::fromStdString( mapping.first ) );
         settings.setValue( QStringLiteral( "keys" ), mapping.second );
         ++shortcutIndex;
     }
@@ -207,14 +206,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     forceFontAntialiasing_
         = settings.value( "mainFont.antialiasing", DefaultConfiguration.forceFontAntialiasing_ )
               .toBool();
-    useBoldFont_
-        = settings.value( "mainFont.bold", DefaultConfiguration.useBoldFont_ )
-              .toBool();
-    lineSpacingPercent_
-        = clampLineSpacingPercent(
-            settings
-                .value( "mainFont.lineSpacingPercent", DefaultConfiguration.lineSpacingPercent_ )
-                .toInt() );
+    useBoldFont_ = settings.value( "mainFont.bold", DefaultConfiguration.useBoldFont_ ).toBool();
+    lineSpacingPercent_ = clampLineSpacingPercent(
+        settings.value( "mainFont.lineSpacingPercent", DefaultConfiguration.lineSpacingPercent_ )
+            .toInt() );
 
     language_ = settings.value( "view.language", DefaultConfiguration.language_ ).toString();
 
@@ -254,19 +249,17 @@ void Configuration::retrieveFromStorage( QSettings& settings )
                       DefaultConfiguration.enableMainSearchHighlightVariance_ )
               .toBool();
 
-    mainSearchBackColor_
-        = klogg::qtcompat::colorFromString(
-            settings
-                .value( "regexpType.mainBackColor",
-                        DefaultConfiguration.mainSearchBackColor_.name( QColor::HexArgb ) )
-                .toString() );
+    mainSearchBackColor_ = klogg::qtcompat::colorFromString(
+        settings
+            .value( "regexpType.mainBackColor",
+                    DefaultConfiguration.mainSearchBackColor_.name( QColor::HexArgb ) )
+            .toString() );
 
-    qfBackColor_
-        = klogg::qtcompat::colorFromString(
-            settings
-                .value( "regexpType.quickfindBackColor",
-                        DefaultConfiguration.qfBackColor_.name( QColor::HexArgb ) )
-                .toString() );
+    qfBackColor_ = klogg::qtcompat::colorFromString(
+        settings
+            .value( "regexpType.quickfindBackColor",
+                    DefaultConfiguration.qfBackColor_.name( QColor::HexArgb ) )
+            .toString() );
 
     qfIgnoreCase_
         = settings.value( "quickfind.ignore_case", DefaultConfiguration.qfIgnoreCase_ ).toBool();
@@ -382,38 +375,39 @@ void Configuration::retrieveFromStorage( QSettings& settings )
 
     verifySslPeers_
         = settings.value( "net.verifySslPeers", DefaultConfiguration.verifySslPeers_ ).toBool();
-    adbExecutable_ = settings.value( "adb.executable", DefaultConfiguration.adbExecutable_ ).toString();
-    adbLogcatExtraArgs_
-        = settings.value( "adb.logcatExtraArgs", DefaultConfiguration.adbLogcatExtraArgs_ )
-              .toString();
+    // Raw executable and free-form argument preferences were retired with the
+    // process-backed new-session UI. Scrub them on every read (the marker makes
+    // the migration explicit; unconditional removal self-heals imported files).
+    settings.remove( QStringLiteral( "adb.executable" ) );
+    settings.remove( QStringLiteral( "adb.logcatExtraArgs" ) );
+    settings.remove( QStringLiteral( "iosLog.executable" ) );
+    settings.remove( QStringLiteral( "iosLog.extraArgs" ) );
+    settings.setValue( QLatin1String( LegacyProcessSettingsRetiredMarker ), true );
+
     adbLogcatAnsiOutputEnabled_
-        = settings
-              .value( "adb.logcatAnsiOutput",
-                      DefaultConfiguration.adbLogcatAnsiOutputEnabled_ )
+        = settings.value( "adb.logcatAnsiOutput", DefaultConfiguration.adbLogcatAnsiOutputEnabled_ )
               .toBool();
-    iosLogExecutable_
-        = settings.value( "iosLog.executable", DefaultConfiguration.iosLogExecutable_ ).toString();
-    iosLogExtraArgs_
-        = settings.value( "iosLog.extraArgs", DefaultConfiguration.iosLogExtraArgs_ ).toString();
     iosLogAnsiOutputEnabled_
         = settings.value( "iosLog.ansiOutput", DefaultConfiguration.iosLogAnsiOutputEnabled_ )
               .toBool();
 
-    liveAutoReconnectEnabled_
-        = settings.value( "liveSource.autoReconnectEnabled",
-                          DefaultConfiguration.liveAutoReconnectEnabled_ )
-              .toBool();
-    liveAutoReconnectMaxAttempts_
-        = settings.value( "liveSource.autoReconnectMaxAttempts",
-                          DefaultConfiguration.liveAutoReconnectMaxAttempts_ )
-              .toInt();
+    liveAutoReconnectEnabled_ = settings
+                                    .value( "liveSource.autoReconnectEnabled",
+                                            DefaultConfiguration.liveAutoReconnectEnabled_ )
+                                    .toBool();
+    liveAutoReconnectMaxAttempts_ = settings
+                                        .value( "liveSource.autoReconnectMaxAttempts",
+                                                DefaultConfiguration.liveAutoReconnectMaxAttempts_ )
+                                        .toInt();
     liveCaptureRollingMaxFileSize_
-        = settings.value( "liveSource.captureRollingMaxFileSize",
-                          DefaultConfiguration.liveCaptureRollingMaxFileSize_ )
+        = settings
+              .value( "liveSource.captureRollingMaxFileSize",
+                      DefaultConfiguration.liveCaptureRollingMaxFileSize_ )
               .toLongLong();
     liveCaptureRollingBackupCount_
-        = settings.value( "liveSource.captureRollingBackupCount",
-                          DefaultConfiguration.liveCaptureRollingBackupCount_ )
+        = settings
+              .value( "liveSource.captureRollingBackupCount",
+                      DefaultConfiguration.liveCaptureRollingBackupCount_ )
               .toInt();
 
     // View settings
@@ -434,10 +428,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
         = settings
               .value( "view.hideAnsiColorSequences", DefaultConfiguration.hideAnsiColorSequences_ )
               .toBool();
-    renderAnsiColorSequences_
-        = settings
-              .value( "view.renderAnsiColorSequences", DefaultConfiguration.renderAnsiColorSequences_ )
-              .toBool();
+    renderAnsiColorSequences_ = settings
+                                    .value( "view.renderAnsiColorSequences",
+                                            DefaultConfiguration.renderAnsiColorSequences_ )
+                                    .toBool();
     if ( hideAnsiColorSequences_ && renderAnsiColorSequences_ ) {
         renderAnsiColorSequences_ = false;
     }
@@ -445,7 +439,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     useTextWrap_ = settings.value( "view.textWrap", DefaultConfiguration.useTextWrap() ).toBool();
 
     confirmTabClose_
-        = settings.value( "session.confirmTabClose", DefaultConfiguration.confirmTabClose_ ).toBool();
+        = settings.value( "session.confirmTabClose", DefaultConfiguration.confirmTabClose_ )
+              .toBool();
 
     style_ = settings.value( "view.style", DefaultConfiguration.style_ ).toString();
 
@@ -470,7 +465,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
 
     // Theme mode
     themeMode_ = static_cast<ThemeMode>(
-        settings.value( "view.themeMode", static_cast<int>( DefaultConfiguration.themeMode_ ) ).toInt() );
+        settings.value( "view.themeMode", static_cast<int>( DefaultConfiguration.themeMode_ ) )
+            .toInt() );
 
     // DefaultConfiguration crawler settings
     searchAutoRefresh_
@@ -479,9 +475,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     searchIgnoreCase_
         = settings.value( "defaultView.searchIgnoreCase", DefaultConfiguration.searchIgnoreCase_ )
               .toBool();
-    searchLogicalCombining_
-        = settings.value( "defaultView.searchLogicalCombining", DefaultConfiguration.searchLogicalCombining_ )
-              .toBool();
+    searchLogicalCombining_ = settings
+                                  .value( "defaultView.searchLogicalCombining",
+                                          DefaultConfiguration.searchLogicalCombining_ )
+                                  .toBool();
 
     defaultEncodingMib_
         = settings.value( "defaultView.encodingMib", DefaultConfiguration.defaultEncodingMib_ )
@@ -539,8 +536,7 @@ void Configuration::retrieveFromStorage( QSettings& settings )
     if ( !ctrlGDefaultsAlreadyMigrated ) {
         settings.setValue( CtrlGDefaultsMigrationMarker, true );
     }
-    if ( loadedLegacyShortcutMapping || migratedCtrlGDefaults
-         || !ctrlGDefaultsAlreadyMigrated ) {
+    if ( loadedLegacyShortcutMapping || migratedCtrlGDefaults || !ctrlGDefaultsAlreadyMigrated ) {
         settings.sync();
     }
 
@@ -611,11 +607,12 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "perf.optimizeForNotLatinEncodings", optimizeForNotLatinEncodings_ );
 
     settings.setValue( "net.verifySslPeers", verifySslPeers_ );
-    settings.setValue( "adb.executable", adbExecutable_ );
-    settings.setValue( "adb.logcatExtraArgs", adbLogcatExtraArgs_ );
+    settings.remove( QStringLiteral( "adb.executable" ) );
+    settings.remove( QStringLiteral( "adb.logcatExtraArgs" ) );
+    settings.remove( QStringLiteral( "iosLog.executable" ) );
+    settings.remove( QStringLiteral( "iosLog.extraArgs" ) );
+    settings.setValue( QLatin1String( LegacyProcessSettingsRetiredMarker ), true );
     settings.setValue( "adb.logcatAnsiOutput", adbLogcatAnsiOutputEnabled_ );
-    settings.setValue( "iosLog.executable", iosLogExecutable_ );
-    settings.setValue( "iosLog.extraArgs", iosLogExtraArgs_ );
     settings.setValue( "iosLog.ansiOutput", iosLogAnsiOutputEnabled_ );
     settings.setValue( "liveSource.autoReconnectEnabled", liveAutoReconnectEnabled_ );
     settings.setValue( "liveSource.autoReconnectMaxAttempts", liveAutoReconnectMaxAttempts_ );

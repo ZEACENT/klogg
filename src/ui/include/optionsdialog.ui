@@ -765,58 +765,6 @@
           <string>ADB</string>
          </property>
          <layout class="QVBoxLayout" name="verticalLayout_adb">
-          <item>
-           <layout class="QHBoxLayout" name="horizontalLayout_adbExecutable">
-            <item>
-             <widget class="QLabel" name="adbExecutableLabel">
-              <property name="text">
-               <string>ADB executable</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLineEdit" name="adbExecutableLineEdit">
-              <property name="placeholderText">
-               <string>adb</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QPushButton" name="adbDetectButton">
-              <property name="toolTip">
-               <string>Probe well-known install locations and fill the path automatically.</string>
-              </property>
-              <property name="text">
-               <string>Detect</string>
-              </property>
-             </widget>
-            </item>
-           </layout>
-          </item>
-          <item>
-           <layout class="QHBoxLayout" name="horizontalLayout_adbArgs">
-            <item>
-             <widget class="QLabel" name="adbLogcatArgsLabel">
-              <property name="text">
-               <string>Extra logcat args</string>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLineEdit" name="adbLogcatArgsLineEdit"/>
-            </item>
-           </layout>
-          </item>
-          <item>
-           <widget class="QLabel" name="adbHelpLabel">
-            <property name="wordWrap">
-             <bool>true</bool>
-            </property>
-            <property name="text">
-             <string>Extra arguments are appended after 'adb -s &lt;serial&gt; logcat'. Leave the executable empty to use adb from PATH.</string>
-            </property>
-           </widget>
-          </item>
          </layout>
         </widget>
        </item>

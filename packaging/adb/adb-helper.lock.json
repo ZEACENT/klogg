@@ -1,0 +1,811 @@
+{
+  "schema_version": 1,
+  "helper": {
+    "product": "adb",
+    "kind": "complete-adb-executable",
+    "source_built": true,
+    "server_only_fork": false,
+    "required_client_commands": [
+      "version",
+      "help"
+    ],
+    "required_roles": [
+      "client",
+      "server"
+    ]
+  },
+  "release_policy": {
+    "source_build_required": true,
+    "fail_closed_on_missing_helper": true,
+    "allow_google_platform_tools_prebuilt": false,
+    "allow_path_adb": false,
+    "allow_android_sdk_adb": false,
+    "allow_runtime_download": false,
+    "allow_floating_revisions": false,
+    "allow_system_dependency_substitution": false,
+    "downloads_allowed_only_in_prefetch_job": true,
+    "application_configure_disconnected": true,
+    "source_date_epoch": 1785561611,
+    "require_signing_for_release_qualification": true,
+    "require_notarization_for_macos_qualification": true,
+    "require_attestation_for_release_qualification": true
+  },
+  "sources": [
+    {
+      "id": "aosp-manifest",
+      "repository_url": "https://android.googlesource.com/platform/manifest",
+      "commit": "5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f",
+      "tag": "android-17.0.0_r1",
+      "archive_url": "https://android.googlesource.com/platform/manifest/+archive/5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f.tar.gz",
+      "archive_file": "aosp-manifest-5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f.tar.gz",
+      "archive_sha256": "2562fc69ae44263ef8fe18d328ad16433e32075f6a1a90d5d4774075e175da46",
+      "build_input": false,
+      "legal": {
+        "licenses": [
+          "Apache-2.0"
+        ],
+        "notices": [
+          "Android Open Source Project manifest notice"
+        ],
+        "notice_label": "AOSP platform manifest android-17.0.0_r1",
+        "source_offer_label": "AOSP manifest source"
+      }
+    },
+    {
+      "id": "aosp-adb",
+      "repository_url": "https://android.googlesource.com/platform/packages/modules/adb",
+      "commit": "9084198a2d4b0f6a0f174260fb42da33485b684d",
+      "archive_url": "https://android.googlesource.com/platform/packages/modules/adb/+archive/9084198a2d4b0f6a0f174260fb42da33485b684d.tar.gz",
+      "archive_file": "aosp-adb-9084198a2d4b0f6a0f174260fb42da33485b684d.tar.gz",
+      "archive_sha256": "bfbbc9f4c59c9b4dd6f1feb4614ac1a0fcc2505fc4fe09f7d37aeb3fefab4f71",
+      "build_input": false,
+      "legal": {
+        "licenses": [
+          "Apache-2.0",
+          "BSD-3-Clause"
+        ],
+        "notices": [
+          "Android Debug Bridge source notices"
+        ],
+        "notice_label": "AOSP packages modules adb",
+        "source_offer_label": "Complete ADB source"
+      }
+    },
+    {
+      "id": "android-tools-release",
+      "repository_url": "https://github.com/nmeum/android-tools",
+      "commit": "0c15591afc76852efea2f46f29f94b60aac44750",
+      "archive_url": "https://github.com/nmeum/android-tools/releases/download/37.0.0/android-tools-37.0.0.tar.xz?commit=0c15591afc76852efea2f46f29f94b60aac44750",
+      "download_url": "https://github.com/nmeum/android-tools/releases/download/37.0.0/android-tools-37.0.0.tar.xz",
+      "archive_file": "android-tools-37.0.0.tar.xz",
+      "archive_sha256": "2725d09f892a3a38e534429f47a321f58ecf6a3169caa42c915fb2cb7d46be0e",
+      "build_input": true,
+      "legal": {
+        "licenses": [
+          "Apache-2.0",
+          "BSD-3-Clause",
+          "MIT",
+          "OpenSSL"
+        ],
+        "notices": [
+          "nmeum android-tools release source closure and vendored AOSP notices"
+        ],
+        "notice_label": "nmeum android-tools 37.0.0 source closure",
+        "source_offer_label": "Patched android-tools source closure"
+      }
+    },
+    {
+      "id": "aosp-libusb",
+      "repository_url": "https://android.googlesource.com/platform/external/libusb",
+      "commit": "70460fc2b43c3948f9caae1fd4eacd2d666a872b",
+      "archive_url": "https://android.googlesource.com/platform/external/libusb/+archive/70460fc2b43c3948f9caae1fd4eacd2d666a872b.tar.gz",
+      "archive_file": "aosp-libusb-70460fc2b43c3948f9caae1fd4eacd2d666a872b.tar.gz",
+      "archive_sha256": "b8b24c84884b34a8a16700123fb240cc14dd37ec47e5950d1d3f79fda7c91a3e",
+      "build_input": false,
+      "legal": {
+        "licenses": [
+          "LGPL-2.1-or-later"
+        ],
+        "notices": [
+          "libusb authors and Android platform modifications"
+        ],
+        "notice_label": "AOSP external libusb",
+        "source_offer_label": "libusb source"
+      }
+    },
+    {
+      "id": "windows-platform-development",
+      "repository_url": "https://android.googlesource.com/platform/development",
+      "commit": "4dafd114fab3c3d9543a5aff0ad097f479915176",
+      "archive_url": "https://android.googlesource.com/platform/development/+archive/4dafd114fab3c3d9543a5aff0ad097f479915176.tar.gz",
+      "archive_file": "platform-development-4dafd114fab3c3d9543a5aff0ad097f479915176.tar.gz",
+      "archive_sha256": "bf67f5ddd9626ed16d0ad73509d6375459e69799a178280ee0757b8ebbe08033",
+      "build_input": true,
+      "legal": {
+        "licenses": [
+          "Apache-2.0"
+        ],
+        "notices": [
+          "AOSP Windows platform development source and Klogg/MSYS2-derived source build patches"
+        ],
+        "notice_label": "AOSP platform development Windows source",
+        "source_offer_label": "Windows ADB platform source"
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "id": "protobuf",
+      "version": "21.12",
+      "archive_url": "https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz",
+      "archive_file": "protobuf-21.12.tar.gz",
+      "archive_sha256": "22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "brotli",
+      "version": "1.1.0",
+      "archive_url": "https://github.com/google/brotli/archive/refs/tags/v1.1.0.tar.gz",
+      "archive_file": "brotli-1.1.0.tar.gz",
+      "archive_sha256": "e720a6ca29428b803f4ad165371771f5398faba397edf6778837a18599ea13ff",
+      "license": "MIT"
+    },
+    {
+      "id": "lz4",
+      "version": "1.10.0",
+      "archive_url": "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+      "archive_file": "lz4-1.10.0.tar.gz",
+      "archive_sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b",
+      "license": "BSD-2-Clause"
+    },
+    {
+      "id": "zstd",
+      "version": "1.5.7",
+      "archive_url": "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
+      "archive_file": "zstd-1.5.7.tar.gz",
+      "archive_sha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "id": "zlib",
+      "version": "1.3.1",
+      "archive_url": "https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz",
+      "archive_file": "zlib-1.3.1.tar.gz",
+      "archive_sha256": "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c",
+      "license": "Zlib"
+    },
+    {
+      "id": "googletest",
+      "version": "1.16.0",
+      "archive_url": "https://github.com/google/googletest/archive/refs/tags/v1.16.0.tar.gz",
+      "archive_file": "googletest-1.16.0.tar.gz",
+      "archive_sha256": "78c676fc63881529bf97bf9d45948d905a66833fbfa5318ea2cd7478cb98f399",
+      "license": "BSD-3-Clause",
+      "build_note": "Pinned fail-closed test dependency; production BUILD_TESTING is disabled."
+    }
+  ],
+  "patches": [
+    {
+      "path": "packaging/adb/patches/0001-klogg-adb-only-private-usb.patch",
+      "sha256": "3e2dbf9f292e4b1d5a4f7d863d34dcff77b1c88591abc7297db9b68f83a21673",
+      "applies_to": "android-tools-release",
+      "exclude_targets": [
+        "windows-x86_64"
+      ]
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/0001-android-tools-cmake.patch",
+      "sha256": "909d4d96a007446747c1ebff824c30092b00f039e9e15a87585520bbc87645d3",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/0002-android-tools-vendor.patch",
+      "sha256": "e02e8a54ff265f75b48e00c444bb6486276fb6051b93ce4d055cb531287f8055",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/0003-fix-building-with-gcc-mingw.patch",
+      "sha256": "528e7a2dbf366832d6ae339e013de7c311efb7fa9139ce3478bc18fe29b0542d",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/0004-leave-wstat-as-is.patch",
+      "sha256": "4c670ab8a96da18f26741bad300a8c218ac50cfa96efb713d36a6883d774c300",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/0005-missing-includes.patch",
+      "sha256": "e0b89815ef8cc40943f79721344937cc037d25cb4ee24a8d4bad5c1d031b0354",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/msys2-android-tools/AdbWinApi.def",
+      "sha256": "e6fc31c148e120fc69be53e0464434c492ab0eaa0dbc8f18dd3c19eb2dd2577b",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "nmeum-msys2-windows-build",
+      "apply": false,
+      "provenance_repository": "https://github.com/msys2/MINGW-packages",
+      "provenance_commit": "c4994de6f981e6a67f8978651baf19c318dfa3ff"
+    },
+    {
+      "path": "packaging/adb/patches/0006-platform-development-adbwinapi-cmake.patch",
+      "sha256": "8ce3fd6d3cfbf42346583b234786d21eb535a2d985d8a12b76b29e1af64fbcc0",
+      "applies_to": "windows-platform-development",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "platform-development-adbwinapi",
+      "provenance_repository": "https://github.com/msys2/adbwinapi",
+      "provenance_commit": "630c546647bd92c1b0540a8fed0ae880f35da785",
+      "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/0007-windows-private-libusb.patch",
+      "sha256": "a8bd17ec011b4cb91117d174de5287aefdb782eb359204b5f26e985e8e26dab6",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "private-windows-libusb",
+      "apply_tool": "gnu-patch"
+    }
+  ],
+  "toolchain_packages": [
+    {
+      "id": "mingw-w64-ucrt-x86_64-binutils",
+      "version": "2.47-3",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-binutils-2.47-3-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-binutils-2.47-3-any.pkg.tar.zst",
+      "archive_sha256": "ba98af202fe71e0884bb51daf78ce10bd8a51c69528c700dcf5855e6ece06dd3",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-crt",
+      "version": "14.0.0.r302.gd7f3c5201-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-crt-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-crt-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_sha256": "04ace41d87f21e48f395029b0fad3c8abd57f88fcc41009dc3f83a5be3dc6b13",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-gcc-libs",
+      "version": "16.2.0-3",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gcc-libs-16.2.0-3-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-gcc-libs-16.2.0-3-any.pkg.tar.zst",
+      "archive_sha256": "5763fabf86fa13a4449ee765006d3446384ed66af7bf827459710eb777e0b11c",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-gmp",
+      "version": "6.3.0-2",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gmp-6.3.0-2-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-gmp-6.3.0-2-any.pkg.tar.zst",
+      "archive_sha256": "e82a75968a556484a50084578238a84eb60fb93e34986fd6695c537975bd39ea",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-headers",
+      "version": "14.0.0.r302.gd7f3c5201-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-headers-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-headers-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_sha256": "9ab48d7877bf1e3040b2b3cdd933b0c3a0eff92f48cfebd1add2c2fb04629935",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-isl",
+      "version": "0.28-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-isl-0.28-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-isl-0.28-1-any.pkg.tar.zst",
+      "archive_sha256": "8594e01a253d5a72646c586cf5a1626c1b1c2be7c30060fe67abd9bebe3fe223",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-mpc",
+      "version": "1.4.1-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-mpc-1.4.1-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-mpc-1.4.1-1-any.pkg.tar.zst",
+      "archive_sha256": "f06556e811c711ce91609484e31d358e4f495811ba29813bf2284a3b236d82ce",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-mpfr",
+      "version": "4.2.2-3",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-mpfr-4.2.2-3-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-mpfr-4.2.2-3-any.pkg.tar.zst",
+      "archive_sha256": "6b70a275d2ec75c70aa50a236c218e6b7ee9a5ab4c6d52cb0b580267b7d200fe",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-windows-default-manifest",
+      "version": "20260815-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-windows-default-manifest-20260815-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-windows-default-manifest-20260815-1-any.pkg.tar.zst",
+      "archive_sha256": "b39039f754a600cc0dec49df7d675a59a3cb2b63691d91b4ae60735ee7075eca",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-winpthreads",
+      "version": "14.0.0.r302.gd7f3c5201-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-winpthreads-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-winpthreads-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_sha256": "c64f7e3e2370cffe40c34c485dcd8cc1834fbf471511b0d0b771962548e9e540",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-zlib",
+      "version": "1.3.2-2",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zlib-1.3.2-2-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-zlib-1.3.2-2-any.pkg.tar.zst",
+      "archive_sha256": "841401182976d2f9e17e5c0ebaac51f2a8014140ea53d67625e91c8fb3c85ea0",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-zstd",
+      "version": "1.5.7-2",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zstd-1.5.7-2-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-zstd-1.5.7-2-any.pkg.tar.zst",
+      "archive_sha256": "dbdb8427280046a2b41697780aa4c52983b708082b0da4755951dc3bea96ca89",
+      "build_input": false
+    },
+    {
+      "id": "mingw-w64-ucrt-x86_64-gcc",
+      "version": "16.2.0-3",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-gcc-16.2.0-3-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-gcc-16.2.0-3-any.pkg.tar.zst",
+      "archive_sha256": "1cd86e5817f6e0d7310d7cb2bb91f4a55e1256cb4ce580a0c5f2a74e013d144d",
+      "build_input": false
+    }
+  ],
+  "toolchains": {
+    "linux-x86_64": {
+      "identifier": "klogg-adb-linux-x86_64-manylinux2014-2026.08.15-1",
+      "compiler": "gcc",
+      "compiler_version": "digest-bound",
+      "cmake_version": "digest-bound",
+      "runner_image": "ubuntu-24.04",
+      "runner_image_revision": "20260818.1",
+      "glibc_version": "2.17",
+      "container_image": "quay.io/pypa/manylinux2014_x86_64",
+      "container_digest": "sha256:95440e0e72dd3a81dc8d2cf59a84d57af661456620f5bc821ff92048d0e54ff9"
+    },
+    "linux-arm64": {
+      "identifier": "klogg-adb-linux-arm64-manylinux2014-2026.08.15-1",
+      "compiler": "gcc",
+      "compiler_version": "digest-bound",
+      "cmake_version": "digest-bound",
+      "runner_image": "ubuntu-24.04-arm",
+      "runner_image_revision": "20260818.1",
+      "glibc_version": "2.17",
+      "container_image": "quay.io/pypa/manylinux2014_aarch64",
+      "container_digest": "sha256:b63ff749fee6f3f2a6b67ed3101a073db3211df1791da19e9acf96f43c0dd6ff"
+    },
+    "windows-x86_64": {
+      "identifier": "klogg-adb-windows-x86_64-msvc-19.44",
+      "compiler": "msvc",
+      "compiler_version": "19.44.35222",
+      "cmake_version": "3.31.6",
+      "runner_image": "windows-2022",
+      "runner_image_revision": "20260818.1",
+      "secondary_compiler": "mingw-w64-ucrt-x86_64-gcc",
+      "secondary_compiler_version": "16.2.0-3",
+      "msys2_environment": "UCRT64"
+    },
+    "macos-x86_64": {
+      "identifier": "klogg-adb-macos-x86_64-appleclang-17",
+      "compiler": "appleclang",
+      "compiler_version": "17.0.0",
+      "cmake_version": "3.31.6",
+      "runner_image": "macos-15-intel",
+      "runner_image_revision": "20260818.1"
+    },
+    "macos-arm64": {
+      "identifier": "klogg-adb-macos-arm64-appleclang-17",
+      "compiler": "appleclang",
+      "compiler_version": "17.0.0",
+      "cmake_version": "3.31.6",
+      "runner_image": "macos-15",
+      "runner_image_revision": "20260818.1"
+    }
+  },
+  "targets": {
+    "linux-x86_64": {
+      "os": "linux",
+      "arch": "x86_64",
+      "toolchain": "linux-x86_64",
+      "qualified": true,
+      "glibc_baseline": "2.17",
+      "symbol_version_maximums": {
+        "GLIBC": "2.17"
+      },
+      "allowed_dynamic_imports": [
+        "libusb-1.0.so.0",
+        "libc.so.6",
+        "libdl.so.2",
+        "libm.so.6",
+        "libpthread.so.0",
+        "librt.so.1"
+      ],
+      "usb": {
+        "backend": "dynamic-libusb",
+        "linkage": "shared",
+        "required_imports": [
+          "libusb-1.0.so.0"
+        ],
+        "runtime_files": [
+          "libusb-1.0.so.0"
+        ],
+        "replacement_probe_required": true,
+        "runpath": "$ORIGIN"
+      },
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "linux-arm64": {
+      "os": "linux",
+      "arch": "arm64",
+      "toolchain": "linux-arm64",
+      "qualified": true,
+      "glibc_baseline": "2.17",
+      "symbol_version_maximums": {
+        "GLIBC": "2.17"
+      },
+      "allowed_dynamic_imports": [
+        "libusb-1.0.so.0",
+        "libc.so.6",
+        "libdl.so.2",
+        "libm.so.6",
+        "libpthread.so.0",
+        "librt.so.1"
+      ],
+      "usb": {
+        "backend": "dynamic-libusb",
+        "linkage": "shared",
+        "required_imports": [
+          "libusb-1.0.so.0"
+        ],
+        "runtime_files": [
+          "libusb-1.0.so.0"
+        ],
+        "replacement_probe_required": true,
+        "runpath": "$ORIGIN"
+      },
+      "qualification": {
+        "validation_class": "cross-build-only",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "windows-x86_64": {
+      "os": "windows",
+      "arch": "x86_64",
+      "toolchain": "windows-x86_64",
+      "qualified": true,
+      "usb": {
+        "backend": "dynamic-libusb",
+        "linkage": "shared",
+        "required_imports": [
+          "AdbWinApi.dll",
+          "AdbWinUsbApi.dll",
+          "libusb-1.0.dll"
+        ],
+        "runtime_files": [
+          "AdbWinApi.dll",
+          "AdbWinUsbApi.dll",
+          "libusb-1.0.dll"
+        ],
+        "forbidden_imports": [
+          "libgcc_s_seh-1.dll",
+          "libstdc++-6.dll",
+          "libwinpthread-1.dll"
+        ],
+        "replacement_probe_required": true
+      },
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "macos-x86_64": {
+      "os": "macos",
+      "arch": "x86_64",
+      "toolchain": "macos-x86_64",
+      "qualified": true,
+      "deployment_target": "15.0",
+      "allowed_dynamic_imports": [
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "usb": {
+        "backend": "native-iokit",
+        "frameworks": [
+          "IOKit",
+          "CoreFoundation"
+        ],
+        "forbidden_imports": [
+          "libusb"
+        ]
+      },
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "macos-arm64": {
+      "os": "macos",
+      "arch": "arm64",
+      "toolchain": "macos-arm64",
+      "qualified": true,
+      "deployment_target": "14.0",
+      "allowed_dynamic_imports": [
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "usb": {
+        "backend": "native-iokit",
+        "frameworks": [
+          "IOKit",
+          "CoreFoundation"
+        ],
+        "forbidden_imports": [
+          "libusb"
+        ]
+      },
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    }
+  },
+  "install_paths": {
+    "app-linux": "output/helpers/adb",
+    "app-windows": "output/helpers/adb.exe",
+    "app-macos": "output/klogg.app/Contents/MacOS/helpers/adb",
+    "deb": "usr/bin/helpers/adb",
+    "appimage": "usr/bin/helpers/adb",
+    "dmg": "klogg.app/Contents/MacOS/helpers/adb",
+    "nsis": "helpers/adb.exe",
+    "7z": "release/helpers/adb.exe"
+  },
+  "release_assets": [
+    {
+      "kind": "source-archive",
+      "required": true,
+      "file_name": "adb-helper-source-archive.tar.gz",
+      "sha256_file": "adb-helper-source-archive.tar.gz.sha256"
+    },
+    {
+      "kind": "licenses",
+      "required": true,
+      "file_name": "adb-helper-licenses.tar.gz",
+      "sha256_file": "adb-helper-licenses.tar.gz.sha256"
+    },
+    {
+      "kind": "notices",
+      "required": true,
+      "file_name": "adb-helper-notices.tar.gz",
+      "sha256_file": "adb-helper-notices.tar.gz.sha256"
+    },
+    {
+      "kind": "sbom",
+      "required": true,
+      "file_name": "adb-helper-sbom.spdx.json",
+      "sha256_file": "adb-helper-sbom.spdx.json.sha256"
+    },
+    {
+      "kind": "source-offer",
+      "required": true,
+      "file_name": "ADB-HELPER-SOURCE-OFFER.txt",
+      "sha256_file": "ADB-HELPER-SOURCE-OFFER.txt.sha256"
+    },
+    {
+      "kind": "source-manifest",
+      "required": true,
+      "file_name": "adb-helper-source-manifest.json",
+      "sha256_file": "adb-helper-source-manifest.json.sha256"
+    }
+  ],
+  "package_targets": {
+    "linux-appimage-x86_64": {
+      "helper_target": "linux-x86_64",
+      "arch": "x86_64",
+      "maximum_glibc": "2.31",
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "macos-arm64-dmg": {
+      "helper_target": "macos-arm64",
+      "arch": "arm64",
+      "deployment_target": "14.0",
+      "signing_required": true,
+      "notarization_required": true,
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification",
+          "signing",
+          "notarization"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "windows-x86_64": {
+      "helper_target": "windows-x86_64",
+      "arch": "x86_64",
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "windows-x86": {
+      "arch": "x86",
+      "packaging_enabled": false,
+      "qualification": {
+        "validation_class": "cross-build-only",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "macos-x86_64-dmg": {
+      "helper_target": "macos-x86_64",
+      "arch": "x86_64",
+      "deployment_target": "15.0",
+      "signing_required": true,
+      "notarization_required": true,
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification",
+          "signing",
+          "notarization"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "linux-jammy-x86_64": {
+      "helper_target": "linux-x86_64",
+      "arch": "x86_64",
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "linux-noble-x86_64": {
+      "helper_target": "linux-x86_64",
+      "arch": "x86_64",
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    },
+    "linux-resolute-x86_64": {
+      "helper_target": "linux-x86_64",
+      "arch": "x86_64",
+      "qualification": {
+        "validation_class": "locally-buildable",
+        "required_receipts": [
+          "binary-build",
+          "binary-smoke",
+          "package-verification"
+        ],
+        "verified_receipts": [],
+        "release_qualified": false
+      }
+    }
+  }
+}

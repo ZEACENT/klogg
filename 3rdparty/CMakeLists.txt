@@ -26,6 +26,118 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/verify_pinned_source.cmake)
 
 set(_TMP_CPM_USE_LOCAL_PACKAGES ${CPM_USE_LOCAL_PACKAGES})
 
+option(
+  KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES
+  "Fetch the complete pinned native iOS source stack"
+  OFF
+)
+option(
+  KLOGG_ENABLE_IOS_NATIVE_STACK
+  "Link the macOS application to a verified, prefetched native iOS dylib closure"
+  OFF
+)
+
+if(KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES)
+  if(NOT APPLE)
+    message(FATAL_ERROR "The iOS native dependency source closure is macOS-only")
+  endif()
+  find_package(Git REQUIRED)
+  set(CPM_USE_LOCAL_PACKAGES OFF)
+  cpmaddpackage(
+    NAME openssl
+    GIT_REPOSITORY https://github.com/openssl/openssl.git
+    # OpenSSL 3.5.7 LTS; the official release archive is separately SHA-256 locked.
+    GIT_TAG 8cf17aaeb4599f8af87fefd810b5b5fee90fe69e
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME curl
+    GITHUB_REPOSITORY curl/curl
+    GIT_TAG 68720b4837284335b2d63cb358f8f6ce65f5bc55
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME libplist
+    GITHUB_REPOSITORY libimobiledevice/libplist
+    GIT_TAG cf5897a71ea412ea2aeb1e2f6b5ea74d4fabfd8c
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME libtatsu
+    GITHUB_REPOSITORY libimobiledevice/libtatsu
+    GIT_TAG 42329cb756682535c7c0f087987b78d1dd5b16c8
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME libimobiledevice-glue
+    GITHUB_REPOSITORY libimobiledevice/libimobiledevice-glue
+    GIT_TAG aef2bf0f5bfe961ad83d224166462d87b1df2b00
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME libusbmuxd
+    GITHUB_REPOSITORY libimobiledevice/libusbmuxd
+    GIT_TAG adf9c22b9010490e4b55eaeb14731991db1c172c
+    DOWNLOAD_ONLY YES
+  )
+  cpmaddpackage(
+    NAME libimobiledevice
+    GITHUB_REPOSITORY libimobiledevice/libimobiledevice
+    GIT_TAG 149f7623c672c1fa73122c7119a12bfc0012f2ac
+    GIT_CONFIG core.autocrlf=false
+    DOWNLOAD_ONLY YES
+    PATCH_COMMAND
+      ${GIT_EXECUTABLE} apply --whitespace=nowarn
+      ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0001-fix-ostrace-live-packet-leak.patch
+    COMMAND
+      ${GIT_EXECUTABLE} apply --whitespace=nowarn
+      ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0002-interrupt-live-capture-receive.patch
+    COMMAND
+      ${GIT_EXECUTABLE} apply --whitespace=nowarn
+      ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0003-passive-lockdown-handshake.patch
+    COMMAND
+      ${GIT_EXECUTABLE} apply --whitespace=nowarn
+      ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0004-syslog-terminal-callback.patch
+  )
+  set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
+endif()
+
+if(KLOGG_ENABLE_IOS_NATIVE_STACK)
+  if(NOT APPLE)
+    message(FATAL_ERROR "The iOS native stack is supported only on macOS")
+  endif()
+  if(NOT KLOGG_IOS_NATIVE_STACK_ROOT)
+    message(FATAL_ERROR "The iOS native stack requires KLOGG_IOS_NATIVE_STACK_ROOT")
+  endif()
+  set(_klogg_ios_native_libdir "${KLOGG_IOS_NATIVE_STACK_ROOT}/lib")
+  set(_klogg_ios_native_dylibs
+      libcrypto.3.dylib
+      libssl.3.dylib
+      libcurl.4.dylib
+      libplist-2.0.dylib
+      libtatsu.0.dylib
+      libimobiledevice-glue-1.0.dylib
+      libusbmuxd-2.0.dylib
+      libimobiledevice-1.0.dylib
+  )
+  add_library(klogg_ios_native_stack INTERFACE)
+  foreach(_klogg_ios_dylib IN LISTS _klogg_ios_native_dylibs)
+    if(NOT EXISTS "${_klogg_ios_native_libdir}/${_klogg_ios_dylib}")
+      message(FATAL_ERROR "Required iOS native dylib is missing: ${_klogg_ios_dylib}")
+    endif()
+    string(MAKE_C_IDENTIFIER "${_klogg_ios_dylib}" _klogg_ios_target)
+    add_library("klogg_ios_${_klogg_ios_target}" SHARED IMPORTED GLOBAL)
+    set_target_properties(
+      "klogg_ios_${_klogg_ios_target}"
+      PROPERTIES IMPORTED_LOCATION "${_klogg_ios_native_libdir}/${_klogg_ios_dylib}"
+    )
+    target_link_libraries(klogg_ios_native_stack INTERFACE "klogg_ios_${_klogg_ios_target}")
+  endforeach()
+  target_include_directories(
+    klogg_ios_native_stack INTERFACE "${KLOGG_IOS_NATIVE_STACK_ROOT}/include"
+  )
+endif()
+
 function(klogg_apply_pinned_patch_series dependency source_dir expected_revision clean_hash patched_hash)
   set(_patch_files ${ARGN})
   execute_process(
@@ -46,6 +158,20 @@ function(klogg_apply_pinned_patch_series dependency source_dir expected_revision
   endif()
 endfunction()
 
+if(KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES)
+  klogg_apply_pinned_patch_series(
+    libimobiledevice
+    ${libimobiledevice_SOURCE_DIR}
+    149f7623c672c1fa73122c7119a12bfc0012f2ac
+    0a6c741d6361d9bb83c0b73e1a463969f2f98da39b518df72f3c24ca3213695e
+    fac5e506389bffe486077ef6ce37c416a3230ef24a6bc8661eb96b9b6c747800
+    ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0001-fix-ostrace-live-packet-leak.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0002-interrupt-live-capture-receive.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0003-passive-lockdown-handshake.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0004-syslog-terminal-callback.patch
+  )
+endif()
+
 set(_klogg_simdutf_options
     "SIMDUTF_TESTS OFF"
     "SIMDUTF_TOOLS OFF"
@@ -57,7 +183,8 @@ set(_klogg_simdutf_options
 cpmaddpackage(
   NAME simdutf
   GITHUB_REPOSITORY simdutf/simdutf
-  VERSION 5.6.2
+  # v5.6.2
+  GIT_TAG 58c12ff5d84665e26e80547e5f0d72b29ba1c5d4
   OPTIONS ${_klogg_simdutf_options}
 )
 # MSVC ASan trips over simdutf's lazy multi-ISA implementation registry even
@@ -76,8 +203,18 @@ if(TARGET simdutf AND MSVC AND ENABLE_SANITIZER_ADDRESS)
            SIMDUTF_IMPLEMENTATION_FALLBACK=1
   )
 endif()
-cpmaddpackage("gh:foonathan/type_safe@0.2.4")
-cpmaddpackage("gh:RoaringBitmap/CRoaring@4.2.1")
+cpmaddpackage(
+  NAME type_safe
+  GITHUB_REPOSITORY foonathan/type_safe
+  # v0.2.4
+  GIT_TAG 1dbea7936a1e389caa692d01bb3f5ba4b6da7d82
+)
+cpmaddpackage(
+  NAME CRoaring
+  GITHUB_REPOSITORY RoaringBitmap/CRoaring
+  # v4.2.1
+  GIT_TAG 3ef7b44a4f74af09fe19bb84d30bc35cab130561
+)
 
 # Patched dependencies must always use their pinned source trees, never a
 # find_package() result selected by CPM_USE_LOCAL_PACKAGES.
@@ -241,8 +378,9 @@ cpmaddpackage(
   Uchardet
   GIT_REPOSITORY
   https://gitlab.freedesktop.org/uchardet/uchardet
-  VERSION
-  0.0.8
+  # v0.0.8
+  GIT_TAG
+  ae6302a016088ad07177f86d417b20010053632b
   EXCLUDE_FROM_ALL
   YES
   OPTIONS
@@ -302,8 +440,9 @@ cpmaddpackage(
   robin_hood
   GITHUB_REPOSITORY
   martinus/robin-hood-hashing
+  # 3.11.2
   GIT_TAG
-  3.11.2
+  f2cae2e6b8231c46fe9c324e31b0a1f64e0de8c6
   EXCLUDE_FROM_ALL
   YES
 )
@@ -379,8 +518,9 @@ cpmaddpackage(
   xxHash
   GITHUB_REPOSITORY
   Cyan4973/xxHash
-  VERSION
-  0.8.1
+  # v0.8.1
+  GIT_TAG
+  35b0373c697b5f160d3db26b1cbb45a0d5ba788c
   DOWNLOAD_ONLY
   YES
 )

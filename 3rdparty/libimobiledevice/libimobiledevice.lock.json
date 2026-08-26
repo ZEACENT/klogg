@@ -1,0 +1,243 @@
+{
+  "schema_version": 2,
+  "sources": [
+    {
+      "id": "openssl",
+      "version": "3.5.7",
+      "release_tag": "openssl-3.5.7",
+      "support_track": "LTS",
+      "commit": "8cf17aaeb4599f8af87fefd810b5b5fee90fe69e",
+      "commit_url": "https://github.com/openssl/openssl/commit/8cf17aaeb4599f8af87fefd810b5b5fee90fe69e",
+      "archive_url": "https://www.openssl.org/source/openssl-3.5.7.tar.gz",
+      "archive_file": "openssl-3.5.7.tar.gz",
+      "archive_sha256": "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "selection_rationale": "OpenSSL 3.5 is the supported LTS line through April 2030; 3.5.7 replaces the obsolete 1.1.1w compatibility artifact and is built from the official release archive pinned by SHA-256.",
+      "legal": {
+        "spdx_license": "Apache-2.0",
+        "license_files": ["LICENSE.txt"],
+        "notice_label": "OpenSSL 3.5.7 notices",
+        "source_offer_label": "OpenSSL 3.5.7 corresponding source"
+      }
+    },
+    {
+      "id": "curl",
+      "version": "8.21.0",
+      "release_tag": "curl-8_21_0",
+      "commit": "68720b4837284335b2d63cb358f8f6ce65f5bc55",
+      "commit_url": "https://github.com/curl/curl/commit/68720b4837284335b2d63cb358f8f6ce65f5bc55",
+      "archive_url": "https://curl.se/download/curl-8.21.0.tar.xz",
+      "archive_file": "curl-8.21.0.tar.xz",
+      "archive_sha256": "aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "selection_rationale": "curl 8.21.0 is the latest stable release before the 8.22.0 release candidates and supplies libtatsu's mandatory HTTPS transport without a host libcurl fallback.",
+      "legal": {
+        "spdx_license": "curl",
+        "license_files": ["COPYING"],
+        "notice_label": "curl 8.21.0 notices",
+        "source_offer_label": "curl 8.21.0 corresponding source"
+      }
+    },
+    {
+      "id": "libplist",
+      "version": "2.7.0",
+      "commit": "cf5897a71ea412ea2aeb1e2f6b5ea74d4fabfd8c",
+      "archive_url": "https://github.com/libimobiledevice/libplist/archive/cf5897a71ea412ea2aeb1e2f6b5ea74d4fabfd8c.tar.gz",
+      "archive_file": "libplist-cf5897a71ea412ea2aeb1e2f6b5ea74d4fabfd8c.tar.gz",
+      "archive_sha256": "fef07306584241e003c8f2078a0ababb1b8ab1ebf68828670df0725d87bf352f",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "legal": {
+        "spdx_license": "LGPL-2.1-or-later",
+        "license_files": ["COPYING", "COPYING.LESSER"],
+        "notice_label": "libplist 2.7.0 notices",
+        "source_offer_label": "libplist 2.7.0 corresponding source"
+      }
+    },
+    {
+      "id": "libtatsu",
+      "version": "1.0.5",
+      "commit": "42329cb756682535c7c0f087987b78d1dd5b16c8",
+      "archive_url": "https://github.com/libimobiledevice/libtatsu/archive/42329cb756682535c7c0f087987b78d1dd5b16c8.tar.gz",
+      "archive_file": "libtatsu-42329cb756682535c7c0f087987b78d1dd5b16c8.tar.gz",
+      "archive_sha256": "83f25dec2d4a3982d6d0b9cb0d9a7c891bc00f3c232b29fb518ad43b16c14bb3",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "legal": {
+        "spdx_license": "LGPL-2.1-or-later",
+        "license_files": ["COPYING"],
+        "notice_label": "libtatsu 1.0.5 notices",
+        "source_offer_label": "libtatsu 1.0.5 corresponding source"
+      }
+    },
+    {
+      "id": "libimobiledevice-glue",
+      "version": "1.3.2",
+      "commit": "aef2bf0f5bfe961ad83d224166462d87b1df2b00",
+      "archive_url": "https://github.com/libimobiledevice/libimobiledevice-glue/archive/aef2bf0f5bfe961ad83d224166462d87b1df2b00.tar.gz",
+      "archive_file": "libimobiledevice-glue-aef2bf0f5bfe961ad83d224166462d87b1df2b00.tar.gz",
+      "archive_sha256": "0de92b9ac143ae9033d134ee842954bfa27498e796da5144a77ebc5fb0df5bdd",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "legal": {
+        "spdx_license": "LGPL-2.1-or-later",
+        "license_files": ["COPYING"],
+        "notice_label": "libimobiledevice-glue 1.3.2 notices",
+        "source_offer_label": "libimobiledevice-glue 1.3.2 corresponding source"
+      }
+    },
+    {
+      "id": "libusbmuxd",
+      "version": "2.1.1",
+      "commit": "adf9c22b9010490e4b55eaeb14731991db1c172c",
+      "archive_url": "https://github.com/libimobiledevice/libusbmuxd/archive/adf9c22b9010490e4b55eaeb14731991db1c172c.tar.gz",
+      "archive_file": "libusbmuxd-adf9c22b9010490e4b55eaeb14731991db1c172c.tar.gz",
+      "archive_sha256": "a4d7a2a8d791fe7850f78299db1d99793ad154f8e85b71c25213eb5c3c837133",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "legal": {
+        "spdx_license": "LGPL-2.1-or-later",
+        "license_files": ["COPYING"],
+        "notice_label": "libusbmuxd 2.1.1 notices",
+        "source_offer_label": "libusbmuxd 2.1.1 corresponding source"
+      }
+    },
+    {
+      "id": "libimobiledevice",
+      "version": "1.4.0",
+      "tag": "1.4.0",
+      "commit": "149f7623c672c1fa73122c7119a12bfc0012f2ac",
+      "archive_url": "https://github.com/libimobiledevice/libimobiledevice/archive/149f7623c672c1fa73122c7119a12bfc0012f2ac.tar.gz",
+      "archive_file": "libimobiledevice-149f7623c672c1fa73122c7119a12bfc0012f2ac.tar.gz",
+      "archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "source_built": true,
+      "allow_system_substitution": false,
+      "legal": {
+        "spdx_license": "LGPL-2.1-or-later",
+        "license_files": ["COPYING"],
+        "notice_label": "libimobiledevice 1.4.0 notices",
+        "source_offer_label": "libimobiledevice 1.4.0 corresponding source"
+      }
+    }
+  ],
+  "patches": [
+    {
+      "source_id": "libimobiledevice",
+      "path": "patches/0001-fix-ostrace-live-packet-leak.patch",
+      "required": true,
+      "source_archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "clean_tree_sha256": "0a6c741d6361d9bb83c0b73e1a463969f2f98da39b518df72f3c24ca3213695e",
+      "sha256": "16cfa302d356472935db7c63d6e98c0df7e1eba5315db4bf2c0a3eb01d7c1c2a",
+      "patched_tree_sha256": "59b04ebd16fd1c84cad8149e4cce9cfe26373cad30a68629d77965d31214b977",
+      "upstream_commit": "5ca453f9e3950b1f24b51e4cdf255236e34254c4",
+      "upstream_subject": "ostrace: Fix memory leak (#1677)",
+      "callback_buffer_ownership": "borrowed-until-callback-returns"
+    },
+    {
+      "source_id": "libimobiledevice",
+      "path": "patches/0002-interrupt-live-capture-receive.patch",
+      "required": true,
+      "source_archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "clean_tree_sha256": "59b04ebd16fd1c84cad8149e4cce9cfe26373cad30a68629d77965d31214b977",
+      "sha256": "3471d9fe6695b1deeb29c37bdabca80e5cb2db289ba471cc8a7f3e90be314b50",
+      "patched_tree_sha256": "9fa51910d1cf7973aed5a059e9a5f9bdccc9614d8e5ed4a6caa9b9c248bf25f0",
+      "provenance": "klogg-local-minimal-cancellation-hardening",
+      "purpose": "interrupt-partial-frame-live-capture-receive",
+      "bounded_stop_deadline_ms": 500,
+      "receive_poll_interval_ms": 100,
+      "maximum_live_packet_bytes": 16777216,
+      "partial_frame_timeout_policy": "continue-until-cancelled",
+      "terminal_callback": "natural-worker-errors-only",
+      "client_reuse_after_stop": "forbidden"
+    },
+    {
+      "source_id": "libimobiledevice",
+      "path": "patches/0003-passive-lockdown-handshake.patch",
+      "required": true,
+      "source_archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "clean_tree_sha256": "9fa51910d1cf7973aed5a059e9a5f9bdccc9614d8e5ed4a6caa9b9c248bf25f0",
+      "sha256": "0bc4b9c88d9c7e37e67c2b57bfe9d6db6c903f5d6dd98b119f8add3fd94f94b3",
+      "patched_tree_sha256": "ba4ddd34f453c1ba22c123150f14ba1298db4276907be59f330eeb05fb9d9167",
+      "provenance": "klogg-local-passive-pairing-policy",
+      "purpose": "existing-pair-only-lockdown-session",
+      "pairing_side_effects": "forbidden"
+    },
+    {
+      "source_id": "libimobiledevice",
+      "path": "patches/0004-syslog-terminal-callback.patch",
+      "required": true,
+      "source_archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "clean_tree_sha256": "ba4ddd34f453c1ba22c123150f14ba1298db4276907be59f330eeb05fb9d9167",
+      "sha256": "c70186776a345ed08412e042523fd8ea6dfa5da2e8f7a16f76099c140fc5c24f",
+      "patched_tree_sha256": "fac5e506389bffe486077ef6ce37c416a3230ef24a6bc8661eb96b9b6c747800",
+      "provenance": "klogg-local-terminal-error-reporting",
+      "purpose": "report-syslog-worker-terminal-error",
+      "terminal_callback": "natural-worker-errors-only"
+    }
+  ],
+  "release_policy": {
+    "allow_runtime_download": false,
+    "allow_homebrew_runtime": false,
+    "allow_system_dependency_substitution": false,
+    "allow_usbmuxd_daemon_dependency": false,
+    "allow_mobiledevice_framework": false,
+    "allow_floating_revisions": false,
+    "source_build_required": true,
+    "application_configure_disconnected": true,
+    "fail_closed_on_missing_native_stack": true,
+    "required_architectures": ["x86_64", "arm64"],
+    "source_date_epoch": 1780963200
+  },
+  "artifact_contract": {
+    "dylib_install_name_prefix": "@rpath/",
+    "allowed_dylib_rpaths": ["@loader_path"],
+    "allowed_system_dependencies": [
+      "/usr/lib/libSystem.B.dylib",
+      "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+      "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+      "/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration"
+    ],
+    "application_rpath": "@executable_path/../Frameworks/ios-native/lib",
+    "bundle_directory": "Contents/Frameworks/ios-native/lib",
+    "required_dylibs": [
+      "libcrypto.3.dylib",
+      "libssl.3.dylib",
+      "libcurl.4.dylib",
+      "libplist-2.0.dylib",
+      "libtatsu.0.dylib",
+      "libimobiledevice-glue-1.0.dylib",
+      "libusbmuxd-2.0.dylib",
+      "libimobiledevice-1.0.dylib"
+    ],
+    "required_architectures": ["x86_64", "arm64"],
+    "thin_artifacts": {
+      "x86_64": {
+        "architecture": "x86_64",
+        "deployment_target": "15.0",
+        "receipt_file": "ios-native-x86_64-build-receipt.json",
+        "native_qualified": true
+      },
+      "arm64": {
+        "architecture": "arm64",
+        "deployment_target": "14.0",
+        "receipt_file": "ios-native-arm64-build-receipt.json",
+        "native_qualified": true
+      }
+    },
+    "forbidden_dynamic_references": [
+      "/opt/homebrew",
+      "/usr/local/opt",
+      "MobileDevice.framework",
+      "/System/Library/PrivateFrameworks"
+    ]
+  },
+  "receipts": {
+    "build": "ios-native-build-receipt.json",
+    "source": "ios-native-source-receipt.json",
+    "legal": "ios-native-legal-receipt.json",
+    "sbom": "ios-native-sbom.spdx.json",
+    "package": "ios-native-package-receipt.json"
+  }
+}

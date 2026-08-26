@@ -41,6 +41,7 @@ object_script.glogg.Release
 /build/
 /build-bench-*/
 /build_root/
+/build_root_*/
 /build_root_ci/
 /build_root_clang/
 /build_root_gcc/
@@ -75,3 +76,4 @@ website/hugo
 website/.hugo_build.lock
 website/resources/
 scripts/__pycache__/
+/.ccache/

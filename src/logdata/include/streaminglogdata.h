@@ -64,6 +64,9 @@ class StreamingLogData : public SearchableLogData {
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
     bool isLiveSource() const override;
 
+  Q_SIGNALS:
+    void captureOutputChanged( bool healthy, const QString& detail );
+
   protected:
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
@@ -99,6 +102,9 @@ class StreamingLogData : public SearchableLogData {
     bool openDisplayOutputFile( const QString& outputPath, bool preserveExisting = false );
     void closeDisplayOutputFile();
     bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
+    void reportCaptureOutputHealthy();
+    void reportCaptureOutputFailure( const QString& detail );
+    void checkPreservedOutputState();
     // Writes the lines appended in `appendResult` to the Strip-mode display
     // file.  Addresses the appended lines by their current tail position so it
     // is correct even when trimming has shifted line numbers — never by a
@@ -126,6 +132,7 @@ class StreamingLogData : public SearchableLogData {
     qint64 rollingMaxFileSize_ = 0;
     int rollingBackupCount_ = 0;
     LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
+    bool captureOutputDegraded_ = false;
     mutable std::mutex cachedRawBatchesMutex_;
     std::deque<CachedRawBatch> cachedRawBatches_;
     qint64 cachedRawBytes_ = 0;

@@ -19,6 +19,7 @@
 
 #include <catch2/catch.hpp>
 
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -26,15 +27,18 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
-#include <QGuiApplication>
+#include <QFormLayout>
+#include <QFutureWatcher>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
 #include <QProcess>
+#include <QPushButton>
 #include <QSemaphore>
 #include <QSettings>
 #include <QSpinBox>
@@ -43,22 +47,26 @@
 #include <QUuid>
 #include <QWidget>
 
+#include <algorithm>
 #include <map>
+#include <optional>
 
-#include "adbprocesstransport.h"
 #include "adbdevicelistprovider.h"
-#include "adblogcatsource.h"
 #include "adblogcatdialog.h"
+#include "adblogcatsource.h"
+#include "adbprocesstransport.h"
+#include "adbsmartsockettransport.h"
 #include "commandargumenttokenizer.h"
 #include "configuration.h"
 #include "highlighterset.h"
+#include "ioslogdialog.h"
 #include "ioslogprocesstransport.h"
 #include "livesourcetransport.h"
 #include "optionsdialog.h"
 #include "recentfiles.h"
 #include "savedsearches.h"
-#include "streaminglogdata.h"
 #include "shortcuts.h"
+#include "streaminglogdata.h"
 #include "test_utils.h"
 
 namespace {
@@ -81,32 +89,26 @@ bool skipHeadlessOptionsDialogTest()
 }
 
 class ScopedAdbConfigurationGuard {
-  public:
+public:
     ScopedAdbConfigurationGuard()
         : config_( Configuration::getSynced() )
-        , executable_( config_.adbExecutable() )
-        , extraArgs_( config_.adbLogcatExtraArgs() )
         , ansiOutput_( config_.adbLogcatAnsiOutputEnabled() )
     {
     }
 
     ~ScopedAdbConfigurationGuard()
     {
-        config_.setAdbExecutable( executable_ );
-        config_.setAdbLogcatExtraArgs( extraArgs_ );
         config_.setAdbLogcatAnsiOutputEnabled( ansiOutput_ );
         config_.save();
     }
 
-  private:
+private:
     Configuration& config_;
-    QString executable_;
-    QString extraArgs_;
     bool ansiOutput_;
 };
 
 class ScopedOptionsDialogConfigurationGuard {
-  public:
+public:
     ScopedOptionsDialogConfigurationGuard()
         : config_( Configuration::getSynced() )
         , savedSearches_( SavedSearches::getSynced() )
@@ -143,7 +145,7 @@ class ScopedOptionsDialogConfigurationGuard {
         highlighterSets_.save();
     }
 
-  private:
+private:
     Configuration& config_;
     SavedSearches& savedSearches_;
     RecentFiles& recentFiles_;
@@ -152,9 +154,71 @@ class ScopedOptionsDialogConfigurationGuard {
     QString snapshotPath_;
 };
 
-class TestAdbProcessTransport : public AdbProcessTransport {
-  public:
-    using AdbProcessTransport::AdbProcessTransport;
+template <typename Base>
+class GenerationDrivenProcessTransport : public Base {
+public:
+    using Base::Base;
+    using Generation = LiveSourceTransport::Generation;
+
+    bool startAndWait()
+    {
+        const auto generation = nextGeneration();
+        currentGeneration_ = generation;
+        bool completed = false;
+        bool connected = false;
+        const auto stateConnection = QObject::connect(
+            this, &LiveSourceTransport::stateChanged,
+            [ & ]( Generation reportedGeneration, LiveSourceTransport::State state ) {
+                if ( reportedGeneration != generation ) {
+                    return;
+                }
+                if ( state == LiveSourceTransport::State::Connected
+                     || state == LiveSourceTransport::State::Error ) {
+                    completed = true;
+                    connected = state == LiveSourceTransport::State::Connected;
+                }
+            } );
+
+        this->start( generation );
+        QElapsedTimer deadline;
+        deadline.start();
+        while ( !completed && deadline.elapsed() < 6000 ) {
+            QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+        }
+        QObject::disconnect( stateConnection );
+        return connected;
+    }
+
+    void startAsync()
+    {
+        const auto generation = nextGeneration();
+        currentGeneration_ = generation;
+        this->start( generation );
+    }
+
+    void stopCurrent()
+    {
+        const auto generation = currentGeneration_;
+        currentGeneration_.reset();
+        if ( generation.has_value() ) {
+            this->stop( *generation );
+        }
+    }
+
+private:
+    Generation nextGeneration()
+    {
+        return ++generationCounter_;
+    }
+
+    Generation generationCounter_{ 0 };
+    std::optional<Generation> currentGeneration_;
+};
+
+class TestAdbProcessTransport : public GenerationDrivenProcessTransport<AdbProcessTransport> {
+public:
+    using TestBase = GenerationDrivenProcessTransport<AdbProcessTransport>;
+    using TestBase::TestBase;
     using Command = ProcessLiveSourceTransport::Command;
 
     Command streamingCommandForTest() const
@@ -168,20 +232,24 @@ class TestAdbProcessTransport : public AdbProcessTransport {
     }
 };
 
-class ImmediateFailureAdbProcessTransport : public AdbProcessTransport {
-  public:
+class ImmediateFailureAdbProcessTransport
+    : public GenerationDrivenProcessTransport<AdbProcessTransport> {
+public:
     ImmediateFailureAdbProcessTransport()
-        : AdbProcessTransport( QString{}, QStringLiteral( "serial-123" ), {} )
+        : GenerationDrivenProcessTransport<AdbProcessTransport>(
+              QString{}, QStringLiteral( "serial-123" ), {} )
     {
     }
 
-  protected:
+protected:
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
         return Command{ QStringLiteral( "cmd" ),
-                        { QStringLiteral( "/c" ), QStringLiteral( "exit" ),
-                          QStringLiteral( "/b" ), QStringLiteral( "7" ) } };
+                        { QStringLiteral( "/c" ),
+                          QStringLiteral( "exit" ),
+                          QStringLiteral( "/b" ),
+                          QStringLiteral( "7" ) } };
 #else
         return Command{ QStringLiteral( "/bin/sh" ),
                         { QStringLiteral( "-c" ), QStringLiteral( "exit 7" ) } };
@@ -189,25 +257,26 @@ class ImmediateFailureAdbProcessTransport : public AdbProcessTransport {
     }
 };
 
-class ReentrantReconnectAdbProcessTransport final
-    : public ImmediateFailureAdbProcessTransport {
-  public:
+class ReentrantReconnectAdbProcessTransport final : public ImmediateFailureAdbProcessTransport {
+public:
     QString stderrFilePathForTest() const
     {
         return stderrFilePath();
     }
 
-  protected:
+protected:
     void startProcessAsync( QProcess& ) override
     {
         // Keep the replacement capture alive without starting a second process.
     }
 };
 
-class LongRunningAdbProcessTransport final : public AdbProcessTransport {
-  public:
+class LongRunningAdbProcessTransport final
+    : public GenerationDrivenProcessTransport<AdbProcessTransport> {
+public:
     LongRunningAdbProcessTransport()
-        : AdbProcessTransport( QString{}, QStringLiteral( "serial-123" ), {} )
+        : GenerationDrivenProcessTransport<AdbProcessTransport>(
+              QString{}, QStringLiteral( "serial-123" ), {} )
     {
     }
 
@@ -216,12 +285,13 @@ class LongRunningAdbProcessTransport final : public AdbProcessTransport {
         return stderrFilePath();
     }
 
-  protected:
+protected:
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
         return Command{ QStringLiteral( "ping" ),
-                        { QStringLiteral( "-n" ), QStringLiteral( "30" ),
+                        { QStringLiteral( "-n" ),
+                          QStringLiteral( "30" ),
                           QStringLiteral( "127.0.0.1" ) } };
 #else
         return Command{ QStringLiteral( "/bin/sleep" ), { QStringLiteral( "30" ) } };
@@ -236,21 +306,20 @@ struct DeviceListTaskState {
 };
 
 class SnapshotDeviceListProvider final : public DeviceListProviderBase<QString> {
-  public:
+public:
     explicit SnapshotDeviceListProvider( std::shared_ptr<DeviceListTaskState> state )
-        : DeviceListProviderBase<QString>(
-              [ state, snapshot = state->result ] {
-                  state->taskEntered.release();
-                  if ( !state->allowTaskToFinish.tryAcquire( 1, 3000 ) ) {
-                      return QList<QString>{};
-                  }
-                  return QList<QString>{ snapshot };
-              } )
+        : DeviceListProviderBase<QString>( [ state, snapshot = state->result ] {
+            state->taskEntered.release();
+            if ( !state->allowTaskToFinish.tryAcquire( 1, 3000 ) ) {
+                return QList<QString>{};
+            }
+            return QList<QString>{ snapshot };
+        } )
         , state_( std::move( state ) )
     {
     }
 
-  protected:
+protected:
     QList<QString> doListDevices( QString* ) const override
     {
         const auto state = state_;
@@ -266,13 +335,14 @@ class SnapshotDeviceListProvider final : public DeviceListProviderBase<QString> 
         return device == deviceId;
     }
 
-  private:
+private:
     std::shared_ptr<DeviceListTaskState> state_;
 };
 
-class TestIosLogProcessTransport : public IosLogProcessTransport {
-  public:
-    using IosLogProcessTransport::IosLogProcessTransport;
+class TestIosLogProcessTransport : public GenerationDrivenProcessTransport<IosLogProcessTransport> {
+public:
+    using TestBase = GenerationDrivenProcessTransport<IosLogProcessTransport>;
+    using TestBase::TestBase;
     using Command = ProcessLiveSourceTransport::Command;
 
     Command streamingCommandForTest() const
@@ -301,7 +371,8 @@ QString makeCaptureId()
     return QUuid::createUuid().toString( QUuid::WithoutBraces );
 }
 
-bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData, unsigned long long lineCount )
+bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData,
+                       unsigned long long lineCount )
 {
     QElapsedTimer deadline;
     deadline.start();
@@ -342,12 +413,62 @@ void drainLiveSourceEvents( int settleMs )
         QCoreApplication::processEvents();
     }
 }
+
+bool hasFutureWatcherChild( const QObject& object )
+{
+    const auto children = object.children();
+    return std::any_of( children.cbegin(), children.cend(), []( const QObject* child ) {
+        return QString::fromLatin1( child->metaObject()->className() )
+            .startsWith( QStringLiteral( "QFutureWatcher" ) );
+    } );
+}
 } // namespace
+
+TEST_CASE( "Default live-source factory selects the explicit ADB backend" )
+{
+    DefaultLiveSourceTransportFactory factory;
+    LiveSourceTransportConfig config;
+    config.sourceType = LiveLogSourceType::AdbLogcat;
+    config.deviceId = QStringLiteral( "SERIAL-42" );
+
+    // Missing backend configuration is modern and environment-independent.
+    auto defaultTransport = factory.create( config );
+    REQUIRE( defaultTransport != nullptr );
+    CHECK( dynamic_cast<klogg::livecapture::adb::AdbSmartSocketTransport*>( defaultTransport.get() )
+           != nullptr );
+
+    // The process compatibility backend is reachable only through an explicit
+    // discriminator together with an explicit executable. It never performs
+    // lookup on behalf of an incomplete/default config.
+    config.adbBackend = AdbTransportBackend::Process;
+    CHECK( factory.create( config ) == nullptr );
+    config.executable = QStringLiteral( "/explicit/legacy/adb" );
+    auto processTransport = factory.create( config );
+    REQUIRE( processTransport != nullptr );
+    CHECK( dynamic_cast<AdbProcessTransport*>( processTransport.get() ) != nullptr );
+
+    config.adbBackend = AdbTransportBackend::SmartSocket;
+    config.executable.clear();
+    auto smartSocketTransport = factory.create( config );
+    REQUIRE( smartSocketTransport != nullptr );
+    CHECK( dynamic_cast<klogg::livecapture::adb::AdbSmartSocketTransport*>(
+               smartSocketTransport.get() )
+           != nullptr );
+
+    config.sourceType = LiveLogSourceType::IosLogStream;
+    config.iosBackend = IosTransportBackend::LegacyProcess;
+    CHECK( factory.create( config ) == nullptr );
+    config.executable = QStringLiteral( "/explicit/legacy/pymobiledevice3" );
+    auto iosTransport = factory.create( config );
+    REQUIRE( iosTransport != nullptr );
+    CHECK( dynamic_cast<IosLogProcessTransport*>( iosTransport.get() ) != nullptr );
+}
 
 TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
 {
-    TestAdbProcessTransport transport( QString{}, QStringLiteral( "emulator-5554" ),
-                                       QStringLiteral( "-v threadtime -T \"2026-03-15 12:34:56.000\" *:I" ) );
+    TestAdbProcessTransport transport(
+        QString{}, QStringLiteral( "emulator-5554" ),
+        QStringLiteral( "-v threadtime -T \"2026-03-15 12:34:56.000\" *:I" ) );
 
     const auto streaming = transport.streamingCommandForTest();
     // When no explicit path is configured, the program is either bare "adb"
@@ -392,9 +513,9 @@ TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "--path" ),
-                             QStringLiteral( "C:\\temp\\log.txt" ),
-                             QStringLiteral( "--pattern" ), QStringLiteral( "regex\\d+" ),
-                             QStringLiteral( "--title" ), QStringLiteral( "hello world" ) } );
+                             QStringLiteral( "C:\\temp\\log.txt" ), QStringLiteral( "--pattern" ),
+                             QStringLiteral( "regex\\d+" ), QStringLiteral( "--title" ),
+                             QStringLiteral( "hello world" ) } );
 }
 
 TEST_CASE( "AdbProcessTransport preserves empty quoted extra args" )
@@ -405,8 +526,8 @@ TEST_CASE( "AdbProcessTransport preserves empty quoted extra args" )
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
-                             QStringLiteral( "logcat" ), QStringLiteral( "--empty" ),
-                             QString{}, QStringLiteral( "--quoted" ), QString{} } );
+                             QStringLiteral( "logcat" ), QStringLiteral( "--empty" ), QString{},
+                             QStringLiteral( "--quoted" ), QString{} } );
 }
 
 TEST_CASE( "AdbProcessTransport adds logcat color modifier when ANSI output is enabled" )
@@ -424,20 +545,17 @@ TEST_CASE( "AdbProcessTransport adds logcat color modifier when ANSI output is e
 
 TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
 {
-    TestIosLogProcessTransport transport(
-        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
-        QStringLiteral( "00008030-001C195E36D8802E" ),
-        QStringLiteral( "--match \"process name\"" ) );
+    TestIosLogProcessTransport transport( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                                          QStringLiteral( "00008030-001C195E36D8802E" ),
+                                          QStringLiteral( "--match \"process name\"" ) );
 
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.program == QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ) );
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "--no-color" ), QStringLiteral( "syslog" ),
-                             QStringLiteral( "live" ),
-                             QStringLiteral( "--udid" ),
+                             QStringLiteral( "live" ), QStringLiteral( "--udid" ),
                              QStringLiteral( "00008030-001C195E36D8802E" ),
-                             QStringLiteral( "--match" ),
-                             QStringLiteral( "process name" ) } );
+                             QStringLiteral( "--match" ), QStringLiteral( "process name" ) } );
 }
 
 TEST_CASE( "ProcessLiveSourceTransport creates unique private stderr capture files" )
@@ -467,33 +585,32 @@ TEST_CASE( "ProcessLiveSourceTransport keeps a reentrant reconnect capture alive
     const auto initialPath = transport.stderrFilePathForTest();
     QString failedPath;
     bool reconnected = false;
-    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport,
-                      [ & ] {
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport, [ & ] {
         if ( !reconnected ) {
             failedPath = transport.stderrFilePathForTest();
             reconnected = true;
-            transport.connectTransportAsync();
+            transport.startAsync();
         }
     } );
 
-    CHECK_FALSE( transport.connectTransport() );
+    CHECK_FALSE( transport.startAndWait() );
     REQUIRE( reconnected );
     REQUIRE( failedPath != initialPath );
     REQUIRE( transport.stderrFilePathForTest() != failedPath );
     REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 }
 
 TEST_CASE( "ProcessLiveSourceTransport removes detached stderr captures after disconnect" )
 {
     LongRunningAdbProcessTransport transport;
-    REQUIRE( transport.connectTransport() );
+    REQUIRE( transport.startAndWait() );
 
     const auto detachedPath = transport.stderrFilePathForTest();
     REQUIRE( QFileInfo::exists( detachedPath ) );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
     REQUIRE( transport.stderrFilePathForTest() != detachedPath );
     REQUIRE( QFileInfo::exists( transport.stderrFilePathForTest() ) );
 
@@ -550,10 +667,9 @@ TEST_CASE( "IosLogProcessTransport passes color flags as pymobiledevice3 top-lev
 
 TEST_CASE( "IosLogProcessTransport preserves empty quoted extra args" )
 {
-    TestIosLogProcessTransport transport(
-        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
-        QStringLiteral( "00008030-001C195E36D8802E" ),
-        QStringLiteral( "--tunnel '' --match \"\"" ) );
+    TestIosLogProcessTransport transport( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                                          QStringLiteral( "00008030-001C195E36D8802E" ),
+                                          QStringLiteral( "--tunnel '' --match \"\"" ) );
 
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.arguments
@@ -653,9 +769,9 @@ TEST_CASE( "IosLogProcessTransport handles split PTY prefix across chunks" )
     // The ^D\b\b prefix (4 bytes) may arrive split across two reads.
     // The transport must buffer the partial prefix and strip it once
     // the rest arrives, without leaking bytes into the log.
-    TestIosLogProcessTransport transport(
-        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
-        QStringLiteral( "00008030-001C195E36D8802E" ), QString{}, true );
+    TestIosLogProcessTransport transport( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                                          QStringLiteral( "00008030-001C195E36D8802E" ), QString{},
+                                          true );
 
     // First chunk: only "^D" (2 of 4 bytes of the prefix)
     QByteArray chunk1 = QByteArrayLiteral( "^D" );
@@ -705,11 +821,13 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
 
     // With ANSI enabled (script wrapper), the process should emit ANSI codes.
     {
-        TestIosLogProcessTransport colorTransport( scriptPath,
-                                                   QStringLiteral( "DEVICE_UDID" ), QString{}, true );
-        SafeQSignalSpy bytesSpy( &colorTransport, SIGNAL( bytesReceived( QByteArray ) ) );
+        TestIosLogProcessTransport colorTransport( scriptPath, QStringLiteral( "DEVICE_UDID" ),
+                                                   QString{}, true );
+        SafeQSignalSpy bytesSpy(
+            &colorTransport,
+            SIGNAL( bytesReceived( LiveSourceTransport::Generation, QByteArray ) ) );
 
-        REQUIRE( colorTransport.connectTransport() );
+        REQUIRE( colorTransport.startAndWait() );
 
         QByteArray accumulated;
         QElapsedTimer deadline;
@@ -719,7 +837,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
             QTest::qWait( 50 );
             if ( bytesSpy.count() > 0 ) {
                 for ( int i = 0; i < bytesSpy.count(); ++i ) {
-                    accumulated += bytesSpy.at( i ).at( 0 ).toByteArray();
+                    accumulated += bytesSpy.at( i ).at( 1 ).toByteArray();
                 }
                 break;
             }
@@ -736,7 +854,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
         // the inner command's stderr to the transport's temp file.
         REQUIRE_FALSE( accumulated.contains( QByteArrayLiteral( "STDERR_LEAK" ) ) );
 
-        colorTransport.disconnectTransport();
+        colorTransport.stopCurrent();
         QCoreApplication::processEvents();
         QTest::qWait( 500 );
         QCoreApplication::processEvents();
@@ -744,11 +862,13 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
 
     // Without ANSI (no script wrapper), the process should NOT emit ANSI codes.
     {
-        TestIosLogProcessTransport plainTransport( scriptPath,
-                                                   QStringLiteral( "DEVICE_UDID" ), QString{}, false );
-        SafeQSignalSpy bytesSpy( &plainTransport, SIGNAL( bytesReceived( QByteArray ) ) );
+        TestIosLogProcessTransport plainTransport( scriptPath, QStringLiteral( "DEVICE_UDID" ),
+                                                   QString{}, false );
+        SafeQSignalSpy bytesSpy(
+            &plainTransport,
+            SIGNAL( bytesReceived( LiveSourceTransport::Generation, QByteArray ) ) );
 
-        REQUIRE( plainTransport.connectTransport() );
+        REQUIRE( plainTransport.startAndWait() );
 
         QByteArray accumulated;
         QElapsedTimer deadline;
@@ -758,7 +878,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
             QTest::qWait( 50 );
             if ( bytesSpy.count() > 0 ) {
                 for ( int i = 0; i < bytesSpy.count(); ++i ) {
-                    accumulated += bytesSpy.at( i ).at( 0 ).toByteArray();
+                    accumulated += bytesSpy.at( i ).at( 1 ).toByteArray();
                 }
                 break;
             }
@@ -772,7 +892,7 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
         // Without the PTY wrapper, stderr goes to the temp file too — no leak.
         REQUIRE_FALSE( accumulated.contains( QByteArrayLiteral( "STDERR_LEAK" ) ) );
 
-        plainTransport.disconnectTransport();
+        plainTransport.stopCurrent();
         QCoreApplication::processEvents();
         QTest::qWait( 500 );
         QCoreApplication::processEvents();
@@ -784,15 +904,16 @@ TEST_CASE( "IosLogProcessTransport PTY wrapper forces ANSI output from script-em
 
 TEST_CASE( "IosLogProcessTransport clear command is an inert no-op" )
 {
-    TestIosLogProcessTransport transport(
-        QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
-        QStringLiteral( "00008030-001C195E36D8802E" ), QString{} );
+    TestIosLogProcessTransport transport( QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
+                                          QStringLiteral( "00008030-001C195E36D8802E" ),
+                                          QString{} );
 
     const auto clear = transport.clearCommandForTest();
 #ifdef Q_OS_WIN
     REQUIRE( clear.program == QStringLiteral( "cmd" ) );
-    REQUIRE( clear.arguments == QStringList{ QStringLiteral( "/c" ), QStringLiteral( "exit" ),
-                                             QStringLiteral( "0" ) } );
+    REQUIRE(
+        clear.arguments
+        == QStringList{ QStringLiteral( "/c" ), QStringLiteral( "exit" ), QStringLiteral( "0" ) } );
 #else
     REQUIRE( clear.program == QStringLiteral( "true" ) );
     REQUIRE( clear.arguments.isEmpty() );
@@ -871,10 +992,12 @@ TEST_CASE( "AdbProcessTransport reports startup failures through the transport i
 {
     TestAdbProcessTransport transport( QStringLiteral( "/path/that/does/not/exist/adb" ),
                                        QStringLiteral( "serial" ), {} );
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
-    REQUIRE_FALSE( transport.connectTransport() );
+    REQUIRE_FALSE( transport.startAndWait() );
     REQUIRE( errorSpy.safeWait() );
     REQUIRE( stateSpy.count() >= 1 );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
@@ -883,9 +1006,8 @@ TEST_CASE( "AdbProcessTransport reports startup failures through the transport i
 TEST_CASE( "AdbProcessTransport listDevices returns an error when adb cannot start" )
 {
     QString error;
-    const auto devices
-        = AdbProcessTransport::listDevices( QStringLiteral( "/path/that/does/not/exist/adb" ),
-                                            &error );
+    const auto devices = AdbProcessTransport::listDevices(
+        QStringLiteral( "/path/that/does/not/exist/adb" ), &error );
 
     REQUIRE( devices.isEmpty() );
     REQUIRE_FALSE( error.isEmpty() );
@@ -900,9 +1022,8 @@ TEST_CASE( "AdbDeviceListProvider returns same results as static listDevices" )
     const auto devices = provider.listDevices( &providerError );
 
     QString staticError;
-    const auto staticDevices
-        = AdbProcessTransport::listDevices( QStringLiteral( "/path/that/does/not/exist/adb" ),
-                                            &staticError );
+    const auto staticDevices = AdbProcessTransport::listDevices(
+        QStringLiteral( "/path/that/does/not/exist/adb" ), &staticError );
 
     REQUIRE( devices.isEmpty() );
     REQUIRE( staticDevices.isEmpty() );
@@ -910,12 +1031,14 @@ TEST_CASE( "AdbDeviceListProvider returns same results as static listDevices" )
     REQUIRE_FALSE( staticError.isEmpty() );
 }
 
-TEST_CASE( "AdbDeviceListProvider isDeviceAvailable returns true on subprocess error" )
+TEST_CASE( "AdbDeviceListProvider reports unknown availability on discovery error" )
 {
-    // When the list command itself fails, isDeviceAvailable should return true
-    // (optimistic fallback — let connectTransport handle the real error).
     AdbDeviceListProvider provider( QStringLiteral( "/nonexistent/adb" ) );
-    CHECK( provider.isDeviceAvailable( QStringLiteral( "any-serial" ) ) );
+    const auto result = provider.deviceAvailability( QStringLiteral( "any-serial" ) );
+
+    CHECK( result.availability == DeviceAvailability::Unknown );
+    REQUIRE( result.error.has_value() );
+    CHECK( result.error->category == klogg::livecapture::ErrorCategory::Configuration );
 }
 
 TEST_CASE( "AdbDeviceListProvider listDevicesAsync returns a valid future" )
@@ -934,10 +1057,14 @@ TEST_CASE( "AdbDeviceListProvider listDevicesAsync returns a valid future" )
     REQUIRE( future.result().isEmpty() );
 }
 
-TEST_CASE( "IosDeviceListProvider isDeviceAvailable returns true on subprocess error" )
+TEST_CASE( "IosDeviceListProvider reports unknown availability on discovery error" )
 {
     IosDeviceListProvider provider( QStringLiteral( "/nonexistent/pymobiledevice3" ) );
-    CHECK( provider.isDeviceAvailable( QStringLiteral( "any-udid" ) ) );
+    const auto result = provider.deviceAvailability( QStringLiteral( "any-udid" ) );
+
+    CHECK( result.availability == DeviceAvailability::Unknown );
+    REQUIRE( result.error.has_value() );
+    CHECK( result.error->category == klogg::livecapture::ErrorCategory::Configuration );
 }
 
 TEST_CASE( "IosDeviceListProvider listDevicesAsync returns a valid future" )
@@ -956,54 +1083,45 @@ TEST_CASE( "IosDeviceListProvider listDevicesAsync returns a valid future" )
 TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transport errors" )
 {
     ImmediateFailureAdbProcessTransport transport;
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
-    REQUIRE_FALSE( transport.connectTransport() );
+    REQUIRE_FALSE( transport.startAndWait() );
     REQUIRE( errorSpy.safeWait() );
     REQUIRE( stateSpy.count() >= 1 );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
 }
 
-TEST_CASE( "OptionsDialog loads and persists adb settings" )
+TEST_CASE( "OptionsDialog exposes no legacy live-source executable or raw-argument controls" )
 {
-    if ( skipHeadlessOptionsDialogTest() ) {
-        return;
-    }
-
-    ScopedAdbConfigurationGuard configGuard;
-    auto& savedSearches = SavedSearches::getSynced();
-    auto& recentFiles = RecentFiles::getSynced();
-    // OptionsDialog also reads the color-label match defaults from
-    // HighlighterSetCollection during construction; initialize the persistable
-    // like the two above so get() does not throw.
-    auto& highlighterSets = HighlighterSetCollection::getSynced();
-    Q_UNUSED( savedSearches );
-    Q_UNUSED( recentFiles );
-    Q_UNUSED( highlighterSets );
-    auto& config = Configuration::getSynced();
-    config.setAdbExecutable( QStringLiteral( "/initial/adb" ) );
-    config.setAdbLogcatExtraArgs( QStringLiteral( "-v brief" ) );
-    config.save();
+    ScopedOptionsDialogConfigurationGuard configGuard;
 
     OptionsDialog dialog;
-    auto* adbExecutableLineEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableLineEdit" ) );
-    auto* adbLogcatArgsLineEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbLogcatArgsLineEdit" ) );
 
-    REQUIRE( adbExecutableLineEdit != nullptr );
-    REQUIRE( adbLogcatArgsLineEdit != nullptr );
-    REQUIRE( adbExecutableLineEdit->text() == QStringLiteral( "/initial/adb" ) );
-    REQUIRE( adbLogcatArgsLineEdit->text() == QStringLiteral( "-v brief" ) );
+    const QStringList retiredObjectNames{
+        QStringLiteral( "adbExecutableLineEdit" ),    QStringLiteral( "adbLogcatArgsLineEdit" ),
+        QStringLiteral( "adbDetectButton" ),          QStringLiteral( "adbExecutableLabel" ),
+        QStringLiteral( "adbLogcatArgsLabel" ),       QStringLiteral( "adbHelpLabel" ),
+        QStringLiteral( "iosLogExecutableLineEdit" ), QStringLiteral( "iosLogArgsLineEdit" ),
+        QStringLiteral( "iosLogDetectButton" ),
+    };
+    for ( const auto& objectName : retiredObjectNames ) {
+        INFO( "retired object: " << objectName.toStdString() );
+        CHECK( dialog.findChild<QObject*>( objectName ) == nullptr );
+    }
+    CHECK( dialog.findChildren<QFileDialog*>().isEmpty() );
 
-    adbExecutableLineEdit->setText( QStringLiteral( "/updated/adb" ) );
-    adbLogcatArgsLineEdit->setText( QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
+    auto* backupCount
+        = dialog.findChild<QSpinBox*>( QStringLiteral( "liveSourceRollingBackupCountSpinBox" ) );
+    REQUIRE( backupCount != nullptr );
+    CHECK( backupCount->specialValueText() == QStringLiteral( "Keep all" ) );
+    CHECK( backupCount->toolTip().contains( QStringLiteral( "keep all" ), Qt::CaseInsensitive ) );
+    CHECK_FALSE( backupCount->toolTip().contains( QStringLiteral( "only the current" ),
+                                                  Qt::CaseInsensitive ) );
 
     REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog", Qt::DirectConnection ) );
-
-    auto& restoredConfig = Configuration::getSynced();
-    REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/updated/adb" ) );
-    REQUIRE( restoredConfig.adbLogcatExtraArgs()
-             == QStringLiteral( "-v threadtime ActivityManager:I *:S" ) );
 }
 
 TEST_CASE( "OptionsDialog default shortcut table keeps Apply and OK enabled" )
@@ -1073,9 +1191,7 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
     config.setVersionCheckingEnabled( false );
     config.setLineSpacingPercent( Configuration::MaxLineSpacingPercent );
     config.setPollIntervalMs( 12345 );
-    config.setAdbExecutable( QStringLiteral( "/custom/adb" ) );
     config.setAdbLogcatAnsiOutputEnabled( true );
-    config.setIosLogExecutable( QStringLiteral( "/custom/pymobiledevice3" ) );
     config.setIosLogAnsiOutputEnabled( true );
     config.setUseSearchResultsCache( false );
     config.setShortcuts( { { ShortcutAction::MainWindowOpenFile,
@@ -1116,22 +1232,19 @@ TEST_CASE( "OptionsDialog reset buttons restore defaults and can be applied" )
     CHECK( restoredConfig.versionCheckingEnabled() == defaults.versionCheckingEnabled() );
     CHECK( restoredConfig.lineSpacingPercent() == defaults.lineSpacingPercent() );
     CHECK( restoredConfig.pollIntervalMs() == defaults.pollIntervalMs() );
-    CHECK( restoredConfig.adbExecutable() == defaults.adbExecutable() );
-    CHECK( restoredConfig.adbLogcatAnsiOutputEnabled()
-           == defaults.adbLogcatAnsiOutputEnabled() );
-    CHECK( restoredConfig.iosLogExecutable() == defaults.iosLogExecutable() );
+    CHECK( restoredConfig.adbLogcatAnsiOutputEnabled() == defaults.adbLogcatAnsiOutputEnabled() );
     CHECK( restoredConfig.iosLogAnsiOutputEnabled() == defaults.iosLogAnsiOutputEnabled() );
     CHECK( restoredConfig.useSearchResultsCache() == defaults.useSearchResultsCache() );
     CHECK( SavedSearches::getSynced().historySize() == defaultSavedSearches.historySize() );
     CHECK( RecentFiles::getSynced().filesHistoryMaxItems()
            == defaultRecentFiles.filesHistoryMaxItems() );
 
-    const auto restoredOpenFileShortcuts
-        = ShortcutAction::shortcutKeys( ShortcutAction::MainWindowOpenFile,
-                                        restoredConfig.shortcuts() );
+    const auto restoredOpenFileShortcuts = ShortcutAction::shortcutKeys(
+        ShortcutAction::MainWindowOpenFile, restoredConfig.shortcuts() );
     const auto defaultOpenFileShortcuts
         = ShortcutAction::shortcutKeys( ShortcutAction::MainWindowOpenFile, {} );
-    CHECK_FALSE( restoredOpenFileShortcuts.contains( QKeySequence( QStringLiteral( "Ctrl+Shift+P" ) ) ) );
+    CHECK_FALSE(
+        restoredOpenFileShortcuts.contains( QKeySequence( QStringLiteral( "Ctrl+Shift+P" ) ) ) );
     for ( const auto& defaultShortcut : defaultOpenFileShortcuts ) {
         CHECK( restoredOpenFileShortcuts.contains( defaultShortcut ) );
     }
@@ -1178,18 +1291,17 @@ TEST_CASE( "OptionsDialog File and Live Source tab widgets do not overlap vertic
         REQUIRE( visibleChildren.size() >= 2 );
 
         for ( int i = 0; i < visibleChildren.size() - 1; ++i ) {
-            auto* current = visibleChildren[i];
-            auto* next = visibleChildren[i + 1];
+            auto* current = visibleChildren[ i ];
+            auto* next = visibleChildren[ i + 1 ];
 
             const auto currentBottom = current->geometry().bottom();
             const auto nextTop = next->geometry().top();
             const int gap = nextTop - currentBottom;
 
             INFO( "[" << tabName.toStdString() << "] Widget " << i << ": \""
-                  << current->objectName().toStdString() << "\" bottom=" << currentBottom
-                  << " vs Widget " << ( i + 1 ) << ": \""
-                  << next->objectName().toStdString() << "\" top=" << nextTop
-                  << " gap=" << gap );
+                      << current->objectName().toStdString() << "\" bottom=" << currentBottom
+                      << " vs Widget " << ( i + 1 ) << ": \"" << next->objectName().toStdString()
+                      << "\" top=" << nextTop << " gap=" << gap );
 
             CHECK( gap >= 1 );
         }
@@ -1199,63 +1311,19 @@ TEST_CASE( "OptionsDialog File and Live Source tab widgets do not overlap vertic
     QCoreApplication::processEvents();
 }
 
-TEST_CASE( "OptionsDialog adb detect button fills the executable field with the resolved adb path" )
-{
-    if ( skipHeadlessOptionsDialogTest() ) {
-        return;
-    }
-
-    if ( AdbProcessTransport::detectAdbExecutable().isEmpty() ) {
-        WARN( "No adb installed at a well-known location -- skipping detect button test" );
-        return;
-    }
-
-    ScopedAdbConfigurationGuard configGuard;
-    auto& savedSearches = SavedSearches::getSynced();
-    auto& recentFiles = RecentFiles::getSynced();
-    // OptionsDialog also reads the color-label match defaults from
-    // HighlighterSetCollection during construction; initialize the persistable
-    // like the two above so get() does not throw.
-    auto& highlighterSets = HighlighterSetCollection::getSynced();
-    Q_UNUSED( savedSearches );
-    Q_UNUSED( recentFiles );
-    Q_UNUSED( highlighterSets );
-    auto& config = Configuration::getSynced();
-    config.setAdbExecutable( QString{} );
-    config.save();
-
-    OptionsDialog dialog;
-    auto* adbExecutableLineEdit
-        = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableLineEdit" ) );
-    auto* adbDetectButton
-        = dialog.findChild<QPushButton*>( QStringLiteral( "adbDetectButton" ) );
-
-    REQUIRE( adbExecutableLineEdit != nullptr );
-    REQUIRE( adbDetectButton != nullptr );
-    REQUIRE( adbDetectButton->isEnabled() );
-    REQUIRE( adbExecutableLineEdit->text().isEmpty() );
-
-    adbDetectButton->click();
-    QCoreApplication::processEvents();
-
-    const auto filled = adbExecutableLineEdit->text();
-    INFO( "Filled value after detect click: " << filled.toStdString() );
-    REQUIRE_FALSE( filled.isEmpty() );
-    REQUIRE( QFileInfo( filled ).isAbsolute() );
-    REQUIRE( QFile::exists( filled ) );
-    REQUIRE( QFileInfo( filled ).isExecutable() );
-}
-
 namespace {
 // A minimal ProcessLiveSourceTransport subclass that runs a long-lived process
 // without ADB-specific argument decoration, for testing disconnect behavior.
-class LongRunningTestTransport : public ProcessLiveSourceTransport {
-  public:
+class LongRunningTestTransport
+    : public GenerationDrivenProcessTransport<ProcessLiveSourceTransport> {
+public:
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
-        return { QStringLiteral( "ping" ), { QStringLiteral( "-n" ), QStringLiteral( "60" ),
-                                             QStringLiteral( "127.0.0.1" ) } };
+        return { QStringLiteral( "ping" ),
+                 { QStringLiteral( "-n" ),
+                   QStringLiteral( "60" ),
+                   QStringLiteral( "127.0.0.1" ) } };
 #else
         return { QStringLiteral( "sleep" ), { QStringLiteral( "60" ) } };
 #endif
@@ -1271,8 +1339,9 @@ class LongRunningTestTransport : public ProcessLiveSourceTransport {
     }
 };
 
-class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
-  public:
+class FiniteSuccessfulTestTransport
+    : public GenerationDrivenProcessTransport<ProcessLiveSourceTransport> {
+public:
     QString stderrFilePathForTest() const
     {
         return stderrFilePath();
@@ -1301,9 +1370,10 @@ class FiniteSuccessfulTestTransport : public ProcessLiveSourceTransport {
 };
 
 // Exits during startup after writing a recognizable line to stderr — exercises
-// the connectTransport() startup-failure error-capture path.
-class StartupStderrFailureTransport : public ProcessLiveSourceTransport {
-  public:
+// the generation-driven startup-failure error-capture path.
+class StartupStderrFailureTransport
+    : public GenerationDrivenProcessTransport<ProcessLiveSourceTransport> {
+public:
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
@@ -1326,12 +1396,14 @@ class StartupStderrFailureTransport : public ProcessLiveSourceTransport {
     }
 };
 
-class DeferredStartTestTransport : public ProcessLiveSourceTransport {
-  public:
+class DeferredStartTestTransport
+    : public GenerationDrivenProcessTransport<ProcessLiveSourceTransport> {
+public:
     enum class Mode { LongRunning, StderrFailure };
 
     DeferredStartTestTransport( Mode mode, AsyncStartupTiming timing )
-        : mode_( mode ), timing_( timing )
+        : mode_( mode )
+        , timing_( timing )
     {
     }
 
@@ -1350,8 +1422,10 @@ class DeferredStartTestTransport : public ProcessLiveSourceTransport {
         }
 
 #ifdef Q_OS_WIN
-        return { QStringLiteral( "ping" ), { QStringLiteral( "-n" ), QStringLiteral( "60" ),
-                                             QStringLiteral( "127.0.0.1" ) } };
+        return { QStringLiteral( "ping" ),
+                 { QStringLiteral( "-n" ),
+                   QStringLiteral( "60" ),
+                   QStringLiteral( "127.0.0.1" ) } };
 #else
         return { QStringLiteral( "sleep" ), { QStringLiteral( "60" ) } };
 #endif
@@ -1394,7 +1468,7 @@ class DeferredStartTestTransport : public ProcessLiveSourceTransport {
         process->start();
     }
 
-  protected:
+protected:
     void startProcessAsync( QProcess& process ) override
     {
         pendingProcess_ = &process;
@@ -1406,7 +1480,7 @@ class DeferredStartTestTransport : public ProcessLiveSourceTransport {
         return timing_;
     }
 
-  private:
+private:
     Mode mode_;
     AsyncStartupTiming timing_;
     QProcess* pendingProcess_ = nullptr;
@@ -1418,15 +1492,17 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
 {
     LongRunningTestTransport transport;
 
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
     // Connect -- the long-running process starts successfully
-    REQUIRE( transport.connectTransport() );
+    REQUIRE( transport.startAndWait() );
 
     // Disconnect detaches the process and removes all transport signal
     // connections before terminating it.
-    transport.disconnectTransport();
+    transport.stopCurrent();
 
     // Process events to let any queued signals through
     QCoreApplication::processEvents();
@@ -1439,7 +1515,7 @@ TEST_CASE( "ProcessLiveSourceTransport suppresses errorOccurred during intention
     // The final state should be Disconnected (not Error)
     REQUIRE( stateSpy.count() >= 1 );
     const auto lastState
-        = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
+        = stateSpy.at( stateSpy.count() - 1 ).at( 1 ).value<LiveSourceTransport::State>();
     CHECK( lastState == LiveSourceTransport::State::Disconnected );
 }
 
@@ -1447,10 +1523,12 @@ TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as e
 {
     FiniteSuccessfulTestTransport transport;
 
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
-    REQUIRE( transport.connectTransport() );
+    REQUIRE( transport.startAndWait() );
     const auto failedCapturePath = transport.stderrFilePathForTest();
     REQUIRE( QFileInfo::exists( failedCapturePath ) );
 
@@ -1469,7 +1547,7 @@ TEST_CASE( "ProcessLiveSourceTransport treats unexpected clean process exit as e
 
     REQUIRE( stateSpy.count() >= 1 );
     const auto lastState
-        = stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>();
+        = stateSpy.at( stateSpy.count() - 1 ).at( 1 ).value<LiveSourceTransport::State>();
     CHECK( lastState == LiveSourceTransport::State::Error );
 }
 
@@ -1477,11 +1555,11 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
 {
     LongRunningTestTransport transport;
 
-    REQUIRE( transport.connectTransport() );
+    REQUIRE( transport.startAndWait() );
 
     QElapsedTimer timer;
     timer.start();
-    transport.disconnectTransport();
+    transport.stopCurrent();
     const auto elapsed = timer.elapsed();
 
     // Disconnect should complete in well under 100ms (no blocking waitForFinished)
@@ -1494,34 +1572,36 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
 }
 
 // ---------------------------------------------------------------------------
-// connectTransportAsync — non-blocking startup detection (replaces the
+// generation start — non-blocking startup detection (replaces the
 // blocking waitForStarted + grace loop for the auto-reconnect path)
 // ---------------------------------------------------------------------------
 
-TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync returns with startup pending" )
+TEST_CASE( "ProcessLiveSourceTransport generation start returns with startup pending" )
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
                                           { 3000, 20 } );
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
-    transport.connectTransportAsync();
+    transport.startAsync();
 
     REQUIRE( transport.startRequestCount() == 1 );
     REQUIRE( transport.hasPendingStart() );
     REQUIRE( stateSpy.count() == 1 );
-    CHECK( stateSpy.at( 0 ).at( 0 ).value<LiveSourceTransport::State>()
+    CHECK( stateSpy.at( 0 ).at( 1 ).value<LiveSourceTransport::State>()
            == LiveSourceTransport::State::Connecting );
     CHECK( errorSpy.count() == 0 );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 }
 
 namespace {
 bool spyContainsState( const SafeQSignalSpy& spy, LiveSourceTransport::State target )
 {
     for ( int i = 0; i < spy.count(); ++i ) {
-        if ( spy.at( i ).at( 0 ).value<LiveSourceTransport::State>() == target ) {
+        if ( spy.at( i ).at( 1 ).value<LiveSourceTransport::State>() == target ) {
             return true;
         }
     }
@@ -1533,9 +1613,11 @@ TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started"
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
                                           { 3000, 20 } );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    transport.connectTransportAsync();
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    transport.startAsync();
 
     // Hold QProcess in the pre-start phase longer than the post-start grace.
     QTest::qWait( 60 );
@@ -1553,16 +1635,18 @@ TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started"
     }
     REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 }
 
 TEST_CASE( "ProcessLiveSourceTransport times out while waiting for QProcess started" )
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
                                           { 30, 10 } );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    transport.connectTransportAsync();
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    transport.startAsync();
 
     QElapsedTimer deadline;
     deadline.start();
@@ -1586,20 +1670,20 @@ TEST_CASE( "ProcessLiveSourceTransport retires a timed-out process before reentr
     QString firstCapturePath;
     QString secondCapturePath;
     bool reconnected = false;
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
 
-    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport,
-                      [ & ] {
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred, &transport, [ & ] {
         if ( reconnected ) {
             return;
         }
         reconnected = true;
-        transport.connectTransportAsync();
+        transport.startAsync();
         secondProcess = transport.pendingProcessForTest();
         secondCapturePath = transport.stderrFilePathForTest();
     } );
 
-    transport.connectTransportAsync();
+    transport.startAsync();
     firstProcess = transport.pendingProcessForTest();
     firstCapturePath = transport.stderrFilePathForTest();
     REQUIRE( firstProcess != nullptr );
@@ -1619,20 +1703,22 @@ TEST_CASE( "ProcessLiveSourceTransport retires a timed-out process before reentr
 
     REQUIRE( transport.startRequestCount() == 2 );
     REQUIRE( spyContainsState( stateSpy, LiveSourceTransport::State::Error ) );
-    REQUIRE( stateSpy.at( stateSpy.count() - 1 ).at( 0 ).value<LiveSourceTransport::State>()
+    REQUIRE( stateSpy.at( stateSpy.count() - 1 ).at( 1 ).value<LiveSourceTransport::State>()
              == LiveSourceTransport::State::Connecting );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 }
 
-TEST_CASE( "ProcessLiveSourceTransport connectTransportAsync detects startup failure" )
+TEST_CASE( "ProcessLiveSourceTransport generation start detects startup failure" )
 {
     TestAdbProcessTransport transport( QStringLiteral( "/path/that/does/not/exist/adb" ),
-                                      QStringLiteral( "serial" ), {} );
+                                       QStringLiteral( "serial" ), {} );
 
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
-    transport.connectTransportAsync();
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
+    transport.startAsync();
 
     // A non-existent executable triggers errorOccurred(FailedToStart) within
     // the next event loop cycle.
@@ -1651,9 +1737,11 @@ TEST_CASE( "ProcessLiveSourceTransport preserves stderr during post-start grace"
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::StderrFailure,
                                           { 3000, 1000 } );
-    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::State ) ) );
-    SafeQSignalSpy errorSpy( &transport, SIGNAL( errorOccurred( QString ) ) );
-    transport.connectTransportAsync();
+    SafeQSignalSpy stateSpy( &transport, SIGNAL( stateChanged( LiveSourceTransport::Generation,
+                                                               LiveSourceTransport::State ) ) );
+    SafeQSignalSpy errorSpy( &transport,
+                             SIGNAL( errorOccurred( LiveSourceTransport::Generation, QString ) ) );
+    transport.startAsync();
 
     QTest::qWait( 60 );
     QCoreApplication::processEvents();
@@ -1670,22 +1758,22 @@ TEST_CASE( "ProcessLiveSourceTransport preserves stderr during post-start grace"
     CHECK_FALSE( spyContainsState( stateSpy, LiveSourceTransport::State::Connected ) );
     REQUIRE( errorSpy.count() == 1 );
     REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
-    CHECK( errorSpy.at( 0 ).at( 0 ).toString().contains( QStringLiteral( "startup-boom" ) ) );
+    CHECK( errorSpy.at( 0 ).at( 1 ).toString().contains( QStringLiteral( "startup-boom" ) ) );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 }
 
 TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async disconnect" )
 {
     LongRunningTestTransport transport;
 
-    REQUIRE( transport.connectTransport() );
-    transport.disconnectTransport();
+    REQUIRE( transport.startAndWait() );
+    transport.stopCurrent();
 
     // Immediately reconnect -- should work since createProcess() made a fresh QProcess
-    REQUIRE( transport.connectTransport() );
+    REQUIRE( transport.startAndWait() );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
 
     // Process events to let async cleanup finish
     QCoreApplication::processEvents();
@@ -1693,66 +1781,71 @@ TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async discon
     QCoreApplication::processEvents();
 }
 
-TEST_CASE( "AdbLogcatDialog reads adb defaults from configuration and saves edits on accept" )
+TEST_CASE( "Live-source dialogs expose only typed built-in transport controls" )
 {
-    if ( isHeadlessDialogTestEnvironment() ) {
-        WARN( "AdbLogcatDialog UI coverage is skipped on headless/offscreen platforms" );
-        return;
+    ScopedAdbConfigurationGuard configGuard;
+    const auto emptyAdbDiscovery = []( klogg::livecapture::Generation generation ) {
+        return DeviceDiscoveryResult<AdbDeviceInfo>{ generation, {}, std::nullopt };
+    };
+    const auto emptyIosDiscovery = []( klogg::livecapture::Generation generation ) {
+        return DeviceDiscoveryResult<IosDeviceInfo>{ generation, {}, std::nullopt };
+    };
+
+    AdbLogcatDialog adbDialog( emptyAdbDiscovery );
+    IosLogDialog iosDialog( emptyIosDiscovery );
+
+    for ( auto* dialog : std::vector<QDialog*>{ &adbDialog, &iosDialog } ) {
+        for ( auto* lineEdit : dialog->findChildren<QLineEdit*>() ) {
+            INFO( "line edit object: " << lineEdit->objectName().toStdString() );
+            CHECK( qobject_cast<QAbstractSpinBox*>( lineEdit->parentWidget() ) != nullptr );
+        }
+        CHECK( dialog->findChildren<QFileDialog*>().isEmpty() );
+        CHECK( dialog->findChild<QObject*>( QStringLiteral( "adbExecutableEdit" ) ) == nullptr );
+        CHECK( dialog->findChild<QObject*>( QStringLiteral( "extraArgsEdit" ) ) == nullptr );
+        CHECK( dialog->findChild<QObject*>( QStringLiteral( "iosLogExecutableEdit" ) ) == nullptr );
+
+        const auto formLayouts = dialog->findChildren<QFormLayout*>();
+        REQUIRE( formLayouts.size() == 1 );
+        auto* form = formLayouts.front();
+        for ( int row = 0; row < form->rowCount(); ++row ) {
+            // QLayoutItem::widget() is non-const on Qt 5; keep the item mutable.
+            auto* labelItem = form->itemAt( row, QFormLayout::LabelRole );
+            if ( labelItem == nullptr ) {
+                continue;
+            }
+            const auto* label = qobject_cast<QLabel*>( labelItem->widget() );
+            REQUIRE( label != nullptr );
+            INFO( "row " << row << " label object " << label->objectName().toStdString() );
+            CHECK_FALSE( label->text().trimmed().isEmpty() );
+        }
     }
 
-    ScopedAdbConfigurationGuard configGuard;
-    auto& config = Configuration::getSynced();
-    config.setAdbExecutable( QStringLiteral( "/configured/adb" ) );
-    config.setAdbLogcatExtraArgs( QStringLiteral( "-v color" ) );
-    config.setAdbLogcatAnsiOutputEnabled( true );
-    config.save();
+    auto* adbDeviceCombo = adbDialog.findChild<QComboBox*>( QStringLiteral( "deviceCombo" ) );
+    REQUIRE( adbDeviceCombo != nullptr );
+    adbDeviceCombo->addItem( QStringLiteral( "Pixel 8 (ABC123)" ), QStringLiteral( "ABC123" ) );
+    adbDeviceCombo->setCurrentIndex( 0 );
 
-    AdbLogcatDialog dialog;
-    auto* adbExecutableEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "adbExecutableEdit" ) );
-    auto* extraArgsEdit = dialog.findChild<QLineEdit*>( QStringLiteral( "extraArgsEdit" ) );
-    auto* ansiOutputCheckBox
-        = dialog.findChild<QCheckBox*>( QStringLiteral( "ansiOutputCheckBox" ) );
-    auto* deviceCombo = dialog.findChild<QComboBox*>( QStringLiteral( "deviceCombo" ) );
-    auto* buttonBox = dialog.findChild<QDialogButtonBox*>( QStringLiteral( "buttonBox" ) );
+    const auto sessionData = adbDialog.sessionData();
+    CHECK( sessionData.adbExecutable.isEmpty() );
+    CHECK( sessionData.extraArgs.isEmpty() );
+    CHECK( sessionData.adbBackend == AdbTransportBackend::SmartSocket );
+    CHECK( sessionData.runIntent == klogg::livecapture::RunIntent::Running );
+    CHECK( sessionData.deviceSerial == QStringLiteral( "ABC123" ) );
+}
 
-    REQUIRE( adbExecutableEdit != nullptr );
-    REQUIRE( extraArgsEdit != nullptr );
-    REQUIRE( deviceCombo != nullptr );
-    REQUIRE( ansiOutputCheckBox != nullptr );
-    REQUIRE( buttonBox != nullptr );
-    REQUIRE( adbExecutableEdit->text() == QStringLiteral( "/configured/adb" ) );
-    REQUIRE( extraArgsEdit->text() == QStringLiteral( "-v color" ) );
-    REQUIRE( ansiOutputCheckBox->isChecked() );
+TEST_CASE( "Default live-source dialogs fail closed without legacy environment discovery" )
+{
+    AdbLogcatDialog adbDialog;
+    CHECK_FALSE( hasFutureWatcherChild( adbDialog ) );
 
-    adbExecutableEdit->setText( QStringLiteral( "/saved/adb" ) );
-    extraArgsEdit->setText( QStringLiteral( "-v threadtime *:I" ) );
-    ansiOutputCheckBox->setChecked( false );
-    deviceCombo->addItem( QStringLiteral( "Pixel 8 (ABC123)" ), QStringLiteral( "ABC123" ) );
-    deviceCombo->setCurrentIndex( 0 );
-    QCoreApplication::processEvents();
-
-    const auto sessionData = dialog.sessionData();
-    REQUIRE( sessionData.adbExecutable == QStringLiteral( "/saved/adb" ) );
-    REQUIRE( sessionData.deviceSerial == QStringLiteral( "ABC123" ) );
-    REQUIRE( sessionData.deviceDescription == QStringLiteral( "Pixel 8 (ABC123)" ) );
-    REQUIRE( sessionData.extraArgs == QStringLiteral( "-v threadtime *:I" ) );
-    REQUIRE_FALSE( sessionData.ansiOutputEnabled );
-    REQUIRE_FALSE( sessionData.captureId.isEmpty() );
-
-    auto* okButton = buttonBox->button( QDialogButtonBox::Ok );
-    REQUIRE( okButton != nullptr );
-    REQUIRE( okButton->isEnabled() );
-    okButton->click();
-
-    auto& restoredConfig = Configuration::getSynced();
-    REQUIRE( restoredConfig.adbExecutable() == QStringLiteral( "/saved/adb" ) );
-    REQUIRE( restoredConfig.adbLogcatExtraArgs() == QStringLiteral( "-v threadtime *:I" ) );
-    REQUIRE_FALSE( restoredConfig.adbLogcatAnsiOutputEnabled() );
+    IosLogDialog iosDialog;
+    REQUIRE( QMetaObject::invokeMethod( &iosDialog, "refreshDevices", Qt::DirectConnection ) );
+    CHECK_FALSE( hasFutureWatcherChild( iosDialog ) );
 }
 
 TEST_CASE( "iOS log stream session data serializes its source type" )
 {
-    const AdbLogcatSessionData iosSessionData{
+    AdbLogcatSessionData iosSessionData{
         QStringLiteral( "/opt/homebrew/bin/pymobiledevice3" ),
         QStringLiteral( "00008030-001C195E36D8802E" ),
         QStringLiteral( "iPhone Test" ),
@@ -1762,6 +1855,7 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
         LiveLogSourceType::IosLogStream,
         true,
     };
+    iosSessionData.iosBackend = IosTransportBackend::LegacyProcess;
 
     const auto json = QString::fromUtf8(
         QJsonDocument( iosSessionData.toJson() ).toJson( QJsonDocument::Compact ) );
@@ -1771,8 +1865,176 @@ TEST_CASE( "iOS log stream session data serializes its source type" )
     REQUIRE( restored.documentId() == QStringLiteral( "ios-log://ios-capture" ) );
     REQUIRE( restored.persistedSourceType() == QStringLiteral( "ios_log_stream" ) );
     REQUIRE( restored.deviceSerial == QStringLiteral( "00008030-001C195E36D8802E" ) );
-    REQUIRE( restored.extraArgs == QStringLiteral( "--network" ) );
+    REQUIRE( restored.adbExecutable.isEmpty() );
+    REQUIRE( restored.extraArgs.isEmpty() );
+    REQUIRE_FALSE( QJsonDocument::fromJson( json.toUtf8() )
+                       .object()
+                       .contains( QStringLiteral( "adbExecutable" ) ) );
+    REQUIRE_FALSE( QJsonDocument::fromJson( json.toUtf8() )
+                       .object()
+                       .contains( QStringLiteral( "extraArgs" ) ) );
+    REQUIRE( restored.iosBackend == IosTransportBackend::LegacyProcess );
     REQUIRE( restored.ansiOutputEnabled );
+}
+
+TEST_CASE( "Missing or tampered legacy backend fields fail closed to built-in transports" )
+{
+    const auto missingAndroid = AdbLogcatSessionData::fromJson( QStringLiteral(
+        R"json({"sourceType":"adb_logcat","adbExecutable":"adb","deviceSerial":"SERIAL","captureId":"capture-android"})json" ) );
+    CHECK( missingAndroid.adbBackend == AdbTransportBackend::SmartSocket );
+
+    const auto tamperedAndroid = AdbLogcatSessionData::fromJson( QStringLiteral(
+        R"json({"sourceType":"adb_logcat","adbBackend":"future_backend","adbExecutable":"adb","deviceSerial":"SERIAL","captureId":"capture-android"})json" ) );
+    CHECK( tamperedAndroid.adbBackend == AdbTransportBackend::SmartSocket );
+
+    const auto missingIos = AdbLogcatSessionData::fromJson( QStringLiteral(
+        R"json({"sourceType":"ios_log_stream","adbExecutable":"pymobiledevice3","deviceSerial":"UDID","captureId":"capture-ios"})json" ) );
+    CHECK( missingIos.iosBackend == IosTransportBackend::Native );
+
+    const auto tamperedIos = AdbLogcatSessionData::fromJson( QStringLiteral(
+        R"json({"sourceType":"ios_log_stream","iosBackend":"future_backend","adbExecutable":"pymobiledevice3","deviceSerial":"UDID","captureId":"capture-ios"})json" ) );
+    CHECK( tamperedIos.iosBackend == IosTransportBackend::Native );
+
+    DefaultLiveSourceTransportFactory factory;
+    LiveSourceTransportConfig androidConfig;
+    androidConfig.sourceType = missingAndroid.sourceType;
+    androidConfig.adbBackend = missingAndroid.adbBackend;
+    androidConfig.executable = missingAndroid.adbExecutable;
+    androidConfig.deviceId = missingAndroid.deviceSerial;
+    const auto transport = factory.create( androidConfig );
+    REQUIRE( transport != nullptr );
+    CHECK( dynamic_cast<klogg::livecapture::adb::AdbSmartSocketTransport*>( transport.get() )
+           != nullptr );
+}
+
+TEST_CASE( "Unavailable iOS native transport reports a source-neutral error" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
+
+    AdbLogcatSessionData sessionData;
+    sessionData.sourceType = LiveLogSourceType::IosLogStream;
+    sessionData.iosBackend = IosTransportBackend::Native;
+    sessionData.deviceSerial = QStringLiteral( "native-ios-device" );
+    sessionData.captureId = captureId;
+
+    AdbLogcatSource source( sessionData, logData );
+    REQUIRE_FALSE( source.connectSource() );
+    CHECK_FALSE( source.lastError().contains( QStringLiteral( "ADB" ), Qt::CaseInsensitive ) );
+    CHECK( source.lastError().contains( QStringLiteral( "live log" ), Qt::CaseInsensitive ) );
+}
+
+TEST_CASE( "Controller-owned manual reconnect never starts a source-local generation" )
+{
+    class RecordingTransport final : public LiveSourceTransport {
+    public:
+        void start( Generation generation ) override
+        {
+            starts.push_back( generation );
+        }
+
+        void stop( Generation generation ) override
+        {
+            stops.push_back( generation );
+        }
+
+        void clearRemoteAsync( Generation generation, ClearRequestId requestId ) override
+        {
+            clearGeneration = generation;
+            clearRequestId = requestId;
+        }
+        QString lastError() const override { return {}; }
+
+        void publishConnected( Generation generation )
+        {
+            Q_EMIT stateChanged( generation, State::Connected );
+        }
+
+        void finishClear()
+        {
+            REQUIRE( clearGeneration.has_value() );
+            REQUIRE( clearRequestId.has_value() );
+            Q_EMIT clearRemoteFinished( *clearGeneration, *clearRequestId, true, QString{} );
+        }
+
+        std::vector<Generation> starts;
+        std::vector<Generation> stops;
+        std::optional<Generation> clearGeneration;
+        std::optional<ClearRequestId> clearRequestId;
+    };
+
+    class RecordingFactory final : public LiveSourceTransportFactory {
+    public:
+        std::unique_ptr<LiveSourceTransport>
+        create( const LiveSourceTransportConfig& config ) const override
+        {
+            requestedConfigs.push_back( config );
+            auto transport = std::make_unique<RecordingTransport>();
+            created = transport.get();
+            return transport;
+        }
+
+        mutable RecordingTransport* created{ nullptr };
+        mutable std::vector<LiveSourceTransportConfig> requestedConfigs;
+    };
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    auto logData = std::make_shared<StreamingLogData>( makeCaptureId(), tempDir.path() );
+    AdbLogcatSessionData sessionData;
+    sessionData.captureId = makeCaptureId();
+    sessionData.deviceSerial = QStringLiteral( "SERIAL" );
+    RecordingFactory factory;
+    AdbLogcatSource source( sessionData, logData, factory );
+    CHECK( factory.created == nullptr );
+
+    int controllerRestarts = 0;
+    source.setControllerCallbacks( {}, {}, {}, {}, [ &controllerRestarts ] {
+        ++controllerRestarts;
+    } );
+
+    LiveSourceTransportConfig config;
+    config.deviceId = sessionData.deviceSerial;
+    source.openTransport( 41u, config );
+    REQUIRE( factory.created != nullptr );
+    factory.created->publishConnected( 41u );
+    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( factory.created->starts == std::vector<LiveSourceTransport::Generation>{ 41u } );
+
+    REQUIRE( source.reconnectSource() );
+
+    CHECK( controllerRestarts == 1 );
+    CHECK( factory.created->starts == std::vector<LiveSourceTransport::Generation>{ 41u } );
+    CHECK( factory.created->stops.empty() );
+
+    int controllerStops = 0;
+    controllerRestarts = 0;
+    source.setControllerCallbacks( {}, {}, {}, [ &controllerStops ] { ++controllerStops; },
+                                   [ &controllerRestarts ] { ++controllerRestarts; } );
+    REQUIRE( source.clearAndRestart() );
+    REQUIRE( controllerStops == 1 );
+    REQUIRE( factory.created->clearGeneration.has_value() );
+
+    REQUIRE( source.reconnectSource() );
+    CHECK( controllerRestarts == 0 );
+    CHECK( factory.created->starts == std::vector<LiveSourceTransport::Generation>{ 41u } );
+
+    factory.created->finishClear();
+    CHECK( controllerRestarts == 1 );
+
+    auto nextConfig = config;
+    nextConfig.ansiOutputEnabled = true;
+    nextConfig.androidBuffers = QStringList{ QStringLiteral( "system" ) };
+    source.openTransport( 42u, nextConfig );
+    REQUIRE( factory.requestedConfigs.size() == 2u );
+    CHECK_FALSE( factory.requestedConfigs.front().ansiOutputEnabled );
+    CHECK( factory.requestedConfigs.back().ansiOutputEnabled );
+    CHECK( factory.requestedConfigs.back().androidBuffers
+           == QStringList{ QStringLiteral( "system" ) } );
+    REQUIRE( factory.created != nullptr );
+    CHECK( factory.created->starts == std::vector<LiveSourceTransport::Generation>{ 42u } );
 }
 
 TEST_CASE( "iOS log stream display name defaults to device name only" )
@@ -1814,7 +2076,7 @@ TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote c
 
     const auto captureId = makeCaptureId();
     auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    const AdbLogcatSessionData sessionData{
+    AdbLogcatSessionData sessionData{
         scriptPath,
         QStringLiteral( "00008030-001C195E36D8802E" ),
         QStringLiteral( "iPhone Test" ),
@@ -1823,15 +2085,16 @@ TEST_CASE( "AdbLogcatSource clears and restarts iOS log streams without remote c
         QString{},
         LiveLogSourceType::IosLogStream,
     };
+    sessionData.iosBackend = IosTransportBackend::LegacyProcess;
 
     AdbLogcatSource source( sessionData, logData );
 
     REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( waitForLineCount( logData, 1 ) );
 
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( source.lastError().isEmpty() );
     REQUIRE( waitForLineCount( logData, 1 ) );
 
@@ -1878,7 +2141,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     AdbLogcatSource source( sessionData, logData );
 
     REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( waitForLineCount( logData, 1 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
 
@@ -1929,12 +2192,12 @@ TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear 
     AdbLogcatSource source( sessionData, logData );
 
     REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( waitForLineCount( logData, 1 ) );
 
-    REQUIRE_FALSE( source.clearAndRestart() );
+    REQUIRE( source.clearAndRestart() );
     REQUIRE( logData->getNbLine().get() == 0 );
-    REQUIRE( source.state() == AdbLogcatSource::State::Error );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );
 
     source.disconnectSource();
@@ -1970,7 +2233,7 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
 
     const auto captureId = makeCaptureId();
     auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    const AdbLogcatSessionData sessionData{
+    AdbLogcatSessionData sessionData{
         scriptPath,
         QStringLiteral( "00008030-001C195E36D8802E" ),
         QStringLiteral( "iPhone Test" ),
@@ -1979,11 +2242,12 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
         QString{},
         LiveLogSourceType::IosLogStream,
     };
+    sessionData.iosBackend = IosTransportBackend::LegacyProcess;
 
     AdbLogcatSource source( sessionData, logData );
 
     REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( waitForLineCount( logData, 1 ) );
 
     QFile marker( unavailableMarker );
@@ -1993,7 +2257,7 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
 
     REQUIRE( source.clearAndRestart() );
     REQUIRE( logData->getNbLine().get() == 0 );
-    REQUIRE( source.state() == AdbLogcatSource::State::Error );
+    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE_FALSE( source.lastError().isEmpty() );
 
     source.disconnectSource();
@@ -2067,8 +2331,9 @@ TEST_CASE( "AdbProcessTransport resolves to an absolute path when adb is install
 }
 
 namespace {
-class StreamingScriptTransport : public ProcessLiveSourceTransport {
-  public:
+class StreamingScriptTransport
+    : public GenerationDrivenProcessTransport<ProcessLiveSourceTransport> {
+public:
     Command streamingCommand() const override
     {
 #ifdef Q_OS_WIN
@@ -2077,10 +2342,12 @@ class StreamingScriptTransport : public ProcessLiveSourceTransport {
                    QStringLiteral( "for /L %i in (1,1,5) do @(echo line %i & ping -n 1 -w 50 "
                                    "127.0.0.1 > nul)" ) } };
 #else
-        return { QStringLiteral( "/bin/sh" ),
-                 { QStringLiteral( "-c" ),
-                   QStringLiteral(
-                       "i=1; while [ $i -le 5 ]; do echo line $i; i=$((i+1)); sleep 0.05; done" ) } };
+        return {
+            QStringLiteral( "/bin/sh" ),
+            { QStringLiteral( "-c" ),
+              QStringLiteral(
+                  "i=1; while [ $i -le 5 ]; do echo line $i; i=$((i+1)); sleep 0.05; done" ) }
+        };
 #endif
     }
 
@@ -2101,11 +2368,13 @@ TEST_CASE( "ProcessLiveSourceTransport delivers every line of a slow streaming p
     StreamingScriptTransport transport;
     QByteArray accumulated;
     QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
-                      [ &accumulated ]( const QByteArray& data ) { accumulated += data; } );
+                      [ &accumulated ]( LiveSourceTransport::Generation, const QByteArray& data ) {
+                          accumulated += data;
+                      } );
 
     KLOGG_REQUIRE_OR_WARN_SKIP(
-        transport.connectTransport(),
-        "StreamingScriptTransport: connectTransport failed in this environment "
+        transport.startAndWait(),
+        "StreamingScriptTransport: transport start failed in this environment "
         "(observed on GitHub-hosted Windows runners; the streaming-pipeline "
         "behaviour itself is exercised on macOS / Linux runners)" );
 
@@ -2121,7 +2390,7 @@ TEST_CASE( "ProcessLiveSourceTransport delivers every line of a slow streaming p
     CHECK( accumulated.contains( QByteArrayLiteral( "line 5" ) ) );
     CHECK( accumulated.count( '\n' ) == 5 );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
     QCoreApplication::processEvents();
     QTest::qWait( 1500 );
     QCoreApplication::processEvents();
@@ -2155,11 +2424,13 @@ TEST_CASE( "expandTildePath leaves non-tilde paths unchanged" )
 
 TEST_CASE( "IosLogProcessTransport expands tilde in user-configured executable" )
 {
-    TestIosLogProcessTransport transport( QStringLiteral( "~/Library/Python/3.9/bin/pymobiledevice3" ),
-                                          QStringLiteral( "DEVICE_UDID" ), {} );
+    TestIosLogProcessTransport transport(
+        QStringLiteral( "~/Library/Python/3.9/bin/pymobiledevice3" ),
+        QStringLiteral( "DEVICE_UDID" ), {} );
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE_FALSE( streaming.program.startsWith( QLatin1Char( '~' ) ) );
-    REQUIRE( streaming.program.contains( QStringLiteral( "Library/Python/3.9/bin/pymobiledevice3" ) ) );
+    REQUIRE(
+        streaming.program.contains( QStringLiteral( "Library/Python/3.9/bin/pymobiledevice3" ) ) );
 }
 
 TEST_CASE( "AdbProcessTransport expands tilde in user-configured executable" )
@@ -2174,238 +2445,6 @@ TEST_CASE( "AdbProcessTransport expands tilde in user-configured executable" )
 // ---------------------------------------------------------------------------
 // Live source auto-reconnect and rolling file settings tests
 // ---------------------------------------------------------------------------
-
-namespace {
-// Helper: read all lines from a StreamingLogData as a single string for assertions
-QString allLogLines( const std::shared_ptr<StreamingLogData>& logData )
-{
-    QStringList lines;
-    const auto count = logData->getNbLine().get();
-    for ( LineNumber::UnderlyingType i = 0; i < count; ++i ) {
-        lines.append( logData->getLineString( LineNumber( i ) ) );
-    }
-    return lines.join( QLatin1Char( '\n' ) );
-}
-
-// Helper: wait until auto-reconnect is no longer active (max attempts exhausted
-// or reconnect cancelled), i.e., the reconnect timer has stopped.
-bool waitForReconnectExhausted( const AdbLogcatSource& source, int timeoutMs = 10000 )
-{
-    QElapsedTimer deadline;
-    deadline.start();
-    while ( deadline.elapsed() < timeoutMs ) {
-        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
-        QTest::qWait( 50 );
-        // Exhausted when both the timer isn't running and state is Error
-        // (not Disconnected, which would mean manual disconnect)
-        if ( !source.isAutoReconnectActive()
-             && source.state() == AdbLogcatSource::State::Error ) {
-            return true;
-        }
-    }
-    return false;
-}
-} // namespace
-
-TEST_CASE( "AdbLogcatSource keeps auto-reconnect failures out of streaming log data" )
-{
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
-
-    const auto captureId = makeCaptureId();
-    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-
-    // Use a non-existent executable path so that connectTransport() always fails
-    // synchronously (waitForStarted returns false), triggering the error+reconnect
-    // cycle without depending on process timing.
-    const AdbLogcatSessionData sessionData{
-        QStringLiteral( "/nonexistent/path/to/adb" ),
-        QStringLiteral( "emulator-5554" ),
-        QStringLiteral( "Test Device" ),
-        QString{},
-        captureId,
-        QString{},
-        LiveLogSourceType::AdbLogcat,
-    };
-
-    AdbLogcatSource source( sessionData, logData );
-    source.setAutoReconnectEnabled( true );
-    source.setAutoReconnectMaxAttempts( 1 ); // Only 1 retry to keep test fast
-
-    SafeQSignalSpy attemptSpy( &source, &AdbLogcatSource::reconnectAttemptStarted );
-
-    // connectSource() will fail because the executable doesn't exist →
-    // triggers scheduleReconnect → timer fires → attemptReconnect fails →
-    // max attempts reached → streaming log must stay empty (silent retries)
-    REQUIRE_FALSE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Error );
-
-    // Wait for the reconnect cycle to complete (max attempts exhausted)
-    REQUIRE( waitForReconnectExhausted( source, 5000 ) );
-
-    // At least one reconnect attempt should have been started
-    REQUIRE( attemptSpy.count() >= 1 );
-
-    // Reconnect failures must NOT be written to the streaming log data
-    // (fully silent retries — failures are surfaced via the status bar only).
-    const auto logText = allLogLines( logData );
-    INFO( "Streaming log content: " << logText.toStdString() );
-
-    CHECK_FALSE( logText.contains( QStringLiteral( "auto-reconnect attempt" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "failed" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "max attempts" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "giving up" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "reconnected" ) ) );
-
-    source.disconnectSource();
-    drainLiveSourceEvents( 200 );
-}
-
-TEST_CASE( "AdbLogcatSource exponential backoff preserves attempt count after rapid "
-           "post-connect death" )
-{
-#ifdef Q_OS_WIN
-    WARN( "Skipping POSIX shell based backoff test on Windows." );
-    return;
-#else
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
-
-    // Script that outputs a line, runs long enough to survive the grace period
-    // (~500ms), then exits. This triggers the brief-connect-then-die pattern
-    // that would reset the backoff counter without the reconnectionProven_ guard.
-    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
-    QFile script( scriptPath );
-    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
-    // No stdout output — the process exits without producing data.
-    // This triggers the failure path (reconnectionProven_ stays false).
-    script.write( "#!/bin/sh\n"
-                  "sleep 0.5\n"
-                  "echo 'device disconnected' >&2\n"
-                  "exit 1\n" );
-    script.close();
-    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
-
-    const auto captureId = makeCaptureId();
-    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    const AdbLogcatSessionData sessionData{
-        scriptPath,
-        QStringLiteral( "emulator-5554" ),
-        QStringLiteral( "Test Device" ),
-        QString{},
-        captureId,
-        QString{},
-        LiveLogSourceType::AdbLogcat,
-    };
-
-    AdbLogcatSource source( sessionData, logData );
-    source.setAutoReconnectEnabled( true );
-    source.setAutoReconnectMaxAttempts( 3 );
-
-    // First connection succeeds (process starts, outputs, survives grace period)
-    REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
-
-    // Wait for the process to exit and trigger auto-reconnect
-    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
-    REQUIRE( source.isAutoReconnectActive() );
-
-    // Wait for the first reconnect attempt to start
-    SafeQSignalSpy attemptSpy( &source, &AdbLogcatSource::reconnectAttemptStarted );
-    REQUIRE( attemptSpy.safeWait( 3000 ) );
-
-    // The reconnect attempt should have incremented the counter
-    // (reconnectAttempt_ should be >= 1 after attemptReconnect increments it)
-    const auto attemptAfterFirstReconnect = source.reconnectAttempt();
-    INFO( "reconnectAttempt after first reconnect: " << attemptAfterFirstReconnect );
-    CHECK( attemptAfterFirstReconnect >= 1 );
-
-    // Wait for the reconnect to fail (process exits after 0.5s) and trigger
-    // another scheduleReconnect cycle
-    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
-
-    // After the reconnect attempt connected briefly then died, the backoff
-    // counter should still be preserved (NOT reset to 0).
-    // The reconnectionProven_ flag prevents reset on brief connections.
-    const auto attemptAfterSecondError = source.reconnectAttempt();
-    INFO( "reconnectAttempt after second error: " << attemptAfterSecondError );
-    CHECK( attemptAfterSecondError >= 1 );
-
-    source.cancelAutoReconnect();
-    source.disconnectSource();
-    drainLiveSourceEvents( 500 );
-#endif
-}
-
-TEST_CASE( "AdbLogcatSource keeps async reconnect failure out of streaming log" )
-{
-#ifdef Q_OS_WIN
-    WARN( "Skipping POSIX shell based async failure test on Windows." );
-    return;
-#else
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
-
-    // Script that runs just long enough to survive the grace period (~400ms)
-    // then exits with an error. This triggers the async failure path where
-    // connectTransport() returns true but the process dies shortly after.
-    const auto scriptPath = tempDir.filePath( QStringLiteral( "adb" ) );
-    QFile script( scriptPath );
-    REQUIRE( script.open( QIODevice::WriteOnly | QIODevice::Text ) );
-    script.write( "#!/bin/sh\n"
-                  "sleep 0.4\n"
-                  "echo 'device offline' >&2\n"
-                  "exit 1\n" );
-    script.close();
-    REQUIRE( script.setPermissions( QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner ) );
-
-    const auto captureId = makeCaptureId();
-    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    const AdbLogcatSessionData sessionData{
-        scriptPath,
-        QStringLiteral( "emulator-5554" ),
-        QStringLiteral( "Test Device" ),
-        QString{},
-        captureId,
-        QString{},
-        LiveLogSourceType::AdbLogcat,
-    };
-
-    AdbLogcatSource source( sessionData, logData );
-    source.setAutoReconnectEnabled( true );
-    source.setAutoReconnectMaxAttempts( 2 );
-
-    // Initial connect: process starts, survives grace period, then dies
-    REQUIRE( source.connectSource() );
-    REQUIRE( source.state() == AdbLogcatSource::State::Connected );
-
-    // Wait for async process death → Error → scheduleReconnect
-    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
-    REQUIRE( source.isAutoReconnectActive() );
-
-    // Wait for the reconnect attempt to fire and the process to die again
-    SafeQSignalSpy attemptSpy( &source, &AdbLogcatSource::reconnectAttemptStarted );
-    REQUIRE( attemptSpy.safeWait( 5000 ) );
-
-    // Wait for the reconnect attempt's process to die asynchronously
-    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
-
-    // Reconnect failures must NOT be written to the streaming log data
-    // (fully silent retries — failures are surfaced via the status bar only).
-    // The mock script's stderr ("device offline") must also not leak.
-    const auto logText = allLogLines( logData );
-    INFO( "Streaming log content after async reconnect failure:\n" << logText.toStdString() );
-
-    CHECK_FALSE( logText.contains( QStringLiteral( "auto-reconnect attempt" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "failed" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "device offline" ) ) );
-    CHECK_FALSE( logText.contains( QStringLiteral( "reconnected" ) ) );
-
-    source.cancelAutoReconnect();
-    source.disconnectSource();
-    drainLiveSourceEvents( 500 );
-#endif
-}
 
 TEST_CASE( "OptionsDialog loads and persists live source auto-reconnect and rolling file settings" )
 {
@@ -2480,7 +2519,8 @@ TEST_CASE( "OptionsDialog reset restores live source settings to defaults" )
     config.save();
 
     OptionsDialog dialog;
-    auto* resetButton = dialog.findChild<QPushButton*>( QStringLiteral( "resetFileDefaultsButton" ) );
+    auto* resetButton
+        = dialog.findChild<QPushButton*>( QStringLiteral( "resetFileDefaultsButton" ) );
     REQUIRE( resetButton != nullptr );
 
     // Click the reset button
@@ -2514,7 +2554,8 @@ TEST_CASE( "OptionsDialog reset restores live source settings to defaults" )
 
     auto& restoredConfig = Configuration::getSynced();
     CHECK( restoredConfig.liveAutoReconnectEnabled() == defaults.liveAutoReconnectEnabled() );
-    CHECK( restoredConfig.liveAutoReconnectMaxAttempts() == defaults.liveAutoReconnectMaxAttempts() );
+    CHECK( restoredConfig.liveAutoReconnectMaxAttempts()
+           == defaults.liveAutoReconnectMaxAttempts() );
     CHECK( restoredConfig.liveCaptureRollingMaxFileSize()
            == defaults.liveCaptureRollingMaxFileSize() );
     CHECK( restoredConfig.liveCaptureRollingBackupCount()
@@ -2525,93 +2566,13 @@ TEST_CASE( "ProcessLiveSourceTransport surfaces real stderr on startup failure" 
 {
     StartupStderrFailureTransport transport;
 
-    REQUIRE_FALSE( transport.connectTransport() );
+    REQUIRE_FALSE( transport.startAndWait() );
     // stderr is redirected to a file via setStandardErrorFile(); the startup
     // path must read that file (not readAllStandardError(), which is empty).
     REQUIRE( transport.lastError().contains( QStringLiteral( "startup-boom" ) ) );
 
-    transport.disconnectTransport();
+    transport.stopCurrent();
     drainLiveSourceEvents( 200 );
-}
-
-TEST_CASE( "AdbLogcatSource does not auto-reconnect before being enabled" )
-{
-#ifdef Q_OS_WIN
-    WARN( "Skipping POSIX shell based auto-reconnect default test on Windows." );
-#else
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
-
-    const auto captureId = makeCaptureId();
-    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    // A non-existent executable fails connectTransport() deterministically in
-    // waitForStarted() (no dependence on the 250ms startup-grace window).
-    const AdbLogcatSessionData sessionData{
-        QStringLiteral( "/path/that/does/not/exist/adb" ),
-        QStringLiteral( "emulator-5554" ),
-        QStringLiteral( "Pixel Test" ),
-        QString{},
-        captureId,
-        QString{},
-        LiveLogSourceType::AdbLogcat,
-    };
-    AdbLogcatSource source( sessionData, logData );
-
-    // No setAutoReconnectEnabled() call: the member default must be disabled so
-    // a failing connect does not arm the reconnect timer.
-    REQUIRE_FALSE( source.connectSource() );
-    QCoreApplication::processEvents();
-    REQUIRE_FALSE( source.isAutoReconnectActive() );
-
-    source.disconnectSource();
-    drainLiveSourceEvents( 200 );
-#endif
-}
-
-TEST_CASE( "AdbLogcatSource manual reconnect resets the attempt counter" )
-{
-#ifdef Q_OS_WIN
-    WARN( "Skipping POSIX shell based reconnect reset test on Windows." );
-#else
-    QTemporaryDir tempDir;
-    REQUIRE( tempDir.isValid() );
-
-    const auto captureId = makeCaptureId();
-    auto logData = std::make_shared<StreamingLogData>( captureId, tempDir.path() );
-    // A non-existent executable fails connectTransport() deterministically in
-    // waitForStarted() (no dependence on the 250ms startup-grace window).
-    const AdbLogcatSessionData sessionData{
-        QStringLiteral( "/path/that/does/not/exist/adb" ),
-        QStringLiteral( "emulator-5554" ),
-        QStringLiteral( "Pixel Test" ),
-        QString{},
-        captureId,
-        QString{},
-        LiveLogSourceType::AdbLogcat,
-    };
-    AdbLogcatSource source( sessionData, logData );
-    source.setAutoReconnectEnabled( true );
-    source.setAutoReconnectMaxAttempts( 50 );
-
-    REQUIRE_FALSE( source.connectSource() ); // fails, schedules first reconnect (~1s)
-
-    // Wait for at least one auto-reconnect attempt to fire and increment.
-    QElapsedTimer deadline;
-    deadline.start();
-    while ( source.reconnectAttempt() < 1 && deadline.elapsed() < 5000 ) {
-        QCoreApplication::processEvents( QEventLoop::AllEvents, 50 );
-        QTest::qWait( 20 );
-    }
-    REQUIRE( source.reconnectAttempt() >= 1 );
-
-    // A manual reconnect must reset the stale attempt counter.
-    source.reconnectSource();
-    REQUIRE( source.reconnectAttempt() == 0 );
-
-    source.setAutoReconnectEnabled( false );
-    source.disconnectSource();
-    drainLiveSourceEvents( 200 );
-#endif
 }
 
 TEST_CASE( "DeviceListProvider async enumeration snapshots work before provider destruction" )
@@ -2638,8 +2599,8 @@ TEST_CASE( "AdbLogcatSessionData round-trips the bound output file and ANSI save
     data.boundOutputFile = QStringLiteral( "/tmp/saved.log" );
     data.outputAnsiMode = LiveLogSaveAnsiMode::Preserve;
 
-    const auto json = QString::fromUtf8(
-        QJsonDocument( data.toJson() ).toJson( QJsonDocument::Compact ) );
+    const auto json
+        = QString::fromUtf8( QJsonDocument( data.toJson() ).toJson( QJsonDocument::Compact ) );
     const auto restored = AdbLogcatSessionData::fromJson( json );
 
     REQUIRE( restored.captureId == QStringLiteral( "cap-1234" ) );
@@ -2657,13 +2618,11 @@ TEST_CASE( "AdbLogcatSessionData round-trips the bound output file and ANSI save
     REQUIRE( restored.isValid() );
     for ( const auto& malformedCaptureId :
           QStringList{ QString{}, QStringLiteral( "." ), QStringLiteral( ".." ),
-                       QStringLiteral( "../outside" ),
-                       QStringLiteral( "nested/capture" ),
-                       QStringLiteral( "nested\\capture" ),
-                       QStringLiteral( "capture:stream" ), QStringLiteral( "CON" ),
-                       QStringLiteral( "nul.txt" ), QStringLiteral( "COM1" ),
-                       QStringLiteral( "LPT9.log" ), QStringLiteral( "capture." ),
-                       QStringLiteral( "capture " ) } ) {
+                       QStringLiteral( "../outside" ), QStringLiteral( "nested/capture" ),
+                       QStringLiteral( "nested\\capture" ), QStringLiteral( "capture:stream" ),
+                       QStringLiteral( "CON" ), QStringLiteral( "nul.txt" ),
+                       QStringLiteral( "COM1" ), QStringLiteral( "LPT9.log" ),
+                       QStringLiteral( "capture." ), QStringLiteral( "capture " ) } ) {
         auto malformed = restored;
         malformed.captureId = malformedCaptureId;
         INFO( "capture id: " << malformedCaptureId.toStdString() );

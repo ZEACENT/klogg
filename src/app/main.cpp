@@ -148,6 +148,8 @@ void kloggUncaughtNSExceptionHandler( NSException* exception )
 #include "configuration.h"
 #include "capturestore.h"
 #include "logger.h"
+
+#include <QJsonDocument>
 #include "mainwindow.h"
 #include "sessioninfo.h"
 #include "styles.h"
@@ -221,9 +223,16 @@ QSet<QString> retainedAdbCaptureIds( const SessionInfo& sessionInfo )
                 continue;
             }
 
-            const auto sessionData = AdbLogcatSessionData::fromJson( openFile.sourceSpec );
-            if ( !sessionData.captureId.isEmpty() ) {
-                captureIds.insert( sessionData.captureId );
+            // Retention keys off whatever the session file lists, including
+            // sessions this version refuses to restore: refusing a tab must
+            // not accelerate deleting its captured data. Both the typed spec
+            // and the legacy flat payload keep the id at the top level.
+            const auto sourceSpecObject
+                = QJsonDocument::fromJson( openFile.sourceSpec.toUtf8() ).object();
+            const auto captureId
+                = sourceSpecObject.value( QStringLiteral( "captureId" ) ).toString();
+            if ( !captureId.isEmpty() ) {
+                captureIds.insert( captureId );
             }
         }
     }

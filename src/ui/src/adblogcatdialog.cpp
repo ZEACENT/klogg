@@ -4,21 +4,78 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
-#include <QHBoxLayout>
-#include <QJsonObject>
+#include <QFutureWatcher>
 #include <QLabel>
-#include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QVBoxLayout>
 #include <QUuid>
+#include <QVBoxLayout>
+
+#include <utility>
 
 #include "adbdevicelistprovider.h"
-#include "adbprocesstransport.h"
+#include "adbtrackeddeviceprovider.h"
 #include "configuration.h"
 
+namespace {
+
+constexpr auto DeviceAvailableRole = Qt::UserRole + 1;
+
+QString discoveryMessage( const klogg::livecapture::LiveSourceError& error )
+{
+    auto message
+        = QString::fromUtf8( error.message.data(), static_cast<int>( error.message.size() ) );
+    const auto detail = QString::fromUtf8( error.nativeDetail.data(),
+                                           static_cast<int>( error.nativeDetail.size() ) );
+    if ( !detail.isEmpty() && detail != message ) {
+        if ( !message.isEmpty() ) {
+            message.append( QStringLiteral( "\n" ) );
+        }
+        message.append( detail );
+    }
+    return message;
+}
+
+} // namespace
+
 AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
+    : AdbLogcatDialog( DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation{}, nullptr, {},
+                       parent )
+{
+}
+
+AdbLogcatDialog::AdbLogcatDialog(
+    DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation discoveryOperation, QWidget* parent )
+    : AdbLogcatDialog( std::move( discoveryOperation ), nullptr, {}, parent )
+{
+}
+
+AdbLogcatDialog::AdbLogcatDialog( AdbTrackedDeviceProvider& provider, QString explicitDeviceSerial,
+                                  QWidget* parent )
+    : AdbLogcatDialog( {}, &provider, std::move( explicitDeviceSerial ), parent )
+{
+}
+
+AdbLogcatDialog::AdbLogcatDialog(
+    DeviceListProviderBase<AdbDeviceInfo>::AsyncListOperation discoveryOperation,
+    AdbTrackedDeviceProvider* trackedProvider, QString explicitDeviceSerial, QWidget* parent )
     : QDialog( parent )
+    , discoveryOperation_( std::move( discoveryOperation ) )
+    , trackedProvider_( trackedProvider )
+    , requestedDeviceSerial_( std::move( explicitDeviceSerial ) )
+{
+    initializeUi();
+    loadSettings();
+
+    if ( trackedProvider_ != nullptr ) {
+        connect( trackedProvider_, &AdbTrackedDeviceProvider::snapshotChanged, this,
+                 &AdbLogcatDialog::applyTrackedSnapshot );
+        infrastructureLease_ = trackedProvider_->acquireLease();
+    }
+    refreshDevices();
+}
+
+void AdbLogcatDialog::initializeUi()
 {
     setWindowTitle( tr( "Open ADB Logcat" ) );
     setModal( true );
@@ -27,24 +84,18 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
     auto* rootLayout = new QVBoxLayout( this );
     auto* formLayout = new QFormLayout();
 
-    auto* adbRowLayout = new QHBoxLayout();
-    adbExecutableEdit_ = new QLineEdit( this );
-    adbExecutableEdit_->setObjectName( QStringLiteral( "adbExecutableEdit" ) );
+    // The dialog composes typed sessions exclusively through the built-in ADB
+    // services: no executable path or free-form argument field exists.
     refreshButton_ = new QPushButton( tr( "Refresh Devices" ), this );
     refreshButton_->setObjectName( QStringLiteral( "refreshDevicesButton" ) );
-    adbRowLayout->addWidget( adbExecutableEdit_ );
-    adbRowLayout->addWidget( refreshButton_ );
+    formLayout->addRow( refreshButton_ );
 
     deviceCombo_ = new QComboBox( this );
     deviceCombo_->setObjectName( QStringLiteral( "deviceCombo" ) );
     deviceCombo_->setSizeAdjustPolicy( QComboBox::AdjustToContents );
-    extraArgsEdit_ = new QLineEdit( this );
-    extraArgsEdit_->setObjectName( QStringLiteral( "extraArgsEdit" ) );
-    extraArgsEdit_->setPlaceholderText( tr( "Optional logcat args, appended after 'adb -s <serial> logcat'" ) );
     ansiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), this );
     ansiOutputCheckBox_->setObjectName( QStringLiteral( "ansiOutputCheckBox" ) );
 
-    // Auto-reconnect: enables automatic reconnection with exponential backoff
     autoReconnectCheckBox_
         = new QCheckBox( tr( "Enable auto-reconnect on connection loss" ), this );
     autoReconnectCheckBox_->setObjectName( QStringLiteral( "autoReconnectCheckBox" ) );
@@ -53,7 +104,6 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
             "after an unexpected disconnection or error. Uses exponential backoff "
             "starting at 1 second and capping at 30 seconds between attempts." ) );
 
-    // Max reconnect attempts
     maxAttemptsSpinBox_ = new QSpinBox( this );
     maxAttemptsSpinBox_->setObjectName( QStringLiteral( "maxAttemptsSpinBox" ) );
     maxAttemptsSpinBox_->setRange( 0, 9999 );
@@ -63,10 +113,9 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
             "Set to 0 for unlimited retries. Each retry uses increasing delay "
             "(1s, 2s, 4s, 8s, ... up to 30s)." ) );
 
-    // Max capture file size (displayed in MB, stored in bytes)
     maxFileSizeSpinBox_ = new QSpinBox( this );
     maxFileSizeSpinBox_->setObjectName( QStringLiteral( "maxFileSizeSpinBox" ) );
-    maxFileSizeSpinBox_->setRange( 0, 1048576 ); // 0 to ~1 TB in MB
+    maxFileSizeSpinBox_->setRange( 0, 1048576 );
     maxFileSizeSpinBox_->setSpecialValueText( tr( "Unlimited" ) );
     maxFileSizeSpinBox_->setSuffix( tr( " MB" ) );
     maxFileSizeSpinBox_->setToolTip(
@@ -74,7 +123,6 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
             "When exceeded, the file is rotated and a new one is started. "
             "Set to 0 to disable size-based rolling." ) );
 
-    // Rolling backup count
     backupCountSpinBox_ = new QSpinBox( this );
     backupCountSpinBox_->setObjectName( QStringLiteral( "backupCountSpinBox" ) );
     backupCountSpinBox_->setRange( 0, 999 );
@@ -83,11 +131,9 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
             "Older files beyond this count are deleted. "
             "Set to 0 to keep all rotated files indefinitely." ) );
 
-    formLayout->addRow( tr( "ADB executable" ), adbRowLayout );
     formLayout->addRow( tr( "Device" ), deviceCombo_ );
-    formLayout->addRow( tr( "Extra logcat args" ), extraArgsEdit_ );
-    formLayout->addRow( QString{}, ansiOutputCheckBox_ );
-    formLayout->addRow( QString{}, autoReconnectCheckBox_ );
+    formLayout->addRow( ansiOutputCheckBox_ );
+    formLayout->addRow( autoReconnectCheckBox_ );
     formLayout->addRow( tr( "Max reconnect attempts" ), maxAttemptsSpinBox_ );
     formLayout->addRow( tr( "Max capture file size" ), maxFileSizeSpinBox_ );
     formLayout->addRow( tr( "Rolling backup count" ), backupCountSpinBox_ );
@@ -111,58 +157,124 @@ AdbLogcatDialog::AdbLogcatDialog( QWidget* parent )
         accept();
     } );
     connect( buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject );
-
-    deviceRefreshWatcher_ = new QFutureWatcher<QList<AdbDeviceInfo>>( this );
-    connect( deviceRefreshWatcher_, &QFutureWatcher<QList<AdbDeviceInfo>>::finished, this,
-             &AdbLogcatDialog::onDevicesEnumerated );
-
-    loadSettings();
-    refreshDevices();
 }
 
 AdbLogcatSessionData AdbLogcatDialog::sessionData() const
 {
+    // Only built-in transports are composed: raw executable/argument fields
+    // were retired with the compatibility process backend.
     AdbLogcatSessionData sessionData;
-    sessionData.adbExecutable = adbExecutableEdit_->text().trimmed();
     sessionData.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
     sessionData.deviceDescription = deviceCombo_->currentText();
-    sessionData.extraArgs = extraArgsEdit_->text().trimmed();
     sessionData.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     sessionData.sourceType = LiveLogSourceType::AdbLogcat;
+    sessionData.adbBackend = AdbTransportBackend::SmartSocket;
+    sessionData.runIntent = klogg::livecapture::RunIntent::Running;
     sessionData.ansiOutputEnabled = ansiOutputCheckBox_->isChecked();
     sessionData.autoReconnectEnabled = autoReconnectCheckBox_->isChecked();
     sessionData.maxReconnectAttempts = maxAttemptsSpinBox_->value();
-    sessionData.captureMaxFileSize = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
+    sessionData.captureMaxFileSize
+        = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
     sessionData.captureBackupCount = backupCountSpinBox_->value();
     return sessionData;
 }
 
 void AdbLogcatDialog::refreshDevices()
 {
-    deviceCombo_->clear();
-    updateAcceptState();
+    if ( trackedProvider_ != nullptr ) {
+        refreshButton_->setEnabled( false );
+        statusLabel_->setText( tr( "Detecting ADB devices..." ) );
+        trackedProvider_->refresh();
+        refreshButton_->setEnabled( true );
+        return;
+    }
+
+    const auto generation = discoveryCoordinator_.beginRefresh();
+    ++pendingRefreshCount_;
+    refreshButton_->setEnabled( false );
     statusLabel_->setText( tr( "Detecting ADB devices..." ) );
 
-    // The provider snapshots an immutable enumeration plan before returning the
-    // future, so the local provider can be destroyed while the task continues.
-    AdbDeviceListProvider provider( adbExecutableEdit_->text() );
-    deviceRefreshWatcher_->setFuture( provider.listDevicesAsync() );
+    if ( !discoveryOperation_ ) {
+        --pendingRefreshCount_;
+        refreshButton_->setEnabled( true );
+        statusLabel_->setText( tr( "No ADB devices detected." ) );
+        deviceCombo_->clear();
+        updateAcceptState();
+        return;
+    }
+
+    auto future = runDeviceDiscoveryAsync<AdbDeviceInfo>( discoveryOperation_, generation );
+
+    // The dialog's QObject child tree owns each request-local watcher.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>( this );
+    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>::finished, this,
+             [ this, watcher ] {
+                 auto result = watcher->result();
+                 watcher->deleteLater();
+                 if ( pendingRefreshCount_ > 0 ) {
+                     --pendingRefreshCount_;
+                 }
+                 refreshButton_->setEnabled( pendingRefreshCount_ == 0 );
+                 applyDiscoveryResult( std::move( result ) );
+             } );
+    watcher->setFuture( future );
 }
 
-void AdbLogcatDialog::onDevicesEnumerated()
+void AdbLogcatDialog::applyDiscoveryResult( DeviceDiscoveryResult<AdbDeviceInfo> result )
 {
-    const auto devices = deviceRefreshWatcher_->result();
-    for ( const auto& device : devices ) {
-        deviceCombo_->addItem( device.displayName, device.serial );
-        deviceCombo_->setItemData( deviceCombo_->count() - 1, device.description, Qt::ToolTipRole );
+    if ( !discoveryCoordinator_.accept( std::move( result ) ) ) {
+        return;
+    }
+    populateDevices( discoveryCoordinator_.currentDevices(), discoveryCoordinator_.currentError() );
+}
+
+void AdbLogcatDialog::applyTrackedSnapshot( const DeviceDiscoveryResult<AdbDeviceInfo>& result )
+{
+    if ( result.generation < latestTrackedGeneration_ ) {
+        return;
+    }
+    latestTrackedGeneration_ = result.generation;
+    populateDevices( result.devices, result.error );
+}
+
+void AdbLogcatDialog::populateDevices(
+    const QList<AdbDeviceInfo>& devices,
+    const std::optional<klogg::livecapture::LiveSourceError>& error )
+{
+    auto selectedDeviceId = deviceCombo_->currentData( Qt::UserRole ).toString();
+    if ( selectedDeviceId.isEmpty() ) {
+        selectedDeviceId = requestedDeviceSerial_;
     }
 
-    if ( devices.isEmpty() ) {
-        statusLabel_->setText( tr( "No online ADB devices detected." ) );
+    deviceCombo_->clear();
+    for ( const auto& device : devices ) {
+        deviceCombo_->addItem( device.displayName, device.serial );
+        const auto index = deviceCombo_->count() - 1;
+        deviceCombo_->setItemData( index, device.description, Qt::ToolTipRole );
+        deviceCombo_->setItemData( index, device.isOnline(), DeviceAvailableRole );
+    }
+
+    auto selectedIndex = deviceCombo_->findData( selectedDeviceId );
+    if ( selectedIndex < 0 ) {
+        for ( int index = 0; index < deviceCombo_->count(); ++index ) {
+            if ( deviceCombo_->itemData( index, DeviceAvailableRole ).toBool() ) {
+                selectedIndex = index;
+                break;
+            }
+        }
+    }
+    deviceCombo_->setCurrentIndex( selectedIndex );
+
+    if ( error.has_value() ) {
+        statusLabel_->setText( discoveryMessage( *error ) );
+    }
+    else if ( devices.isEmpty() ) {
+        statusLabel_->setText( tr( "No ADB devices detected." ) );
     }
     else {
-        statusLabel_->setText(
-            tr( "Data stays in temp capture storage until you explicitly save or close the tab." ) );
+        statusLabel_->setText( tr(
+            "Data stays in temp capture storage until you explicitly save or close the tab." ) );
     }
 
     updateAcceptState();
@@ -171,15 +283,14 @@ void AdbLogcatDialog::onDevicesEnumerated()
 void AdbLogcatDialog::updateAcceptState()
 {
     if ( auto* okButton = buttonBox_->button( QDialogButtonBox::Ok ) ) {
-        okButton->setEnabled( deviceCombo_->count() > 0 && deviceCombo_->currentIndex() >= 0 );
+        okButton->setEnabled( deviceCombo_->currentIndex() >= 0
+                              && deviceCombo_->currentData( DeviceAvailableRole ).toBool() );
     }
 }
 
 void AdbLogcatDialog::loadSettings()
 {
     const auto& config = Configuration::get();
-    adbExecutableEdit_->setText( config.adbExecutable() );
-    extraArgsEdit_->setText( config.adbLogcatExtraArgs() );
     ansiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
     autoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
     maxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
@@ -190,8 +301,6 @@ void AdbLogcatDialog::loadSettings()
 void AdbLogcatDialog::saveSettings() const
 {
     auto& config = Configuration::get();
-    config.setAdbExecutable( adbExecutableEdit_->text().trimmed() );
-    config.setAdbLogcatExtraArgs( extraArgsEdit_->text().trimmed() );
     config.setAdbLogcatAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.setLiveAutoReconnectEnabled( autoReconnectCheckBox_->isChecked() );
     config.setLiveAutoReconnectMaxAttempts( maxAttemptsSpinBox_->value() );

@@ -3,11 +3,16 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractcrawlerwidget.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/abstractlogview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatdialog.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatsessiondata.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adbliveservices.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprocesstransport.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adbsmartsockettransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbdevicelistprovider.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/adbtrackeddeviceprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adblogcatsource.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/commandargumenttokenizer.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/crawlerwidget.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/devicediscovery.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/devicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filteredview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filterfavoritesmodel.h
@@ -28,12 +33,16 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/savefavoritedialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/filterdiffdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/infoline.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosliveservices.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogdialog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ioslogprocesstransport.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativetransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdevicelistprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdeviceparser.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logmainview.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogcontroller.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogsession.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livesourcetransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindow.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindowtext.h
@@ -87,8 +96,12 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/abstractlogview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/highlightcompose.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatdialog.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsessiondata.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adbliveservices.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbprocesstransport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adbsmartsockettransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adbdevicelistprovider.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/adbtrackeddeviceprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/adblogcatsource.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/crawlerwidget.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filteredview.cpp
@@ -107,12 +120,16 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/savefavoritedialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/filterdiffdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/infoline.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosliveservices.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogdialog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/ioslogprocesstransport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosdevicelistprovider.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosdeviceparser.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/pathline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logmainview.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogcontroller.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogsession.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindowtext.cpp
@@ -174,6 +191,8 @@ target_link_libraries(
   PUBLIC project_options
          project_warnings
          klogg_logdata
+         klogg_livecapture
+         klogg_adb_smartsocket
          klogg_versioncheck
          klogg_karchive
          Qt${QT_VERSION_MAJOR}::Widgets

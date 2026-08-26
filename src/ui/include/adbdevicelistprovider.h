@@ -20,8 +20,14 @@
 #ifndef KLOGG_ADBDEVICELISTPROVIDER_H
 #define KLOGG_ADBDEVICELISTPROVIDER_H
 
+#include <QByteArray>
+
 #include "adbdeviceinfo.h"
 #include "devicelistprovider.h"
+
+QList<AdbDeviceInfo> parseAdbDeviceListOutput( const QByteArray& output );
+DeviceDiscoveryResult<AdbDeviceInfo>
+parseAdbDeviceDiscovery( klogg::livecapture::Generation generation, const QByteArray& output );
 
 // Provides ADB device enumeration by running `adb devices -l`.
 //
@@ -32,9 +38,8 @@
 class AdbDeviceListProvider : public DeviceListProviderBase<AdbDeviceInfo> {
     Q_OBJECT
 
-  public:
-    explicit AdbDeviceListProvider( QString adbExecutable,
-                                    QObject* parent = nullptr );
+public:
+    explicit AdbDeviceListProvider( QString adbExecutable, QObject* parent = nullptr );
 
     // Resolve the adb executable path through well-known locations.
     // Exposed for "Detect adb" UI affordances.
@@ -43,12 +48,11 @@ class AdbDeviceListProvider : public DeviceListProviderBase<AdbDeviceInfo> {
     // Normalize an adb executable path (expand tilde, resolve known locations).
     static QString normalizedExecutable( const QString& adbExecutable );
 
-  protected:
+protected:
     QList<AdbDeviceInfo> doListDevices( QString* error ) const override;
-    bool deviceMatches( const AdbDeviceInfo& device,
-                        const QString& deviceId ) const override;
+    bool deviceMatches( const AdbDeviceInfo& device, const QString& deviceId ) const override;
 
-  private:
+private:
     QString adbExecutable_;
 };
 
