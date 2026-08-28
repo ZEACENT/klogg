@@ -18,7 +18,7 @@ runs:
             --env TSAN_OPTIONS \
             --env KLOGG_CMAKE_OPTS="$KLOGG_CMAKE_OPTS" \
             -v "$KLOGG_WORKSPACE":/usr/local \
-            ${{ matrix.config.container }} \
+            ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} \
             /bin/bash -lc \
             "rm -rf /usr/local/$KLOGG_BUILD_ROOT && mkdir -p /usr/local/$KLOGG_BUILD_ROOT && cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"; then
             exit 0
@@ -43,6 +43,6 @@ runs:
           --env LSAN_OPTIONS \
           --env TSAN_OPTIONS \
           -v "$KLOGG_WORKSPACE":/usr/local \
-          ${{ matrix.config.container }} \
+          ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} \
           /bin/bash -c \
           "cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"

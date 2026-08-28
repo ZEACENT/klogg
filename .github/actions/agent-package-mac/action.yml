@@ -494,7 +494,7 @@ runs:
     #    mkdir -p pkg_resources/en.lproj
     #    cp ../COPYING pkg_resources/en.lproj
     #    cp ../packaging/description.txt pkg_resources/en.lproj
-    #    sed -e s/%klogg_version%/${{ env.KLOGG_VERSION }}/ -e s/%klogg_pkg%/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg/ ../packaging/osx/distribution.xml > distribution.xml
+    #    sed -e s/%klogg_version%/${{ env.KLOGG_VERSION }}/ -e s/%klogg_pkg%/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg/ ./generated/distribution.xml > distribution.xml
     #    pkgbuild --component ./output/klogg.app --install-location /Applications --version ${{ env.KLOGG_VERSION }} --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg
     #    productbuild --package-path ./output --distribution distribution.xml --resources ./pkg_resources --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg
     #    pkgutil --expand ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg ./output/klogg_product_pkg

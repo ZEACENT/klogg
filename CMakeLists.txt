@@ -62,13 +62,21 @@ project(
   LANGUAGES C CXX ASM
 )
 
-set(PROJECT_HOMEPAGE_URL "https://github.com/ZEACENT/klogg")
+set(KLOGG_REPOSITORY_OWNER ZEACENT)
+string(TOLOWER ${KLOGG_REPOSITORY_OWNER} KLOGG_REPOSITORY_OWNER_LOWER)
+set(PROJECT_HOMEPAGE_URL "https://github.com/${KLOGG_REPOSITORY_OWNER}/${PROJECT_NAME}")
+set(KLOGG_APPLICATION_ID "com.github.${KLOGG_REPOSITORY_OWNER_LOWER}.${PROJECT_NAME}")
 
 string(TIMESTAMP PRODUCT_CURRENT_YEAR "%Y")
 set(COMPANY "Anton Filimonov")
 set(COPYRIGHT "Copyright (c) 2020-${PRODUCT_CURRENT_YEAR} ZEACENT, Nicolas Bonnefon, Anton Filimonov and other contributors.")
-set(IDENTIFIER "com.github.variar.klogg")
 set(PROJECT_DESCRIPTION "${PROJECT_NAME} log viewer")
+
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/distribution.xml.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/distribution.xml
+  @ONLY
+)
 
 option(KLOGG_BUILD_TESTS "Build tests" ON)
 option(KLOGG_BUILD_BENCHMARKS "Build benchmark tools" ON)
@@ -448,7 +456,7 @@ if(UNIX)
     #deb
     set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
     set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "http://github.com/ZEACENT/klogg")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE ${PROJECT_HOMEPAGE_URL})
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Anton Filimonov <${CPACK_PACKAGE_CONTACT}>")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS YES)
 
@@ -457,7 +465,7 @@ if(UNIX)
     set(CPACK_RPM_PACKAGE_LICENSE "GPLv3")
     set(CPACK_RPM_PACKAGE_AUTOREQ YES)
     #set(CPACK_RPM_PACKAGE_REQUIRES "qt5-qtbase >= ${KLOGG_QT_VERSION}")
-    set(CPACK_RPM_PACKAGE_URL "http://github.com/ZEACENT/klogg")
+    set(CPACK_RPM_PACKAGE_URL ${PROJECT_HOMEPAGE_URL})
     set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
         /usr/share/applications
         /usr/share/icons
@@ -478,6 +486,8 @@ add_custom_target(
   installation
   SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/klogg.nsi
           ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/klogg.desktop
+          ${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/distribution.xml.in
+          ${CMAKE_CURRENT_BINARY_DIR}/generated/distribution.xml
           ${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in
 )
 

@@ -4,16 +4,16 @@
     <license file="COPYING"/>
     <welcome file="description.txt"/>
     
-    <pkg-ref id="com.github.variar.klogg"/>
+    <pkg-ref id="@KLOGG_APPLICATION_ID@"/>
     <options customize="never" require-scripts="false"/>
     <choices-outline>
         <line choice="default">
-            <line choice="com.github.variar.klogg"/>
+            <line choice="@KLOGG_APPLICATION_ID@"/>
         </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="com.github.variar.klogg" visible="false">
-        <pkg-ref id="com.github.variar.klogg"/>
+    <choice id="@KLOGG_APPLICATION_ID@" visible="false">
+        <pkg-ref id="@KLOGG_APPLICATION_ID@"/>
     </choice>
-    <pkg-ref id="com.github.variar.klogg" version="%klogg_version%" onConclusion="none">%klogg_pkg%</pkg-ref>
+    <pkg-ref id="@KLOGG_APPLICATION_ID@" version="%klogg_version%" onConclusion="none">%klogg_pkg%</pkg-ref>
 </installer-gui-script>

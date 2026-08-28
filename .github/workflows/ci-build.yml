@@ -33,6 +33,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  KLOGG_CI_IMAGE_PREFIX: zeacent/klogg
+
 jobs:
   SaveVersion:
     needs: [PrefetchDeps, PrefetchWindowsTools]
@@ -579,7 +582,7 @@ jobs:
             package_suffix: deb
             check_container: ubuntu:22.04
             container_root: docker/ubuntu22.04
-            container: variar/klogg_ubuntu22.04
+            container_suffix: _ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
             package: true
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
@@ -595,7 +598,7 @@ jobs:
             package_suffix: deb
             check_container: ubuntu:24.04
             container_root: docker/ubuntu24.04
-            container: variar/klogg_ubuntu24.04
+            container_suffix: _ubuntu24.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
             package: true
 
@@ -614,7 +617,7 @@ jobs:
             # (unsuffixed) names; building there yields the deb for 26.04 LTS.
             check_container: ubuntu:26.04
             container_root: docker/ubuntu26.04
-            container: variar/klogg_ubuntu26.04
+            container_suffix: _ubuntu26.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
             package: true
 
@@ -626,7 +629,7 @@ jobs:
             artifacts_id: appimage
             package_suffix: AppImage
             container_root: docker/ubuntu20.04
-            container: variar/klogg_ubuntu20.04
+            container_suffix: _ubuntu20.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
             package: true
 
@@ -643,7 +646,7 @@ jobs:
             label: ubuntu-22.04-asan-lsan
             package_tag: asan
             container_root: docker/ubuntu22.04
-            container: variar/klogg_ubuntu22.04
+            container_suffix: _ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: address
             # ASan instrumentation + the full test suite is the longest pole in
@@ -658,7 +661,7 @@ jobs:
             label: ubuntu-22.04-ubsan
             package_tag: ubsan
             container_root: docker/ubuntu22.04
-            container: variar/klogg_ubuntu22.04
+            container_suffix: _ubuntu22.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
             sanitizer: undefined
             timeout_minutes: 60
@@ -670,7 +673,7 @@ jobs:
             label: ubuntu-22.04-tsan
             package_tag: tsan
             container_root: docker/ubuntu22.04-tsan
-            container: variar/klogg_ubuntu22.04-tsan
+            container_suffix: _ubuntu22.04-tsan
             cmake_opts: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
             sanitizer: thread
             timeout_minutes: 120
@@ -762,7 +765,7 @@ jobs:
         with:
           context: ${{ matrix.config.container_root }}
           load: true
-          tags: ${{ matrix.config.container }}
+          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
           cache-from: type=gha,scope=klogg-qt5-tsan
           cache-to: type=gha,mode=max,scope=klogg-qt5-tsan
 
@@ -778,16 +781,16 @@ jobs:
         with:
           context: ${{ matrix.config.container_root }}
           load: true
-          tags: ${{ matrix.config.container }}
+          tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
           # Same type=gha layer cache pattern as the TSan image. The scope is
           # the container image name, so legs sharing an image (e.g. the deb
-          # and asan legs both build variar/klogg_ubuntu22.04) share one cache.
+          # and asan legs both build the _ubuntu22.04 image) share one cache.
           # mode=min (final image only) instead of mode=max: these are
           # single-stage images, so no intermediate stages are lost, and the
           # smaller footprint keeps the shared 10GB repo cache budget from
           # evicting the per-leg ccache entries that the restore step relies on.
-          cache-from: type=gha,scope=klogg-linux-${{ matrix.config.container }}
-          cache-to: type=gha,mode=min,scope=klogg-linux-${{ matrix.config.container }}
+          cache-from: type=gha,scope=klogg-linux-${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
+          cache-to: type=gha,mode=min,scope=klogg-linux-${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
 
       - name: Restore ccache for the Linux build
         id: restore-ccache
@@ -847,7 +850,7 @@ jobs:
             echo "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" >> $GITHUB_ENV
           fi
           if [ "${{ matrix.config.sanitizer }}" = "thread" ]; then
-            docker run --rm "${{ matrix.config.container }}" /bin/bash -c '
+            docker run --rm "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" /bin/bash -c '
               test -x /usr/bin/llvm-symbolizer-14 &&
               test -f /opt/qt5-tsan/plugins/platforms/libqoffscreen.so &&
               llvm-nm-14 -D --undefined-only /opt/qt5-tsan/lib/libQt5Core.so.5 | grep -q __tsan_acquire &&
@@ -865,7 +868,7 @@ jobs:
           # Exposes the hit/miss ratio so a warm-cache regression is visible in
           # the job log instead of silently costing a full rebuild every run.
           docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
-            "${{ matrix.config.container }}" \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
             /bin/bash -c 'ccache -s 2>/dev/null || echo "ccache stats unavailable"'
 
       - name: Save ccache for the Linux build
@@ -887,7 +890,7 @@ jobs:
           docker run --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
-            "${{ matrix.config.container }}" \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
             /bin/bash -c '
               set -euo pipefail
               for bin in klogg_tests klogg_itests; do
@@ -910,7 +913,7 @@ jobs:
           docker run --rm \
             --env KLOGG_BUILD_ROOT \
             -v "$KLOGG_WORKSPACE:/usr/local" \
-            "${{ matrix.config.container }}" \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
             /bin/bash -c '
               set -euo pipefail
               for bin in klogg_tests klogg_itests; do
@@ -933,7 +936,7 @@ jobs:
           docker run --rm \
             --env TSAN_OPTIONS \
             -v "$KLOGG_WORKSPACE:/usr/local" \
-            "${{ matrix.config.container }}" \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
             /usr/local/scripts/verify_tsan_qt_runtime.sh \
             "/usr/local/$KLOGG_BUILD_ROOT/output/klogg_itests" \
             /opt/qt5-tsan

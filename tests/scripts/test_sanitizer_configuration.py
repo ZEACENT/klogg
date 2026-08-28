@@ -711,7 +711,15 @@ class SanitizerConfigurationTest(unittest.TestCase):
     def test_linux_tsan_uses_a_dedicated_instrumented_qt_runtime(self):
         workflow = CI_BUILD.read_text()
         self.assertIn("container_root: docker/ubuntu22.04-tsan", workflow)
-        self.assertIn("container: variar/klogg_ubuntu22.04-tsan", workflow)
+        self.assertTrue(
+            "container_suffix: _ubuntu22.04-tsan" in workflow,
+            "TSan matrix leg must use the unified _ubuntu22.04-tsan image suffix",
+        )
+        self.assertTrue(
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}"
+            in workflow,
+            "TSan image consumers must resolve KLOGG_CI_IMAGE_PREFIX plus container_suffix",
+        )
         self.assertIn("-DCMAKE_C_COMPILER=clang-14", workflow)
         self.assertIn("-DCMAKE_CXX_COMPILER=clang++-14", workflow)
         self.assertIn("-DCMAKE_PREFIX_PATH=/opt/qt5-tsan", workflow)

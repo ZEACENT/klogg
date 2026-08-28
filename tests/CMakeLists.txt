@@ -86,6 +86,10 @@ add_test(
   NAME static_link_policy_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_static_link_policy_contract.py
 )
+add_test(
+  NAME application_identity_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_application_identity_contract.py
+)
 set_tests_properties(
   adb_helper_release_contract
   adb_helper_verifier_contract
@@ -99,6 +103,7 @@ set_tests_properties(
   live_session_ui_retirement_contract
   livelog_controller_retirement_contract
   static_link_policy_contract
+  application_identity_contract
   PROPERTIES TIMEOUT 60
 )
 

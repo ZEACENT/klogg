@@ -11,5 +11,5 @@ runs:
         # runtime) transcodes file names via the locale codec and silently
         # drops non-ASCII bytes, mangling non-ASCII path fixtures (PR #62 TSan
         # leg: a CJK directory was created on disk as "APP").
-        docker run --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env LANG=C.UTF-8 --env ASAN_OPTIONS --env UBSAN_OPTIONS --env TSAN_OPTIONS --env LSAN_OPTIONS -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/$KLOGG_BUILD_ROOT && ctest --verbose"
+        docker run --env KLOGG_BUILD_ROOT=$KLOGG_BUILD_ROOT --env LANG=C.UTF-8 --env ASAN_OPTIONS --env UBSAN_OPTIONS --env TSAN_OPTIONS --env LSAN_OPTIONS -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/$KLOGG_BUILD_ROOT && ctest --verbose"
 
