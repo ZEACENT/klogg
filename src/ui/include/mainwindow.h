@@ -47,6 +47,7 @@
 
 #include <QTranslator>
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -124,7 +125,7 @@ class MainWindow : public QMainWindow {
     bool event( QEvent* event ) override;
 
   private:
-    enum class ActionInitiator { User, App };
+    enum class ActionInitiator : std::uint8_t { User, WindowDiscard, App };
 
   private Q_SLOTS:
     void open();

@@ -2395,8 +2395,11 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
             controller->stopRequested();
         }
         if ( auto* adbSource = session_.getAdbLogcatSource( widget ) ) {
-            // Preserve captures during app shutdown so restored live tabs keep their history.
-            if ( initiator == ActionInitiator::User && !session_.exitRequested() ) {
+            // Preserve captures only while this window remains in the shutdown
+            // session. User-closed tabs and discarded multi-window sessions are final.
+            const bool discardsCapture = initiator == ActionInitiator::User
+                                         || initiator == ActionInitiator::WindowDiscard;
+            if ( discardsCapture && !session_.exitRequested() ) {
                 adbSource->deleteCaptureFiles();
             }
         }
@@ -2648,14 +2651,17 @@ void MainWindow::closeEvent( QCloseEvent* event )
         this->hide();
     }
     else {
-        session_.close();
+        // The last window remains persisted for normal application shutdown;
+        // closing one of several windows removes that session permanently.
+        const bool preserveWindowSession = session_.close();
 
         shutdownInProgress_ = true;
         suspendSessionPersistence_ = true;
         writeSettings();
         TabGroupManager::get().save();
 
-        closeAll( ActionInitiator::App );
+        closeAll( preserveWindowSession ? ActionInitiator::App
+                                         : ActionInitiator::WindowDiscard );
         trayIcon_->hide();
         Q_EMIT windowClosed();
 

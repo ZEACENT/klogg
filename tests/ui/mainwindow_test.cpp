@@ -914,6 +914,84 @@ SCENARIO( "MainWindow close preserves restored ADB capture files", "[ui][session
     config.save();
 }
 
+SCENARIO( "Closing one of several windows deletes its discarded live capture",
+          "[ui][session][adb][capture-cleanup]" )
+{
+    auto appSession = std::make_shared<Session>();
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard sessionInfoRestoreGuard{ sessionInfo };
+    const auto existingWindowIds = sessionInfo.windows();
+    const auto targetWindowId
+        = QString( "discard-adb-session-%1" )
+              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto survivorWindowId
+        = QString( "survivor-session-%1" )
+              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    for ( const auto& windowId : existingWindowIds ) {
+        sessionInfo.remove( windowId );
+    }
+    sessionInfo.add( targetWindowId );
+    sessionInfo.add( survivorWindowId );
+
+    const auto captureId = QString( "discard_capture_%1" )
+                               .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    QString capturePath;
+    {
+        CaptureStore captureStore( captureId );
+        captureStore.appendUtf8( QByteArrayLiteral( "line\n" ) );
+        captureStore.finishInput();
+        capturePath = captureStore.capturePath();
+    }
+    REQUIRE( QDir{ capturePath }.exists() );
+
+    const AdbLogcatSessionData sessionData{
+        QStringLiteral( "adb" ),
+        QStringLiteral( "serial-discard" ),
+        QStringLiteral( "Discarded Pixel" ),
+        QString{},
+        captureId,
+        QString{},
+    };
+    const auto sourceSpec = klogg::livelog::serializeSpec(
+        klogg::livelog::sessionSpecFromSessionData( sessionData ) );
+    sessionInfo.setOpenFiles(
+        targetWindowId,
+        { SessionInfo::OpenFile( sessionData.documentId(), 0, {}, "adb_logcat",
+                                 sessionData.displayName(), sourceSpec ) } );
+    sessionInfo.setCurrentFileIndex( targetWindowId, 0 );
+    sessionInfo.save();
+
+    WindowSession windowSession{ appSession, targetWindowId, 0 };
+    auto& config = Configuration::get();
+    const auto previousMinimizeToTray = config.minimizeToTray();
+    config.setMinimizeToTray( false );
+    config.save();
+
+    std::unique_ptr<MainWindow> mainWindow;
+    QTimer::singleShot( 0, [ & ] { mainWindow.reset( new MainWindow( windowSession ) ); } );
+    QTest::qWait( 100 );
+    mainWindow->show();
+    QTest::qWait( 100 );
+
+    auto* tabArea = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabArea != nullptr );
+    QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(),
+                        [ &mainWindow ] { mainWindow->reloadSession(); } );
+    REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
+
+    QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(),
+                        [ &mainWindow ] { mainWindow->close(); } );
+    REQUIRE( waitUiState( [ & ] { return !mainWindow->isVisible(); } ) );
+
+    CHECK_FALSE( QDir{ capturePath }.exists() );
+    const auto remainingWindows = SessionInfo::getSynced().windows();
+    CHECK_FALSE( remainingWindows.contains( targetWindowId ) );
+    CHECK( remainingWindows.contains( survivorWindowId ) );
+
+    config.setMinimizeToTray( previousMinimizeToTray );
+    config.save();
+}
+
 SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )
 {
     auto appSession = std::make_shared<Session>();
