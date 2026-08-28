@@ -3164,10 +3164,30 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
                                     QString::fromStdString( projection.failureMessage ) );
             }
             break;
+        case klogg::livecapture::PresentationStatus::AwaitingUser:
+            liveStatus = LiveTabStatus::Disconnected;
+            if ( projection.awaitingUserReason.has_value() ) {
+                QString action;
+                switch ( *projection.awaitingUserReason ) {
+                case klogg::livecapture::AwaitingUserReason::Authorize:
+                    action = tr( "Authorize this computer on the device." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Pair:
+                    action = tr( "Pair the device with this computer." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Trust:
+                    action = tr( "Trust this computer on the device." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Unlock:
+                    action = tr( "Unlock the device." );
+                    break;
+                }
+                toolTip = tr( "%1\nAction required: %2" ).arg( baseTip, action );
+            }
+            break;
         case klogg::livecapture::PresentationStatus::Stopped:
         case klogg::livecapture::PresentationStatus::WaitingForInfrastructure:
         case klogg::livecapture::PresentationStatus::WaitingForDevice:
-        case klogg::livecapture::PresentationStatus::AwaitingUser:
         case klogg::livecapture::PresentationStatus::OpeningStream:
         case klogg::livecapture::PresentationStatus::Stopping:
             liveStatus = LiveTabStatus::Disconnected;

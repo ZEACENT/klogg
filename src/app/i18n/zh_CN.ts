@@ -480,7 +480,40 @@
     </message>
 </context>
 <context>
+    <name>IosLogDialog</name>
+    <message>
+        <location filename="../../ui/src/ioslogdialog.cpp" line="198"/>
+        <source>Native iOS device service is unavailable: %1</source>
+        <translation>原生 iOS 设备服务不可用：%1</translation>
+    </message>
+</context>
+<context>
     <name>MainWindow</name>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3173"/>
+        <source>Authorize this computer on the device.</source>
+        <translation>在设备上授权这台电脑。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3176"/>
+        <source>Pair the device with this computer.</source>
+        <translation>将设备与这台电脑配对。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3179"/>
+        <source>Trust this computer on the device.</source>
+        <translation>在设备上信任这台电脑。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3182"/>
+        <source>Unlock the device.</source>
+        <translation>解锁设备。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3185"/>
+        <source>%1\nAction required: %2</source>
+        <translation>%1\n需要操作：%2</translation>
+    </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1147"/>
         <source>Open URL as log file</source>

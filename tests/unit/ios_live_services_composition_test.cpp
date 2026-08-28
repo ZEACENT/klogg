@@ -10,9 +10,11 @@
 
 #include <catch2/catch.hpp>
 
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QEvent>
 #include <QJsonDocument>
+#include <QLabel>
 #include <QPointer>
 #include <QString>
 
@@ -31,6 +33,7 @@
 #include "boundedserialexecutor.h"
 #include "ioscatalogprovider.h"
 #include "iosliveservices.h"
+#include "ioslogdialog.h"
 #include "iosnativestream.h"
 #include "iosnativetransport.h"
 #include "livesourcetransport.h"
@@ -71,6 +74,11 @@ public:
     IosCatalogSnapshot snapshot() const override
     {
         return snapshot_;
+    }
+
+    std::optional<klogg::livecapture::LiveSourceError> startupError() const override
+    {
+        return startupError_;
     }
 
     SubscriptionId subscribe( SnapshotCallback callback ) override
@@ -115,6 +123,7 @@ public:
                                   { IosCatalogEntry{
                                       IosEndpointKey{ "owned-device", NativeConnectionType::Usb },
                                       3u, std::nullopt, std::nullopt } } };
+    std::optional<klogg::livecapture::LiveSourceError> startupError_;
     std::vector<std::pair<SubscriptionId, SnapshotCallback>> callbacks;
     std::vector<MetadataRequest> metadataRequests;
 
@@ -377,6 +386,52 @@ TEST_CASE( "iOS composition re-requests metadata after a recoverable error is re
     REQUIRE( catalogAddress->metadataRequests.size() == 2u );
     CHECK( catalogAddress->metadataRequests.back().endpoint == rearmed.entries.front().endpoint );
     CHECK( catalogAddress->metadataRequests.back().endpointEpoch == 4u );
+}
+
+TEST_CASE( "iOS picker follows catalog metadata snapshots without manual refresh",
+           "[ios][native][composition][dialog][catalog][metadata]" )
+{
+    MemoryCatalog catalog;
+    IosLogDialog dialog( catalog );
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
+    auto* const combo = dialog.findChild<QComboBox*>( QStringLiteral( "deviceCombo" ) );
+    REQUIRE( combo != nullptr );
+    REQUIRE( combo->count() == 1 );
+    CHECK( combo->currentText().contains( QStringLiteral( "owned-device" ) ) );
+    drainQtEvents();
+
+    auto enriched = catalog.snapshot();
+    enriched.entries.front().metadata
+        = IosDeviceMetadata{ "My iPhone", "iPhone17,1", "20.0" };
+    catalog.publish( enriched );
+    drainQtEvents();
+
+    REQUIRE( combo->count() == 1 );
+    CHECK( combo->currentText().contains( QStringLiteral( "My iPhone" ) ) );
+    CHECK( combo->itemData( 0, Qt::ToolTipRole ).toString().contains(
+        QStringLiteral( "iPhone17,1" ) ) );
+    CHECK( combo->itemData( 0, Qt::ToolTipRole ).toString().contains(
+        QStringLiteral( "20.0" ) ) );
+}
+
+TEST_CASE( "iOS picker surfaces native catalog startup failures",
+           "[ios][native][composition][dialog][catalog][startup-error]" )
+{
+    MemoryCatalog catalog;
+    catalog.snapshot_.entries.clear();
+    catalog.startupError_ = klogg::livecapture::LiveSourceError{
+        klogg::livecapture::ErrorCategory::Configuration, "ios-catalog-start-failed",
+        klogg::livecapture::ErrorScope::Infrastructure, klogg::livecapture::RetryPolicy::Never,
+        "The bundled native iOS catalog is unavailable.", "missing native symbol" };
+    IosLogDialog dialog( catalog );
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
+
+    auto* const status
+        = dialog.findChild<QLabel*>( QStringLiteral( "iosLogStatusLabel" ) );
+    REQUIRE( status != nullptr );
+    CHECK( status->text().contains( QStringLiteral( "unavailable" ),
+                                    Qt::CaseInsensitive ) );
+    CHECK( status->toolTip().contains( QStringLiteral( "missing native symbol" ) ) );
 }
 
 TEST_CASE( "one application iOS root shares catalog identity and creates native transports",

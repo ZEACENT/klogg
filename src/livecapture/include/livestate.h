@@ -283,6 +283,7 @@ struct LiveStatePresentation {
     bool retryCountdownVisible{ false };
     Timestamp retryRemaining{ 0 };
     std::optional<unsigned> retryAttempt;
+    std::optional<AwaitingUserReason> awaitingUserReason;
     std::string failureMessage;
 };
 

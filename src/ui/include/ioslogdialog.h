@@ -3,6 +3,8 @@
 
 #include <QDialog>
 
+#include <optional>
+
 #include "adblogcatsource.h"
 #include "ioscatalogprovider.h"
 #include "iosdevicelistprovider.h"
@@ -24,6 +26,7 @@ public:
         QWidget* parent = nullptr );
     explicit IosLogDialog( klogg::livecapture::ios::IosCatalogSnapshotProvider& catalogProvider,
                            QWidget* parent = nullptr );
+    ~IosLogDialog() override;
 
     AdbLogcatSessionData sessionData() const;
 
@@ -39,6 +42,8 @@ private:
 private:
     DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation discoveryOperation_;
     klogg::livecapture::ios::IosCatalogSnapshotProvider* catalogProvider_{ nullptr };
+    std::optional<klogg::livecapture::ios::IosCatalogSnapshotProvider::SubscriptionId>
+        catalogSubscription_;
     DeviceDiscoveryCoordinator<IosDeviceInfo> discoveryCoordinator_;
     unsigned pendingRefreshCount_{ 0 };
     QPushButton* refreshButton_ = nullptr;

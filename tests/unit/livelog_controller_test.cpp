@@ -320,6 +320,9 @@ void checkProjectionMatches( const livelog::LiveLogController& controller )
     CHECK( actual.reconnectEnabled == expected.reconnectEnabled );
     CHECK( actual.retryCountdownVisible == expected.retryCountdownVisible );
     CHECK( actual.retryRemaining == expected.retryRemaining );
+    CHECK( actual.retryAttempt == expected.retryAttempt );
+    CHECK( actual.awaitingUserReason == expected.awaitingUserReason );
+    CHECK( actual.failureMessage == expected.failureMessage );
 }
 
 } // namespace

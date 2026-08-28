@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QFutureWatcher>
 #include <QLabel>
+#include <QPointer>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTimer>
@@ -130,6 +131,28 @@ IosLogDialog::IosLogDialog( klogg::livecapture::ios::IosCatalogSnapshotProvider&
     : IosLogDialog( DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation{}, parent )
 {
     catalogProvider_ = &catalogProvider;
+    const QPointer<IosLogDialog> guard( this );
+    catalogSubscription_ = catalogProvider.subscribe(
+        [ guard ]( const klogg::livecapture::ios::IosCatalogSnapshot& ) {
+            if ( guard == nullptr ) {
+                return;
+            }
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [ guard ] {
+                    if ( guard != nullptr ) {
+                        guard->refreshDevices();
+                    }
+                },
+                Qt::QueuedConnection );
+        } );
+}
+
+IosLogDialog::~IosLogDialog()
+{
+    if ( catalogProvider_ != nullptr && catalogSubscription_.has_value() ) {
+        catalogProvider_->unsubscribe( *catalogSubscription_ );
+    }
 }
 
 AdbLogcatSessionData IosLogDialog::sessionData() const
@@ -168,8 +191,21 @@ void IosLogDialog::refreshDevices()
 {
     if ( catalogProvider_ != nullptr ) {
         const auto selectedEndpoint = deviceCombo_->currentData( Qt::UserRole );
+        if ( const auto startupError = catalogProvider_->startupError();
+             startupError.has_value() ) {
+            deviceCombo_->clear();
+            statusLabel_->setText(
+                tr( "Native iOS device service is unavailable: %1" )
+                    .arg( QString::fromStdString( startupError->message ) ) );
+            statusLabel_->setToolTip( QString::fromStdString( startupError->nativeDetail ) );
+            refreshButton_->setEnabled( true );
+            updateAcceptState();
+            return;
+        }
+
         const auto snapshot = catalogProvider_->snapshot();
         deviceCombo_->clear();
+        statusLabel_->setToolTip( {} );
         for ( const auto& entry : snapshot.entries ) {
             QVariantMap endpoint;
             endpoint.insert( QStringLiteral( "udid" ),

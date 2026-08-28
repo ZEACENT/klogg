@@ -538,6 +538,9 @@ LiveStatePresentation projectLiveState( const LiveStateSnapshot& snapshot )
             presentation.retryAttempt = snapshot.source.retry->attempt;
         }
     }
+    if ( snapshot.source.status == SourceStatus::AwaitingUser ) {
+        presentation.awaitingUserReason = snapshot.source.awaitingUserReason;
+    }
     if ( snapshot.source.failure.has_value() ) {
         presentation.failureMessage = snapshot.source.failure->message;
     }
