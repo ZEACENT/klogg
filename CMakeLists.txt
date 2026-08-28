@@ -140,6 +140,14 @@ include(ucm)
 # ucm declares an older standalone minimum; keep the enclosing project on the
 # CMake 3.14 policy baseline after returning from the bundled module.
 cmake_policy(VERSION 3.14)
+# Modern CMake deduplicates only for linkers known to rescan static archives;
+# traditional linkers retain required repetition. Guards keep CMake 3.14 valid.
+if(POLICY CMP0156)
+  cmake_policy(SET CMP0156 NEW)
+endif()
+if(POLICY CMP0179)
+  cmake_policy(SET CMP0179 NEW)
+endif()
 include(prepare_version)
 include(FindPkgConfig)
 include(GNUInstallDirs)

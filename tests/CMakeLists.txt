@@ -82,6 +82,10 @@ add_test(
   NAME livelog_controller_retirement_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_livelog_controller_retirement_contract.py
 )
+add_test(
+  NAME static_link_policy_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_static_link_policy_contract.py
+)
 set_tests_properties(
   adb_helper_release_contract
   adb_helper_verifier_contract
@@ -94,6 +98,7 @@ set_tests_properties(
   live_capture_results_contract
   live_session_ui_retirement_contract
   livelog_controller_retirement_contract
+  static_link_policy_contract
   PROPERTIES TIMEOUT 60
 )
 
