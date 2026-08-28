@@ -462,9 +462,13 @@ public:
     static constexpr qint64 LiveCaptureRollingBytesPerMb = 1024LL * 1024;
     int liveCaptureRollingMaxFileSizeMb() const
     {
-        const qint64 mb = ( liveCaptureRollingMaxFileSize_ + LiveCaptureRollingBytesPerMb / 2 )
-                          / LiveCaptureRollingBytesPerMb;
-        return static_cast<int>( qMin( mb, static_cast<qint64>( 2000000000LL ) ) );
+        const auto bytes = qMax( liveCaptureRollingMaxFileSize_, qint64{ 0 } );
+        const auto wholeMb = bytes / LiveCaptureRollingBytesPerMb;
+        const auto remainder = bytes % LiveCaptureRollingBytesPerMb;
+        const auto roundedMb
+            = wholeMb + ( remainder >= LiveCaptureRollingBytesPerMb / 2 ? 1 : 0 );
+        return static_cast<int>(
+            qMin( roundedMb, static_cast<qint64>( 2000000000LL ) ) );
     }
     void setLiveCaptureRollingMaxFileSizeMb( int megabytes )
     {

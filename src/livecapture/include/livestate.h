@@ -169,6 +169,11 @@ struct InfrastructureChanged {
     std::optional<InfrastructureOwnership> ownership;
     Timestamp at{ 0 };
 };
+struct InfrastructureFailed {
+    Generation generation{ 0 };
+    LiveSourceError error;
+    Timestamp at{ 0 };
+};
 struct DeviceAvailable {
     Generation generation{ 0 };
     Timestamp at{ 0 };
@@ -226,7 +231,8 @@ struct TimeAdvanced {
 
 using LiveStateEvent
     = std::variant<StartRequested, StopRequested, StopCompleted, InfrastructureChanged,
-                   DeviceAvailable, DeviceAbsent, UserActionRequired, ProtocolServiceReady,
+                   InfrastructureFailed, DeviceAvailable, DeviceAbsent, UserActionRequired,
+                   ProtocolServiceReady,
                    StreamHandleOpened, StreamReadArmed, StreamBytesReceived, StreamStable,
                    RetryRequested, RetryDeadlineReached, CaptureChanged, TimeAdvanced>;
 

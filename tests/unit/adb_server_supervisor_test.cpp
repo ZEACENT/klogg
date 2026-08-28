@@ -983,6 +983,8 @@ TEST_CASE( "launch failure and readiness timeout preserve actionable diagnostics
 
         CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Failed );
         REQUIRE( harness.supervisor.snapshot().error.has_value() );
+        CHECK( harness.supervisor.snapshot().error->retryPolicy
+               == klogg::livecapture::RetryPolicy::Backoff );
         CHECK( diagnostic( harness.supervisor.snapshot() ).find( "codesign" )
                != std::string::npos );
         REQUIRE( harness.events.errors.size() == 1 );
@@ -1006,6 +1008,9 @@ TEST_CASE( "launch failure and readiness timeout preserve actionable diagnostics
         harness.scheduler.fire( AdbServerScheduleKind::StartupTimeout );
 
         CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Failed );
+        REQUIRE( harness.supervisor.snapshot().error.has_value() );
+        CHECK( harness.supervisor.snapshot().error->retryPolicy
+               == klogg::livecapture::RetryPolicy::Backoff );
         CHECK( diagnostic( harness.supervisor.snapshot() ).find( "timed out" )
                != std::string::npos );
         CHECK( diagnostic( harness.supervisor.snapshot() ).find( "handshake truncated" )
@@ -1053,6 +1058,9 @@ TEST_CASE( "pre-ready child exit is cleaned only when launcher ownership permits
                                           "bundled adb exited with status 7" } );
 
             CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Failed );
+            REQUIRE( harness.supervisor.snapshot().error.has_value() );
+            CHECK( harness.supervisor.snapshot().error->retryPolicy
+                   == klogg::livecapture::RetryPolicy::Backoff );
             CHECK( diagnostic( harness.supervisor.snapshot() ).find( "status 7" )
                    != std::string::npos );
             CHECK( harness.launcher.wasCleaned( 0 ) == cleanupPermitted );

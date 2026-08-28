@@ -140,6 +140,28 @@ TEST_CASE( "live state keeps run intent, infrastructure, source, and capture ort
     REQUIRE( state.capture == CaptureState::OpenHealthy );
 }
 
+TEST_CASE( "terminal infrastructure failure leaves a running tab in Failed",
+           "[livecapture][state]" )
+{
+    auto state = dispatch( initialLiveState(), StartRequested{ at( 10 ) } ).snapshot;
+    state = dispatch( state,
+                      InfrastructureChanged{ InfrastructureStatus::Unavailable,
+                                             InfrastructureOwnership::AppShared, at( 20 ) } )
+                .snapshot;
+    const auto error
+        = makeError( ErrorCategory::Infrastructure, ErrorScope::Infrastructure,
+                     RetryPolicy::Never, "adb-helper-unavailable" );
+
+    const auto failed
+        = dispatch( state, InfrastructureFailed{ state.generation, error, at( 30 ) } );
+
+    REQUIRE( failed.accepted );
+    REQUIRE( failed.snapshot.source.status == SourceStatus::Failed );
+    REQUIRE( failed.snapshot.source.failure.has_value() );
+    CHECK( failed.snapshot.source.failure->code == "adb-helper-unavailable" );
+    CHECK( projectLiveState( failed.snapshot ).failureMessage == "actionable message" );
+}
+
 TEST_CASE( "source state belongs to each tab while infrastructure ownership is shared",
            "[livecapture][state]" )
 {
@@ -431,6 +453,25 @@ TEST_CASE( "retry exhaustion presents Failed and disables countdown",
     REQUIRE( ui.status == PresentationStatus::Failed );
     REQUIRE_FALSE( ui.retryCountdownVisible );
     REQUIRE( ui.retryRemaining == 0ms );
+}
+
+TEST_CASE( "manual reconnect after retry exhaustion starts with a fresh retry budget",
+           "[livecapture][state][retry]" )
+{
+    const auto opening = openingState();
+    const auto error = makeError( ErrorCategory::Service, ErrorScope::Service, RetryPolicy::Backoff,
+                                  "service-unavailable" );
+    const auto exhausted
+        = dispatch( opening, RetryRequested{ opening.generation, error,
+                                            defaultConfig.maxRetryAttempts, at( 9000 ), at( 1000 ) } )
+              .snapshot;
+    REQUIRE( exhausted.source.status == SourceStatus::Failed );
+    REQUIRE( exhausted.consecutiveFailures == defaultConfig.maxRetryAttempts );
+
+    const auto restarted = dispatch( exhausted, StartRequested{ at( 2000 ) } );
+
+    REQUIRE( restarted.accepted );
+    CHECK( restarted.snapshot.consecutiveFailures == 0u );
 }
 
 TEST_CASE( "UI action booleans are a deterministic pure projection of the snapshot",

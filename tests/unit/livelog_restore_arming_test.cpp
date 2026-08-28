@@ -51,9 +51,11 @@
 #include <utility>
 #include <vector>
 
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
+#include <QTemporaryDir>
 #include <QStringList>
 
 #include "adblogcatsource.h"
@@ -63,6 +65,7 @@
 #include "livestate.h"
 #include "session.h"
 #include "sessioninfo.h"
+#include "streaminglogdata.h"
 #include "viewinterface.h"
 
 namespace {
@@ -223,6 +226,11 @@ public:
         }
     }
 
+    std::optional<live::LiveSourceError> startupError() const override
+    {
+        return startupError_;
+    }
+
     void publish( klogg::livecapture::ios::IosCatalogSnapshot snapshot )
     {
         snapshot_ = std::move( snapshot );
@@ -231,17 +239,36 @@ public:
         }
     }
 
+    SnapshotCallback callbackCopy() const
+    {
+        return callback_;
+    }
+
+    void setStartupError( live::LiveSourceError error )
+    {
+        startupError_ = std::move( error );
+    }
+
 private:
     klogg::livecapture::ios::IosCatalogSnapshot snapshot_;
     SnapshotCallback callback_;
+    std::optional<live::LiveSourceError> startupError_;
 };
 
 // Minimal view stand-in: restore wires data objects through ViewInterface's
 // NVI surface; no widget is needed to observe arming decisions.
 class NullView final : public ViewInterface {
-protected:
-    void doSetData( std::shared_ptr<SearchableLogData>, std::shared_ptr<LogFilteredData> ) override
+public:
+    std::shared_ptr<SearchableLogData> data() const
     {
+        return data_;
+    }
+
+protected:
+    void doSetData( std::shared_ptr<SearchableLogData> data,
+                    std::shared_ptr<LogFilteredData> ) override
+    {
+        data_ = std::move( data );
     }
     void doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> ) override {}
     void doSetSavedSearches( SavedSearches* ) override {}
@@ -250,6 +277,9 @@ protected:
     {
         return nullptr;
     }
+
+private:
+    std::shared_ptr<SearchableLogData> data_;
 };
 
 // Removes every persisted window for the duration of one test case so the
@@ -653,6 +683,40 @@ TEST_CASE( "Stopped restore creates one inert tab and zero transport starts",
     closeAndDeleteViews( *appSession, opened );
 }
 
+TEST_CASE( "restored output binding applies rolling limits before opening the file",
+           "[livelog-restore-arming][session][capture]" )
+{
+    ScopedSessionWindows windowsGuard;
+    QTemporaryDir outputDir;
+    REQUIRE( outputDir.isValid() );
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+
+    auto spec = makeAndroidSpec();
+    spec.runIntent = live::RunIntent::Stopped;
+    spec.boundOutputFile = outputDir.filePath( QStringLiteral( "restored.log" ) );
+    spec.capture.captureMaxFileSize = 32;
+    spec.capture.captureBackupCount = 2;
+    const auto windowId = QStringLiteral( "livelog-rolling-output-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* const view = dynamic_cast<NullView*>( opened.front().second );
+    REQUIRE( view != nullptr );
+    auto logData = std::dynamic_pointer_cast<StreamingLogData>( view->data() );
+    REQUIRE( logData != nullptr );
+
+    for ( int line = 0; line < 10; ++line ) {
+        logData->appendUtf8( QByteArrayLiteral( "0123456789\n" ) );
+    }
+    logData->finishInput();
+
+    CHECK( QFile::exists( spec.boundOutputFile + QStringLiteral( ".0" ) ) );
+    closeAndDeleteViews( *appSession, opened );
+}
+
 TEST_CASE( "Restore remaps the selected index after rejecting earlier entries",
            "[livelog-restore-arming][session]" )
 {
@@ -812,6 +876,35 @@ TEST_CASE( "One configured reconnect attempt permits one retry after the initial
     closeAndDeleteViews( *appSession, opened );
 }
 
+TEST_CASE( "iOS catalog startup failure surfaces as a failed restored tab",
+           "[livelog-restore-arming][session][ios-catalog][error]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    catalog.setStartupError( live::LiveSourceError{ live::ErrorCategory::Configuration,
+                                                    "ios-catalog-api-incomplete",
+                                                    live::ErrorScope::Infrastructure,
+                                                    live::RetryPolicy::Never,
+                                                    "The bundled native iOS catalog is unavailable.",
+                                                    "missing symbols" } );
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-catalog-failure-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
+    REQUIRE( controller->snapshot().source.failure.has_value() );
+    CHECK( controller->snapshot().source.failure->code == "ios-catalog-api-incomplete" );
+    CHECK( factory.totalStarts() == 0u );
+    closeAndDeleteViews( *appSession, opened );
+}
+
 TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
            "[livelog-restore-arming][session][ios-catalog]" )
 {
@@ -845,6 +938,40 @@ TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
     catalog.publish( { 2u, {} } );
     CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
     CHECK_FALSE( factory.createdTransports.front()->stopGenerations.empty() );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "queued iOS snapshot from a retired observation cannot arm a restarted run",
+           "[livelog-restore-arming][session][ios-catalog]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-stale-catalog-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+    const auto staleCallback = catalog.callbackCopy();
+    REQUIRE( static_cast<bool>( staleCallback ) );
+
+    controller->stopRequested();
+    REQUIRE( controller->snapshot().runIntent == live::RunIntent::Stopped );
+    controller->startRequested();
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+
+    klogg::livecapture::ios::IosCatalogEntry staleEntry;
+    staleEntry.endpoint.udid = spec.device.deviceId.toStdString();
+    staleEntry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    staleCallback( { catalog.snapshot().generation, { staleEntry } } );
+
+    CHECK( factory.totalStarts() == 0u );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
     closeAndDeleteViews( *appSession, opened );
 }
 

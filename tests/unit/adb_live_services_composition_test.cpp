@@ -395,6 +395,15 @@ public:
         Q_EMIT stateChanged( *activeGeneration, state );
     }
 
+    void publishError( QString error )
+    {
+        REQUIRE( activeGeneration.has_value() );
+        lastError_ = std::move( error );
+        const auto generation = *activeGeneration;
+        Q_EMIT stateChanged( generation, State::Error );
+        Q_EMIT errorOccurred( generation, lastError_ );
+    }
+
     void setStatistics( klogg::livecapture::LiveDataStatistics statistics )
     {
         statistics_ = statistics;
@@ -894,6 +903,41 @@ TEST_CASE( "managed transport publishes Connecting when ready infrastructure is 
     dependencies.probe.completeAbsent( 1 );
 
     CHECK( states.back() == LiveSourceTransport::State::Connecting );
+}
+
+TEST_CASE( "managed transport publishes the inner diagnostic with terminal Error state",
+           "[livecapture][adb][composition][transport][error]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto applicationDir = root.filePath( QStringLiteral( "package/bin" ) );
+    const auto runtimeDir = root.filePath( QStringLiteral( "user/runtime" ) );
+    REQUIRE( QDir().mkpath( runtimeDir ) );
+    createPackagedHelper( applicationDir );
+
+    ServicesDependencies dependencies;
+    ScriptedManagedTransportFactory innerFactory;
+    AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ),
+                              dependencies.refs( &innerFactory ) );
+    auto transport = services.create( smartSocketConfig( QStringLiteral( "restored-device" ) ) );
+    REQUIRE( transport != nullptr );
+
+    QString errorObservedWithState;
+    QObject::connect( transport.get(), &LiveSourceTransport::stateChanged, transport.get(),
+                      [ &transport, &errorObservedWithState ](
+                          Generation generation, LiveSourceTransport::State state ) {
+                          if ( state == LiveSourceTransport::State::Error ) {
+                              errorObservedWithState = transport->lastError();
+                              transport->stop( generation );
+                          }
+                      } );
+
+    transport->start( 84u );
+    dependencies.probe.completeReady( 0, "adb-server:ready" );
+    REQUIRE( innerFactory.created.size() == 1u );
+    innerFactory.created.front()->publishError( QStringLiteral( "feature negotiation failed" ) );
+
+    CHECK( errorObservedWithState == QStringLiteral( "feature negotiation failed" ) );
 }
 
 TEST_CASE( "managed transport suppresses a terminal diagnostic made stale by Error reentrancy",

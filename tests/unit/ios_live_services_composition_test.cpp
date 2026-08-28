@@ -56,8 +56,14 @@ void drainQtEvents()
     QCoreApplication::processEvents();
 }
 
-class MemoryCatalog final : public IosCatalogSnapshotProvider {
+class MemoryCatalog final : public IosCatalogSnapshotProvider, public IosCatalogMetadataRequester {
 public:
+    struct MetadataRequest {
+        IosEndpointKey endpoint;
+        Generation catalogGeneration{ 0u };
+        Generation endpointEpoch{ 0u };
+    };
+
     IosCatalogSnapshot snapshot() const override
     {
         return snapshot_;
@@ -78,11 +84,35 @@ public:
         }
     }
 
+    void requestMetadata( IosEndpointKey endpoint ) override
+    {
+        Generation endpointEpoch{ 0u };
+        for ( const auto& entry : snapshot_.entries ) {
+            if ( entry.endpoint == endpoint ) {
+                endpointEpoch = entry.epoch;
+                break;
+            }
+        }
+        metadataRequests.push_back(
+            MetadataRequest{ std::move( endpoint ), snapshot_.generation, endpointEpoch } );
+    }
+
+    void publish( IosCatalogSnapshot snapshot )
+    {
+        snapshot_ = std::move( snapshot );
+        for ( const auto& entry : callbacks ) {
+            if ( entry.second ) {
+                entry.second( snapshot_ );
+            }
+        }
+    }
+
     IosCatalogSnapshot snapshot_{ 7u,
                                   { IosCatalogEntry{
                                       IosEndpointKey{ "owned-device", NativeConnectionType::Usb },
                                       3u, std::nullopt, std::nullopt } } };
     std::vector<std::pair<SubscriptionId, SnapshotCallback>> callbacks;
+    std::vector<MetadataRequest> metadataRequests;
 
 private:
     SubscriptionId nextSubscription_{ 0u };
@@ -196,6 +226,79 @@ TEST_CASE( "iOS backend persistence makes native fresh and legacy process explic
     const auto tampered = AdbLogcatSessionData::fromJson( QStringLiteral(
         R"({"sourceType":"ios_log_stream","iosBackend":"python","adbExecutable":"/legacy/python","deviceSerial":"tampered-device"})" ) );
     CHECK( tampered.iosBackend == IosTransportBackend::Native );
+}
+
+TEST_CASE( "iOS composition requests initial endpoint metadata once with its catalog generation",
+           "[ios][native][composition][catalog][metadata][generation]" )
+{
+    auto catalog = std::make_unique<MemoryCatalog>();
+    auto* const catalogAddress = catalog.get();
+    IosLiveServices services( std::move( catalog ), nullptr );
+
+    REQUIRE( catalogAddress->metadataRequests.size() == 1u );
+    const auto& request = catalogAddress->metadataRequests.front();
+    CHECK( request.endpoint == IosEndpointKey{ "owned-device", NativeConnectionType::Usb } );
+    CHECK( request.catalogGeneration == 7u );
+    CHECK( request.endpointEpoch == 3u );
+
+    catalogAddress->publish( catalogAddress->snapshot() );
+    CHECK( catalogAddress->metadataRequests.size() == 1u );
+
+    services.shutdown();
+    auto afterShutdown = catalogAddress->snapshot();
+    afterShutdown.entries.push_back(
+        IosCatalogEntry{ IosEndpointKey{ "ignored-after-shutdown", NativeConnectionType::Usb }, 4u,
+                         std::nullopt, std::nullopt } );
+    catalogAddress->publish( std::move( afterShutdown ) );
+    CHECK( catalogAddress->metadataRequests.size() == 1u );
+}
+
+TEST_CASE( "iOS composition requests each newly added endpoint once in the current generation",
+           "[ios][native][composition][catalog][metadata][generation][add]" )
+{
+    auto catalog = std::make_unique<MemoryCatalog>();
+    auto* const catalogAddress = catalog.get();
+    IosLiveServices services( std::move( catalog ), nullptr );
+    REQUIRE( catalogAddress->metadataRequests.size() == 1u );
+
+    auto addedSnapshot = catalogAddress->snapshot();
+    addedSnapshot.entries.push_back(
+        IosCatalogEntry{ IosEndpointKey{ "new-device", NativeConnectionType::Network }, 4u,
+                         std::nullopt, std::nullopt } );
+    catalogAddress->publish( addedSnapshot );
+
+    REQUIRE( catalogAddress->metadataRequests.size() == 2u );
+    const auto& addedRequest = catalogAddress->metadataRequests.back();
+    CHECK( addedRequest.endpoint == IosEndpointKey{ "new-device", NativeConnectionType::Network } );
+    CHECK( addedRequest.catalogGeneration == 7u );
+    CHECK( addedRequest.endpointEpoch == 4u );
+
+    catalogAddress->publish( addedSnapshot );
+    CHECK( catalogAddress->metadataRequests.size() == 2u );
+}
+
+TEST_CASE( "iOS composition re-requests an endpoint once after catalog generation changes",
+           "[ios][native][composition][catalog][metadata][generation][restart]" )
+{
+    auto catalog = std::make_unique<MemoryCatalog>();
+    auto* const catalogAddress = catalog.get();
+    IosLiveServices services( std::move( catalog ), nullptr );
+    REQUIRE( catalogAddress->metadataRequests.size() == 1u );
+
+    IosCatalogSnapshot restartedSnapshot{
+        8u,
+        { IosCatalogEntry{ IosEndpointKey{ "owned-device", NativeConnectionType::Usb }, 5u,
+                           std::nullopt, std::nullopt } }
+    };
+    catalogAddress->publish( restartedSnapshot );
+
+    REQUIRE( catalogAddress->metadataRequests.size() == 2u );
+    const auto& restartedRequest = catalogAddress->metadataRequests.back();
+    CHECK( restartedRequest.catalogGeneration == 8u );
+    CHECK( restartedRequest.endpointEpoch == 5u );
+
+    catalogAddress->publish( restartedSnapshot );
+    CHECK( catalogAddress->metadataRequests.size() == 2u );
 }
 
 TEST_CASE( "one application iOS root shares catalog identity and creates native transports",

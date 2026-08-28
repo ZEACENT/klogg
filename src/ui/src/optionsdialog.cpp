@@ -723,9 +723,8 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
         liveSourceMaxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
     }
     if ( liveSourceRollingMaxFileSizeSpinBox_ ) {
-        // Configuration stores bytes, UI displays MB
         liveSourceRollingMaxFileSizeSpinBox_->setValue(
-            static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+            config.liveCaptureRollingMaxFileSizeMb() );
     }
     if ( liveSourceRollingBackupCountSpinBox_ ) {
         liveSourceRollingBackupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );

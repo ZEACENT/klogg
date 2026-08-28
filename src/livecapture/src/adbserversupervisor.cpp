@@ -135,7 +135,7 @@ public:
         if ( !granted ) {
             snapshot_.keyConsent = AdbServerKeyConsentState::Denied;
             failStartup( "key-generation-denied", "ADB key generation was denied.",
-                         "ADB standard key generation was denied.", false,
+                         "ADB standard key generation was denied.", false, RetryPolicy::Never,
                          ErrorCategory::Cancelled );
             return;
         }
@@ -329,7 +329,7 @@ private:
                 const auto detail = compatibilityDiagnostic( result );
                 if ( purpose == ProbePurpose::StartupReadiness ) {
                     failStartup( "incompatible-server", "The ADB server is incompatible.", detail,
-                                 true );
+                                 true, RetryPolicy::Never );
                 }
                 else {
                     releaseStartupLock();
@@ -826,7 +826,7 @@ private:
     }
 
     void failStartup( std::string code, std::string message, std::string nativeDetail,
-                      bool cleanupIfPermitted,
+                      bool cleanupIfPermitted, RetryPolicy retryPolicy = RetryPolicy::Backoff,
                       ErrorCategory category = ErrorCategory::Infrastructure )
     {
         cancelSchedule( AdbServerScheduleKind::StartupTimeout );
@@ -837,7 +837,7 @@ private:
         }
         releaseStartupLock();
         fail( AdbServerSupervisorStatus::Failed, std::move( code ), std::move( message ),
-              std::move( nativeDetail ), RetryPolicy::Never, category );
+              std::move( nativeDetail ), retryPolicy, category );
     }
 
     void publishState()

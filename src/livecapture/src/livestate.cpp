@@ -171,6 +171,7 @@ void apply( LiveStateTransition& transition, const StartRequested& event, const 
         snapshot.captureError.reset();
     }
     resetSourceAttempt( transition );
+    snapshot.consecutiveFailures = 0u;
 
     const auto nextStatus = snapshot.infrastructure.status == InfrastructureStatus::Ready
                                 ? SourceStatus::WaitingForDevice
@@ -261,6 +262,21 @@ void apply( LiveStateTransition& transition, const InfrastructureChanged& event,
         }
     }
 
+    transition.accepted = true;
+}
+
+void apply( LiveStateTransition& transition, const InfrastructureFailed& event,
+            const LiveStateConfig& )
+{
+    auto& snapshot = transition.snapshot;
+    if ( !hasCurrentRunningGeneration( snapshot, event )
+         || snapshot.source.status != SourceStatus::WaitingForInfrastructure ) {
+        return;
+    }
+
+    advanceNow( snapshot, event.at );
+    enterSourceState( snapshot, SourceStatus::Failed );
+    snapshot.source.failure = event.error;
     transition.accepted = true;
 }
 

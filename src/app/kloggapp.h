@@ -355,9 +355,10 @@ class KloggApp : public QApplication {
     {
         // MainWindow participates in Qt top-level lifetime management; this list
         // is a non-owning registry pruned by handleWindowClose().
-        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
         mainWindows_.emplace_back(
-            session, new MainWindow( session, *adbLiveServices_, *iosLiveServices_ ) );
+            session,
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            new MainWindow( session, *adbLiveServices_, *iosLiveServices_ ) );
 
         auto& window = mainWindows_.back().second;
 

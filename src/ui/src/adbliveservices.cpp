@@ -414,9 +414,13 @@ private:
                           &LiveSourceTransport::clearRemoteFinished );
         QObject::connect( transport_.get(), &LiveSourceTransport::stateChanged, this,
                           [ this ]( Generation generation, State state ) {
-                              if ( activeGeneration_ == generation ) {
-                                  emitState( generation, state );
+                              if ( activeGeneration_ != generation ) {
+                                  return;
                               }
+                              if ( state == State::Error ) {
+                                  lastError_ = transport_->lastError();
+                              }
+                              emitState( generation, state );
                           } );
         QObject::connect( transport_.get(), &LiveSourceTransport::errorOccurred, this,
                           [ this ]( Generation generation, const QString& error ) {

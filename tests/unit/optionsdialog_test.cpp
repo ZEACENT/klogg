@@ -24,6 +24,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QSpinBox>
 
 #include "highlighterset.h"
 #include "optionsdialog.h"
@@ -41,6 +42,7 @@ class ConfigurationScope {
         : style_( Configuration::getSynced().style() )
         , themeMode_( Configuration::getSynced().themeMode() )
         , language_( Configuration::getSynced().language() )
+        , rollingMaxFileSize_( Configuration::getSynced().liveCaptureRollingMaxFileSize() )
     {
     }
     ~ConfigurationScope()
@@ -50,6 +52,7 @@ class ConfigurationScope {
         // updateConfigFromDialog() writes the language from the combo; restore
         // it too so later tests see the same process-wide configuration.
         Configuration::get().setLanguage( language_ );
+        Configuration::get().setLiveCaptureRollingMaxFileSize( rollingMaxFileSize_ );
         // updateConfigFromDialog() also calls save(), persisting the test's
         // values to the QSettings store. Persist the restored snapshot too, or
         // a later getSynced() reloads the leaked test configuration and the
@@ -64,6 +67,7 @@ class ConfigurationScope {
     QString style_;
     ThemeMode themeMode_;
     QString language_;
+    qint64 rollingMaxFileSize_;
 };
 
 // Restore the process-wide HighlighterSetCollection quick-defaults when the
@@ -468,4 +472,26 @@ TEST_CASE( "Color label match option defaults are configurable in the options di
     const auto defaults = HighlighterSetCollection::get().quickHighlighterDefaults();
     REQUIRE_FALSE( defaults.ignoreCase );
     REQUIRE( defaults.wholeWord );
+}
+
+TEST_CASE( "OptionsDialog preserves rounded positive sub-megabyte rolling limits",
+           "[configuration]" )
+{
+    SavedSearches::getSynced();
+    RecentFiles::getSynced();
+    HighlighterSetCollection::getSynced();
+
+    ConfigurationScope configScope;
+    Configuration::get().setLiveCaptureRollingMaxFileSize( 512LL * 1024 );
+
+    OptionsDialog dialog;
+    auto* const maxFileSizeSpinBox
+        = dialog.findChild<QSpinBox*>( QStringLiteral( "liveSourceRollingMaxFileSizeSpinBox" ) );
+    REQUIRE( maxFileSizeSpinBox != nullptr );
+    REQUIRE( maxFileSizeSpinBox->value() == 1 );
+
+    REQUIRE( QMetaObject::invokeMethod( &dialog, "updateConfigFromDialog",
+                                        Qt::DirectConnection ) );
+    REQUIRE( Configuration::get().liveCaptureRollingMaxFileSize()
+             == Configuration::LiveCaptureRollingBytesPerMb );
 }

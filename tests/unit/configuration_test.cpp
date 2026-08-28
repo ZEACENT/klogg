@@ -19,6 +19,8 @@
 
 #include <catch2/catch.hpp>
 
+#include <limits>
+
 #include <QDir>
 #include <QSettings>
 #include <QUuid>
@@ -320,6 +322,13 @@ TEST_CASE( "Configuration live-capture rolling size MB view does not truncate su
 
     // 0 bytes stays 0 MB.
     config.setLiveCaptureRollingMaxFileSize( 0 );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 0 );
+
+    // Corrupt or hand-edited persisted values must be bounded without signed
+    // overflow before the UI spinbox sees them.
+    config.setLiveCaptureRollingMaxFileSize( std::numeric_limits<qint64>::max() );
+    REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 2000000000 );
+    config.setLiveCaptureRollingMaxFileSize( -1 );
     REQUIRE( config.liveCaptureRollingMaxFileSizeMb() == 0 );
 }
 

@@ -62,6 +62,16 @@ public:
     virtual IosCatalogSnapshot snapshot() const = 0;
     virtual SubscriptionId subscribe( SnapshotCallback callback ) = 0;
     virtual void unsubscribe( SubscriptionId subscription ) = 0;
+    virtual std::optional<LiveSourceError> startupError() const
+    {
+        return std::nullopt;
+    }
+};
+
+class IosCatalogMetadataRequester {
+public:
+    virtual ~IosCatalogMetadataRequester() = default;
+    virtual void requestMetadata( IosEndpointKey endpoint ) = 0;
 };
 
 } // namespace klogg::livecapture::ios

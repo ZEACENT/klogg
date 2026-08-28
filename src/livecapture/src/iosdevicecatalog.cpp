@@ -173,6 +173,12 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         }
     }
 
+    std::optional<LiveSourceError> startupFailure() const
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        return startupError;
+    }
+
     bool start()
     {
         std::lock_guard<std::recursive_mutex> lifecycleLock( lifecycleMutex );
@@ -198,17 +204,24 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
             startupEvents.clear();
         }
 
-        auto failStart = [ this ] {
+        auto failStart = [ this ]( std::string code, std::string detail ) {
             std::lock_guard<std::mutex> lock( mutex );
             lifecycle = Lifecycle::Stopped;
             current.entries.clear();
             latestMetadataRequest.clear();
             startupEvents.clear();
+            startupError = LiveSourceError{ ErrorCategory::Configuration,
+                                            std::move( code ),
+                                            ErrorScope::Infrastructure,
+                                            RetryPolicy::Never,
+                                            "The bundled native iOS catalog is unavailable.",
+                                            std::move( detail ) };
         };
 
         if ( api.getDeviceListExtended == nullptr || api.deviceListExtendedFree == nullptr
              || api.eventSubscribe == nullptr || api.eventUnsubscribe == nullptr ) {
-            failStart();
+            failStart( "ios-catalog-api-incomplete",
+                       "The native iOS catalog API is missing required symbols." );
             return false;
         }
 
@@ -217,7 +230,8 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         NativeEventSubscription newSubscription( api, &IosDeviceCatalog::nativeEventCallback,
                                                  newCallbackContext.get() );
         if ( !newSubscription.active() ) {
-            failStart();
+            failStart( "ios-catalog-start-failed",
+                       "The native iOS device catalog could not be started." );
             if ( !newSubscription.reset() ) {
                 // The native side still owns the user-data pointer. Leak only this
                 // inert weak gate rather than allowing a callback-after-free.
@@ -232,7 +246,8 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         const auto listResult = api.getDeviceListExtended( &rawList, &count );
         NativeDeviceListOwner devices( api, rawList, count );
         if ( listResult != 0 || count < 0 || ( count > 0 && rawList == nullptr ) ) {
-            failStart();
+            failStart( "ios-catalog-start-failed",
+                       "The native iOS device catalog could not be started." );
             if ( !newSubscription.reset() ) {
                 static_cast<void>(
                     newCallbackContext.release() ); // NOLINT(bugprone-unused-return-value)
@@ -258,6 +273,7 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
             subscription = std::move( newSubscription );
             callbackContext = std::move( newCallbackContext );
             lifecycle = Lifecycle::Running;
+            startupError.reset();
         }
 
         notify();
@@ -349,6 +365,7 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
     IosCatalogExecutor executor;
     IosCatalogSnapshot current;
     Lifecycle lifecycle{ Lifecycle::Stopped };
+    std::optional<LiveSourceError> startupError;
     Generation nextEpoch{ 0 };
     Generation nextRequestGeneration{ 0 };
     SubscriptionId nextSubscription{ 0 };
@@ -507,6 +524,11 @@ void IosDeviceCatalog::unsubscribe( SubscriptionId subscription )
     const auto state = state_;
     std::lock_guard<std::mutex> lock( state->mutex );
     state->callbacks.erase( subscription );
+}
+
+std::optional<LiveSourceError> IosDeviceCatalog::startupError() const
+{
+    return state_->startupFailure();
 }
 
 void IosDeviceCatalog::nativeEventCallback( const NativeDeviceEvent* event, void* context )

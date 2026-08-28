@@ -305,6 +305,12 @@ void LiveLogController::infrastructureChanged(
     dispatch( live::InfrastructureChanged{ status, ownership, clock_->now() } );
 }
 
+void LiveLogController::infrastructureFailed( live::Generation generation,
+                                              live::LiveSourceError error )
+{
+    dispatch( live::InfrastructureFailed{ generation, std::move( error ), clock_->now() } );
+}
+
 void LiveLogController::deviceAvailable( live::Generation generation )
 {
     dispatch( live::DeviceAvailable{ generation, clock_->now() } );

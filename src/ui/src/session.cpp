@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <limits>
 
@@ -236,6 +237,11 @@ private:
                 klogg::livecapture::InfrastructureOwnership::AppShared ) );
         if ( snapshot.infrastructure.status
              != klogg::livecapture::InfrastructureStatus::Ready ) {
+            if ( snapshot.error.has_value()
+                 && snapshot.error->retryPolicy == klogg::livecapture::RetryPolicy::Never ) {
+                controller_->infrastructureFailed( controller_->snapshot().generation,
+                                                   *snapshot.error );
+            }
             return;
         }
 
@@ -267,10 +273,20 @@ private:
 
     void startIosObservation()
     {
+        if ( const auto startupError = iosCatalog_->startupError(); startupError.has_value() ) {
+            controller_->infrastructureChanged(
+                klogg::livecapture::InfrastructureStatus::Unavailable,
+                klogg::livecapture::InfrastructureOwnership::AppShared );
+            controller_->infrastructureFailed( controller_->snapshot().generation, *startupError );
+            return;
+        }
+
         if ( !iosSubscription_.has_value() ) {
+            const auto observationEpoch = ++iosObservationEpoch_;
             const QPointer<AdbLogcatSource> context( source_.get() );
             iosSubscription_ = iosCatalog_->subscribe(
-                [ this, context ]( const klogg::livecapture::ios::IosCatalogSnapshot& snapshot ) {
+                [ this, context,
+                  observationEpoch ]( const klogg::livecapture::ios::IosCatalogSnapshot& snapshot ) {
                     // The catalog invokes callbacks from its native monitor thread;
                     // nothing here may escape into vendor code.
                     try { // NOLINT(bugprone-exception-escape)
@@ -279,11 +295,13 @@ private:
                         }
                         QMetaObject::invokeMethod(
                             context.data(),
-                            [ this, context, snapshot ] { // NOLINT(bugprone-exception-escape)
+                            // NOLINTNEXTLINE(bugprone-exception-escape)
+                            [ this, context, snapshot, observationEpoch ] {
                                 // Queued UI slots are an event-loop boundary; a failed
                                 // observation must not escape the dispatcher.
                                 try { // NOLINT(bugprone-exception-escape)
-                                    if ( context != nullptr ) {
+                                    if ( context != nullptr
+                                         && observationEpoch == iosObservationEpoch_ ) {
                                         observeIosSnapshot( snapshot );
                                     }
                                 } catch ( ... ) { // NOLINT(bugprone-empty-catch)
@@ -344,6 +362,7 @@ private:
         }
         adbLease_.reset();
         if ( iosCatalog_ != nullptr && iosSubscription_.has_value() ) {
+            ++iosObservationEpoch_;
             iosCatalog_->unsubscribe( *iosSubscription_ );
             iosSubscription_.reset();
         }
@@ -358,6 +377,7 @@ private:
     QMetaObject::Connection captureConnection_;
     std::optional<klogg::livecapture::ios::IosCatalogSnapshotProvider::SubscriptionId>
         iosSubscription_;
+    std::uint64_t iosObservationEpoch_{ 0 };
     klogg::livecapture::Generation lastIosSnapshotGeneration_{ 0 };
     klogg::livelog::LiveLogController* controller_{ nullptr };
 };
@@ -741,6 +761,11 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
         return nullptr;
     }
 
+    CaptureStore::Limits captureLimits;
+    captureLimits.rollingMaxFileSize = restoredSessionData.captureMaxFileSize;
+    captureLimits.rollingBackupCount = restoredSessionData.captureBackupCount;
+    logData->setCaptureLimits( captureLimits );
+
     if ( !restoredSessionData.boundOutputFile.isEmpty()
          && !logData->bindOutputFile( restoredSessionData.boundOutputFile,
                                       restoredSessionData.outputAnsiMode,
@@ -754,8 +779,6 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
                          ? std::make_shared<AdbLogcatSource>( restoredSessionData, logData,
                                                               *transportFactory_ )
                          : std::make_shared<AdbLogcatSource>( restoredSessionData, logData );
-    adbSource->setCaptureLimits( restoredSessionData.captureMaxFileSize,
-                                 restoredSessionData.captureBackupCount );
 
     auto liveSpec = klogg::livelog::sessionSpecFromSessionData( restoredSessionData );
     liveSpec.runIntent = startConnected ? klogg::livecapture::RunIntent::Running
@@ -782,10 +805,17 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
         liveController->armRunIntent();
         if ( liveController->snapshot().source.status
              == klogg::livecapture::SourceStatus::Failed ) {
-            // Session owns the factory-created view once openAdbAlways is called.
-            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-            delete view;
-            return nullptr;
+            const auto& failure = liveController->snapshot().source.failure;
+            const bool transportUnavailable
+                = failure.has_value()
+                  && ( failure->code == "live-transport-unavailable"
+                       || failure->code == "live-transport-create-failed" );
+            if ( transportUnavailable ) {
+                // Session owns the factory-created view once openAdbAlways is called.
+                // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+                delete view;
+                return nullptr;
+            }
         }
     }
 

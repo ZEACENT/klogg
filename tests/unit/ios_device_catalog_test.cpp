@@ -717,6 +717,8 @@ TEST_CASE( "catalog subscription failure publishes no non-live endpoints",
 
     CHECK_FALSE( catalog.start() );
     CHECK( catalog.snapshot().entries.empty() );
+    REQUIRE( catalog.startupError().has_value() );
+    CHECK( catalog.startupError()->retryPolicy == RetryPolicy::Never );
     CHECK( notifications == 0 );
     CHECK( state.listFreeCalls == 0 );
 }

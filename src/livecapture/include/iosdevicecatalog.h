@@ -26,7 +26,8 @@ using IosCatalogTask = std::function<void()>;
 // serializes snapshot observer delivery.
 using IosCatalogExecutor = std::function<void( IosCatalogTask )>;
 
-class IosDeviceCatalog final : public IosCatalogSnapshotProvider {
+class IosDeviceCatalog final : public IosCatalogSnapshotProvider,
+                               public IosCatalogMetadataRequester {
 public:
     IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor executor );
     ~IosDeviceCatalog() override;
@@ -36,11 +37,12 @@ public:
 
     bool start();
     void stop();
-    void requestMetadata( IosEndpointKey endpoint );
+    void requestMetadata( IosEndpointKey endpoint ) override;
 
     IosCatalogSnapshot snapshot() const override;
     SubscriptionId subscribe( SnapshotCallback callback ) override;
     void unsubscribe( SubscriptionId subscription ) override;
+    std::optional<LiveSourceError> startupError() const override;
 
 private:
     struct State;

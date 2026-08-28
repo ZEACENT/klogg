@@ -29,6 +29,59 @@
 namespace klogg::livecapture::ios {
 namespace {
 
+class CatalogMetadataObservation final {
+public:
+    explicit CatalogMetadataObservation( IosCatalogMetadataRequester& requester )
+        : requester_( &requester )
+    {
+    }
+
+    void observe( const IosCatalogSnapshot& snapshot )
+    {
+        std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        if ( requester_ == nullptr || snapshot.generation < generation_ ) {
+            return;
+        }
+        if ( snapshot.generation != generation_ ) {
+            generation_ = snapshot.generation;
+            requested_.clear();
+        }
+
+        for ( const auto& entry : snapshot.entries ) {
+            if ( entry.metadata.has_value() || entry.error.has_value() ) {
+                continue;
+            }
+            const auto requested = std::find_if(
+                requested_.cbegin(), requested_.cend(), [ &entry ]( const RequestedEntry& value ) {
+                    return value.endpoint == entry.endpoint && value.epoch == entry.epoch;
+                } );
+            if ( requested != requested_.cend() ) {
+                continue;
+            }
+            requested_.push_back( RequestedEntry{ entry.endpoint, entry.epoch } );
+            requester_->requestMetadata( entry.endpoint );
+        }
+    }
+
+    void stop()
+    {
+        std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        requester_ = nullptr;
+        requested_.clear();
+    }
+
+private:
+    struct RequestedEntry {
+        IosEndpointKey endpoint;
+        Generation epoch{ 0u };
+    };
+
+    std::recursive_mutex mutex_;
+    IosCatalogMetadataRequester* requester_{ nullptr };
+    Generation generation_{ 0u };
+    std::vector<RequestedEntry> requested_;
+};
+
 class SerialCatalogExecutor final {
 public:
     SerialCatalogExecutor()
@@ -140,8 +193,10 @@ public:
             api, [ executor = catalogExecutor_.get() ]( IosCatalogTask task ) {
                 executor->post( std::move( task ) );
             } );
-        static_cast<void>( catalog->start() );
+        auto* const nativeCatalog = catalog.get();
         catalog_ = std::move( catalog );
+        startMetadataObservation();
+        static_cast<void>( nativeCatalog->start() );
         if ( streamApiComplete( api ) ) {
             workerFactory_ = std::make_unique<DefaultIosNativeStreamWorkerFactory>( api );
         }
@@ -162,11 +217,40 @@ public:
         , catalog_( std::move( catalog ) )
         , workerFactory_( std::move( workerFactory ) )
     {
+        startMetadataObservation();
     }
 
     ~Impl()
     {
         shutdown();
+    }
+
+    void startMetadataObservation()
+    {
+        auto* const requester = dynamic_cast<IosCatalogMetadataRequester*>( catalog_.get() );
+        if ( requester == nullptr ) {
+            return;
+        }
+
+        metadataObservation_ = std::make_shared<CatalogMetadataObservation>( *requester );
+        const auto observation = metadataObservation_;
+        metadataSubscription_
+            = catalog_->subscribe( [ observation ]( const IosCatalogSnapshot& snapshot ) {
+                  observation->observe( snapshot );
+              } );
+        observation->observe( catalog_->snapshot() );
+    }
+
+    void stopMetadataObservation()
+    {
+        if ( metadataObservation_ != nullptr ) {
+            metadataObservation_->stop();
+        }
+        if ( catalog_ != nullptr && metadataSubscription_.has_value() ) {
+            catalog_->unsubscribe( *metadataSubscription_ );
+            metadataSubscription_.reset();
+        }
+        metadataObservation_.reset();
     }
 
     std::unique_ptr<LiveSourceTransport> create( const LiveSourceTransportConfig& config ) const
@@ -209,14 +293,13 @@ public:
 
         auto nativeConfig = klogg::livelog::makeIosNativeStreamConfig( config );
         if ( !nativeConfig.has_value() ) {
-            lastConfigurationError_ = LiveSourceError{
-                ErrorCategory::Configuration,
-                "ios-options-invalid",
-                ErrorScope::Stream,
-                RetryPolicy::Never,
-                "The typed iOS log options are invalid.",
-                "The native stream configuration could not be constructed."
-            };
+            lastConfigurationError_
+                = LiveSourceError{ ErrorCategory::Configuration,
+                                   "ios-options-invalid",
+                                   ErrorScope::Stream,
+                                   RetryPolicy::Never,
+                                   "The typed iOS log options are invalid.",
+                                   "The native stream configuration could not be constructed." };
             return nullptr;
         }
         auto transport
@@ -246,6 +329,7 @@ public:
                 transport->serviceShutdown();
             }
         }
+        stopMetadataObservation();
         if ( auto* nativeCatalog = dynamic_cast<IosDeviceCatalog*>( catalog_.get() ) ) {
             nativeCatalog->stop();
         }
@@ -256,6 +340,8 @@ public:
     IosLiveServices& owner_;
     std::unique_ptr<SerialCatalogExecutor> catalogExecutor_;
     std::unique_ptr<IosCatalogSnapshotProvider> catalog_;
+    std::shared_ptr<CatalogMetadataObservation> metadataObservation_;
+    std::optional<IosCatalogSnapshotProvider::SubscriptionId> metadataSubscription_;
     std::unique_ptr<IosNativeStreamWorkerFactory> workerFactory_;
     mutable DefaultLiveSourceTransportFactory legacyFactory_;
     mutable std::optional<LiveSourceError> lastConfigurationError_;
