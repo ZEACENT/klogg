@@ -52,11 +52,14 @@ jobs:
         run: |
           echo "klogg_version=$KLOGG_VERSION" >> "$GITHUB_OUTPUT"
           echo "$KLOGG_VERSION" > klogg_version.txt
+          echo "$GITHUB_SHA" > klogg_commit.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: klogg_version
-          path: 'klogg_version.txt'
+          path: |
+            klogg_version.txt
+            klogg_commit.txt
           if-no-files-found: error
 
   PrefetchDeps:
@@ -401,9 +404,12 @@ jobs:
           if-no-files-found: error
 
   PrefetchAdbHelperSources:
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -420,6 +426,8 @@ jobs:
             --lock packaging/adb/adb-helper.lock.json \
             --archive-root prefetch_artifacts/adb-helper-sources \
             --repository-root "$GITHUB_WORKSPACE" \
+            --version "$KLOGG_VERSION" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
             --output prefetch_artifacts/adb-helper-release
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -959,8 +967,11 @@ jobs:
           if-no-files-found: error
 
   BuildIosNativeStacks:
+    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "iOS native stack ${{ matrix.architecture }}"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -1024,9 +1035,12 @@ jobs:
             --archive-root "${{ github.workspace }}/ios-native-sources" \
             --repository-root "${{ github.workspace }}" \
             --stack-root "$stack_root" \
+            --version "$KLOGG_VERSION" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
             --output "$stack_root"
           for receipt in \
             ios-native-build-receipt.json \
+            ios-native-source-set-receipt.json \
             ios-native-source-receipt.json \
             ios-native-legal-receipt.json \
             ios-native-sbom.spdx.json; do
@@ -1059,6 +1073,20 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/ios-native-stack
+          if-no-files-found: error
+
+      - name: Upload architecture-independent iOS source set
+        if: ${{ matrix.architecture == 'arm64' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-native-source-assets
+          path: |
+            ${{ runner.temp }}/ios-native-stack/ios-native-corresponding-source.tar.gz
+            ${{ runner.temp }}/ios-native-stack/ios-native-source-set-receipt.json
+            ${{ runner.temp }}/ios-native-stack/ios-native-source-offer.txt
+            ${{ runner.temp }}/ios-native-stack/ios-native-lgpl-replacement.txt
+            ${{ runner.temp }}/ios-native-stack/NOTICE-ios-native.txt
+            ${{ runner.temp }}/ios-native-stack/licenses
           if-no-files-found: error
 
       - name: Attest target-bound iOS native stack provenance
@@ -1878,8 +1906,11 @@ jobs:
           name: klogg_version
           path: klogg_version
 
-      - name: Set version
-        run: echo "KLOGG_VERSION=$(cat klogg_version/klogg_version.txt)" >> $GITHUB_ENV
+      - name: Set version and source commit
+        shell: bash
+        run: |
+          echo "KLOGG_VERSION=$(cat klogg_version/klogg_version.txt)" >> "$GITHUB_ENV"
+          echo "KLOGG_SOURCE_COMMIT=$(cat klogg_version/klogg_commit.txt)" >> "$GITHUB_ENV"
 
       - name: Download all package artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -1892,6 +1923,12 @@ jobs:
         with:
           name: adb-helper-legal-assets
           path: ./packages-all/adb-helper-legal-assets
+
+      - name: Download architecture-independent iOS source assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ios-native-source-assets
+          path: ./packages-all/ios-native-source-assets
 
       - name: Verify ADB helper release assets before publication
         shell: bash
@@ -1927,9 +1964,11 @@ jobs:
             ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
             ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-signing-receipt.json
             ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-notarization-receipt.json
+            ./packages-all/packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
             ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
             ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-signing-receipt.json
             ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-notarization-receipt.json
+            ./packages-all/packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
           "
           for receipt in $required; do
             test -f "$receipt" || { echo "Missing continuous qualification receipt: $receipt"; exit 1; }
@@ -1994,9 +2033,38 @@ jobs:
                       raise SystemExit(f"macOS {name} receipt is not bound to source-built helper: {path}")
           PY
 
+      - name: Prepare coherent rolling package and source publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_args=(
+            --qualification-receipt packages-all/packages-jammy-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-noble-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-resolute-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
+            --qualification-receipt packages-all/packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
+            --qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
+            --qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
+            --ios-qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
+            --ios-qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
+          )
+          python3 scripts/prepare_source_publication.py \
+            --channel continuous \
+            --tag continuous \
+            --version "${KLOGG_VERSION}" \
+            --commit "${KLOGG_SOURCE_COMMIT}" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+            --adb-source-root ./packages-all/adb-helper-legal-assets \
+            --ios-source-root ./packages-all/ios-native-source-assets \
+            "${qualification_args[@]}" \
+            --output ./packages-publication
+
       - name: Clean up package artifacts
         shell: sh
         run: |
+          # Source assets are published from the coherent, content-addressed
+          # packages-publication set rather than their internal build-artifact names.
+          rm -rf ./packages-all/adb-helper-legal-assets ./packages-all/ios-native-source-assets
           # Remove macOS app bundles and internal files that shouldn't be uploaded to GitHub Release
           # These files are inside DMG packages and shouldn't be uploaded as separate assets
           find ./packages-all -type d -name "*.app" -exec rm -rf {} + 2>/dev/null || true
@@ -2009,72 +2077,43 @@ jobs:
           # license, notice, SPDX SBOM, source-offer, manifest, and checksum assets.
           find ./packages-all -type f ! \( -name "*.dmg" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.exe" -o -name "*.zip" -o -name "*.xz" -o -name "*.tar.xz" -o -name "*.tar.gz" -o -name "*.json" -o -name "*.txt" -o -name "*.sha256" \) -delete 2>/dev/null || true
 
-      - name: Delete existing continuous release
+      - name: Clean stale continuous candidate draft
         if: env.GITHUB_TOKEN != ''
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
-          tag="continuous"
-
-          release_id=""
-          if release_id_value="$(gh api "/repos/${repo}/releases/tags/${tag}" --jq '.id' 2>/tmp/gh_release_lookup_err)"; then
-            release_id="${release_id_value}"
-          elif grep -q "404" /tmp/gh_release_lookup_err; then
-            echo "No existing release for tag ${tag}"
-          else
-            cat /tmp/gh_release_lookup_err
+          candidate_tag="continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          lookup_error=$(mktemp)
+          if release_id=$(gh api "/repos/${repo}/releases/tags/${candidate_tag}" --jq '.id' 2>"$lookup_error"); then
+            draft=$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')
+            test "${draft}" = "true" || {
+              echo "::error::refusing to replace published candidate ${candidate_tag}"
+              exit 1
+            }
+            gh api -X DELETE "/repos/${repo}/releases/${release_id}"
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null 2>&1 || true
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
             exit 1
           fi
-          rm -f /tmp/gh_release_lookup_err
+          rm -f "$lookup_error"
 
-          if [ -n "${release_id}" ]; then
-            echo "Deleting existing release id ${release_id} for tag ${tag}"
-            gh api -X DELETE "/repos/${repo}/releases/${release_id}"
-          fi
-
-          # Delete the tag reference so the next release always points to this run's commit.
-          # GitHub Delete a reference returns:
-          # - 204: deleted
-          # - 422: ref is already absent / unprocessable (safe to continue)
-          # - 409: conflict (fail the job)
-          tag_delete_headers="$(gh api -i --silent -X DELETE "/repos/${repo}/git/refs/tags/${tag}" 2>/tmp/gh_tag_delete_err || true)"
-          tag_delete_status="$(printf '%s\n' "${tag_delete_headers}" | awk 'toupper($1) ~ /^HTTP/ { status=$2 } END { print status }')"
-
-          case "${tag_delete_status}" in
-            204)
-              echo "Deleted tag reference ${tag}"
-              ;;
-            422)
-              echo "Tag reference ${tag} is already absent or cannot be deleted (422); continuing"
-              ;;
-            409)
-              echo "Conflict while deleting tag reference ${tag}"
-              cat /tmp/gh_tag_delete_err
-              exit 1
-              ;;
-            *)
-              echo "Unexpected response while deleting tag reference ${tag}: status=${tag_delete_status:-unknown}"
-              cat /tmp/gh_tag_delete_err
-              exit 1
-              ;;
-          esac
-          rm -f /tmp/gh_tag_delete_err
-
-      - name: Create pre-release (continuous)
-        id: create_release
+      - name: Create continuous candidate draft
+        id: candidate_release
         if: env.GITHUB_TOKEN != ''
         uses: softprops/action-gh-release@v1
         with:
           token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          tag_name: continuous
-          target_commitish: ${{ github.sha }}
-          name: Continuous Build ${{ env.KLOGG_VERSION }}
+          tag_name: continuous-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
+          name: Continuous Candidate ${{ env.KLOGG_VERSION }}
           body: |
             Continuous Build ${{ env.KLOGG_VERSION }}
 
-            This is an automated pre-release build. For the latest stable release, see [latest release](https://github.com/ZEACENT/klogg/releases/latest).
+            This is an automated rolling pre-release build. Its package/source publication set is mutable=true and is replaced as one verified coherent set by each successful master run. A parked prior release is restored if promotion verification fails. For the latest stable release, see [latest release](https://github.com/ZEACENT/klogg/releases/latest).
 
             ## Changes
             ${{ env.CHANGELOG }}
@@ -2099,13 +2138,94 @@ jobs:
           prerelease: true
           files: |
             ./packages-all/**/*
-          draft: false
+            ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz
+            ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz.sha256
+            ./packages-publication/klogg-v*-ios-native-source-*.tar.gz
+            ./packages-publication/klogg-v*-ios-native-source-*.tar.gz.sha256
+            ./packages-publication/adb-helper-source-set-receipt.json
+            ./packages-publication/ios-native-source-set-receipt.json
+            ./packages-publication/ios-native-*.sha256
+            ./packages-publication/NOTICE-ios-native.txt.sha256
+            ./packages-publication/klogg-source-publication-manifest.json
+            ./packages-publication/*.qualification.json
+            ./packages-publication/*.ios-qualification.json
+            ./packages-publication/adb-helper-licenses.tar.gz
+            ./packages-publication/adb-helper-notices.tar.gz
+            ./packages-publication/adb-helper-sbom.spdx.json
+            ./packages-publication/ADB-HELPER-SOURCE-OFFER.txt
+            ./packages-publication/adb-helper-source-manifest.json
+            ./packages-publication/adb-helper-*.sha256
+            ./packages-publication/ADB-HELPER-*.sha256
+            ./packages-publication/ios-native-source-offer.txt
+            ./packages-publication/ios-native-lgpl-replacement.txt
+            ./packages-publication/NOTICE-ios-native.txt
+          draft: true
 
-      - name: Enforce continuous release flags
+      - name: Verify rolling source publication after upload
+        if: env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_ID}" || { echo "::error::Missing candidate release ID"; exit 1; }
+          verification_root=$(mktemp -d)
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api -H "Accept: application/octet-stream" \
+              "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
+          done < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
+            --jq '.[] | [.id, .name] | @tsv')
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest "$verification_root/klogg-source-publication-manifest.json" \
+            --assets-root "$verification_root" \
+            --expected-channel continuous \
+            --expected-tag continuous \
+            --expected-version "${KLOGG_VERSION}" \
+            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+
+      - name: Park existing continuous release for rollback
         if: env.GITHUB_TOKEN != ''
         env:
           GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          tag="continuous"
+          backup_tag="continuous-rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          lookup_error=$(mktemp)
+          if ! release_id=$(gh api "/repos/${repo}/releases/tags/${tag}" --jq '.id' 2>"$lookup_error"); then
+            if grep -Eq '404|Not Found' "$lookup_error"; then
+              echo "No existing continuous release to park"
+              rm -f "$lookup_error"
+              exit 0
+            fi
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+          old_sha=$(gh api "/repos/${repo}/git/ref/tags/${tag}" --jq '.object.sha')
+          {
+            echo "KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID=${release_id}"
+            echo "KLOGG_PREVIOUS_CONTINUOUS_SHA=${old_sha}"
+            echo "KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG=${backup_tag}"
+          } >> "$GITHUB_ENV"
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/${backup_tag}" >/dev/null 2>&1 || true
+          gh api -X POST "/repos/${repo}/git/refs" \
+            -f ref="refs/tags/${backup_tag}" \
+            -f sha="${old_sha}" >/dev/null
+          gh api -X PATCH "/repos/${repo}/releases/${release_id}" \
+            -f tag_name="${backup_tag}" \
+            -F draft=true \
+            -F prerelease=true >/dev/null
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null 2>&1 || true
+
+      - name: Promote verified continuous candidate
+        if: env.GITHUB_TOKEN != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
@@ -2116,14 +2236,17 @@ jobs:
           fi
           echo "Enforcing flags on release ${release_id}"
           gh api -X PATCH "/repos/${repo}/releases/${release_id}" \
+            -f tag_name=continuous \
             -f draft=false \
             -f prerelease=true >/dev/null
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            >/dev/null 2>&1 || true
 
       - name: Verify continuous release flags
         if: env.GITHUB_TOKEN != ''
         env:
           GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
@@ -2132,11 +2255,97 @@ jobs:
             echo "::error::No release ID from create_release step"
             exit 1
           fi
+          tag_name="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.tag_name')"
           draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
           prerelease="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.prerelease')"
 
-          echo "continuous release flags: draft=${draft} prerelease=${prerelease}"
-          if [ "${draft}" != "false" ] || [ "${prerelease}" != "true" ]; then
+          echo "continuous release flags: tag_name=${tag_name} draft=${draft} prerelease=${prerelease}"
+          if [ "${tag_name}" != "continuous" ] || [ "${draft}" != "false" ] || [ "${prerelease}" != "true" ]; then
             gh api "/repos/${repo}/releases/${release_id}" --jq '{id,tag_name,html_url,draft,prerelease,target_commitish}'
             exit 1
           fi
+
+      - name: Reverify promoted continuous release
+        if: env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          tag_name="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.tag_name')"
+          test "${tag_name}" = "continuous" || { echo "::error::continuous release tag mismatch"; exit 1; }
+          ref_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')"
+          test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
+            echo "::error::continuous ref ${ref_sha} != source commit ${KLOGG_SOURCE_COMMIT}"
+            exit 1
+          }
+          candidate_ref="continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate_error=$(mktemp)
+          if gh api "/repos/${repo}/git/ref/tags/${candidate_ref}" >/dev/null 2>"$candidate_error"; then
+            echo "::error::candidate tag was not cleaned up: ${candidate_ref}"
+            exit 1
+          elif ! grep -Eq '404|Not Found' "$candidate_error"; then
+            cat "$candidate_error"
+            exit 1
+          fi
+          rm -f "$candidate_error"
+          verification_root=$(mktemp -d)
+          gh release download continuous --repo "${repo}" --dir "$verification_root"
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest "$verification_root/klogg-source-publication-manifest.json" \
+            --assets-root "$verification_root" \
+            --expected-channel continuous \
+            --expected-tag continuous \
+            --expected-version "${KLOGG_VERSION}" \
+            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+
+      - name: Roll back failed continuous promotion
+        if: failure() && env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          CANDIDATE_RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          candidate_id="${CANDIDATE_RELEASE_ID:-}"
+          previous_id="${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID:-}"
+          previous_sha="${KLOGG_PREVIOUS_CONTINUOUS_SHA:-}"
+          backup_tag="${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG:-}"
+          if [ -n "$candidate_id" ]; then
+            candidate_tag=$(gh api "/repos/${repo}/releases/${candidate_id}" --jq '.tag_name' 2>/dev/null || true)
+            gh api -X DELETE "/repos/${repo}/releases/${candidate_id}" >/dev/null 2>&1 || true
+            if [ -n "$candidate_tag" ]; then
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null 2>&1 || true
+            fi
+          fi
+          if [ -z "$previous_id" ]; then
+            echo "No previous continuous release was parked; removed failed candidate without changing the live release"
+            exit 0
+          fi
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous" >/dev/null 2>&1 || true
+          test -n "$previous_sha" && test -n "$backup_tag"
+          gh api -X POST "/repos/${repo}/git/refs" \
+            -f ref="refs/tags/continuous" \
+            -f sha="$previous_sha" >/dev/null
+          gh api -X PATCH "/repos/${repo}/releases/${previous_id}" \
+            -f tag_name=continuous \
+            -F draft=false \
+            -F prerelease=true >/dev/null
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/${backup_tag}" >/dev/null 2>&1 || true
+          restored_id=$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')
+          test "$restored_id" = "$previous_id"
+
+      - name: Remove parked continuous release after promotion
+        if: success() && env.GITHUB_TOKEN != '' && env.KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        run: |
+          repo="${GITHUB_REPOSITORY}"
+          gh api -X DELETE "/repos/${repo}/releases/${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID}" \
+            >/dev/null 2>&1 || echo "::warning::failed to delete parked continuous release"
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG}" \
+            >/dev/null 2>&1 || true

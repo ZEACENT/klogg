@@ -22,6 +22,16 @@ def first_line(command: list[str], accepted_returncodes: tuple[int, ...] = (0,))
     return lines[0]
 
 
+def verify_cmake_generator(expected: dict) -> None:
+    generator = expected.get("cmake_generator")
+    if generator == "Ninja":
+        first_line(["ninja", "--version"])
+    elif generator == "Unix Makefiles":
+        first_line(["make", "--version"])
+    else:
+        raise RuntimeError(f"unsupported or missing locked CMake generator: {generator}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
@@ -59,6 +69,8 @@ def main() -> int:
             raise RuntimeError(
                 f"container architecture mismatch for {args.target}: expected {expected_arch}, got {actual_arch}"
             )
+        first_line(["cmake", "--version"])
+        verify_cmake_generator(expected)
         print(
             f"verified digest-bound container toolchain {expected['identifier']} "
             f"on {actual_arch}; glibc={actual_glibc}"
@@ -80,6 +92,7 @@ def main() -> int:
     cmake_line = first_line(["cmake", "--version"])
     if expected["cmake_version"] not in cmake_line:
         raise RuntimeError(f"CMake version mismatch: expected {expected['cmake_version']}, got {cmake_line}")
+    verify_cmake_generator(expected)
 
     compiler = expected["compiler"]
     if compiler == "gcc":

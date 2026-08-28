@@ -51,26 +51,58 @@ def normalized_archive_parts(value: str, label: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
+def safe_extract(
+    archive: pathlib.Path,
+    destination: pathlib.Path,
+    excluded_build_symlinks: object = None,
+) -> list[dict[str, str]]:
     destination.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink() or any(destination.iterdir()):
         raise RuntimeError(f"archive extraction destination must be an empty directory: {destination}")
 
+    exclusions: dict[tuple[str, ...], dict[str, str]] = {}
+    for item in excluded_build_symlinks or []:
+        if not isinstance(item, dict):
+            raise RuntimeError("invalid excluded build symlink record")
+        path = item.get("path")
+        target = item.get("target")
+        reason = item.get("reason")
+        if not all(isinstance(value, str) and value for value in (path, target, reason)):
+            raise RuntimeError("invalid excluded build symlink record")
+        parts = normalized_archive_parts(path, "excluded build symlink path")
+        if pathlib.PurePosixPath(*parts).as_posix() != path or parts in exclusions:
+            raise RuntimeError(f"invalid or duplicate excluded build symlink path: {path}")
+        exclusions[parts] = {"path": path, "target": target, "reason": reason}
+
+    matched_exclusions: set[tuple[str, ...]] = set()
     with tarfile.open(archive, "r:*") as tar:
         members = tar.getmembers()
         by_name: dict[tuple[str, ...], tarfile.TarInfo] = {}
         for member in members:
             parts = normalized_archive_parts(member.name, "member")
-            if parts in by_name:
+            if parts in by_name or parts in matched_exclusions:
                 raise RuntimeError(f"archive contains duplicate member path: {member.name}")
-            by_name[parts] = member
             if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
                 raise RuntimeError(
                     f"archive contains unsupported member type: {member.name}"
                 )
             if member.issym():
+                exclusion = exclusions.get(parts)
+                if exclusion is not None:
+                    if member.linkname != exclusion["target"]:
+                        raise RuntimeError(
+                            f"excluded build symlink target mismatch: {member.name}"
+                        )
+                    matched_exclusions.add(parts)
+                    continue
                 link_path = pathlib.PurePosixPath(*parts[:-1], member.linkname)
                 normalized_archive_parts(link_path.as_posix(), "symlink target")
+            by_name[parts] = member
+
+        missing_exclusions = exclusions.keys() - matched_exclusions
+        if missing_exclusions:
+            missing = ", ".join(exclusions[parts]["path"] for parts in missing_exclusions)
+            raise RuntimeError(f"excluded build symlink is missing from archive: {missing}")
 
         directories = sorted(
             ((parts, member) for parts, member in by_name.items() if member.isdir()),
@@ -124,6 +156,8 @@ def safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
             raise RuntimeError(
                 f"archive symlink escapes extraction root after layout normalization: {path}"
             ) from error
+
+    return [exclusions[parts] for parts in exclusions if parts in matched_exclusions]
 
 
 def download(url: str, destination: pathlib.Path) -> None:
@@ -182,15 +216,20 @@ def main() -> int:
             raise RuntimeError(
                 f"ADB source archive sha256 mismatch for {record['id']}: expected {expected}, got {actual}"
             )
-        manifest["archives"].append(
-            {"id": record_id, "file": archive_file, "sha256": actual}
-        )
+        archive_manifest = {"id": record_id, "file": archive_file, "sha256": actual}
 
         if args.extract_root is not None and (record.get("build_input", True)):
             destination = args.extract_root / record_id
             if destination.exists():
                 shutil.rmtree(destination)
-            safe_extract(archive, destination)
+            exclusions = safe_extract(
+                archive,
+                destination,
+                record.get("excluded_build_symlinks", []),
+            )
+            if exclusions:
+                archive_manifest["excluded_build_symlinks"] = exclusions
+        manifest["archives"].append(archive_manifest)
 
     (args.download_root / "adb-helper-prefetch-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"

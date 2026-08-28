@@ -136,6 +136,51 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes extraction root", (result.stdout + result.stderr).lower())
 
+    def test_prefetch_omits_only_exact_lock_pinned_build_irrelevant_symlink(self):
+        download_root = self.root / "downloads"
+        download_root.mkdir()
+        archive = download_root / "sanitized-symlink.tar"
+        with tarfile.open(archive, "w") as tar:
+            add_bytes(tar, "source/payload", b"payload")
+            member = tarfile.TarInfo("source/rustfmt.toml")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "../../build/soong/scripts/rustfmt.toml"
+            tar.addfile(member)
+        record = {
+            "id": "source",
+            "archive_file": archive.name,
+            "archive_sha256": archive_sha256(archive),
+            "build_input": True,
+            "excluded_build_symlinks": [
+                {
+                    "path": "source/rustfmt.toml",
+                    "target": "../../build/soong/scripts/rustfmt.toml",
+                    "reason": "Formatting metadata is not a production build input.",
+                }
+            ],
+        }
+        lock = self.write_lock(record)
+        extract_root = self.root / "extract"
+
+        result = self.run_prefetch(lock, download_root, extract_root)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((extract_root / "source/payload").is_file())
+        self.assertFalse((extract_root / "source/rustfmt.toml").is_symlink())
+        manifest = json.loads(
+            (download_root / "adb-helper-prefetch-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            manifest["archives"][0]["excluded_build_symlinks"],
+            record["excluded_build_symlinks"],
+        )
+
+        record["excluded_build_symlinks"][0]["target"] = "../../../changed-target"
+        lock = self.write_lock(record)
+        result = self.run_prefetch(lock, download_root, extract_root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("excluded build symlink", (result.stdout + result.stderr).lower())
+
     def make_legal_fixture(self):
         repository = self.root / "repository"
         archive_root = self.root / "archives"
@@ -148,6 +193,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/prefetch_adb_helper_sources.py": "# prefetch\n",
             "scripts/build_adb_helper.py": "# build\n",
             "scripts/build_adb_helper_legal_assets.py": "# legal\n",
+            "scripts/source_publication_identity.py": "# identity\n",
             "scripts/extract_verified_tar.py": "# extract\n",
             "scripts/verify_adb_helper_toolchain.py": "# toolchain\n",
             "scripts/verify_adb_helper_artifact.py": "# verify\n",
@@ -170,6 +216,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             ("sbom", "adb-helper-sbom.spdx.json"),
             ("source-offer", "ADB-HELPER-SOURCE-OFFER.txt"),
             ("source-manifest", "adb-helper-source-manifest.json"),
+            ("source-set-receipt", "adb-helper-source-set-receipt.json"),
         ]
         lock = {
             "schema_version": 1,
@@ -199,6 +246,10 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
                 {
                     "kind": kind,
                     "required": True,
+                    "distribution": {
+                        "package_required": kind != "source-archive",
+                        "release_required": True,
+                    },
                     "file_name": name,
                     "sha256_file": name + ".sha256",
                 }
@@ -221,6 +272,10 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
                 str(archive_root),
                 "--repository-root",
                 str(repository),
+                "--version",
+                "26.08.27",
+                "--base-url",
+                "https://github.com/ZEACENT/klogg",
                 "--output",
                 str(output),
             ],
@@ -267,6 +322,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/prefetch_adb_helper_sources.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
+            "scripts/source_publication_identity.py",
             "scripts/extract_verified_tar.py",
             "scripts/verify_adb_helper_toolchain.py",
             "scripts/verify_adb_helper_artifact.py",
@@ -294,7 +350,21 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         self.assertTrue(sbom["relationships"])
 
         offer = (output / "ADB-HELPER-SOURCE-OFFER.txt").read_text(encoding="utf-8").lower()
-        for term in ("libusb", "replace", "relink"):
+        source_archive = output / "adb-helper-source-archive.tar.gz"
+        archive_hash = archive_sha256(source_archive)
+        published_name = f"klogg-v26.08.27-adb-helper-source-{archive_hash[:12]}.tar.gz"
+        for term in (
+            "libusb",
+            "replace",
+            "relink",
+            "not included in the installer",
+            published_name,
+            archive_hash,
+            f"/releases/download/v26.08.27/{published_name}",
+            f"/releases/download/continuous/{published_name}",
+            "rolling",
+            "shasum -a 256",
+        ):
             self.assertIn(term, offer)
 
 
@@ -302,6 +372,35 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_build_module()
+
+    def test_locked_patch_application_requires_explicit_gnu_patch_dispatch(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            source = root / "source"
+            source.mkdir()
+            patch = root / "change.patch"
+            patch.write_text("fixture\n", encoding="utf-8")
+            record = {"path": "change.patch", "apply": True}
+
+            with self.assertRaisesRegex(RuntimeError, "apply_tool"):
+                self.module.apply_locked_patch(source, patch, record)
+
+            record["apply_tool"] = "gnu-patch"
+            with mock.patch.object(self.module, "run") as run:
+                self.module.apply_locked_patch(source, patch, record)
+            run.assert_called_once_with(
+                [
+                    "patch",
+                    "--directory",
+                    str(source),
+                    "--strip",
+                    "1",
+                    "--batch",
+                    "--forward",
+                    "--input",
+                    str(patch),
+                ]
+            )
 
     def test_dependency_resolution_rejects_dynamic_pinned_build_dependencies(self):
         with tempfile.TemporaryDirectory() as tempdir:

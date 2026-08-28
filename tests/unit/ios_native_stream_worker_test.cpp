@@ -66,12 +66,20 @@ struct FakeNative {
     bool nullSyslogOnSuccess{ false };
     bool emitOsTraceErrorDuringStart{ false };
     bool throwDuringDeviceNew{ false };
-    std::atomic_bool insideCallback{ false };
-    std::atomic_bool stopOrFreeInsideCallback{ false };
+    std::atomic_bool stopOnCallbackThread{ false };
+    std::atomic_bool freeInsideCallback{ false };
     std::atomic_bool abiViolation{ false };
     std::vector<std::string> calls;
     std::vector<std::thread::id> nativeThreads;
     std::mutex recordMutex;
+    std::mutex callbackMutex;
+    std::condition_variable callbackChanged;
+    bool callbackActive{ false };
+    bool blockCallbackReturn{ false };
+    bool callbackBodyReturned{ false };
+    bool callbackReturnReleased{ false };
+    bool stopEntered{ false };
+    std::thread::id callbackThread;
     NativeOsTraceActivityCallback osTraceActivityCallback{ nullptr };
     NativeOsTraceErrorCallback osTraceErrorCallback{ nullptr };
     NativeSyslogRelayCallback syslogCallback{ nullptr };
@@ -155,14 +163,82 @@ struct FakeNative {
         handshakeChanged.notify_all();
     }
 
+    void beginCallback()
+    {
+        std::lock_guard<std::mutex> lock( callbackMutex );
+        callbackActive = true;
+        callbackBodyReturned = false;
+        callbackReturnReleased = false;
+        callbackThread = std::this_thread::get_id();
+    }
+
+    void finishCallback()
+    {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        callbackBodyReturned = true;
+        callbackChanged.notify_all();
+        callbackChanged.wait( lock, [ this ] {
+            return !blockCallbackReturn || callbackReturnReleased;
+        } );
+        callbackActive = false;
+        callbackThread = {};
+        lock.unlock();
+        callbackChanged.notify_all();
+    }
+
+    bool waitUntilCallbackBodyReturned()
+    {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        return callbackChanged.wait_for( lock, 2s,
+                                         [ this ] { return callbackBodyReturned; } );
+    }
+
+    bool waitUntilStopEntered()
+    {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        return callbackChanged.wait_for( lock, 2s, [ this ] { return stopEntered; } );
+    }
+
+    void releaseCallbackReturn()
+    {
+        {
+            std::lock_guard<std::mutex> lock( callbackMutex );
+            callbackReturnReleased = true;
+        }
+        callbackChanged.notify_all();
+    }
+
+    void waitUntilCallbackExited()
+    {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        callbackChanged.wait( lock, [ this ] { return !callbackActive; } );
+    }
+
+    bool callbackTeardownViolation() const
+    {
+        return stopOnCallbackThread.load() || freeInsideCallback.load();
+    }
+
     void record( std::string call )
     {
-        std::lock_guard<std::mutex> lock( recordMutex );
-        if ( insideCallback
-             && ( call.find( "stop" ) != std::string::npos
-                  || call.find( "free" ) != std::string::npos ) ) {
-            stopOrFreeInsideCallback = true;
+        bool notifyCallback = false;
+        {
+            std::lock_guard<std::mutex> lock( callbackMutex );
+            if ( call.find( "stop" ) != std::string::npos ) {
+                stopEntered = true;
+                notifyCallback = true;
+                if ( callbackActive && callbackThread == std::this_thread::get_id() ) {
+                    stopOnCallbackThread = true;
+                }
+            }
+            if ( call.find( "free" ) != std::string::npos && callbackActive ) {
+                freeInsideCallback = true;
+            }
         }
+        if ( notifyCallback ) {
+            callbackChanged.notify_all();
+        }
+        std::lock_guard<std::mutex> lock( recordMutex );
         calls.push_back( std::move( call ) );
         nativeThreads.push_back( std::this_thread::get_id() );
     }
@@ -173,10 +249,10 @@ struct FakeNative {
             abiViolation = true;
             return;
         }
-        insideCallback = true;
+        beginCallback();
         osTraceActivityCallback( bytes.data(), static_cast<std::uint32_t>( bytes.size() ),
                                  osTraceContext );
-        insideCallback = false;
+        finishCallback();
     }
 
     void emitOsTraceError( std::int32_t code )
@@ -185,9 +261,9 @@ struct FakeNative {
             abiViolation = true;
             return;
         }
-        insideCallback = true;
+        beginCallback();
         osTraceErrorCallback( code, osTraceContext );
-        insideCallback = false;
+        finishCallback();
     }
 
     void emitSyslog( const std::string& bytes )
@@ -196,11 +272,11 @@ struct FakeNative {
             abiViolation = true;
             return;
         }
-        insideCallback = true;
+        beginCallback();
         for ( const auto byte : bytes ) {
             syslogCallback( byte, syslogContext );
         }
-        insideCallback = false;
+        finishCallback();
     }
 
     void emitSyslogError( std::int32_t code )
@@ -209,9 +285,9 @@ struct FakeNative {
             abiViolation = true;
             return;
         }
-        insideCallback = true;
+        beginCallback();
         syslogErrorCallback( code, syslogContext );
-        insideCallback = false;
+        finishCallback();
     }
 };
 
@@ -367,6 +443,7 @@ std::int32_t stopOsTrace( NativeOsTraceClient client )
     }
     fake->record( "ostrace-stop" );
     fake->interruptBlockedReceive();
+    fake->waitUntilCallbackExited();
     return 0;
 }
 
@@ -412,6 +489,7 @@ std::int32_t stopSyslog( NativeSyslogRelayClient client )
         fake->abiViolation = true;
     }
     fake->record( "syslog-stop" );
+    fake->waitUntilCallbackExited();
     return 0;
 }
 
@@ -912,7 +990,7 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
     CHECK( output.find( "copy me" ) != std::string::npos );
     CHECK( output.find( "\x1b[" ) != std::string::npos );
     CHECK( output.back() == '\n' );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
 
     auto activity = osTracePacket( "not-an-activity-text-span" );
     putLe32( activity, 1u, 2u );
@@ -936,7 +1014,7 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
 
     observed.throwFromBytesAvailable = true;
     CHECK_NOTHROW( state.emitOsTrace( osTracePacket( "observer throws" ) ) );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
     worker.stop( 41u );
     executor.runAllOnWorker();
 }
@@ -983,7 +1061,7 @@ TEST_CASE( "malformed os_trace packets and native packet errors are terminal and
         REQUIRE( observed.errors.size() == 1u );
         CHECK( observed.errors.front().second.error.code == "ios-ostrace-malformed-packet" );
         CHECK_FALSE( observed.errors.front().second.error.nativeDetail.empty() );
-        CHECK_FALSE( state.stopOrFreeInsideCallback );
+        CHECK_FALSE( state.callbackTeardownViolation() );
         REQUIRE( executor.pending() == 1u );
         executor.runAllOnWorker();
         CHECK( std::count( state.calls.cbegin(), state.calls.cend(), "ostrace-stop" ) == 1 );
@@ -1032,7 +1110,7 @@ TEST_CASE( "malformed os_trace packets and native packet errors are terminal and
         CHECK_NOTHROW( state.emitOsTraceError( -2 ) );
         REQUIRE( observed.errors.size() == 1u );
         CHECK( observed.errors.front().second.error.code == "ios-device-disconnected" );
-        CHECK_FALSE( state.stopOrFreeInsideCallback );
+        CHECK_FALSE( state.callbackTeardownViolation() );
         executor.runAllOnWorker();
     }
 }
@@ -1062,7 +1140,7 @@ TEST_CASE(
     CHECK( drained->sourceChunks == 2u );
     const std::string output( drained->bytes.begin(), drained->bytes.end() );
     CHECK( output == "alpha\n\x1b[31mbeta\x1b[0m\n" );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
 
     worker.stop( 51u );
     executor.runAllOnWorker();
@@ -1151,7 +1229,7 @@ TEST_CASE( "bounded native queue reports backpressure and statistics without sil
     CHECK( statistics.backpressuredBytes == 2u );
     CHECK( statistics.backpressuredChunks == 1u );
     CHECK( statistics.highWaterQueuedBytes == 2u );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
     executor.runAllOnWorker();
 }
 
@@ -1209,7 +1287,7 @@ TEST_CASE( "native stop is asynchronous ordered and recreates one-shot clients f
     CHECK( serviceFree < lockdownFree );
     CHECK( lockdownFree < deviceFree );
     CHECK( firstObserved.stopped == std::vector<Generation>{ 61u } );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
 
     ObservedCallbacks secondObserved;
     IosNativeStreamWorker second( makeApi(), executor.executor(), config( 62u ),
@@ -1255,7 +1333,7 @@ TEST_CASE( "cleanup waits for an in-flight native callback before stop and free"
     worker.stop( 73u );
     auto cleanupThread = executor.startNextOnWorker();
     std::this_thread::sleep_for( 20ms );
-    CHECK_FALSE( state.stopOrFreeInsideCallback.load() );
+    CHECK_FALSE( state.callbackTeardownViolation() );
     {
         std::lock_guard<std::mutex> lock( callbackMutex );
         releaseCallback = true;
@@ -1451,6 +1529,7 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
 
     auto options = config( 812u );
     options.cleanupDeadline = 75ms;
+    state.blockCallbackReturn = true;
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
     session = factory.create( options, std::move( callbacks ) );
     REQUIRE( session->start() );
@@ -1464,10 +1543,17 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
     {
         std::unique_lock<std::mutex> lock( mutex );
         REQUIRE( changed.wait_for( lock, 1s, [ & ] { return destroyed; } ) );
+    }
+    REQUIRE( state.waitUntilCallbackBodyReturned() );
+    REQUIRE( state.waitUntilStopEntered() );
+    CHECK_FALSE( state.freeInsideCallback.load() );
+    state.releaseCallbackReturn();
+    {
+        std::unique_lock<std::mutex> lock( mutex );
         REQUIRE( changed.wait_for( lock, 2s, [ & ] { return stopped; } ) );
     }
     callbackThread.join();
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
     CHECK_FALSE( state.abiViolation );
 }
 
@@ -1547,5 +1633,5 @@ TEST_CASE( "worker shutdown rejects late callbacks and completes cleanup on its 
 
     CHECK( observed.bytesAvailable.size() == notificationsBeforeLateCallback );
     CHECK( observed.stopped == std::vector<Generation>{ 71u } );
-    CHECK_FALSE( state.stopOrFreeInsideCallback );
+    CHECK_FALSE( state.callbackTeardownViolation() );
 }

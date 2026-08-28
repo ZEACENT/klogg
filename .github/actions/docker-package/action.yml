@@ -31,7 +31,8 @@ runs:
             --receipt adb-helper-staged/receipt.json \
             --binary-smoke-receipt adb-helper-deb-smoke.json \
             --package-root adb-deb-root \
-            --release-root adb-deb-root/usr/share/doc/klogg/adb-helper \
+            --asset-scope package \
+            --source-assets-root adb-deb-root/usr/share/doc/klogg/adb-helper \
             --layout deb \
             --expected-target linux-x86_64 \
             --package-target linux-${{ matrix.config.artifacts_id }}-x86_64 \

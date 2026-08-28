@@ -36,6 +36,29 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def apply_locked_patch(
+    source: pathlib.Path, patch_path: pathlib.Path, record: dict
+) -> None:
+    apply_tool = record.get("apply_tool")
+    if apply_tool != "gnu-patch":
+        raise RuntimeError(
+            f"locked ADB patch requires explicit supported apply_tool=gnu-patch: {patch_path}"
+        )
+    run(
+        [
+            "patch",
+            "--directory",
+            str(source),
+            "--strip",
+            "1",
+            "--batch",
+            "--forward",
+            "--input",
+            str(patch_path),
+        ]
+    )
+
+
 def verify_dependency_resolution(superbuild: pathlib.Path, prefix: pathlib.Path) -> None:
     cache = superbuild / "adb_android_tools-prefix/src/adb_android_tools-build/CMakeCache.txt"
     if not cache.is_file():
@@ -359,10 +382,23 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    try:
+        parallel = int(args.parallel)
+    except ValueError as error:
+        raise RuntimeError(f"invalid ADB build parallelism: {args.parallel}") from error
+    if parallel <= 0:
+        raise RuntimeError(f"invalid ADB build parallelism: {args.parallel}")
+    build_env = os.environ.copy()
+    build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(parallel)
+
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     target_plan = lock.get("targets", {}).get(args.target)
     if not isinstance(target_plan, dict):
         raise RuntimeError(f"unknown locked ADB helper target: {args.target}")
+    toolchain = lock.get("toolchains", {}).get(target_plan.get("toolchain"))
+    generator = toolchain.get("cmake_generator") if isinstance(toolchain, dict) else None
+    if generator not in ("Ninja", "Unix Makefiles"):
+        raise RuntimeError(f"unsupported or missing locked CMake generator: {generator}")
     host_os, host_arch = normalized_host_target()
     native_build = (host_os, host_arch) == (target_plan["os"], target_plan["arch"])
     macos_thin_cross_build = (
@@ -403,17 +439,7 @@ def main() -> int:
             raise RuntimeError(f"locked ADB patch sha256 mismatch: {patch_path}")
         if patch.get("apply", True) is False:
             continue
-        if patch.get("apply_tool") == "gnu-patch":
-            run([
-                "patch",
-                "--directory", str(patch_source),
-                "--strip", "1",
-                "--batch",
-                "--forward",
-                "--input", str(patch_path),
-            ])
-        else:
-            run(["git", "-C", str(patch_source), "apply", "--whitespace=nowarn", str(patch_path)])
+        apply_locked_patch(patch_source, patch_path, patch)
 
     if args.target == "windows-x86_64":
         development_source = work_sources / "windows-platform-development"
@@ -432,14 +458,25 @@ def main() -> int:
         "cmake",
         "-S", str(args.repository_root / "packaging/adb/superbuild"),
         "-B", str(superbuild),
-        "-G", "Ninja",
+        "-G", generator,
         f"-DKLOGG_ADB_SOURCE_ROOT={work_sources}",
         f"-DKLOGG_ADB_INSTALL_PREFIX={install_prefix}",
         f"-DKLOGG_ADB_TARGET={args.target}",
         "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
     ]
-    run(configure)
-    run(["cmake", "--build", str(superbuild), "--target", "klogg_adb_helper", "--parallel", args.parallel])
+    run(configure, env=build_env)
+    run(
+        [
+            "cmake",
+            "--build",
+            str(superbuild),
+            "--target",
+            "klogg_adb_helper",
+            "--parallel",
+            str(parallel),
+        ],
+        env=build_env,
+    )
     verify_dependency_resolution(superbuild, install_prefix)
 
     installed_helper = install_prefix / "bin" / ("adb.exe" if host_os == "windows" else "adb")
@@ -511,6 +548,16 @@ def main() -> int:
     release_assets = json.loads(
         (args.release_assets_root / "adb-helper-release-assets.json").read_text(encoding="utf-8")
     )
+    source_set_assets = [
+        asset
+        for asset in release_assets
+        if isinstance(asset, dict) and asset.get("kind") == "source-set-receipt"
+    ]
+    if len(source_set_assets) != 1:
+        raise RuntimeError("ADB release assets must contain exactly one source-set receipt")
+    source_set_receipt_sha256 = source_set_assets[0].get("sha256")
+    if not isinstance(source_set_receipt_sha256, str):
+        raise RuntimeError("ADB source-set receipt lacks sha256 binding")
     receipt = {
         "schema_version": 1,
         "receipt_kind": "binary-build",
@@ -518,6 +565,7 @@ def main() -> int:
         "target": args.target,
         "layout": "artifact",
         "qualification": target_plan.get("qualification", {}),
+        "source_set_receipt_sha256": source_set_receipt_sha256,
         "helper": {
             "path": f"helpers/{helper.name}",
             "sha256": sha256(helper),

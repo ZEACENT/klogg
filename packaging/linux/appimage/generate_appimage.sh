@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-DESTDIR=$(readlink -f appdir) ninja install
+DESTDIR=$(readlink -f appdir) cmake --install . --component klogg-runtime
 
 test -x appdir/usr/bin/helpers/adb || {
   echo "ERROR: source-built ADB helper missing from appdir/usr/bin/helpers/adb"
@@ -16,7 +16,8 @@ python3 ../scripts/verify_adb_helper_artifact.py \
   --receipt adb-helper-staged/receipt.json \
   --binary-smoke-receipt adb-helper-appimage-smoke.json \
   --package-root appdir \
-  --release-root appdir/usr/share/doc/klogg/adb-helper \
+  --asset-scope package \
+  --source-assets-root appdir/usr/share/doc/klogg/adb-helper \
   --layout appimage \
   --expected-target linux-x86_64 \
   --maximum-glibc-version 2.31 \
@@ -52,7 +53,8 @@ python3 ../scripts/verify_adb_helper_artifact.py \
   --receipt adb-helper-staged/receipt.json \
   --binary-smoke-receipt adb-helper-appimage-final-smoke.json \
   --package-root appdir \
-  --release-root appdir/usr/share/doc/klogg/adb-helper \
+  --asset-scope package \
+  --source-assets-root appdir/usr/share/doc/klogg/adb-helper \
   --layout appimage \
   --expected-target linux-x86_64 \
   --maximum-glibc-version 2.31 \

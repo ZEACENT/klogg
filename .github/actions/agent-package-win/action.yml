@@ -39,7 +39,8 @@ runs:
           --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
           --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json" `
           --package-root release `
-          --release-root release/adb-helper-assets `
+          --asset-scope package `
+          --source-assets-root release/adb-helper-assets `
           --layout nsis `
           --expected-target $env:KLOGG_ADB_HELPER_TARGET `
           --checksum-envelope "$env:KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" `
@@ -71,7 +72,8 @@ runs:
           --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
           --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json" `
           --package-root release `
-          --release-root release/adb-helper-assets `
+          --asset-scope package `
+          --source-assets-root release/adb-helper-assets `
           --layout nsis `
           --expected-target $env:KLOGG_ADB_HELPER_TARGET `
           --package-target windows-x86_64 `

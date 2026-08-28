@@ -78,7 +78,18 @@ Section "klogg" klogg
     File release\helpers\AdbWinUsbApi.dll
     File release\helpers\libusb-1.0.dll
     SetOutPath $INSTDIR\adb-helper-assets
-    File /r release\adb-helper-assets\*
+    File release\adb-helper-assets\adb-helper-licenses.tar.gz
+    File release\adb-helper-assets\adb-helper-licenses.tar.gz.sha256
+    File release\adb-helper-assets\adb-helper-notices.tar.gz
+    File release\adb-helper-assets\adb-helper-notices.tar.gz.sha256
+    File release\adb-helper-assets\adb-helper-sbom.spdx.json
+    File release\adb-helper-assets\adb-helper-sbom.spdx.json.sha256
+    File release\adb-helper-assets\ADB-HELPER-SOURCE-OFFER.txt
+    File release\adb-helper-assets\ADB-HELPER-SOURCE-OFFER.txt.sha256
+    File release\adb-helper-assets\adb-helper-source-manifest.json
+    File release\adb-helper-assets\adb-helper-source-manifest.json.sha256
+    File release\adb-helper-assets\adb-helper-source-set-receipt.json
+    File release\adb-helper-assets\adb-helper-source-set-receipt.json.sha256
     SetOutPath $INSTDIR
 !if ${PLATFORM} == "x64"
     File release\klogg_crashpad_handler.exe

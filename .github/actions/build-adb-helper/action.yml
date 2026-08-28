@@ -51,12 +51,14 @@ runs:
           -e FETCHCONTENT_FULLY_DISCONNECTED=ON \
           -e FETCHCONTENT_UPDATES_DISCONNECTED=ON \
           "${{ inputs.container-image }}" -lc '
-            python3 scripts/verify_adb_helper_toolchain.py \
+            python=/opt/python/cp311-cp311/bin/python3 &&
+            test -x "$python" &&
+            "$python" scripts/verify_adb_helper_toolchain.py \
               --lock packaging/adb/adb-helper.lock.json \
               --target "${{ inputs.target }}" \
               --containerized \
               --container-image "${{ inputs.container-image }}" &&
-            python3 scripts/build_adb_helper.py \
+            "$python" scripts/build_adb_helper.py \
               --repository-root "$GITHUB_WORKSPACE" \
               --lock "$GITHUB_WORKSPACE/packaging/adb/adb-helper.lock.json" \
               --source-root "${{ inputs.source-root }}" \
@@ -116,7 +118,8 @@ runs:
           --receipt "${{ inputs.artifact-root }}/receipt.json" \
           --binary-smoke-receipt "${{ inputs.artifact-root }}/package-smoke.json" \
           --package-root "${{ inputs.artifact-root }}" \
-          --release-root "${{ inputs.release-assets-root }}" \
+          --asset-scope release \
+          --source-assets-root "${{ inputs.release-assets-root }}" \
           --helper-path "helpers/${helper_name}" \
           --expected-target "${{ inputs.target }}" \
           --package-verification-receipt "${{ inputs.artifact-root }}/package-verification.json" \

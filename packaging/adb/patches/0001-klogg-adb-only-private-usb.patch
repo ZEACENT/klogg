@@ -73,8 +73,12 @@ index b2afaba..c58a72b 100644
  		adb/client/usb_linux.cpp
  		adb/client/usb_linux_netlink.cpp)
  endif()
-@@ -220,13 +235,19 @@ target_link_libraries(adb
+@@ -217,16 +232,22 @@ target_link_libraries(adb
+ 	protobuf::libprotobuf
+-	PkgConfig::libbrotlicommon
+ 	PkgConfig::libbrotlidec
  	PkgConfig::libbrotlienc
++	PkgConfig::libbrotlicommon
  	PkgConfig::liblz4
  	Threads::Threads
 -	z

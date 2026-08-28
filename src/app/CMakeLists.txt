@@ -83,8 +83,9 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
       add_custom_command(
         TARGET ${target_name}
         POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_RELEASE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
         VERBATIM
       )
     endif()
@@ -102,8 +103,9 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
     add_custom_command(
       TARGET klogg_stage_adb_helpers
       POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
       COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
-      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_RELEASE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
       VERBATIM
     )
   elseif(WIN32)
@@ -190,8 +192,10 @@ endif()
 
 install(
   TARGETS klogg
-  DESTINATION ${CMAKE_INSTALL_BINDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+          COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
   BUNDLE DESTINATION .
+         COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
 )
 
 if(WIN32)
@@ -319,10 +323,12 @@ if(KLOGG_USE_SENTRY)
   if(APPLE)
     install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION $<TARGET_BUNDLE_CONTENT_DIR:klogg>/MacOS
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
   elseif(NOT WIN32)
     install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION ${CMAKE_INSTALL_BINDIR}
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
   endif()
 endif(KLOGG_USE_SENTRY)

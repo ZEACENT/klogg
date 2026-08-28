@@ -14,6 +14,13 @@ import pathlib
 import re
 import tarfile
 
+from source_publication_identity import (
+    normalize_base_url,
+    published_source_name,
+    source_asset_url,
+    validate_version,
+)
+
 
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -95,14 +102,23 @@ def write_hash(path: pathlib.Path) -> None:
     )
 
 
+def canonical_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
     parser.add_argument("--archive-root", required=True, type=pathlib.Path)
     parser.add_argument("--repository-root", required=True, type=pathlib.Path)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
+    version = validate_version(args.version)
+    base_url = normalize_base_url(args.base_url)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     args.output.mkdir(parents=True, exist_ok=True)
     by_kind = {asset["kind"]: asset for asset in lock["release_assets"]}
@@ -132,6 +148,7 @@ def main() -> int:
             "scripts/prefetch_adb_helper_sources.py",
             "scripts/build_adb_helper.py",
             "scripts/build_adb_helper_legal_assets.py",
+            "scripts/source_publication_identity.py",
             "scripts/extract_verified_tar.py",
             "scripts/verify_adb_helper_toolchain.py",
             "scripts/verify_adb_helper_artifact.py",
@@ -240,21 +257,87 @@ def main() -> int:
     sbom_path.write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     source_offer = args.output / by_kind["source-offer"]["file_name"]
+    source_archive_hash = sha256(source_archive)
+    published_archive = published_source_name(version, "adb-helper", source_archive_hash)
+    stable_url = source_asset_url(base_url, f"v{version}", published_archive)
+    continuous_url = source_asset_url(base_url, "continuous", published_archive)
     source_offer.write_text(
         "Klogg ADB Helper Corresponding Source Offer\n"
         "==========================================\n\n"
         "The complete, source-built ADB helper distributed with klogg is built from the immutable\n"
-        "source closure recorded in adb-helper-source-manifest.json. The accompanying\n"
-        "adb-helper-source-archive.tar.gz contains every locked upstream archive and every klogg\n"
-        "patch needed by the published build. No Google Platform-Tools binary is redistributed.\n\n"
-        "The same corresponding source is available from the klogg release assets for at least\n"
-        "three years after that binary release. Build instructions are included in this source\n"
+        "source closure recorded in adb-helper-source-manifest.json. The corresponding-source\n"
+        "archive is not included in the installer; it is a separate GitHub Release asset. No\n"
+        "Google Platform-Tools binary is redistributed.\n\n"
+        f"Published archive: {published_archive}\n"
+        f"SHA-256: {source_archive_hash}\n"
+        f"Stable release URL: {stable_url}\n"
+        f"Rolling continuous URL: {continuous_url}\n\n"
+        "Stable versioned releases retain their matching source asset for at least three years.\n"
+        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
+        "replaces its packages and source assets together and does not provide archival retention.\n"
+        "Verify downloaded bytes with:\n"
+        f"  shasum -a 256 {published_archive}\n"
+        "and compare the result with the SHA-256 above. Build instructions are included in the\n"
         "archive at packaging/adb/README.md.\n\n"
         "Linux packages place the LGPL-2.1-or-later libusb shared library beside adb and resolve it\n"
         "through the relative $ORIGIN runpath. You may replace that libusb file with a modified,\n"
         "ABI-compatible version. The source archive also contains the material needed to rebuild\n"
         "and relink adb against a modified libusb. No libusb library is shipped on macOS.\n",
         encoding="utf-8",
+    )
+
+    source_set_asset = by_kind["source-set-receipt"]
+    package_support_assets = []
+    for asset in lock["release_assets"]:
+        distribution = asset.get("distribution", {})
+        if (
+            asset["kind"] == "source-set-receipt"
+            or distribution.get("package_required") is not True
+        ):
+            continue
+        path = args.output / asset["file_name"]
+        if not path.is_file():
+            raise RuntimeError(f"required ADB package support asset was not generated: {path}")
+        package_support_assets.append(
+            {"kind": asset["kind"], "file_name": path.name, "sha256": sha256(path)}
+        )
+
+    closure_identity = [
+        {
+            "id": record["id"],
+            "archive_file": record["archive_file"],
+            "archive_sha256": record["archive_sha256"],
+            "revision": record.get("commit", record.get("version")),
+        }
+        for record in [*lock["sources"], *lock.get("dependencies", [])]
+    ]
+    patch_identity = [
+        {
+            "path": patch["path"],
+            "sha256": patch["sha256"],
+            "applies_to": patch.get("applies_to"),
+            "target": patch.get("target"),
+        }
+        for patch in lock["patches"]
+    ]
+    source_set_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "component-source-set",
+        "component": "adb-helper",
+        "lock_sha256": sha256(args.lock),
+        "archive": {"file_name": source_archive.name, "sha256": sha256(source_archive)},
+        "source_identity": {
+            "manifest_or_closure_sha256": sha256(manifest_path),
+            "tree_hash_algorithm": "sha256",
+            "final_tree_sha256": canonical_sha256(closure_identity),
+        },
+        "patch_chain_sha256": canonical_sha256(patch_identity),
+        "package_support_assets": package_support_assets,
+        "distribution": {"package_required": False, "release_required": True},
+    }
+    source_set_path = args.output / source_set_asset["file_name"]
+    source_set_path.write_text(
+        json.dumps(source_set_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
     receipt_assets = []

@@ -235,7 +235,7 @@
   },
   "receipts": {
     "build": "ios-native-build-receipt.json",
-    "source": "ios-native-source-receipt.json",
+    "source": "ios-native-source-set-receipt.json",
     "legal": "ios-native-legal-receipt.json",
     "sbom": "ios-native-sbom.spdx.json",
     "package": "ios-native-package-receipt.json"

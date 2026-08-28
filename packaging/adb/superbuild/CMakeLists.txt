@@ -62,7 +62,7 @@ elseif(UNIX)
   # package contract then depends only on the locked GLIBC baseline and private
   # libusb closure, not the host distribution's libstdc++/libgcc versions.
   list(APPEND _platform_args
-    -DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++
+    -DCMAKE_EXE_LINKER_FLAGS=-static-libgcc\ -static-libstdc++\ -Wl,--enable-new-dtags
   )
 else()
   message(FATAL_ERROR "unsupported ADB helper host for ${KLOGG_ADB_TARGET}")
@@ -70,18 +70,21 @@ endif()
 list(APPEND _common_args ${_platform_args})
 
 ExternalProject_Add(adb_zlib
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/zlib"
   CMAKE_ARGS ${_common_args} -DZLIB_BUILD_EXAMPLES=OFF
   BUILD_BYPRODUCTS "${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a"
 )
 
 ExternalProject_Add(adb_brotli
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/brotli"
   CMAKE_ARGS ${_common_args} -DBROTLI_DISABLE_TESTS=ON
   BUILD_BYPRODUCTS "${KLOGG_ADB_INSTALL_PREFIX}/lib/libbrotlicommon.a"
 )
 
 ExternalProject_Add(adb_lz4
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/lz4"
   SOURCE_SUBDIR build/cmake
   CMAKE_ARGS ${_common_args} -DLZ4_BUILD_CLI=OFF -DLZ4_BUILD_LEGACY_LZ4C=OFF
@@ -89,6 +92,7 @@ ExternalProject_Add(adb_lz4
 )
 
 ExternalProject_Add(adb_zstd
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/zstd"
   SOURCE_SUBDIR build/cmake
   CMAKE_ARGS ${_common_args}
@@ -100,6 +104,7 @@ ExternalProject_Add(adb_zstd
 )
 
 ExternalProject_Add(adb_googletest
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/googletest"
   CMAKE_ARGS ${_common_args}
     -DINSTALL_GTEST=ON
@@ -108,6 +113,7 @@ ExternalProject_Add(adb_googletest
 )
 
 ExternalProject_Add(adb_protobuf
+  CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/protobuf"
   CMAKE_ARGS ${_common_args}
     -Dprotobuf_BUILD_TESTS=OFF
@@ -127,7 +133,7 @@ set(_windows_api_dependency)
 if(WIN32)
   ExternalProject_Add(adb_windows_api
     SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/windows-platform-development/klogg"
-    CMAKE_GENERATOR Ninja
+    CMAKE_GENERATOR "${CMAKE_GENERATOR}"
     CMAKE_ARGS
       -DCMAKE_BUILD_TYPE=Release
       -DCMAKE_INSTALL_PREFIX=${KLOGG_ADB_INSTALL_PREFIX}
@@ -158,6 +164,7 @@ set(_android_configure
   "PKG_CONFIG_LIBDIR=${_pkg_config_path}"
   "PKG_CONFIG_SYSROOT_DIR="
   ${CMAKE_COMMAND}
+  -G "${CMAKE_GENERATOR}"
   -S "${KLOGG_ADB_SOURCE_ROOT}/android-tools-release"
   -B "<BINARY_DIR>"
   ${_common_args}

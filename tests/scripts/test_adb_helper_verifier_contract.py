@@ -78,29 +78,60 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 }
             )
 
-        asset_kinds = (
-            "source-archive",
-            "licenses",
-            "notices",
-            "sbom",
-            "source-offer",
-            "source-manifest",
+        asset_specs = (
+            ("source-archive", "adb-helper-source-archive.tar.gz", False),
+            ("licenses", "adb-helper-licenses.tar.gz", True),
+            ("notices", "adb-helper-notices.tar.gz", True),
+            ("sbom", "adb-helper-sbom.spdx.json", True),
+            ("source-offer", "ADB-HELPER-SOURCE-OFFER.txt", True),
+            ("source-manifest", "adb-helper-source-manifest.json", True),
         )
         assets = []
-        for kind in asset_kinds:
-            asset = self.write_file(f"release/adb-helper-{kind}.tar", f"{kind}\n".encode())
+        package_support_assets = []
+        for kind, name, package_required in asset_specs:
+            asset = self.write_file(f"release/{name}", f"{kind}\n".encode())
             asset_hash = hashlib.sha256(asset.read_bytes()).hexdigest()
             self.write_file(
                 f"release/{asset.name}.sha256",
                 f"{asset_hash}  {asset.name}\n".encode(),
             )
-            assets.append(
-                {
-                    "kind": kind,
-                    "path": asset.name,
-                    "sha256": asset_hash,
-                }
-            )
+            assets.append({"kind": kind, "path": asset.name, "sha256": asset_hash})
+            if package_required:
+                package_support_assets.append(
+                    {"kind": kind, "file_name": asset.name, "sha256": asset_hash}
+                )
+
+        source_archive = next(asset for asset in assets if asset["kind"] == "source-archive")
+        source_set_document = {
+            "schema_version": 1,
+            "receipt_kind": "component-source-set",
+            "component": "adb-helper",
+            "lock_sha256": "1" * 64,
+            "archive": {
+                "file_name": source_archive["path"],
+                "sha256": source_archive["sha256"],
+            },
+            "source_identity": {
+                "manifest_or_closure_sha256": "2" * 64,
+                "tree_hash_algorithm": "sha256",
+                "final_tree_sha256": "3" * 64,
+            },
+            "patch_chain_sha256": "4" * 64,
+            "package_support_assets": package_support_assets,
+            "distribution": {"package_required": False, "release_required": True},
+        }
+        source_set = self.write_file(
+            "release/adb-helper-source-set-receipt.json",
+            (json.dumps(source_set_document, sort_keys=True) + "\n").encode(),
+        )
+        source_set_hash = hashlib.sha256(source_set.read_bytes()).hexdigest()
+        self.write_file(
+            f"release/{source_set.name}.sha256",
+            f"{source_set_hash}  {source_set.name}\n".encode(),
+        )
+        assets.append(
+            {"kind": "source-set-receipt", "path": source_set.name, "sha256": source_set_hash}
+        )
 
         target_arch = "arm64" if target.endswith("arm64") else "x86_64"
         target_plan = {"arch": target_arch, "qualified": True, "usb": usb}
@@ -138,14 +169,30 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 {
                     "kind": kind,
                     "required": True,
-                    "file_name": f"adb-helper-{kind}.tar",
-                    "sha256_file": f"adb-helper-{kind}.tar.sha256",
+                    "file_name": name,
+                    "sha256_file": name + ".sha256",
+                    "distribution": {
+                        "package_required": package_required,
+                        "release_required": True,
+                    },
                 }
-                for kind in asset_kinds
+                for kind, name, package_required in (
+                    *asset_specs,
+                    ("source-set-receipt", source_set.name, True),
+                )
             ],
         }
         lock_path = self.root / "lock.json"
         lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        source_set_document["lock_sha256"] = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+        source_set.write_text(json.dumps(source_set_document, sort_keys=True) + "\n", encoding="utf-8")
+        source_set_hash = hashlib.sha256(source_set.read_bytes()).hexdigest()
+        source_set.with_name(source_set.name + ".sha256").write_text(
+            f"{source_set_hash}  {source_set.name}\n", encoding="utf-8"
+        )
+        next(asset for asset in assets if asset["kind"] == "source-set-receipt")[
+            "sha256"
+        ] = source_set_hash
 
         receipt = {
             "schema_version": 1,
@@ -158,6 +205,7 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 "symlink": False,
                 "kind": "complete-adb-executable",
             },
+            "source_set_receipt_sha256": source_set_hash,
             "binary_verification": {
                 "dynamic_imports": imports,
                 "native_frameworks": frameworks,
@@ -224,10 +272,104 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
             check=False,
         )
 
+    def run_scoped_verifier(
+        self, lock, receipt, package_root, source_assets_root, asset_scope, *extra_args
+    ):
+        self.assertTrue(VERIFY_SCRIPT.is_file(), f"missing verifier script: {VERIFY_SCRIPT}")
+        return subprocess.run(
+            [
+                sys.executable,
+                str(VERIFY_SCRIPT),
+                "--lock",
+                str(lock),
+                "--receipt",
+                str(receipt),
+                "--package-root",
+                str(package_root),
+                "--asset-scope",
+                asset_scope,
+                "--source-assets-root",
+                str(source_assets_root),
+                *extra_args,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
     def test_verifier_accepts_complete_locked_release_fixture(self):
         lock, receipt, package_root, release_root, _ = self.make_release_fixture()
         result = self.run_verifier(lock, receipt, package_root, release_root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_package_scope_omits_source_archive_but_requires_and_hash_checks_source_set_receipt(self):
+        lock, receipt, package_root, source_assets_root, document = self.make_release_fixture()
+        archive = next(
+            asset for asset in document["release_assets"] if asset["kind"] == "source-archive"
+        )
+        archive_path = source_assets_root / archive["path"]
+        leaked = self.run_scoped_verifier(
+            lock, receipt, package_root, source_assets_root, "package"
+        )
+        self.assertNotEqual(leaked.returncode, 0)
+        self.assertIn("archive", (leaked.stdout + leaked.stderr).lower())
+        archive_path.unlink()
+        archive_path.with_name(archive_path.name + ".sha256").unlink()
+
+        package = self.write_file("package/klogg.deb", b"qualified package\n")
+        qualification = self.root / "package-scope-verification.json"
+        package_args = (
+            "--package-target",
+            "linux-jammy-x86_64",
+            "--package-file",
+            str(package),
+            "--package-verification-receipt",
+            str(qualification),
+        )
+        result = self.run_scoped_verifier(
+            lock,
+            receipt,
+            package_root,
+            source_assets_root,
+            "package",
+            *package_args,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads(qualification.read_text(encoding="utf-8"))
+        self.assertEqual(
+            evidence.get("source_set_receipt_sha256"),
+            document["source_set_receipt_sha256"],
+        )
+
+        source_set = source_assets_root / "adb-helper-source-set-receipt.json"
+        source_set.write_text(source_set.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        result = self.run_scoped_verifier(
+            lock, receipt, package_root, source_assets_root, "package"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex((result.stdout + result.stderr).lower(), r"source.set|sha256")
+
+    def test_release_scope_requires_source_archive_and_its_hash_sidecar(self):
+        for missing in ("archive", "sidecar"):
+            with self.subTest(missing=missing):
+                lock, receipt, package_root, source_assets_root, document = self.make_release_fixture()
+                archive = next(
+                    asset
+                    for asset in document["release_assets"]
+                    if asset["kind"] == "source-archive"
+                )
+                archive_path = source_assets_root / archive["path"]
+                if missing == "archive":
+                    archive_path.unlink()
+                else:
+                    archive_path.with_name(archive_path.name + ".sha256").unlink()
+
+                result = self.run_scoped_verifier(
+                    lock, receipt, package_root, source_assets_root, "release"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"archive|sha256")
 
     def test_verifier_rejects_missing_nonexecutable_symlinked_and_hash_mismatched_helpers(self):
         scenarios = ("missing", "non-executable", "symlink", "hash")

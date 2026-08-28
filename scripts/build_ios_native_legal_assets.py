@@ -12,9 +12,19 @@ import pathlib
 import shutil
 import tarfile
 
+from source_publication_identity import (
+    normalize_base_url,
+    published_source_name,
+    source_asset_url,
+    validate_version,
+)
+
 
 class LegalAssetError(RuntimeError):
     pass
+
+
+SOURCE_SET_RECEIPT = "ios-native-source-set-receipt.json"
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -25,7 +35,20 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def validated_relative_path(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or value.startswith("/")
+        or any(part in ("", ".", "..") for part in value.split("/"))
+    ):
+        raise LegalAssetError(f"invalid {label} path: {value}")
+    return value
+
+
 def add_bytes(archive: tarfile.TarFile, name: str, value: bytes) -> None:
+    name = validated_relative_path(name, "source archive member")
     info = tarfile.TarInfo(name)
     info.size = len(value)
     info.mode = 0o644
@@ -51,21 +74,34 @@ def write_deterministic_source_archive(
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
                 add_file(archive, lock_path, "libimobiledevice.lock.json")
                 for source in lock["sources"]:
-                    path = archive_root / source["archive_file"]
+                    archive_file = validated_relative_path(
+                        source.get("archive_file"), "locked source archive"
+                    )
+                    path = archive_root.joinpath(*pathlib.PurePosixPath(archive_file).parts)
                     if not path.is_file() or sha256(path) != source["archive_sha256"]:
                         raise LegalAssetError(f"missing or mismatched source archive: {path}")
-                    add_file(archive, path, f"archives/{path.name}")
+                    add_file(archive, path, f"archives/{archive_file}")
                 for patch in lock["patches"]:
-                    path = repository_root / "3rdparty/libimobiledevice" / patch["path"]
+                    patch_path = validated_relative_path(
+                        patch.get("path"), "locked patch"
+                    )
+                    path = (repository_root / "3rdparty/libimobiledevice").joinpath(
+                        *pathlib.PurePosixPath(patch_path).parts
+                    )
                     if not path.is_file() or sha256(path) != patch["sha256"]:
                         raise LegalAssetError(f"missing or mismatched patch: {path}")
-                    add_file(archive, path, patch["path"])
+                    add_file(
+                        archive,
+                        path,
+                        f"3rdparty/libimobiledevice/{patch_path}",
+                    )
                 for relative in (
                     "packaging/ios-native/superbuild/CMakeLists.txt",
                     "scripts/prefetch_ios_native_sources.py",
                     "scripts/build_ios_native_stack.py",
                     "scripts/verify_ios_native_stack.py",
                     "scripts/build_ios_native_legal_assets.py",
+                    "scripts/source_publication_identity.py",
                 ):
                     add_file(archive, repository_root / relative, relative)
 
@@ -89,6 +125,11 @@ def extract_legal_file(source_archive: pathlib.Path, wanted: str) -> bytes:
 
 def write_json(path: pathlib.Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def canonical_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def validated_build_receipt(
@@ -146,9 +187,13 @@ def main() -> int:
     parser.add_argument("--archive-root", required=True, type=pathlib.Path)
     parser.add_argument("--repository-root", required=True, type=pathlib.Path)
     parser.add_argument("--stack-root", required=True, type=pathlib.Path)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
+    version = validate_version(args.version)
+    base_url = normalize_base_url(args.base_url)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
     args.output.mkdir(parents=True, exist_ok=True)
     sources = lock["sources"]
@@ -166,19 +211,32 @@ def main() -> int:
 
     build_receipt, dylibs = validated_build_receipt(args.lock, lock, args.stack_root)
 
-    source_offer = args.output / "ios-native-corresponding-source.tar.gz"
+    source_archive = args.output / "ios-native-corresponding-source.tar.gz"
     write_deterministic_source_archive(
-        source_offer, args.lock, lock, args.archive_root, args.repository_root
+        source_archive, args.lock, lock, args.archive_root, args.repository_root
     )
+    source_archive_hash = sha256(source_archive)
+    published_archive = published_source_name(version, "ios-native", source_archive_hash)
+    stable_url = source_asset_url(base_url, f"v{version}", published_archive)
+    continuous_url = source_asset_url(base_url, "continuous", published_archive)
     (args.output / "ios-native-source-offer.txt").write_text(
         "Klogg iOS Native Stack Corresponding Source Offer\n"
         "================================================\n\n"
-        "The accompanying ios-native-corresponding-source.tar.gz package contains every locked\n"
-        "source archive, the mandatory upstream 5ca453f9 leak patch, and the disconnected build,\n"
-        "verification, legal, receipt, and package scripts needed to reproduce the shipped dylibs.\n"
-        "No Homebrew runtime, usbmuxd daemon, MobileDevice private framework, or command-line tool\n"
-        "is included in the application package. The corresponding source remains available with\n"
-        "the release package for at least three years. See ios-native-lgpl-replacement.txt for\n"
+        "The corresponding-source archive is not included in the installer; it is a separate\n"
+        "GitHub Release asset containing every locked source archive, all mandatory patches, and\n"
+        "the disconnected build, verification, legal, receipt, and package scripts needed to\n"
+        "reproduce the shipped dylibs. No Homebrew runtime, usbmuxd daemon, MobileDevice private\n"
+        "framework, or command-line tool is included in the application package.\n\n"
+        f"Published archive: {published_archive}\n"
+        f"SHA-256: {source_archive_hash}\n"
+        f"Stable release URL: {stable_url}\n"
+        f"Rolling continuous URL: {continuous_url}\n\n"
+        "Stable versioned releases retain their matching source asset for at least three years.\n"
+        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
+        "replaces its packages and source assets together and does not provide archival retention.\n"
+        "Verify downloaded bytes with:\n"
+        f"  shasum -a 256 {published_archive}\n"
+        "and compare the result with the SHA-256 above. See ios-native-lgpl-replacement.txt for\n"
         "rebuild, replacement, and ad-hoc re-signing instructions.\n",
         encoding="utf-8",
     )
@@ -187,17 +245,17 @@ def main() -> int:
         "Klogg iOS Native LGPL Replacement Guide\n"
         "========================================\n\n"
         "The libplist, libtatsu, libimobiledevice-glue, libusbmuxd, and libimobiledevice\n"
-        "dylibs are\n"
-        "dynamically loaded from Contents/Frameworks/ios-native/lib. You may rebuild or modify\n"
-        "them from ios-native-corresponding-source.tar.gz and replace the matching dylib files.\n\n"
-        "1. Extract ios-native-corresponding-source.tar.gz and the seven locked source archives.\n"
-        "2. Install CMake, Ninja, autoconf, automake, libtool, pkg-config, Perl, and Clang.\n"
-        "3. Run scripts/build_ios_native_stack.py with the included lock, archives, repository\n"
+        "dylibs are dynamically loaded from Contents/Frameworks/ios-native/lib. You may rebuild\n"
+        f"or modify them from {published_archive} and replace the matching dylib files.\n\n"
+        f"1. Download and verify {published_archive} using ios-native-source-offer.txt.\n"
+        f"2. Extract {published_archive} and the seven locked source archives.\n"
+        "3. Install CMake, Ninja, autoconf, automake, libtool, pkg-config, Perl, and Clang.\n"
+        "4. Run scripts/build_ios_native_stack.py with the included lock, archives, repository\n"
         "   root, a fresh work root, an artifact root, and the architecture of your Klogg build.\n"
-        "4. Replace the dylibs in Klogg.app/Contents/Frameworks/ios-native/lib, preserving names.\n"
-        "5. Re-sign the modified local application ad hoc:\n"
+        "5. Replace the dylibs in Klogg.app/Contents/Frameworks/ios-native/lib, preserving names.\n"
+        "6. Re-sign the modified local application ad hoc:\n"
         "     codesign --force --deep --sign - /path/to/Klogg.app\n"
-        "6. Verify it before launch:\n"
+        "7. Verify it before launch:\n"
         "     codesign --verify --deep --strict --verbose=2 /path/to/Klogg.app\n\n"
         "Replacing code invalidates the upstream notarized signature; the ad-hoc signature is for\n"
         "your locally modified copy. Klogg imposes no restriction on debugging or reverse\n"
@@ -275,20 +333,69 @@ def main() -> int:
     sbom_path = args.output / lock["receipts"]["sbom"]
     write_json(sbom_path, sbom)
 
-    source_receipt = {
+    closure_identity = [
+        {
+            "id": source["id"],
+            "archive_file": source["archive_file"],
+            "archive_sha256": source["archive_sha256"],
+            "commit": source["commit"],
+        }
+        for source in sources
+    ]
+    patch_identity = [
+        {
+            "source_id": patch["source_id"],
+            "path": patch["path"],
+            "sha256": patch["sha256"],
+            "clean_tree_sha256": patch["clean_tree_sha256"],
+            "patched_tree_sha256": patch["patched_tree_sha256"],
+        }
+        for patch in lock["patches"]
+    ]
+    source_set_receipt = {
         "schema_version": 1,
-        "receipt_kind": "source",
+        "receipt_kind": "component-source-set",
+        "component": "ios-native",
         "lock_sha256": sha256(args.lock),
-        "architecture": build_receipt["architecture"],
-        "deployment_target": build_receipt["deployment_target"],
-        "source_offer": {"path": source_offer.name, "sha256": sha256(source_offer)},
-        "archives": [
-            {"id": source["id"], "file": source["archive_file"], "sha256": source["archive_sha256"]}
-            for source in sources
+        "archive": {"file_name": source_archive.name, "sha256": source_archive_hash},
+        "source_identity": {
+            "manifest_or_closure_sha256": canonical_sha256(closure_identity),
+            "tree_hash_algorithm": "sha256",
+            "final_tree_sha256": lock["patches"][-1]["patched_tree_sha256"],
+        },
+        "patch_chain_sha256": canonical_sha256(patch_identity),
+        "package_support_assets": [
+            {
+                "kind": "source-offer",
+                "file_name": "ios-native-source-offer.txt",
+                "sha256": sha256(args.output / "ios-native-source-offer.txt"),
+            },
+            {
+                "kind": "replacement-guide",
+                "file_name": replacement_guide.name,
+                "sha256": sha256(replacement_guide),
+            },
+            {"kind": "notices", "file_name": notice.name, "sha256": sha256(notice)},
+            *[
+                {
+                    "kind": f"license:{item['source']}",
+                    "file_name": item["path"],
+                    "sha256": item["sha256"],
+                }
+                for item in legal_files
+            ],
         ],
-        "patches": lock["patches"],
+        "distribution": {"package_required": False, "release_required": True},
     }
-    write_json(args.output / lock["receipts"]["source"], source_receipt)
+    if lock["receipts"]["source"] != SOURCE_SET_RECEIPT:
+        raise LegalAssetError("iOS native lock names an unsupported source-set receipt")
+    source_set_path = args.output / SOURCE_SET_RECEIPT
+    write_json(source_set_path, source_set_receipt)
+    # Preserve the historical thin-artifact filename while consumers migrate to
+    # the architecture-independent component source-set receipt.
+    write_json(args.output / "ios-native-source-receipt.json", source_set_receipt)
+    build_receipt["source_set_receipt_sha256"] = sha256(source_set_path)
+    write_json(args.stack_root / lock["receipts"]["build"], build_receipt)
 
     legal_receipt = {
         "schema_version": 1,

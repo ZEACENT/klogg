@@ -5,9 +5,12 @@ import json
 import pathlib
 import re
 import shlex
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -32,6 +35,10 @@ _BUILD_SPEC = importlib.util.spec_from_file_location("build_ios_native_stack", B
 assert _BUILD_SPEC is not None and _BUILD_SPEC.loader is not None
 BUILD_MODULE = importlib.util.module_from_spec(_BUILD_SPEC)
 _BUILD_SPEC.loader.exec_module(BUILD_MODULE)
+_VERIFY_SPEC = importlib.util.spec_from_file_location("verify_ios_native_stack", VERIFY_SCRIPT)
+assert _VERIFY_SPEC is not None and _VERIFY_SPEC.loader is not None
+VERIFY_MODULE = importlib.util.module_from_spec(_VERIFY_SPEC)
+_VERIFY_SPEC.loader.exec_module(VERIFY_MODULE)
 
 EXPECTED_SOURCES = {
     "openssl": {
@@ -161,6 +168,31 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             "the lock must describe the complete source-built native dependency closure",
         )
         return by_id
+
+    def test_legal_source_archive_rejects_traversal_member_names(self):
+        code = """
+import io
+import tarfile
+from build_ios_native_legal_assets import LegalAssetError, add_bytes
+for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim"):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        try:
+            add_bytes(archive, name, b"data")
+        except LegalAssetError:
+            pass
+        else:
+            raise SystemExit("accepted " + name)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT / "scripts",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_lock_schema_is_extended_for_release_and_artifact_evidence(self):
         self.assertGreaterEqual(self.lock().get("schema_version", 0), 2)
@@ -413,6 +445,106 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         self.assertIn(str(VERIFY_SCRIPT.relative_to(ROOT)), package_action)
         self.assertIn(str(LOCK.relative_to(ROOT)), package_action)
 
+    def test_source_set_receipt_is_architecture_independent_and_hash_bound(self):
+        legal = required_text(LEGAL_SCRIPT)
+        verifier = required_text(VERIFY_SCRIPT)
+        build = required_text(BUILD_SCRIPT)
+        receipt_name = "ios-native-source-set-receipt.json"
+
+        self.assertIn(receipt_name, legal)
+        self.assertIn('"receipt_kind": "component-source-set"', legal)
+        self.assertIn('"component": "ios-native"', legal)
+        source_set_start = legal.index('"receipt_kind": "component-source-set"')
+        source_set_end = legal.find("write_json", source_set_start)
+        self.assertGreater(source_set_end, source_set_start)
+        source_set_block = legal[source_set_start:source_set_end]
+        self.assertNotIn("architecture", source_set_block)
+        self.assertNotIn("deployment_target", source_set_block)
+        for token in (
+            "lock_sha256",
+            "archive",
+            "source_identity",
+            "tree_hash_algorithm",
+            "final_tree_sha256",
+            "package_support_assets",
+            "package_required",
+            "release_required",
+        ):
+            self.assertIn(token, source_set_block)
+
+        self.assertIn("source_set_receipt_sha256", legal + "\n" + build)
+        package_start = verifier.index("package = {")
+        package_end = verifier.index("args.package_receipt.write_text", package_start)
+        self.assertIn(
+            "source_set_receipt_sha256",
+            verifier[package_start:package_end],
+            "iOS package receipts must bind the architecture-independent source set",
+        )
+
+    def test_package_and_release_scopes_resolve_ios_source_archive_separately(self):
+        verifier = required_text(VERIFY_SCRIPT)
+        self.assertNotRegex(
+            verifier,
+            re.compile(
+                r"bound_asset\(source_receipt_path\.parent,\s*"
+                r"source\.get\(\"source_offer\"\),\s*\"corresponding source\"\)"
+            ),
+            "package verification must not unconditionally resolve the release-only source archive beside the package receipt",
+        )
+        for token in (
+            "--asset-scope",
+            "--source-assets-root",
+            "package",
+            "release",
+            "must not contain the corresponding source archive",
+        ):
+            self.assertIn(token, verifier)
+
+    def test_release_scope_requires_external_source_assets_without_package_receipt_operation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            lock = root / "lock.json"
+            receipt = root / "ios-native-build-receipt.json"
+            lock.write_text("{}\n", encoding="utf-8")
+            receipt.write_text("{}\n", encoding="utf-8")
+            argv = [
+                str(VERIFY_SCRIPT),
+                "--lock",
+                str(lock),
+                "--stack-root",
+                str(root),
+                "--architecture",
+                "arm64",
+                "--receipt",
+                str(receipt),
+                "--asset-scope",
+                "release",
+                "--source-assets-root",
+                str(root / "external-sources"),
+                "--source-receipt",
+                str(root / "source-set.json"),
+                "--legal-receipt",
+                str(root / "legal.json"),
+                "--sbom",
+                str(root / "sbom.json"),
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                VERIFY_MODULE, "validate_build_receipt"
+            ), mock.patch.object(
+                VERIFY_MODULE, "verify_stack", return_value=[]
+            ), mock.patch.object(
+                VERIFY_MODULE,
+                "verify_legal_assets",
+                side_effect=VERIFY_MODULE.VerificationError(
+                    "missing corresponding source archive"
+                ),
+            ):
+                self.assertNotEqual(
+                    VERIFY_MODULE.main(),
+                    0,
+                    "release scope must verify its external archive even without package receipt creation/verification",
+                )
+
     def test_ci_produces_both_thin_stacks_and_mac_consumes_the_bound_artifact(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
         for token in (
@@ -505,6 +637,41 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         action = required_text(MAC_PACKAGE_ACTION)
         self.assertIn("ios-native-lgpl-replacement.txt", action)
         self.assertIn("codesign --force --deep --sign -", legal)
+
+    def test_external_ios_source_offer_is_actionable_and_archive_rebuild_paths_match(self):
+        legal = required_text(LEGAL_SCRIPT)
+        for token in (
+            "--version",
+            "--base-url",
+            "not included in the installer",
+            'source_asset_url(base_url, "continuous"',
+            "rolling",
+            "shasum -a 256",
+            "validated_relative_path(",
+            'patch.get("path"), "locked patch"',
+            'f"3rdparty/libimobiledevice/{patch_path}"',
+        ):
+            self.assertIn(token, legal)
+        self.assertNotIn(
+            "The accompanying ios-native-corresponding-source.tar.gz",
+            legal,
+        )
+
+    def test_macos_root_closure_check_targets_ios_specific_dylibs_only(self):
+        action = required_text(MAC_PACKAGE_ACTION)
+        start = action.index('if find "$app_frameworks"')
+        end = action.index('case "${KLOGG_ARCH}"', start)
+        check = action[start:end]
+        for name in (
+            "libimobiledevice",
+            "libplist",
+            "libusbmuxd",
+            "libimobiledevice-glue",
+            "libtatsu",
+        ):
+            self.assertIn(name, check)
+        for qt_runtime_dependency in ("libssl", "libcrypto", "libcurl"):
+            self.assertNotIn(qt_runtime_dependency, check)
 
     def test_staged_bundle_is_reverified_after_macdeployqt_before_signing(self):
         action = required_text(MAC_PACKAGE_ACTION)

@@ -110,7 +110,7 @@ runs:
         cp -a "$KLOGG_IOS_NATIVE_STACK_ROOT/lib/"*.dylib "$bundled_stack/lib/"
         for receipt in \
           ios-native-build-receipt.json \
-          ios-native-source-receipt.json \
+          ios-native-source-set-receipt.json \
           ios-native-legal-receipt.json \
           ios-native-sbom.spdx.json; do
           test -f "$KLOGG_IOS_NATIVE_STACK_ROOT/$receipt" || {
@@ -120,7 +120,6 @@ runs:
           cp "$KLOGG_IOS_NATIVE_STACK_ROOT/$receipt" "$ios_support/$receipt"
         done
         for asset in \
-          ios-native-corresponding-source.tar.gz \
           ios-native-source-offer.txt \
           ios-native-lgpl-replacement.txt \
           NOTICE-ios-native.txt; do
@@ -137,8 +136,8 @@ runs:
         cp -a "$KLOGG_IOS_NATIVE_STACK_ROOT/licenses" "$ios_support/licenses"
         if find "$app_frameworks" -maxdepth 1 -type f \
              \( -name 'libimobiledevice*.dylib' -o -name 'libplist*.dylib' \
-                -o -name 'libusbmuxd*.dylib' -o -name 'libssl*.dylib' \
-                -o -name 'libcrypto*.dylib' \) | grep .; then
+                -o -name 'libusbmuxd*.dylib' -o -name 'libimobiledevice-glue*.dylib' \
+                -o -name 'libtatsu*.dylib' \) | grep .; then
           echo "::error::macdeployqt created an iOS native dylib outside the private closure"
           exit 1
         fi
@@ -153,7 +152,9 @@ runs:
           --architecture "$ios_arch" \
           --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
           --app-executable "$KLOGG_BUILD_ROOT/output/klogg.app/Contents/MacOS/klogg" \
-          --source-receipt "$ios_support/ios-native-source-receipt.json" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
           --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
           --sbom "$ios_support/ios-native-sbom.spdx.json" \
           --package-receipt "$ios_support/ios-native-package-receipt.json"
@@ -175,7 +176,8 @@ runs:
           --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
           --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-smoke.json" \
           --package-root "$KLOGG_BUILD_ROOT/output" \
-          --release-root "$KLOGG_BUILD_ROOT/output/klogg.app/Contents/SharedSupport/adb-helper" \
+          --asset-scope package \
+          --source-assets-root "$KLOGG_BUILD_ROOT/output/klogg.app/Contents/SharedSupport/adb-helper" \
           --layout dmg \
           --expected-target "${{ matrix.config.adb_target }}" \
           --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
@@ -218,7 +220,9 @@ runs:
           --architecture "$ios_arch" \
           --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
           --app-executable "$app/Contents/MacOS/klogg" \
-          --source-receipt "$ios_support/ios-native-source-receipt.json" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
           --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
           --sbom "$ios_support/ios-native-sbom.spdx.json" \
           --signed-package-stage \
@@ -233,7 +237,9 @@ runs:
           --architecture "$ios_arch" \
           --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
           --app-executable "$app/Contents/MacOS/klogg" \
-          --source-receipt "$ios_support/ios-native-source-receipt.json" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
           --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
           --sbom "$ios_support/ios-native-sbom.spdx.json" \
           --verify-package-receipt "$package_receipt"
@@ -406,7 +412,8 @@ runs:
           --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
           --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-signed-smoke.json" \
           --package-root "$KLOGG_BUILD_ROOT/output" \
-          --release-root "$KLOGG_BUILD_ROOT/output/klogg.app/Contents/SharedSupport/adb-helper" \
+          --asset-scope package \
+          --source-assets-root "$KLOGG_BUILD_ROOT/output/klogg.app/Contents/SharedSupport/adb-helper" \
           --layout dmg \
           --expected-target "${{ matrix.config.adb_target }}" \
           --package-target "${{ matrix.config.adb_target }}-dmg" \
@@ -416,6 +423,64 @@ runs:
           --package-verification-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" \
           --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
           --require-lock-binding
+        mount_dir=$(mktemp -d)
+        mounted_device=""
+        cleanup_mounted_dmg() {
+          if [ -n "${mounted_device}" ]; then
+            hdiutil detach "${mounted_device}" -force >/dev/null
+          fi
+          rm -rf "${mount_dir}"
+        }
+        trap cleanup_mounted_dmg EXIT
+        attach_output=$(hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir")
+        mounted_device=$(printf '%s\n' "$attach_output" | awk '$1 ~ /^\/dev\// { device=$1 } END { print device }')
+        test -n "$mounted_device" || { echo "::error::failed to identify mounted DMG device"; exit 1; }
+        mounted_app=$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)
+        test -n "$mounted_app" || { echo "::error::mounted DMG has no application bundle"; exit 1; }
+        mounted_stack="$mounted_app/Contents/Frameworks/ios-native"
+        mounted_support="$mounted_app/Contents/SharedSupport/ios-native"
+        test ! -e "$mounted_support/ios-native-corresponding-source.tar.gz" || {
+          echo "::error::release-only iOS source archive leaked into final DMG"
+          exit 1
+        }
+        case "${KLOGG_ARCH}" in
+          x64) ios_arch=x86_64 ;;
+          arm64) ios_arch=arm64 ;;
+          *) echo "::error::unsupported iOS native stack architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$mounted_stack" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$mounted_app/Contents/MacOS/klogg" \
+          --source-receipt "$mounted_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$mounted_support" \
+          --legal-receipt "$mounted_support/ios-native-legal-receipt.json" \
+          --sbom "$mounted_support/ios-native-sbom.spdx.json" \
+          --verify-package-receipt "$mounted_support/ios-native-package-receipt.json"
+        python3 - \
+          "$dmg" \
+          "$mounted_support/ios-native-package-receipt.json" \
+          "$mounted_support/ios-native-source-set-receipt.json" \
+          "$KLOGG_BUILD_ROOT/packages/ios-native-dmg-package-verification.json" <<'PY'
+        import hashlib, json, pathlib, sys
+        dmg, package_receipt_path, source_set_path, output = map(pathlib.Path, sys.argv[1:5])
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        package_receipt = json.loads(package_receipt_path.read_text(encoding="utf-8"))
+        source_set_hash = digest(source_set_path)
+        if package_receipt.get("source_set_receipt_sha256") != source_set_hash:
+            raise SystemExit("iOS package receipt source-set binding mismatch")
+        output.write_text(json.dumps({
+            "schema_version": 1,
+            "receipt_kind": "ios-native-package-verification",
+            "release_qualified": True,
+            "source_set_receipt_sha256": source_set_hash,
+            "ios_native_package_receipt_sha256": digest(package_receipt_path),
+            "packages": [{"name": dmg.name, "sha256": digest(dmg)}],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        PY
         cp "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" "$KLOGG_BUILD_ROOT/packages/"

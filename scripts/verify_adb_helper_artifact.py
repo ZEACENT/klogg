@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import stat
 
 from verify_adb_helper_envelope import EnvelopeError, verify_checksum_file
@@ -98,12 +99,138 @@ def verify_hash_sidecar(path: pathlib.Path, expected_hash: str, expected_name: s
         )
 
 
+def asset_required_for_scope(asset: dict, scope: str | None) -> bool:
+    if asset.get("required") is not True:
+        return False
+    if scope is None:
+        return True
+    distribution = asset.get("distribution")
+    if not isinstance(distribution, dict):
+        raise VerificationError(
+            f"ADB release asset lacks package/release distribution: {asset.get('kind')}"
+        )
+    return distribution.get(f"{scope}_required") is True
+
+
+def validate_source_set_receipt(
+    lock: dict,
+    lock_path: pathlib.Path,
+    build_receipt: dict,
+    source_assets_root: pathlib.Path,
+    scope: str | None,
+) -> str | None:
+    source_assets = [
+        asset
+        for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict) and asset.get("kind") == "source-set-receipt"
+    ]
+    if not source_assets:
+        if scope is not None:
+            raise VerificationError("ADB lock lacks the required source-set receipt asset")
+        return None
+    if len(source_assets) != 1:
+        raise VerificationError("ADB lock must declare exactly one source-set receipt asset")
+    locked_asset = source_assets[0]
+    receipt_path = source_assets_root / safe_relative(
+        str(locked_asset.get("file_name", "")), "ADB source-set receipt"
+    )
+    source_set = read_json(receipt_path, "ADB source-set receipt")
+    if (
+        source_set.get("schema_version") != 1
+        or source_set.get("receipt_kind") != "component-source-set"
+        or source_set.get("component") != "adb-helper"
+        or source_set.get("lock_sha256") != sha256(lock_path)
+    ):
+        raise VerificationError("invalid or stale ADB component source-set receipt")
+    actual_receipt_hash = sha256(receipt_path)
+    if build_receipt.get("source_set_receipt_sha256") != actual_receipt_hash:
+        raise VerificationError("ADB binary-build receipt source-set sha256 mismatch")
+
+    identity = source_set.get("source_identity")
+    if not isinstance(identity, dict):
+        raise VerificationError("ADB source-set receipt lacks source identity")
+    for field in ("manifest_or_closure_sha256", "final_tree_sha256"):
+        if not isinstance(identity.get(field), str) or re.fullmatch(
+            r"[0-9a-f]{64}", identity[field]
+        ) is None:
+            raise VerificationError(f"ADB source-set receipt has invalid {field}")
+    if identity.get("tree_hash_algorithm") != "sha256":
+        raise VerificationError("ADB source-set receipt uses an unsupported tree hash algorithm")
+    if re.fullmatch(r"[0-9a-f]{64}", str(source_set.get("patch_chain_sha256", ""))) is None:
+        raise VerificationError("ADB source-set receipt has invalid patch chain sha256")
+    if source_set.get("distribution") != {
+        "package_required": False,
+        "release_required": True,
+    }:
+        raise VerificationError("ADB source-set receipt has invalid archive distribution")
+
+    expected_support = {
+        asset["kind"]: asset
+        for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict)
+        and asset.get("kind") != "source-set-receipt"
+        and isinstance(asset.get("distribution"), dict)
+        and asset["distribution"].get("package_required") is True
+    }
+    support_records = source_set.get("package_support_assets")
+    if not isinstance(support_records, list):
+        raise VerificationError("ADB source-set receipt package support assets must be an array")
+    support_by_kind = {
+        item.get("kind"): item for item in support_records if isinstance(item, dict)
+    }
+    if set(support_by_kind) != set(expected_support) or len(support_by_kind) != len(
+        support_records
+    ):
+        raise VerificationError("ADB source-set package support asset coverage mismatch")
+    for kind, locked in expected_support.items():
+        record = support_by_kind[kind]
+        if record.get("file_name") != locked.get("file_name"):
+            raise VerificationError(f"ADB source-set package support path mismatch: {kind}")
+        path = source_assets_root / safe_relative(record["file_name"], f"{kind} support asset")
+        require_regular_file(path, f"ADB package support asset {kind}")
+        if record.get("sha256") != sha256(path):
+            raise VerificationError(f"ADB package support asset sha256 mismatch: {kind}")
+
+    archive = source_set.get("archive")
+    archive_assets = [
+        asset
+        for asset in lock.get("release_assets", [])
+        if isinstance(asset, dict) and asset.get("kind") == "source-archive"
+    ]
+    if len(archive_assets) != 1 or not isinstance(archive, dict):
+        raise VerificationError("ADB source-set receipt lacks one locked source archive")
+    locked_archive = archive_assets[0]
+    if archive.get("file_name") != locked_archive.get("file_name") or re.fullmatch(
+        r"[0-9a-f]{64}", str(archive.get("sha256", ""))
+    ) is None:
+        raise VerificationError("ADB source-set archive identity mismatch")
+    archive_path = source_assets_root / safe_relative(
+        archive["file_name"], "ADB corresponding source archive"
+    )
+    archive_sidecar = source_assets_root / safe_relative(
+        str(locked_archive.get("sha256_file", archive["file_name"] + ".sha256")),
+        "ADB corresponding source archive checksum",
+    )
+    if scope == "package":
+        if archive_path.exists() or archive_path.is_symlink() or archive_sidecar.exists():
+            raise VerificationError(
+                "ADB package must not contain the corresponding source archive or checksum"
+            )
+    else:
+        require_regular_file(archive_path, "ADB corresponding source archive")
+        if sha256(archive_path) != archive["sha256"]:
+            raise VerificationError("ADB corresponding source archive sha256 mismatch")
+    return actual_receipt_hash
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", required=True, type=pathlib.Path)
     parser.add_argument("--receipt", required=True, type=pathlib.Path)
     parser.add_argument("--package-root", required=True, type=pathlib.Path)
-    parser.add_argument("--release-root", required=True, type=pathlib.Path)
+    parser.add_argument("--release-root", type=pathlib.Path)
+    parser.add_argument("--asset-scope", choices=("package", "release"))
+    parser.add_argument("--source-assets-root", type=pathlib.Path)
     parser.add_argument("--layout")
     parser.add_argument("--helper-path")
     parser.add_argument("--expected-target")
@@ -123,6 +250,13 @@ def main() -> int:
         receipt = read_json(args.receipt, "ADB helper receipt")
         if lock.get("schema_version") != 1 or receipt.get("schema_version") != 1:
             raise VerificationError("unsupported ADB helper lock or receipt schema")
+        source_assets_root = args.source_assets_root or args.release_root
+        if source_assets_root is None:
+            raise VerificationError(
+                "ADB verification requires --source-assets-root or legacy --release-root"
+            )
+        if args.asset_scope is None and args.release_root is None:
+            raise VerificationError("legacy ADB asset verification requires --release-root")
         if args.checksum_envelope is not None:
             try:
                 verify_checksum_file(args.checksum_envelope)
@@ -353,7 +487,9 @@ def main() -> int:
             raise VerificationError(f"unsupported locked USB backend: {usb.get('backend')}")
 
         for required in lock.get("release_assets", []):
-            if not required.get("required"):
+            if not isinstance(required, dict) or not asset_required_for_scope(
+                required, args.asset_scope
+            ):
                 continue
             kind = required.get("kind")
             asset_receipt = find_receipt_asset(receipt, kind)
@@ -362,7 +498,7 @@ def main() -> int:
                 raise VerificationError(
                     f"release asset path is not the locked file name ({kind}): {relative}"
                 )
-            asset = args.release_root / relative
+            asset = source_assets_root / relative
             if not asset.is_file() or asset.is_symlink():
                 raise VerificationError(f"missing or invalid release asset ({kind}): {asset}")
             actual = sha256(asset)
@@ -376,8 +512,16 @@ def main() -> int:
                     f"release asset sha256 sidecar is not the locked file name ({kind}): {sidecar_relative}"
                 )
             verify_hash_sidecar(
-                args.release_root / sidecar_relative, actual, relative.name
+                source_assets_root / sidecar_relative, actual, relative.name
             )
+
+        source_set_receipt_hash = validate_source_set_receipt(
+            lock,
+            args.lock,
+            receipt,
+            source_assets_root,
+            args.asset_scope,
+        )
 
         verified_receipts = [BINARY_BUILD_RECEIPT]
         if smoke_receipt is not None:
@@ -426,6 +570,7 @@ def main() -> int:
                 "target": target,
                 "package_target": args.package_target,
                 "layout": layout,
+                "source_set_receipt_sha256": source_set_receipt_hash,
                 "source_helper_sha256": source_helper_hash,
                 "helper_sha256": actual_helper_hash,
                 "package_sha256": package_hash,

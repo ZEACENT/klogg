@@ -776,10 +776,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
         {
             std::unique_lock<std::mutex> lock( controlMutex );
-            // Public stop is asynchronous, so cleanup can honor the stronger
-            // lifetime invariant: never stop/free a callback context until every
-            // callback that already entered has returned. The vendor receive
-            // timeout bounds the subsequent stop/join of a partial frame.
+            // Public stop is asynchronous, so cleanup waits until every entered
+            // callback body reaches its exit barrier. The subsequent vendor
+            // stop/join supplies full native callback-return quiescence before
+            // any callback context or client is freed.
             callbacksChanged.wait( lock, [ this ] { return callbacksInFlight == 0u; } );
         }
 

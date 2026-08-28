@@ -63,6 +63,10 @@ add_test(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_ios_native_release_contract.py
 )
 add_test(
+  NAME external_source_asset_package_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_external_source_asset_package_contract.py
+)
+add_test(
   NAME live_capture_benchmark_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_live_capture_benchmark_contract.py
 )
@@ -85,6 +89,7 @@ set_tests_properties(
   adb_helper_cycle8_release_contract
   libimobiledevice_ostrace_patch_contract
   ios_native_release_contract
+  external_source_asset_package_contract
   live_capture_benchmark_contract
   live_capture_results_contract
   live_session_ui_retirement_contract

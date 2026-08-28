@@ -214,6 +214,7 @@ cpmaddpackage(
   GITHUB_REPOSITORY RoaringBitmap/CRoaring
   # v4.2.1
   GIT_TAG 3ef7b44a4f74af09fe19bb84d30bc35cab130561
+  OPTIONS "ENABLE_ROARING_TESTS OFF"
 )
 
 # Patched dependencies must always use their pinned source trees, never a

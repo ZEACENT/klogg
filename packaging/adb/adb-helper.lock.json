@@ -80,6 +80,13 @@
       "archive_file": "android-tools-37.0.0.tar.xz",
       "archive_sha256": "2725d09f892a3a38e534429f47a321f58ecf6a3169caa42c915fb2cb7d46be0e",
       "build_input": true,
+      "excluded_build_symlinks": [
+        {
+          "path": "android-tools-37.0.0/vendor/adb/rustfmt.toml",
+          "target": "../../../build/soong/scripts/rustfmt.toml",
+          "reason": "Upstream formatting-only metadata points outside the released source closure and is not used by the production CMake adb target."
+        }
+      ],
       "legal": {
         "licenses": [
           "Apache-2.0",
@@ -121,6 +128,13 @@
       "archive_file": "platform-development-4dafd114fab3c3d9543a5aff0ad097f479915176.tar.gz",
       "archive_sha256": "bf67f5ddd9626ed16d0ad73509d6375459e69799a178280ee0757b8ebbe08033",
       "build_input": true,
+      "excluded_build_symlinks": [
+        {
+          "path": "rustfmt.toml",
+          "target": "../build/soong/scripts/rustfmt.toml",
+          "reason": "Upstream formatting-only metadata points outside the released source closure and is not used by the source-built AdbWinApi target."
+        }
+      ],
       "legal": {
         "licenses": [
           "Apache-2.0"
@@ -187,8 +201,9 @@
   "patches": [
     {
       "path": "packaging/adb/patches/0001-klogg-adb-only-private-usb.patch",
-      "sha256": "3e2dbf9f292e4b1d5a4f7d863d34dcff77b1c88591abc7297db9b68f83a21673",
+      "sha256": "d62121a38d8e6264b0c2246bef7c1a4a6e179a04967a8262b9a6b5ddbba53610",
       "applies_to": "android-tools-release",
+      "apply_tool": "gnu-patch",
       "exclude_targets": [
         "windows-x86_64"
       ]
@@ -408,6 +423,7 @@
       "compiler": "gcc",
       "compiler_version": "digest-bound",
       "cmake_version": "digest-bound",
+      "cmake_generator": "Unix Makefiles",
       "runner_image": "ubuntu-24.04",
       "runner_image_revision": "20260818.1",
       "glibc_version": "2.17",
@@ -419,6 +435,7 @@
       "compiler": "gcc",
       "compiler_version": "digest-bound",
       "cmake_version": "digest-bound",
+      "cmake_generator": "Unix Makefiles",
       "runner_image": "ubuntu-24.04-arm",
       "runner_image_revision": "20260818.1",
       "glibc_version": "2.17",
@@ -430,6 +447,7 @@
       "compiler": "msvc",
       "compiler_version": "19.44.35222",
       "cmake_version": "3.31.6",
+      "cmake_generator": "Ninja",
       "runner_image": "windows-2022",
       "runner_image_revision": "20260818.1",
       "secondary_compiler": "mingw-w64-ucrt-x86_64-gcc",
@@ -441,6 +459,7 @@
       "compiler": "appleclang",
       "compiler_version": "17.0.0",
       "cmake_version": "3.31.6",
+      "cmake_generator": "Ninja",
       "runner_image": "macos-15-intel",
       "runner_image_revision": "20260818.1"
     },
@@ -449,6 +468,7 @@
       "compiler": "appleclang",
       "compiler_version": "17.0.0",
       "cmake_version": "3.31.6",
+      "cmake_generator": "Ninja",
       "runner_image": "macos-15",
       "runner_image_revision": "20260818.1"
     }
@@ -469,7 +489,8 @@
         "libdl.so.2",
         "libm.so.6",
         "libpthread.so.0",
-        "librt.so.1"
+        "librt.so.1",
+        "ld-linux-x86-64.so.2"
       ],
       "usb": {
         "backend": "dynamic-libusb",
@@ -509,7 +530,8 @@
         "libdl.so.2",
         "libm.so.6",
         "libpthread.so.0",
-        "librt.so.1"
+        "librt.so.1",
+        "ld-linux-aarch64.so.1"
       ],
       "usb": {
         "backend": "dynamic-libusb",
@@ -579,6 +601,7 @@
       "allowed_dynamic_imports": [
         "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
         "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/usr/lib/libc++.1.dylib",
         "/usr/lib/libSystem.B.dylib"
       ],
       "usb": {
@@ -611,6 +634,7 @@
       "allowed_dynamic_imports": [
         "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
         "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+        "/usr/lib/libc++.1.dylib",
         "/usr/lib/libSystem.B.dylib"
       ],
       "usb": {
@@ -649,38 +673,72 @@
     {
       "kind": "source-archive",
       "required": true,
+      "distribution": {
+        "package_required": false,
+        "release_required": true
+      },
       "file_name": "adb-helper-source-archive.tar.gz",
       "sha256_file": "adb-helper-source-archive.tar.gz.sha256"
     },
     {
       "kind": "licenses",
       "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
       "file_name": "adb-helper-licenses.tar.gz",
       "sha256_file": "adb-helper-licenses.tar.gz.sha256"
     },
     {
       "kind": "notices",
       "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
       "file_name": "adb-helper-notices.tar.gz",
       "sha256_file": "adb-helper-notices.tar.gz.sha256"
     },
     {
       "kind": "sbom",
       "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
       "file_name": "adb-helper-sbom.spdx.json",
       "sha256_file": "adb-helper-sbom.spdx.json.sha256"
     },
     {
       "kind": "source-offer",
       "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
       "file_name": "ADB-HELPER-SOURCE-OFFER.txt",
       "sha256_file": "ADB-HELPER-SOURCE-OFFER.txt.sha256"
     },
     {
       "kind": "source-manifest",
       "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
       "file_name": "adb-helper-source-manifest.json",
       "sha256_file": "adb-helper-source-manifest.json.sha256"
+    },
+    {
+      "kind": "source-set-receipt",
+      "required": true,
+      "distribution": {
+        "package_required": true,
+        "release_required": true
+      },
+      "file_name": "adb-helper-source-set-receipt.json",
+      "sha256_file": "adb-helper-source-set-receipt.json.sha256"
     }
   ],
   "package_targets": {

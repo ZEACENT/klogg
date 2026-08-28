@@ -267,18 +267,84 @@ def verify_legal_assets(
     source_receipt_path: pathlib.Path,
     legal_receipt_path: pathlib.Path,
     sbom_path: pathlib.Path,
+    *,
+    asset_scope: str | None = None,
+    source_assets_root: pathlib.Path | None = None,
 ) -> dict:
     lock_hash = sha256(lock_path)
-    source = read_json(source_receipt_path, "iOS native source receipt")
+    source = read_json(source_receipt_path, "iOS native source-set receipt")
     legal = read_json(legal_receipt_path, "iOS native legal receipt")
     sbom = read_json(sbom_path, "iOS native SPDX SBOM")
-    for value, kind in ((source, "source"), (legal, "legal")):
-        if value.get("receipt_kind") != kind or value.get("lock_sha256") != lock_hash:
-            raise VerificationError(f"invalid or stale iOS native {kind} receipt")
-        if value.get("architecture") != architecture:
-            raise VerificationError(f"iOS native {kind} receipt architecture mismatch")
+    if (
+        source.get("schema_version") != 1
+        or source.get("receipt_kind") != "component-source-set"
+        or source.get("component") != "ios-native"
+        or source.get("lock_sha256") != lock_hash
+    ):
+        raise VerificationError("invalid or stale iOS native component source-set receipt")
+    if legal.get("receipt_kind") != "legal" or legal.get("lock_sha256") != lock_hash:
+        raise VerificationError("invalid or stale iOS native legal receipt")
+    if legal.get("architecture") != architecture:
+        raise VerificationError("iOS native legal receipt architecture mismatch")
 
-    bound_asset(source_receipt_path.parent, source.get("source_offer"), "corresponding source")
+    identity = source.get("source_identity")
+    if not isinstance(identity, dict):
+        raise VerificationError("iOS native source-set receipt lacks source identity")
+    for field in ("manifest_or_closure_sha256", "final_tree_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(identity.get(field, ""))) is None:
+            raise VerificationError(f"invalid iOS native source-set {field}")
+    if identity.get("tree_hash_algorithm") != "sha256":
+        raise VerificationError("unsupported iOS native source tree hash algorithm")
+    if re.fullmatch(r"[0-9a-f]{64}", str(source.get("patch_chain_sha256", ""))) is None:
+        raise VerificationError("invalid iOS native source-set patch chain sha256")
+    if source.get("distribution") != {
+        "package_required": False,
+        "release_required": True,
+    }:
+        raise VerificationError("invalid iOS native source archive distribution")
+
+    assets_root = source_assets_root or source_receipt_path.parent
+    support = source.get("package_support_assets")
+    if not isinstance(support, list) or not support:
+        raise VerificationError("iOS native source-set receipt has no package support assets")
+    seen_support = set()
+    for index, item in enumerate(support):
+        if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
+            raise VerificationError(f"invalid iOS native package support asset {index}")
+        if item["kind"] in seen_support and not item["kind"].startswith("license:"):
+            raise VerificationError(f"duplicate iOS native package support asset: {item['kind']}")
+        seen_support.add(item["kind"])
+        bound_asset(
+            assets_root,
+            {"path": item.get("file_name"), "sha256": item.get("sha256")},
+            f"iOS native package support asset {item['kind']}",
+        )
+    required_support = {"source-offer", "replacement-guide", "notices"}
+    if not required_support.issubset(seen_support) or not any(
+        kind.startswith("license:") for kind in seen_support
+    ):
+        raise VerificationError("iOS native source-set package support coverage is incomplete")
+
+    archive = source.get("archive")
+    if not isinstance(archive, dict):
+        raise VerificationError("iOS native source-set receipt lacks corresponding source archive")
+    if asset_scope == "package":
+        archive_name = archive.get("file_name")
+        if not isinstance(archive_name, str) or pathlib.PurePosixPath(archive_name).name != archive_name:
+            raise VerificationError("invalid corresponding source archive file name")
+        archive_path = assets_root / archive_name
+        if archive_path.exists() or archive_path.is_symlink() or archive_path.with_name(
+            archive_path.name + ".sha256"
+        ).exists():
+            raise VerificationError(
+                "iOS native package must not contain the corresponding source archive"
+            )
+    else:
+        bound_asset(
+            assets_root,
+            {"path": archive.get("file_name"), "sha256": archive.get("sha256")},
+            "corresponding source",
+        )
     bound_asset(legal_receipt_path.parent, legal.get("notice"), "native notice")
     bound_asset(legal_receipt_path.parent, legal.get("replacement_guide"), "LGPL replacement guide")
     license_files = legal.get("license_files")
@@ -291,8 +357,10 @@ def verify_legal_assets(
         raise VerificationError("explicit SBOM path does not match the legal receipt")
     if sbom.get("spdxVersion") != "SPDX-2.3":
         raise VerificationError("unsupported or missing SPDX version")
+    source_set_hash = sha256(source_receipt_path)
     return {
-        "source_receipt_sha256": sha256(source_receipt_path),
+        "source_receipt_sha256": source_set_hash,
+        "source_set_receipt_sha256": source_set_hash,
         "legal_receipt_sha256": sha256(legal_receipt_path),
         "sbom_sha256": sha256(sbom_path),
     }
@@ -334,6 +402,8 @@ def main() -> int:
     parser.add_argument("--package-receipt", type=pathlib.Path)
     parser.add_argument("--verify-package-receipt", type=pathlib.Path)
     parser.add_argument("--source-receipt", type=pathlib.Path)
+    parser.add_argument("--asset-scope", choices=("package", "release"))
+    parser.add_argument("--source-assets-root", type=pathlib.Path)
     parser.add_argument("--legal-receipt", type=pathlib.Path)
     parser.add_argument("--sbom", type=pathlib.Path)
     parser.add_argument("--app-executable", type=pathlib.Path)
@@ -360,18 +430,37 @@ def main() -> int:
         )
 
         receipt_actions = args.package_receipt is not None or args.verify_package_receipt is not None
+        legal_verification_required = receipt_actions or args.asset_scope is not None
         legal_paths = (args.source_receipt, args.legal_receipt, args.sbom)
-        if receipt_actions and any(path is None for path in legal_paths):
-            raise VerificationError("package receipt operations require source, legal, and SBOM paths")
+        if legal_verification_required and any(path is None for path in legal_paths):
+            raise VerificationError(
+                "scoped/package verification requires source, legal, and SBOM paths"
+            )
+        if args.asset_scope == "release" and args.source_assets_root is None:
+            raise VerificationError(
+                "iOS native release scope requires an external --source-assets-root"
+            )
         legal_hashes = {}
-        if receipt_actions:
+        if legal_verification_required:
             legal_hashes = verify_legal_assets(
                 args.lock,
                 args.architecture,
                 args.source_receipt,
                 args.legal_receipt,
                 args.sbom,
+                asset_scope=args.asset_scope,
+                source_assets_root=args.source_assets_root,
             )
+            expected_source_set_hash = legal_hashes["source_set_receipt_sha256"]
+            bound_source_set_hash = receipt.get("source_set_receipt_sha256")
+            if args.asset_scope is not None and bound_source_set_hash != expected_source_set_hash:
+                raise VerificationError(
+                    "iOS native build receipt source-set receipt sha256 mismatch"
+                )
+            if bound_source_set_hash not in (None, expected_source_set_hash):
+                raise VerificationError(
+                    "iOS native build receipt has a stale source-set receipt binding"
+                )
 
         build_receipt_hash = sha256(receipt_path)
         if args.package_receipt is not None:
@@ -386,6 +475,9 @@ def main() -> int:
                 "stack_root": str(args.stack_root),
                 "application": application,
                 **legal_hashes,
+                "source_set_receipt_sha256": legal_hashes.get(
+                    "source_set_receipt_sha256"
+                ),
                 "dylibs": evidence,
                 "status": "passed",
             }

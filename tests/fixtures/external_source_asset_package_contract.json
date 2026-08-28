@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "source_sets": {
+    "adb-helper": {
+      "receipt_file": "adb-helper-source-set-receipt.json",
+      "archive_file": "adb-helper-source-archive.tar.gz",
+      "stable_archive_pattern": "klogg-v{version}-adb-helper-source-{sha12}.tar.gz",
+      "package_support_assets": [
+        {"kind": "licenses", "file_name": "adb-helper-licenses.tar.gz"},
+        {"kind": "notices", "file_name": "adb-helper-notices.tar.gz"},
+        {"kind": "sbom", "file_name": "adb-helper-sbom.spdx.json"},
+        {"kind": "source-offer", "file_name": "ADB-HELPER-SOURCE-OFFER.txt"},
+        {"kind": "source-manifest", "file_name": "adb-helper-source-manifest.json"}
+      ]
+    },
+    "ios-native": {
+      "receipt_file": "ios-native-source-set-receipt.json",
+      "archive_file": "ios-native-corresponding-source.tar.gz",
+      "stable_archive_pattern": "klogg-v{version}-ios-native-source-{sha12}.tar.gz",
+      "package_support_assets": [
+        {"kind": "licenses", "file_name": "licenses"},
+        {"kind": "notices", "file_name": "NOTICE-ios-native.txt"},
+        {"kind": "sbom", "file_name": "ios-native-sbom.spdx.json"},
+        {"kind": "source-offer", "file_name": "ios-native-source-offer.txt"},
+        {"kind": "replacement-guide", "file_name": "ios-native-lgpl-replacement.txt"},
+        {"kind": "legal-receipt", "file_name": "ios-native-legal-receipt.json"},
+        {"kind": "package-receipt", "file_name": "ios-native-package-receipt.json"}
+      ]
+    }
+  },
+  "package_receipts": [
+    "adb-helper-source-set-receipt.json",
+    "ios-native-source-set-receipt.json"
+  ],
+  "publication_manifest": {
+    "file_name": "klogg-source-publication-manifest.json",
+    "schema_version": 1,
+    "manifest_kind": "klogg-source-publication",
+    "stable_channel": "stable",
+    "continuous_channel": "continuous"
+  }
+}

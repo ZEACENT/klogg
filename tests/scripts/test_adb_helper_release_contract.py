@@ -8,6 +8,8 @@ import unittest
 ROOT = pathlib.Path(__file__).parents[2]
 LOCK = ROOT / "packaging" / "adb" / "adb-helper.lock.json"
 ADB_CMAKE = ROOT / "packaging" / "adb" / "CMakeLists.txt"
+ADB_SUPERBUILD = ROOT / "packaging" / "adb" / "superbuild" / "CMakeLists.txt"
+ADB_BUILD_SCRIPT = ROOT / "scripts" / "build_adb_helper.py"
 ROOT_CMAKE = ROOT / "CMakeLists.txt"
 APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 NOTICE = ROOT / "NOTICE"
@@ -78,6 +80,7 @@ REQUIRED_RELEASE_ASSET_KINDS = {
     "sbom",
     "source-offer",
     "source-manifest",
+    "source-set-receipt",
 }
 
 
@@ -156,6 +159,24 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                 self.assertTrue(patch_path.is_file(), f"locked patch does not exist: {relative_path}")
                 actual_hash = hashlib.sha256(patch_path.read_bytes()).hexdigest()
                 self.assertEqual(actual_hash, expected_hash)
+                if patch.get("apply", True) is not False:
+                    self.assertEqual(
+                        patch.get("apply_tool"),
+                        "gnu-patch",
+                        "tarball source patches must not inherit an enclosing Git repository",
+                    )
+
+        adb_patch = self.required_text(
+            ROOT / "packaging/adb/patches/0001-klogg-adb-only-private-usb.patch"
+        )
+        link_block = adb_patch.split(
+            "@@ -217,16 +232,22 @@ target_link_libraries(adb", 1
+        )[1].split("@@", 1)[0]
+        self.assertLess(link_block.index("\tPkgConfig::libbrotlidec"), link_block.index("\tPkgConfig::libbrotlienc"))
+        self.assertLess(
+            link_block.index("\tPkgConfig::libbrotlienc"),
+            link_block.index("+\tPkgConfig::libbrotlicommon"),
+        )
 
         toolchains = document.get("toolchains")
         self.assertIsInstance(toolchains, dict)
@@ -167,6 +188,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     "compiler",
                     "compiler_version",
                     "cmake_version",
+                    "cmake_generator",
                     "runner_image",
                     "runner_image_revision",
                 ):
@@ -179,6 +201,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                         "compiler",
                         "compiler_version",
                         "cmake_version",
+                        "cmake_generator",
                         "runner_image",
                         "runner_image_revision",
                     )
@@ -240,6 +263,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     self.assertIs(plan.get("qualified"), True)
                 if expected_os == "linux":
                     self.assertRegex(plan.get("glibc_baseline", ""), r"^\d+\.\d+$")
+                    loader = (
+                        "ld-linux-x86-64.so.2"
+                        if expected_arch == "x86_64"
+                        else "ld-linux-aarch64.so.1"
+                    )
+                    self.assertIn(loader, plan.get("allowed_dynamic_imports", []))
                 if expected_os in ("linux", "windows"):
                     self.assertEqual(usb.get("backend"), "dynamic-libusb")
                     self.assertEqual(usb.get("linkage"), "shared")
@@ -251,6 +280,10 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     self.assertIn("IOKit", usb.get("frameworks", []))
                     self.assertIn("CoreFoundation", usb.get("frameworks", []))
                     self.assertIn("libusb", usb.get("forbidden_imports", []))
+                    self.assertIn(
+                        "/usr/lib/libc++.1.dylib",
+                        plan.get("allowed_dynamic_imports", []),
+                    )
 
     def test_lock_install_layout_matches_adb_live_services_resolver(self):
         document = self.lock()
@@ -284,6 +317,27 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                 self.assertTrue(legal.get("notices"))
                 self.assertIsInstance(legal.get("source_offer_label"), str)
                 self.assertTrue(legal["source_offer_label"])
+
+    def test_lock_assigns_package_and_release_distribution_to_every_external_asset(self):
+        assets = self.lock().get("release_assets")
+        self.assertIsInstance(assets, list)
+        by_kind = {
+            asset.get("kind"): asset for asset in assets if isinstance(asset, dict)
+        }
+        self.assertEqual(set(by_kind), REQUIRED_RELEASE_ASSET_KINDS)
+        for kind, asset in by_kind.items():
+            with self.subTest(kind=kind):
+                self.assertIs(asset.get("required"), True)
+                distribution = asset.get("distribution")
+                self.assertIsInstance(
+                    distribution, dict, f"{kind} must declare package/release distribution"
+                )
+                self.assertIs(distribution.get("release_required"), True)
+                self.assertIs(
+                    distribution.get("package_required"),
+                    kind != "source-archive",
+                    f"unexpected package scope for {kind}",
+                )
 
     def test_cmake_builds_and_installs_the_locked_helper_fail_closed(self):
         root_cmake = self.required_text(ROOT_CMAKE)
@@ -394,6 +448,13 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             "the cross-job source cache must not be extracted by raw tar before member validation",
         )
         self.assertIn("--require-lock-binding", build_action)
+        self.assertIn("/opt/python/cp311-cp311/bin/python3", build_action)
+        superbuild = self.required_text(ADB_SUPERBUILD)
+        build_script = self.required_text(ADB_BUILD_SCRIPT)
+        self.assertIn('CMAKE_GENERATOR "${CMAKE_GENERATOR}"', superbuild)
+        self.assertIn('-G "${CMAKE_GENERATOR}"', superbuild)
+        self.assertIn("--enable-new-dtags", superbuild)
+        self.assertIn("CMAKE_BUILD_PARALLEL_LEVEL", build_script)
 
         for kind in REQUIRED_RELEASE_ASSET_KINDS:
             self.assertIn(kind, ci_release)
