@@ -78,9 +78,9 @@ class FolderSearchResults : public AbstractLogData {
     void setResults( std::vector<klogg::folder::FileGroup> groups );
 
     // --- Streaming API (stable incremental display) ---
-    // beginSearch resets for a streaming search and sizes the internal pending
-    // buffer to the number of files in `expectedFileOrder`. Call once at the
-    // start of a search. Emits layoutChanged().
+    // beginSearch resets for a streaming search, retains `expectedFileOrder` as
+    // this pane's membership snapshot, and sizes the internal pending buffer to
+    // its file count. Call once at the start of a search. Emits layoutChanged().
     void beginSearch( const QStringList& expectedFileOrder );
     // Buffer `group` by its file index, then commit every consecutive completed
     // predecessor in enumeration order (advancing an internal cursor). This
@@ -233,6 +233,9 @@ class FolderSearchResults : public AbstractLogData {
     };
 
     void rebuildVisibleRows();
+    // Full result-set replacement invalidates every file-backed cache. Caller
+    // holds dataMutex_ uniquely; this helper takes fileIoMutex_ second.
+    void resetFileCaches();
     // Snapshot the filePaths of currently-collapsed groups (called at the top of
     // beginSearch, before groups_ is rebuilt) and re-apply collapse to a group as
     // it streams back in (called after each push_back). Keyed by filePath because
@@ -265,13 +268,15 @@ class FolderSearchResults : public AbstractLogData {
     QFile* fileForGroup( klogg::folder::FileId fileId ) const;
     const VisibleRow* visibleRowAt( LineNumber line ) const;
 
-    // Guards every data member below EXCEPT openFiles_ (see fileIoMutex_):
-    // unique for mutation (streaming commits, collapse, visibility, encoding
-    // overrides), shared for all getters incl. the QuickFind worker's reads.
+    // Guards every logical model member below: unique for mutation (streaming
+    // commits, collapse, visibility, encoding overrides), shared for all getters
+    // incl. the QuickFind worker's reads. The file-content caches named below are
+    // instead guarded by fileIoMutex_.
     mutable SharedMutex dataMutex_;
-    // Guards openFiles_ and every seek/read on the shared per-group QFile
-    // handles (two concurrent readMatchLine callers would otherwise tear the
-    // file cursor). Always taken AFTER dataMutex_, never the reverse.
+    // Guards openFiles_, markLineCache_, markTextCache_, markTextCacheBytes_, and
+    // every seek/read on the shared per-group QFile handles (two concurrent
+    // readMatchLine callers would otherwise tear the file cursor). Always taken
+    // AFTER dataMutex_ when both are needed, never the reverse.
     mutable std::mutex fileIoMutex_;
 
     std::vector<klogg::folder::FileGroup> groups_;
@@ -281,6 +286,12 @@ class FolderSearchResults : public AbstractLogData {
     // re-applied as each group streams back in, so a re-scan (e.g. a context-line
     // change) preserves the user's collapse state. Lives one search cycle.
     QSet<QString> pendingCollapsePaths_;
+    // Files belonging to this pane's current streaming-search snapshot. Marks
+    // are kept externally even when a path disappears, but marks-only groups may
+    // only be synthesized for paths in this membership set. setResults() has no
+    // membership input and therefore preserves its legacy unrestricted behavior.
+    QSet<QString> expectedFilePaths_;
+    bool restrictMarksToExpectedFiles_ = false;
 
     Visibility visibility_ = Visibility::MarksAndMatches;
     // Widget-owned per-file marks store, read LIVE during rebuildVisibleRows
@@ -298,7 +309,7 @@ class FolderSearchResults : public AbstractLogData {
     // PER-FILE kMarkLineCacheCap (16 MiB) with such a codec cache an EMPTY list
     // (marked-line text unavailable rather than a main-thread O(file) decode).
     // Byte-newline-safe files never populate this for text fetch (seek path).
-    // Persists across searches (file-intrinsic); invalidated on
+    // Invalidated at full result-set replacement boundaries and on an
     // encoding-override change. A transient open failure is NOT cached so a
     // later fetch can retry. Guarded by fileIoMutex_.
     mutable QHash<QString, std::vector<QString>> markLineCache_;
@@ -306,9 +317,10 @@ class FolderSearchResults : public AbstractLogData {
     // The view re-fetches every visible mark row on each repaint; without this,
     // a mark near the end of a large file rescans from byte 0 every frame. Key
     // is filePath + null + codec name + null + localLine. Only seek-path reads
-    // populate it (whole-file path already caches all lines). Invalidated
-    // alongside markLineCache_ on encoding-override change (same prefix sweep
-    // covers both). Guarded by fileIoMutex_.
+    // populate it (whole-file path already caches all lines). Invalidated at
+    // full result-set replacement boundaries and alongside markLineCache_ on an
+    // encoding-override change (same prefix sweep covers both). Guarded by
+    // fileIoMutex_.
     //
     // Aggregate byte budget: unbounded growth would let a user who marks many
     // lines in a large file retain ~the whole file in decoded QStrings. When

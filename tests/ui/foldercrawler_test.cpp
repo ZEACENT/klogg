@@ -2001,6 +2001,170 @@ TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new s
     REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
 }
 
+TEST_CASE( "FolderCrawlerWidget explicit re-search discovers newly added files in natural order",
+           "[folder][folder-refresh]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString file2 = writeFile( dir, "file2.log", QByteArray( "ERROR two\n" ) );
+    const QString file10 = writeFile( dir, "file10.log", QByteArray( "ERROR ten\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ file2, file10 } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+
+    const QString file1 = writeFile( dir, "file1.log", QByteArray( "ERROR one\n" ) );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    REQUIRE( widget.folderResults()->groupCount() == 3 );
+    REQUIRE( widget.folderResults()->getNbLine() == 6_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).filePath == file1 );
+    REQUIRE( widget.folderResults()->sourceForLine( 3_lnum ).filePath == file2 );
+    REQUIRE( widget.folderResults()->sourceForLine( 5_lnum ).filePath == file10 );
+}
+
+TEST_CASE( "FolderCrawlerWidget explicit re-search drops deleted and old renamed paths",
+           "[folder][folder-refresh]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString deleted = writeFile( dir, "a-deleted.log", QByteArray( "ERROR deleted\n" ) );
+    const QString oldName = writeFile( dir, "b-old.log", QByteArray( "ERROR renamed\n" ) );
+    const QString unchanged = writeFile( dir, "d-unchanged.log", QByteArray( "ERROR unchanged\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ deleted, oldName, unchanged } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->groupCount() == 3 );
+
+    REQUIRE( QFile::remove( deleted ) );
+    const QString renamed = QDir( dir.path() ).absoluteFilePath( "c-renamed.log" );
+    REQUIRE( QFile::rename( oldName, renamed ) );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    REQUIRE( widget.folderResults()->groupCount() == 2 );
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).filePath == renamed );
+    REQUIRE( widget.folderResults()->sourceForLine( 3_lnum ).filePath == unchanged );
+}
+
+TEST_CASE( "FolderCrawlerWidget deleting the final marked file clears re-search results",
+           "[folder][folder-refresh][marks]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString only = writeFile( dir, "only.log", QByteArray( "ERROR marked\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ only } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+
+    // Mark through the results model signal without selecting/opening the source
+    // file; deleting the fixture must not race an asynchronous LogData attach on
+    // Windows.
+    Q_EMIT widget.filteredView()->markLines( { 1_lnum } );
+    QTest::qWait( 50 );
+    REQUIRE( widget.isFilteredResultRowMarked( 1_lnum ) );
+    REQUIRE( QFile::remove( only ) );
+
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    REQUIRE( widget.statusText() == QStringLiteral( "No matches" ) );
+    REQUIRE( widget.folderResults()->groupCount() == 0 );
+    REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+}
+
+TEST_CASE( "FolderCrawlerWidget explicit re-search reads rewritten appended and truncated content",
+           "[folder][folder-refresh]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "changing.log",
+                                    QByteArray( "ERROR original\npadding\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ path } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).localLine == 0_lnum );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum ) == QStringLiteral( "ERROR original" ) );
+
+    REQUIRE( writeFile( dir, "changing.log",
+                        QByteArray( "padding\nERROR rewritten\nERROR second\n" ) )
+             == path );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).localLine == 1_lnum );
+    REQUIRE( widget.folderResults()->sourceForLine( 2_lnum ).localLine == 2_lnum );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum ) == QStringLiteral( "ERROR rewritten" ) );
+    REQUIRE( widget.folderResults()->getLineString( 2_lnum ) == QStringLiteral( "ERROR second" ) );
+
+    {
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Append ) );
+        REQUIRE( file.write( "padding\nERROR appended\n" ) > 0 );
+    }
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 3_lnum ).localLine == 4_lnum );
+    REQUIRE( widget.folderResults()->getLineString( 3_lnum ) == QStringLiteral( "ERROR appended" ) );
+
+    REQUIRE( writeFile( dir, "changing.log",
+                        QByteArray( "padding\npadding\nERROR after truncate\n" ) )
+             == path );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).localLine == 2_lnum );
+    REQUIRE( widget.folderResults()->getLineString( 1_lnum )
+             == QStringLiteral( "ERROR after truncate" ) );
+}
+
+TEST_CASE( "FolderCrawlerWidget Keep Results preserves old membership while re-search refreshes the active pane",
+           "[folder][folder-refresh][keep]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = writeFile( dir, "a.log", QByteArray( "ERROR a\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+
+    const QString b = writeFile( dir, "b.log", QByteArray( "ERROR b\n" ) );
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+    REQUIRE( widget.paneCount() == 2 );
+
+    // Only the newly-created active pane sees the refreshed folder membership.
+    REQUIRE( widget.folderResults()->groupCount() == 2 );
+    REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).filePath == a );
+    REQUIRE( widget.folderResults()->sourceForLine( 3_lnum ).filePath == b );
+
+    // The kept pane remains the historical one-file membership snapshot.
+    widget.resultsTabs()->setCurrentIndex( 0 );
+    QTest::qWait( 50 );
+    REQUIRE( widget.folderResults()->groupCount() == 1 );
+    REQUIRE( widget.folderResults()->getNbLine() == 2_lcount );
+    REQUIRE( widget.folderResults()->sourceForLine( 1_lnum ).filePath == a );
+}
+
 // RAII save/restore for the Configuration fields the F2 wiring tests mutate
 // (font size zoom, line-number toggle, splitter sizes). Restores on unwind so
 // a failed REQUIRE cannot leak state into sibling tests.
@@ -2581,6 +2745,11 @@ TEST_CASE( "FolderCrawlerWidget marks survive a view-context round-trip",
 
     REQUIRE( restored.isLineMarkedInFile( a, 1_lnum ) );
     REQUIRE( restored.isLineMarkedInFile( b, 0_lnum ) );
+    // Restoring marks does not auto-run the saved search, but present files must
+    // still render as marks-only groups immediately.
+    REQUIRE( restored.folderResults()->getNbLine() == 4_lcount );
+    REQUIRE( restored.folderResults()->sourceForLine( 1_lnum ).filePath == a );
+    REQUIRE( restored.folderResults()->sourceForLine( 3_lnum ).filePath == b );
 }
 
 TEST_CASE( "FolderCrawlerWidget restores marks into a moved folder",

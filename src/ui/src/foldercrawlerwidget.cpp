@@ -46,6 +46,7 @@
 #include "abstractlogview.h"
 #include "configuration.h"
 #include "crawlershortcuts.h"
+#include "folderenumeration.h"
 #include "folderfilteredview.h"
 #include "foldersearchengine.h"
 #include "foldersearchresults.h"
@@ -555,6 +556,14 @@ void FolderCrawlerWidget::setFolder( const QString& folderPath, const QStringLis
 {
     folderPath_ = folderPath;
     filePaths_ = filePaths;
+    // Seed every pane's membership before session marks are restored. setFolder
+    // normally initializes the first pane, but resetting an existing widget must
+    // not leave historical panes scoped to the previous folder.
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->results != nullptr ) {
+            pane->results->beginSearch( filePaths_ );
+        }
+    }
     lastResultStatusText_.clear();
     updateReadyStatus();
 }
@@ -1478,8 +1487,21 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
 
 void FolderCrawlerWidget::startSearch()
 {
-    if ( filePaths_.isEmpty() ) {
-        return;
+    // Supersede the old generation before synchronous enumeration so obsolete
+    // workers stop competing for the same storage while the fresh snapshot is
+    // collected. Queued old signals are rejected immediately.
+    engine_->interrupt();
+    currentSearchGeneration_ = engine_->bumpGeneration();
+    searchTargetResults_ = nullptr;
+
+    // Folder membership is a snapshot of the filesystem at explicit search time,
+    // not the list captured when the tab was opened. Re-enumeration also retains
+    // the shared natural ordering used by initial folder open and Merge Files.
+    const auto currentFilePaths = enumerateFolderFiles( folderPath_ );
+    filePaths_.clear();
+    filePaths_.reserve( static_cast<int>( currentFilePaths.size() ) );
+    for ( const auto& filePath : currentFilePaths ) {
+        filePaths_.append( filePath );
     }
 
     // A new search clears a previous invalid-pattern error state.
@@ -1495,15 +1517,6 @@ void FolderCrawlerWidget::startSearch()
 
     const auto pattern = searchToolbar_->currentSearchText();
     if ( pattern.isEmpty() ) {
-        // Supersede any in-flight scan BEFORE mutating state: interrupt it and
-        // bump the generation so its queued progress/finish signals are
-        // treated as stale (parity with CrawlerWidget::replaceCurrentSearch,
-        // crawlerwidget.cpp:1566-1567). The pane is detached so no late group
-        // can re-append to it after the clear.
-        engine_->interrupt();
-        currentSearchGeneration_ = engine_->bumpGeneration();
-        searchTargetResults_ = nullptr;
-
         // Parity with CrawlerWidget::replaceCurrentSearch(""): an empty search
         // clears the results pane instead of leaving stale results behind.
         // Folder results panes always use EmptyFilterPolicy::ClearResults --
@@ -1568,9 +1581,6 @@ void FolderCrawlerWidget::startSearch()
     // of silently scanning to zero matches.
     const RegularExpression validation{ regexpPattern };
     if ( !validation.isValid() ) {
-        // Supersede any in-flight scan (see the empty-pattern path above).
-        engine_->interrupt();
-        currentSearchGeneration_ = engine_->bumpGeneration();
         searchTargetResults_ = nullptr;
 
         searchToolbar_->setSearchInProgress( false );

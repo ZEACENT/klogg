@@ -337,6 +337,106 @@ TEST_CASE( "FolderSearchResults a marked UTF-16 line under the cache cap decodes
     REQUIRE( r.getLineString( 2_lnum ) == QStringLiteral( "gamma" ) );
 }
 
+TEST_CASE( "FolderSearchResults setResults keeps marks-only paths when membership is unspecified",
+           "[folder][marks]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "marked-only.log", { "marked text" } );
+
+    FolderSearchResults results;
+    results.setResults( {} );
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 0 );
+    results.setMarksStore( &marks );
+
+    REQUIRE( results.getNbLine() == 2_lcount );
+    REQUIRE( results.sourceForLine( 1_lnum ).filePath == path );
+    REQUIRE( results.sourceForLine( 1_lnum ).localLine == 0_lnum );
+}
+
+TEST_CASE( "FolderSearchResults beginSearch invalidates the seek-based marked-line text cache",
+           "[folder][marks][mark-cache-refresh]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "seek.log", { "old text", "ERROR" } );
+
+    auto makeGroup = [ & ] {
+        klogg::folder::FileGroup group;
+        group.filePath = path;
+        group.matches.push_back( match( 1, 9, 15, 5, 5 ) );
+        return group;
+    };
+
+    FolderSearchResults results;
+    results.setResults( { makeGroup() } );
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 0 );
+    results.setMarksStore( &marks );
+
+    // rows: [header, marked non-match line 0, match line 1]. Reading the mark
+    // populates markTextCache_, the byte-newline-safe seek-path cache.
+    REQUIRE( results.sourceForLine( 1_lnum ).localLine == 0_lnum );
+    REQUIRE( results.getLineString( 1_lnum ) == QStringLiteral( "old text" ) );
+
+    REQUIRE( writeFile( dir, "seek.log", { "new text", "ERROR" } ) == path );
+    results.beginSearch( QStringList{ path } );
+    results.addFileGroup( 0, makeGroup() );
+
+    REQUIRE( results.sourceForLine( 1_lnum ).localLine == 0_lnum );
+    REQUIRE( results.getLineString( 1_lnum ) == QStringLiteral( "new text" ) );
+}
+
+TEST_CASE( "FolderSearchResults beginSearch invalidates the UTF-16 marked-line decode cache",
+           "[folder][marks][mark-cache-refresh]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = QDir( dir.path() ).absoluteFilePath( "utf16-refresh.log" );
+
+    auto writeUtf16 = [ & ]( const QString& firstLine ) {
+        QFile file( path );
+        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        QByteArray bytes;
+        bytes.append( "\xFF\xFE", 2 );
+        for ( const QString& line : { firstLine, QStringLiteral( "ERROR" ) } ) {
+            for ( const QChar c : line ) {
+                bytes.append( static_cast<char>( c.unicode() & 0xFF ) );
+                bytes.append( static_cast<char>( ( c.unicode() >> 8 ) & 0xFF ) );
+            }
+            bytes.append( '\n' );
+            bytes.append( '\0' );
+        }
+        REQUIRE( file.write( bytes ) == bytes.size() );
+    };
+    auto makeGroup = [ & ] {
+        klogg::folder::FileGroup group;
+        group.filePath = path;
+        group.sourceCodec = QTextCodec::codecForName( "UTF-16LE" );
+        group.matches.push_back( match( 1, 14, 26, 5, 5 ) );
+        return group;
+    };
+
+    writeUtf16( QStringLiteral( "alpha" ) );
+    FolderSearchResults results;
+    results.setResults( { makeGroup() } );
+    QHash<QString, std::set<uint64_t>> marks;
+    marks[ path ].insert( 0 );
+    results.setMarksStore( &marks );
+
+    // The stateful codec forces the whole-file markLineCache_ path.
+    REQUIRE( results.sourceForLine( 1_lnum ).localLine == 0_lnum );
+    REQUIRE( results.getLineString( 1_lnum ) == QStringLiteral( "alpha" ) );
+
+    writeUtf16( QStringLiteral( "omega" ) );
+    results.beginSearch( QStringList{ path } );
+    results.addFileGroup( 0, makeGroup() );
+
+    REQUIRE( results.sourceForLine( 1_lnum ).localLine == 0_lnum );
+    REQUIRE( results.getLineString( 1_lnum ) == QStringLiteral( "omega" ) );
+}
+
 TEST_CASE( "FolderSearchResults a marked line over the cache cap with a stateful codec "
            "reports Unavailable instead of silently rendering empty",
            "[folder][marks][regression]" )

@@ -322,6 +322,8 @@ class FolderCrawlerWidget : public QWidget,
     void applyDetectedEncoding();
 
     QString folderPath_;
+    // Naturally sorted filesystem membership snapshot, refreshed at the start of
+    // every explicit search (setFolder seeds it for the initial Ready status).
     QStringList filePaths_;
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
