@@ -442,6 +442,9 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
 
     def test_result_privacy_and_synthetic_target_release_isolation(self):
         tests_cmake = (ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        unit_tests_cmake = (ROOT / "tests" / "unit" / "CMakeLists.txt").read_text(
+            encoding="utf-8"
+        )
         benchmarks_cmake = (ROOT / "benchmarks" / "CMakeLists.txt").read_text(
             encoding="utf-8"
         )
@@ -468,9 +471,10 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
             benchmarks_cmake,
             r"live_capture_fixture_producer\s+PRIVATE\s+klogg_live_capture_benchmark_protocol",
         )
-        self.assertRegex(
-            tests_cmake,
-            r"add_dependencies\(ci_build\s+klogg_live_capture_benchmark_contract_tests\)",
+        self.assertIn("add_dependencies(ci_build klogg_test_build)", tests_cmake)
+        self.assertIn(
+            "klogg_configure_test_target(klogg_live_capture_benchmark_contract_tests)",
+            unit_tests_cmake,
         )
         ci_dependencies = "\n".join(
             match.group(0)

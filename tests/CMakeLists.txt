@@ -1,6 +1,7 @@
 find_package(QT NAMES Qt6 Qt5 COMPONENTS Test REQUIRED)
 find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Test REQUIRED)
 
+add_custom_target(klogg_test_build)
 include(${CMAKE_SOURCE_DIR}/cmake/TestTargetOptions.cmake)
 
 add_subdirectory(helpers)
@@ -18,23 +19,9 @@ target_compile_definitions(klogg_tests PUBLIC -DKLOGG_TESTS)
 target_compile_definitions(klogg_itests PUBLIC -DKLOGG_TESTS)
 
 add_dependencies(klogg_itests file_write_helper)
-add_dependencies(
-  ci_build
-  klogg_tests
-  klogg_itests
-  klogg_ios_protocol_tests
-  klogg_ios_native_contract_tests
-  klogg_livelog_session_spec_tests
-  klogg_livelog_restore_arming_tests
-  klogg_livelog_migration_notice_tests
-  klogg_livelog_controller_tests
-)
-if(KLOGG_BUILD_BENCHMARKS)
-  # The benchmark executable remains out of ci_build/release. Only its focused
-  # contract test (and the fixture producer dependency required by that test)
-  # participates in the test gate.
-  add_dependencies(ci_build klogg_live_capture_benchmark_contract_tests)
-endif()
+# Every configured C++ test joins klogg_test_build through
+# klogg_configure_test_target(), keeping CI and coverage build scope aligned.
+add_dependencies(ci_build klogg_test_build)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 

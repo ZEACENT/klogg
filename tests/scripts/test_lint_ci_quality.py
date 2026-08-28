@@ -236,14 +236,14 @@ steps:
       --filter '.*/src/.*'
       --filter '.*/src/.*'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 6)
 
         secure = """\
 env:
   EVENT_NAME: ${{ github.event_name }}
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
       git fetch --no-tags origin "$base_sha"
@@ -251,6 +251,10 @@ steps:
       echo "coverage ratchet base commit"
 """
         self.assertEqual(MODULE.coverage_workflow_issues(secure), [])
+
+    def test_configured_test_targets_join_the_coverage_aggregate(self):
+        options = (ROOT / "cmake" / "TestTargetOptions.cmake").read_text()
+        self.assertIn("add_dependencies(klogg_test_build ${target})", options)
 
     def test_coverage_ratchet_requires_the_authoritative_event_base(self):
         workflow = (
@@ -274,13 +278,13 @@ steps:
     def test_coverage_comments_cannot_spoof_scope_or_targets(self):
         workflow = """\
 steps:
-  # cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+  # cmake --build build_root -t klogg klogg_grep klogg_test_build
   - run: |
       # --filter '^src/'
       # --filter '^src/'
       cmake --build build_root -t klogg_tests klogg_itests
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
 
     def test_inline_shell_comments_cannot_spoof_coverage_policy(self):
         workflow = """\
@@ -290,13 +294,13 @@ steps:
       true # --filter '^src/'
       true # --filter '^src/'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
 
     def test_coverage_noop_tokens_cannot_spoof_report_policy(self):
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
       echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
       gcovr --filter '^src/' --html
@@ -312,7 +316,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file
       gcovr --filter '^src/' --json
 """
@@ -326,7 +330,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html || echo ignored
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json || :
 """
@@ -337,7 +341,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index-2.html
 """
@@ -362,7 +366,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --html-details --print-summary -o coverage_report/index.html
       gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --json -o coverage_report/coverage.json
 """
@@ -380,7 +384,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html && :
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
 """
@@ -393,7 +397,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --filter '.*' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html -o /tmp/redirected.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
 """

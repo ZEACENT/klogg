@@ -729,7 +729,7 @@ def coverage_workflow_issues(text: str) -> list[str]:
     build_targets = set()
     for command in commands:
         build_targets.update(coverage_build_targets(command))
-    for target in ("klogg", "klogg_grep", "klogg_tests", "klogg_itests"):
+    for target in ("klogg", "klogg_grep", "klogg_test_build"):
         if target not in build_targets:
             issues.append(f"coverage build must include target {target}")
 

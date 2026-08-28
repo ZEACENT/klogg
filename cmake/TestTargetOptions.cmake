@@ -15,6 +15,10 @@ function(klogg_configure_test_target target)
     )
   endif()
 
+  if(TARGET klogg_test_build)
+    add_dependencies(klogg_test_build ${target})
+  endif()
+
   if(MSVC)
     if(KLOGG_TEST_KEEP_DEBUG_SYMBOLS)
       set(_klogg_debug_option /DEBUG:FULL)
