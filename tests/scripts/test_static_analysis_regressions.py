@@ -10,7 +10,9 @@ SECURE_CAPTURE_DIRECTORY_SOURCE = (
     ROOT / "src" / "logdata" / "src" / "securecapturedirectory.cpp"
 )
 LIVE_SOURCE_TRANSPORT = ROOT / "src" / "ui" / "src" / "livesourcetransport.cpp"
-ADB_LOGCAT_SOURCE = ROOT / "src" / "ui" / "src" / "adblogcatsource.cpp"
+ADB_LOGCAT_SESSION_DATA_SOURCE = (
+    ROOT / "src" / "ui" / "src" / "adblogcatsessiondata.cpp"
+)
 SESSION_SOURCE = ROOT / "src" / "ui" / "src" / "session.cpp"
 QUICKFIND_HEADER = ROOT / "src" / "ui" / "include" / "quickfind.h"
 QUICKFIND_SOURCE = ROOT / "src" / "ui" / "src" / "quickfind.cpp"
@@ -366,7 +368,7 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
     def test_live_capture_ids_are_validated_and_fail_closed(self):
         header = CAPTURESTORE_HEADER.read_text()
         capture_source = CAPTURESTORE_SOURCE.read_text()
-        adb_source = ADB_LOGCAT_SOURCE.read_text()
+        adb_session_data = ADB_LOGCAT_SESSION_DATA_SOURCE.read_text()
         session_source = SESSION_SOURCE.read_text()
 
         self.assertIn(
@@ -382,7 +384,7 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("QFileInfo( capturePath ).isSymLink()", path_builder)
 
         validity = function_body(
-            adb_source, "bool AdbLogcatSessionData::isValid"
+            adb_session_data, "bool AdbLogcatSessionData::isValid"
         )
         self.assertIn("CaptureStore::isValidCaptureId", validity)
 

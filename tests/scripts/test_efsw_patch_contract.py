@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 
@@ -13,6 +14,26 @@ STREAMVBYTE_PATCH = (
 VECTORSCAN_HISTORY_PATCH = (
     ROOT / "3rdparty" / "patches" / "fix_vectorscan_null_history_ubsan.patch"
 )
+IMMUTABLE_GIT_PACKAGES = {
+    "efsw",
+    "libimobiledevice",
+    "streamvbyte",
+    "vectorscan",
+}
+
+
+def packages_with_autocrlf_disabled(source):
+    packages = set()
+    for body in re.findall(
+        r"cpmaddpackage\s*\((.*?)\n\s*\)", source, re.IGNORECASE | re.DOTALL
+    ):
+        if "core.autocrlf=false" not in body:
+            continue
+        name = re.search(r"\bNAME\s+([^\s\)]+)", body, re.IGNORECASE)
+        if name is None:
+            raise AssertionError("CPM package with core.autocrlf=false has no NAME")
+        packages.add(name.group(1))
+    return packages
 
 
 class EfswPatchContractTest(unittest.TestCase):
@@ -54,8 +75,14 @@ class EfswPatchContractTest(unittest.TestCase):
         self.assertIn(pinned_revision, text)
         self.assertIn(pinned_revision, prefetch)
         self.assertIn("c43294a81501e0fdf14adc83818d47f7f9bc1bb6", prefetch)
-        self.assertEqual(text.count("core.autocrlf=false"), 3)
-        self.assertEqual(prefetch.count("core.autocrlf=false"), 3)
+        self.assertEqual(
+            packages_with_autocrlf_disabled(text),
+            IMMUTABLE_GIT_PACKAGES,
+        )
+        self.assertEqual(
+            packages_with_autocrlf_disabled(prefetch),
+            IMMUTABLE_GIT_PACKAGES,
+        )
         for digest in (
             "3f4a410e6b1ad8f1f1d53c8463dc7accc7e1c94a32ca1ed1da778a181f5892b9",
             "d736c1c9bc9e3aca800bea90765f805e27229785e3d8e417e64103ba5fc96164",
