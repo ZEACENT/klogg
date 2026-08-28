@@ -46,7 +46,7 @@ def apply_locked_patch(
         )
     run(
         [
-            "patch",
+            os.environ.get("KLOGG_ADB_PATCH_EXECUTABLE", "patch"),
             "--directory",
             str(source),
             "--strip",

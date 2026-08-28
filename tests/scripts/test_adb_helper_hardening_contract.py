@@ -524,11 +524,14 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
                 self.module.apply_locked_patch(source, patch, record)
 
             record["apply_tool"] = "gnu-patch"
-            with mock.patch.object(self.module, "run") as run:
+            with mock.patch.dict(
+                self.module.os.environ,
+                {"KLOGG_ADB_PATCH_EXECUTABLE": "/locked/usr/bin/patch"},
+            ), mock.patch.object(self.module, "run") as run:
                 self.module.apply_locked_patch(source, patch, record)
             run.assert_called_once_with(
                 [
-                    "patch",
+                    "/locked/usr/bin/patch",
                     "--directory",
                     str(source),
                     "--strip",

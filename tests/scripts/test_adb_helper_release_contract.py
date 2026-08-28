@@ -222,6 +222,16 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         for family in ("macos15", "win22"):
             self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
 
+    def test_windows_build_selects_the_msys2_gnu_patch_binary_explicitly(self):
+        workflow = self.required_text(BUILD_ACTION)
+        windows_build = workflow.split(
+            "- name: Build native Windows helper from prefetched sources", 1
+        )[1].split("- name: Smoke and verify source-built ADB artifact", 1)[0]
+        self.assertIn(
+            'KLOGG_ADB_PATCH_EXECUTABLE="$(cygpath -w /usr/bin/patch.exe)"',
+            windows_build,
+        )
+
     def test_windows_hosted_toolchain_locks_the_serviced_msvc_release_family(self):
         toolchain = self.lock()["toolchains"]["windows-x86_64"]
         compiler_version = toolchain.get("compiler_version", "")

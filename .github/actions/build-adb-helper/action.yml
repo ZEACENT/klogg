@@ -95,7 +95,8 @@ runs:
         FETCHCONTENT_UPDATES_DISCONNECTED: "ON"
       run: |
         set -euo pipefail
-        python3 scripts/build_adb_helper.py \
+        KLOGG_ADB_PATCH_EXECUTABLE="$(cygpath -w /usr/bin/patch.exe)" \
+          python3 scripts/build_adb_helper.py \
           --repository-root "$GITHUB_WORKSPACE" \
           --lock "$GITHUB_WORKSPACE/packaging/adb/adb-helper.lock.json" \
           --source-root "${{ inputs.source-root }}" \
