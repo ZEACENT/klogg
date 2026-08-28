@@ -38,7 +38,8 @@
       "tag": "android-17.0.0_r1",
       "archive_url": "https://android.googlesource.com/platform/manifest/+archive/5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f.tar.gz",
       "archive_file": "aosp-manifest-5bc9a7ce1cd78dd53613bbfd0ebf506e1e4adb0f.tar.gz",
-      "archive_sha256": "2562fc69ae44263ef8fe18d328ad16433e32075f6a1a90d5d4774075e175da46",
+      "archive_sha256": "5ae266404d0a1c71cb6d91d15c24b1c7cb7c33abb7bdeb3a49f5e9f2b57b1fab",
+      "archive_identity": "canonical-tar-gz-v1",
       "build_input": false,
       "legal": {
         "licenses": [
@@ -57,7 +58,8 @@
       "commit": "9084198a2d4b0f6a0f174260fb42da33485b684d",
       "archive_url": "https://android.googlesource.com/platform/packages/modules/adb/+archive/9084198a2d4b0f6a0f174260fb42da33485b684d.tar.gz",
       "archive_file": "aosp-adb-9084198a2d4b0f6a0f174260fb42da33485b684d.tar.gz",
-      "archive_sha256": "bfbbc9f4c59c9b4dd6f1feb4614ac1a0fcc2505fc4fe09f7d37aeb3fefab4f71",
+      "archive_sha256": "2c4e81b83fcada398b7f64bb62ecabe2d96eeb08fcc890403558480f8d6ad0f4",
+      "archive_identity": "canonical-tar-gz-v1",
       "build_input": false,
       "legal": {
         "licenses": [
@@ -107,7 +109,8 @@
       "commit": "70460fc2b43c3948f9caae1fd4eacd2d666a872b",
       "archive_url": "https://android.googlesource.com/platform/external/libusb/+archive/70460fc2b43c3948f9caae1fd4eacd2d666a872b.tar.gz",
       "archive_file": "aosp-libusb-70460fc2b43c3948f9caae1fd4eacd2d666a872b.tar.gz",
-      "archive_sha256": "b8b24c84884b34a8a16700123fb240cc14dd37ec47e5950d1d3f79fda7c91a3e",
+      "archive_sha256": "3cefc015ee99db245dbbb5e0401bf1a6531ab3505b3810968665c862766dadde",
+      "archive_identity": "canonical-tar-gz-v1",
       "build_input": false,
       "legal": {
         "licenses": [
@@ -126,7 +129,8 @@
       "commit": "4dafd114fab3c3d9543a5aff0ad097f479915176",
       "archive_url": "https://android.googlesource.com/platform/development/+archive/4dafd114fab3c3d9543a5aff0ad097f479915176.tar.gz",
       "archive_file": "platform-development-4dafd114fab3c3d9543a5aff0ad097f479915176.tar.gz",
-      "archive_sha256": "bf67f5ddd9626ed16d0ad73509d6375459e69799a178280ee0757b8ebbe08033",
+      "archive_sha256": "14b81988c08651b57ada9585275a64355e9e102b119404c648997ec62bf0cf48",
+      "archive_identity": "canonical-tar-gz-v1",
       "build_input": true,
       "excluded_build_symlinks": [
         {

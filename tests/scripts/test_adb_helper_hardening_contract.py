@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -16,6 +17,8 @@ ROOT = pathlib.Path(__file__).parents[2]
 PREFETCH_SCRIPT = ROOT / "scripts" / "prefetch_adb_helper_sources.py"
 LEGAL_SCRIPT = ROOT / "scripts" / "build_adb_helper_legal_assets.py"
 BUILD_SCRIPT = ROOT / "scripts" / "build_adb_helper.py"
+LOCK = ROOT / "packaging" / "adb" / "adb-helper.lock.json"
+CANONICAL_TAR_GZ_IDENTITY = "canonical-tar-gz-v1"
 
 
 def load_build_module():
@@ -35,6 +38,20 @@ def add_bytes(tar: tarfile.TarFile, name: str, content: bytes) -> None:
     info.size = len(content)
     info.mode = 0o644
     tar.addfile(info, io.BytesIO(content))
+
+
+def canonical_tar_gz_bytes(name: str, content: bytes, mode: int = 0o644) -> bytes:
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = mode
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = "root"
+            tar.addfile(info, io.BytesIO(content))
+    return output.getvalue()
 
 
 class AdbHelperSourceHardeningContractTest(unittest.TestCase):
@@ -63,6 +80,88 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         if extract_root is not None:
             command.extend(("--extract-root", str(extract_root)))
         return subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+
+    def test_gitiles_archives_use_canonical_content_identity_in_the_real_lock(self):
+        lock = json.loads(LOCK.read_text(encoding="utf-8"))
+        gitiles = [
+            record
+            for record in lock.get("sources", [])
+            if "android.googlesource.com" in str(record.get("archive_url", ""))
+        ]
+        self.assertTrue(gitiles, "the ADB closure must contain locked Gitiles sources")
+        for record in gitiles:
+            with self.subTest(source=record.get("id")):
+                self.assertEqual(
+                    record.get("archive_identity"),
+                    CANONICAL_TAR_GZ_IDENTITY,
+                    "Gitiles stamps each generated tar member with request time, so raw "
+                    "archive bytes are not an immutable source identity",
+                )
+
+    def test_prefetch_canonicalizes_volatile_gitiles_metadata_before_hashing(self):
+        download_root = self.root / "downloads"
+        download_root.mkdir()
+        archive = download_root / "gitiles-source.tar.gz"
+        content = b"immutable source payload\n"
+        canonical = canonical_tar_gz_bytes("source.txt", content)
+        record = {
+            "id": "gitiles-source",
+            "archive_file": archive.name,
+            "archive_sha256": hashlib.sha256(canonical).hexdigest(),
+            "archive_identity": CANONICAL_TAR_GZ_IDENTITY,
+            "build_input": False,
+        }
+        lock = self.write_lock(record)
+
+        for request_time in (1_700_000_000, 1_800_000_000):
+            with self.subTest(request_time=request_time):
+                with tarfile.open(archive, "w:gz") as tar:
+                    info = tarfile.TarInfo("source.txt")
+                    info.size = len(content)
+                    info.mode = 0o644
+                    info.mtime = request_time
+                    info.uid = 123
+                    info.gid = 456
+                    info.uname = "volatile"
+                    info.gname = "metadata"
+                    tar.addfile(info, io.BytesIO(content))
+
+                result = self.run_prefetch(lock, download_root)
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(archive.read_bytes(), canonical)
+
+        with tarfile.open(archive, "w:gz") as tar:
+            info = tarfile.TarInfo("source.txt")
+            changed = b"different source payload\n"
+            info.size = len(changed)
+            info.mode = 0o644
+            info.mtime = 1_900_000_000
+            tar.addfile(info, io.BytesIO(changed))
+        result = self.run_prefetch(lock, download_root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sha256 mismatch", (result.stdout + result.stderr).lower())
+
+    def test_prefetch_rejects_unknown_archive_identity_fail_closed(self):
+        download_root = self.root / "downloads"
+        download_root.mkdir()
+        archive = download_root / "source.tar"
+        with tarfile.open(archive, "w") as tar:
+            add_bytes(tar, "payload", b"payload")
+        lock = self.write_lock(
+            {
+                "id": "source",
+                "archive_file": archive.name,
+                "archive_sha256": archive_sha256(archive),
+                "archive_identity": "unknown-identity-v9",
+                "build_input": False,
+            }
+        )
+
+        result = self.run_prefetch(lock, download_root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("archive identity", (result.stdout + result.stderr).lower())
 
     def test_prefetch_rejects_unsafe_record_paths_and_unsupported_archive_members(self):
         download_root = self.root / "downloads"
@@ -330,6 +429,45 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/smoke_adb_helper.py",
         }
         self.assertEqual(required_build_material - members, set())
+
+    def test_legal_assets_do_not_claim_canonical_archives_are_raw_upstream_downloads(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        record = lock["sources"][0]
+        record["archive_identity"] = CANONICAL_TAR_GZ_IDENTITY
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        output = self.root / "release-canonical"
+
+        result = self.build_legal_assets(repository, archive_root, lock_path, output)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = json.loads(
+            (output / "adb-helper-sbom.spdx.json").read_text(encoding="utf-8")
+        )["packages"][0]
+        self.assertEqual(package["downloadLocation"], "NOASSERTION")
+        for marker in (
+            CANONICAL_TAR_GZ_IDENTITY,
+            record["archive_url"],
+            record["archive_file"],
+        ):
+            self.assertIn(marker, package.get("sourceInfo", ""))
+        closure_identity = [
+            {
+                "id": record["id"],
+                "archive_file": record["archive_file"],
+                "archive_sha256": record["archive_sha256"],
+                "archive_identity": CANONICAL_TAR_GZ_IDENTITY,
+                "revision": record["commit"],
+            }
+        ]
+        expected_tree_hash = hashlib.sha256(
+            json.dumps(closure_identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        receipt = json.loads(
+            (output / "adb-helper-source-set-receipt.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            receipt["source_identity"]["final_tree_sha256"], expected_tree_hash
+        )
 
     def test_legal_assets_include_license_texts_valid_spdx_and_lgpl_replacement_terms(self):
         repository, archive_root, lock_path, _ = self.make_legal_fixture()

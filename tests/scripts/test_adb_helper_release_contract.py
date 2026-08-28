@@ -368,7 +368,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             app_cmake,
             r"add_dependencies\(\s*ci_build\s+klogg_stage_adb_helpers",
         )
-        self.assertIn("FETCHCONTENT_FULLY_DISCONNECTED", adb_cmake)
+        self.assertNotRegex(
+            adb_cmake,
+            r"set\(\s*FETCHCONTENT_FULLY_DISCONNECTED\b",
+            "application packaging glue must not disable FetchContent globally for third-party dependencies",
+        )
         superbuild = self.required_text(ROOT / "packaging" / "adb" / "superbuild" / "CMakeLists.txt")
         common_args = re.search(r"set\(_common_args(?P<body>.*?)\n\)", superbuild, re.DOTALL)
         self.assertIsNotNone(common_args)

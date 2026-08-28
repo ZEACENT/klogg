@@ -22,6 +22,11 @@ from source_publication_identity import (
 )
 
 
+RAW_ARCHIVE_IDENTITY = "raw-sha256"
+CANONICAL_TAR_GZ_IDENTITY = "canonical-tar-gz-v1"
+SUPPORTED_ARCHIVE_IDENTITIES = {RAW_ARCHIVE_IDENTITY, CANONICAL_TAR_GZ_IDENTITY}
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -105,6 +110,37 @@ def write_hash(path: pathlib.Path) -> None:
 def canonical_sha256(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def spdx_package(item: dict) -> dict:
+    archive_identity = str(item.get("archive_identity", RAW_ARCHIVE_IDENTITY))
+    if archive_identity not in SUPPORTED_ARCHIVE_IDENTITIES:
+        raise RuntimeError(
+            f"unsupported ADB archive identity for {item.get('id')}: {archive_identity}"
+        )
+    package = {
+        "name": item["id"],
+        "SPDXID": "SPDXRef-Package-" + item["id"].replace("_", "-"),
+        "versionInfo": item.get("version", item.get("commit")),
+        "downloadLocation": item["archive_url"],
+        "checksums": [{"algorithm": "SHA256", "checksumValue": item["archive_sha256"]}],
+        "licenseConcluded": item.get(
+            "license", " AND ".join(item.get("legal", {}).get("licenses", [])) or "NOASSERTION"
+        ),
+        "licenseDeclared": item.get(
+            "license", " AND ".join(item.get("legal", {}).get("licenses", [])) or "NOASSERTION"
+        ),
+        "filesAnalyzed": False,
+    }
+    if archive_identity == CANONICAL_TAR_GZ_IDENTITY:
+        package["downloadLocation"] = "NOASSERTION"
+        package["sourceInfo"] = (
+            f"{item['archive_file']} is included under archives/ in the klogg ADB helper "
+            f"corresponding-source asset. It was canonicalized from {item['archive_url']} "
+            f"using {archive_identity}; the SHA-256 identifies those canonical bytes, not "
+            "the provider's transport-time tar.gz response."
+        )
+    return package
 
 
 def main() -> int:
@@ -227,23 +263,7 @@ def main() -> int:
             "creators": ["Tool: klogg-build-adb-helper-legal-assets"],
         },
         "documentDescribes": package_ids,
-        "packages": [
-            {
-                "name": item["id"],
-                "SPDXID": "SPDXRef-Package-" + item["id"].replace("_", "-"),
-                "versionInfo": item.get("version", item.get("commit")),
-                "downloadLocation": item["archive_url"],
-                "checksums": [{"algorithm": "SHA256", "checksumValue": item["archive_sha256"]}],
-                "licenseConcluded": item.get(
-                    "license", " AND ".join(item.get("legal", {}).get("licenses", [])) or "NOASSERTION"
-                ),
-                "licenseDeclared": item.get(
-                    "license", " AND ".join(item.get("legal", {}).get("licenses", [])) or "NOASSERTION"
-                ),
-                "filesAnalyzed": False,
-            }
-            for item in locked_material
-        ],
+        "packages": [spdx_package(item) for item in locked_material],
         "relationships": [
             {
                 "spdxElementId": "SPDXRef-DOCUMENT",
@@ -307,6 +327,7 @@ def main() -> int:
             "id": record["id"],
             "archive_file": record["archive_file"],
             "archive_sha256": record["archive_sha256"],
+            "archive_identity": record.get("archive_identity", RAW_ARCHIVE_IDENTITY),
             "revision": record.get("commit", record.get("version")),
         }
         for record in [*lock["sources"], *lock.get("dependencies", [])]
