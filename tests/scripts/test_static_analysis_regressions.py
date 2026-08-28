@@ -21,6 +21,7 @@ EFSW_INOTIFY_TEST = ROOT / "tests" / "unit" / "efsw_inotify_test.cpp"
 APP_MAIN = ROOT / "src" / "app" / "main.cpp"
 UNIT_TEST_MAIN = ROOT / "tests" / "unit" / "tests_main.cpp"
 UI_TEST_MAIN = ROOT / "tests" / "ui" / "qtests_main.cpp"
+ADB_TRACKER_MANAGER_TEST = ROOT / "tests" / "unit" / "adb_device_tracker_manager_test.cpp"
 
 
 def function_body(source, signature):
@@ -51,6 +52,12 @@ def function_body(source, signature):
 
 
 class StaticAnalysisRegressionTest(unittest.TestCase):
+    def test_reference_returning_adb_lookup_does_not_bind_a_temporary_string_key(self):
+        source = ADB_TRACKER_MANAGER_TEST.read_text()
+        lookup = function_body(source, "const DomainAdbDeviceInfo& deviceWithSerial(")
+        self.assertIn("std::string_view serial", lookup)
+        self.assertNotIn("const std::string& serial", lookup)
+
     def test_filewatch_executor_contains_callback_exceptions(self):
         source = FILEWATCHER_SOURCE.read_text()
         runner = function_body(source, "    void run()")

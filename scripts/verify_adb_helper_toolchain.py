@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that an ADB helper release build runs on its exactly locked toolchain."""
+"""Verify the locked ADB compiler/toolchain on an approved hosted image family."""
 
 from __future__ import annotations
 
@@ -30,6 +30,16 @@ def verify_cmake_generator(expected: dict) -> None:
         first_line(["make", "--version"])
     else:
         raise RuntimeError(f"unsupported or missing locked CMake generator: {generator}")
+
+
+def verify_hosted_image_family(expected: dict, image_os: str) -> None:
+    family = expected.get("hosted_image_family")
+    if not isinstance(family, str) or not family:
+        raise RuntimeError("native ADB toolchain lacks a hosted_image_family")
+    if image_os != family:
+        raise RuntimeError(
+            f"hosted runner image family mismatch: expected {family}, got {image_os}"
+        )
 
 
 def main() -> int:
@@ -84,10 +94,10 @@ def main() -> int:
             print(f"local inspection build: skipping hosted runner identity check for {args.target}")
             return 0
         raise RuntimeError("release ADB build lacks GitHub hosted runner ImageOS/ImageVersion identity")
-    if image_version != expected["runner_image_revision"]:
-        raise RuntimeError(
-            f"runner image revision mismatch for {args.target}: expected {expected['runner_image_revision']}, got {image_version}"
-        )
+    # GitHub rotates the concrete ImageVersion behind stable hosted labels at
+    # different times for each architecture. Bind the stable image family plus
+    # exact compiler/CMake identities, and record the revision as provenance.
+    verify_hosted_image_family(expected, image_os)
 
     cmake_line = first_line(["cmake", "--version"])
     if expected["cmake_version"] not in cmake_line:

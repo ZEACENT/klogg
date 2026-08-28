@@ -42,12 +42,14 @@ runs:
         }
         docker pull "${{ inputs.container-image }}"
         docker run --rm --network none \
+          --user "$(id -u):$(id -g)" \
           --entrypoint /bin/bash \
           -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
           -v "$RUNNER_TEMP:$RUNNER_TEMP" \
           -w "$GITHUB_WORKSPACE" \
           -e GITHUB_WORKSPACE \
           -e RUNNER_TEMP \
+          -e HOME="$RUNNER_TEMP" \
           -e FETCHCONTENT_FULLY_DISCONNECTED=ON \
           -e FETCHCONTENT_UPDATES_DISCONNECTED=ON \
           "${{ inputs.container-image }}" -lc '

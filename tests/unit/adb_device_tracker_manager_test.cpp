@@ -27,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -588,7 +589,7 @@ struct ManagerHarness {
 };
 
 const DomainAdbDeviceInfo& deviceWithSerial( const std::vector<DomainAdbDeviceInfo>& devices,
-                                             const std::string& serial )
+                                             std::string_view serial )
 {
     const auto found
         = std::find_if( devices.begin(), devices.end(),

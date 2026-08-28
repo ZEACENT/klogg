@@ -389,6 +389,14 @@
       "build_input": false
     },
     {
+      "id": "mingw-w64-ucrt-x86_64-libwinpthread",
+      "version": "14.0.0.r302.gd7f3c5201-1",
+      "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-libwinpthread-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_file": "mingw-w64-ucrt-x86_64-libwinpthread-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
+      "archive_sha256": "585a24715e00130e4973a6f4806a0c728443ff035f7c78b0683974474424b30f",
+      "build_input": false
+    },
+    {
       "id": "mingw-w64-ucrt-x86_64-winpthreads",
       "version": "14.0.0.r302.gd7f3c5201-1",
       "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-winpthreads-14.0.0.r302.gd7f3c5201-1-any.pkg.tar.zst",
@@ -453,7 +461,7 @@
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "runner_image": "windows-2022",
-      "runner_image_revision": "20260818.1",
+      "hosted_image_family": "win22",
       "secondary_compiler": "mingw-w64-ucrt-x86_64-gcc",
       "secondary_compiler_version": "16.2.0-3",
       "msys2_environment": "UCRT64"
@@ -465,7 +473,7 @@
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "runner_image": "macos-15-intel",
-      "runner_image_revision": "20260818.1"
+      "hosted_image_family": "macos15"
     },
     "macos-arm64": {
       "identifier": "klogg-adb-macos-arm64-appleclang-17",
@@ -474,7 +482,7 @@
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "runner_image": "macos-15",
-      "runner_image_revision": "20260818.1"
+      "hosted_image_family": "macos15"
     }
   },
   "targets": {

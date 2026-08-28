@@ -298,8 +298,9 @@ void IosLogDialog::applyDiscoveryResult( DeviceDiscoveryResult<IosDeviceInfo> re
         deviceCombo_->setCurrentIndex( selectedIndex );
     }
 
-    if ( discoveryCoordinator_.currentError() ) {
-        statusLabel_->setText( discoveryMessage( *discoveryCoordinator_.currentError() ) );
+    if ( const auto error = discoveryCoordinator_.currentError(); error.has_value() ) {
+        statusLabel_->setText(
+            discoveryMessage( error.value_or( klogg::livecapture::LiveSourceError{} ) ) );
     }
     else if ( discoveryCoordinator_.currentDevices().isEmpty() ) {
         statusLabel_->setText( tr( "No iOS devices detected." ) );

@@ -25,6 +25,7 @@ NSIS = ROOT / "packaging" / "windows" / "klogg.nsi"
 SEVEN_Z_LIST = ROOT / "packaging" / "windows" / "7z_klogg_listfile.txt"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_adb_helper_artifact.py"
 SMOKE_SCRIPT = ROOT / "scripts" / "smoke_adb_helper.py"
+TOOLCHAIN_SCRIPT = ROOT / "scripts" / "verify_adb_helper_toolchain.py"
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -183,33 +184,38 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertEqual(set(toolchains), set(EXPECTED_TARGETS))
         for target, toolchain in toolchains.items():
             with self.subTest(target=target):
-                for field in (
+                identity_fields = [
                     "identifier",
                     "compiler",
                     "compiler_version",
                     "cmake_version",
                     "cmake_generator",
                     "runner_image",
-                    "runner_image_revision",
-                ):
+                ]
+                if target.startswith("linux-"):
+                    identity_fields.extend(("container_image", "container_digest"))
+                else:
+                    identity_fields.append("hosted_image_family")
+                    self.assertNotIn(
+                        "runner_image_revision",
+                        toolchain,
+                        "hosted image revisions rotate independently; lock the stable family and exact tools",
+                    )
+                for field in identity_fields:
                     self.assertIsInstance(toolchain.get(field), str)
                     self.assertTrue(toolchain[field].strip(), f"{target} lacks locked {field}")
-                locked_identity = " ".join(
-                    toolchain[field]
-                    for field in (
-                        "identifier",
-                        "compiler",
-                        "compiler_version",
-                        "cmake_version",
-                        "cmake_generator",
-                        "runner_image",
-                        "runner_image_revision",
-                    )
-                )
+                locked_identity = " ".join(toolchain[field] for field in identity_fields)
                 self.assertNotRegex(
                     locked_identity.lower(),
                     r"\b(?:latest|current|stable|rolling)\b",
                 )
+
+    def test_native_toolchains_bind_stable_hosted_families_not_ephemeral_revisions(self):
+        script = self.required_text(TOOLCHAIN_SCRIPT)
+        self.assertIn("verify_hosted_image_family(expected, image_os)", script)
+        self.assertNotIn('image_version != expected["runner_image_revision"]', script)
+        for family in ("macos15", "win22"):
+            self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
 
     def test_lock_forbids_prebuilt_sdk_path_runtime_and_system_fallbacks(self):
         document = self.lock()

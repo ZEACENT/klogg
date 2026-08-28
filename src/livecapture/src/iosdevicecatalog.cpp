@@ -83,8 +83,8 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
                 IosCatalogEntry{ std::move( endpoint ), ++nextEpoch, std::nullopt, std::nullopt } );
             return false;
         }
-        if ( !found->error.has_value()
-             || found->error->error.retryPolicy == RetryPolicy::Never ) {
+        const auto error = found->error.value_or( IosCatalogError{} );
+        if ( error.error.retryPolicy == RetryPolicy::Never ) {
             return false;
         }
 

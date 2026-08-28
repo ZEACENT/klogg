@@ -414,6 +414,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             package.get("id") for package in packages if isinstance(package, dict)
         }
         self.assertIn("mingw-w64-ucrt-x86_64-gcc", package_ids)
+        self.assertIn("mingw-w64-ucrt-x86_64-libwinpthread", package_ids)
         for package in packages:
             with self.subTest(package=package.get("id") if isinstance(package, dict) else package):
                 self.assertIsInstance(package, dict)
@@ -435,6 +436,10 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             helper_job,
             r'"?\$RUNNER_TEMP"?/adb-helper-prefetch/\*\.pkg\.tar\.zst',
         )
+
+    def test_linux_helper_container_writes_artifacts_as_the_runner_user(self):
+        self.assertIn('--user "$(id -u):$(id -g)"', self.build_action)
+        self.assertIn('-e HOME="$RUNNER_TEMP"', self.build_action)
 
     def test_source_build_artifacts_are_disconnected_hashed_attested_and_target_bound(self):
         expected = self.fixture["artifact_envelope"]
