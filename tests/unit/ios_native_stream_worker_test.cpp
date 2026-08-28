@@ -1412,8 +1412,8 @@ TEST_CASE( "default worker factory drains cleanup without executor self-join",
     CHECK_NOTHROW( session.reset() );
 }
 
-TEST_CASE( "default worker session destruction honors cleanup deadline while callback is blocked",
-           "[ios][native][stream][factory][lifetime][deadline][callback]" )
+TEST_CASE( "default worker session destruction never waits for a blocked native callback",
+           "[ios][native][stream][factory][lifetime][async-cleanup][callback]" )
 {
     FakeNative state;
     fake = &state;
@@ -1448,7 +1448,7 @@ TEST_CASE( "default worker session destruction honors cleanup deadline while cal
     };
 
     auto options = config( 811u );
-    options.cleanupDeadline = 75ms;
+    options.cleanupDeadline = 2s;
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
     auto session = factory.create( options, std::move( callbacks ) );
     REQUIRE( session->start() );
@@ -1476,7 +1476,7 @@ TEST_CASE( "default worker session destruction honors cleanup deadline while cal
     bool destroyedPromptly = false;
     {
         std::unique_lock<std::mutex> lock( mutex );
-        destroyedPromptly = changed.wait_for( lock, 500ms, [ & ] { return destroyed; } );
+        destroyedPromptly = changed.wait_for( lock, 250ms, [ & ] { return destroyed; } );
         releaseCallback = true;
     }
     changed.notify_all();

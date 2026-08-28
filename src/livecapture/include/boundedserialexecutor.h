@@ -70,6 +70,25 @@ public:
     BoundedSerialExecutor( const BoundedSerialExecutor& ) = delete;
     BoundedSerialExecutor& operator=( const BoundedSerialExecutor& ) = delete;
 
+    void shutdownAsync() noexcept
+    {
+        try {
+            {
+                std::lock_guard<std::mutex> lock( state_->mutex );
+                state_->stopping = true;
+            }
+            state_->changed.notify_all();
+            if ( thread_.joinable() ) {
+                // The worker retains State and drains already queued tasks before
+                // exiting. Detaching keeps a caller-owned teardown path nonblocking.
+                thread_.detach();
+            }
+        } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+            // Teardown must remain noexcept. The destructor retains its bounded
+            // wait fallback if the platform rejects detaching unexpectedly.
+        }
+    }
+
     void post( Task task )
     {
         {

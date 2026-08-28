@@ -824,6 +824,15 @@ public:
     {
     }
 
+    ~OwnedIosNativeStreamSession() override
+    {
+        worker_.shutdown();
+        // Cleanup already queued by shutdown retains the executor state. Detach
+        // its thread so destroying this wrapper never consumes the bounded wait
+        // deadline on a caller such as the Qt GUI thread.
+        executor_->shutdownAsync();
+    }
+
     bool start() override
     {
         return worker_.start();
