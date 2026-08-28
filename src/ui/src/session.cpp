@@ -294,9 +294,12 @@ private:
         const auto entry = std::find_if(
             snapshot.entries.cbegin(), snapshot.entries.cend(),
             [ &endpoint ]( const auto& candidate ) { return candidate.endpoint == endpoint; } );
-        if ( entry != snapshot.entries.cend() && entry->error.has_value()
-             && entry->error->error.retryPolicy != klogg::livecapture::RetryPolicy::Never ) {
-            requester->requestMetadata( endpoint );
+        if ( entry != snapshot.entries.cend() ) {
+            const auto error
+                = entry->error.value_or( klogg::livecapture::ios::IosCatalogError{} );
+            if ( error.error.retryPolicy != klogg::livecapture::RetryPolicy::Never ) {
+                requester->requestMetadata( endpoint );
+            }
         }
     }
 
@@ -306,7 +309,9 @@ private:
             controller_->infrastructureChanged(
                 klogg::livecapture::InfrastructureStatus::Unavailable,
                 klogg::livecapture::InfrastructureOwnership::AppShared );
-            controller_->infrastructureFailed( controller_->snapshot().generation, *startupError );
+            controller_->infrastructureFailed(
+                controller_->snapshot().generation,
+                startupError.value_or( klogg::livecapture::LiveSourceError{} ) );
             return;
         }
 
@@ -367,13 +372,17 @@ private:
             return;
         }
         if ( entry->error.has_value() ) {
-            if ( entry->error->error.retryPolicy == klogg::livecapture::RetryPolicy::AwaitUser
-                 && entry->error->awaitingUserReason.has_value() ) {
-                controller_->userActionRequired( generation,
-                                                 *entry->error->awaitingUserReason );
+            const auto error
+                = entry->error.value_or( klogg::livecapture::ios::IosCatalogError{} );
+            if ( error.error.retryPolicy == klogg::livecapture::RetryPolicy::AwaitUser
+                 && error.awaitingUserReason.has_value() ) {
+                controller_->userActionRequired(
+                    generation,
+                    error.awaitingUserReason.value_or(
+                        klogg::livecapture::AwaitingUserReason::Authorize ) );
             }
             else {
-                controller_->deviceAbsent( generation );
+                controller_->availabilityFailed( generation, error.error );
             }
             return;
         }

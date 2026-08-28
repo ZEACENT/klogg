@@ -174,6 +174,11 @@ struct InfrastructureFailed {
     LiveSourceError error;
     Timestamp at{ 0 };
 };
+struct AvailabilityFailed {
+    Generation generation{ 0 };
+    LiveSourceError error;
+    Timestamp at{ 0 };
+};
 struct DeviceAvailable {
     Generation generation{ 0 };
     Timestamp at{ 0 };
@@ -231,7 +236,8 @@ struct TimeAdvanced {
 
 using LiveStateEvent
     = std::variant<StartRequested, StopRequested, StopCompleted, InfrastructureChanged,
-                   InfrastructureFailed, DeviceAvailable, DeviceAbsent, UserActionRequired,
+                   InfrastructureFailed, AvailabilityFailed, DeviceAvailable, DeviceAbsent,
+                   UserActionRequired,
                    ProtocolServiceReady,
                    StreamHandleOpened, StreamReadArmed, StreamBytesReceived, StreamStable,
                    RetryRequested, RetryDeadlineReached, CaptureChanged, TimeAdvanced>;

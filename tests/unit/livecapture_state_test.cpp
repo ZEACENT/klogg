@@ -162,6 +162,23 @@ TEST_CASE( "terminal infrastructure failure leaves a running tab in Failed",
     CHECK( projectLiveState( failed.snapshot ).failureMessage == "actionable message" );
 }
 
+TEST_CASE( "recoverable availability failure is actionable instead of physical absence",
+           "[livecapture][state][device][failure]" )
+{
+    const auto state = waitingForDeviceState( InfrastructureOwnership::AppShared );
+    const auto error = makeError( ErrorCategory::Device, ErrorScope::Device,
+                                  RetryPolicy::Backoff, "ios-lockdown-timeout" );
+
+    const auto failed
+        = dispatch( state, AvailabilityFailed{ state.generation, error, at( 40 ) } );
+
+    REQUIRE( failed.accepted );
+    REQUIRE( failed.snapshot.source.status == SourceStatus::Failed );
+    REQUIRE( failed.snapshot.source.failure.has_value() );
+    CHECK( failed.snapshot.source.failure->code == "ios-lockdown-timeout" );
+    CHECK( projectLiveState( failed.snapshot ).reconnectEnabled );
+}
+
 TEST_CASE( "source state belongs to each tab while infrastructure ownership is shared",
            "[livecapture][state]" )
 {

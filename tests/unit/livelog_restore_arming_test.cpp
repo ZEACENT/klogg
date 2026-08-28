@@ -953,6 +953,47 @@ TEST_CASE( "manual reconnect retries recoverable iOS metadata for the selected e
     closeAndDeleteViews( *appSession, opened );
 }
 
+TEST_CASE( "transient iOS metadata failure remains actionable and retries on reconnect",
+           "[livelog-restore-arming][session][ios-catalog][metadata][backoff]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-metadata-backoff-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+
+    klogg::livecapture::ios::IosCatalogEntry entry;
+    entry.endpoint.udid = spec.device.deviceId.toStdString();
+    entry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    entry.epoch = 1u;
+    entry.error = klogg::livecapture::ios::IosCatalogError{
+        live::LiveSourceError{ live::ErrorCategory::Device, "ios-lockdown-timeout",
+                               live::ErrorScope::Device, live::RetryPolicy::Backoff,
+                               "The iOS device metadata request timed out.", "lockdown timeout" },
+        std::nullopt
+    };
+    catalog.publish( { 1u, { entry } } );
+
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Failed );
+    REQUIRE( controller->snapshot().source.failure.has_value() );
+    CHECK( controller->snapshot().source.failure->code == "ios-lockdown-timeout" );
+    REQUIRE( catalog.metadataRequests.empty() );
+
+    controller->startRequested();
+
+    REQUIRE( catalog.metadataRequests.size() == 1u );
+    CHECK( catalog.metadataRequests.front() == entry.endpoint );
+    closeAndDeleteViews( *appSession, opened );
+}
+
 TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
            "[livelog-restore-arming][session][ios-catalog]" )
 {

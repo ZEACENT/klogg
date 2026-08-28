@@ -85,6 +85,8 @@ public:
         std::optional<livecapture::InfrastructureOwnership> ownership = std::nullopt );
     void infrastructureFailed( livecapture::Generation generation,
                                livecapture::LiveSourceError error );
+    void availabilityFailed( livecapture::Generation generation,
+                             livecapture::LiveSourceError error );
     void deviceAvailable( livecapture::Generation generation );
     void deviceAbsent( livecapture::Generation generation );
     void userActionRequired( livecapture::Generation generation,

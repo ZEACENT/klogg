@@ -824,12 +824,14 @@ TEST_CASE( "Reentrant effect callbacks wait until the current effect batch is re
     clock.set( at( 500 ) );
     controller.reconnectRequested();
 
-    REQUIRE( effects.records.size() == 3u );
+    REQUIRE( effects.records.size() == 4u );
     CHECK( effects.records.at( 0 ).kind == RecordingEffects::Kind::InvalidateGeneration );
     CHECK( effects.records.at( 1 ).kind == RecordingEffects::Kind::CancelStream );
     CHECK( effects.records.at( 1 ).generation == oldGeneration );
-    CHECK( effects.records.at( 2 ).kind == RecordingEffects::Kind::OpenStream );
+    CHECK( effects.records.at( 2 ).kind == RecordingEffects::Kind::StartInfrastructure );
     CHECK( effects.records.at( 2 ).generation == controller.snapshot().generation );
+    CHECK( effects.records.at( 3 ).kind == RecordingEffects::Kind::OpenStream );
+    CHECK( effects.records.at( 3 ).generation == controller.snapshot().generation );
     CHECK( controller.snapshot().source.status == live::SourceStatus::OpeningStream );
 }
 

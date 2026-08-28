@@ -311,6 +311,12 @@ void LiveLogController::infrastructureFailed( live::Generation generation,
     dispatch( live::InfrastructureFailed{ generation, std::move( error ), clock_->now() } );
 }
 
+void LiveLogController::availabilityFailed( live::Generation generation,
+                                            live::LiveSourceError error )
+{
+    dispatch( live::AvailabilityFailed{ generation, std::move( error ), clock_->now() } );
+}
+
 void LiveLogController::deviceAvailable( live::Generation generation )
 {
     dispatch( live::DeviceAvailable{ generation, clock_->now() } );

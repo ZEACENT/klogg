@@ -280,6 +280,22 @@ void apply( LiveStateTransition& transition, const InfrastructureFailed& event,
     transition.accepted = true;
 }
 
+void apply( LiveStateTransition& transition, const AvailabilityFailed& event,
+            const LiveStateConfig& )
+{
+    auto& snapshot = transition.snapshot;
+    if ( !hasCurrentRunningGeneration( snapshot, event )
+         || ( snapshot.source.status != SourceStatus::WaitingForDevice
+              && snapshot.source.status != SourceStatus::AwaitingUser ) ) {
+        return;
+    }
+
+    advanceNow( snapshot, event.at );
+    enterSourceState( snapshot, SourceStatus::Failed );
+    snapshot.source.failure = event.error;
+    transition.accepted = true;
+}
+
 void apply( LiveStateTransition& transition, const DeviceAvailable& event, const LiveStateConfig& )
 {
     auto& snapshot = transition.snapshot;
