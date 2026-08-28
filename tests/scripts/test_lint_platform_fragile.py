@@ -13,15 +13,23 @@ def check(text, name="foldersearchengine_test.cpp"):
     return lint._check_vectorscan_capability_assertion(text, Path(name))
 
 
-class DefaultQtryTimeoutPatternTest(unittest.TestCase):
-    def test_default_timeout_is_flagged_but_explicit_int_timeout_is_allowed(self):
+class QtryVerifyMacroPatternTest(unittest.TestCase):
+    def test_all_qtry_verify_variants_are_flagged(self):
         pattern = next(
-            item for item in lint.PATTERNS if item["name"] == "qtry-verify-default-timeout"
+            item for item in lint.PATTERNS if item["name"] == "qtry-verify-macro"
         )["regex"]
         self.assertIsNotNone(pattern.search("QTRY_VERIFY( ready );"))
-        self.assertIsNone(
+        self.assertIsNotNone(
             pattern.search("QTRY_VERIFY_WITH_TIMEOUT( ready, AsyncWaitTimeoutMs );")
         )
+        self.assertIsNotNone(pattern.search("QTRY_VERIFY_FUTURE_VARIANT( ready );"))
+
+    def test_similarly_named_helpers_are_allowed(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qtry-verify-macro"
+        )["regex"]
+        self.assertIsNone(pattern.search("waitForQtCondition( ready );"))
+        self.assertIsNone(pattern.search("QTRY_COMPARE( actual, expected );"))
 
 
 class VectorscanCapabilityAssertionTest(unittest.TestCase):

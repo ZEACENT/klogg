@@ -281,12 +281,12 @@ PATTERNS: list[dict] = [
         ),
     },
     {
-        "name": "qtry-verify-default-timeout",
-        "regex": re.compile(r"\bQTRY_VERIFY\s*\("),
+        "name": "qtry-verify-macro",
+        "regex": re.compile(r"\bQTRY_VERIFY[A-Z0-9_]*\s*\("),
         "fix": (
-            "Use QTRY_VERIFY_WITH_TIMEOUT with a named int timeout. Qt 6.9's "
-            "default QTRY_VERIFY timeout is chrono-based and GCC 13 rejects "
-            "the macro's implicit duration::rep-to-int conversion under -Werror."
+            "Use a QElapsedTimer/QTest::qWait polling helper instead of QTRY_VERIFY. "
+            "Qt 6.9's retry macros pass chrono duration reps through int timeout "
+            "internals, which GCC 13 rejects under -Werror=conversion."
         ),
     },
 ]
