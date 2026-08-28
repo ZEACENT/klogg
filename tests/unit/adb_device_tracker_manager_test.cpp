@@ -600,7 +600,8 @@ const DomainAdbDeviceInfo& deviceWithSerial( const std::vector<DomainAdbDeviceIn
 void requireKnownDevices( const AdbInfrastructureManager& manager,
                           const std::vector<std::string>& serials )
 {
-    const auto& devices = manager.snapshot().devices.devices;
+    const auto snapshot = manager.snapshot();
+    const auto& devices = snapshot.devices.devices;
     REQUIRE( devices.size() == serials.size() );
     for ( std::size_t index = 0; index < serials.size(); ++index ) {
         CHECK( devices.at( index ).serial == serials.at( index ) );
@@ -638,7 +639,7 @@ TEST_CASE( "shared ADB tracker starts only after infrastructure readiness and pu
     REQUIRE( drainEventsUntil(
         [ &harness ] { return harness.manager.snapshot().devices.devices.size() == 3u; } ) );
 
-    const auto& snapshot = harness.manager.snapshot();
+    const auto snapshot = harness.manager.snapshot();
     CHECK( snapshot.generation == managerGeneration );
     CHECK( snapshot.infrastructureEpoch > 0u );
     CHECK( snapshot.devices.generation == managerGeneration );
@@ -794,7 +795,8 @@ TEST_CASE( "track FAIL and EOF use bounded injected reconnect without withdrawin
     harness.server.sendTrackAccepted(
         2, QByteArrayLiteral( "replacement-device\tdevice model:Pixel_10 transport_id:7\n" ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
-        const auto& devices = harness.manager.snapshot().devices.devices;
+        const auto snapshot = harness.manager.snapshot();
+        const auto& devices = snapshot.devices.devices;
         return devices.size() == 1u && devices.front().serial == "replacement-device";
     } ) );
 }
@@ -854,7 +856,8 @@ TEST_CASE( "server replacement advances infrastructure epoch and ignores stale t
     harness.server.sendTrackAccepted(
         1, QByteArrayLiteral( "current-after-replacement\tdevice transport_id:9\n" ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
-        const auto& devices = harness.manager.snapshot().devices.devices;
+        const auto snapshot = harness.manager.snapshot();
+        const auto& devices = snapshot.devices.devices;
         return devices.size() == 1u && devices.front().serial == "current-after-replacement";
     } ) );
     CHECK( harness.manager.snapshot().devices.infrastructureEpoch == firstEpoch + 1u );

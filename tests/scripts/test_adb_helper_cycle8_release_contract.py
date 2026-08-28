@@ -320,6 +320,12 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             matching_helper or fail_closed,
             "Windows x86 packaging must be disabled or declare a matching windows-x86 helper",
         )
+        if fail_closed:
+            self.assertNotIn(
+                "x86-Qt5-QTRegex",
+                self.ci_build,
+                "continuous release notes must not advertise disabled Windows x86 packages",
+            )
 
         active_package = active_lines(read_text(WIN_PACKAGE))
         self.assertNotIn("--expected-target windows-x86_64", active_package)

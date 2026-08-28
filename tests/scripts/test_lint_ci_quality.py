@@ -119,6 +119,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{'a' * 40}
 """
         issues = MODULE.codeql_workflow_issues(text)
@@ -133,6 +134,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{CODEQL_PINNED}
 """
         issues = MODULE.codeql_workflow_issues(text)
@@ -146,9 +148,40 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{CODEQL_PINNED}
 """
         self.assertEqual(MODULE.codeql_workflow_issues(text), [])
+
+    def test_codeql_configure_requires_the_restored_cpm_source_cache(self):
+        text = f"""\
+jobs:
+  analyze:
+    timeout-minutes: 30
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build
+      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
+"""
+        self.assertIn(
+            "CodeQL configure must use the restored CPM source cache fully disconnected",
+            MODULE.codeql_workflow_issues(text),
+        )
+
+    def test_agent_setup_self_populates_cold_cpm_caches(self):
+        action = (
+            ROOT / ".github" / "actions" / "agent-setup" / "action.yml"
+        ).read_text()
+        self.assertEqual(MODULE.agent_setup_cpm_issues(action), [])
+
+        without_prefetch = action.replace(
+            "      uses: ./.github/actions/prefetch-cpm-cache\n", "", 1
+        )
+        self.assertNotEqual(without_prefetch, action)
+        self.assertIn(
+            "agent setup must populate the CPM source cache after restore",
+            MODULE.agent_setup_cpm_issues(without_prefetch),
+        )
 
     def test_scans_yaml_workflows_and_composite_actions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -443,7 +476,7 @@ env:
   KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
@@ -466,6 +499,24 @@ steps:
             "static analysis must configure optional Vectorscan production code",
             MODULE.static_analysis_workflow_issues(insecure),
         )
+
+    def test_static_analysis_configure_requires_the_prefetched_cpm_cache(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        message = (
+            "static analysis configure must use the prefetched CPM cache "
+            "fully disconnected"
+        )
+        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
+
+        without_cache = workflow.replace(
+            '            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \\\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(without_cache, workflow)
+        self.assertIn(message, MODULE.static_analysis_workflow_issues(without_cache))
 
     def test_static_analysis_changed_path_discovery_excludes_deleted_files(self):
         # A PR that deletes a src/ file must not feed the deleted path to

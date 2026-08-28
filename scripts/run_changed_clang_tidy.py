@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -19,6 +20,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from clang_tidy_header_filter import build_filter
 from first_party_compile_units import load_first_party_compile_units
+from lint_header_self_contained import (
+    first_party_units as load_header_compile_units,
+    include_flag_union,
+    load_compile_database,
+    representative_unit,
+    syntax_only_command,
+)
 
 
 SOURCE_EXTENSIONS = {".c", ".cc", ".cpp", ".cxx"}
@@ -172,6 +180,7 @@ def header_analysis_command(
     header: Path,
     line_filter: str,
     extra_arguments: list[str],
+    compiler_arguments: list[str],
 ) -> list[str]:
     return [
         str(clang_tidy),
@@ -180,6 +189,8 @@ def header_analysis_command(
         f"--line-filter={line_filter}",
         *clang_tidy_extra_arguments(extra_arguments),
         str(header),
+        "--",
+        *compiler_arguments,
     ]
 
 
@@ -252,25 +263,44 @@ def run_direct_header_pass(
     jobs: int,
     extra_arguments: list[str],
     environment: dict[str, str],
+    header_units: list[tuple[Path, Path, list[str]]],
+    header_include_flags: list[str],
 ) -> tuple[int, str]:
-    def analyze(header: Path) -> tuple[int, str]:
-        return run_process(
-            header_analysis_command(
-                clang_tidy,
-                build_dir,
-                header,
-                line_filter,
-                extra_arguments,
-            ),
-            environment=environment,
-        )
-
     status = 0
     outputs: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
-        for header_status, header_output in executor.map(analyze, headers):
-            status = status or header_status
-            outputs.append(header_output)
+    with tempfile.TemporaryDirectory(
+        prefix="klogg-clang-tidy-header-", dir=build_dir
+    ) as directory:
+        probe_dir = Path(directory)
+        probes: list[tuple[Path, Path]] = []
+        for index, header in enumerate(headers):
+            probe = probe_dir / f"header_{index}.cpp"
+            probe.write_text(f'#include "{header}"\n')
+            probes.append((header, probe))
+
+        def analyze(item: tuple[Path, Path]) -> tuple[int, str]:
+            header, probe = item
+            compiler_command = syntax_only_command(
+                representative_unit(header, header_units), probe, header_include_flags
+            )
+            return run_process(
+                header_analysis_command(
+                    clang_tidy,
+                    build_dir,
+                    probe,
+                    line_filter,
+                    extra_arguments,
+                    compiler_command[1:-1],
+                ),
+                environment=environment,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, jobs)
+        ) as executor:
+            for header_status, header_output in executor.map(analyze, probes):
+                status = status or header_status
+                outputs.append(header_output)
     return status, "".join(outputs)
 
 
@@ -283,6 +313,8 @@ def run_changed_header_passes(
     jobs: int,
     extra_arguments: list[str],
     environment: dict[str, str],
+    header_units: list[tuple[Path, Path, list[str]]],
+    header_include_flags: list[str],
     *,
     fast: bool,
 ) -> tuple[int, str]:
@@ -311,6 +343,8 @@ def run_changed_header_passes(
         jobs,
         extra_arguments,
         environment,
+        header_units,
+        header_include_flags,
     )
     status = status or direct_status
     outputs.append(direct_output)
@@ -357,6 +391,10 @@ def main() -> int:
         clang_tidy = find_clang_tidy(args.clang_tidy)
         clang_tidy_diff = find_clang_tidy_diff(args.clang_tidy_diff, clang_tidy)
         units = load_first_party_compile_units(compile_database, source_root)
+        header_units = load_header_compile_units(
+            load_compile_database(build_dir), source_root
+        )
+        header_include_flags = include_flag_union(header_units)
     except (FileNotFoundError, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -425,6 +463,8 @@ def main() -> int:
             args.jobs,
             args.extra_arg,
             environment,
+            header_units,
+            header_include_flags,
             fast=args.fast,
         )
         status = status or header_status

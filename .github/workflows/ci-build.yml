@@ -2126,8 +2126,6 @@ jobs:
             ### Windows
             - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
             - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
-            - Windows x86 (Qt 5, QT Regex engine): [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe)
-            - Windows x86 (Qt 5, QT Regex engine) portable: [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip)
 
             ### Linux
             - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)

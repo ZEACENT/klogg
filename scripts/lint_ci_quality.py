@@ -404,7 +404,69 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if len(pinned_shas) == 2 and pinned_shas["init"] != pinned_shas["analyze"]:
         issues.append("CodeQL init and analyze must use the same reviewed SHA")
 
+    cmake_configures = []
+    for command in shell_commands(text):
+        tokens = shell_tokens(command)
+        if (
+            tokens
+            and tokens[0] == "cmake"
+            and "--build" not in tokens
+            and "-P" not in tokens
+        ):
+            cmake_configures.append(tokens)
+    cpm_source_caches = [
+        value
+        for tokens in cmake_configures
+        for value in cmake_cache_assignments(tokens, "CPM_SOURCE_CACHE")
+    ]
+    fully_disconnected = [
+        value
+        for tokens in cmake_configures
+        for value in cmake_cache_assignments(
+            tokens, "FETCHCONTENT_FULLY_DISCONNECTED"
+        )
+    ]
+    if (
+        cpm_source_caches != ["$GITHUB_WORKSPACE/CPM_CACHE"]
+        or fully_disconnected != ["ON"]
+    ):
+        issues.append(
+            "CodeQL configure must use the restored CPM source cache fully disconnected"
+        )
+
     return issues
+
+
+def agent_setup_cpm_issues(text: str) -> list[str]:
+    """Keep cache-only workflows independent of cross-workflow warm-up races."""
+    restore_marker = "name: Restore CPM cache"
+    prefetch_marker = "uses: ./.github/actions/prefetch-cpm-cache"
+    restore_position = text.find(restore_marker)
+    prefetch_position = text.find(prefetch_marker)
+    required_condition = "if: ${{ env.KLOGG_REQUIRE_PREFETCHED_CPM != 'ON' }}"
+
+    if (
+        restore_position < 0
+        or prefetch_position < 0
+        or restore_position >= prefetch_position
+        or text.count(prefetch_marker) != 1
+    ):
+        return ["agent setup must populate the CPM source cache after restore"]
+
+    prefetch_block_start = text.rfind("\n    - ", restore_position, prefetch_position)
+    if prefetch_block_start < 0:
+        prefetch_block_start = restore_position
+    prefetch_block_end = text.find("\n    - ", prefetch_position)
+    if prefetch_block_end < 0:
+        prefetch_block_end = len(text)
+    prefetch_block = text[prefetch_block_start:prefetch_block_end]
+    if (
+        required_condition not in prefetch_block
+        or "KLOGG_WORKSPACE: ${{ github.workspace }}" not in prefetch_block
+    ):
+        return ["agent setup must populate the CPM source cache after restore"]
+
+    return []
 
 
 def has_unsupported_macos_lsan(text: str) -> bool:
@@ -550,6 +612,26 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
     ):
         issues.append(
             "static analysis must configure optional Vectorscan production code"
+        )
+
+    cpm_source_caches = [
+        value
+        for tokens in sentry_configures
+        for value in cmake_cache_assignments(tokens, "CPM_SOURCE_CACHE")
+    ]
+    fully_disconnected = [
+        value
+        for tokens in sentry_configures
+        for value in cmake_cache_assignments(
+            tokens, "FETCHCONTENT_FULLY_DISCONNECTED"
+        )
+    ]
+    if (
+        cpm_source_caches != ["$KLOGG_WORKSPACE/CPM_CACHE"]
+        or fully_disconnected != ["ON"]
+    ):
+        issues.append(
+            "static analysis configure must use the prefetched CPM cache fully disconnected"
         )
 
     if not re.search(
@@ -739,6 +821,14 @@ def check_repo(root: Path) -> list[str]:
     issues.extend(
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in codeql_workflow_issues(codeql_text)
+    )
+
+    agent_setup_path = (
+        root / ".github" / "actions" / "agent-setup" / "action.yml"
+    )
+    issues.extend(
+        f".github/actions/agent-setup/action.yml: {issue}"
+        for issue in agent_setup_cpm_issues(agent_setup_path.read_text())
     )
 
     static_text = (workflows / "static-analysis.yml").read_text()

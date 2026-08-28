@@ -48,9 +48,14 @@ jobs:
 
     - name: configure
       run: |
-        mkdir build
-        cd build
-        cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=OFF -DKLOGG_USE_VECTORSCAN=OFF ..
+        cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DKLOGG_GENERIC_CPU=ON \
+          -DKLOGG_USE_SENTRY=OFF \
+          -DKLOGG_USE_VECTORSCAN=OFF \
+          -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" \
+          -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
     - name: build
       run: |

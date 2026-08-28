@@ -3,7 +3,6 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 option(KLOGG_ADB_HELPER_REQUIRED "Fail configure when a verified source-built ADB helper artifact is unavailable" OFF)
 set(KLOGG_ADB_HELPER_ARTIFACT_ROOT "" CACHE PATH "Disconnected source-built ADB helper artifact root")
 set(KLOGG_ADB_HELPER_TARGET "" CACHE STRING "Locked ADB helper target identifier")
-set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "ADB helper application/package configuration is always disconnected" FORCE)
 
 set(KLOGG_ADB_HELPER_LOCK "${CMAKE_CURRENT_SOURCE_DIR}/adb-helper.lock.json")
 set(_klogg_adb_verify "${CMAKE_SOURCE_DIR}/scripts/verify_adb_helper_artifact.py")
