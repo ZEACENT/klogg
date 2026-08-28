@@ -51,6 +51,7 @@ constexpr auto BundledAdbPath = "/opt/klogg/libexec/android-platform-tools/adb";
 constexpr auto StartupLockPath = "/test-user/state/klogg/adb-server-5037.lock";
 constexpr auto FirstIdentity = "adb-server:first";
 constexpr auto ReplacementIdentity = "adb-server:replacement";
+constexpr int AsyncWaitTimeoutMs = 5000;
 
 AdbServerProbeResult absentProbe( std::string diagnostic = "connection refused" )
 {
@@ -1106,7 +1107,7 @@ TEST_CASE( "Qt launcher refuses PATH resolution even when an adb-named executabl
     launcher.launch( request,
                      [ &result ]( AdbServerLaunchResult event ) { result = std::move( event ); } );
 
-    QTRY_VERIFY( result.has_value() );
+    QTRY_VERIFY_WITH_TIMEOUT( result.has_value(), AsyncWaitTimeoutMs );
     CHECK( result->state == AdbServerLaunchState::Failed );
     CHECK_FALSE( result->cleanupPermitted );
     CHECK( result->diagnostic.find( "explicit executable" ) != std::string::npos );
@@ -1137,14 +1138,15 @@ TEST_CASE( "published Qt launcher process survives launcher destruction and drai
         };
         const auto token = launcher.launch(
             request, [ &result ]( AdbServerLaunchResult event ) { result = std::move( event ); } );
-        QTRY_VERIFY( result.has_value() );
+        QTRY_VERIFY_WITH_TIMEOUT( result.has_value(), AsyncWaitTimeoutMs );
         REQUIRE( result->state == AdbServerLaunchState::Started );
-        QTRY_VERIFY( readHeartbeat( heartbeatPath ) > 0u );
+        QTRY_VERIFY_WITH_TIMEOUT( readHeartbeat( heartbeatPath ) > 0u, AsyncWaitTimeoutMs );
         launcher.release( token );
     }
 
     const auto heartbeatAfterLauncherDestruction = readHeartbeat( heartbeatPath );
-    QTRY_VERIFY( readHeartbeat( heartbeatPath ) > heartbeatAfterLauncherDestruction );
+    QTRY_VERIFY_WITH_TIMEOUT(
+        readHeartbeat( heartbeatPath ) > heartbeatAfterLauncherDestruction, AsyncWaitTimeoutMs );
     stopGuard.requestStop();
     QTest::qWait( 100 );
 }
@@ -1521,7 +1523,7 @@ TEST_CASE( "startup lock never steals an old lease from a live process",
               result = std::move( completed );
           } );
 
-    QTRY_VERIFY( result.has_value() );
+    QTRY_VERIFY_WITH_TIMEOUT( result.has_value(), AsyncWaitTimeoutMs );
     CHECK( result->state == AdbServerStartupLockState::Contended );
     startupLock.cancel( token );
     heldLock.unlock();
@@ -1543,7 +1545,7 @@ TEST_CASE( "startup lock adapter distinguishes permanent path failures from cont
         QDir( blockerPath ).filePath( QStringLiteral( "adb-server.lock" ) ),
         [ &result ]( AdbServerStartupLockResult completed ) { result = std::move( completed ); } );
 
-    QTRY_VERIFY( result.has_value() );
+    QTRY_VERIFY_WITH_TIMEOUT( result.has_value(), AsyncWaitTimeoutMs );
     CHECK( result->state == AdbServerStartupLockState::Failed );
     CHECK_FALSE( result->diagnostic.empty() );
 }

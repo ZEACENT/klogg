@@ -13,6 +13,17 @@ def check(text, name="foldersearchengine_test.cpp"):
     return lint._check_vectorscan_capability_assertion(text, Path(name))
 
 
+class DefaultQtryTimeoutPatternTest(unittest.TestCase):
+    def test_default_timeout_is_flagged_but_explicit_int_timeout_is_allowed(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qtry-verify-default-timeout"
+        )["regex"]
+        self.assertIsNotNone(pattern.search("QTRY_VERIFY( ready );"))
+        self.assertIsNone(
+            pattern.search("QTRY_VERIFY_WITH_TIMEOUT( ready, AsyncWaitTimeoutMs );")
+        )
+
+
 class VectorscanCapabilityAssertionTest(unittest.TestCase):
     def test_unguarded_require_is_flagged(self):
         # The exact shape that broke the Windows x86-qt5 [QTRegex] job in PR #42.

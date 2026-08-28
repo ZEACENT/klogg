@@ -12,20 +12,29 @@ import re
 import subprocess
 
 
-def first_line(command: list[str], accepted_returncodes: tuple[int, ...] = (0,)) -> str:
+def command_text(command: list[str], accepted_returncodes: tuple[int, ...] = (0,)) -> str:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode not in accepted_returncodes:
         raise RuntimeError(f"toolchain command failed: {' '.join(command)}")
-    lines = (result.stdout or result.stderr).splitlines()
-    if not lines:
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if not output:
         raise RuntimeError(f"toolchain command produced no identity: {' '.join(command)}")
-    return lines[0]
+    return output
+
+
+def first_line(command: list[str], accepted_returncodes: tuple[int, ...] = (0,)) -> str:
+    return command_text(command, accepted_returncodes).splitlines()[0]
 
 
 def verify_cmake_generator(expected: dict) -> None:
     generator = expected.get("cmake_generator")
     if generator == "Ninja":
-        first_line(["ninja", "--version"])
+        ninja_line = first_line(["ninja", "--version"])
+        expected_ninja = expected.get("ninja_version")
+        if not isinstance(expected_ninja, str) or expected_ninja not in ninja_line:
+            raise RuntimeError(
+                f"Ninja version mismatch: expected {expected_ninja}, got {ninja_line}"
+            )
     elif generator == "Unix Makefiles":
         first_line(["make", "--version"])
     else:
@@ -110,8 +119,9 @@ def main() -> int:
     elif compiler == "appleclang":
         compiler_line = first_line(["clang++", "--version"])
     elif compiler == "msvc":
-        # cl.exe prints its identity and exits 2 when invoked without an input file.
-        compiler_line = first_line(["cl"], accepted_returncodes=(0, 2))
+        # /Bv emits the compiler identity even when cl exits 2 for no input file.
+        # Inspect combined stdout/stderr because MSYS wrappers may print usage first.
+        compiler_line = command_text(["cl", "/Bv"], accepted_returncodes=(0, 2))
     else:
         raise RuntimeError(f"unsupported locked compiler identity: {compiler}")
     if expected["compiler_version"] not in compiler_line:

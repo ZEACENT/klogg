@@ -195,7 +195,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                 if target.startswith("linux-"):
                     identity_fields.extend(("container_image", "container_digest"))
                 else:
-                    identity_fields.append("hosted_image_family")
+                    identity_fields.extend(("hosted_image_family", "ninja_version"))
                     self.assertNotIn(
                         "runner_image_revision",
                         toolchain,
@@ -212,8 +212,13 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
     def test_native_toolchains_bind_stable_hosted_families_not_ephemeral_revisions(self):
         script = self.required_text(TOOLCHAIN_SCRIPT)
+        workflow = self.required_text(CI_BUILD)
         self.assertIn("verify_hosted_image_family(expected, image_os)", script)
         self.assertNotIn('image_version != expected["runner_image_revision"]', script)
+        self.assertIn('command_text(["cl", "/Bv"]', script)
+        self.assertIn("lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb", workflow)
+        self.assertIn("cmakeVersion: 3.31.6", workflow)
+        self.assertIn("ninjaVersion: 1.12.1", workflow)
         for family in ("macos15", "win22"):
             self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
 

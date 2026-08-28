@@ -280,6 +280,15 @@ PATTERNS: list[dict] = [
             "mainwindow_test.cpp folder-dispatch test.)"
         ),
     },
+    {
+        "name": "qtry-verify-default-timeout",
+        "regex": re.compile(r"\bQTRY_VERIFY\s*\("),
+        "fix": (
+            "Use QTRY_VERIFY_WITH_TIMEOUT with a named int timeout. Qt 6.9's "
+            "default QTRY_VERIFY timeout is chrono-based and GCC 13 rejects "
+            "the macro's implicit duration::rep-to-int conversion under -Werror."
+        ),
+    },
 ]
 
 # Multi-line patterns: checked separately via whole-file analysis.

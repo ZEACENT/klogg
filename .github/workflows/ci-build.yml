@@ -474,6 +474,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install locked native CMake toolchain
+        if: ${{ !startsWith(matrix.target, 'linux-') }}
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb
+        with:
+          cmakeVersion: 3.31.6
+          ninjaVersion: 1.12.1
+
       - name: Prepare MSVC for source-built AdbWinApi DLLs
         if: ${{ matrix.target == 'windows-x86_64' }}
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1

@@ -460,6 +460,7 @@
       "compiler_version": "19.44.35222",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
+      "ninja_version": "1.12.1",
       "runner_image": "windows-2022",
       "hosted_image_family": "win22",
       "secondary_compiler": "mingw-w64-ucrt-x86_64-gcc",
@@ -472,6 +473,7 @@
       "compiler_version": "17.0.0",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
+      "ninja_version": "1.12.1",
       "runner_image": "macos-15-intel",
       "hosted_image_family": "macos15"
     },
@@ -481,6 +483,7 @@
       "compiler_version": "17.0.0",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
+      "ninja_version": "1.12.1",
       "runner_image": "macos-15",
       "hosted_image_family": "macos15"
     }
