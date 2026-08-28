@@ -632,6 +632,49 @@ TEST_CASE(
     catalog.stop();
 }
 
+TEST_CASE( "paired event rearms recoverable metadata failure for the existing endpoint",
+           "[ios][catalog][metadata][error][pairing-policy][retry]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "trust-retry", NativeConnectionType::Usb } };
+    state.metadata[ "trust-retry@usb" ] = { -19, {}, {}, {} };
+    ManualExecutor executor;
+    IosDeviceCatalog catalog( makeApi(), executor.executor() );
+    REQUIRE( catalog.start() );
+
+    const IosEndpointKey endpoint{ "trust-retry", NativeConnectionType::Usb };
+    catalog.requestMetadata( endpoint );
+    executor.runAllOnWorker();
+    const auto failed = catalog.snapshot();
+    const auto* failedEntry
+        = findEntry( failed, endpoint.udid, endpoint.connectionType );
+    REQUIRE( failedEntry != nullptr );
+    REQUIRE( failedEntry->error.has_value() );
+    const auto failedEpoch = failedEntry->epoch;
+
+    state.metadata[ "trust-retry@usb" ] = { 0, "Trusted phone", "iPhone17,1", "20.0" };
+    state.emit( NativeEventType::Paired, endpoint.udid, endpoint.connectionType );
+    executor.runAllOnWorker();
+
+    const auto rearmed = catalog.snapshot();
+    const auto* rearmedEntry
+        = findEntry( rearmed, endpoint.udid, endpoint.connectionType );
+    REQUIRE( rearmedEntry != nullptr );
+    CHECK( rearmedEntry->epoch > failedEpoch );
+    CHECK_FALSE( rearmedEntry->error.has_value() );
+
+    catalog.requestMetadata( endpoint );
+    executor.runAllOnWorker();
+    const auto recovered = catalog.snapshot();
+    const auto* recoveredEntry
+        = findEntry( recovered, endpoint.udid, endpoint.connectionType );
+    REQUIRE( recoveredEntry != nullptr );
+    REQUIRE( recoveredEntry->metadata.has_value() );
+    CHECK( recoveredEntry->metadata->displayName == "Trusted phone" );
+    catalog.stop();
+}
+
 TEST_CASE( "catalog restart rejects metadata queued by a stale catalog generation",
            "[ios][catalog][generation][stale]" )
 {

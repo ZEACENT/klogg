@@ -71,15 +71,27 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
             [ &endpoint ]( const IosCatalogEntry& entry ) { return entry.endpoint == endpoint; } );
     }
 
-    static void addEndpointToSnapshot( IosCatalogSnapshot& snapshot, IosEndpointKey endpoint,
-                                       Generation& nextEpoch )
+    static bool addOrRearmEndpoint( IosCatalogSnapshot& snapshot, IosEndpointKey endpoint,
+                                    Generation& nextEpoch )
     {
-        if ( endpoint.udid.empty() || !isSupportedConnection( endpoint.connectionType )
-             || findEntry( snapshot, endpoint ) != snapshot.entries.end() ) {
-            return;
+        if ( endpoint.udid.empty() || !isSupportedConnection( endpoint.connectionType ) ) {
+            return false;
         }
-        snapshot.entries.push_back(
-            IosCatalogEntry{ std::move( endpoint ), ++nextEpoch, std::nullopt, std::nullopt } );
+        const auto found = findEntry( snapshot, endpoint );
+        if ( found == snapshot.entries.end() ) {
+            snapshot.entries.push_back(
+                IosCatalogEntry{ std::move( endpoint ), ++nextEpoch, std::nullopt, std::nullopt } );
+            return false;
+        }
+        if ( !found->error.has_value()
+             || found->error->error.retryPolicy == RetryPolicy::Never ) {
+            return false;
+        }
+
+        found->epoch = ++nextEpoch;
+        found->metadata.reset();
+        found->error.reset();
+        return true;
     }
 
     void applyEventToSnapshot( const CopiedNativeEvent& event )
@@ -87,7 +99,9 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         switch ( event.type ) {
         case NativeEventType::Add:
         case NativeEventType::Paired:
-            addEndpointToSnapshot( current, event.endpoint, nextEpoch );
+            if ( addOrRearmEndpoint( current, event.endpoint, nextEpoch ) ) {
+                latestMetadataRequest.erase( endpointIdentity( event.endpoint ) );
+            }
             break;
         case NativeEventType::Remove: {
             const auto found = findEntry( current, event.endpoint );
@@ -263,8 +277,8 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
                 if ( entry == nullptr || entry->udid == nullptr ) {
                     continue;
                 }
-                addEndpointToSnapshot(
-                    current, IosEndpointKey{ entry->udid, entry->connectionType }, nextEpoch );
+                static_cast<void>( addOrRearmEndpoint(
+                    current, IosEndpointKey{ entry->udid, entry->connectionType }, nextEpoch ) );
             }
             for ( const auto& event : startupEvents ) {
                 applyEventToSnapshot( event );

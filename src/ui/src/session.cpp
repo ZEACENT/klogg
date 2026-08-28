@@ -271,6 +271,35 @@ private:
         }
     }
 
+    klogg::livecapture::ios::IosEndpointKey iosEndpoint() const
+    {
+        klogg::livecapture::ios::IosEndpointKey endpoint;
+        endpoint.udid = spec_.device.deviceId.toStdString();
+        endpoint.connectionType
+            = spec_.device.connection == klogg::livelog::DeviceIdentity::Connection::Network
+                  ? klogg::livecapture::ios::NativeConnectionType::Network
+                  : klogg::livecapture::ios::NativeConnectionType::Usb;
+        return endpoint;
+    }
+
+    void retryRecoverableIosMetadata(
+        const klogg::livecapture::ios::IosCatalogSnapshot& snapshot )
+    {
+        auto* const requester
+            = dynamic_cast<klogg::livecapture::ios::IosCatalogMetadataRequester*>( iosCatalog_ );
+        if ( requester == nullptr ) {
+            return;
+        }
+        const auto endpoint = iosEndpoint();
+        const auto entry = std::find_if(
+            snapshot.entries.cbegin(), snapshot.entries.cend(),
+            [ &endpoint ]( const auto& candidate ) { return candidate.endpoint == endpoint; } );
+        if ( entry != snapshot.entries.cend() && entry->error.has_value()
+             && entry->error->error.retryPolicy != klogg::livecapture::RetryPolicy::Never ) {
+            requester->requestMetadata( endpoint );
+        }
+    }
+
     void startIosObservation()
     {
         if ( const auto startupError = iosCatalog_->startupError(); startupError.has_value() ) {
@@ -315,7 +344,9 @@ private:
         controller_->infrastructureChanged(
             klogg::livecapture::InfrastructureStatus::Ready,
             klogg::livecapture::InfrastructureOwnership::AppShared );
-        observeIosSnapshot( iosCatalog_->snapshot() );
+        const auto snapshot = iosCatalog_->snapshot();
+        retryRecoverableIosMetadata( snapshot );
+        observeIosSnapshot( snapshot );
     }
 
     void observeIosSnapshot( const klogg::livecapture::ios::IosCatalogSnapshot& snapshot )
@@ -326,12 +357,7 @@ private:
         }
         lastIosSnapshotGeneration_ = snapshot.generation;
 
-        klogg::livecapture::ios::IosEndpointKey endpoint;
-        endpoint.udid = spec_.device.deviceId.toStdString();
-        endpoint.connectionType
-            = spec_.device.connection == klogg::livelog::DeviceIdentity::Connection::Network
-                  ? klogg::livecapture::ios::NativeConnectionType::Network
-                  : klogg::livecapture::ios::NativeConnectionType::Usb;
+        const auto endpoint = iosEndpoint();
         const auto entry = std::find_if(
             snapshot.entries.cbegin(), snapshot.entries.cend(),
             [ &endpoint ]( const auto& candidate ) { return candidate.endpoint == endpoint; } );

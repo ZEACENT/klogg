@@ -206,7 +206,8 @@ public:
     }
 };
 
-class RecordingIosCatalog final : public klogg::livecapture::ios::IosCatalogSnapshotProvider {
+class RecordingIosCatalog final : public klogg::livecapture::ios::IosCatalogSnapshotProvider,
+                                  public klogg::livecapture::ios::IosCatalogMetadataRequester {
 public:
     klogg::livecapture::ios::IosCatalogSnapshot snapshot() const override
     {
@@ -231,6 +232,11 @@ public:
         return startupError_;
     }
 
+    void requestMetadata( klogg::livecapture::ios::IosEndpointKey endpoint ) override
+    {
+        metadataRequests.push_back( std::move( endpoint ) );
+    }
+
     void publish( klogg::livecapture::ios::IosCatalogSnapshot snapshot )
     {
         snapshot_ = std::move( snapshot );
@@ -248,6 +254,8 @@ public:
     {
         startupError_ = std::move( error );
     }
+
+    std::vector<klogg::livecapture::ios::IosEndpointKey> metadataRequests;
 
 private:
     klogg::livecapture::ios::IosCatalogSnapshot snapshot_;
@@ -902,6 +910,46 @@ TEST_CASE( "iOS catalog startup failure surfaces as a failed restored tab",
     REQUIRE( controller->snapshot().source.failure.has_value() );
     CHECK( controller->snapshot().source.failure->code == "ios-catalog-api-incomplete" );
     CHECK( factory.totalStarts() == 0u );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "manual reconnect retries recoverable iOS metadata for the selected endpoint",
+           "[livelog-restore-arming][session][ios-catalog][metadata][retry]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-metadata-retry-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+
+    klogg::livecapture::ios::IosCatalogEntry entry;
+    entry.endpoint.udid = spec.device.deviceId.toStdString();
+    entry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    entry.epoch = 1u;
+    entry.error = klogg::livecapture::ios::IosCatalogError{
+        live::LiveSourceError{ live::ErrorCategory::Device, "ios-trust-pending",
+                               live::ErrorScope::Device, live::RetryPolicy::AwaitUser,
+                               "Trust this computer on the iOS device.", "trust pending" },
+        live::AwaitingUserReason::Trust
+    };
+    catalog.publish( { 1u, { entry } } );
+
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::AwaitingUser );
+    REQUIRE( klogg::livecapture::projectLiveState( controller->snapshot() ).reconnectEnabled );
+    REQUIRE( catalog.metadataRequests.empty() );
+
+    controller->startRequested();
+
+    REQUIRE( catalog.metadataRequests.size() == 1u );
+    CHECK( catalog.metadataRequests.front() == entry.endpoint );
     closeAndDeleteViews( *appSession, opened );
 }
 

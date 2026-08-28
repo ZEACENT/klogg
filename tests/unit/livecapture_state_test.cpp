@@ -197,7 +197,9 @@ TEST_CASE( "current-generation device gates present each AwaitingUser reason",
         REQUIRE( awaiting.snapshot.source.status == SourceStatus::AwaitingUser );
         REQUIRE( awaiting.snapshot.source.awaitingUserReason == reason );
         REQUIRE_FALSE( awaiting.snapshot.retryTimer.has_value() );
-        REQUIRE( projectLiveState( awaiting.snapshot ).status == PresentationStatus::AwaitingUser );
+        const auto presentation = projectLiveState( awaiting.snapshot );
+        REQUIRE( presentation.status == PresentationStatus::AwaitingUser );
+        REQUIRE( presentation.reconnectEnabled );
     }
 }
 

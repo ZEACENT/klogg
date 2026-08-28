@@ -491,13 +491,13 @@ bool reconnectEnabled( SourceStatus status )
 {
     switch ( status ) {
     case SourceStatus::Stopped:
+    case SourceStatus::AwaitingUser:
     case SourceStatus::Streaming:
     case SourceStatus::RetryWait:
     case SourceStatus::Failed:
         return true;
     case SourceStatus::WaitingForInfrastructure:
     case SourceStatus::WaitingForDevice:
-    case SourceStatus::AwaitingUser:
     case SourceStatus::OpeningStream:
     case SourceStatus::Stopping:
         return false;

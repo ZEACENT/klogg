@@ -348,6 +348,37 @@ TEST_CASE( "iOS composition re-requests an endpoint once after catalog generatio
     CHECK( catalogAddress->metadataRequests.size() == 2u );
 }
 
+TEST_CASE( "iOS composition re-requests metadata after a recoverable error is rearmed",
+           "[ios][native][composition][catalog][metadata][retry]" )
+{
+    auto catalog = std::make_unique<MemoryCatalog>();
+    auto* const catalogAddress = catalog.get();
+    IosLiveServices services( std::move( catalog ), nullptr );
+    REQUIRE( catalogAddress->metadataRequests.size() == 1u );
+
+    auto failed = catalogAddress->snapshot();
+    failed.entries.front().error = IosCatalogError{
+        klogg::livecapture::LiveSourceError{ klogg::livecapture::ErrorCategory::Device,
+                                            "ios-trust-pending",
+                                            klogg::livecapture::ErrorScope::Device,
+                                            klogg::livecapture::RetryPolicy::AwaitUser,
+                                            "Trust this computer on the iOS device.",
+                                            "trust pending" },
+        klogg::livecapture::AwaitingUserReason::Trust
+    };
+    catalogAddress->publish( failed );
+    CHECK( catalogAddress->metadataRequests.size() == 1u );
+
+    auto rearmed = failed;
+    rearmed.entries.front().epoch = 4u;
+    rearmed.entries.front().error.reset();
+    catalogAddress->publish( rearmed );
+
+    REQUIRE( catalogAddress->metadataRequests.size() == 2u );
+    CHECK( catalogAddress->metadataRequests.back().endpoint == rearmed.entries.front().endpoint );
+    CHECK( catalogAddress->metadataRequests.back().endpointEpoch == 4u );
+}
+
 TEST_CASE( "one application iOS root shares catalog identity and creates native transports",
            "[ios][native][composition][ownership][catalog][transport]" )
 {
