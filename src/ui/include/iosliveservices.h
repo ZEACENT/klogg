@@ -13,6 +13,7 @@
 
 #include <QObject>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,6 +26,7 @@ namespace klogg::livecapture::ios {
 
 struct IosLiveServicesConfig {
     std::string nativeStackRoot;
+    std::chrono::milliseconds catalogShutdownDeadline{ DefaultIosNativeShutdownDeadline };
 };
 
 class IosLiveServices final : public QObject, public LiveSourceTransportFactory {

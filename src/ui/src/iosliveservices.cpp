@@ -14,13 +14,11 @@
 #include <QPointer>
 
 #include <algorithm>
-#include <condition_variable>
-#include <deque>
 #include <mutex>
-#include <thread>
 #include <utility>
 #include <vector>
 
+#include "boundedserialexecutor.h"
 #include "iosdevicecatalog.h"
 #include "iosnativeadapter.h"
 #include "iosnativetransport.h"
@@ -82,68 +80,6 @@ private:
     std::vector<RequestedEntry> requested_;
 };
 
-class SerialCatalogExecutor final {
-public:
-    SerialCatalogExecutor()
-        : thread_( [ this ] { run(); } )
-    {
-    }
-
-    ~SerialCatalogExecutor()
-    {
-        {
-            std::lock_guard<std::mutex> lock( mutex_ );
-            stopping_ = true;
-        }
-        changed_.notify_all();
-        if ( thread_.joinable() ) {
-            thread_.join();
-        }
-    }
-
-    void post( IosCatalogTask task )
-    {
-        {
-            std::lock_guard<std::mutex> lock( mutex_ );
-            if ( stopping_ ) {
-                return;
-            }
-            tasks_.push_back( std::move( task ) );
-        }
-        changed_.notify_one();
-    }
-
-private:
-    void run() noexcept
-    {
-        for ( ;; ) {
-            IosCatalogTask task;
-            {
-                std::unique_lock<std::mutex> lock( mutex_ );
-                changed_.wait( lock, [ this ] { return stopping_ || !tasks_.empty(); } );
-                if ( tasks_.empty() ) {
-                    if ( stopping_ ) {
-                        return;
-                    }
-                    continue;
-                }
-                task = std::move( tasks_.front() );
-                tasks_.pop_front();
-            }
-            try {
-                task();
-            } catch ( ... ) { // NOLINT(bugprone-empty-catch)
-            }
-        }
-    }
-
-    std::mutex mutex_;
-    std::condition_variable changed_;
-    std::deque<IosCatalogTask> tasks_;
-    bool stopping_{ false };
-    std::thread thread_;
-};
-
 LiveSourceError invalidLegacyOptions( const LiveSourceTransportConfig& config )
 {
     auto detail = std::string{ "Native iOS capture rejected legacy process options: executable=" }
@@ -185,7 +121,8 @@ class IosLiveServices::Impl final {
 public:
     explicit Impl( IosLiveServices& owner, IosLiveServicesConfig config )
         : owner_( owner )
-        , catalogExecutor_( std::make_unique<SerialCatalogExecutor>() )
+        , catalogExecutor_( std::make_unique<BoundedSerialExecutor>(
+              config.catalogShutdownDeadline ) )
     {
         std::string loadError;
         const auto api = loadIosNativeApiFromBundle( config.nativeStackRoot, &loadError );
@@ -338,7 +275,7 @@ public:
     }
 
     IosLiveServices& owner_;
-    std::unique_ptr<SerialCatalogExecutor> catalogExecutor_;
+    std::unique_ptr<BoundedSerialExecutor> catalogExecutor_;
     std::unique_ptr<IosCatalogSnapshotProvider> catalog_;
     std::shared_ptr<CatalogMetadataObservation> metadataObservation_;
     std::optional<IosCatalogSnapshotProvider::SubscriptionId> metadataSubscription_;

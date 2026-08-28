@@ -1,6 +1,7 @@
 add_library(
   klogg_livecapture STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprotocol.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/boundedserialexecutor.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/ioscatalogprovider.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdevicecatalog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativeadapter.h

@@ -15,13 +15,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
+#include "boundedserialexecutor.h"
 #include "iosostraceprotocol.h"
 
 namespace klogg::livecapture::ios {
@@ -89,107 +88,6 @@ bool usesOsTrace( const IosNativeStreamConfig& config, const std::string& produc
         return true;
     }
 }
-
-class SerialExecutor final {
-public:
-    explicit SerialExecutor( std::chrono::milliseconds shutdownDeadline )
-        : state_( std::make_shared<State>() )
-        , shutdownDeadline_( shutdownDeadline )
-        , thread_( [ state = state_ ] { run( state ); } )
-    {
-    }
-
-    ~SerialExecutor()
-    {
-        {
-            std::lock_guard<std::mutex> lock( state_->mutex );
-            state_->stopping = true;
-        }
-        state_->changed.notify_all();
-        if ( !thread_.joinable() ) {
-            return;
-        }
-        if ( thread_.get_id() == std::this_thread::get_id() ) {
-            // The worker loop owns State independently, so a callback may retire
-            // the final session on this thread without self-joining or UAF.
-            thread_.detach();
-            return;
-        }
-
-        bool finished = false;
-        {
-            std::unique_lock<std::mutex> lock( state_->mutex );
-            const auto deadline = std::max( shutdownDeadline_, std::chrono::milliseconds::zero() );
-            finished
-                = state_->changed.wait_for( lock, deadline, [ this ] { return state_->finished; } );
-        }
-        if ( finished ) {
-            thread_.join();
-        }
-        else {
-            // Tasks capture every native owner through shared State. Detaching after
-            // the public deadline is therefore safe: the blocked callback/cleanup
-            // can finish later without retaining this session or its caller thread.
-            thread_.detach();
-        }
-    }
-
-    void post( IosNativeStreamTask task )
-    {
-        {
-            std::lock_guard<std::mutex> lock( state_->mutex );
-            if ( state_->stopping ) {
-                return;
-            }
-            state_->tasks.push_back( std::move( task ) );
-        }
-        state_->changed.notify_one();
-    }
-
-private:
-    struct State {
-        std::mutex mutex;
-        std::condition_variable changed;
-        std::deque<IosNativeStreamTask> tasks;
-        bool stopping{ false };
-        bool finished{ false };
-    };
-
-    static void run( const std::shared_ptr<State>& state ) noexcept
-    {
-        for ( ;; ) {
-            IosNativeStreamTask task;
-            {
-                std::unique_lock<std::mutex> lock( state->mutex );
-                state->changed.wait( lock,
-                                     [ & ] { return state->stopping || !state->tasks.empty(); } );
-                if ( state->tasks.empty() ) {
-                    if ( state->stopping ) {
-                        break;
-                    }
-                    continue;
-                }
-                task = std::move( state->tasks.front() );
-                state->tasks.pop_front();
-            }
-            try {
-                task();
-            } catch ( ... ) { // NOLINT(bugprone-empty-catch)
-                // Native worker tasks are an exception boundary. A failed observer or
-                // allocation must never terminate the application worker thread.
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock( state->mutex );
-            state->finished = true;
-        }
-        state->changed.notify_all();
-    }
-
-    std::shared_ptr<State> state_;
-    std::chrono::milliseconds shutdownDeadline_;
-    std::thread thread_;
-};
 
 } // namespace
 
@@ -913,11 +811,11 @@ class OwnedIosNativeStreamSession final : public IosNativeStreamSession {
 public:
     OwnedIosNativeStreamSession( IosNativeApi api, IosNativeStreamConfig config,
                                  IosNativeStreamCallbacks callbacks )
-        : executor_( std::make_shared<SerialExecutor>( config.cleanupDeadline ) )
+        : executor_( std::make_shared<BoundedSerialExecutor>( config.cleanupDeadline ) )
         , worker_(
               api,
-              [ executor
-                = std::weak_ptr<SerialExecutor>( executor_ ) ]( IosNativeStreamTask task ) {
+              [ executor = std::weak_ptr<BoundedSerialExecutor>( executor_ ) ](
+                  IosNativeStreamTask task ) {
                   if ( const auto owned = executor.lock() ) {
                       owned->post( std::move( task ) );
                   }
@@ -948,7 +846,7 @@ public:
     }
 
 private:
-    std::shared_ptr<SerialExecutor> executor_;
+    std::shared_ptr<BoundedSerialExecutor> executor_;
     IosNativeStreamWorker worker_;
 };
 

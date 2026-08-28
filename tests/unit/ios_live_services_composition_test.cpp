@@ -16,8 +16,11 @@
 #include <QPointer>
 #include <QString>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -25,6 +28,7 @@
 #include <vector>
 
 #include "adblogcatsource.h"
+#include "boundedserialexecutor.h"
 #include "ioscatalogprovider.h"
 #include "iosliveservices.h"
 #include "iosnativestream.h"
@@ -198,6 +202,49 @@ LiveSourceTransportConfig iosConfig()
 }
 
 } // namespace
+
+TEST_CASE( "bounded serial executor releases shutdown when a native task remains blocked",
+           "[ios][native][composition][catalog][shutdown][deadline]" )
+{
+    using namespace std::chrono_literals;
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+        bool finished{ false };
+    };
+
+    auto gate = std::make_shared<Gate>();
+    auto executor = std::make_unique<klogg::livecapture::BoundedSerialExecutor>( 20ms );
+    executor->post( [ gate ] {
+        std::unique_lock<std::mutex> lock( gate->mutex );
+        gate->started = true;
+        gate->changed.notify_all();
+        gate->changed.wait( lock, [ & ] { return gate->release; } );
+        gate->finished = true;
+        gate->changed.notify_all();
+    } );
+
+    {
+        std::unique_lock<std::mutex> lock( gate->mutex );
+        REQUIRE( gate->changed.wait_for( lock, 1s, [ & ] { return gate->started; } ) );
+    }
+
+    const auto shutdownStarted = std::chrono::steady_clock::now();
+    executor.reset();
+    CHECK( std::chrono::steady_clock::now() - shutdownStarted < 500ms );
+
+    {
+        std::lock_guard<std::mutex> lock( gate->mutex );
+        gate->release = true;
+    }
+    gate->changed.notify_all();
+    {
+        std::unique_lock<std::mutex> lock( gate->mutex );
+        REQUIRE( gate->changed.wait_for( lock, 1s, [ & ] { return gate->finished; } ) );
+    }
+}
 
 TEST_CASE( "iOS backend persistence makes native fresh and legacy process explicit",
            "[ios][native][composition][persistence][migration]" )

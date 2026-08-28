@@ -40,6 +40,8 @@ struct IosLogOptions {
     IosLogOutputFormat outputFormat{ IosLogOutputFormat::Default };
 };
 
+inline constexpr std::chrono::milliseconds DefaultIosNativeShutdownDeadline{ 750 };
+
 struct IosNativeStreamConfig {
     IosEndpointKey endpoint;
     Generation generation{ 0 };
@@ -48,7 +50,7 @@ struct IosNativeStreamConfig {
     std::size_t maximumSyslogRecordBytes{ std::size_t{ 1u } * 1024u * 1024u };
     IosNativeServicePolicy servicePolicy{ IosNativeServicePolicy::AutomaticByProductVersion };
     IosLogOptions logOptions;
-    std::chrono::milliseconds cleanupDeadline{ 750 };
+    std::chrono::milliseconds cleanupDeadline{ DefaultIosNativeShutdownDeadline };
 };
 
 struct IosNativeStreamCallbacks {
