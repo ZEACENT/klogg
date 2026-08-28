@@ -222,6 +222,17 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         for family in ("macos15", "win22"):
             self.assertIn(f'"hosted_image_family": "{family}"', LOCK.read_text())
 
+    def test_windows_hosted_toolchain_locks_the_serviced_msvc_release_family(self):
+        toolchain = self.lock()["toolchains"]["windows-x86_64"]
+        compiler_version = toolchain.get("compiler_version", "")
+        self.assertRegex(
+            compiler_version,
+            r"^\d+\.\d+$",
+            "windows-2022 services MSVC patch binaries in place; lock the stable "
+            "major.minor release family rather than an ephemeral patch build",
+        )
+        self.assertIn(compiler_version, toolchain.get("identifier", ""))
+
     def test_lock_forbids_prebuilt_sdk_path_runtime_and_system_fallbacks(self):
         document = self.lock()
         policy = document.get("release_policy")

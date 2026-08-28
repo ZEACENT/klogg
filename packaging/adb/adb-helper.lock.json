@@ -457,7 +457,7 @@
     "windows-x86_64": {
       "identifier": "klogg-adb-windows-x86_64-msvc-19.44",
       "compiler": "msvc",
-      "compiler_version": "19.44.35222",
+      "compiler_version": "19.44",
       "cmake_version": "3.31.6",
       "cmake_generator": "Ninja",
       "ninja_version": "1.12.1",
