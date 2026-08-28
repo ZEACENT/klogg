@@ -669,7 +669,23 @@ TEST_CASE( "capture failures require structured diagnostics", "[livecapture][sta
     REQUIRE_FALSE( missingError.snapshot.captureError.has_value() );
 }
 
-TEST_CASE( "shared infrastructure starts only when no start is already in progress",
+TEST_CASE( "explicit reconnect reacquires availability observation while infrastructure stays ready",
+           "[livecapture][state][infrastructure][reconnect]" )
+{
+    auto stopped = initialLiveState();
+    stopped.infrastructure = InfrastructureState{ InfrastructureStatus::Ready,
+                                                  InfrastructureOwnership::AppShared };
+    stopped.runIntent = RunIntent::Stopped;
+    stopped.source.status = SourceStatus::Stopped;
+
+    const auto started = dispatch( stopped, StartRequested{ at( 10 ) } );
+
+    REQUIRE( started.accepted );
+    REQUIRE( started.snapshot.source.status == SourceStatus::WaitingForDevice );
+    REQUIRE( hasEffect( started, EffectKind::StartInfrastructure ) );
+}
+
+TEST_CASE( "shared infrastructure observation starts per run and retries only when permitted",
            "[livecapture][state][infrastructure]" )
 {
     auto connecting = initialLiveState();
@@ -679,7 +695,7 @@ TEST_CASE( "shared infrastructure starts only when no start is already in progre
     const auto started = dispatch( connecting, StartRequested{ at( 10 ) } );
     REQUIRE( started.accepted );
     REQUIRE( started.snapshot.source.status == SourceStatus::WaitingForInfrastructure );
-    REQUIRE_FALSE( hasEffect( started, EffectKind::StartInfrastructure ) );
+    REQUIRE( hasEffect( started, EffectKind::StartInfrastructure ) );
 
     const auto unavailable = dispatch(
         started.snapshot, InfrastructureChanged{ InfrastructureStatus::Unavailable,

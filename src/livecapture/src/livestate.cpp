@@ -185,10 +185,10 @@ void apply( LiveStateTransition& transition, const StartRequested& event, const 
         transition.effects.push_back(
             LiveStateEffect{ EffectKind::CancelStream, previousGeneration, Timestamp{ 0 }, 0u } );
     }
-    if ( shouldStartInfrastructure( snapshot.infrastructure ) ) {
-        transition.effects.push_back( LiveStateEffect{ EffectKind::StartInfrastructure,
-                                                       snapshot.generation, Timestamp{ 0 }, 0u } );
-    }
+    // Every explicit run must reacquire availability observation and replay the
+    // current shared snapshot, even when the infrastructure itself stayed ready.
+    transition.effects.push_back( LiveStateEffect{ EffectKind::StartInfrastructure,
+                                                   snapshot.generation, Timestamp{ 0 }, 0u } );
     transition.accepted = true;
 }
 
