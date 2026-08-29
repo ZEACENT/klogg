@@ -636,6 +636,8 @@ OsTraceRelayFeedResult OsTraceRelayFrameDecoder::feed( const ByteBuffer& bytes )
             std::uint32_t wireLength = 0u;
             if ( currentType_ == OsTraceRelayRecordType::ControlPlist ) {
                 for ( std::size_t index = 1u; index < header_.size(); ++index ) {
+                    // The explicit shift documents the wire-endian fold.
+                    // cppcheck-suppress useStlAlgorithm
                     wireLength = static_cast<std::uint32_t>( wireLength << 8u )
                                  | static_cast<std::uint32_t>( header_[ index ] );
                 }
@@ -715,7 +717,6 @@ FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
 {
     constexpr const char* Green = "\x1b[32m";
     constexpr const char* Magenta = "\x1b[35m";
-    constexpr const char* Blue = "\x1b[34m";
     constexpr const char* Cyan = "\x1b[36m";
 
     FormatBuilder builder( options.ansiColors );
@@ -724,6 +725,7 @@ FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
     builder.appendStyled( escapeDisplayText( baseName( record.processPath ) ), Magenta );
     builder.append( "{" );
     if ( options.includeImageMetadata && record.imagePath ) {
+        constexpr const char* Blue = "\x1b[34m";
         builder.appendStyled( escapeDisplayText( baseName( record.imagePath ) ), Magenta );
         builder.appendStyled( "+0x" + lowercaseHex( record.imageOffset ), Blue );
     }

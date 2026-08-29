@@ -124,7 +124,9 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
             std::lock_guard<std::mutex> lock( mutex );
             value = current;
             listeners.reserve( callbacks.size() );
+            // Preserve subscription IDs beside copied callbacks for revalidation.
             for ( const auto& callback : callbacks ) {
+                // cppcheck-suppress useStlAlgorithm
                 listeners.emplace_back( callback.first, callback.second );
             }
         }
@@ -505,6 +507,9 @@ void IosDeviceCatalog::requestMetadata( IosEndpointKey endpoint )
                           "lockdownd metadata query failed" );
                     return;
                 }
+                // lockdownGetStringValue runs without the state mutex; another
+                // thread can supersede this request between the two checks.
+                // cppcheck-suppress identicalConditionAfterEarlyExit
                 if ( !locked->isMetadataRequestCurrent( request ) ) {
                     return;
                 }

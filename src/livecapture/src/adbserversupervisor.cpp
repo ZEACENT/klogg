@@ -647,14 +647,19 @@ private:
             invocation->terminal = result.state != AdbServerLaunchState::Started;
             const auto gate = weakGate.lock();
             if ( gate != nullptr && gate->owner != nullptr ) {
-                gate->owner->launchEvent( runSerial, serial, std::move( result ) );
+                gate->owner->launchEvent( runSerial, serial, result );
             }
         } );
         if ( activeLaunchInvocation_ == invocation ) {
             activeLaunchInvocation_.reset();
         }
+        // launch() may complete synchronously and advance the supervisor state
+        // before it returns its cleanup token.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( running_ && runSerial == runSerial_ && serial == launchSerial_ ) {
             if ( !invocation->terminal ) {
+                // A synchronous launch callback can publish the server.
+                // cppcheck-suppress knownConditionTrueFalse
                 if ( serverPublished_ ) {
                     launcher_.release( token );
                 }
@@ -663,12 +668,15 @@ private:
                 }
             }
         }
+        // A synchronous launch callback can permit cleanup before launch() returns.
+        // cppcheck-suppress knownConditionTrueFalse
         else if ( token != 0u && ( !invocation->terminal || launchCleanupPermitted_ ) ) {
             launcher_.cleanup( token );
         }
     }
 
-    void launchEvent( std::uint64_t runSerial, std::uint64_t serial, AdbServerLaunchResult result )
+    void launchEvent( std::uint64_t runSerial, std::uint64_t serial,
+                      const AdbServerLaunchResult& result )
     {
         if ( !running_ || runSerial != runSerial_ || serial != launchSerial_ || serverPublished_ ) {
             return;
@@ -860,6 +868,9 @@ private:
                     gate->owner->scheduledCallback( runSerial, index, serial, callback );
                 }
             } );
+        // schedule() may invoke synchronously and change these serials before
+        // returning the cancellation token.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( running_ && runSerial == runSerial_ && serial == scheduleSerials_.at( index ) ) {
             scheduleTokens_.at( index ) = token;
         }

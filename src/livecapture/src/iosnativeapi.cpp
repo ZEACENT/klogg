@@ -65,6 +65,8 @@ void NativeDeviceListOwner::reset() noexcept
     size_ = 0;
 }
 
+// IosNativeApi is a small function-pointer table copied into the owner.
+// cppcheck-suppress passedByValue
 NativeEventSubscription::NativeEventSubscription( IosNativeApi api, NativeEventCallback callback,
                                                   void* context )
     : api_( api )

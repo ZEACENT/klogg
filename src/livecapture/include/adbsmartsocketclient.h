@@ -99,7 +99,8 @@ public:
 
     void requestHostService( Generation generation, OperationId operationId, HostService service );
     void startShellService( Generation generation, OperationId operationId,
-                            const TransportSelection& transport, std::string service );
+                            const TransportSelection& transport,
+                            const std::string& service );
     void cancelGeneration( Generation generation );
 
 Q_SIGNALS:

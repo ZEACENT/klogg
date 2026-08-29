@@ -99,11 +99,10 @@ private:
 
 ByteVector bytesFromString( const std::string& bytes )
 {
-    ByteVector result;
-    result.reserve( bytes.size() );
-    for ( const auto byte : bytes ) {
-        result.push_back( static_cast<std::uint8_t>( static_cast<unsigned char>( byte ) ) );
-    }
+    ByteVector result( bytes.size() );
+    std::transform( bytes.cbegin(), bytes.cend(), result.begin(), []( const auto byte ) {
+        return static_cast<std::uint8_t>( static_cast<unsigned char>( byte ) );
+    } );
     return result;
 }
 
@@ -388,6 +387,8 @@ private:
         cancelDeadline();
         const auto serial = operationSerial_;
         Q_EMIT client_.operationConnected( generation_, operationId_ );
+        // A direct signal handler can cancel or replace this operation.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( serial != operationSerial_ || phase_ != Phase::Connecting ) {
             return;
         }
@@ -547,6 +548,8 @@ private:
                 {
                     const auto serial = operationSerial_;
                     Q_EMIT client_.shellServiceStarted( generation_, operationId_ );
+                    // A direct signal handler can cancel or replace this operation.
+                    // cppcheck-suppress knownConditionTrueFalse
                     if ( serial != operationSerial_ || phase_ != Phase::ShellFrames ) {
                         return;
                     }
@@ -571,6 +574,8 @@ private:
                     for ( const auto& frame : result.frames ) {
                         Q_EMIT client_.hostReplyReceived( generation, operationId,
                                                           byteArrayFromBytes( frame ) );
+                        // A direct signal handler can cancel or replace this operation.
+                        // cppcheck-suppress knownConditionTrueFalse
                         if ( serial != operationSerial_ || phase_ != Phase::HostReply ) {
                             return;
                         }
@@ -823,7 +828,7 @@ void AdbSmartSocketClient::requestHostService( Generation generation, OperationI
 
 void AdbSmartSocketClient::startShellService( Generation generation, OperationId operationId,
                                               const TransportSelection& transport,
-                                              std::string service )
+                                              const std::string& service )
 {
     impl_->startShellService( generation, operationId, transport, service );
 }

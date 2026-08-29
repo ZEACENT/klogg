@@ -809,6 +809,8 @@ namespace {
 
 class OwnedIosNativeStreamSession final : public IosNativeStreamSession {
 public:
+    // IosNativeApi is a small function-pointer table copied into the worker.
+    // cppcheck-suppress passedByValue
     OwnedIosNativeStreamSession( IosNativeApi api, IosNativeStreamConfig config,
                                  IosNativeStreamCallbacks callbacks )
         : executor_( std::make_shared<BoundedSerialExecutor>( config.cleanupDeadline ) )
@@ -861,6 +863,8 @@ private:
 
 } // namespace
 
+// IosNativeApi is a small function-pointer table copied into the factory.
+// cppcheck-suppress passedByValue
 DefaultIosNativeStreamWorkerFactory::DefaultIosNativeStreamWorkerFactory( IosNativeApi api )
     : api_( api )
 {

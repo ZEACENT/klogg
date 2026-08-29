@@ -394,6 +394,9 @@ private:
                                            gate->owner->reconnectFired( runSerial, scheduleSerial );
                                        }
                                    } );
+        // A scheduler is allowed to invoke synchronously and mutate the run or
+        // reconnect serial before schedule() returns.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( running_ && runSerial == runSerial_ && scheduleSerial == reconnectSerial_
              && !invocation->fired ) {
             reconnectToken_ = token;

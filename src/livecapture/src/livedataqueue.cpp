@@ -117,6 +117,9 @@ LiveDataEnqueueResult LiveDataQueue::enqueueWait( const LiveDataChunk& chunk )
         } );
         --waitingProducers_;
 
+        // capacityChanged_.wait releases the mutex, so resetEpoch_ can change
+        // after enqueueEpoch is captured even though cppcheck models it locally.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( chunk.generation != generation_ || enqueueEpoch != resetEpoch_ ) {
             return LiveDataEnqueueResult::StaleGeneration;
         }
