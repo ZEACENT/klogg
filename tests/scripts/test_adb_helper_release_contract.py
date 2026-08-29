@@ -210,6 +210,10 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     r"\b(?:latest|current|stable|rolling)\b",
                 )
 
+    def test_locked_patch_support_files_have_canonical_checkout_bytes(self):
+        attributes = self.required_text(ROOT / ".gitattributes")
+        self.assertIn("**/patches/**/*.def text eol=lf", attributes)
+
     def test_native_toolchains_bind_stable_hosted_families_not_ephemeral_revisions(self):
         script = self.required_text(TOOLCHAIN_SCRIPT)
         workflow = self.required_text(CI_BUILD)
