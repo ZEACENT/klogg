@@ -254,6 +254,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             superbuild,
         )
         self.assertIn("-DZLIB_LIBRARY=${_zlib_static_library}", superbuild)
+        self.assertIn(
+            "find_program(KLOGG_ADB_NASM_EXECUTABLE NAMES nasm.exe REQUIRED)", superbuild
+        )
+        self.assertIn(
+            "-DCMAKE_ASM_NASM_COMPILER=${KLOGG_ADB_NASM_EXECUTABLE}", superbuild
+        )
 
         windows_patch = self.required_text(
             ROOT / "packaging/adb/patches/0006-platform-development-adbwinapi-cmake.patch"

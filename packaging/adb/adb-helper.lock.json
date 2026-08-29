@@ -325,6 +325,14 @@
       "build_input": false
     },
     {
+      "id": "nasm",
+      "version": "2.16.03-1",
+      "archive_url": "https://mirror.msys2.org/msys/x86_64/nasm-2.16.03-1-x86_64.pkg.tar.zst",
+      "archive_file": "nasm-2.16.03-1-x86_64.pkg.tar.zst",
+      "archive_sha256": "e5f54d79b94c0290579c20d092603dc97289887ba1c281ac0af88626bfbf1cab",
+      "build_input": false
+    },
+    {
       "id": "mingw-w64-ucrt-x86_64-binutils",
       "version": "2.47-3",
       "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-binutils-2.47-3-any.pkg.tar.zst",

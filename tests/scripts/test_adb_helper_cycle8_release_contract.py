@@ -416,13 +416,14 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertIn("mingw-w64-ucrt-x86_64-gcc", package_ids)
         self.assertIn("mingw-w64-ucrt-x86_64-libwinpthread", package_ids)
         self.assertIn("patch", package_ids)
+        self.assertIn("nasm", package_ids)
         for package in packages:
             with self.subTest(package=package.get("id") if isinstance(package, dict) else package):
                 self.assertIsInstance(package, dict)
                 self.assertRegex(str(package.get("archive_sha256", "")), r"^[0-9a-f]{64}$")
                 repository = (
                     "msys/x86_64"
-                    if package.get("id") == "patch"
+                    if package.get("id") in {"patch", "nasm"}
                     else "mingw/ucrt64"
                 )
                 self.assertRegex(
