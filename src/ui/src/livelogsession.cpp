@@ -56,13 +56,9 @@ Target saturatedNumber( const QJsonValue& value, Target fallback, Target lowestA
     if ( !value.isDouble() ) {
         return fallback;
     }
+    // Qt's JSON parser rejects NaN and infinity before deserialization reaches
+    // this helper, so every accepted numeric value is finite.
     const auto raw = value.toDouble();
-    // NaN cannot occur through Qt's parser (it refuses such documents
-    // wholesale) but is guarded anyway: every comparison below would be false
-    // and the narrowing cast would be undefined.
-    if ( std::isnan( raw ) ) {
-        return fallback;
-    }
     if ( raw <= static_cast<double>( lowestAllowed ) ) {
         return lowestAllowed;
     }
