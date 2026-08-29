@@ -317,6 +317,14 @@
   ],
   "toolchain_packages": [
     {
+      "id": "patch",
+      "version": "2.7.6-3",
+      "archive_url": "https://mirror.msys2.org/msys/x86_64/patch-2.7.6-3-x86_64.pkg.tar.zst",
+      "archive_file": "patch-2.7.6-3-x86_64.pkg.tar.zst",
+      "archive_sha256": "dd75ca0f715dd9c71a43af6a0ff3d068faeee1d768e02282d319671201cd5d45",
+      "build_input": false
+    },
+    {
       "id": "mingw-w64-ucrt-x86_64-binutils",
       "version": "2.47-3",
       "archive_url": "https://mirror.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-binutils-2.47-3-any.pkg.tar.zst",

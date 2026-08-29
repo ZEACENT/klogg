@@ -415,13 +415,19 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         }
         self.assertIn("mingw-w64-ucrt-x86_64-gcc", package_ids)
         self.assertIn("mingw-w64-ucrt-x86_64-libwinpthread", package_ids)
+        self.assertIn("patch", package_ids)
         for package in packages:
             with self.subTest(package=package.get("id") if isinstance(package, dict) else package):
                 self.assertIsInstance(package, dict)
                 self.assertRegex(str(package.get("archive_sha256", "")), r"^[0-9a-f]{64}$")
+                repository = (
+                    "msys/x86_64"
+                    if package.get("id") == "patch"
+                    else "mingw/ucrt64"
+                )
                 self.assertRegex(
                     str(package.get("archive_url", "")),
-                    r"^https://mirror\.msys2\.org/mingw/ucrt64/.+\.pkg\.tar\.zst$",
+                    rf"^https://mirror\.msys2\.org/{repository}/.+\.pkg\.tar\.zst$",
                 )
                 self.assertIs(package.get("build_input"), False)
         helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  Linux:\n")
