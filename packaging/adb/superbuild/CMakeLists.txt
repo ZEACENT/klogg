@@ -69,11 +69,16 @@ else()
 endif()
 list(APPEND _common_args ${_platform_args})
 
+set(_zlib_static_library "${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a")
+if(WIN32)
+  set(_zlib_static_library "${KLOGG_ADB_INSTALL_PREFIX}/lib/libzlibstatic.a")
+endif()
+
 ExternalProject_Add(adb_zlib
   CMAKE_GENERATOR "${CMAKE_GENERATOR}"
   SOURCE_DIR "${KLOGG_ADB_SOURCE_ROOT}/zlib"
   CMAKE_ARGS ${_common_args} -DZLIB_BUILD_EXAMPLES=OFF
-  BUILD_BYPRODUCTS "${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a"
+  BUILD_BYPRODUCTS "${_zlib_static_library}"
 )
 
 ExternalProject_Add(adb_brotli
@@ -120,8 +125,8 @@ ExternalProject_Add(adb_protobuf
     -Dprotobuf_BUILD_SHARED_LIBS=OFF
     -Dprotobuf_WITH_ZLIB=ON
     -DZLIB_ROOT=${KLOGG_ADB_INSTALL_PREFIX}
-    -DZLIB_LIBRARY=${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a
-    -DZLIB_LIBRARY_RELEASE=${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a
+    -DZLIB_LIBRARY=${_zlib_static_library}
+    -DZLIB_LIBRARY_RELEASE=${_zlib_static_library}
     -DCMAKE_PREFIX_PATH=${KLOGG_ADB_INSTALL_PREFIX}
   DEPENDS adb_zlib
   BUILD_BYPRODUCTS
@@ -169,8 +174,8 @@ set(_android_configure
   -B "<BINARY_DIR>"
   ${_common_args}
   -DCMAKE_PREFIX_PATH=${KLOGG_ADB_INSTALL_PREFIX}
-  -DZLIB_LIBRARY=${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a
-  -DZLIB_LIBRARY_RELEASE=${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a
+  -DZLIB_LIBRARY=${_zlib_static_library}
+  -DZLIB_LIBRARY_RELEASE=${_zlib_static_library}
   -DCMAKE_FIND_ROOT_PATH=${KLOGG_ADB_INSTALL_PREFIX}
   -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
   -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY

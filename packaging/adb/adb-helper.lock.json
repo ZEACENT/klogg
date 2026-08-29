@@ -292,7 +292,7 @@
     },
     {
       "path": "packaging/adb/patches/0006-platform-development-adbwinapi-cmake.patch",
-      "sha256": "1db6cbeebcedd1e66db52f74dc57b3280f431aa3d8bdd5cd1d56aa0eaa91db5e",
+      "sha256": "acb43343aab45bd6897eda2184f78ad160c44fc9f24c2b38915a45e9dfc9fc36",
       "applies_to": "windows-platform-development",
       "targets": [
         "windows-x86_64"

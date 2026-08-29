@@ -247,6 +247,19 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         )
         self.assertIn(compiler_version, toolchain.get("identifier", ""))
 
+    def test_windows_superbuild_uses_native_zlib_name_and_dll_definitions(self):
+        superbuild = self.required_text(ADB_SUPERBUILD)
+        self.assertIn(
+            'set(_zlib_static_library "${KLOGG_ADB_INSTALL_PREFIX}/lib/libzlibstatic.a")',
+            superbuild,
+        )
+        self.assertIn("-DZLIB_LIBRARY=${_zlib_static_library}", superbuild)
+
+        windows_patch = self.required_text(
+            ROOT / "packaging/adb/patches/0006-platform-development-adbwinapi-cmake.patch"
+        )
+        self.assertGreaterEqual(windows_patch.count("_WINDLL"), 2)
+
     def test_lock_forbids_prebuilt_sdk_path_runtime_and_system_fallbacks(self):
         document = self.lock()
         policy = document.get("release_policy")
@@ -415,7 +428,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("-DFETCHCONTENT_FULLY_DISCONNECTED=ON", common_args.group("body"))
         self.assertIn("-DFETCHCONTENT_UPDATES_DISCONNECTED=ON", common_args.group("body"))
         self.assertIn(
-            "-DZLIB_LIBRARY=${KLOGG_ADB_INSTALL_PREFIX}/lib/libz.a", superbuild
+            "-DZLIB_LIBRARY=${_zlib_static_library}", superbuild
         )
         self.assertIn("adb-helper.lock.json", adb_cmake)
         self.assertRegex(adb_cmake, r"install\(\s*PROGRAMS[^)]+helpers", re.DOTALL)
