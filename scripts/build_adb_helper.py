@@ -51,6 +51,93 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def verify_required_runtime_loads(source_root: pathlib.Path, target_plan: dict) -> list[dict]:
+    usb = target_plan.get("usb", {})
+    runtime_files = set(usb.get("runtime_files", []))
+    delayed_records = usb.get("required_delayed_runtime_loads", [])
+    if not isinstance(delayed_records, list):
+        raise RuntimeError("delayed ADB runtime load contract must be an array")
+    delayed_runtime_files = {
+        str(record.get("runtime_file", ""))
+        for record in delayed_records
+        if isinstance(record, dict)
+    }
+    direct_runtime_files = set(usb.get("required_imports", []))
+    if (
+        len(delayed_runtime_files) != len(delayed_records)
+        or direct_runtime_files & delayed_runtime_files
+        or direct_runtime_files | delayed_runtime_files != runtime_files
+    ):
+        raise RuntimeError(
+            "ADB helper direct and delayed runtime edges must partition the private closure"
+        )
+
+    evidence = []
+    for record in delayed_records:
+        if not isinstance(record, dict):
+            raise RuntimeError("delayed ADB runtime load contract must contain objects")
+        runtime_file = record.get("runtime_file")
+        loaded_by = record.get("loaded_by")
+        source_name = record.get("source")
+        expression = record.get("expression")
+        expected_source_hash = record.get("source_sha256")
+        loader_symbol = record.get("loader_symbol")
+        if runtime_file not in runtime_files or loaded_by not in runtime_files:
+            raise RuntimeError(
+                "delayed ADB runtime load contract must stay inside the private runtime closure"
+            )
+        if (
+            not isinstance(source_name, str)
+            or not isinstance(expression, str)
+            or not expression
+            or not isinstance(loader_symbol, str)
+            or not loader_symbol
+            or re.fullmatch(r"[0-9a-f]{64}", str(expected_source_hash)) is None
+        ):
+            raise RuntimeError("delayed ADB runtime load contract lacks locked source evidence")
+        relative_source = pathlib.PurePosixPath(source_name)
+        if (
+            relative_source.is_absolute()
+            or ".." in relative_source.parts
+            or "\\" in source_name
+            or ":" in source_name
+        ):
+            raise RuntimeError(f"unsafe delayed ADB runtime load source path: {source_name}")
+        source_path = source_root.joinpath(*relative_source.parts)
+        if not source_path.is_file():
+            raise RuntimeError(f"delayed ADB runtime load source is missing: {source_path}")
+        source_bytes = source_path.read_bytes()
+        actual_source_hash = hashlib.sha256(source_bytes).hexdigest()
+        if actual_source_hash != expected_source_hash:
+            raise RuntimeError(
+                f"delayed ADB runtime load source sha256 mismatch: {source_path}"
+            )
+        source_text = source_bytes.decode("utf-8")
+        active_source = re.sub(r"//[^\n]*|/\*.*?\*/", "", source_text, flags=re.DOTALL)
+        if expression not in active_source:
+            raise RuntimeError(
+                f"{loaded_by} no longer loads required sidecar {runtime_file}: {source_path}"
+            )
+        evidence.append(dict(record))
+    return evidence
+
+
+def verify_runtime_load_binaries(helper_dir: pathlib.Path, evidence: list[dict]) -> list[dict]:
+    verified = []
+    for record in evidence:
+        loaded_by = str(record["loaded_by"])
+        runtime_file = str(record["runtime_file"])
+        loader_symbol = str(record["loader_symbol"])
+        loader_path = helper_dir / loaded_by
+        imports = run(["dumpbin", "/nologo", "/imports", str(loader_path)])
+        if re.search(rf"\b{re.escape(loader_symbol)}\b", imports) is None:
+            raise RuntimeError(f"{loaded_by} does not import delayed loader {loader_symbol}")
+        if runtime_file.encode("utf-16le") not in loader_path.read_bytes():
+            raise RuntimeError(f"{loaded_by} does not embed delayed sidecar name {runtime_file}")
+        verified.append({**record, "runtime_name_encoding": "utf-16le"})
+    return verified
+
+
 def apply_locked_patch(
     source: pathlib.Path, patch_path: pathlib.Path, record: dict
 ) -> None:
@@ -166,6 +253,93 @@ def normalized_host_target() -> tuple[str, str]:
     return os_name, arch
 
 
+def verify_private_import_graph(
+    imports_by_binary: dict[str, list[str]], target_plan: dict
+) -> None:
+    usb = target_plan.get("usb", {})
+    if usb.get("backend") != "dynamic-libusb":
+        return
+    expected = usb.get("required_private_imports_by_binary")
+    if not isinstance(expected, dict) or set(expected) != set(imports_by_binary):
+        raise RuntimeError("ADB helper lock lacks a complete private import graph")
+    runtime_names = {str(item).lower() for item in usb.get("runtime_files", [])}
+    for binary_name, expected_imports in expected.items():
+        if not isinstance(expected_imports, list):
+            raise RuntimeError("ADB helper private import graph must contain arrays")
+        actual_private = {
+            str(item).lower()
+            for item in imports_by_binary[binary_name]
+            if str(item).lower() in runtime_names
+        }
+        if actual_private != {str(item).lower() for item in expected_imports}:
+            raise RuntimeError(f"ADB helper private imports mismatch for {binary_name}")
+
+
+def parse_dumpbin_dependencies(output: str, binary_name: str) -> list[str]:
+    section = re.search(
+        r"Image has the following dependencies:\s*(.*?)^\s*Summary\s*$",
+        output,
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+    if section is None:
+        raise RuntimeError(f"dumpbin dependency section is missing for {binary_name}")
+    dependencies = []
+    for raw_line in section.group(1).splitlines():
+        dependency = raw_line.strip()
+        if not dependency:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_.+-]+\.dll", dependency, re.IGNORECASE) is None:
+            raise RuntimeError(
+                f"ADB helper {binary_name} has an unsupported PE dependency name: {dependency}"
+            )
+        if dependency.lower() not in {item.lower() for item in dependencies}:
+            dependencies.append(dependency)
+    if not dependencies:
+        raise RuntimeError(f"dumpbin reported no dependencies for {binary_name}")
+    return dependencies
+
+
+def classify_windows_system_imports(
+    imports_by_binary: dict[str, list[str]],
+    target_plan: dict,
+    system_directory: pathlib.Path,
+) -> dict[str, list[str]]:
+    """Partition direct PE imports into packaged runtimes and Windows system DLLs."""
+    usb = target_plan.get("usb", {})
+    runtime_names = {
+        str(item).lower() for item in usb.get("runtime_files", [])
+    }
+    allowed_by_binary = usb.get("allowed_system_imports_by_binary")
+    if not isinstance(allowed_by_binary, dict) or set(allowed_by_binary) != set(
+        imports_by_binary
+    ):
+        raise RuntimeError("ADB helper lock lacks a complete Windows system import policy")
+    system_roots = (system_directory, system_directory / "downlevel")
+    system_imports: dict[str, list[str]] = {}
+    for binary_name, binary_imports in imports_by_binary.items():
+        allowed_imports = allowed_by_binary[binary_name]
+        if not isinstance(allowed_imports, list) or not all(
+            isinstance(item, str) for item in allowed_imports
+        ):
+            raise RuntimeError("Windows system import policy must contain arrays")
+        allowed_names = {item.lower() for item in allowed_imports}
+        classified = []
+        for imported in binary_imports:
+            if imported.lower() in runtime_names:
+                continue
+            if imported.lower() not in allowed_names:
+                raise RuntimeError(
+                    f"ADB helper {binary_name} has an unlocked system import: {imported}"
+                )
+            if not any((root / imported).is_file() for root in system_roots):
+                raise RuntimeError(
+                    f"ADB helper {binary_name} imports unavailable Windows system DLL: {imported}"
+                )
+            classified.append(imported)
+        system_imports[binary_name] = classified
+    return system_imports
+
+
 def verify_forbidden_imports(imports: list[str], target_plan: dict) -> None:
     import_names = {
         pathlib.PurePosixPath(item.replace("\\", "/")).name.lower() for item in imports
@@ -190,8 +364,21 @@ def inspect_binary(
     helper: pathlib.Path,
     helper_dir: pathlib.Path,
     target_plan: dict | None = None,
-) -> tuple[list[str], list[str], list[str], str, str | None, str | None, list[str]]:
+) -> tuple[
+    list[str],
+    list[str],
+    list[str],
+    str,
+    str | None,
+    str | None,
+    list[str],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    list[dict],
+]:
     target_plan = target_plan or {}
+    helper = helper.resolve()
+    helper_dir = helper_dir.resolve()
     expected_arch = target.split("-", 1)[1]
     if target.startswith("macos-"):
         output = run(["otool", "-L", str(helper)])
@@ -242,7 +429,18 @@ def inspect_binary(
         if deployment_target is None:
             raise RuntimeError("macOS helper lacks LC_BUILD_VERSION/minos deployment metadata")
         verify_forbidden_imports(imports, target_plan)
-        return imports, frameworks, architectures, "not-applicable", deployment_target, None, []
+        return (
+            imports,
+            frameworks,
+            architectures,
+            "not-applicable",
+            deployment_target,
+            None,
+            [],
+            {helper.name: imports},
+            {},
+            [],
+        )
     if target.startswith("linux-"):
         output = run(["readelf", "-d", str(helper)])
         imports = []
@@ -339,8 +537,21 @@ def inspect_binary(
         maximum_text = ".".join(
             str(part) for part in max(required_versions["GLIBC"])
         )
+        imports_by_binary = {helper.name: imports}
+        verify_private_import_graph(imports_by_binary, target_plan)
         verify_forbidden_imports(imports, target_plan)
-        return imports, [], [actual_arch], "passed", None, maximum_text, []
+        return (
+            imports,
+            [],
+            [actual_arch],
+            "passed",
+            None,
+            maximum_text,
+            [],
+            imports_by_binary,
+            {},
+            [],
+        )
     if target == "windows-x86_64":
         import ctypes
 
@@ -349,13 +560,16 @@ def inspect_binary(
             helper_dir / name
             for name in target_plan.get("usb", {}).get("runtime_files", [])
         )
-        imports: list[str] = []
+        imports_by_binary: dict[str, list[str]] = {}
+        closure_imports: list[str] = []
         for binary in closure:
             output = run(["dumpbin", "/nologo", "/dependents", str(binary)])
-            for match in re.finditer(r"^\s*([A-Za-z0-9_.+-]+\.dll)\s*$", output, re.MULTILINE | re.IGNORECASE):
-                imported = match.group(1)
-                if imported.lower() not in {item.lower() for item in imports}:
-                    imports.append(imported)
+            binary_imports = parse_dumpbin_dependencies(output, binary.name)
+            for imported in binary_imports:
+                if imported.lower() not in {item.lower() for item in closure_imports}:
+                    closure_imports.append(imported)
+            imports_by_binary[binary.name] = binary_imports
+        imports = imports_by_binary[helper.name]
 
         headers = run(["dumpbin", "/nologo", "/headers", str(helper)])
         machine_match = re.search(r"machine\s*\(([^)]+)\)", headers, re.IGNORECASE)
@@ -367,16 +581,96 @@ def inspect_binary(
             )
 
         runtime_loads: list[str] = []
+        observed_runtime_edges: list[dict] = []
+        loaded_runtimes = []
+        delayed_loads = target_plan.get("usb", {}).get(
+            "required_delayed_runtime_loads", []
+        )
+        delayed_runtime_names = {
+            str(record.get("runtime_file", "")).lower() for record in delayed_loads
+        }
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        kernel32.GetModuleFileNameW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+        ]
+        kernel32.GetModuleFileNameW.restype = ctypes.c_uint32
+        kernel32.GetSystemDirectoryW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        kernel32.GetSystemDirectoryW.restype = ctypes.c_uint32
+        system_directory_buffer = ctypes.create_unicode_buffer(32768)
+        system_directory_length = kernel32.GetSystemDirectoryW(
+            system_directory_buffer, len(system_directory_buffer)
+        )
+        if not system_directory_length or system_directory_length >= len(
+            system_directory_buffer
+        ):
+            raise RuntimeError("failed to resolve the Windows system directory")
+        system_imports_by_binary = classify_windows_system_imports(
+            imports_by_binary,
+            target_plan,
+            pathlib.Path(system_directory_buffer.value),
+        )
         dll_scope = os.add_dll_directory(str(helper_dir)) if hasattr(os, "add_dll_directory") else None
+        previous_cwd = pathlib.Path.cwd()
+        os.chdir(helper_dir)
         try:
             for runtime_name in target_plan.get("usb", {}).get("runtime_files", []):
-                ctypes.WinDLL(str(helper_dir / runtime_name))
+                if runtime_name.lower() in delayed_runtime_names:
+                    continue
+                loader_edges = [
+                    record
+                    for record in delayed_loads
+                    if str(record.get("loaded_by", "")).lower() == runtime_name.lower()
+                ]
+                for record in loader_edges:
+                    delayed_name = str(record.get("runtime_file", ""))
+                    if kernel32.GetModuleHandleW(delayed_name):
+                        raise RuntimeError(
+                            f"required sidecar {delayed_name} was loaded before {runtime_name}"
+                        )
+                loaded_runtimes.append(ctypes.WinDLL(str(helper_dir / runtime_name)))
                 runtime_loads.append(runtime_name)
+                for record in loader_edges:
+                    delayed_name = str(record.get("runtime_file", ""))
+                    delayed_handle = kernel32.GetModuleHandleW(delayed_name)
+                    if not delayed_handle:
+                        raise RuntimeError(
+                            f"{runtime_name} did not load required sidecar {delayed_name}"
+                        )
+                    resolved_buffer = ctypes.create_unicode_buffer(32768)
+                    if not kernel32.GetModuleFileNameW(
+                        delayed_handle, resolved_buffer, len(resolved_buffer)
+                    ) or os.path.normcase(str(pathlib.Path(resolved_buffer.value).resolve())) != os.path.normcase(
+                        str((helper_dir / delayed_name).resolve())
+                    ):
+                        raise RuntimeError(
+                            f"{runtime_name} loaded {delayed_name} outside the private helper directory"
+                        )
+                    observed_runtime_edges.append(
+                        {"loaded_by": runtime_name, "runtime_file": delayed_name}
+                    )
+                    runtime_loads.append(delayed_name)
         finally:
+            os.chdir(previous_cwd)
             if dll_scope is not None:
                 dll_scope.close()
-        verify_forbidden_imports(imports, target_plan)
-        return imports, [], [actual_arch], "passed", None, None, runtime_loads
+        verify_private_import_graph(imports_by_binary, target_plan)
+        verify_forbidden_imports(closure_imports, target_plan)
+        return (
+            imports,
+            [],
+            [actual_arch],
+            "passed",
+            None,
+            None,
+            runtime_loads,
+            imports_by_binary,
+            system_imports_by_binary,
+            observed_runtime_edges,
+        )
     raise RuntimeError(f"no native binary inspector is available for locked target {target}")
 
 
@@ -407,6 +701,8 @@ def main() -> int:
     build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(parallel)
 
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
+    if lock.get("schema_version") != 2:
+        raise RuntimeError("unsupported ADB helper lock schema")
     target_plan = lock.get("targets", {}).get(args.target)
     if not isinstance(target_plan, dict):
         raise RuntimeError(f"unknown locked ADB helper target: {args.target}")
@@ -427,6 +723,8 @@ def main() -> int:
         raise RuntimeError(
             f"native source build required for {args.target}; current host is {host_os}-{host_arch} and only an explicit macOS thin inspection cross-build is allowed"
         )
+
+    runtime_load_evidence = verify_required_runtime_loads(args.source_root, target_plan)
 
     work_sources = args.build_root / "sources"
     install_prefix = args.build_root / "install"
@@ -455,6 +753,8 @@ def main() -> int:
         if patch.get("apply", True) is False:
             continue
         apply_locked_patch(patch_source, patch_path, patch)
+
+    runtime_load_evidence = verify_required_runtime_loads(work_sources, target_plan)
 
     if args.target == "windows-x86_64":
         development_source = work_sources / "windows-platform-development"
@@ -536,7 +836,13 @@ def main() -> int:
         deployment_target,
         glibc_maximum_required,
         runtime_loads,
+        imports_by_binary,
+        system_imports_by_binary,
+        observed_runtime_edges,
     ) = inspect_binary(args.target, helper, helper_dir, target_plan)
+    runtime_load_evidence = verify_runtime_load_binaries(
+        helper_dir, runtime_load_evidence
+    )
 
     smoke_report = args.artifact_root / "smoke.json"
     if native_build:
@@ -593,11 +899,16 @@ def main() -> int:
             "kind": "complete-adb-executable",
         },
         "binary_verification": {
+            "schema_version": 2,
             "dynamic_imports": imports,
+            "imports_by_binary": imports_by_binary,
+            "windows_system_imports_by_binary": system_imports_by_binary,
             "native_frameworks": frameworks,
             "architectures": architectures,
             "runtime_closure": runtime_closure,
             "runtime_loads": runtime_loads,
+            "runtime_load_evidence": runtime_load_evidence,
+            "observed_runtime_edges": observed_runtime_edges,
             "deployment_target": deployment_target,
             "glibc_maximum_required": glibc_maximum_required,
             "libusb_replacement_probe": replacement,

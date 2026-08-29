@@ -248,7 +248,8 @@ def main() -> int:
     try:
         lock = read_json(args.lock, "ADB helper lock")
         receipt = read_json(args.receipt, "ADB helper receipt")
-        if lock.get("schema_version") != 1 or receipt.get("schema_version") != 1:
+        lock_schema = lock.get("schema_version")
+        if lock_schema != 2 or receipt.get("schema_version") != 1:
             raise VerificationError("unsupported ADB helper lock or receipt schema")
         source_assets_root = args.source_assets_root or args.release_root
         if source_assets_root is None:
@@ -378,8 +379,8 @@ def main() -> int:
             )
 
         binary = receipt.get("binary_verification")
-        if not isinstance(binary, dict):
-            raise VerificationError("receipt lacks binary verification")
+        if not isinstance(binary, dict) or binary.get("schema_version") != 2:
+            raise VerificationError("receipt lacks supported binary verification")
         architectures = binary.get("architectures", [])
         expected_architectures = [target_plan.get("arch")]
         if architectures != expected_architectures:
@@ -414,11 +415,113 @@ def main() -> int:
 
         usb = target_plan.get("usb", {})
         imports = [str(item).lower() for item in binary.get("dynamic_imports", [])]
+        imports_by_binary = binary.get("imports_by_binary", {})
+        windows_system_imports = binary.get(
+            "windows_system_imports_by_binary", {}
+        )
         runtime_loads = [str(item).lower() for item in binary.get("runtime_loads", [])]
         expected_runtime = usb.get("runtime_files", [])
         runtime_receipt = binary.get("runtime_closure", [])
+        expected_delayed_loads = usb.get("required_delayed_runtime_loads", [])
+        delayed_load_evidence = binary.get("runtime_load_evidence", [])
+        observed_runtime_edges = binary.get("observed_runtime_edges", [])
         if not isinstance(expected_runtime, list) or not isinstance(runtime_receipt, list):
             raise VerificationError("ADB helper runtime closure metadata must be arrays")
+        if not isinstance(imports_by_binary, dict) or not imports_by_binary:
+            raise VerificationError("ADB helper receipt lacks per-binary import evidence")
+        expected_import_binaries = {helper_path.name}
+        if str(target).startswith("windows-"):
+            expected_import_binaries.update(expected_runtime)
+        if set(imports_by_binary) != expected_import_binaries:
+            raise VerificationError("ADB helper per-binary import evidence is incomplete")
+        if any(
+            not isinstance(binary_imports, list)
+            or not all(isinstance(item, str) for item in binary_imports)
+            for binary_imports in imports_by_binary.values()
+        ):
+            raise VerificationError("ADB helper per-binary imports must be string arrays")
+        if {
+            str(item).lower() for item in imports_by_binary[helper_path.name]
+        } != set(imports):
+            raise VerificationError("ADB helper direct import evidence is contradictory")
+        if usb.get("backend") == "dynamic-libusb":
+            expected_private_imports = usb.get("required_private_imports_by_binary")
+            if not isinstance(expected_private_imports, dict) or set(
+                expected_private_imports
+            ) != expected_import_binaries:
+                raise VerificationError("ADB helper lock lacks a complete private import graph")
+            runtime_names = {str(item).lower() for item in expected_runtime}
+            for binary_name, expected_binary_imports in expected_private_imports.items():
+                if not isinstance(expected_binary_imports, list) or not all(
+                    isinstance(item, str) for item in expected_binary_imports
+                ):
+                    raise VerificationError("ADB helper private import graph must contain arrays")
+                actual_private_imports = {
+                    str(item).lower()
+                    for item in imports_by_binary[binary_name]
+                    if str(item).lower() in runtime_names
+                }
+                if actual_private_imports != {
+                    str(item).lower() for item in expected_binary_imports
+                }:
+                    raise VerificationError(
+                        f"ADB helper private imports mismatch for {binary_name}"
+                    )
+            if str(target).startswith("windows-"):
+                allowed_system_imports = usb.get(
+                    "allowed_system_imports_by_binary"
+                )
+                if not isinstance(allowed_system_imports, dict) or set(
+                    allowed_system_imports
+                ) != expected_import_binaries:
+                    raise VerificationError(
+                        "ADB helper lock lacks a complete Windows system import policy"
+                    )
+                if any(
+                    not isinstance(imports, list)
+                    or not all(isinstance(item, str) for item in imports)
+                    for imports in allowed_system_imports.values()
+                ):
+                    raise VerificationError(
+                        "Windows system import policy must contain arrays"
+                    )
+                if not isinstance(windows_system_imports, dict) or set(
+                    windows_system_imports
+                ) != expected_import_binaries:
+                    raise VerificationError(
+                        "Windows ADB receipt lacks complete system import evidence"
+                    )
+                for binary_name, system_imports in windows_system_imports.items():
+                    if not isinstance(system_imports, list) or not all(
+                        isinstance(item, str) for item in system_imports
+                    ):
+                        raise VerificationError(
+                            "Windows ADB system import evidence must contain arrays"
+                        )
+                    recorded_system_imports = {
+                        str(item).lower() for item in system_imports
+                    }
+                    allowed_names = {
+                        str(item).lower()
+                        for item in allowed_system_imports[binary_name]
+                    }
+                    if not recorded_system_imports.issubset(allowed_names):
+                        raise VerificationError(
+                            f"Windows ADB system import evidence is not locked for {binary_name}"
+                        )
+                    actual_system_imports = {
+                        str(item).lower()
+                        for item in imports_by_binary[binary_name]
+                        if str(item).lower() not in runtime_names
+                    }
+                    if actual_system_imports != recorded_system_imports:
+                        raise VerificationError(
+                            f"Windows ADB system import evidence mismatch for {binary_name}"
+                        )
+        if not isinstance(observed_runtime_edges, list) or any(
+            not isinstance(edge, dict) for edge in observed_runtime_edges
+        ):
+            raise VerificationError("ADB helper observed runtime edges must be objects")
         runtime_by_name = {}
         for entry in runtime_receipt:
             if not isinstance(entry, dict):
@@ -438,6 +541,67 @@ def main() -> int:
             str(item).lower() for item in expected_runtime
         }:
             raise VerificationError("Windows ADB runtime load probe did not cover the complete private closure")
+        if not isinstance(expected_delayed_loads, list) or not isinstance(
+            delayed_load_evidence, list
+        ) or not isinstance(observed_runtime_edges, list):
+            raise VerificationError("ADB helper delayed runtime load metadata must be arrays")
+
+        delayed_by_key = {}
+        for expected_load in expected_delayed_loads:
+            if not isinstance(expected_load, dict):
+                raise VerificationError("ADB helper delayed runtime lock contains a non-object")
+            key = (expected_load.get("loaded_by"), expected_load.get("runtime_file"))
+            if key in delayed_by_key:
+                raise VerificationError("duplicate locked ADB delayed runtime edge")
+            delayed_by_key[key] = expected_load
+        direct_runtime = set(usb.get("required_imports", []))
+        delayed_runtime = {str(key[1]) for key in delayed_by_key}
+        if direct_runtime & delayed_runtime or direct_runtime | delayed_runtime != set(expected_runtime):
+            raise VerificationError(
+                "ADB helper direct and delayed runtime edges must partition the private closure"
+            )
+
+        evidence_by_key = {}
+        for actual_load in delayed_load_evidence:
+            if not isinstance(actual_load, dict):
+                raise VerificationError("ADB helper delayed runtime load evidence contains a non-object")
+            key = (actual_load.get("loaded_by"), actual_load.get("runtime_file"))
+            if key in evidence_by_key:
+                raise VerificationError("duplicate ADB delayed runtime load evidence")
+            evidence_by_key[key] = actual_load
+        if set(evidence_by_key) != set(delayed_by_key):
+            raise VerificationError("ADB helper delayed runtime load evidence is incomplete")
+        for key, expected_load in delayed_by_key.items():
+            actual_load = evidence_by_key[key]
+            if re.fullmatch(
+                r"[0-9a-f]{64}", str(expected_load.get("source_sha256", ""))
+            ) is None:
+                raise VerificationError("ADB delayed runtime lock has invalid source sha256")
+            for field in (
+                "runtime_file",
+                "loaded_by",
+                "source",
+                "expression",
+                "source_sha256",
+                "loader_symbol",
+            ):
+                if actual_load.get(field) != expected_load.get(field):
+                    raise VerificationError(
+                        f"ADB helper delayed runtime load evidence mismatches locked {field}"
+                    )
+            if actual_load.get("runtime_name_encoding") != "utf-16le":
+                raise VerificationError("ADB helper delayed runtime name lacks binary evidence")
+            loader_imports = {
+                str(item).lower() for item in imports_by_binary.get(str(key[0]), [])
+            }
+            if str(expected_load["runtime_file"]).lower() in loader_imports:
+                raise VerificationError("ADB delayed runtime sidecar became a direct PE import")
+        expected_observed_edges = [
+            {"loaded_by": str(key[0]), "runtime_file": str(key[1])}
+            for key in sorted(delayed_by_key)
+        ]
+        if sorted(observed_runtime_edges, key=lambda item: (item.get("loaded_by"), item.get("runtime_file"))) != expected_observed_edges:
+            raise VerificationError("ADB helper delayed runtime edge probe did not pass")
         for name in expected_runtime:
             runtime = helper_path.parent / name
             require_regular_file(runtime, f"ADB helper runtime {name}")
@@ -447,9 +611,14 @@ def main() -> int:
                     f"ADB helper runtime sha256 mismatch ({name}): expected {runtime_by_name[name].get('sha256')}, got {actual_runtime_hash}"
                 )
 
+        closure_imports = [
+            str(imported)
+            for binary_imports in imports_by_binary.values()
+            for imported in binary_imports
+        ]
         import_names = {
             pathlib.PurePosixPath(imported.replace("\\", "/")).name.lower()
-            for imported in imports
+            for imported in closure_imports
         }
         forbidden_imports = []
         for forbidden in usb.get("forbidden_imports", []):
@@ -467,10 +636,28 @@ def main() -> int:
             )
 
         if usb.get("backend") == "dynamic-libusb":
+            direct_import_names = {
+                pathlib.PurePosixPath(imported.replace("\\", "/")).name.lower()
+                for imported in imports
+            }
+            runtime_names = {str(item).lower() for item in expected_runtime}
+            expected_direct_names = {
+                str(item).lower() for item in usb.get("required_imports", [])
+            }
+            if direct_import_names & runtime_names != expected_direct_names:
+                raise VerificationError(
+                    "ADB helper private direct imports do not match the locked runtime partition"
+                )
+            delayed_names = {
+                str(record.get("runtime_file", "")).lower()
+                for record in expected_delayed_loads
+            }
+            if import_names & delayed_names:
+                raise VerificationError("ADB delayed runtime sidecar became a direct PE import")
             missing_imports = [
                 item
                 for item in usb.get("required_imports", [])
-                if pathlib.PurePath(str(item)).name.lower() not in import_names
+                if pathlib.PurePath(str(item)).name.lower() not in direct_import_names
             ]
             if missing_imports:
                 raise VerificationError("ADB helper lacks required dynamic libusb import: " + ", ".join(missing_imports))

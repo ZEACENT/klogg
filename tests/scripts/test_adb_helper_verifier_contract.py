@@ -38,15 +38,44 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
             "backend": "dynamic-libusb",
             "required_imports": ["libusb-1.0.so.0"],
             "runtime_files": ["libusb-1.0.so.0"],
+            "required_private_imports_by_binary": {
+                "adb": ["libusb-1.0.so.0"],
+            },
             "replacement_probe_required": True,
         }
         imports = ["libusb-1.0.so.0", "libc.so.6"]
         frameworks = []
         if target == "windows-x86_64":
             helper_relative = "helpers/adb.exe"
-            usb["required_imports"] = ["libusb-1.0.dll"]
-            usb["runtime_files"] = ["libusb-1.0.dll"]
-            imports = ["libusb-1.0.dll", "kernel32.dll"]
+            usb["required_imports"] = ["AdbWinApi.dll", "libusb-1.0.dll"]
+            usb["runtime_files"] = [
+                "AdbWinApi.dll",
+                "AdbWinUsbApi.dll",
+                "libusb-1.0.dll",
+            ]
+            usb["required_delayed_runtime_loads"] = [
+                {
+                    "runtime_file": "AdbWinUsbApi.dll",
+                    "loaded_by": "AdbWinApi.dll",
+                    "source": "windows-platform-development/AdbWinApi.cpp",
+                    "expression": 'LoadLibrary(L"AdbWinUsbApi.dll")',
+                    "source_sha256": "a" * 64,
+                    "loader_symbol": "LoadLibraryW",
+                }
+            ]
+            usb["required_private_imports_by_binary"] = {
+                "adb.exe": ["AdbWinApi.dll", "libusb-1.0.dll"],
+                "AdbWinApi.dll": [],
+                "AdbWinUsbApi.dll": ["AdbWinApi.dll"],
+                "libusb-1.0.dll": [],
+            }
+            usb["allowed_system_imports_by_binary"] = {
+                "adb.exe": ["KERNEL32.dll"],
+                "AdbWinApi.dll": ["KERNEL32.dll"],
+                "AdbWinUsbApi.dll": ["WINUSB.dll"],
+                "libusb-1.0.dll": ["KERNEL32.dll"],
+            }
+            imports = ["AdbWinApi.dll", "libusb-1.0.dll", "kernel32.dll"]
         elif target.startswith("macos-"):
             helper_relative = "klogg.app/Contents/MacOS/helpers/adb"
             usb = {
@@ -64,19 +93,18 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         helper_hash = hashlib.sha256(helper.read_bytes()).hexdigest()
         runtime_closure = []
         if usb["backend"] == "dynamic-libusb":
-            runtime_name = usb["required_imports"][0]
-            usb["runtime_files"] = [runtime_name]
-            runtime = self.write_file(
-                f"package/{pathlib.PurePosixPath(helper_relative).parent}/{runtime_name}",
-                b"fixture private libusb runtime\n",
-            )
-            runtime_closure.append(
-                {
-                    "name": runtime_name,
-                    "sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
-                    "symlink": False,
-                }
-            )
+            for runtime_name in usb["runtime_files"]:
+                runtime = self.write_file(
+                    f"package/{pathlib.PurePosixPath(helper_relative).parent}/{runtime_name}",
+                    f"fixture private runtime {runtime_name}\n".encode(),
+                )
+                runtime_closure.append(
+                    {
+                        "name": runtime_name,
+                        "sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+                        "symlink": False,
+                    }
+                )
 
         asset_specs = (
             ("source-archive", "adb-helper-source-archive.tar.gz", False),
@@ -146,7 +174,7 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         if target.startswith("macos-"):
             required_receipts.extend(("signing", "notarization"))
         lock = {
-            "schema_version": 1,
+            "schema_version": 2,
             "helper": {
                 "kind": "complete-adb-executable",
                 "required_client_commands": ["version", "help"],
@@ -194,6 +222,35 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
             "sha256"
         ] = source_set_hash
 
+        imports_by_binary = {pathlib.PurePosixPath(helper_relative).name: imports}
+        runtime_loads = []
+        runtime_load_evidence = []
+        observed_runtime_edges = []
+        windows_system_imports = {}
+        if target == "windows-x86_64":
+            imports_by_binary = {
+                "adb.exe": imports,
+                "AdbWinApi.dll": ["KERNEL32.dll"],
+                "AdbWinUsbApi.dll": ["AdbWinApi.dll", "WINUSB.dll"],
+                "libusb-1.0.dll": ["KERNEL32.dll"],
+            }
+            windows_system_imports = {
+                "adb.exe": ["kernel32.dll"],
+                "AdbWinApi.dll": ["KERNEL32.dll"],
+                "AdbWinUsbApi.dll": ["WINUSB.dll"],
+                "libusb-1.0.dll": ["KERNEL32.dll"],
+            }
+            runtime_loads = list(usb["runtime_files"])
+            runtime_load_evidence = [
+                {
+                    **usb["required_delayed_runtime_loads"][0],
+                    "runtime_name_encoding": "utf-16le",
+                }
+            ]
+            observed_runtime_edges = [
+                {"loaded_by": "AdbWinApi.dll", "runtime_file": "AdbWinUsbApi.dll"}
+            ]
+
         receipt = {
             "schema_version": 1,
             "target": target,
@@ -207,10 +264,16 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
             },
             "source_set_receipt_sha256": source_set_hash,
             "binary_verification": {
+                "schema_version": 2,
                 "dynamic_imports": imports,
+                "imports_by_binary": imports_by_binary,
+                "windows_system_imports_by_binary": windows_system_imports,
                 "native_frameworks": frameworks,
                 "architectures": [target_arch],
                 "runtime_closure": runtime_closure,
+                "runtime_loads": runtime_loads,
+                "runtime_load_evidence": runtime_load_evidence,
+                "observed_runtime_edges": observed_runtime_edges,
                 "glibc_maximum_required": "2.34" if target.startswith("linux-") else None,
                 "libusb_replacement_probe": "passed"
                 if usb["backend"] == "dynamic-libusb"
@@ -405,13 +468,19 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 lock, receipt, package_root, release_root, document = self.make_release_fixture()
                 if scenario == "missing-import":
                     document["binary_verification"]["dynamic_imports"] = ["libc.so.6"]
+                    document["binary_verification"]["imports_by_binary"]["adb"] = [
+                        "libc.so.6"
+                    ]
                 else:
                     document["binary_verification"]["libusb_replacement_probe"] = "failed"
                 receipt.write_text(json.dumps(document), encoding="utf-8")
 
                 result = self.run_verifier(lock, receipt, package_root, release_root)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("libusb", (result.stdout + result.stderr).lower())
+                expected = (
+                    "private imports" if scenario == "missing-import" else "libusb"
+                )
+                self.assertIn(expected, (result.stdout + result.stderr).lower())
 
     def test_verifier_requires_exact_dynamic_import_names(self):
         lock, receipt, package_root, release_root, document = self.make_release_fixture(
@@ -421,13 +490,67 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
             "evil-libusb-1.0.dll",
             "kernel32.dll",
         ]
-        document["binary_verification"]["runtime_loads"] = ["libusb-1.0.dll"]
+        document["binary_verification"]["imports_by_binary"]["adb.exe"] = [
+            "evil-libusb-1.0.dll",
+            "kernel32.dll",
+        ]
         receipt.write_text(json.dumps(document), encoding="utf-8")
 
         result = self.run_verifier(lock, receipt, package_root, release_root)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("required dynamic", (result.stdout + result.stderr).lower())
+        self.assertIn("private imports", (result.stdout + result.stderr).lower())
+
+    def test_verifier_rejects_unclassified_windows_host_import(self):
+        lock, receipt, package_root, release_root, document = self.make_release_fixture(
+            target="windows-x86_64", layout="nsis"
+        )
+        binary = document["binary_verification"]
+        binary["dynamic_imports"].append("host-only-vendor.dll")
+        binary["imports_by_binary"]["adb.exe"].append("host-only-vendor.dll")
+        binary["windows_system_imports_by_binary"]["adb.exe"].append(
+            "host-only-vendor.dll"
+        )
+        receipt.write_text(json.dumps(document), encoding="utf-8")
+
+        result = self.run_verifier(lock, receipt, package_root, release_root)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("system import evidence", (result.stdout + result.stderr).lower())
+
+    def test_verifier_rejects_tampered_delayed_runtime_evidence(self):
+        for scenario in (
+            "source-hash",
+            "loader-symbol",
+            "missing-observed-edge",
+            "missing-import-map",
+            "invalid-import-map",
+            "sidecar-became-direct",
+        ):
+            with self.subTest(scenario=scenario):
+                lock, receipt, package_root, release_root, document = self.make_release_fixture(
+                    target="windows-x86_64", layout="nsis"
+                )
+                binary = document["binary_verification"]
+                if scenario == "source-hash":
+                    binary["runtime_load_evidence"][0]["source_sha256"] = "0" * 64
+                elif scenario == "loader-symbol":
+                    binary["runtime_load_evidence"][0]["loader_symbol"] = "LoadLibraryA"
+                elif scenario == "missing-observed-edge":
+                    binary["observed_runtime_edges"] = []
+                elif scenario == "missing-import-map":
+                    binary["imports_by_binary"] = {}
+                elif scenario == "invalid-import-map":
+                    binary["imports_by_binary"]["AdbWinApi.dll"] = "KERNEL32.dll"
+                else:
+                    binary["imports_by_binary"]["AdbWinApi.dll"].append(
+                        "AdbWinUsbApi.dll"
+                    )
+                receipt.write_text(json.dumps(document), encoding="utf-8")
+
+                result = self.run_verifier(lock, receipt, package_root, release_root)
+
+                self.assertNotEqual(result.returncode, 0)
 
     def test_verifier_requires_native_iokit_and_forbids_libusb_on_macos(self):
         for scenario in ("missing-iokit", "imports-libusb"):
@@ -647,7 +770,6 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         lock, receipt, package_root, release_root, document = self.make_release_fixture(
             target="windows-x86_64", layout="nsis"
         )
-        document["binary_verification"]["runtime_loads"] = ["libusb-1.0.dll"]
         receipt.write_text(json.dumps(document), encoding="utf-8")
         helper = package_root / document["helper"]["path"]
         smoke = self.write_smoke_receipt(helper)

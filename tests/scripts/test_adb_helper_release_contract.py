@@ -117,7 +117,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
     def test_lock_records_exact_upstream_baseline_and_immutable_archives(self):
         document = self.lock()
-        self.assertEqual(document.get("schema_version"), 1)
+        self.assertEqual(document.get("schema_version"), 2)
         sources = self.source_map(document)
         self.assertEqual(set(sources), set(EXPECTED_SOURCES))
 
@@ -328,7 +328,20 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
                     self.assertEqual(usb.get("backend"), "dynamic-libusb")
                     self.assertEqual(usb.get("linkage"), "shared")
                     self.assertTrue(usb.get("required_imports"))
-                    self.assertEqual(usb.get("runtime_files"), usb.get("required_imports"))
+                    self.assertTrue(usb.get("runtime_files"))
+                    if expected_os == "linux":
+                        self.assertEqual(
+                            set(usb.get("required_imports", [])),
+                            set(usb.get("runtime_files", [])),
+                        )
+                        self.assertEqual(usb.get("required_delayed_runtime_loads", []), [])
+                    else:
+                        self.assertTrue(
+                            set(usb.get("required_imports", [])).issubset(
+                                set(usb.get("runtime_files", []))
+                            )
+                        )
+                        self.assertTrue(usb.get("required_delayed_runtime_loads"))
                     self.assertIs(usb.get("replacement_probe_required"), True)
                 else:
                     self.assertEqual(usb.get("backend"), "native-iokit")

@@ -239,7 +239,17 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertEqual(usb.get("backend"), "dynamic-libusb")
         self.assertEqual(usb.get("linkage"), "shared")
         self.assertEqual(runtime_files, set(expected["required_runtime_files"]))
-        self.assertTrue(imports.issuperset(runtime_files))
+        self.assertEqual(imports, set(expected["required_direct_imports"]))
+        self.assertTrue(imports.issubset(runtime_files))
+        self.assertEqual(
+            usb.get("required_delayed_runtime_loads"),
+            expected["required_delayed_runtime_loads"],
+        )
+        delayed_runtime_files = {
+            record["runtime_file"] for record in usb["required_delayed_runtime_loads"]
+        }
+        self.assertFalse(imports & delayed_runtime_files)
+        self.assertEqual(imports | delayed_runtime_files, runtime_files)
         self.assertIs(usb.get("replacement_probe_required"), True)
 
         helper_build = "\n".join((self.build_action, self.build_script, self.superbuild))

@@ -662,6 +662,157 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
             ):
                 self.module.run_smoke(["adb-smoke"], report)
 
+    def test_delayed_runtime_load_contract_binds_sidecar_to_pinned_source(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source_root = pathlib.Path(tempdir)
+            source = source_root / "windows-platform-development/AdbWinApi.cpp"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                'handle = LoadLibrary(L"AdbWinUsbApi.dll");\n', encoding="utf-8"
+            )
+            record = {
+                "runtime_file": "AdbWinUsbApi.dll",
+                "loaded_by": "AdbWinApi.dll",
+                "source": "windows-platform-development/AdbWinApi.cpp",
+                "expression": 'LoadLibrary(L"AdbWinUsbApi.dll")',
+                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "loader_symbol": "LoadLibraryW",
+            }
+
+            evidence = self.module.verify_required_runtime_loads(
+                source_root,
+                {
+                    "usb": {
+                        "runtime_files": ["AdbWinApi.dll", "AdbWinUsbApi.dll"],
+                        "required_imports": ["AdbWinApi.dll"],
+                        "required_delayed_runtime_loads": [record],
+                    }
+                },
+            )
+
+            self.assertEqual(len(evidence), 1)
+            self.assertEqual(
+                {key: evidence[0][key] for key in record},
+                record,
+            )
+            self.assertRegex(evidence[0]["source_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_delayed_runtime_load_contract_fails_when_pinned_source_stops_loading_sidecar(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            source_root = pathlib.Path(tempdir)
+            source = source_root / "windows-platform-development/AdbWinApi.cpp"
+            source.parent.mkdir(parents=True)
+            source.write_text("return false;\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "no longer loads required sidecar"):
+                self.module.verify_required_runtime_loads(
+                    source_root,
+                    {
+                        "usb": {
+                            "runtime_files": ["AdbWinApi.dll", "AdbWinUsbApi.dll"],
+                            "required_imports": ["AdbWinApi.dll"],
+                            "required_delayed_runtime_loads": [
+                                {
+                                    "runtime_file": "AdbWinUsbApi.dll",
+                                    "loaded_by": "AdbWinApi.dll",
+                                    "source": "windows-platform-development/AdbWinApi.cpp",
+                                    "expression": 'LoadLibrary(L"AdbWinUsbApi.dll")',
+                                    "source_sha256": hashlib.sha256(
+                                        source.read_bytes()
+                                    ).hexdigest(),
+                                    "loader_symbol": "LoadLibraryW",
+                                }
+                            ],
+                        }
+                    },
+                )
+
+    def test_dumpbin_dependency_parser_rejects_unrepresentable_import_names(self):
+        valid = """
+Dump of file adb.exe
+
+  Image has the following dependencies:
+
+    KERNEL32.dll
+    AdbWinApi.dll
+
+  Summary
+"""
+        self.assertEqual(
+            self.module.parse_dumpbin_dependencies(valid, "adb.exe"),
+            ["KERNEL32.dll", "AdbWinApi.dll"],
+        )
+
+        invalid = valid.replace("AdbWinApi.dll", "vendor\\host-only.dll")
+        with self.assertRaisesRegex(RuntimeError, "unsupported PE dependency name"):
+            self.module.parse_dumpbin_dependencies(invalid, "adb.exe")
+
+    def test_windows_import_partition_rejects_unpackaged_host_dlls(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            system_directory = pathlib.Path(tempdir) / "System32"
+            system_directory.mkdir()
+            (system_directory / "KERNEL32.dll").write_bytes(b"system")
+            target_plan = {
+                "usb": {
+                    "runtime_files": ["AdbWinApi.dll"],
+                    "allowed_system_imports_by_binary": {
+                        "adb.exe": ["KERNEL32.dll"],
+                    },
+                }
+            }
+            imports = {
+                "adb.exe": ["AdbWinApi.dll", "KERNEL32.dll"],
+            }
+
+            self.assertEqual(
+                self.module.classify_windows_system_imports(
+                    imports, target_plan, system_directory
+                ),
+                {"adb.exe": ["KERNEL32.dll"]},
+            )
+
+            imports["adb.exe"].append("host-only-vendor.dll")
+            with self.assertRaisesRegex(RuntimeError, "unlocked system import"):
+                self.module.classify_windows_system_imports(
+                    imports, target_plan, system_directory
+                )
+
+    def test_delayed_runtime_binary_evidence_binds_loader_symbol_and_sidecar_name(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            helper_dir = pathlib.Path(tempdir)
+            loader = helper_dir / "AdbWinApi.dll"
+            loader.write_bytes(b"prefix" + "AdbWinUsbApi.dll".encode("utf-16le") + b"suffix")
+            record = {
+                "runtime_file": "AdbWinUsbApi.dll",
+                "loaded_by": "AdbWinApi.dll",
+                "loader_symbol": "LoadLibraryW",
+            }
+            with mock.patch.object(self.module, "run", return_value="  LoadLibraryW\n"):
+                evidence = self.module.verify_runtime_load_binaries(
+                    helper_dir, [record]
+                )
+            self.assertEqual(
+                evidence,
+                [{**record, "runtime_name_encoding": "utf-16le"}],
+            )
+
+    def test_delayed_runtime_binary_evidence_rejects_missing_sidecar_name(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            helper_dir = pathlib.Path(tempdir)
+            (helper_dir / "AdbWinApi.dll").write_bytes(b"LoadLibraryW only")
+            with mock.patch.object(self.module, "run", return_value="  LoadLibraryW\n"):
+                with self.assertRaisesRegex(RuntimeError, "does not embed delayed sidecar"):
+                    self.module.verify_runtime_load_binaries(
+                        helper_dir,
+                        [
+                            {
+                                "runtime_file": "AdbWinUsbApi.dll",
+                                "loaded_by": "AdbWinApi.dll",
+                                "loader_symbol": "LoadLibraryW",
+                            }
+                        ],
+                    )
+
     def test_dependency_resolution_rejects_dynamic_pinned_build_dependencies(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = pathlib.Path(tempdir)
