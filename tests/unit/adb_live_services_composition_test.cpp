@@ -653,6 +653,10 @@ TEST_CASE( "packaged ADB helper validation rejects non-files non-executables and
         REQUIRE( helper.write( "not executable" ) > 0 );
         helper.close();
         REQUIRE( helper.setPermissions( QFileDevice::ReadOwner | QFileDevice::WriteOwner ) );
+        if ( QFileInfo( helperPath ).isExecutable() ) {
+            SUCCEED( "Platform does not model executable files with Qt permission bits" );
+            return;
+        }
         requireRejectedPackagedHelper( applicationDir, runtimeDir );
     }
 
@@ -671,6 +675,10 @@ TEST_CASE( "packaged ADB helper validation rejects non-files non-executables and
                                         | QFileDevice::ExeOwner ) );
         if ( !QFile::link( externalHelper, helperPath ) ) {
             WARN( "Filesystem does not support creating the helper symlink" );
+        }
+        else if ( !QFileInfo( helperPath ).isSymLink() ) {
+            SUCCEED( "Platform link API did not create a filesystem symlink" );
+            return;
         }
         else {
             requireRejectedPackagedHelper( applicationDir, runtimeDir );
@@ -696,6 +704,10 @@ TEST_CASE( "packaged ADB helper validation rejects non-files non-executables and
                                         | QFileDevice::ExeOwner ) );
         if ( !QFile::link( externalHelpersDir, helpersDir ) ) {
             WARN( "Filesystem does not support creating the helpers-directory symlink" );
+        }
+        else if ( !QFileInfo( helpersDir ).isSymLink() ) {
+            SUCCEED( "Platform link API did not create a filesystem directory symlink" );
+            return;
         }
         else {
             requireRejectedPackagedHelper( applicationDir, runtimeDir );

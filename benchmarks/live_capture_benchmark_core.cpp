@@ -347,9 +347,24 @@ public:
             auto file = std::make_unique<QTemporaryFile>(
                 pathToQString( captureRoot_ / "fixture-XXXXXX" ) );
             file->setAutoRemove( true );
-            if ( !file->open() || file->write( toQByteArray( stream ) ) != file->size()
-                 || !file->flush() ) {
-                throw std::runtime_error( "could not stage the synthetic process fixture" );
+            if ( !file->open() ) {
+                throw std::runtime_error(
+                    "could not open the synthetic process fixture: "
+                    + file->errorString().toStdString() );
+            }
+            const auto payload = toQByteArray( stream );
+            const auto expectedBytes = static_cast<qint64>( payload.size() );
+            const auto writtenBytes = file->write( payload );
+            if ( writtenBytes != expectedBytes ) {
+                throw std::runtime_error(
+                    "could not write the complete synthetic process fixture: expected "
+                    + std::to_string( expectedBytes ) + ", wrote "
+                    + std::to_string( writtenBytes ) );
+            }
+            if ( !file->flush() ) {
+                throw std::runtime_error(
+                    "could not flush the synthetic process fixture: "
+                    + file->errorString().toStdString() );
             }
             const auto fixturePath = file->fileName();
             file->close();
