@@ -7,7 +7,7 @@ runs:
       shell: sh
       run: |
         PREFETCH_BUILD_ROOT="$KLOGG_WORKSPACE/build_root_prefetch"
-        CROARING_CACHE="$KLOGG_WORKSPACE/cpm_cache/croaring/ba5bf40909b6935a298d4d2231f2072e6de80041"
+        CROARING_CACHE="$KLOGG_WORKSPACE/cpm_cache/croaring"
         if ! "$KLOGG_WORKSPACE/scripts/check_cpm_cache_contract.sh" --root "$KLOGG_WORKSPACE"; then
           rm -rf "$CROARING_CACHE"
         fi

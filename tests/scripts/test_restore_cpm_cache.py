@@ -76,7 +76,7 @@ class RestoreCpmCacheTest(unittest.TestCase):
         action = PREFETCH_ACTION.read_text(encoding="utf-8")
         self.assertGreaterEqual(action.count("check_cpm_cache_contract.sh"), 2)
         self.assertIn("rm -rf", action)
-        self.assertIn("cpm_cache/croaring/ba5bf40909b6935a298d4d2231f2072e6de80041", action)
+        self.assertIn('CROARING_CACHE="$KLOGG_WORKSPACE/cpm_cache/croaring"', action)
 
     def test_valid_archive_replaces_cache_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
