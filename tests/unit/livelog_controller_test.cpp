@@ -483,6 +483,13 @@ TEST_CASE( "Device authorization snapshots can gate a waiting live tab",
     CHECK( controller.snapshot().source.status == live::SourceStatus::AwaitingUser );
     CHECK( controller.snapshot().source.awaitingUserReason == live::AwaitingUserReason::Trust );
     CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 0u );
+
+    controller.userActionRequired( generation, live::AwaitingUserReason::Unlock );
+
+    CHECK( controller.snapshot().source.status == live::SourceStatus::AwaitingUser );
+    CHECK( controller.snapshot().source.awaitingUserReason == live::AwaitingUserReason::Unlock );
+    CHECK( controller.presentation().awaitingUserReason == live::AwaitingUserReason::Unlock );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 0u );
 }
 
 TEST_CASE( "Connecting and Opening never present Connected while an idle armed stream does",

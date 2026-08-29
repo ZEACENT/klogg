@@ -221,6 +221,26 @@ TEST_CASE( "current-generation device gates present each AwaitingUser reason",
     }
 }
 
+TEST_CASE( "current-generation device gates refresh an existing AwaitingUser reason",
+           "[livecapture][state][device]" )
+{
+    const auto waiting = waitingForDeviceState();
+    const auto awaiting = dispatch(
+        waiting, UserActionRequired{ waiting.generation, AwaitingUserReason::Trust, at( 40 ) } );
+    REQUIRE( awaiting.accepted );
+    REQUIRE( awaiting.snapshot.source.status == SourceStatus::AwaitingUser );
+
+    const auto refreshed
+        = dispatch( awaiting.snapshot, UserActionRequired{ awaiting.snapshot.generation,
+                                                           AwaitingUserReason::Unlock, at( 50 ) } );
+
+    REQUIRE( refreshed.accepted );
+    CHECK( refreshed.snapshot.source.status == SourceStatus::AwaitingUser );
+    CHECK( refreshed.snapshot.source.awaitingUserReason == AwaitingUserReason::Unlock );
+    CHECK( refreshed.snapshot.generation == awaiting.snapshot.generation );
+    CHECK( refreshed.effects.empty() );
+}
+
 TEST_CASE( "only a fully ready streaming source presents Connected",
            "[livecapture][state][presentation]" )
 {

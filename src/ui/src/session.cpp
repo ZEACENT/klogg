@@ -325,7 +325,7 @@ private:
             const QPointer<AdbLogcatSource> context( source_.get() );
             iosSubscription_ = iosCatalog_->subscribe(
                 [ this, context,
-                  observationEpoch ]( const klogg::livecapture::ios::IosCatalogSnapshot& snapshot ) {
+                  observationEpoch ]( const klogg::livecapture::ios::IosCatalogSnapshot& ) {
                     // The catalog invokes callbacks from its native monitor thread;
                     // nothing here may escape into vendor code.
                     try { // NOLINT(bugprone-exception-escape)
@@ -335,13 +335,14 @@ private:
                         QMetaObject::invokeMethod(
                             context.data(),
                             // NOLINTNEXTLINE(bugprone-exception-escape)
-                            [ this, context, snapshot, observationEpoch ] {
-                                // Queued UI slots are an event-loop boundary; a failed
-                                // observation must not escape the dispatcher.
+                            [ this, context, observationEpoch ] {
+                                // A callback invalidates the catalog view. Read the latest
+                                // snapshot after queued delivery so an older notification
+                                // cannot overwrite a synchronous reconnect replay.
                                 try { // NOLINT(bugprone-exception-escape)
                                     if ( context != nullptr
                                          && observationEpoch == iosObservationEpoch_ ) {
-                                        observeIosSnapshot( snapshot );
+                                        observeIosSnapshot( iosCatalog_->snapshot() );
                                     }
                                 } catch ( ... ) { // NOLINT(bugprone-empty-catch)
                                 }

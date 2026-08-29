@@ -48,15 +48,18 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include <QCoreApplication>
+#include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
-#include <QTemporaryDir>
 #include <QStringList>
+#include <QTemporaryDir>
 
 #include "adblogcatsource.h"
 #include "livelogcontroller.h"
@@ -243,6 +246,11 @@ public:
         if ( callback_ ) {
             callback_( snapshot_ );
         }
+    }
+
+    void replaceSnapshot( klogg::livecapture::ios::IosCatalogSnapshot snapshot )
+    {
+        snapshot_ = std::move( snapshot );
     }
 
     SnapshotCallback callbackCopy() const
@@ -1072,6 +1080,52 @@ TEST_CASE( "queued iOS snapshot from a retired observation cannot arm a restarte
 
     CHECK( factory.totalStarts() == 0u );
     CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "queued iOS catalog invalidation observes the latest same-generation snapshot",
+           "[livelog-restore-arming][session][ios-catalog]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-latest-catalog-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+
+    klogg::livecapture::ios::IosCatalogEntry entry;
+    entry.endpoint.udid = spec.device.deviceId.toStdString();
+    entry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    catalog.publish( { 1u, { entry } } );
+    REQUIRE( factory.totalStarts() == 1u );
+    const auto generation = controller->snapshot().generation;
+    factory.createdTransports.front()->publishState( generation,
+                                                     LiveSourceTransport::State::Connected );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+
+    const auto callback = catalog.callbackCopy();
+    REQUIRE( static_cast<bool>( callback ) );
+    std::thread observer( [ callback, entry ] { callback( { 1u, { entry } } ); } );
+    observer.join();
+
+    catalog.replaceSnapshot( { 1u, {} } );
+    REQUIRE( source->reconnectSource() );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+    REQUIRE( factory.totalStarts() == 1u );
+
+    QCoreApplication::sendPostedEvents( source, QEvent::MetaCall );
+
+    CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+    CHECK( factory.totalStarts() == 1u );
     closeAndDeleteViews( *appSession, opened );
 }
 

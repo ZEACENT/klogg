@@ -336,14 +336,15 @@ void apply( LiveStateTransition& transition, const UserActionRequired& event,
             const LiveStateConfig& )
 {
     auto& snapshot = transition.snapshot;
+    const auto activeStreamAttempt = hasActiveStreamAttempt( snapshot );
     if ( !hasCurrentRunningGeneration( snapshot, event )
          || ( snapshot.source.status != SourceStatus::WaitingForDevice
-              && !hasActiveStreamAttempt( snapshot ) ) ) {
+              && snapshot.source.status != SourceStatus::AwaitingUser && !activeStreamAttempt ) ) {
         return;
     }
 
     advanceNow( snapshot, event.at );
-    if ( hasActiveStreamAttempt( snapshot ) ) {
+    if ( activeStreamAttempt ) {
         invalidateStreamAttempt( transition );
     }
     resetSourceAttempt( transition );
