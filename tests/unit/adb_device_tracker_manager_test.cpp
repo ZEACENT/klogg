@@ -783,6 +783,7 @@ TEST_CASE( "track FAIL and EOF use bounded injected reconnect without withdrawin
     CHECK( harness.manager.snapshot().error->retryPolicy == RetryPolicy::Backoff );
     CHECK( harness.manager.snapshot().error->nativeDetail.find( "track service replaced" )
            != std::string::npos );
+    CHECK( mapTrackedAdbInfrastructureSnapshot( 80u, harness.manager.snapshot() ).devices.empty() );
     const auto errorSnapshotCount = harness.snapshots.snapshots.size();
     harness.supervisorScheduler.fire( AdbServerScheduleKind::HealthProbe );
     REQUIRE( harness.probe.requests.size() == 2u );
@@ -892,7 +893,7 @@ TEST_CASE( "supervisor loss cancels tracking and publishes a structured infrastr
     const auto refreshGeneration = coordinator.beginRefresh();
     REQUIRE( coordinator.accept(
         mapTrackedAdbInfrastructureSnapshot( refreshGeneration, harness.manager.snapshot() ) ) );
-    CHECK( coordinator.currentDevices().size() == 3 );
+    CHECK( coordinator.currentDevices().empty() );
     REQUIRE( coordinator.currentError().has_value() );
     CHECK( coordinator.currentError()->scope == ErrorScope::Infrastructure );
     CHECK( coordinator.currentError()->retryPolicy == RetryPolicy::WaitForInfrastructure );
@@ -1059,12 +1060,14 @@ TEST_CASE(
              == InfrastructureStatus::Unavailable );
     CHECK_FALSE( harness.manager.defaultOnlineDevice().has_value() );
     requireKnownDevices( harness.manager, { "online-1", "locked-2", "sleeping-3" } );
+    CHECK( mapTrackedAdbInfrastructureSnapshot( 81u, harness.manager.snapshot() ).devices.empty() );
 
     harness.supervisorScheduler.fire( AdbServerScheduleKind::ReconnectBackoff );
     REQUIRE( harness.probe.requests.size() == 3u );
     harness.probe.completeReady( 2, ReplacementServerIdentity );
     REQUIRE( harness.manager.snapshot().infrastructure.status == InfrastructureStatus::Ready );
     CHECK_FALSE( harness.manager.defaultOnlineDevice().has_value() );
+    CHECK( mapTrackedAdbInfrastructureSnapshot( 82u, harness.manager.snapshot() ).devices.empty() );
 
     REQUIRE( drainEventsUntil( [ &harness ] { return harness.server.requestCount() == 2; } ) );
     harness.server.sendTrackAccepted(
@@ -1073,6 +1076,10 @@ TEST_CASE(
         const auto selected = harness.manager.defaultOnlineDevice();
         return selected.has_value() && selected->serial == "replacement-online";
     } ) );
+    const auto currentDiscovery
+        = mapTrackedAdbInfrastructureSnapshot( 83u, harness.manager.snapshot() );
+    REQUIRE( currentDiscovery.devices.size() == 1 );
+    CHECK( currentDiscovery.devices.front().serial == QStringLiteral( "replacement-online" ) );
 }
 
 TEST_CASE( "unchanged health confirmation coalesces at the aggregate manager boundary",

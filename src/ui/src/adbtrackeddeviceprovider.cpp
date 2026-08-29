@@ -47,6 +47,15 @@ QString displayDescription( const klogg::livecapture::adb::AdbDeviceInfo& device
     return QString::fromStdString( device.serial );
 }
 
+bool hasCurrentDeviceSnapshot(
+    const klogg::livecapture::adb::AdbInfrastructureSnapshot& snapshot ) noexcept
+{
+    return snapshot.infrastructure.status == klogg::livecapture::InfrastructureStatus::Ready
+           && snapshot.devices.generation == snapshot.generation
+           && snapshot.devices.infrastructureEpoch == snapshot.infrastructureEpoch
+           && !snapshot.devices.error.has_value();
+}
+
 std::optional<klogg::livecapture::LiveSourceError>
 presentationError( const std::optional<klogg::livecapture::LiveSourceError>& error )
 {
@@ -70,16 +79,19 @@ DeviceDiscoveryResult<AdbDeviceInfo> mapTrackedAdbInfrastructureSnapshot(
     const klogg::livecapture::adb::AdbInfrastructureSnapshot& snapshot )
 {
     QList<AdbDeviceInfo> devices;
-    devices.reserve( static_cast<decltype( devices.size() )>( snapshot.devices.devices.size() ) );
-    for ( const auto& device : snapshot.devices.devices ) {
-        const auto serial = QString::fromStdString( device.serial );
-        const auto stateText = QString::fromStdString( device.stateText );
-        const auto description = displayDescription( device );
-        const auto displayName = device.state == klogg::livecapture::adb::AdbDeviceState::Online
-                                     ? QStringLiteral( "%1 (%2)" ).arg( description, serial )
-                                     : QStringLiteral( "%1 [%2]" ).arg( serial, stateText );
-        devices.push_back( AdbDeviceInfo{ serial, displayName, description,
-                                          mapState( device.state ), stateText } );
+    if ( hasCurrentDeviceSnapshot( snapshot ) ) {
+        devices.reserve(
+            static_cast<decltype( devices.size() )>( snapshot.devices.devices.size() ) );
+        for ( const auto& device : snapshot.devices.devices ) {
+            const auto serial = QString::fromStdString( device.serial );
+            const auto stateText = QString::fromStdString( device.stateText );
+            const auto description = displayDescription( device );
+            const auto displayName = device.state == klogg::livecapture::adb::AdbDeviceState::Online
+                                         ? QStringLiteral( "%1 (%2)" ).arg( description, serial )
+                                         : QStringLiteral( "%1 [%2]" ).arg( serial, stateText );
+            devices.push_back( AdbDeviceInfo{ serial, displayName, description,
+                                              mapState( device.state ), stateText } );
+        }
     }
     return { refreshGeneration, std::move( devices ), presentationError( snapshot.error ) };
 }
