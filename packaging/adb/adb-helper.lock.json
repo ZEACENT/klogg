@@ -324,6 +324,17 @@
       "target": "windows-x86_64",
       "role": "windows-adb-only",
       "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/0009-windows-static-link-order.patch",
+      "sha256": "a515a7b28f849e9896b5d0579619293c956b3d64d62e0bcacdacb4113b35473f",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "windows-static-link-order",
+      "apply_tool": "gnu-patch"
     }
   ],
   "toolchain_packages": [

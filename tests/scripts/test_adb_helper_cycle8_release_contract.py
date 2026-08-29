@@ -186,6 +186,26 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertIn("add_library(libzip STATIC", patch_text)
         self.assertNotIn("pcre2", records_by_id(self.lock.get("dependencies")))
 
+    def test_windows_x64_static_brotli_link_order_places_common_after_consumers(self):
+        patches = [
+            patch
+            for patch in self.lock.get("patches", [])
+            if isinstance(patch, dict)
+            and patch.get("target") == "windows-x86_64"
+            and patch.get("applies_to") == "android-tools-release"
+            and patch.get("role") == "windows-static-link-order"
+            and patch.get("apply", True) is True
+        ]
+        self.assertEqual(len(patches), 1)
+        patch_text = read_text(ROOT / patches[0]["path"])
+        self.assertIn(
+            "-\tPkgConfig::libbrotlicommon\n"
+            " \tPkgConfig::libbrotlidec\n"
+            " \tPkgConfig::libbrotlienc\n"
+            "+\tPkgConfig::libbrotlicommon\n",
+            patch_text,
+        )
+
     def test_windows_x64_closure_is_private_dynamic_and_contains_every_source_built_dll(self):
         expected = self.fixture["helper_targets"]["windows-x86_64"]
         target = self.lock.get("targets", {}).get("windows-x86_64", {})
