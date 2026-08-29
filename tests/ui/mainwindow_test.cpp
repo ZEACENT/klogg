@@ -56,6 +56,7 @@
 #include "filterfavoritesmodel.h"
 #include "foldercrawlerwidget.h"
 #include "folderfilteredview.h"
+#include "livelogcontroller.h"
 #include "livelogsession.h"
 #include "log.h"
 #include "mainwindow.h"
@@ -1049,12 +1050,35 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui]
     REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
     REQUIRE( tabArea->tabText( 0 ) == QStringLiteral( "iPhone Test" ) );
 
+    const auto disconnectedIconKey = tabArea->tabIcon( 0 ).cacheKey();
+    auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->widget( 0 ) );
+    REQUIRE( crawler != nullptr );
+    auto* source = appSession->getAdbLogcatSource( crawler );
+    REQUIRE( source != nullptr );
+
+    runInUiThread(
+        [ source ] { Q_EMIT source->captureOutputChanged( false, CaptureOutputError::Write ); } );
+    REQUIRE( waitUiState( [ & ] {
+        return tabArea->tabToolTip( 0 ).contains( QStringLiteral( "Output error" ) )
+               && tabArea->tabToolTip( 0 ).contains(
+                   QStringLiteral( "The bound capture output could not be written." ) );
+    } ) );
+    CHECK( tabArea->tabIcon( 0 ).cacheKey() != disconnectedIconKey );
+
+    runInUiThread(
+        [ source ] { Q_EMIT source->captureOutputChanged( true, CaptureOutputError::Write ); } );
+    REQUIRE( waitUiState( [ & ] {
+        return !tabArea->tabToolTip( 0 ).contains( QStringLiteral( "Output error" ) );
+    } ) );
+    CHECK( tabArea->tabIcon( 0 ).cacheKey() == disconnectedIconKey );
+
     mainWindow->close();
     sessionInfo.remove( windowId );
     sessionInfo.save();
 }
 
-SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][session][adb]" )
+SCENARIO( "Session restore retains unavailable ADB output bindings as degraded",
+          "[ui][session][adb]" )
 {
     auto appSession = std::make_shared<Session>();
     const auto tempDirPath = makeTestDir( "restore_adb_output" );
@@ -1080,10 +1104,25 @@ SCENARIO( "Session restore clears unavailable ADB output bindings", "[ui][sessio
         = appSession->openAdbLogcat( adbSessionData, []() { return new CrawlerWidget(); }, false );
     REQUIRE( view != nullptr );
 
-    REQUIRE( appSession->getAssociatedPath( view ).isEmpty() );
+    REQUIRE( appSession->getAssociatedPath( view ) == adbSessionData.boundOutputFile );
     auto* adbSource = appSession->getAdbLogcatSource( view );
+    auto* controller = appSession->getLiveLogController( view );
     REQUIRE( adbSource != nullptr );
-    REQUIRE( adbSource->sessionData().boundOutputFile.isEmpty() );
+    REQUIRE( controller != nullptr );
+    REQUIRE( adbSource->sessionData().boundOutputFile == adbSessionData.boundOutputFile );
+    REQUIRE( controller->snapshot().outputBinding
+             == klogg::livecapture::OutputBindingState::Degraded );
+    REQUIRE( controller->snapshot().outputBindingError.has_value() );
+    CHECK( controller->snapshot().outputBindingError->code == "output-open-failed" );
+
+    const auto validOutputPath = QDir{ tempDirPath }.filePath( "capture.log" );
+    REQUIRE( adbSource->bindOutputFile( validOutputPath, LiveLogSaveAnsiMode::Strip ) );
+    REQUIRE( controller->snapshot().outputBinding
+             == klogg::livecapture::OutputBindingState::Healthy );
+    REQUIRE_FALSE(
+        adbSource->bindOutputFile( adbSessionData.boundOutputFile, LiveLogSaveAnsiMode::Strip ) );
+    CHECK( controller->snapshot().outputBinding
+           == klogg::livecapture::OutputBindingState::Healthy );
 
     appSession->close( view );
 }

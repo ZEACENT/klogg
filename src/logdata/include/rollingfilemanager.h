@@ -25,6 +25,7 @@ class RollingFileManager {
 
     bool isValid() const;
     bool open( bool truncate = false );
+    bool openExisting();
     void close();
     bool flush();
 
@@ -47,6 +48,8 @@ class RollingFileManager {
     // decide whether a capture must be replayed into the file, avoiding the
     // TOCTOU window between that check and the actual open().
     bool openedNewFile() const;
+    bool refersToPath( const QString& path ) const;
+    bool removeCurrentFile();
     qint64 currentFileSize() const;
     qint64 maxFileSize() const;
     int backupCount() const;

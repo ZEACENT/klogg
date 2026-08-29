@@ -410,10 +410,10 @@ void LiveLogController::streamFailed( live::Generation generation, live::LiveSou
     dispatch( live::RetryRequested{ generation, std::move( error ), attempt, now + delay, now } );
 }
 
-void LiveLogController::captureChanged( live::Generation generation, live::CaptureState state,
-                                        std::optional<live::LiveSourceError> error )
+void LiveLogController::outputBindingChanged( live::OutputBindingState state,
+                                              std::optional<live::LiveSourceError> error )
 {
-    dispatch( live::CaptureChanged{ generation, state, std::move( error ), clock_->now() } );
+    dispatch( live::OutputBindingChanged{ state, std::move( error ), clock_->now() } );
 }
 
 void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByteArray* bytes )

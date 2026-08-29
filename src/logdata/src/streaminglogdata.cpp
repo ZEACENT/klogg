@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
+#include <QSaveFile>
+#include <QTemporaryFile>
 
 #include "logfiltereddata.h"
 
@@ -29,9 +31,8 @@ StreamingLogData::StreamingLogData( QString captureId, QString captureRoot )
     connect( &outputFlushTimer_, &QTimer::timeout, this, [ this ] {
         if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
              && rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
-            closeDisplayOutputFile();
-            reportCaptureOutputFailure(
-                QStringLiteral( "The bound capture output could not be flushed." ) );
+            closeDisplayOutputFile( false );
+            reportCaptureOutputFailure( CaptureOutputError::Flush );
         }
         if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
             captureStore_.flush();
@@ -54,7 +55,7 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 
     // Restart the flush timer if new data arrives while an output file is bound
     // but the timer is stopped (e.g. after finishInput from a reconnect cycle).
-    if ( !outputFlushTimer_.isActive() && !boundOutputFile().isEmpty() ) {
+    if ( !outputFlushTimer_.isActive() && isOutputFileActive() ) {
         startOutputFlushTimer();
     }
 
@@ -149,8 +150,8 @@ void StreamingLogData::finishInput()
     }
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
          && rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
-        closeDisplayOutputFile();
-        reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be flushed." ) );
+        closeDisplayOutputFile( false );
+        reportCaptureOutputFailure( CaptureOutputError::Flush );
     }
 }
 
@@ -185,13 +186,31 @@ void StreamingLogData::clearCapture()
     }
     const auto boundPath = boundOutputFile();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundPath.isEmpty() ) {
-        openDisplayOutputFile( boundPath );
+        if ( openDisplayOutputFile( boundPath ).success ) {
+            reportCaptureOutputHealthy();
+        }
+        else {
+            reportCaptureOutputFailure( CaptureOutputError::Reopen );
+        }
+    }
+    else if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve && !boundPath.isEmpty() ) {
+        if ( captureStore_.boundOutputFile().isEmpty() ) {
+            RollingFileManager staleOutput( boundPath, rollingMaxFileSize_, rollingBackupCount_ );
+            staleOutput.deleteAll();
+        }
+        if ( !captureStore_.boundOutputFile().isEmpty()
+             || captureStore_.bindOutputFile( boundPath ) ) {
+            reportCaptureOutputHealthy();
+        }
+        else {
+            reportCaptureOutputFailure( CaptureOutputError::Reopen );
+        }
     }
 
     // clear() internally rebinds the output file if one was bound.
     // Only restart the timer if it was running before the clear,
     // so a clearCapture after finishInput does not revive the timer.
-    if ( timerWasActive && !boundOutputFile().isEmpty() ) {
+    if ( timerWasActive && isOutputFileActive() ) {
         startOutputFlushTimer();
     }
 
@@ -204,6 +223,23 @@ void StreamingLogData::setCaptureLimits( CaptureStore::Limits limits )
     rollingMaxFileSize_ = limits.rollingMaxFileSize;
     rollingBackupCount_ = limits.rollingBackupCount;
     captureStore_.setLimits( std::move( limits ) );
+}
+
+CaptureOutputError
+StreamingLogData::captureStoreOutputError( std::optional<CaptureStore::OutputFailure> failure )
+{
+    if ( !failure.has_value() ) {
+        return CaptureOutputError::Open;
+    }
+    switch ( *failure ) {
+    case CaptureStore::OutputFailure::Open:
+        return CaptureOutputError::Open;
+    case CaptureStore::OutputFailure::Write:
+        return CaptureOutputError::Write;
+    case CaptureStore::OutputFailure::Flush:
+        return CaptureOutputError::Flush;
+    }
+    return CaptureOutputError::Open;
 }
 
 bool StreamingLogData::bindOutputFile( const QString& outputPath )
@@ -220,51 +256,110 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
                                        OutputBindMode mode )
 {
     stopOutputFlushTimer();
-    outputSaveAnsiMode_ = ansiMode;
+    const auto previousOutputPath = boundOutputFile();
+    const auto previousAnsiMode = outputSaveAnsiMode_;
+    const auto hadBoundOutput = !previousOutputPath.isEmpty();
 
     if ( outputPath.isEmpty() ) {
+        outputSaveAnsiMode_ = ansiMode;
         closeDisplayOutputFile();
         captureStore_.bindOutputFile( QString{} );
         reportCaptureOutputHealthy();
         return true;
     }
 
+    const auto normalizedPath = []( const QString& path ) {
+        const QFileInfo info( path );
+        const auto canonicalPath = info.canonicalFilePath();
+        return canonicalPath.isEmpty() ? info.absoluteFilePath() : canonicalPath;
+    };
+    const auto sameLexicalPath
+        = QDir::cleanPath( outputPath ) == QDir::cleanPath( previousOutputPath );
+    const auto refersToActiveOutput = outputRefersToPath( outputPath );
+    const auto rebindsActivePath
+        = hadBoundOutput
+          && ( sameLexicalPath
+               || normalizedPath( outputPath ) == normalizedPath( previousOutputPath )
+               || refersToActiveOutput );
+    if ( mode == OutputBindMode::FreshSave && rebindsActivePath && isOutputFileActive() ) {
+        if ( refersToActiveOutput ) {
+            if ( ansiMode != previousAnsiMode ) {
+                startOutputFlushTimer();
+                return false;
+            }
+            reportCaptureOutputHealthy();
+            startOutputFlushTimer();
+            return true;
+        }
+        // The active handle may refer to a pathname that was moved or deleted.
+        // Rebind below so Save As can recreate the requested path from capture.
+    }
+
+    outputSaveAnsiMode_ = ansiMode;
+
     // FreshSave truncates the destination and replays the current capture
     // (user-initiated "Save As" — overwrite was already confirmed by the
-    // dialog). Restore opens the destination append-only so content already
-    // streamed to the file survives a restart even when the volatile capture
-    // (OS temp dir) has been cleared. If the destination is gone (moved or
-    // deleted while klogg was closed) but the capture still reloaded, fall back
-    // to the fresh replay path so the rebuilt file carries the restored history
-    // instead of starting empty.
-    const bool preserveExisting
-        = ( mode == OutputBindMode::Restore ) && QFileInfo::exists( outputPath );
+    // dialog). Restore always uses append/create semantics so a path created
+    // concurrently cannot be truncated. openedNewFile() determines whether a
+    // missing destination was created and therefore needs capture replay.
+    const bool preserveExisting = mode == OutputBindMode::Restore;
 
-    bool result = false;
+    OutputBindResult binding;
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve ) {
         closeDisplayOutputFile();
-        result = captureStore_.bindOutputFile( outputPath, preserveExisting );
+        binding.success = captureStore_.bindOutputFile( outputPath, preserveExisting );
+        binding.error = captureStoreOutputError( captureStore_.outputFailure() );
         {
             const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
-            boundOutputFile_ = result ? outputPath : QString{};
+            boundOutputFile_ = binding.success ? outputPath : previousOutputPath;
         }
     }
     else {
         captureStore_.bindOutputFile( QString{} );
-        result = openDisplayOutputFile( outputPath, preserveExisting );
+        binding = openDisplayOutputFile( outputPath, preserveExisting );
+        if ( !binding.success ) {
+            const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+            boundOutputFile_ = previousOutputPath;
+        }
     }
 
-    if ( !outputPath.isEmpty() && result ) {
+    if ( binding.success ) {
         reportCaptureOutputHealthy();
         startOutputFlushTimer();
     }
-    return result;
+    else {
+        outputSaveAnsiMode_ = previousAnsiMode;
+        const auto rollback = hadBoundOutput
+                                  ? restoreOutputFile( previousOutputPath, previousAnsiMode )
+                                  : OutputBindResult{};
+        if ( rollback.success ) {
+            reportCaptureOutputHealthy();
+            startOutputFlushTimer();
+        }
+        else if ( hadBoundOutput ) {
+            reportCaptureOutputFailure( rollback.error );
+        }
+        else if ( mode == OutputBindMode::Restore ) {
+            outputSaveAnsiMode_ = ansiMode;
+            {
+                const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+                boundOutputFile_ = outputPath;
+            }
+            reportCaptureOutputFailure( binding.error );
+        }
+    }
+    return binding.success;
 }
 
 QString StreamingLogData::boundOutputFile() const
 {
     const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
     return boundOutputFile_;
+}
+
+std::optional<CaptureOutputError> StreamingLogData::captureOutputError() const
+{
+    return captureOutputError_;
 }
 
 QString StreamingLogData::captureId() const
@@ -507,61 +602,183 @@ void StreamingLogData::stopOutputFlushTimer()
     outputFlushTimer_.stop();
 }
 
-bool StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserveExisting )
+StreamingLogData::OutputBindResult
+StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserveExisting )
 {
-    const auto outputPathCopy = outputPath;
-    closeDisplayOutputFile();
+    const auto previousOutputPath = boundOutputFile();
+    closeDisplayOutputFile( false );
     {
         const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
-        boundOutputFile_ = outputPathCopy;
+        boundOutputFile_ = outputPath;
     }
 
-    if ( outputPathCopy.isEmpty() ) {
-        return true;
-    }
-
-    QDir().mkpath( QFileInfo( outputPathCopy ).absolutePath() );
-
-    // Use CaptureStore's rolling settings for the display file
-    rollingDisplayOutput_ = RollingFileManager( outputPathCopy, rollingMaxFileSize_,
-                                                 rollingBackupCount_ );
-    // FreshSave truncates and dumps the current capture; Restore opens
-    // append-only so existing on-disk content is preserved.
-    if ( !rollingDisplayOutput_.open( /*truncate=*/!preserveExisting ) ) {
+    const auto failOpen = [ this, &previousOutputPath ]( CaptureOutputError error,
+                                                         bool initializedOutput = false ) {
+        if ( initializedOutput ) {
+            rollingDisplayOutput_.removeCurrentFile();
+        }
+        closeDisplayOutputFile( false );
         const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
-        boundOutputFile_.clear();
-        return false;
+        boundOutputFile_ = previousOutputPath;
+        return OutputBindResult{ false, error };
+    };
+
+    if ( outputPath.isEmpty() ) {
+        return { true, CaptureOutputError::Open };
     }
 
-    // Replay only into a file this open actually created. Gating on
-    // openedNewFile() (rather than the pre-open preserveExisting flag) closes
-    // the TOCTOU window: a Restore open that found the file already missing
-    // created a new empty file, which must be seeded from the capture.
-    if ( rollingDisplayOutput_.openedNewFile()
-         && !writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount() ) ) {
-        closeDisplayOutputFile();
-        return false;
+    const auto outputDirectory = QFileInfo( outputPath ).absoluteDir();
+    QDir().mkpath( outputDirectory.absolutePath() );
+
+    // Restore never publishes a partial replay at the requested pathname. Open
+    // an existing file append-only; if it is missing, seed a unique sibling and
+    // publish it with a no-overwrite rename. If another process creates the
+    // destination first, discard the staged replay and preserve that file.
+    if ( preserveExisting ) {
+        rollingDisplayOutput_
+            = RollingFileManager( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
+        if ( rollingDisplayOutput_.openExisting() ) {
+            return { true, CaptureOutputError::Open };
+        }
+
+        QTemporaryFile stagedOutput(
+            outputDirectory.filePath( QStringLiteral( ".klogg-output-XXXXXX" ) ) );
+        if ( !stagedOutput.open() ) {
+            return failOpen( CaptureOutputError::Open );
+        }
+        const auto stagedPath = stagedOutput.fileName();
+        stagedOutput.close();
+        stagedOutput.setAutoRemove( false );
+
+        rollingDisplayOutput_
+            = RollingFileManager( stagedPath, rollingMaxFileSize_, rollingBackupCount_ );
+        if ( !rollingDisplayOutput_.open( true ) ) {
+            QFile::remove( stagedPath );
+            return failOpen( CaptureOutputError::Open );
+        }
+        const auto replay
+            = writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount(), false, false );
+        if ( !replay.success ) {
+            return failOpen( replay.error, true );
+        }
+        rollingDisplayOutput_.resyncSize();
+        if ( !rollingDisplayOutput_.flush() ) {
+            return failOpen( CaptureOutputError::Flush, true );
+        }
+        closeDisplayOutputFile( false );
+
+        if ( !QFile::rename( stagedPath, outputPath ) ) {
+            QFile::remove( stagedPath );
+        }
+        rollingDisplayOutput_
+            = RollingFileManager( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
+        if ( !rollingDisplayOutput_.openExisting() ) {
+            return failOpen( CaptureOutputError::Open );
+        }
+        return { true, CaptureOutputError::Open };
     }
 
-    if ( !rollingDisplayOutput_.flush() ) {
-        closeDisplayOutputFile();
-        return false;
+    // FreshSave publishes through QSaveFile after overwrite confirmation, so a
+    // replay or commit failure cannot expose a truncated public destination.
+    QSaveFile stagedOutput( outputPath );
+    if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
+        return failOpen( CaptureOutputError::Open );
     }
-    return true;
+    const auto replay
+        = writeDisplayLinesToDevice( 0_lnum, captureStore_.lineCount(), &stagedOutput );
+    if ( !replay.success ) {
+        stagedOutput.cancelWriting();
+        return failOpen( replay.error );
+    }
+    if ( !stagedOutput.commit() ) {
+        return failOpen( CaptureOutputError::Flush );
+    }
+    rollingDisplayOutput_
+        = RollingFileManager( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
+    if ( !rollingDisplayOutput_.openExisting() ) {
+        return failOpen( CaptureOutputError::Open );
+    }
+    return { true, CaptureOutputError::Open };
 }
 
-void StreamingLogData::closeDisplayOutputFile()
+void StreamingLogData::closeDisplayOutputFile( bool clearBinding )
 {
     rollingDisplayOutput_.close();
     rollingDisplayOutput_ = RollingFileManager();
-    const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
-    boundOutputFile_.clear();
+    if ( clearBinding ) {
+        const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+        boundOutputFile_.clear();
+    }
 }
 
-bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount count )
+StreamingLogData::OutputBindResult
+StreamingLogData::restoreOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
+{
+    OutputBindResult restored;
+    if ( ansiMode == LiveLogSaveAnsiMode::Preserve ) {
+        closeDisplayOutputFile();
+        restored.success = captureStore_.bindOutputFile( outputPath, true );
+        restored.error = captureStoreOutputError( captureStore_.outputFailure() );
+        const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+        boundOutputFile_ = outputPath;
+    }
+    else {
+        captureStore_.bindOutputFile( QString{} );
+        restored = openDisplayOutputFile( outputPath, true );
+        if ( !restored.success ) {
+            const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
+            boundOutputFile_ = outputPath;
+        }
+    }
+    return restored;
+}
+
+StreamingLogData::OutputBindResult
+StreamingLogData::writeDisplayLinesToDevice( LineNumber first, LinesCount count, QIODevice* output )
+{
+    if ( !output || count <= 0_lcount ) {
+        return { true, CaptureOutputError::Open };
+    }
+    const auto lines = getLines( first, count );
+    for ( const auto& line : lines ) {
+        auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+        outputLine.append( '\n' );
+        qint64 offset = 0;
+        while ( offset < outputLine.size() ) {
+            const auto written
+                = output->write( outputLine.constData() + offset, outputLine.size() - offset );
+            if ( written <= 0 ) {
+                return { false, CaptureOutputError::Write };
+            }
+            offset += written;
+        }
+    }
+    return { true, CaptureOutputError::Open };
+}
+
+StreamingLogData::OutputBindResult StreamingLogData::writeDisplayLinesToOutput( LineNumber first,
+                                                                                LinesCount count,
+                                                                                bool reportFailures,
+                                                                                bool allowRotation )
 {
     if ( !rollingDisplayOutput_.isValid() || count <= 0_lcount ) {
-        return true;
+        return { true, CaptureOutputError::Open };
+    }
+    if ( !allowRotation ) {
+        const auto result
+            = writeDisplayLinesToDevice( first, count, rollingDisplayOutput_.currentFile() );
+        if ( !result.success && reportFailures ) {
+            closeDisplayOutputFile( false );
+            reportCaptureOutputFailure( result.error );
+        }
+        else if ( result.success && !rollingDisplayOutput_.flush() ) {
+            if ( reportFailures ) {
+                closeDisplayOutputFile( false );
+                reportCaptureOutputFailure( CaptureOutputError::Flush );
+            }
+            return { false, CaptureOutputError::Flush };
+        }
+        return result;
     }
 
     const auto lines = getLines( first, count );
@@ -569,45 +786,69 @@ bool StreamingLogData::writeDisplayLinesToOutput( LineNumber first, LinesCount c
         auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
         outputLine.append( '\n' );
 
-        const auto sizeBefore = rollingDisplayOutput_.currentFileSize();
-        const auto written = rollingDisplayOutput_.write( outputLine );
-        if ( written <= 0 ) {
-            closeDisplayOutputFile();
-            reportCaptureOutputFailure(
-                QStringLiteral( "The bound capture output could not be written." ) );
-            return false;
+        qint64 offset = 0;
+        while ( offset < outputLine.size() ) {
+            const auto remaining = outputLine.mid( static_cast<int>( offset ) );
+            const auto written = rollingDisplayOutput_.write( remaining );
+            if ( written <= 0 ) {
+                if ( reportFailures ) {
+                    closeDisplayOutputFile( false );
+                    reportCaptureOutputFailure( CaptureOutputError::Write );
+                }
+                return { false, CaptureOutputError::Write };
+            }
+            offset += written;
         }
 
         // If rotation happened, the display file is now a rolling window.
         // No need to trim CaptureStore here — it handles its own trimming
         // when the Preserve mode rolling file rotates.
-        Q_UNUSED( sizeBefore );
     }
 
     if ( !rollingDisplayOutput_.flush() ) {
-        closeDisplayOutputFile();
-        reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be flushed." ) );
+        if ( reportFailures ) {
+            closeDisplayOutputFile( false );
+            reportCaptureOutputFailure( CaptureOutputError::Flush );
+        }
+        return { false, CaptureOutputError::Flush };
+    }
+    return { true, CaptureOutputError::Open };
+}
+
+bool StreamingLogData::isOutputFileActive() const
+{
+    if ( boundOutputFile().isEmpty() ) {
         return false;
     }
-    return true;
+    return outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve
+               ? !captureStore_.boundOutputFile().isEmpty()
+               : rollingDisplayOutput_.isValid();
+}
+
+bool StreamingLogData::outputRefersToPath( const QString& path ) const
+{
+    return outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve
+               ? captureStore_.outputRefersToPath( path )
+               : rollingDisplayOutput_.refersToPath( path );
 }
 
 void StreamingLogData::reportCaptureOutputHealthy()
 {
-    if ( !captureOutputDegraded_ ) {
+    if ( !captureOutputError_.has_value() ) {
         return;
     }
-    captureOutputDegraded_ = false;
-    Q_EMIT captureOutputChanged( true, QString{} );
+    const auto recoveredError = *captureOutputError_;
+    captureOutputError_.reset();
+    Q_EMIT captureOutputChanged( true, recoveredError );
 }
 
-void StreamingLogData::reportCaptureOutputFailure( const QString& detail )
+void StreamingLogData::reportCaptureOutputFailure( CaptureOutputError error )
 {
-    if ( captureOutputDegraded_ ) {
+    if ( captureOutputError_ == error ) {
         return;
     }
-    captureOutputDegraded_ = true;
-    Q_EMIT captureOutputChanged( false, detail );
+    captureOutputError_ = error;
+    Q_EMIT captureOutputChanged( false, error );
 }
 
 void StreamingLogData::checkPreservedOutputState()
@@ -616,7 +857,7 @@ void StreamingLogData::checkPreservedOutputState()
          || boundOutputFile().isEmpty() || !captureStore_.boundOutputFile().isEmpty() ) {
         return;
     }
-    reportCaptureOutputFailure( QStringLiteral( "The bound capture output could not be written." ) );
+    reportCaptureOutputFailure( captureStoreOutputError( captureStore_.outputFailure() ) );
 }
 
 void StreamingLogData::writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult )

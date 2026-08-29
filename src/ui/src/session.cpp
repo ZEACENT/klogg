@@ -64,6 +64,34 @@ QStringList fatalMessagesOf( const std::vector<klogg::livelog::Diagnostic>& diag
     return messages;
 }
 
+klogg::livecapture::LiveSourceError outputBindingError( CaptureOutputError error )
+{
+    const char* code = "output-open-failed";
+    const char* message = "The bound capture output could not be opened.";
+    switch ( error ) {
+    case CaptureOutputError::Open:
+        break;
+    case CaptureOutputError::Write:
+        code = "output-write-failed";
+        message = "The bound capture output could not be written.";
+        break;
+    case CaptureOutputError::Flush:
+        code = "output-flush-failed";
+        message = "The bound capture output could not be flushed.";
+        break;
+    case CaptureOutputError::Reopen:
+        code = "output-reopen-failed";
+        message = "The bound capture output could not be reopened after clearing.";
+        break;
+    }
+    return { klogg::livecapture::ErrorCategory::Capture,
+             code,
+             klogg::livecapture::ErrorScope::Capture,
+             klogg::livecapture::RetryPolicy::Never,
+             message,
+             {} };
+}
+
 class SessionLiveLogEffects final : public klogg::livelog::LiveLogControllerEffects {
 public:
     SessionLiveLogEffects(
@@ -89,23 +117,17 @@ public:
         controller_ = &controller;
         captureConnection_ = QObject::connect(
             source_.get(), &AdbLogcatSource::captureOutputChanged, source_.get(),
-            [ this ]( bool healthy, const QString& detail ) {
+            [ this ]( bool healthy, CaptureOutputError error ) {
                 if ( controller_ == nullptr ) {
                     return;
                 }
-                const auto generation = controller_->snapshot().captureGeneration;
                 if ( healthy ) {
-                    controller_->captureChanged( generation,
-                                                 klogg::livecapture::CaptureState::OpenHealthy );
+                    controller_->outputBindingChanged(
+                        klogg::livecapture::OutputBindingState::Healthy );
                     return;
                 }
-                controller_->captureChanged(
-                    generation, klogg::livecapture::CaptureState::OutputDegraded,
-                    klogg::livecapture::LiveSourceError{
-                        klogg::livecapture::ErrorCategory::Capture, "output-write-failed",
-                        klogg::livecapture::ErrorScope::Capture,
-                        klogg::livecapture::RetryPolicy::Never,
-                        "The bound capture output could not be written.", detail.toStdString() } );
+                controller_->outputBindingChanged( klogg::livecapture::OutputBindingState::Degraded,
+                                                   outputBindingError( error ) );
             } );
         source_->setControllerCallbacks(
             [ this ]( auto generation, const QByteArray& bytes ) {
@@ -163,11 +185,6 @@ public:
         }
         if ( controller_ != nullptr
              && controller_->snapshot().runIntent == klogg::livecapture::RunIntent::Stopped ) {
-            const auto captureGeneration = controller_->snapshot().captureGeneration;
-            controller_->captureChanged( captureGeneration,
-                                         klogg::livecapture::CaptureState::Finalizing );
-            controller_->captureChanged( captureGeneration,
-                                         klogg::livecapture::CaptureState::Finalized );
             stopAvailabilityObservation();
         }
     }
@@ -816,7 +833,6 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
                                       OutputBindMode::Restore ) ) {
         LOG_WARNING << "Failed to restore ADB output file binding "
                     << restoredSessionData.boundOutputFile;
-        restoredSessionData.boundOutputFile.clear();
     }
     auto logFilteredData = std::shared_ptr<LogFilteredData>( logData->getNewFilteredData() );
     auto adbSource = transportFactory_ != nullptr
@@ -832,6 +848,11 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
     auto liveController = std::make_shared<klogg::livelog::LiveLogController>(
         liveSpec, controllerConfigFor( liveSpec ), *liveEffects );
     liveEffects->attach( *liveController );
+    const auto restoredOutputError = logData->captureOutputError();
+    if ( restoredOutputError.has_value() ) {
+        liveController->outputBindingChanged( klogg::livecapture::OutputBindingState::Degraded,
+                                              outputBindingError( *restoredOutputError ) );
+    }
 
     ViewInterface* view = view_factory();
     view->setData( logData, logFilteredData );

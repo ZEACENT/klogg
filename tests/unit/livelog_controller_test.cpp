@@ -94,7 +94,7 @@ live::LiveSourceError retryableStreamError( std::string code = "stream-lost" )
                                   "deterministic test failure" };
 }
 
-live::LiveSourceError captureError()
+live::LiveSourceError outputBindingError()
 {
     return live::LiveSourceError{ live::ErrorCategory::Capture,
                                   "output-write-failed",
@@ -323,6 +323,7 @@ void checkProjectionMatches( const livelog::LiveLogController& controller )
     CHECK( actual.retryAttempt == expected.retryAttempt );
     CHECK( actual.awaitingUserReason == expected.awaitingUserReason );
     CHECK( actual.failureMessage == expected.failureMessage );
+    CHECK( actual.outputBinding == expected.outputBinding );
 }
 
 } // namespace
@@ -422,17 +423,15 @@ TEST_CASE( "Infrastructure device service stream and capture callbacks flow thro
     controller.streamReadArmed( generation );
     CHECK( controller.snapshot().source.status == expected.source.status );
 
-    const auto outputError = captureError();
+    const auto outputError = outputBindingError();
     clock.set( at( 60 ) );
     expected = live::reduce( expected,
-                             live::CaptureChanged{ expected.captureGeneration,
-                                                   live::CaptureState::OutputDegraded, outputError,
-                                                   at( 60 ) },
+                             live::OutputBindingChanged{ live::OutputBindingState::Degraded,
+                                                         outputError, at( 60 ) },
                              controllerConfig().reducer )
                    .snapshot;
-    controller.captureChanged( expected.captureGeneration, live::CaptureState::OutputDegraded,
-                               outputError );
-    CHECK( controller.snapshot().capture == expected.capture );
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, outputError );
+    CHECK( controller.snapshot().outputBinding == expected.outputBinding );
     CHECK( controller.snapshot().source.status == expected.source.status );
     checkProjectionMatches( controller );
 }
@@ -662,8 +661,8 @@ TEST_CASE( "Manual reconnect invalidates first and never pre-writes a reconnecte
     CHECK( controller.snapshot().runIntent == live::RunIntent::Running );
 }
 
-TEST_CASE( "Capture degradation does not change stream connectivity",
-           "[livelog-controller][red][capture]" )
+TEST_CASE( "Output binding degradation does not change stream connectivity",
+           "[livelog-controller][red][capture][output]" )
 {
     ManualClock clock;
     ManualScheduler scheduler;
@@ -672,12 +671,15 @@ TEST_CASE( "Capture degradation does not change stream connectivity",
     armToStreaming( controller, clock );
 
     clock.set( at( 100 ) );
-    controller.captureChanged( controller.snapshot().captureGeneration,
-                               live::CaptureState::OutputDegraded, captureError() );
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, outputBindingError() );
 
-    CHECK( controller.snapshot().capture == live::CaptureState::OutputDegraded );
+    CHECK( controller.snapshot().outputBinding == live::OutputBindingState::Degraded );
     CHECK( controller.snapshot().source.status == live::SourceStatus::Streaming );
     CHECK( controller.presentation().status == live::PresentationStatus::Connected );
+    CHECK( controller.presentation().outputBinding == live::OutputBindingState::Degraded );
+    REQUIRE( controller.snapshot().outputBindingError.has_value() );
+    CHECK( controller.snapshot().outputBindingError->message
+           == "The output file could not be written." );
     CHECK( controller.presentation().disconnectEnabled );
 }
 

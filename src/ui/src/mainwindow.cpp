@@ -3010,7 +3010,8 @@ bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, b
                              : session_.getAssociatedPath( crawlerWidget );
     const auto index
         = mainTabWidget_.addCrawler( crawlerWidget, session_.getDocumentId( crawlerWidget ),
-                                     session_.getDisplayName( crawlerWidget ), toolTip );
+                                     session_.getDisplayName( crawlerWidget ), toolTip,
+                                     session_.getAssociatedPath( crawlerWidget ) );
     mainTabWidget_.setCurrentIndex( index );
 
     registerAdbLogcatSource( crawlerWidget );
@@ -3142,8 +3143,8 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
     QString toolTip = baseTip;
     LiveTabStatus liveStatus = LiveTabStatus::Disconnected;
     if ( controller != nullptr ) {
-        const auto projection
-            = klogg::livecapture::projectLiveState( controller->snapshot() );
+        const auto& snapshot = controller->snapshot();
+        const auto projection = klogg::livecapture::projectLiveState( snapshot );
         switch ( projection.status ) {
         case klogg::livecapture::PresentationStatus::Connected:
             liveStatus = LiveTabStatus::Connected;
@@ -3193,10 +3194,36 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
             liveStatus = LiveTabStatus::Disconnected;
             break;
         }
+
+        if ( projection.outputBinding == klogg::livecapture::OutputBindingState::Degraded ) {
+            liveStatus = LiveTabStatus::Error;
+            if ( snapshot.outputBindingError.has_value() ) {
+                QString outputError;
+                const auto& error = *snapshot.outputBindingError;
+                if ( error.code == "output-open-failed" ) {
+                    outputError = tr( "The bound capture output could not be opened." );
+                }
+                else if ( error.code == "output-write-failed" ) {
+                    outputError = tr( "The bound capture output could not be written." );
+                }
+                else if ( error.code == "output-flush-failed" ) {
+                    outputError = tr( "The bound capture output could not be flushed." );
+                }
+                else if ( error.code == "output-reopen-failed" ) {
+                    outputError
+                        = tr( "The bound capture output could not be reopened after clearing." );
+                }
+                else {
+                    outputError = QString::fromStdString( error.message );
+                }
+                toolTip = tr( "%1\nOutput error: %2" ).arg( toolTip, outputError );
+            }
+        }
     }
 
     mainTabWidget_.setLiveTabStatus( tabIndex, liveStatus );
-    mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip );
+    mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip,
+                                  session_.getAssociatedPath( crawler ) );
 }
 
 void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )

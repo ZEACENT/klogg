@@ -96,13 +96,11 @@ TEST_CASE( "live state keeps run intent, infrastructure, source, and capture ort
     REQUIRE_FALSE( state.infrastructure.ownership.has_value() );
     REQUIRE( state.source.status == SourceStatus::Stopped );
     REQUIRE( state.source.stopReason == StopReason::NeverStarted );
-    REQUIRE( state.capture == CaptureState::OpenHealthy );
 
     state = dispatch( state, StartRequested{ at( 10 ) } ).snapshot;
     REQUIRE( state.runIntent == RunIntent::Running );
     REQUIRE( state.infrastructure.status == InfrastructureStatus::Unknown );
     REQUIRE( state.source.status == SourceStatus::WaitingForInfrastructure );
-    REQUIRE( state.capture == CaptureState::OpenHealthy );
 
     state = dispatch( state, InfrastructureChanged{ InfrastructureStatus::Connecting,
                                                     InfrastructureOwnership::AppShared, at( 20 ) } )
@@ -111,7 +109,6 @@ TEST_CASE( "live state keeps run intent, infrastructure, source, and capture ort
     REQUIRE( state.infrastructure.status == InfrastructureStatus::Connecting );
     REQUIRE( state.infrastructure.ownership == InfrastructureOwnership::AppShared );
     REQUIRE( state.source.status == SourceStatus::WaitingForInfrastructure );
-    REQUIRE( state.capture == CaptureState::OpenHealthy );
 
     state = dispatch( state, InfrastructureChanged{ InfrastructureStatus::Ready,
                                                     InfrastructureOwnership::AppShared, at( 30 ) } )
@@ -120,7 +117,6 @@ TEST_CASE( "live state keeps run intent, infrastructure, source, and capture ort
     REQUIRE( state.infrastructure.status == InfrastructureStatus::Ready );
     REQUIRE( state.infrastructure.ownership == InfrastructureOwnership::AppShared );
     REQUIRE( state.source.status == SourceStatus::WaitingForDevice );
-    REQUIRE( state.capture == CaptureState::OpenHealthy );
 
     state = dispatch( state, InfrastructureChanged{ InfrastructureStatus::Stopping,
                                                     InfrastructureOwnership::AppShared, at( 40 ) } )
@@ -137,7 +133,6 @@ TEST_CASE( "live state keeps run intent, infrastructure, source, and capture ort
     REQUIRE( state.infrastructure.status == InfrastructureStatus::Unavailable );
     REQUIRE( state.infrastructure.ownership == InfrastructureOwnership::AppShared );
     REQUIRE( state.source.status == SourceStatus::WaitingForInfrastructure );
-    REQUIRE( state.capture == CaptureState::OpenHealthy );
 }
 
 TEST_CASE( "terminal infrastructure failure leaves a running tab in Failed",
@@ -335,7 +330,7 @@ TEST_CASE( "generation-tagged callbacks accept current work and reject stale wor
     REQUIRE( stale.effects.empty() );
     REQUIRE( stale.snapshot.generation == state.generation );
     REQUIRE( stale.snapshot.source.status == state.source.status );
-    REQUIRE( stale.snapshot.capture == state.capture );
+    REQUIRE( stale.snapshot.outputBinding == state.outputBinding );
     REQUIRE( stale.snapshot.consecutiveFailures == state.consecutiveFailures );
     REQUIRE( stale.snapshot.now == state.now );
 }
@@ -437,39 +432,52 @@ TEST_CASE( "device absence waits for discovery without restarting shared infrast
     REQUIRE_FALSE( absent.snapshot.retryTimer.has_value() );
 }
 
-TEST_CASE( "capture lifecycle and degradation remain orthogonal to Streaming",
-           "[livecapture][state][capture]" )
+TEST_CASE( "output degradation remains orthogonal to Streaming", "[livecapture][state][output]" )
 {
     const auto streaming = streamingState();
-    const auto captureError = makeError( ErrorCategory::Capture, ErrorScope::Capture,
-                                         RetryPolicy::Never, "output-write-failed" );
+    const auto outputError = makeError( ErrorCategory::Capture, ErrorScope::Capture,
+                                        RetryPolicy::Never, "output-write-failed" );
 
-    const auto degraded = dispatch( streaming, CaptureChanged{ streaming.captureGeneration,
-                                                               CaptureState::OutputDegraded,
-                                                               captureError, at( 100 ) } );
-    REQUIRE( degraded.snapshot.capture == CaptureState::OutputDegraded );
-    REQUIRE( degraded.snapshot.captureError.has_value() );
-    REQUIRE( degraded.snapshot.captureError->code == "output-write-failed" );
+    const auto degraded = dispatch(
+        streaming, OutputBindingChanged{ OutputBindingState::Degraded, outputError, at( 100 ) } );
+    REQUIRE( degraded.snapshot.outputBinding == OutputBindingState::Degraded );
+    REQUIRE( degraded.snapshot.outputBindingError.has_value() );
+    REQUIRE( degraded.snapshot.outputBindingError->code == "output-write-failed" );
     REQUIRE( degraded.snapshot.source.status == SourceStatus::Streaming );
-    REQUIRE( projectLiveState( degraded.snapshot ).status == PresentationStatus::Connected );
+    const auto degradedPresentation = projectLiveState( degraded.snapshot );
+    REQUIRE( degradedPresentation.status == PresentationStatus::Connected );
+    REQUIRE( degradedPresentation.outputBinding == OutputBindingState::Degraded );
+}
 
-    const auto finalizing = dispatch(
-        degraded.snapshot, CaptureChanged{ degraded.snapshot.captureGeneration,
-                                           CaptureState::Finalizing, std::nullopt, at( 110 ) } );
-    REQUIRE( finalizing.snapshot.capture == CaptureState::Finalizing );
-    REQUIRE( finalizing.snapshot.source.status == SourceStatus::Streaming );
+TEST_CASE( "fresh runs preserve output degradation until a successful rebind",
+           "[livecapture][state][capture][output]" )
+{
+    const auto streaming = streamingState();
+    const auto outputError = makeError( ErrorCategory::Capture, ErrorScope::Capture,
+                                        RetryPolicy::Never, "output-write-failed" );
+    auto state = dispatch( streaming, OutputBindingChanged{ OutputBindingState::Degraded,
+                                                            outputError, at( 100 ) } )
+                     .snapshot;
+    REQUIRE( state.outputBinding == OutputBindingState::Degraded );
 
-    const auto finalized = dispatch(
-        finalizing.snapshot, CaptureChanged{ finalizing.snapshot.captureGeneration,
-                                             CaptureState::Finalized, std::nullopt, at( 120 ) } );
-    REQUIRE( finalized.snapshot.capture == CaptureState::Finalized );
-    REQUIRE( finalized.snapshot.source.status == SourceStatus::Streaming );
+    state = dispatch( state, StopRequested{ at( 110 ) } ).snapshot;
+    REQUIRE( state.source.stoppingGeneration.has_value() );
+    const auto stoppedGeneration = *state.source.stoppingGeneration;
+    state = dispatch( state, StopCompleted{ stoppedGeneration, at( 120 ) } ).snapshot;
+    REQUIRE( state.source.status == SourceStatus::Stopped );
+    REQUIRE( state.outputBinding == OutputBindingState::Degraded );
 
-    const auto faulted
-        = dispatch( streaming, CaptureChanged{ streaming.captureGeneration, CaptureState::Faulted,
-                                               captureError, at( 130 ) } );
-    REQUIRE( faulted.snapshot.capture == CaptureState::Faulted );
-    REQUIRE( faulted.snapshot.source.status == SourceStatus::Streaming );
+    state = dispatch( state, StartRequested{ at( 130 ) } ).snapshot;
+
+    CHECK( state.outputBinding == OutputBindingState::Degraded );
+    REQUIRE( state.outputBindingError.has_value() );
+    CHECK( state.outputBindingError->code == "output-write-failed" );
+
+    const auto rebound = dispatch(
+        state, OutputBindingChanged{ OutputBindingState::Healthy, std::nullopt, at( 140 ) } );
+    REQUIRE( rebound.accepted );
+    CHECK( rebound.snapshot.outputBinding == OutputBindingState::Healthy );
+    CHECK_FALSE( rebound.snapshot.outputBindingError.has_value() );
 }
 
 TEST_CASE( "retry exhaustion presents Failed and disables countdown",
@@ -596,13 +604,13 @@ TEST_CASE( "retrying starts a new stream generation and rejects callbacks from t
     REQUIRE( hasEffect( retry, EffectKind::InvalidateGeneration ) );
     REQUIRE( hasEffect( retry, EffectKind::CancelStream ) );
 
-    const auto captureUpdate = dispatch(
-        retry.snapshot, CaptureChanged{ opening.captureGeneration, CaptureState::OutputDegraded,
-                                        makeError( ErrorCategory::Capture, ErrorScope::Capture,
-                                                   RetryPolicy::Never ),
-                                        at( 1100 ) } );
-    REQUIRE( captureUpdate.accepted );
-    REQUIRE( captureUpdate.snapshot.capture == CaptureState::OutputDegraded );
+    const auto outputUpdate = dispatch(
+        retry.snapshot, OutputBindingChanged{ OutputBindingState::Degraded,
+                                              makeError( ErrorCategory::Capture,
+                                                         ErrorScope::Capture, RetryPolicy::Never ),
+                                              at( 1100 ) } );
+    REQUIRE( outputUpdate.accepted );
+    REQUIRE( outputUpdate.snapshot.outputBinding == OutputBindingState::Degraded );
 
     const auto deadline
         = dispatch( retry.snapshot, RetryDeadlineReached{ retry.snapshot.generation, at( 5000 ) } );
@@ -629,8 +637,8 @@ TEST_CASE( "stability interval must elapse before backoff is reset",
     REQUIRE( stable.snapshot.consecutiveFailures == 0u );
 }
 
-TEST_CASE( "stop is idempotent and capture finalization from the cancelled run remains valid",
-           "[livecapture][state][generation][capture]" )
+TEST_CASE( "stop is idempotent until the cancelled generation completes",
+           "[livecapture][state][generation]" )
 {
     const auto streaming = streamingState();
     const auto stopped = dispatch( streaming, StopRequested{ at( 200 ) } );
@@ -644,42 +652,13 @@ TEST_CASE( "stop is idempotent and capture finalization from the cancelled run r
     REQUIRE( duplicateStop.snapshot.generation == stopped.snapshot.generation );
     REQUIRE( duplicateStop.effects.empty() );
 
-    const auto finalizing = dispatch( stopped.snapshot, CaptureChanged{ streaming.captureGeneration,
-                                                                        CaptureState::Finalizing,
-                                                                        std::nullopt, at( 220 ) } );
-    REQUIRE( finalizing.accepted );
-    REQUIRE( finalizing.snapshot.capture == CaptureState::Finalizing );
-
-    const auto finalized = dispatch(
-        finalizing.snapshot, CaptureChanged{ streaming.captureGeneration, CaptureState::Finalized,
-                                             std::nullopt, at( 230 ) } );
-    REQUIRE( finalized.accepted );
-    REQUIRE( finalized.snapshot.capture == CaptureState::Finalized );
-
     const auto completed
-        = dispatch( finalized.snapshot, StopCompleted{ streaming.generation, at( 240 ) } );
+        = dispatch( stopped.snapshot, StopCompleted{ streaming.generation, at( 220 ) } );
     REQUIRE( completed.accepted );
     REQUIRE( completed.snapshot.source.status == SourceStatus::Stopped );
     REQUIRE( completed.snapshot.source.stopReason == StopReason::User );
     REQUIRE_FALSE( completed.snapshot.source.stoppingGeneration.has_value() );
     REQUIRE( projectLiveState( completed.snapshot ).status == PresentationStatus::Stopped );
-}
-
-TEST_CASE( "capture terminal states reject delayed lifecycle regressions",
-           "[livecapture][state][capture]" )
-{
-    const auto streaming = streamingState();
-    const auto finalized
-        = dispatch( streaming, CaptureChanged{ streaming.captureGeneration, CaptureState::Finalized,
-                                               std::nullopt, at( 120 ) } );
-    REQUIRE( finalized.accepted );
-
-    const auto delayedFinalizing = dispatch(
-        finalized.snapshot, CaptureChanged{ streaming.captureGeneration, CaptureState::Finalizing,
-                                            std::nullopt, at( 110 ) } );
-    REQUIRE_FALSE( delayedFinalizing.accepted );
-    REQUIRE( delayedFinalizing.snapshot.capture == CaptureState::Finalized );
-    REQUIRE( delayedFinalizing.snapshot.now == at( 120 ) );
 }
 
 TEST_CASE( "accepted events cannot move the reducer clock backwards", "[livecapture][state][time]" )
@@ -697,16 +676,26 @@ TEST_CASE( "accepted events cannot move the reducer clock backwards", "[livecapt
     REQUIRE( projectLiveState( delayedClock.snapshot ).retryRemaining == at( 1000 ) );
 }
 
-TEST_CASE( "capture failures require structured diagnostics", "[livecapture][state][capture]" )
+TEST_CASE( "output degradation requires a structured diagnostic", "[livecapture][state][output]" )
 {
     const auto streaming = streamingState();
-    const auto missingError
-        = dispatch( streaming, CaptureChanged{ streaming.captureGeneration, CaptureState::Faulted,
-                                               std::nullopt, at( 100 ) } );
+    const auto missingError = dispatch(
+        streaming, OutputBindingChanged{ OutputBindingState::Degraded, std::nullopt, at( 100 ) } );
 
     REQUIRE_FALSE( missingError.accepted );
-    REQUIRE( missingError.snapshot.capture == CaptureState::OpenHealthy );
-    REQUIRE_FALSE( missingError.snapshot.captureError.has_value() );
+    REQUIRE( missingError.snapshot.outputBinding == OutputBindingState::Healthy );
+    REQUIRE_FALSE( missingError.snapshot.outputBindingError.has_value() );
+
+    const auto error = makeError( ErrorCategory::Capture, ErrorScope::Capture, RetryPolicy::Never );
+    const auto degraded = dispatch(
+        streaming, OutputBindingChanged{ OutputBindingState::Degraded, error, at( 100 ) } );
+    REQUIRE( degraded.accepted );
+    const auto missingUpdate
+        = dispatch( degraded.snapshot,
+                    OutputBindingChanged{ OutputBindingState::Degraded, std::nullopt, at( 110 ) } );
+    CHECK_FALSE( missingUpdate.accepted );
+    REQUIRE( missingUpdate.snapshot.outputBindingError.has_value() );
+    CHECK( missingUpdate.snapshot.outputBindingError->code == error.code );
 }
 
 TEST_CASE( "explicit reconnect reacquires availability observation while infrastructure stays ready",

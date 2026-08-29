@@ -53,6 +53,7 @@
 #include <vector>
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
@@ -167,6 +168,11 @@ public:
     void publishState( Generation generation, State state )
     {
         Q_EMIT stateChanged( generation, state );
+    }
+
+    void publishBytes( Generation generation, const QByteArray& bytes )
+    {
+        Q_EMIT bytesReceived( generation, bytes );
     }
 
     std::vector<Generation> startGenerations;
@@ -1129,7 +1135,7 @@ TEST_CASE( "queued iOS catalog invalidation observes the latest same-generation 
     closeAndDeleteViews( *appSession, opened );
 }
 
-TEST_CASE( "Capture output degradation reaches the per-tab controller without disconnecting",
+TEST_CASE( "Failed output rebind keeps the rolled-back per-tab binding healthy",
            "[livelog-restore-arming][session][capture]" )
 {
     ScopedSessionWindows windowsGuard;
@@ -1151,14 +1157,72 @@ TEST_CASE( "Capture output degradation reaches the per-tab controller without di
         generation, LiveSourceTransport::State::Connected );
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
 
-    Q_EMIT source->captureOutputChanged( false, QStringLiteral( "disk full" ) );
-    CHECK( controller->snapshot().capture == live::CaptureState::OutputDegraded );
-    CHECK( controller->snapshot().source.status == live::SourceStatus::Streaming );
+    QTemporaryDir outputRoot;
+    REQUIRE( outputRoot.isValid() );
+    const auto outputPath = outputRoot.filePath( QStringLiteral( "capture.log" ) );
+    REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
 
-    Q_EMIT source->captureOutputChanged( true, QString{} );
-    CHECK( controller->snapshot().capture == live::CaptureState::OpenHealthy );
+    REQUIRE_FALSE( source->bindOutputFile( outputRoot.path(), LiveLogSaveAnsiMode::Strip ) );
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK_FALSE( controller->snapshot().outputBindingError.has_value() );
+
+    REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
 
     controller->stopRequested();
-    CHECK( controller->snapshot().capture == live::CaptureState::Finalized );
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "Capture output degradation survives stop and fresh start until rebind succeeds",
+           "[livelog-restore-arming][session][capture]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto spec = makeAndroidSpec();
+    spec.capture.captureMaxFileSize = 1;
+    spec.capture.captureBackupCount = 1;
+    const auto windowId = QStringLiteral( "livelog-capture-degradation-restart-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    const auto generation = controller->snapshot().generation;
+    factory.createdTransports.front()->publishState( generation,
+                                                     LiveSourceTransport::State::Connected );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+
+    QTemporaryDir outputRoot;
+    REQUIRE( outputRoot.isValid() );
+    const auto outputPath = outputRoot.filePath( QStringLiteral( "capture.log" ) );
+    REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    const auto rotationPath = outputPath + QStringLiteral( ".tmp_rotate" );
+    REQUIRE( QDir().mkpath( rotationPath ) );
+
+    factory.createdTransports.front()->publishBytes( generation, QByteArrayLiteral( "line\n" ) );
+    REQUIRE( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
+
+    controller->stopRequested();
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
+
+    controller->startRequested();
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
+    REQUIRE( controller->snapshot().outputBindingError.has_value() );
+    CHECK( controller->snapshot().outputBindingError->code == "output-write-failed" );
+    CHECK( controller->snapshot().outputBindingError->message
+           == "The bound capture output could not be written." );
+    CHECK( controller->snapshot().outputBindingError->nativeDetail.empty() );
+
+    REQUIRE( QDir( rotationPath ).removeRecursively() );
+    REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
+    CHECK_FALSE( controller->snapshot().outputBindingError.has_value() );
     closeAndDeleteViews( *appSession, opened );
 }

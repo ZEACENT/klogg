@@ -515,6 +515,27 @@
         <translation>%1\nAction required: %2</translation>
     </message>
     <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3201"/>
+        <source>%1\nOutput error: %2</source>
+        <translation>%1\nOutput error: %2</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be opened.</source>
+        <translation>The bound capture output could not be opened.</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be written.</source>
+        <translation>The bound capture output could not be written.</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be flushed.</source>
+        <translation>The bound capture output could not be flushed.</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be reopened after clearing.</source>
+        <translation>The bound capture output could not be reopened after clearing.</translation>
+    </message>
+    <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1147"/>
         <source>Open URL as log file</source>
         <translation>Open URL as log file</translation>

@@ -179,12 +179,17 @@ TEST_CASE( "TabbedCrawlerWidget keeps live tab title and tooltip across group re
     REQUIRE( tabWidget.tabToolTip( index ) == QDir::toNativeSeparators( QStringLiteral( "/tmp/pixel.log" ) ) );
 
     tabWidget.updateCrawler( index, QStringLiteral( "Pixel 8 Pro" ),
+                             QStringLiteral( "Pixel 8 Pro\nOutput error: disk full" ),
                              QStringLiteral( "/tmp/pixel-saved.log" ) );
     tabWidget.onGroupsChanged();
 
     REQUIRE( tabWidget.tabText( index ) == QStringLiteral( "Pixel 8 Pro" ) );
     REQUIRE( tabWidget.tabToolTip( index )
-             == QDir::toNativeSeparators( QStringLiteral( "/tmp/pixel-saved.log" ) ) );
+             == QStringLiteral( "Pixel 8 Pro\nOutput error: disk full" ) );
+    auto* tabBar = tabWidget.findChild<QTabBar*>();
+    REQUIRE( tabBar != nullptr );
+    CHECK( tabBar->tabData( index ).toMap().value( QStringLiteral( "associatedPath" ) )
+           == QStringLiteral( "/tmp/pixel-saved.log" ) );
 }
 
 TEST_CASE( "TabbedCrawlerWidget updateCrawler strips old-format live status suffixes from tab text" )

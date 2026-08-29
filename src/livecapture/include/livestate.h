@@ -64,13 +64,7 @@ enum class SourceStatus : std::uint8_t {
     Failed
 };
 
-enum class CaptureState : std::uint8_t {
-    OpenHealthy,
-    OutputDegraded,
-    Finalizing,
-    Finalized,
-    Faulted
-};
+enum class OutputBindingState : std::uint8_t { Healthy, Degraded };
 
 enum class ErrorCategory : std::uint8_t {
     Configuration,
@@ -141,10 +135,9 @@ struct LiveStateSnapshot {
     RunIntent runIntent{ RunIntent::Stopped };
     InfrastructureState infrastructure;
     SourceState source;
-    CaptureState capture{ CaptureState::OpenHealthy };
-    std::optional<LiveSourceError> captureError;
+    OutputBindingState outputBinding{ OutputBindingState::Healthy };
+    std::optional<LiveSourceError> outputBindingError;
     Generation generation{ 0 };
-    Generation captureGeneration{ 0 };
     Timestamp now{ 0 };
     unsigned consecutiveFailures{ 0 };
     bool protocolServiceReady{ false };
@@ -224,9 +217,8 @@ struct RetryDeadlineReached {
     Generation generation{ 0 };
     Timestamp at{ 0 };
 };
-struct CaptureChanged {
-    Generation generation{ 0 };
-    CaptureState state{ CaptureState::OpenHealthy };
+struct OutputBindingChanged {
+    OutputBindingState state{ OutputBindingState::Healthy };
     std::optional<LiveSourceError> error;
     Timestamp at{ 0 };
 };
@@ -237,10 +229,9 @@ struct TimeAdvanced {
 using LiveStateEvent
     = std::variant<StartRequested, StopRequested, StopCompleted, InfrastructureChanged,
                    InfrastructureFailed, AvailabilityFailed, DeviceAvailable, DeviceAbsent,
-                   UserActionRequired,
-                   ProtocolServiceReady,
-                   StreamHandleOpened, StreamReadArmed, StreamBytesReceived, StreamStable,
-                   RetryRequested, RetryDeadlineReached, CaptureChanged, TimeAdvanced>;
+                   UserActionRequired, ProtocolServiceReady, StreamHandleOpened, StreamReadArmed,
+                   StreamBytesReceived, StreamStable, RetryRequested, RetryDeadlineReached,
+                   OutputBindingChanged, TimeAdvanced>;
 
 enum class EffectKind : std::uint8_t {
     InvalidateGeneration,
@@ -291,6 +282,7 @@ struct LiveStatePresentation {
     std::optional<unsigned> retryAttempt;
     std::optional<AwaitingUserReason> awaitingUserReason;
     std::string failureMessage;
+    OutputBindingState outputBinding{ OutputBindingState::Healthy };
 };
 
 LiveStateSnapshot initialLiveState();

@@ -24,6 +24,7 @@
 #include <QLockFile>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QTemporaryFile>
 #include <QUuid>
 
 #if defined( Q_OS_WIN )
@@ -1939,6 +1940,12 @@ void CaptureStore::failNextSegmentWriteForTesting()
     failNextSegmentWriteForTesting_ = true;
 }
 
+void CaptureStore::failNextOutputReplayWriteForTesting()
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    failNextOutputReplayWriteForTesting_ = true;
+}
+
 void CaptureStore::setAfterCaptureFilesRetiredCallbackForTesting(
     std::function<void()> callback )
 {
@@ -2263,6 +2270,7 @@ CaptureStore::AppendResult CaptureStore::finishInput()
             rollingOutput_.close();
             rollingOutput_ = RollingFileManager();
             boundOutputFile_.clear();
+            outputFailure_ = OutputFailure::Flush;
         }
         resetOutputFlushCounters();
     }
@@ -2279,6 +2287,7 @@ void CaptureStore::flush()
             rollingOutput_.close();
             rollingOutput_ = RollingFileManager();
             boundOutputFile_.clear();
+            outputFailure_ = OutputFailure::Flush;
         }
         resetOutputFlushCounters();
     }
@@ -2308,6 +2317,7 @@ void CaptureStore::clear()
             LOG_WARNING << "CaptureStore::clear: failed to reopen output file: "
                         << boundOutputFile_;
             boundOutputFile_.clear();
+            outputFailure_ = OutputFailure::Open;
         }
     }
 }
@@ -2443,43 +2453,91 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
     rollingOutput_.close();
     rollingOutput_ = RollingFileManager();
     boundOutputFile_ = outputPath;
+    outputFailure_.reset();
+    resetOutputFlushCounters();
     if ( boundOutputFile_.isEmpty() ) {
         return true;
     }
 
-    QDir().mkpath( QFileInfo( boundOutputFile_ ).absolutePath() );
-
-    rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
-                                         limits_.rollingBackupCount );
-    // FreshSave truncates and replays the capture; Restore opens append-only so
-    // previously streamed content already on disk is never destroyed (the
-    // capture is volatile — it lives in the OS temp dir and may be empty on
-    // restart, which would otherwise empty the file).
-    if ( !rollingOutput_.open( /*truncate=*/!preserveExisting ) ) {
+    const auto outputDirectory = QFileInfo( boundOutputFile_ ).absoluteDir();
+    QDir().mkpath( outputDirectory.absolutePath() );
+    const auto failBinding = [ this ]( OutputFailure failure, bool removeCurrent = false ) {
+        if ( removeCurrent ) {
+            rollingOutput_.removeCurrentFile();
+        }
+        rollingOutput_.close();
+        rollingOutput_ = RollingFileManager();
         boundOutputFile_.clear();
+        resetOutputFlushCounters();
+        outputFailure_ = failure;
         return false;
-    }
+    };
 
-    // Replay only into a file this open actually created (see
-    // RollingFileManager::openedNewFile for the truncate-vs-missing rationale).
-    // The pre-open preserveExisting flag cannot gate this: a Restore open that
-    // found the path already gone starts a new empty file that must be seeded.
-    if ( rollingOutput_.openedNewFile() ) {
-        // Write existing segments to the rolling file
+    if ( preserveExisting ) {
+        rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
+                                             limits_.rollingBackupCount );
+        if ( rollingOutput_.openExisting() ) {
+            return true;
+        }
+
+        QTemporaryFile stagedOutput(
+            outputDirectory.filePath( QStringLiteral( ".klogg-output-XXXXXX" ) ) );
+        if ( !stagedOutput.open() ) {
+            return failBinding( OutputFailure::Open );
+        }
+        const auto stagedPath = stagedOutput.fileName();
+        stagedOutput.close();
+        stagedOutput.setAutoRemove( false );
+
+        rollingOutput_ = RollingFileManager( stagedPath, limits_.rollingMaxFileSize,
+                                             limits_.rollingBackupCount );
+        if ( !rollingOutput_.open( true ) ) {
+            QFile::remove( stagedPath );
+            return failBinding( OutputFailure::Open );
+        }
         for ( const auto& segment : segments_ ) {
             if ( !writeSegmentToDevice( segment, rollingOutput_.currentFile() ) ) {
-                boundOutputFile_.clear();
-                rollingOutput_.close();
-                return false;
+                return failBinding( OutputFailure::Write, true );
             }
         }
-    }
-    // Replay writes directly to QFile, bypassing RollingFileManager::write().
-    // Sync the byte counter so needsRotation() reflects the true file size.
-    rollingOutput_.resyncSize();
-    rollingOutput_.flush();
+        rollingOutput_.resyncSize();
+        if ( !rollingOutput_.flush() ) {
+            return failBinding( OutputFailure::Flush, true );
+        }
+        rollingOutput_.close();
+        rollingOutput_ = RollingFileManager();
 
-    resetOutputFlushCounters();
+        if ( !QFile::rename( stagedPath, boundOutputFile_ ) ) {
+            QFile::remove( stagedPath );
+        }
+        rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
+                                             limits_.rollingBackupCount );
+        if ( !rollingOutput_.openExisting() ) {
+            return failBinding( OutputFailure::Open );
+        }
+        return true;
+    }
+
+    // FreshSave publishes through QSaveFile after overwrite confirmation, so a
+    // replay or commit failure cannot expose a truncated public destination.
+    QSaveFile stagedOutput( boundOutputFile_ );
+    if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
+        return failBinding( OutputFailure::Open );
+    }
+    for ( const auto& segment : segments_ ) {
+        if ( !writeSegmentToDevice( segment, &stagedOutput ) ) {
+            stagedOutput.cancelWriting();
+            return failBinding( OutputFailure::Write );
+        }
+    }
+    if ( !stagedOutput.commit() ) {
+        return failBinding( OutputFailure::Flush );
+    }
+    rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
+                                         limits_.rollingBackupCount );
+    if ( !rollingOutput_.openExisting() ) {
+        return failBinding( OutputFailure::Open );
+    }
     return true;
 }
 
@@ -2493,6 +2551,18 @@ QString CaptureStore::boundOutputFile() const
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     return boundOutputFile_;
+}
+
+bool CaptureStore::outputRefersToPath( const QString& path ) const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return rollingOutput_.refersToPath( path );
+}
+
+std::optional<CaptureStore::OutputFailure> CaptureStore::outputFailure() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return outputFailure_;
 }
 
 QString CaptureStore::captureId() const
@@ -3331,9 +3401,15 @@ QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine 
     return file->read( lineLength );
 }
 
-bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* device ) const
+bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* device )
 {
     if ( !device ) {
+        return false;
+    }
+    if ( failNextOutputReplayWriteForTesting_ ) {
+        failNextOutputReplayWriteForTesting_ = false;
+        static constexpr char PartialReplay[] = "partial";
+        device->write( PartialReplay, static_cast<qint64>( sizeof( PartialReplay ) - 1 ) );
         return false;
     }
 
@@ -3379,11 +3455,12 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
     }
 
     const auto written = rollingOutput_.write( bytes );
-    if ( written <= 0 ) {
-        LOG_WARNING << "Rolling output file write failed, unbinding: " << boundOutputFile_;
+    if ( written != bytes.size() ) {
+        LOG_WARNING << "Rolling output file write was incomplete, unbinding: " << boundOutputFile_;
         rollingOutput_.close();
         rollingOutput_ = RollingFileManager();
         boundOutputFile_.clear();
+        outputFailure_ = OutputFailure::Write;
         return;
     }
 
@@ -3415,6 +3492,7 @@ void CaptureStore::flushOutputIfNeeded()
             rollingOutput_.close();
             rollingOutput_ = RollingFileManager();
             boundOutputFile_.clear();
+            outputFailure_ = OutputFailure::Flush;
             resetOutputFlushCounters();
             return;
         }

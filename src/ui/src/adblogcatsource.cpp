@@ -338,7 +338,7 @@ bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsi
     if ( !logData_ || !logData_->bindOutputFile( outputPath, ansiMode ) ) {
         return false;
     }
-    sessionData_.boundOutputFile = outputPath;
+    sessionData_.boundOutputFile = logData_->boundOutputFile();
     sessionData_.outputAnsiMode = ansiMode;
     return true;
 }

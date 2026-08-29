@@ -66,7 +66,7 @@ Q_SIGNALS:
     void stateChanged( AdbLogcatSource::State state );
     void errorOccurred( const QString& error );
     void clearFailed( const QString& error );
-    void captureOutputChanged( bool healthy, const QString& detail );
+    void captureOutputChanged( bool healthy, CaptureOutputError error );
 
 private:
     using Generation = LiveSourceTransport::Generation;

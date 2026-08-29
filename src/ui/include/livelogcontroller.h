@@ -97,8 +97,8 @@ public:
     void streamBytesReceived( livecapture::Generation generation, const QByteArray& bytes );
     void streamStable( livecapture::Generation generation );
     void streamFailed( livecapture::Generation generation, livecapture::LiveSourceError error );
-    void captureChanged( livecapture::Generation generation, livecapture::CaptureState state,
-                         std::optional<livecapture::LiveSourceError> error = std::nullopt );
+    void outputBindingChanged( livecapture::OutputBindingState state,
+                               std::optional<livecapture::LiveSourceError> error = std::nullopt );
 
 private:
     class ProductionRuntime;

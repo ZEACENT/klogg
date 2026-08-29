@@ -110,33 +110,6 @@ void updateStreamingReadiness( LiveStateSnapshot& snapshot )
     }
 }
 
-bool isCaptureTransitionAllowed( CaptureState from, CaptureState targetState )
-{
-    if ( from == targetState ) {
-        return true;
-    }
-
-    switch ( from ) {
-    case CaptureState::OpenHealthy:
-        return true;
-    case CaptureState::OutputDegraded:
-        return targetState == CaptureState::OpenHealthy || targetState == CaptureState::Finalizing
-               || targetState == CaptureState::Finalized || targetState == CaptureState::Faulted;
-    case CaptureState::Finalizing:
-        return targetState == CaptureState::Finalized || targetState == CaptureState::Faulted;
-    case CaptureState::Finalized:
-    case CaptureState::Faulted:
-        return false;
-    }
-
-    return false;
-}
-
-bool captureStateRequiresError( CaptureState state )
-{
-    return state == CaptureState::OutputDegraded || state == CaptureState::Faulted;
-}
-
 void applyReadiness( LiveStateTransition& transition, Generation generation, Timestamp timestamp,
                      bool LiveStateSnapshot::* readiness )
 {
@@ -160,16 +133,10 @@ void apply( LiveStateTransition& transition, const StartRequested& event, const 
     }
 
     const auto previousGeneration = snapshot.generation;
-    const auto startsCapture = snapshot.runIntent == RunIntent::Stopped;
 
     advanceNow( snapshot, event.at );
     snapshot.runIntent = RunIntent::Running;
     ++snapshot.generation;
-    if ( startsCapture ) {
-        snapshot.captureGeneration = snapshot.generation;
-        snapshot.capture = CaptureState::OpenHealthy;
-        snapshot.captureError.reset();
-    }
     resetSourceAttempt( transition );
     snapshot.consecutiveFailures = 0u;
 
@@ -451,22 +418,18 @@ void apply( LiveStateTransition& transition, const RetryDeadlineReached& event,
     transition.accepted = true;
 }
 
-void apply( LiveStateTransition& transition, const CaptureChanged& event, const LiveStateConfig& )
+void apply( LiveStateTransition& transition, const OutputBindingChanged& event,
+            const LiveStateConfig& )
 {
     auto& snapshot = transition.snapshot;
-    const auto requiresError = captureStateRequiresError( event.state );
-    if ( event.generation != snapshot.captureGeneration
-         || !isCaptureTransitionAllowed( snapshot.capture, event.state )
-         || ( requiresError && !event.error.has_value() && !snapshot.captureError.has_value() )
-         || ( !requiresError && event.error.has_value() ) ) {
+    const auto requiresError = event.state == OutputBindingState::Degraded;
+    if ( requiresError != event.error.has_value() ) {
         return;
     }
 
     advanceNow( snapshot, event.at );
-    snapshot.capture = event.state;
-    if ( event.error.has_value() || !requiresError ) {
-        snapshot.captureError = event.error;
-    }
+    snapshot.outputBinding = event.state;
+    snapshot.outputBindingError = event.error;
     transition.accepted = true;
 }
 
@@ -561,6 +524,7 @@ LiveStatePresentation projectLiveState( const LiveStateSnapshot& snapshot )
     if ( snapshot.source.failure.has_value() ) {
         presentation.failureMessage = snapshot.source.failure->message;
     }
+    presentation.outputBinding = snapshot.outputBinding;
 
     return presentation;
 }

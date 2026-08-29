@@ -515,6 +515,27 @@
         <translation>%1\n需要操作：%2</translation>
     </message>
     <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3201"/>
+        <source>%1\nOutput error: %2</source>
+        <translation>%1\n输出错误：%2</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be opened.</source>
+        <translation>无法打开绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be written.</source>
+        <translation>无法写入绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be flushed.</source>
+        <translation>无法刷新绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be reopened after clearing.</source>
+        <translation>清除日志后无法重新打开绑定的采集输出文件。</translation>
+    </message>
+    <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1147"/>
         <source>Open URL as log file</source>
         <translation>打开URL作为日志文件</translation>

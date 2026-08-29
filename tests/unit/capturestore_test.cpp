@@ -98,6 +98,11 @@ class CaptureStoreTestAccess {
         store.failNextSegmentWriteForTesting();
     }
 
+    static void failNextOutputReplayWrite( CaptureStore& store )
+    {
+        store.failNextOutputReplayWriteForTesting();
+    }
+
     static void setAfterCaptureFilesRetiredCallback(
         CaptureStore& store, std::function<void()> callback )
     {
@@ -2441,6 +2446,23 @@ TEST_CASE( "CaptureStore bindOutputFile overwrites existing files and replays sp
     REQUIRE( QFileInfo::exists( outputPath ) );
     REQUIRE( readUtf8File( outputPath )
              == QStringLiteral( "alpha\nbeta\ngamma\ndelta\nepsilon\n" ) );
+}
+
+TEST_CASE( "CaptureStore removes a newly created Restore output after replay fails" )
+{
+    const auto rootPath = makeTestDir( "capturestore_restore_replay_failure" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "saved.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    store.appendUtf8( QByteArrayLiteral( "alpha\nbeta\n" ) );
+    CaptureStoreTestAccess::failNextOutputReplayWrite( store );
+
+    REQUIRE_FALSE( store.bindOutputFile( outputPath, true ) );
+    CHECK( store.outputFailure() == CaptureStore::OutputFailure::Write );
+    CHECK_FALSE( QFileInfo::exists( outputPath ) );
+    CHECK( QDir( rootPath )
+               .entryList( { QStringLiteral( ".klogg-output-*" ) }, QDir::Files )
+               .isEmpty() );
 }
 
 TEST_CASE( "RollingFileManager resyncSize reads actual file size after direct writes" )
