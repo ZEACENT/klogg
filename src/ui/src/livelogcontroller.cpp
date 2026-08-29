@@ -17,6 +17,8 @@
 #include <QObject>
 #include <QTimer>
 
+#include "qtcompat/qtcompat.h"
+
 namespace klogg::livelog {
 namespace {
 
@@ -133,7 +135,8 @@ androidFilters( const QString& filterSpec, const QString& defaultPriority )
     }
 
     std::vector<adb::LogcatFilter> filters;
-    const auto expressions = filterSpec.split( QLatin1Char( ' ' ), Qt::SkipEmptyParts );
+    const auto expressions
+        = filterSpec.split( QLatin1Char( ' ' ), klogg::qtcompat::skipEmptyParts() );
     filters.reserve( static_cast<std::size_t>( expressions.size() ) + 1u );
     for ( const auto& expression : expressions ) {
         const auto separator = expression.lastIndexOf( QLatin1Char( ':' ) );

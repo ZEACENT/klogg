@@ -77,6 +77,14 @@ add_test(
   NAME application_identity_contract
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_application_identity_contract.py
 )
+add_test(
+  NAME adb_compiler_portability_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_adb_compiler_portability_contract.py
+)
+add_test(
+  NAME ios_compiler_portability_contract
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_ios_compiler_portability_contract.py
+)
 set_tests_properties(
   adb_helper_release_contract
   adb_helper_verifier_contract
@@ -91,6 +99,8 @@ set_tests_properties(
   livelog_controller_retirement_contract
   static_link_policy_contract
   application_identity_contract
+  adb_compiler_portability_contract
+  ios_compiler_portability_contract
   PROPERTIES TIMEOUT 60
 )
 

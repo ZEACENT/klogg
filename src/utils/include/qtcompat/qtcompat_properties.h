@@ -158,7 +158,7 @@ inline QString::SplitBehavior skipEmptyParts()
 #endif
 {
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    return Qt::SkipEmptyParts;
+    return Qt::SkipEmptyParts; // lint-allow: platform-fragile
 #else
     return QString::SkipEmptyParts;
 #endif

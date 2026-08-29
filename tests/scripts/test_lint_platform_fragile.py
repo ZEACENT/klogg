@@ -32,6 +32,24 @@ class QtryVerifyMacroPatternTest(unittest.TestCase):
         self.assertIsNone(pattern.search("QTRY_COMPARE( actual, expected );"))
 
 
+class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
+    def test_qt_namespace_skip_empty_parts_is_flagged(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qt-5.12-split-behavior"
+        )["regex"]
+        self.assertIsNotNone(
+            pattern.search(
+                "const auto parts = value.split( QLatin1Char( ' ' ), Qt::SkipEmptyParts );"
+            )
+        )
+
+    def test_qtcompat_split_behavior_is_allowed(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qt-5.12-split-behavior"
+        )["regex"]
+        self.assertIsNone(pattern.search("klogg::qtcompat::skipEmptyParts()"))
+
+
 class VectorscanCapabilityAssertionTest(unittest.TestCase):
     def test_unguarded_require_is_flagged(self):
         # The exact shape that broke the Windows x86-qt5 [QTRegex] job in PR #42.

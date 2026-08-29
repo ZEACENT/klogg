@@ -281,6 +281,17 @@ PATTERNS: list[dict] = [
         ),
     },
     {
+        "name": "qt-5.12-split-behavior",
+        # Qt::SkipEmptyParts was added after the supported Qt 5.12 baseline.
+        # Keep the version split in the shared compatibility layer.
+        "regex": re.compile(r"\bQt::SkipEmptyParts\b"),
+        "fix": (
+            "Qt::SkipEmptyParts is unavailable on the Qt 5.12 baseline. Include "
+            "qtcompat/qtcompat.h and use klogg::qtcompat::skipEmptyParts() so the "
+            "Qt version split remains isolated in the compatibility layer."
+        ),
+    },
+    {
         "name": "qtry-verify-macro",
         "regex": re.compile(r"\bQTRY_VERIFY[A-Z0-9_]*\s*\("),
         "fix": (

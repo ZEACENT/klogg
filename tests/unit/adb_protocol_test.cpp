@@ -63,7 +63,9 @@ ByteVector hostFrame( const std::string& payload )
         static_cast<std::uint8_t>( hexDigits.at( ( length >> 4u ) & 0x0fu ) ),
         static_cast<std::uint8_t>( hexDigits.at( length & 0x0fu ) ),
     };
-    frame.insert( frame.end(), payload.begin(), payload.end() );
+    for ( const auto byte : payload ) {
+        frame.push_back( static_cast<std::uint8_t>( byte ) );
+    }
     return frame;
 }
 
