@@ -29,6 +29,14 @@ def load_build_module():
     return module
 
 
+def load_prefetch_module():
+    spec = importlib.util.spec_from_file_location("prefetch_adb_helper_sources", PREFETCH_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def archive_sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -234,6 +242,46 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes extraction root", (result.stdout + result.stderr).lower())
+
+    def test_prefetch_marks_directory_symlinks_for_windows_reparse_points(self):
+        archive = self.root / "directory-symlink.tar"
+        with tarfile.open(archive, "w") as tar:
+            for name in (
+                "source",
+                "source/libcutils",
+                "source/libcutils/include",
+                "source/libcutils/include/cutils",
+                "source/include",
+            ):
+                directory = tarfile.TarInfo(name)
+                directory.type = tarfile.DIRTYPE
+                directory.mode = 0o755
+                tar.addfile(directory)
+            add_bytes(
+                tar,
+                "source/libcutils/include/cutils/list.h",
+                b"directory symlink payload\n",
+            )
+            link = tarfile.TarInfo("source/include/cutils")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../libcutils/include/cutils"
+            tar.addfile(link)
+
+        module = load_prefetch_module()
+        real_symlink = module.os.symlink
+        extract_root = self.root / "extract-directory-link"
+        with mock.patch.object(module.os, "symlink", wraps=real_symlink) as symlink:
+            module.safe_extract(archive, extract_root)
+
+        symlink.assert_called_once_with(
+            "../libcutils/include/cutils",
+            self.root / "extract-directory-link/source/include/cutils",
+            target_is_directory=True,
+        )
+        self.assertEqual(
+            (extract_root / "include/cutils/list.h").read_bytes(),
+            b"directory symlink payload\n",
+        )
 
     def test_prefetch_omits_only_exact_lock_pinned_build_irrelevant_symlink(self):
         download_root = self.root / "downloads"

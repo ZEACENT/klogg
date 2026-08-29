@@ -174,6 +174,43 @@ def canonicalize_tar_gz(
         temporary.unlink(missing_ok=True)
 
 
+def symlink_target_is_directory(
+    parts: tuple[str, ...],
+    member: tarfile.TarInfo,
+    by_name: dict[tuple[str, ...], tarfile.TarInfo],
+) -> bool:
+    def target_parts(link_parts: tuple[str, ...], linkname: str) -> tuple[str, ...]:
+        target = pathlib.PurePosixPath(*link_parts[:-1], linkname)
+        return normalized_archive_parts(target.as_posix(), "symlink target")
+
+    candidate = target_parts(parts, member.linkname)
+    visited: set[tuple[str, ...]] = set()
+    while True:
+        if candidate in visited:
+            raise RuntimeError(f"archive contains a symlink cycle: {member.name}")
+        visited.add(candidate)
+        target = by_name.get(candidate)
+        if target is not None:
+            if target.isdir():
+                return True
+            if target.isfile():
+                return False
+            if target.issym():
+                candidate = target_parts(candidate, target.linkname)
+                continue
+        if any(
+            len(path) > len(candidate) and path[: len(candidate)] == candidate
+            for path in by_name
+        ):
+            return True
+        top_level = {path[0] for path in by_name}
+        if len(top_level) == 1 and candidate[0] not in top_level:
+            raise RuntimeError(
+                f"archive symlink escapes extraction root after layout normalization: {member.name}"
+            )
+        raise RuntimeError(f"archive symlink target type is ambiguous: {member.name}")
+
+
 def safe_extract(
     archive: pathlib.Path,
     destination: pathlib.Path,
@@ -220,7 +257,11 @@ def safe_extract(
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() or path.is_symlink():
                 raise RuntimeError(f"archive symlink collides with extracted path: {member.name}")
-            os.symlink(member.linkname, path)
+            os.symlink(
+                member.linkname,
+                path,
+                target_is_directory=symlink_target_is_directory(parts, member, by_name),
+            )
 
     children = [path for path in destination.iterdir() if path.name != ".DS_Store"]
     if len(children) == 1 and children[0].is_dir():
