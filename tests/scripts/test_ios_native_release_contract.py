@@ -567,6 +567,10 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             self.assertIn(token, workflow)
         self.assertRegex(workflow, r"Mac:\s+needs:\s*\[[^\]]*BuildIosNativeStacks")
         self.assertRegex(workflow, r"download-artifact@[^\r\n]+[\s\S]+name:\s+ios-native-\$\{\{")
+        self.assertIn("${{ matrix.artifact }}.tar.gz", workflow)
+        self.assertIn("tar -czf", workflow)
+        self.assertIn("tar -xzf", workflow)
+        self.assertIn("prefetch_artifacts/ios-native-archive", workflow)
         producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  Mac:", 1)[0]
         self.assertNotIn("continue-on-error: true", producer)
 

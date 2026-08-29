@@ -1145,11 +1145,13 @@ jobs:
               lines.append(f"{digest}  {path.relative_to(root).as_posix()}")
           (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
+          tar -czf "${{ runner.temp }}/${{ matrix.artifact }}.tar.gz" \
+            -C "${{ runner.temp }}/ios-native-stack" .
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/ios-native-stack
+          path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
 
       - name: Upload architecture-independent iOS source set
@@ -1267,7 +1269,20 @@ jobs:
         if: ${{ matrix.config.package != false }}
         with:
           name: ios-native-${{ matrix.config.arch == 'x64' && 'x86_64' || 'arm64' }}
-          path: ${{ github.workspace }}/prefetch_artifacts/ios-native
+          path: ${{ github.workspace }}/prefetch_artifacts/ios-native-archive
+
+      - name: Extract symlink-preserving iOS native stack
+        if: ${{ matrix.config.package != false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${{ github.workspace }}/prefetch_artifacts/ios-native-archive"
+          stack_root="${{ github.workspace }}/prefetch_artifacts/ios-native"
+          archive="$archive_root/ios-native-${{ matrix.config.arch == 'x64' && 'x86_64' || 'arm64' }}.tar.gz"
+          test -f "$archive"
+          rm -rf "$stack_root"
+          mkdir -p "$stack_root"
+          tar -xzf "$archive" -C "$stack_root"
 
       - name: Verify target-bound iOS native checksum envelope and Mach-O closure
         if: ${{ matrix.config.package != false }}
