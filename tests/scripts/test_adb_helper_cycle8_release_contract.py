@@ -16,6 +16,7 @@ MAC_PACKAGE = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
 WIN_PACKAGE = ROOT / ".github" / "actions" / "agent-package-win" / "action.yml"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yml"
+GIT_ATTRIBUTES = ROOT / ".gitattributes"
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -227,6 +228,13 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertLess(
             main.index(") = inspect_binary"),
             main.index("scripts/smoke_adb_helper.py"),
+        )
+
+    def test_adb_lock_has_platform_stable_lf_bytes(self):
+        attributes = read_text(GIT_ATTRIBUTES)
+        self.assertRegex(
+            attributes,
+            r"(?m)^packaging/adb/adb-helper\.lock\.json\s+text\s+eol=lf(?:\s|$)",
         )
 
     def test_windows_x64_closure_is_private_dynamic_and_contains_every_source_built_dll(self):
