@@ -172,7 +172,9 @@ elseif(APPLE)
     )
     set_target_properties(klogg PROPERTIES KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}")
     target_link_options(
-      klogg PRIVATE "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
+      klogg PRIVATE
+      "LINKER:-rpath,@executable_path/../Frameworks"
+      "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
     )
   endif()
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)

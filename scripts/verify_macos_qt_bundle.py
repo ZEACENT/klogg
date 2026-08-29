@@ -14,6 +14,7 @@ from collections.abc import Iterable
 
 
 SYSTEM_PREFIXES = ("/System/Library/", "/usr/lib/")
+QT_FRAMEWORK_RPATH = "@executable_path/../Frameworks"
 QPA_FAILURE_MARKERS = (
     "You might be loading two sets of Qt binaries",
     "Could not load the Qt platform plugin",
@@ -53,7 +54,7 @@ def runtime_issues(app: pathlib.Path, output: str) -> list[str]:
         issues.append("Objective-C class is implemented in two runtime images")
 
     app_text = str(app.resolve())
-    for path in re.findall(r"/(?:[^\s:'\"]+/)*Qt[^\s:'\"]+", output):
+    for path in re.findall(r"(?<![\w@])/(?:[^\s:'\"]+/)*Qt[^\s:'\"]+", output):
         if path.startswith(SYSTEM_PREFIXES) or path.startswith(app_text):
             continue
         issues.append(f"runtime loaded Qt outside the app bundle: {path}")
@@ -82,6 +83,40 @@ def macho_dependencies(path: pathlib.Path) -> list[str] | None:
         if entry:
             dependencies.append(entry)
     return dependencies
+
+
+def macho_rpaths(path: pathlib.Path) -> list[str] | None:
+    result = subprocess.run(
+        ["otool", "-l", str(path)], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        return None
+
+    rpaths: list[str] = []
+    lines = result.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_RPATH":
+            continue
+        for detail in lines[index + 1 : index + 4]:
+            match = re.match(r"\s*path\s+(.+?)\s+\(offset\s+\d+\)\s*$", detail)
+            if match is not None:
+                rpaths.append(match.group(1))
+                break
+    return rpaths
+
+
+def executable_rpath_issues(
+    binary: pathlib.Path, dependencies: Iterable[str], rpaths: Iterable[str]
+) -> list[str]:
+    has_rpath_qt_import = any(
+        dependency.startswith("@rpath/Qt") and ".framework/" in dependency
+        for dependency in dependencies
+    )
+    if has_rpath_qt_import and QT_FRAMEWORK_RPATH not in rpaths:
+        return [
+            f"{binary}: missing Qt framework runpath: {QT_FRAMEWORK_RPATH}"
+        ]
+    return []
 
 
 def validate_qt_conf(app: pathlib.Path) -> list[str]:
@@ -116,6 +151,15 @@ def validate_bundle(app: pathlib.Path, expected_architecture: str) -> list[str]:
             dependencies = macho_dependencies(candidate)
             if dependencies is not None:
                 issues.extend(dependency_issues(app, candidate, dependencies))
+
+    executable_dependencies = macho_dependencies(executable)
+    executable_rpaths = macho_rpaths(executable)
+    if executable_dependencies is not None and executable_rpaths is not None:
+        issues.extend(
+            executable_rpath_issues(
+                executable, executable_dependencies, executable_rpaths
+            )
+        )
 
     for path in (executable, cocoa):
         architectures = command_output(["lipo", "-archs", str(path)]).split()

@@ -42,6 +42,27 @@ class MacosQtBundleVerifierTest(unittest.TestCase):
             )
         self.assertEqual(issues, [])
 
+    def test_rpath_dependency_requires_the_bundled_framework_runpath(self):
+        binary = pathlib.Path("/tmp/klogg.app/Contents/MacOS/klogg")
+        dependencies = ["@rpath/QtCore5Compat.framework/Versions/A/QtCore5Compat"]
+        issues = self.module.executable_rpath_issues(binary, dependencies, [])
+        self.assertTrue(any("missing Qt framework runpath" in issue for issue in issues))
+
+        issues = self.module.executable_rpath_issues(
+            binary, dependencies, ["@executable_path/../Frameworks"]
+        )
+        self.assertEqual(issues, [])
+
+    def test_rpath_loader_diagnostic_is_not_an_external_runtime_image(self):
+        output = """\
+dyld: Library not loaded: @rpath/QtCore5Compat.framework/Versions/A/QtCore5Compat
+  Referenced from: /tmp/klogg.app/Contents/MacOS/klogg
+"""
+        issues = self.module.runtime_issues(pathlib.Path("/tmp/klogg.app"), output)
+        self.assertFalse(
+            any("runtime loaded Qt outside" in issue for issue in issues), issues
+        )
+
     def test_runtime_qpa_and_duplicate_qt_diagnostics_are_rejected(self):
         output = """\
 Class Foo is implemented in both /usr/local/QtCore and /tmp/klogg.app/QtCore

@@ -224,6 +224,16 @@ def symlink_target_is_directory(
         return False
 
 
+def canonical_existing_ancestor(path: pathlib.Path) -> pathlib.Path:
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            raise RuntimeError(f"path has no existing ancestor: {path}")
+        candidate = parent
+    return candidate.resolve(strict=True)
+
+
 def safe_extract(
     archive: pathlib.Path,
     destination: pathlib.Path,
@@ -292,7 +302,7 @@ def safe_extract(
             continue
         try:
             resolved = path.resolve(strict=False)
-            resolved.relative_to(extraction_root)
+            canonical_existing_ancestor( resolved ).relative_to( extraction_root )
         except (OSError, RuntimeError, ValueError) as error:
             raise RuntimeError(
                 f"archive symlink escapes extraction root after layout normalization: {path}"

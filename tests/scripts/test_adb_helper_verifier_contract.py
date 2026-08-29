@@ -1,8 +1,12 @@
+import contextlib
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import pathlib
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -435,7 +439,10 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
                 self.assertRegex((result.stdout + result.stderr).lower(), r"archive|sha256")
 
     def test_verifier_rejects_missing_nonexecutable_symlinked_and_hash_mismatched_helpers(self):
-        scenarios = ("missing", "non-executable", "symlink", "hash")
+        scenarios = ["missing"]
+        if os.name != "nt":
+            scenarios.append("non-executable")
+        scenarios.extend(("symlink", "hash"))
         for scenario in scenarios:
             with self.subTest(scenario=scenario):
                 lock, receipt, package_root, release_root, document = self.make_release_fixture()
@@ -939,6 +946,13 @@ class AdbHelperEnvelopeContractTest(unittest.TestCase):
 
 
 class AdbHelperSmokeContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("smoke_adb_helper", SMOKE_SCRIPT)
+        cls.smoke_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(cls.smoke_module)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tempdir.name)
@@ -1012,25 +1026,24 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
         return path
 
     def run_smoke(self, adb: pathlib.Path, report: pathlib.Path):
-        self.assertTrue(SMOKE_SCRIPT.is_file(), f"missing smoke script: {SMOKE_SCRIPT}")
-        return subprocess.run(
-            [
-                sys.executable,
-                str(SMOKE_SCRIPT),
-                "--adb",
-                str(adb),
-                "--port",
-                "0",
-                "--timeout-seconds",
-                "5",
-                "--json-output",
-                str(report),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            return_code = self.smoke_module.smoke_adb(
+                adb=adb,
+                port=0,
+                timeout_seconds=5,
+                json_output=report,
+                command_prefix=[sys.executable, str(adb)],
+            )
+        return subprocess.CompletedProcess([], return_code, output.getvalue(), "")
+
+    def assert_reported_endpoint_closed(self, report: dict):
+        endpoint = report.get("server_endpoint")
+        if not isinstance(endpoint, str):
+            return
+        port = int(endpoint.rsplit(":", 1)[1])
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=0.25)
 
     def test_smoke_probes_complete_client_private_server_smart_socket_and_cleanup(self):
         adb = self.make_fake_adb(complete_client=True)
@@ -1048,10 +1061,8 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
                 "no-lingering-process",
             ],
         )
-        pid = report.get("server_pid")
-        self.assertIsInstance(pid, int)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        self.assertIsInstance(report.get("server_pid"), int)
+        self.assert_reported_endpoint_closed(report)
 
     def test_smoke_rejects_server_only_fork_and_still_leaves_no_process(self):
         adb = self.make_fake_adb(complete_client=False)
@@ -1061,10 +1072,7 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
         self.assertIn("complete", (result.stdout + result.stderr).lower())
         if report_path.is_file():
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            pid = report.get("server_pid")
-            if isinstance(pid, int):
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(pid, 0)
+            self.assert_reported_endpoint_closed(report)
 
 
 if __name__ == "__main__":

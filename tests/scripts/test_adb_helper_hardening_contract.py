@@ -296,7 +296,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             module.safe_extract(archive, extract_root)
 
         symlink.assert_called_once_with(
-            "../libcutils/include/cutils",
+            module.platform_symlink_target( "../libcutils/include/cutils" ),
             self.root / "extract-directory-link/source/include/cutils",
             target_is_directory=True,
         )
@@ -321,7 +321,7 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             module.safe_extract(archive, extract_root)
 
         symlink.assert_called_once_with(
-            "testdata/",
+            module.platform_symlink_target( "testdata/" ),
             self.root / "extract-broken-directory-link/source/testdata-link",
             target_is_directory=True,
         )

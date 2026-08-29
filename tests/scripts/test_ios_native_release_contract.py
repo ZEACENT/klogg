@@ -444,8 +444,8 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         package_action = required_text(MAC_PACKAGE_ACTION)
         for path in receipts.values():
             self.assertIn(path, package_action)
-        self.assertIn(str(VERIFY_SCRIPT.relative_to(ROOT)), package_action)
-        self.assertIn(str(LOCK.relative_to(ROOT)), package_action)
+        self.assertIn(VERIFY_SCRIPT.relative_to(ROOT).as_posix(), package_action)
+        self.assertIn(LOCK.relative_to(ROOT).as_posix(), package_action)
 
     def test_source_set_receipt_is_architecture_independent_and_hash_bound(self):
         legal = required_text(LEGAL_SCRIPT)
@@ -559,6 +559,9 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         )
         self.assertIn(
             'KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}"', native_rpath_block
+        )
+        self.assertIn(
+            '"LINKER:-rpath,@executable_path/../Frameworks"', native_rpath_block
         )
         self.assertIn(
             '"LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"',

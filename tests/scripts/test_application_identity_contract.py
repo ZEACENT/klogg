@@ -1,7 +1,9 @@
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -42,26 +44,66 @@ def read(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def tracked_text_lines():
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    for relative_bytes in result.stdout.split(b"\0"):
-        if not relative_bytes:
-            continue
-        relative = pathlib.Path(relative_bytes.decode("utf-8"))
-        path = ROOT / relative
+GENERATED_ROOTS = {
+    ".ccache",
+    ".git",
+    "build_root",
+    "cpm_cache",
+    "prefetch_artifacts",
+    "test_tmp",
+}
+GENERATED_PATHS = {("3rdparty", "boost")}
+
+
+def repository_files(root: pathlib.Path = ROOT) -> list[pathlib.Path]:
+    root = root.resolve()
+    if not root.is_dir() or not (root / "CMakeLists.txt").is_file():
+        raise RuntimeError(f"invalid klogg source root: {root}")
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        files = [
+            pathlib.Path(relative.decode("utf-8"))
+            for relative in result.stdout.split(b"\0")
+            if relative
+        ]
+    else:
+        files = []
+        for path in root.rglob("*"):
+            relative = path.relative_to(root)
+            if relative.parts[0] in GENERATED_ROOTS:
+                continue
+            if any(relative.parts[: len(prefix)] == prefix for prefix in GENERATED_PATHS):
+                continue
+            if path.is_file():
+                files.append(relative)
+
+    files = sorted(set(files), key=lambda path: path.as_posix())
+    if not files:
+        raise RuntimeError(f"source inventory is empty: {root}")
+    return files
+
+
+def tracked_text_lines(root: pathlib.Path = ROOT):
+    for relative in repository_files(root):
+        path = root / relative
         if not path.is_file():
             continue
         data = path.read_bytes()
@@ -75,21 +117,15 @@ def tracked_text_lines():
             yield relative.as_posix(), line_number, line
 
 
-def cmake_sources() -> dict[str, str]:
-    result = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "*CMakeLists.txt", "*.cmake"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+def cmake_sources(root: pathlib.Path = ROOT) -> dict[str, str]:
     return {
-        relative: read(ROOT / relative)
-        for relative in result.stdout.splitlines()
-        if relative
+        relative.as_posix(): read(root / relative)
+        for relative in repository_files(root)
+        if relative.name == "CMakeLists.txt" or relative.suffix == ".cmake"
     }
 
 
-def unexpected_legacy_owner_references():
+def unexpected_legacy_owner_references(root: pathlib.Path = ROOT):
     legacy_pattern = re.compile(re.escape(LEGACY_OWNER), re.IGNORECASE)
     commit_url = re.compile(
         rf"https://github\.com/{re.escape(LEGACY_OWNER)}/klogg/commit/[0-9a-f]+",
@@ -118,7 +154,7 @@ def unexpected_legacy_owner_references():
     }
 
     unexpected = []
-    for relative, line_number, line in tracked_text_lines():
+    for relative, line_number, line in tracked_text_lines(root):
         if legacy_pattern.search(line) is None:
             continue
 
@@ -160,6 +196,81 @@ def unexpected_legacy_owner_references():
             unexpected.append(f"{relative}:{line_number}: {line.strip()}")
 
     return unexpected
+
+
+class RepositoryInventoryFallbackTest(unittest.TestCase):
+    def make_root(self) -> pathlib.Path:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = pathlib.Path(temporary.name)
+        (root / "CMakeLists.txt").write_text("project(klogg)\n", encoding="utf-8")
+        return root
+
+    def unavailable_git(self):
+        return mock.patch.object(
+            subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout=b"", stderr=b"not a repository"
+            ),
+        )
+
+    def test_gitless_inventory_audits_unknown_first_party_roots(self):
+        root = self.make_root()
+        source = root / "future-component" / "nested.txt"
+        source.parent.mkdir(parents=True)
+        source.write_text(f"unexpected {LEGACY_OWNER} owner\n", encoding="utf-8")
+
+        with self.unavailable_git():
+            failures = unexpected_legacy_owner_references(root)
+
+        self.assertEqual(
+            failures,
+            [f"future-component/nested.txt:1: unexpected {LEGACY_OWNER} owner"],
+        )
+
+    def test_gitless_cmake_inventory_uses_the_same_complete_file_set(self):
+        root = self.make_root()
+        policy = root / "future-component" / "policy.cmake"
+        policy.parent.mkdir(parents=True)
+        policy.write_text("set(FUTURE_COMPONENT ON)\n", encoding="utf-8")
+
+        with self.unavailable_git():
+            sources = cmake_sources(root)
+
+        self.assertEqual(
+            set(sources), {"CMakeLists.txt", "future-component/policy.cmake"}
+        )
+
+    def test_gitless_inventory_excludes_only_generated_workspace_roots(self):
+        root = self.make_root()
+        for relative in (
+            "build_root/generated.txt",
+            "cpm_cache/dependency.txt",
+            "3rdparty/boost/generated.txt",
+        ):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"generated {LEGACY_OWNER}\n", encoding="utf-8")
+        source = root / "new-first-party" / "source.txt"
+        source.parent.mkdir()
+        source.write_text(f"first-party {LEGACY_OWNER}\n", encoding="utf-8")
+
+        with self.unavailable_git():
+            failures = unexpected_legacy_owner_references(root)
+
+        self.assertEqual(
+            failures,
+            [f"new-first-party/source.txt:1: first-party {LEGACY_OWNER}"],
+        )
+
+    def test_gitless_inventory_fails_closed_without_source_sentinel(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        with self.unavailable_git(), self.assertRaisesRegex(
+            RuntimeError, "invalid klogg source root"
+        ):
+            repository_files(pathlib.Path(temporary.name))
 
 
 class ApplicationIdentityContractTest(unittest.TestCase):

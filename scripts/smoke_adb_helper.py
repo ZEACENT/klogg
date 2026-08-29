@@ -13,6 +13,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 
 
 PROBES = [
@@ -32,9 +33,11 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def run_client(adb: pathlib.Path, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
+def run_client(
+    command_prefix: Sequence[str], command: str, timeout: float
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(adb), command],
+        [*command_prefix, command],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -107,14 +110,14 @@ def write_report(path: pathlib.Path | None, report: dict) -> None:
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--adb", required=True, type=pathlib.Path)
-    parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--timeout-seconds", default=10.0, type=float)
-    parser.add_argument("--json-output", type=pathlib.Path)
-    args = parser.parse_args()
-
+def smoke_adb(
+    *,
+    adb: pathlib.Path,
+    port: int,
+    timeout_seconds: float,
+    json_output: pathlib.Path | None,
+    command_prefix: Sequence[str] | None = None,
+) -> int:
     report: dict = {
         "schema_version": 1,
         "receipt_kind": "binary-smoke",
@@ -123,27 +126,28 @@ def main() -> int:
     server: subprocess.Popen[bytes] | None = None
     isolated_home = tempfile.TemporaryDirectory(prefix="klogg-adb-smoke-")
     try:
-        adb = args.adb.resolve(strict=True)
+        adb = adb.resolve(strict=True)
         if adb.is_symlink() or not adb.is_file():
             raise RuntimeError(f"ADB helper is not a regular executable: {adb}")
         if os.name != "nt" and not os.access(adb, os.X_OK):
             raise RuntimeError(f"ADB helper is not executable: {adb}")
         report["helper_path"] = str(adb)
         report["helper_sha256"] = sha256(adb)
+        executable = list(command_prefix) if command_prefix is not None else [str(adb)]
 
-        version = run_client(adb, "version", args.timeout_seconds)
+        version = run_client(executable, "version", timeout_seconds)
         if version.returncode != 0 or "Android Debug Bridge version" not in version.stdout:
             raise RuntimeError("ADB version probe failed or did not identify Android Debug Bridge")
         report["version_output"] = version.stdout.strip()
         report["passed_probes"].append("version")
 
-        help_result = run_client(adb, "help", args.timeout_seconds)
+        help_result = run_client(executable, "help", timeout_seconds)
         help_text = help_result.stdout + help_result.stderr
         if help_result.returncode != 0 or not all(token in help_text.lower() for token in ("devices", "shell")):
             raise RuntimeError("complete ADB client help probe failed; server-only fork is not acceptable")
         report["passed_probes"].append("complete-client")
 
-        port = args.port or free_loopback_port()
+        port = port or free_loopback_port()
         creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         # ADB's portable loopback syntax is tcp:<port>. The implementation binds
         # 127.0.0.1; tcp:<hostname>:<port> is rejected by the native server.
@@ -154,7 +158,7 @@ def main() -> int:
         server_environment["HOME"] = isolated_home.name
         server_environment["USERPROFILE"] = isolated_home.name
         server = subprocess.Popen(
-            [str(adb), "-L", server_socket_spec, "server", "nodaemon"],
+            [*executable, "-L", server_socket_spec, "server", "nodaemon"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -166,7 +170,7 @@ def main() -> int:
         report["server_endpoint"] = f"tcp:127.0.0.1:{port}"
         report["passed_probes"].append("loopback-private-server")
 
-        report["host_version"] = smart_socket_version(port, time.monotonic() + args.timeout_seconds)
+        report["host_version"] = smart_socket_version(port, time.monotonic() + timeout_seconds)
         report["passed_probes"].append("smart-socket-host-version")
     except Exception as error:
         report["error"] = str(error)
@@ -177,7 +181,7 @@ def main() -> int:
     finally:
         if server is not None:
             try:
-                terminate(server, max(1.0, args.timeout_seconds / 2.0))
+                terminate(server, max(1.0, timeout_seconds / 2.0))
             except Exception as error:
                 report["cleanup_error"] = str(error)
                 return_code = 1
@@ -187,12 +191,27 @@ def main() -> int:
                 report["cleanup_error"] = f"ADB server process {server.pid} is still running"
                 return_code = 1
         isolated_home.cleanup()
-        write_report(args.json_output, report)
+        write_report(json_output, report)
 
     if return_code == 0 and report.get("passed_probes") != PROBES:
         print(f"ADB helper smoke failure: incomplete probe set {report.get('passed_probes')}")
         return 1
     return return_code
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--adb", required=True, type=pathlib.Path)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--timeout-seconds", default=10.0, type=float)
+    parser.add_argument("--json-output", type=pathlib.Path)
+    args = parser.parse_args()
+    return smoke_adb(
+        adb=args.adb,
+        port=args.port,
+        timeout_seconds=args.timeout_seconds,
+        json_output=args.json_output,
+    )
 
 
 if __name__ == "__main__":
