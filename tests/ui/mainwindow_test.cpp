@@ -979,6 +979,11 @@ SCENARIO( "Closing one of several windows deletes its discarded live capture",
     QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(),
                         [ &mainWindow ] { mainWindow->reloadSession(); } );
     REQUIRE( waitUiState( [ & ] { return tabArea->count() == 1; } ) );
+    REQUIRE( waitUiState( [ & ] {
+        auto* crawler = qobject_cast<CrawlerWidget*>( tabArea->currentWidget() );
+        return crawler != nullptr && crawler->isFirstLoadDone();
+    } ) );
+    QTest::qWait( 200 );
 
     QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(),
                         [ &mainWindow ] { mainWindow->close(); } );
