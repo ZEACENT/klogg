@@ -401,6 +401,59 @@ TEST_CASE( "catalog retains extended USB and network endpoints sharing one UDID"
     catalog.stop();
 }
 
+TEST_CASE( "catalog skips an observer after reentrant peer unsubscribe returns",
+           "[ios][catalog][callback][unsubscribe][quiescence]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    IosDeviceCatalog catalog( makeApi(), executor.executor() );
+    REQUIRE( catalog.start() );
+
+    int retiredCalls = 0;
+    std::optional<IosCatalogSnapshotProvider::SubscriptionId> retiredSubscription;
+    catalog.subscribe( [ & ]( const IosCatalogSnapshot& ) {
+        REQUIRE( retiredSubscription.has_value() );
+        catalog.unsubscribe( retiredSubscription.value_or(
+            IosCatalogSnapshotProvider::SubscriptionId{ 0 } ) );
+    } );
+    retiredSubscription = catalog.subscribe(
+        [ & ]( const IosCatalogSnapshot& ) { ++retiredCalls; } );
+
+    state.emit( NativeEventType::Add, "device", NativeConnectionType::Usb );
+    REQUIRE( executor.pending() == 1u );
+    executor.runAllOnWorker();
+
+    CHECK( retiredCalls == 0 );
+    catalog.stop();
+}
+
+TEST_CASE( "catalog callback may unsubscribe itself without receiving later notifications",
+           "[ios][catalog][callback][unsubscribe][self]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    IosDeviceCatalog catalog( makeApi(), executor.executor() );
+    REQUIRE( catalog.start() );
+
+    int calls = 0;
+    std::optional<IosCatalogSnapshotProvider::SubscriptionId> subscription;
+    subscription = catalog.subscribe( [ & ]( const IosCatalogSnapshot& ) {
+        ++calls;
+        catalog.unsubscribe( subscription.value_or(
+            IosCatalogSnapshotProvider::SubscriptionId{ 0 } ) );
+    } );
+
+    state.emit( NativeEventType::Add, "device", NativeConnectionType::Usb );
+    executor.runAllOnWorker();
+    state.emit( NativeEventType::Paired, "device", NativeConnectionType::Usb );
+    executor.runAllOnWorker();
+
+    CHECK( calls == 1 );
+    catalog.stop();
+}
+
 TEST_CASE( "catalog accepts synchronous ADD during native subscription and copies callback UDID",
            "[ios][catalog][subscribe][callback-lifetime]" )
 {

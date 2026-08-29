@@ -119,21 +119,27 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         const auto keepAlive = shared_from_this();
         std::lock_guard<std::recursive_mutex> notificationLock( notificationMutex );
         IosCatalogSnapshot value;
-        std::vector<SnapshotCallback> listeners;
+        std::vector<std::pair<SubscriptionId, SnapshotCallback>> listeners;
         {
             std::lock_guard<std::mutex> lock( mutex );
             value = current;
             listeners.reserve( callbacks.size() );
             for ( const auto& callback : callbacks ) {
-                listeners.push_back( callback.second );
+                listeners.emplace_back( callback.first, callback.second );
             }
         }
-        for ( const auto& callback : listeners ) {
-            if ( !callback ) {
+        for ( const auto& listener : listeners ) {
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+                if ( callbacks.find( listener.first ) == callbacks.cend() ) {
+                    continue;
+                }
+            }
+            if ( !listener.second ) {
                 continue;
             }
             try {
-                callback( value );
+                listener.second( value );
             } catch ( ... ) { // NOLINT(bugprone-empty-catch)
                 // Snapshot observers are an application boundary. One observer must not
                 // prevent peers from receiving updates or unwind through a native C callback.
@@ -536,6 +542,7 @@ IosCatalogSnapshotProvider::SubscriptionId IosDeviceCatalog::subscribe( Snapshot
 void IosDeviceCatalog::unsubscribe( SubscriptionId subscription )
 {
     const auto state = state_;
+    std::lock_guard<std::recursive_mutex> notificationLock( state->notificationMutex );
     std::lock_guard<std::mutex> lock( state->mutex );
     state->callbacks.erase( subscription );
 }
