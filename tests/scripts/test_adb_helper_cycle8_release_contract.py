@@ -252,6 +252,28 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertEqual(imports | delayed_runtime_files, runtime_files)
         self.assertIs(usb.get("replacement_probe_required"), True)
 
+        system_policy = usb.get("allowed_system_imports_by_binary", {})
+        observed_system_imports = {
+            "adb.exe": {
+                "ADVAPI32.dll",
+                "KERNEL32.dll",
+                "SHELL32.dll",
+                "USER32.dll",
+                "WS2_32.dll",
+                "api-ms-win-crt-private-l1-1-0.dll",
+            },
+            "AdbWinApi.dll": {"KERNEL32.dll", "OLE32.dll", "SETUPAPI.dll"},
+            "AdbWinUsbApi.dll": {"KERNEL32.dll", "OLE32.dll", "WINUSB.dll"},
+            "libusb-1.0.dll": {
+                "KERNEL32.dll",
+                "api-ms-win-crt-private-l1-1-0.dll",
+            },
+        }
+        self.assertEqual(set(system_policy), set(observed_system_imports))
+        for binary_name, observed_imports in observed_system_imports.items():
+            self.assertTrue(observed_imports.issubset(set(system_policy[binary_name])))
+            self.assertNotIn("VCRUNTIME140.dll", system_policy[binary_name])
+
         helper_build = "\n".join((self.build_action, self.build_script, self.superbuild))
         self.assertNotRegex(
             helper_build,

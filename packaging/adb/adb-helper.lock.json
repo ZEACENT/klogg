@@ -685,6 +685,7 @@
             "api-ms-win-crt-math-l1-1-0.dll",
             "api-ms-win-crt-multibyte-l1-1-0.dll",
             "api-ms-win-crt-process-l1-1-0.dll",
+            "api-ms-win-crt-private-l1-1-0.dll",
             "api-ms-win-crt-runtime-l1-1-0.dll",
             "api-ms-win-crt-stdio-l1-1-0.dll",
             "api-ms-win-crt-string-l1-1-0.dll",
@@ -694,10 +695,12 @@
           ],
           "AdbWinApi.dll": [
             "KERNEL32.dll",
+            "OLE32.dll",
             "SETUPAPI.dll"
           ],
           "AdbWinUsbApi.dll": [
             "KERNEL32.dll",
+            "OLE32.dll",
             "WINUSB.dll"
           ],
           "libusb-1.0.dll": [
@@ -716,6 +719,7 @@
             "api-ms-win-crt-math-l1-1-0.dll",
             "api-ms-win-crt-multibyte-l1-1-0.dll",
             "api-ms-win-crt-process-l1-1-0.dll",
+            "api-ms-win-crt-private-l1-1-0.dll",
             "api-ms-win-crt-runtime-l1-1-0.dll",
             "api-ms-win-crt-stdio-l1-1-0.dll",
             "api-ms-win-crt-string-l1-1-0.dll",
