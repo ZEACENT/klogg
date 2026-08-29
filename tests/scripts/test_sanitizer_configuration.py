@@ -20,6 +20,7 @@ RESTORE_CPM_CACHE_ACTION = (
     ROOT / ".github" / "actions" / "restore-cpm-cache" / "action.yml"
 )
 RESTORE_CPM_CACHE_SCRIPT = ROOT / "scripts" / "restore_cpm_cache.sh"
+CPM_CACHE_CONTRACT_SCRIPT = ROOT / "scripts" / "check_cpm_cache_contract.sh"
 THIRD_PARTY_CMAKE = ROOT / "3rdparty" / "CMakeLists.txt"
 CPM_PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 UBUNTU_22_DOCKERFILE = ROOT / "docker" / "ubuntu22.04" / "Dockerfile"
@@ -692,11 +693,12 @@ class SanitizerConfigurationTest(unittest.TestCase):
             'tar -tzf "${archive}"',
             'tar -xzf "${archive}" -C "${staging}"',
             'mv "${staging}/cpm_cache" "${workspace}/cpm_cache"',
-            "roaring.pc.in",
-            "tests/config.h.in",
-            "src/CMakeLists.txt",
+            "check_cpm_cache_contract.sh",
         ):
             self.assertIn(guard, restore_script)
+        contract_script = CPM_CACHE_CONTRACT_SCRIPT.read_text()
+        for guard in ("roaring.pc.in", "tests/config.h.in", "src/CMakeLists.txt"):
+            self.assertIn(guard, contract_script)
 
     def test_linux_tsan_requires_an_installed_explicit_symbolizer(self):
         dockerfile = UBUNTU_22_TSAN_DOCKERFILE.read_text()

@@ -8,6 +8,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).parents[2]
 RESTORE_SCRIPT = ROOT / "scripts" / "restore_cpm_cache.sh"
+CONTRACT_SCRIPT = ROOT / "scripts" / "check_cpm_cache_contract.sh"
+PREFETCH_ACTION = ROOT / ".github" / "actions" / "prefetch-cpm-cache" / "action.yml"
 CROARING_ROOT = pathlib.Path(
     "cpm_cache/croaring/ba5bf40909b6935a298d4d2231f2072e6de80041"
 )
@@ -41,6 +43,40 @@ class RestoreCpmCacheTest(unittest.TestCase):
             target.write_text(f"sentinel for {relative_path}\n")
         with tarfile.open(workspace / "cpm-cache.tar.gz", "w:gz") as archive:
             archive.add(staging / "cpm_cache", arcname="cpm_cache")
+
+    def test_shared_contract_rejects_incomplete_cache_and_accepts_complete_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for relative_path in REQUIRED_PATHS[:-1]:
+                target = root / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("present\n")
+
+            incomplete = subprocess.run(
+                ["bash", str(CONTRACT_SCRIPT), "--root", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(incomplete.returncode, 0)
+            self.assertIn(str(REQUIRED_PATHS[-1]), incomplete.stderr)
+
+            missing = root / REQUIRED_PATHS[-1]
+            missing.parent.mkdir(parents=True, exist_ok=True)
+            missing.write_text("present\n")
+            complete = subprocess.run(
+                ["bash", str(CONTRACT_SCRIPT), "--root", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+
+    def test_prefetch_evicts_and_revalidates_incomplete_cached_package(self):
+        action = PREFETCH_ACTION.read_text(encoding="utf-8")
+        self.assertGreaterEqual(action.count("check_cpm_cache_contract.sh"), 2)
+        self.assertIn("rm -rf", action)
+        self.assertIn("cpm_cache/croaring/ba5bf40909b6935a298d4d2231f2072e6de80041", action)
 
     def test_valid_archive_replaces_cache_atomically(self):
         with tempfile.TemporaryDirectory() as directory:
