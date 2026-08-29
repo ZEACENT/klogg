@@ -6,6 +6,8 @@ i18n keys for every new live-session diagnostic. Runs against the working
 tree; each failure names the retired pattern that must disappear.
 """
 
+from __future__ import annotations
+
 import pathlib
 import re
 import unittest

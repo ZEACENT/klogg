@@ -68,7 +68,8 @@ def published_source_name(version: str, component: str, archive_sha256: str) -> 
 
 
 def source_asset_url(base_url: str, tag: str, file_name: str) -> str:
-    if tag != "continuous" and tag != f"v{validate_version(tag.removeprefix('v'))}":
+    version = tag[1:] if tag.startswith("v") else tag
+    if tag != "continuous" and tag != f"v{validate_version(version)}":
         raise SourcePublicationIdentityError(f"invalid source publication tag: {tag}")
     return (
         f"{normalize_base_url(base_url)}/releases/download/{tag}/"
