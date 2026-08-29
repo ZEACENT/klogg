@@ -89,19 +89,30 @@ public:
         }
     }
 
-    void post( Task task )
+    bool post( Task task )
+    {
+        return enqueue( std::move( task ), false );
+    }
+
+    bool postBeforeFinished( Task task )
+    {
+        return enqueue( std::move( task ), true );
+    }
+
+private:
+    bool enqueue( Task task, bool allowStopping )
     {
         {
             std::lock_guard<std::mutex> lock( state_->mutex );
-            if ( state_->stopping ) {
-                return;
+            if ( state_->finished || ( state_->stopping && !allowStopping ) ) {
+                return false;
             }
             state_->tasks.push_back( std::move( task ) );
         }
         state_->changed.notify_one();
+        return true;
     }
 
-private:
     struct State {
         std::mutex mutex;
         std::condition_variable changed;
@@ -120,6 +131,7 @@ private:
                     lock, [ & ] { return state->stopping || !state->tasks.empty(); } );
                 if ( state->tasks.empty() ) {
                     if ( state->stopping ) {
+                        state->finished = true;
                         break;
                     }
                     continue;

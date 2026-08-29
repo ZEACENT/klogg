@@ -1,0 +1,43 @@
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).parents[2]
+STREAM_SOURCE = ROOT / "src" / "livecapture" / "src" / "iosnativestream.cpp"
+STREAM_TEST = ROOT / "tests" / "unit" / "ios_native_stream_worker_test.cpp"
+PROTOCOL_TEST = ROOT / "tests" / "unit" / "ios_ostrace_protocol_test.cpp"
+
+
+class IosCompilerPortabilityContractTest(unittest.TestCase):
+    def test_syslog_byte_copy_avoids_gcc13_iterator_provenance_warning(self):
+        source = STREAM_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "completed.assign( state->syslogRecord.begin(), state->syslogRecord.end() )",
+            source,
+        )
+        self.assertIn(
+            "std::memcpy( completed.data(), completedRecord.data(), completed.size() )",
+            source,
+        )
+
+    def test_protocol_bounds_check_uses_a_named_fixture_for_gcc15(self):
+        source = PROTOCOL_TEST.read_text(encoding="utf-8")
+        self.assertNotIn("PacketFixture{}.message.size()", source)
+        self.assertIn("const PacketFixture fixture;", source)
+
+    def test_byte_fill_values_are_explicitly_typed_for_msvc(self):
+        sources = "\n".join(
+            path.read_text(encoding="utf-8") for path in (STREAM_TEST, PROTOCOL_TEST)
+        )
+        for unsafe_fill in (
+            "std::fill( source.begin(), source.end(), 0xa5u )",
+            "std::fill( source.begin(), source.end(), 0x5au )",
+            "std::fill( borrowed.begin(), borrowed.end(), 0xa5u )",
+        ):
+            self.assertNotIn(unsafe_fill, sources)
+        self.assertIn("std::uint8_t{ 0xa5 }", sources)
+        self.assertIn("std::uint8_t{ 0x5a }", sources)
+
+
+if __name__ == "__main__":
+    unittest.main()

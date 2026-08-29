@@ -155,8 +155,24 @@ void IosNativeTransport::start( Generation generation )
         return;
     }
 
-    guard->session_ = guard->workerFactory_.create( config, std::move( callbacks ) );
-    if ( guard->session_ == nullptr || !guard->session_->start() ) {
+    auto creation = guard->workerFactory_.create( config, std::move( callbacks ) );
+    guard->session_ = std::move( creation.session );
+    if ( guard->session_ == nullptr ) {
+        if ( creation.error.has_value() ) {
+            postFailure( generation, std::move( *creation.error ) );
+        }
+        else {
+            const LiveSourceError error{ ErrorCategory::Backend,
+                                         "ios-native-worker-create-failed",
+                                         ErrorScope::Stream,
+                                         RetryPolicy::Backoff,
+                                         "The native iOS stream worker could not be created.",
+                                         "The worker factory rejected session creation." };
+            postFailure( generation, ClassifiedIosNativeError{ error, std::nullopt } );
+        }
+    }
+    else if ( !guard->session_->start() ) {
+        guard->session_.reset();
         const LiveSourceError error{ ErrorCategory::Backend,
                                      "ios-native-worker-start-failed",
                                      ErrorScope::Stream,

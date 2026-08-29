@@ -12,6 +12,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -41,6 +42,7 @@ struct IosLogOptions {
 };
 
 inline constexpr std::chrono::milliseconds DefaultIosNativeShutdownDeadline{ 750 };
+inline constexpr std::size_t DefaultIosNativeConcurrentSessionLimit{ 8u };
 
 struct IosNativeStreamConfig {
     IosEndpointKey endpoint;
@@ -61,6 +63,8 @@ struct IosNativeStreamCallbacks {
 };
 
 using IosNativeStreamTask = std::function<void()>;
+// Executors must enqueue the task and return; executing it inline can deadlock
+// native callback quiescence during cleanup.
 using IosNativeStreamExecutor = std::function<void( IosNativeStreamTask )>;
 
 class IosNativeStreamSession {
@@ -73,10 +77,33 @@ public:
     virtual LiveDataStatistics statistics() const = 0;
 };
 
+class DefaultIosNativeStreamWorkerFactory;
+
+class IosNativeSessionLease final {
+public:
+    IosNativeSessionLease() = default;
+    ~IosNativeSessionLease() = default;
+
+    IosNativeSessionLease( const IosNativeSessionLease& ) = delete;
+    IosNativeSessionLease& operator=( const IosNativeSessionLease& ) = delete;
+    IosNativeSessionLease( IosNativeSessionLease&& ) noexcept = default;
+    IosNativeSessionLease& operator=( IosNativeSessionLease&& ) noexcept = default;
+
+    void reset() noexcept;
+    explicit operator bool() const noexcept;
+
+private:
+    friend class DefaultIosNativeStreamWorkerFactory;
+    explicit IosNativeSessionLease( std::shared_ptr<void> token );
+
+    std::shared_ptr<void> token_;
+};
+
 class IosNativeStreamWorker final : public IosNativeStreamSession {
 public:
     IosNativeStreamWorker( IosNativeApi api, IosNativeStreamExecutor executor,
-                           IosNativeStreamConfig config, IosNativeStreamCallbacks callbacks );
+                           IosNativeStreamConfig config, IosNativeStreamCallbacks callbacks,
+                           IosNativeSessionLease admissionLease = {} );
     ~IosNativeStreamWorker() override;
 
     IosNativeStreamWorker( const IosNativeStreamWorker& ) = delete;
@@ -93,23 +120,33 @@ private:
     std::shared_ptr<State> state_;
 };
 
+struct IosNativeStreamSessionCreation {
+    std::unique_ptr<IosNativeStreamSession> session;
+    std::optional<ClassifiedIosNativeError> error;
+};
+
 class IosNativeStreamWorkerFactory {
 public:
     virtual ~IosNativeStreamWorkerFactory() = default;
-    virtual std::unique_ptr<IosNativeStreamSession>
+    virtual IosNativeStreamSessionCreation
     create( const IosNativeStreamConfig& config, IosNativeStreamCallbacks callbacks ) const = 0;
 };
 
 class DefaultIosNativeStreamWorkerFactory final : public IosNativeStreamWorkerFactory {
 public:
-    explicit DefaultIosNativeStreamWorkerFactory( IosNativeApi api );
+    explicit DefaultIosNativeStreamWorkerFactory(
+        IosNativeApi api,
+        std::size_t maximumConcurrentSessions = DefaultIosNativeConcurrentSessionLimit );
 
-    std::unique_ptr<IosNativeStreamSession>
+    IosNativeStreamSessionCreation
     create( const IosNativeStreamConfig& config,
             IosNativeStreamCallbacks callbacks ) const override;
 
 private:
+    struct AdmissionState;
+
     IosNativeApi api_{};
+    std::shared_ptr<AdmissionState> admission_;
 };
 
 } // namespace klogg::livecapture::ios

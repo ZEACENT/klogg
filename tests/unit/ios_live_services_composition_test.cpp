@@ -189,12 +189,14 @@ public:
     {
     }
 
-    std::unique_ptr<IosNativeStreamSession>
+    IosNativeStreamSessionCreation
     create( const IosNativeStreamConfig& config, IosNativeStreamCallbacks callbacks ) const override
     {
         state_->configs.push_back( config );
         state_->callbacks.push_back( std::move( callbacks ) );
-        return std::make_unique<RecordingSession>( state_, config.generation );
+        return IosNativeStreamSessionCreation{
+            std::make_unique<RecordingSession>( state_, config.generation ), std::nullopt
+        };
     }
 
 private:

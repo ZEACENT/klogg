@@ -101,6 +101,7 @@ struct FakeNative {
 
     ~FakeNative()
     {
+        releaseHandshake();
         interruptBlockedReceive();
     }
 
@@ -148,10 +149,10 @@ struct FakeNative {
         handshakeChanged.wait( lock, [ this ] { return handshakeReleased; } );
     }
 
-    void waitUntilHandshakeEntered()
+    bool waitUntilHandshakeEntered()
     {
         std::unique_lock<std::mutex> lock( handshakeMutex );
-        handshakeChanged.wait( lock, [ this ] { return handshakeEntered; } );
+        return handshakeChanged.wait_for( lock, 2s, [ this ] { return handshakeEntered; } );
     }
 
     void releaseHandshake()
@@ -700,7 +701,11 @@ TEST_CASE( "stop during in-flight startup cancels readiness and retires partial 
                                   observed.callbacks() );
     REQUIRE( worker.start() );
     auto startup = executor.startNextOnWorker();
-    state.waitUntilHandshakeEntered();
+    if ( !state.waitUntilHandshakeEntered() ) {
+        state.releaseHandshake();
+        startup.join();
+        FAIL( "native startup did not reach the handshake barrier" );
+    }
 
     worker.stop( 111u );
     REQUIRE( executor.pending() == 1u );
@@ -981,7 +986,7 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
 
     auto borrowed = osTracePacket( "copy me" );
     CHECK_NOTHROW( state.emitOsTrace( borrowed ) );
-    std::fill( borrowed.begin(), borrowed.end(), 0xa5u );
+    std::fill( borrowed.begin(), borrowed.end(), std::uint8_t{ 0xa5 } );
 
     REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 41u } );
     const auto drained = worker.drain();
@@ -1370,6 +1375,88 @@ TEST_CASE( "worker ignores stale stop commands without retiring the current gene
     CHECK( observed.stopped == std::vector<Generation>{ 72u } );
 }
 
+TEST_CASE( "default worker factory bounds sessions while native startup remains blocked",
+           "[ios][native][stream][factory][admission][blocked-startup]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.blockHandshake = true;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool stopped = false;
+    IosNativeStreamCallbacks callbacks;
+    callbacks.ready = []( Generation ) {};
+    callbacks.bytesAvailable = []( Generation ) {};
+    callbacks.failed = []( Generation, const ClassifiedIosNativeError& ) {};
+    callbacks.stopped = [ & ]( Generation ) {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            stopped = true;
+        }
+        changed.notify_all();
+    };
+
+    DefaultIosNativeStreamWorkerFactory factory( makeApi(), 2u );
+    auto creation = factory.create( config( 801u ), std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    REQUIRE( creation.session->start() );
+    if ( !state.waitUntilHandshakeEntered() ) {
+        creation.session->stop( 801u );
+        state.releaseHandshake();
+        std::unique_lock<std::mutex> lock( mutex );
+        changed.wait( lock, [ & ] { return stopped; } );
+        FAIL( "native startup did not reach the handshake barrier" );
+    }
+    struct HandshakeRelease final {
+        FakeNative* state;
+        ~HandshakeRelease()
+        {
+            if ( state != nullptr ) {
+                state->releaseHandshake();
+            }
+        }
+    } handshakeRelease{ &state };
+    creation.session->stop( 801u );
+    creation.session.reset();
+
+    const auto duplicate = factory.create( config( 802u ), {} );
+    CHECK( duplicate.session == nullptr );
+    CHECK( duplicate.error.has_value() );
+    if ( duplicate.error.has_value() ) {
+        CHECK( duplicate.error->error.code == "ios-native-endpoint-busy" );
+    }
+
+    auto otherEndpoint = config( 803u );
+    otherEndpoint.endpoint.udid = "other-device";
+    auto other = factory.create( otherEndpoint, {} );
+    CHECK( other.session != nullptr );
+    auto thirdEndpoint = config( 804u );
+    thirdEndpoint.endpoint.udid = "third-device";
+    const auto capacity = factory.create( thirdEndpoint, {} );
+    CHECK( capacity.session == nullptr );
+    CHECK( capacity.error.has_value() );
+    if ( capacity.error.has_value() ) {
+        CHECK( capacity.error->error.code == "ios-native-session-capacity-exhausted" );
+    }
+
+    state.releaseHandshake();
+    handshakeRelease.state = nullptr;
+    {
+        std::unique_lock<std::mutex> lock( mutex );
+        changed.wait( lock, [ & ] { return stopped; } );
+    }
+    std::unique_ptr<IosNativeStreamSession> replacement;
+    const auto releaseDeadline = std::chrono::steady_clock::now() + 2s;
+    while ( replacement == nullptr && std::chrono::steady_clock::now() < releaseDeadline ) {
+        auto retry = factory.create( config( 805u ), {} );
+        replacement = std::move( retry.session );
+        if ( replacement == nullptr ) {
+            std::this_thread::sleep_for( 1ms );
+        }
+    }
+    CHECK( replacement != nullptr );
+}
+
 TEST_CASE( "default worker factory drains cleanup without executor self-join",
            "[ios][native][stream][factory][lifetime][shutdown]" )
 {
@@ -1398,7 +1485,9 @@ TEST_CASE( "default worker factory drains cleanup without executor self-join",
     };
 
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
-    auto session = factory.create( config( 81u ), std::move( callbacks ) );
+    auto creation = factory.create( config( 81u ), std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    auto session = std::move( creation.session );
     REQUIRE( session->start() );
     {
         std::unique_lock<std::mutex> lock( mutex );
@@ -1450,7 +1539,9 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
     auto options = config( 811u );
     options.cleanupDeadline = 2s;
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
-    auto session = factory.create( options, std::move( callbacks ) );
+    auto creation = factory.create( options, std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    auto session = std::move( creation.session );
     REQUIRE( session->start() );
     {
         std::unique_lock<std::mutex> lock( mutex );
@@ -1531,7 +1622,9 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
     options.cleanupDeadline = 75ms;
     state.blockCallbackReturn = true;
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
-    session = factory.create( options, std::move( callbacks ) );
+    auto creation = factory.create( options, std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    session = std::move( creation.session );
     REQUIRE( session->start() );
     {
         std::unique_lock<std::mutex> lock( mutex );
@@ -1592,7 +1685,9 @@ TEST_CASE( "default worker session may be destroyed from its stopped callback",
     };
 
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
-    session = factory.create( config( 82u ), std::move( callbacks ) );
+    auto creation = factory.create( config( 82u ), std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    session = std::move( creation.session );
     REQUIRE( session->start() );
     {
         std::unique_lock<std::mutex> lock( mutex );

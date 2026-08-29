@@ -125,14 +125,35 @@ private:
     std::shared_ptr<ScriptedSessionState> state_;
 };
 
+class RejectingWorkerFactory final : public IosNativeStreamWorkerFactory {
+public:
+    IosNativeStreamSessionCreation
+    create( const IosNativeStreamConfig&, IosNativeStreamCallbacks ) const override
+    {
+        return IosNativeStreamSessionCreation{
+            nullptr,
+            ClassifiedIosNativeError{
+                LiveSourceError{ ErrorCategory::Backend,
+                                 "ios-native-test-rejection",
+                                 ErrorScope::Stream,
+                                 RetryPolicy::Backoff,
+                                 "The test factory rejected native session creation.",
+                                 "Synthetic typed factory rejection." },
+                std::nullopt }
+        };
+    }
+};
+
 class ScriptedWorkerFactory final : public IosNativeStreamWorkerFactory {
 public:
-    std::unique_ptr<IosNativeStreamSession>
+    IosNativeStreamSessionCreation
     create( const IosNativeStreamConfig& config, IosNativeStreamCallbacks callbacks ) const override
     {
         auto state = std::make_shared<ScriptedSessionState>( config, std::move( callbacks ) );
         sessions.push_back( state );
-        return std::make_unique<ScriptedSession>( std::move( state ) );
+        return IosNativeStreamSessionCreation{
+            std::make_unique<ScriptedSession>( std::move( state ) ), std::nullopt
+        };
     }
 
     std::shared_ptr<ScriptedSessionState> latest() const
@@ -214,6 +235,19 @@ TEST_CASE( "iOS native transport is Connecting until service handle and read are
     // No first-byte watchdog exists: a quiet but armed stream stays connected.
     drainQtEvents();
     CHECK( states.back().second == LiveSourceTransport::State::Connected );
+}
+
+TEST_CASE( "iOS native transport preserves typed factory rejection diagnostics",
+           "[ios][native][transport][admission][backoff]" )
+{
+    RejectingWorkerFactory factory;
+    IosNativeTransport transport( factory, nativeConfig() );
+
+    transport.start( 104u );
+
+    REQUIRE( transport.lastStructuredError().has_value() );
+    CHECK( transport.lastStructuredError()->code == "ios-native-test-rejection" );
+    CHECK( transport.lastStructuredError()->retryPolicy == RetryPolicy::Backoff );
 }
 
 TEST_CASE( "iOS native transport tolerates synchronous stop from readiness state handlers",

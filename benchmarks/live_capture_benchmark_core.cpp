@@ -365,13 +365,16 @@ public:
             *this, std::move( nativeConfig ) );
     }
 
-    std::unique_ptr<::klogg::livecapture::ios::IosNativeStreamSession>
+    ::klogg::livecapture::ios::IosNativeStreamSessionCreation
     create( const ::klogg::livecapture::ios::IosNativeStreamConfig& config,
             ::klogg::livecapture::ios::IosNativeStreamCallbacks callbacks ) const override
     {
         auto fragments = std::exchange( pendingNativeFragments_, {} );
-        return std::make_unique<FixtureNativeSession>( config.generation, std::move( fragments ),
-                                                       std::move( callbacks ), totals_ );
+        return ::klogg::livecapture::ios::IosNativeStreamSessionCreation{
+            std::make_unique<FixtureNativeSession>( config.generation, std::move( fragments ),
+                                                    std::move( callbacks ), totals_ ),
+            std::nullopt
+        };
     }
 
     QueueMetrics queueMetrics() const

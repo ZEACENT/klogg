@@ -15,7 +15,9 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -93,20 +95,27 @@ bool usesOsTrace( const IosNativeStreamConfig& config, const std::string& produc
 
 struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<State> {
     State( IosNativeApi nativeApi, IosNativeStreamExecutor streamExecutor,
-           IosNativeStreamConfig streamConfig, IosNativeStreamCallbacks streamCallbacks )
+           IosNativeStreamConfig streamConfig, IosNativeStreamCallbacks streamCallbacks,
+           IosNativeSessionLease streamAdmissionLease )
         : api( nativeApi )
         , executor( std::move( streamExecutor ) )
         , config( std::move( streamConfig ) )
         , callbacks( std::move( streamCallbacks ) )
+        , admissionLease( std::move( streamAdmissionLease ) )
         , queue( config.queueLimits, config.generation, [ this ] { publishBytesAvailable(); } )
     {
     }
 
     struct CallbackGuard {
         explicit CallbackGuard( State* value ) noexcept
-            : state( value )
-            , active( value != nullptr && value->beginCallback() )
         {
+            try {
+                if ( value != nullptr ) {
+                    state = value->shared_from_this();
+                    active = state->beginCallback();
+                }
+            } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+            }
         }
 
         ~CallbackGuard()
@@ -116,8 +125,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             }
         }
 
-        State* state;
-        bool active;
+        std::shared_ptr<State> state;
+        bool active{ false };
     };
 
     bool beginCallback() noexcept
@@ -171,38 +180,66 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         }
     }
 
+    bool scheduleCleanup() noexcept
+    {
+        {
+            std::unique_lock<std::mutex> lock( controlMutex );
+            if ( cleanupRunning ) {
+                return true;
+            }
+            callbacksChanged.wait( lock, [ this ] { return !cleanupDispatching; } );
+            if ( cleanupScheduled ) {
+                return true;
+            }
+            cleanupScheduled = true;
+            cleanupDispatching = true;
+        }
+
+        bool queued = false;
+        try {
+            const auto state = shared_from_this();
+            executor( [ state ] { state->runCleanup(); } );
+            queued = true;
+        } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+        }
+
+        {
+            std::lock_guard<std::mutex> lock( controlMutex );
+            cleanupDispatching = false;
+            if ( !queued ) {
+                cleanupScheduled = false;
+            }
+        }
+        callbacksChanged.notify_all();
+        return queued;
+    }
+
     void publishFailure( const ClassifiedIosNativeError& failure ) noexcept
     {
         bool shouldPublish = false;
-        bool shouldScheduleCleanup = false;
         {
             std::lock_guard<std::mutex> lock( controlMutex );
             if ( !terminal && !retired ) {
                 terminal = true;
                 acceptingCallbacks = false;
                 shouldPublish = true;
-                if ( !cleanupScheduled ) {
-                    cleanupScheduled = true;
-                    shouldScheduleCleanup = true;
-                }
             }
         }
         if ( !shouldPublish ) {
             return;
         }
+        const auto state = weak_from_this().lock();
+        if ( state == nullptr ) {
+            return;
+        }
         try {
-            if ( callbacks.failed ) {
-                callbacks.failed( config.generation, failure );
+            if ( state->callbacks.failed ) {
+                state->callbacks.failed( state->config.generation, failure );
             }
         } catch ( ... ) { // NOLINT(bugprone-empty-catch)
         }
-        if ( shouldScheduleCleanup ) {
-            try {
-                const auto state = shared_from_this();
-                executor( [ state ] { state->runCleanup(); } );
-            } catch ( ... ) {
-                publishStopped();
-            }
+        if ( !state->scheduleCleanup() ) {
+            state->publishStopped();
         }
     }
 
@@ -347,7 +384,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             return;
         }
         try {
-            std::vector<std::uint8_t> completed;
+            std::string completedRecord;
             bool recordTooLarge = false;
             {
                 std::lock_guard<std::mutex> lock( state->syslogMutex );
@@ -362,7 +399,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 }
                 else {
                     state->syslogRecord.push_back( '\n' );
-                    completed.assign( state->syslogRecord.begin(), state->syslogRecord.end() );
+                    completedRecord = std::move( state->syslogRecord );
                     state->syslogRecord.clear();
                 }
             }
@@ -373,7 +410,9 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                     "An unterminated syslog record exceeded the configured byte limit." ) );
                 return;
             }
-            if ( !completed.empty() ) {
+            if ( !completedRecord.empty() ) {
+                std::vector<std::uint8_t> completed( completedRecord.size() );
+                std::memcpy( completed.data(), completedRecord.data(), completed.size() );
                 state->enqueue( std::move( completed ) );
             }
         } catch ( ... ) {
@@ -652,6 +691,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
     void runCleanup() noexcept
     {
+        {
+            std::lock_guard<std::mutex> lock( controlMutex );
+            cleanupRunning = true;
+        }
         NativeDeviceOwner closingDevice;
         NativeLockdownOwner closingLockdown;
         NativeServiceOwner closingService;
@@ -698,12 +741,14 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         closingDevice.reset();
         queue.close();
         publishStopped();
+        admissionLease.reset();
     }
 
     IosNativeApi api{};
     IosNativeStreamExecutor executor;
     IosNativeStreamConfig config;
     IosNativeStreamCallbacks callbacks;
+    IosNativeSessionLease admissionLease;
     LiveDataQueue queue;
 
     mutable std::mutex controlMutex;
@@ -717,7 +762,9 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     NativeSyslogRelayOwner syslogClient;
     std::size_t callbacksInFlight{ 0u };
     bool startScheduled{ false };
+    bool cleanupDispatching{ false };
     bool cleanupScheduled{ false };
+    bool cleanupRunning{ false };
     bool acceptingCallbacks{ false };
     bool streamStarted{ false };
     bool streamIsOsTrace{ false };
@@ -728,9 +775,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
 IosNativeStreamWorker::IosNativeStreamWorker( IosNativeApi api, IosNativeStreamExecutor executor,
                                               IosNativeStreamConfig config,
-                                              IosNativeStreamCallbacks callbacks )
+                                              IosNativeStreamCallbacks callbacks,
+                                              IosNativeSessionLease admissionLease )
     : state_( std::make_shared<State>( api, std::move( executor ), std::move( config ),
-                                       std::move( callbacks ) ) )
+                                       std::move( callbacks ), std::move( admissionLease ) ) )
 {
 }
 
@@ -770,16 +818,10 @@ void IosNativeStreamWorker::stop( Generation generation ) noexcept
     }
     {
         std::lock_guard<std::mutex> lock( state->controlMutex );
-        if ( state->cleanupScheduled ) {
-            return;
-        }
         state->retired = true;
         state->acceptingCallbacks = false;
-        state->cleanupScheduled = true;
     }
-    try {
-        state->executor( [ state ] { state->runCleanup(); } );
-    } catch ( ... ) {
+    if ( !state->scheduleCleanup() ) {
         state->publishStopped();
     }
 }
@@ -805,6 +847,75 @@ LiveDataStatistics IosNativeStreamWorker::statistics() const
     return {};
 }
 
+IosNativeSessionLease::IosNativeSessionLease( std::shared_ptr<void> token )
+    : token_( std::move( token ) )
+{
+}
+
+void IosNativeSessionLease::reset() noexcept
+{
+    token_.reset();
+}
+
+IosNativeSessionLease::operator bool() const noexcept
+{
+    return token_ != nullptr;
+}
+
+struct DefaultIosNativeStreamWorkerFactory::AdmissionState final
+    : public std::enable_shared_from_this<AdmissionState> {
+    explicit AdmissionState( std::size_t maximumConcurrentSessions )
+        : maximumConcurrentSessions( maximumConcurrentSessions )
+    {
+    }
+
+    struct Lease final {
+        Lease( std::shared_ptr<AdmissionState> owner, IosEndpointKey endpoint )
+            : owner( std::move( owner ) )
+            , endpoint( std::move( endpoint ) )
+        {
+        }
+
+        ~Lease()
+        {
+            owner->release( endpoint );
+        }
+
+        std::shared_ptr<AdmissionState> owner;
+        IosEndpointKey endpoint;
+    };
+
+    std::shared_ptr<void> tryAcquire( const IosEndpointKey& endpoint, bool& endpointBusy )
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        endpointBusy = std::find( activeEndpoints.cbegin(), activeEndpoints.cend(), endpoint )
+                       != activeEndpoints.cend();
+        if ( endpointBusy || activeEndpoints.size() >= maximumConcurrentSessions ) {
+            return nullptr;
+        }
+        activeEndpoints.push_back( endpoint );
+        try {
+            return std::make_shared<Lease>( shared_from_this(), endpoint );
+        } catch ( ... ) {
+            activeEndpoints.pop_back();
+            throw;
+        }
+    }
+
+    void release( const IosEndpointKey& endpoint )
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        const auto found = std::find( activeEndpoints.cbegin(), activeEndpoints.cend(), endpoint );
+        if ( found != activeEndpoints.cend() ) {
+            activeEndpoints.erase( found );
+        }
+    }
+
+    const std::size_t maximumConcurrentSessions;
+    std::mutex mutex;
+    std::vector<IosEndpointKey> activeEndpoints;
+};
+
 namespace {
 
 class OwnedIosNativeStreamSession final : public IosNativeStreamSession {
@@ -812,17 +923,17 @@ public:
     // IosNativeApi is a small function-pointer table copied into the worker.
     // cppcheck-suppress passedByValue
     OwnedIosNativeStreamSession( IosNativeApi api, IosNativeStreamConfig config,
-                                 IosNativeStreamCallbacks callbacks )
+                                 IosNativeStreamCallbacks callbacks,
+                                 IosNativeSessionLease admissionLease )
         : executor_( std::make_shared<BoundedSerialExecutor>( config.cleanupDeadline ) )
         , worker_(
               api,
-              [ executor = std::weak_ptr<BoundedSerialExecutor>( executor_ ) ](
-                  IosNativeStreamTask task ) {
-                  if ( const auto owned = executor.lock() ) {
-                      owned->post( std::move( task ) );
+              [ executor = executor_ ]( IosNativeStreamTask task ) {
+                  if ( !executor->postBeforeFinished( std::move( task ) ) ) {
+                      throw std::runtime_error( "native iOS executor is stopping" );
                   }
               },
-              std::move( config ), std::move( callbacks ) )
+              std::move( config ), std::move( callbacks ), std::move( admissionLease ) )
     {
     }
 
@@ -865,16 +976,39 @@ private:
 
 // IosNativeApi is a small function-pointer table copied into the factory.
 // cppcheck-suppress passedByValue
-DefaultIosNativeStreamWorkerFactory::DefaultIosNativeStreamWorkerFactory( IosNativeApi api )
+DefaultIosNativeStreamWorkerFactory::DefaultIosNativeStreamWorkerFactory(
+    IosNativeApi api, std::size_t maximumConcurrentSessions )
     : api_( api )
+    , admission_( std::make_shared<AdmissionState>( maximumConcurrentSessions ) )
 {
 }
 
-std::unique_ptr<IosNativeStreamSession>
+IosNativeStreamSessionCreation
 DefaultIosNativeStreamWorkerFactory::create( const IosNativeStreamConfig& config,
                                              IosNativeStreamCallbacks callbacks ) const
 {
-    return std::make_unique<OwnedIosNativeStreamSession>( api_, config, std::move( callbacks ) );
+    bool endpointBusy = false;
+    auto lease = admission_->tryAcquire( config.endpoint, endpointBusy );
+    if ( lease == nullptr ) {
+        return IosNativeStreamSessionCreation{
+            nullptr,
+            endpointBusy
+                ? localError( ErrorCategory::Backend, "ios-native-endpoint-busy",
+                              ErrorScope::Device, RetryPolicy::Backoff,
+                              "The selected iOS endpoint already has an active native session.",
+                              "Per-endpoint native session admission is already occupied." )
+                : localError( ErrorCategory::Backend, "ios-native-session-capacity-exhausted",
+                              ErrorScope::Infrastructure, RetryPolicy::Backoff,
+                              "Native iOS session capacity is currently occupied.",
+                              "The global native session admission limit was reached." )
+        };
+    }
+    return IosNativeStreamSessionCreation{
+        std::make_unique<OwnedIosNativeStreamSession>(
+            api_, config, std::move( callbacks ),
+            IosNativeSessionLease{ std::move( lease ) } ),
+        std::nullopt
+    };
 }
 
 } // namespace klogg::livecapture::ios

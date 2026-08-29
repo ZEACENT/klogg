@@ -421,8 +421,9 @@ TEST_CASE( "iOS os_trace decoder bounds-checks every variable field before slici
         OverflowCase{ CategoryLengthOffset, false, OsTraceField::Category },
     };
 
+    const PacketFixture fixture;
     for ( const auto& overflow : cases ) {
-        auto wire = PacketFixture{}.wire();
+        auto wire = fixture.wire();
         if ( overflow.lengthIs32Bit ) {
             putLe32( wire, overflow.lengthOffset, std::numeric_limits<std::uint32_t>::max() );
         }
@@ -442,7 +443,7 @@ TEST_CASE( "iOS os_trace decoder bounds-checks every variable field before slici
         CHECK( structure.declaredSpanByteCount > structure.availableVariableByteCount );
         CHECK( structure.fieldLengths.at( 2u )
                == ( overflow.lengthIs32Bit ? std::numeric_limits<std::uint32_t>::max()
-                                           : PacketFixture{}.message.size() ) );
+                                           : fixture.message.size() ) );
     }
 }
 
@@ -998,10 +999,10 @@ TEST_CASE(
 
     ByteBuffer source{ 'f', 'i', 'r', 's', 't' };
     bridge( source.data(), source.size() );
-    std::fill( source.begin(), source.end(), 0xa5u );
+    std::fill( source.begin(), source.end(), std::uint8_t{ 0xa5 } );
     source.assign( { 's', 'e', 'c', 'o', 'n', 'd' } );
     bridge( source.data(), source.size() );
-    std::fill( source.begin(), source.end(), 0x5au );
+    std::fill( source.begin(), source.end(), std::uint8_t{ 0x5a } );
 
     REQUIRE( delivered.size() == 2u );
     CHECK( byteString( delivered.at( 0 ) ) == "first" );
