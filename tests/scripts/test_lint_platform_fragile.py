@@ -50,6 +50,44 @@ class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
         self.assertIsNone(pattern.search("klogg::qtcompat::skipEmptyParts()"))
 
 
+class FolderEngineQSignalSpyTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/foldersearchengine_test.cpp"):
+        return lint._check_folder_engine_qsignalspy(text, Path(name))
+
+    def test_direct_spy_on_worker_signal_is_flagged(self):
+        text = (
+            "QSignalSpy snapshotSpy(\n"
+            "    &engine, &FolderSearchEngine::folderSnapshotReady );\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 1)
+
+    def test_queued_lambda_recorder_is_allowed(self):
+        text = (
+            "QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, "
+            "&engine, callback, Qt::QueuedConnection );\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_comments_and_non_test_code_are_ignored(self):
+        comment = "// QSignalSpy spy( &engine, &FolderSearchEngine::searchFinished );\n"
+        self.assertEqual(self.check(comment), [])
+        self.assertEqual(
+            self.check(
+                "QSignalSpy spy( &engine, &FolderSearchEngine::searchFinished );\n",
+                name="src/logdata/src/example.cpp",
+            ),
+            [],
+        )
+
+    def test_current_folder_engine_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "foldersearchengine_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
 class QFileInfoDirectIncludeTest(unittest.TestCase):
     def check(self, text, name="src/utils/src/platform_files.cpp"):
         return lint._check_qfileinfo_direct_include(text, Path(name))

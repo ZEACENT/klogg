@@ -1289,6 +1289,35 @@ def _check_qt_version_macro_in_tests(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+_FOLDER_ENGINE_QSIGNALSPY_RE = re.compile(
+    r"\bQSignalSpy\b[^;]*\bFolderSearchEngine::", re.DOTALL
+)
+
+
+def _check_folder_engine_qsignalspy(text: str, path: Path) -> list[tuple[int, str]]:
+    """Reject direct QSignalSpy recording of FolderSearchEngine signals.
+
+    QSignalSpy installs a DirectConnection. FolderSearchEngine emits from its
+    coordinator thread for asynchronous requests, so the spy mutates its QList
+    on that thread while test assertions read it on the main thread. PR #64's
+    Linux TSan leg caught this race only because Qt itself was instrumented.
+    """
+    if "tests" not in path.parts:
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    match = _FOLDER_ENGINE_QSIGNALSPY_RE.search(code)
+    if match is None:
+        return []
+    return [
+        (
+            code.count("\n", 0, match.start()) + 1,
+            "QSignalSpy uses a direct connection and is unsafe for "
+            "FolderSearchEngine worker-thread signals. Record through an explicit "
+            "Qt::QueuedConnection and assert after draining the event loop.",
+        )
+    ]
+
+
 _QFILEINFO_INCLUDE_RE = re.compile(
     r'^\s*#\s*include\s*[<"](?:QtCore/)?QFileInfo[>"]', re.MULTILINE
 )
@@ -1329,6 +1358,10 @@ def _check_qfileinfo_direct_include(text: str, path: Path) -> list[tuple[int, st
 
 
 MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "folder-engine-qsignalspy",
+        "check": _check_folder_engine_qsignalspy,
+    },
     {
         "name": "qfileinfo-direct-include",
         "check": _check_qfileinfo_direct_include,

@@ -33,7 +33,6 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QSemaphore>
-#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTextCodec>
 #include <QThread>
@@ -344,14 +343,20 @@ TEST_CASE( "FolderSearchEngine emits searchStarted and searchFinished", "[folder
     const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
 
     FolderSearchEngine engine;
-    QSignalSpy startedSpy( &engine, &FolderSearchEngine::searchStarted );
-    QSignalSpy finishedSpy( &engine, &FolderSearchEngine::searchFinished );
+    std::vector<quint64> startedGenerations;
+    std::vector<quint64> finishedGenerations;
+    QObject::connect( &engine, &FolderSearchEngine::searchStarted, &engine,
+                      [ &startedGenerations ]( quint64 generation ) {
+                          startedGenerations.push_back( generation );
+                      } );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedGenerations ]( quint64 generation ) {
+                          finishedGenerations.push_back( generation );
+                      } );
     const auto gen = engine.scanSynchronously( QStringList{ path }, RegularExpressionPattern( "MATCH" ) );
 
-    REQUIRE( startedSpy.count() == 1 );
-    REQUIRE( finishedSpy.count() == 1 );
-    REQUIRE( startedSpy.takeFirst()[ 0 ].toULongLong() == gen );
-    REQUIRE( finishedSpy.takeFirst()[ 0 ].toULongLong() == gen );
+    REQUIRE( startedGenerations == std::vector<quint64>{ gen } );
+    REQUIRE( finishedGenerations == std::vector<quint64>{ gen } );
 }
 
 TEST_CASE( "FolderSearchEngine enumerates folder requests off the caller thread",
