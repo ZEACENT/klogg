@@ -146,7 +146,10 @@ struct FakeNative {
         std::unique_lock<std::mutex> lock( handshakeMutex );
         handshakeEntered = true;
         handshakeChanged.notify_all();
-        handshakeChanged.wait( lock, [ this ] { return handshakeReleased; } );
+        if ( !handshakeChanged.wait_for( lock, 2s,
+                                         [ this ] { return handshakeReleased; } ) ) {
+            abiViolation = true;
+        }
     }
 
     bool waitUntilHandshakeEntered()
