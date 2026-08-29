@@ -62,7 +62,13 @@ class FolderSearchEngine : public QObject {
     // few KB; mirror that window rather than scanning the whole first block.
     static constexpr int BinaryDetectionWindow = 32 * 1024;
 
+    using StopPredicate = std::function<bool()>;
+    using FolderEnumerator
+        = std::function<QStringList( const QString&, const StopPredicate& )>;
+
     explicit FolderSearchEngine( QObject* parent = nullptr );
+    explicit FolderSearchEngine( FolderEnumerator folderEnumerator,
+                                 QObject* parent = nullptr );
     ~FolderSearchEngine() override;
 
     FolderSearchEngine( const FolderSearchEngine& ) = delete;
@@ -75,6 +81,12 @@ class FolderSearchEngine : public QObject {
     // context lines captured at scan time (re-run startSearch to change it).
     quint64 startSearch( const QStringList& filePaths, const RegularExpressionPattern& pattern,
                          klogg::folder::ContextOptions context = {} );
+
+    // Async latest-snapshot search. Enumeration and scanning share the same
+    // generation, cancellation, worker, and destruction lifecycle.
+    quint64 startFolderSearch( const QString& folderPath,
+                               const RegularExpressionPattern& pattern,
+                               klogg::folder::ContextOptions context = {} );
 
     // Synchronous full scan on the calling thread (bumps generation first).
     // Used by tests and the benchmark. Emits searchStarted/searchProgressed/
@@ -127,12 +139,16 @@ class FolderSearchEngine : public QObject {
     void searchStarted( quint64 generation );
     void searchProgressed( quint64 nbMatches, int progressPercent, quint64 generation );
     void searchFinished( quint64 generation );
+    // Published after worker-thread enumeration and before scanning starts.
+    void folderSnapshotReady( QStringList filePaths, quint64 generation );
     // Fired per file once its scan completes (crosses thread boundaries on a
     // queued connection; carries only plain int + quint64, like searchProgressed).
     // The main thread responds by calling takeCompletedGroup(fileIndex).
     void fileGroupReady( int fileIndex, quint64 generation );
 
   private:
+    enum class RequestSource : std::uint8_t { FilePaths, Folder };
+
     void workerLoop();
 
     std::atomic<quint64> generation_{ 0 };
@@ -143,13 +159,17 @@ class FolderSearchEngine : public QObject {
     std::condition_variable requestCv_;
     struct Request {
         quint64 generation = 0;
+        RequestSource source = RequestSource::FilePaths;
         QStringList filePaths;
+        QString folderPath;
         RegularExpressionPattern pattern;
         klogg::folder::ContextOptions context;
         bool valid = false;
     };
+    void runFolderSearch( const Request& request );
     Request pendingRequest_; // guarded by requestMutex_
 
+    FolderEnumerator folderEnumerator_;
     std::thread workerThread_;
 
     std::mutex resultsMutex_;

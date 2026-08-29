@@ -29,9 +29,13 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTextCodec>
+
+#include <atomic>
+#include <thread>
 
 namespace {
 QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArray& bytes )
@@ -329,6 +333,111 @@ TEST_CASE( "FolderSearchEngine emits searchStarted and searchFinished", "[folder
     REQUIRE( finishedSpy.count() == 1 );
     REQUIRE( startedSpy.takeFirst()[ 0 ].toULongLong() == gen );
     REQUIRE( finishedSpy.takeFirst()[ 0 ].toULongLong() == gen );
+}
+
+TEST_CASE( "FolderSearchEngine enumerates folder requests on its coordinator thread",
+           "[folder][enumeration][async]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
+
+    const auto callerThread = std::this_thread::get_id();
+    std::thread::id enumeratorThread;
+    std::atomic<int> enumerationCalls{ 0 };
+    FolderSearchEngine engine(
+        [ & ]( const QString& folderPath, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            ++enumerationCalls;
+            enumeratorThread = std::this_thread::get_id();
+            REQUIRE( folderPath == dir.path() );
+            REQUIRE_FALSE( shouldStop() );
+            return QStringList{ path };
+        } );
+
+    QStringList events;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+             [ &events ]( const QStringList&, quint64 ) {
+                 events.append( QStringLiteral( "snapshot" ) );
+             },
+             Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchStarted, &engine,
+             [ &events ]( quint64 ) { events.append( QStringLiteral( "started" ) ); },
+             Qt::QueuedConnection );
+    QSignalSpy snapshotSpy( &engine, &FolderSearchEngine::folderSnapshotReady );
+    QSignalSpy finishedSpy( &engine, &FolderSearchEngine::searchFinished );
+
+    const auto generation
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( ( finishedSpy.count() > 0 || finishedSpy.wait( 3000 ) ) );
+
+    REQUIRE( enumerationCalls.load() == 1 );
+    CHECK( enumeratorThread != callerThread );
+    REQUIRE( snapshotSpy.count() == 1 );
+    CHECK( snapshotSpy.front().at( 0 ).toStringList() == QStringList{ path } );
+    CHECK( snapshotSpy.front().at( 1 ).toULongLong() == generation );
+    REQUIRE( events.size() >= 2 );
+    CHECK( events.at( 0 ) == QStringLiteral( "snapshot" ) );
+    CHECK( events.at( 1 ) == QStringLiteral( "started" ) );
+}
+
+TEST_CASE( "FolderSearchEngine cancels stale enumeration before publishing its snapshot",
+           "[folder][enumeration][generation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    QSemaphore firstEntered;
+    std::atomic<int> enumerationCalls{ 0 };
+    std::atomic<bool> firstCanceled{ false };
+    FolderSearchEngine engine(
+        [ & ]( const QString&, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            const int call = ++enumerationCalls;
+            if ( call == 1 ) {
+                firstEntered.release();
+                while ( !shouldStop() ) {
+                    std::this_thread::yield();
+                }
+                firstCanceled = true;
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+    QSignalSpy snapshotSpy( &engine, &FolderSearchEngine::folderSnapshotReady );
+    QSignalSpy finishedSpy( &engine, &FolderSearchEngine::searchFinished );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( firstEntered.tryAcquire( 1, 3000 ) );
+    const auto latestGeneration
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( ( snapshotSpy.count() > 0 || snapshotSpy.wait( 3000 ) ) );
+    REQUIRE( ( finishedSpy.count() > 1 || finishedSpy.wait( 3000 ) ) );
+
+    CHECK( firstCanceled.load() );
+    CHECK( enumerationCalls.load() == 2 );
+    REQUIRE( snapshotSpy.count() == 1 );
+    CHECK( snapshotSpy.front().at( 0 ).toStringList() == QStringList{ latestPath } );
+    CHECK( snapshotSpy.front().at( 1 ).toULongLong() == latestGeneration );
+}
+
+TEST_CASE( "FolderSearchEngine rejects invalid folder patterns before enumeration",
+           "[folder][enumeration][validation]" )
+{
+    std::atomic<int> enumerationCalls{ 0 };
+    FolderSearchEngine engine(
+        [ & ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            ++enumerationCalls;
+            return QStringList{};
+        } );
+    QSignalSpy snapshotSpy( &engine, &FolderSearchEngine::folderSnapshotReady );
+    QSignalSpy finishedSpy( &engine, &FolderSearchEngine::searchFinished );
+
+    engine.startFolderSearch( QStringLiteral( "/unused" ),
+                              RegularExpressionPattern( QStringLiteral( "[invalid" ) ) );
+    REQUIRE( ( finishedSpy.count() > 0 || finishedSpy.wait( 3000 ) ) );
+
+    CHECK( enumerationCalls.load() == 0 );
+    CHECK( snapshotSpy.isEmpty() );
 }
 
 TEST_CASE( "FolderSearchEngine stale generation produces no new results", "[folder]" )

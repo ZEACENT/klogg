@@ -21,6 +21,7 @@
 #define FOLDERENUMERATION_H
 
 #include <QString>
+#include <functional>
 #include <vector>
 
 struct FolderEnumerationOptions {
@@ -34,7 +35,10 @@ struct FolderEnumerationOptions {
 // dictionary order as the Merge Files dialog). Returns an empty vector if
 // `folder` is empty or not a directory. Binary files are NOT filtered here --
 // the search engine skips them (grep -I) at scan time.
-std::vector<QString> enumerateFolderFiles( const QString& folder,
-                                            const FolderEnumerationOptions& options = {} );
+using FolderEnumerationStopPredicate = std::function<bool()>;
+
+std::vector<QString> enumerateFolderFiles(
+    const QString& folder, const FolderEnumerationOptions& options = {},
+    FolderEnumerationStopPredicate shouldStop = {} );
 
 #endif // FOLDERENUMERATION_H

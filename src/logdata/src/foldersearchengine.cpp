@@ -51,7 +51,13 @@ bool stopped( const std::function<bool()>& shouldStop )
 } // namespace
 
 FolderSearchEngine::FolderSearchEngine( QObject* parent )
+    : FolderSearchEngine( FolderEnumerator{}, parent )
+{
+}
+
+FolderSearchEngine::FolderSearchEngine( FolderEnumerator folderEnumerator, QObject* parent )
     : QObject( parent )
+    , folderEnumerator_( std::move( folderEnumerator ) )
 {
     workerThread_ = std::thread( [ this ] { workerLoop(); } );
 }
@@ -78,7 +84,33 @@ quint64 FolderSearchEngine::startSearch( const QStringList& filePaths,
     interruptRequested_ = false;
     {
         std::lock_guard<std::mutex> lock( requestMutex_ );
-        pendingRequest_ = Request{ gen, filePaths, pattern, context, true };
+        pendingRequest_ = {};
+        pendingRequest_.generation = gen;
+        pendingRequest_.source = RequestSource::FilePaths;
+        pendingRequest_.filePaths = filePaths;
+        pendingRequest_.pattern = pattern;
+        pendingRequest_.context = context;
+        pendingRequest_.valid = true;
+    }
+    requestCv_.notify_one();
+    return gen;
+}
+
+quint64 FolderSearchEngine::startFolderSearch(
+    const QString& folderPath, const RegularExpressionPattern& pattern,
+    klogg::folder::ContextOptions context )
+{
+    const quint64 gen = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
+    interruptRequested_ = false;
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        pendingRequest_ = {};
+        pendingRequest_.generation = gen;
+        pendingRequest_.source = RequestSource::Folder;
+        pendingRequest_.folderPath = folderPath;
+        pendingRequest_.pattern = pattern;
+        pendingRequest_.context = context;
+        pendingRequest_.valid = true;
     }
     requestCv_.notify_one();
     return gen;
@@ -270,6 +302,34 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
     Q_EMIT searchFinished( gen );
 }
 
+void FolderSearchEngine::runFolderSearch( const Request& request )
+{
+    const auto shouldStop = [ this, generation = request.generation ]() {
+        return shutdown_.load( std::memory_order_relaxed )
+               || generation_.load( std::memory_order_relaxed ) != generation
+               || interruptRequested_.load( std::memory_order_relaxed );
+    };
+    if ( shouldStop() ) {
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    const RegularExpression validation( request.pattern );
+    if ( !validation.isValid() || !folderEnumerator_ ) {
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    auto filePaths = folderEnumerator_( request.folderPath, shouldStop );
+    if ( shouldStop() ) {
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    Q_EMIT folderSnapshotReady( filePaths, request.generation );
+    runSearch( request.generation, filePaths, request.pattern, request.context );
+}
+
 void FolderSearchEngine::workerLoop()
 {
     while ( true ) {
@@ -285,7 +345,12 @@ void FolderSearchEngine::workerLoop()
             req = std::move( pendingRequest_ );
             pendingRequest_.valid = false;
         }
-        runSearch( req.generation, req.filePaths, req.pattern, req.context );
+        if ( req.source == RequestSource::Folder ) {
+            runFolderSearch( req );
+        }
+        else {
+            runSearch( req.generation, req.filePaths, req.pattern, req.context );
+        }
     }
 }
 

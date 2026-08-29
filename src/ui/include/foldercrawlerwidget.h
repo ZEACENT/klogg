@@ -269,6 +269,7 @@ class FolderCrawlerWidget : public QWidget,
   private Q_SLOTS:
     void startSearch();
     void stopSearch() override;
+    void onFolderSnapshotReady( QStringList filePaths, quint64 generation );
     void onSearchStarted( quint64 generation );
     void onSearchProgressed( quint64 nbMatches, int percent, quint64 generation );
     void onSearchFinished( quint64 generation );

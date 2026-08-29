@@ -187,7 +187,19 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     placeholderData_ = std::make_shared<LogData>();
     currentMainData_ = placeholderData_;
     quickFindPattern_ = std::make_shared<QuickFindPattern>();
-    engine_ = new FolderSearchEngine( this ); // QObject-owned
+    // QObject ownership is transferred to this widget.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    engine_ = new FolderSearchEngine(
+        []( const QString& folderPath, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            const auto files = enumerateFolderFiles( folderPath, {}, shouldStop );
+            QStringList snapshot;
+            snapshot.reserve( static_cast<int>( files.size() ) );
+            for ( const auto& file : files ) {
+                snapshot.append( file );
+            }
+            return snapshot;
+        },
+        this ); // QObject-owned
 
     // --- toolbar ---
     // SearchToolbar (shared with CrawlerWidget) owns the search input + option
@@ -434,6 +446,8 @@ FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     connect( contextLinesSpinBox_, qOverload<int>( &QSpinBox::valueChanged ), this,
              &FolderCrawlerWidget::onContextControlsChanged );
 
+    connect( engine_, &FolderSearchEngine::folderSnapshotReady, this,
+             &FolderCrawlerWidget::onFolderSnapshotReady, Qt::QueuedConnection );
     connect( engine_, &FolderSearchEngine::searchStarted, this, &FolderCrawlerWidget::onSearchStarted );
     connect( engine_, &FolderSearchEngine::searchProgressed, this,
              &FolderCrawlerWidget::onSearchProgressed );
@@ -1487,22 +1501,11 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
 
 void FolderCrawlerWidget::startSearch()
 {
-    // Supersede the old generation before synchronous enumeration so obsolete
-    // workers stop competing for the same storage while the fresh snapshot is
-    // collected. Queued old signals are rejected immediately.
+    // Supersede the old generation before submitting the next complete
+    // enumerate-and-scan operation. Queued old signals are rejected immediately.
     engine_->interrupt();
     currentSearchGeneration_ = engine_->bumpGeneration();
     searchTargetResults_ = nullptr;
-
-    // Folder membership is a snapshot of the filesystem at explicit search time,
-    // not the list captured when the tab was opened. Re-enumeration also retains
-    // the shared natural ordering used by initial folder open and Merge Files.
-    const auto currentFilePaths = enumerateFolderFiles( folderPath_ );
-    filePaths_.clear();
-    filePaths_.reserve( static_cast<int>( currentFilePaths.size() ) );
-    for ( const auto& filePath : currentFilePaths ) {
-        filePaths_.append( filePath );
-    }
 
     // A new search clears a previous invalid-pattern error state.
     statusErrorActive_ = false;
@@ -1532,6 +1535,31 @@ void FolderCrawlerWidget::startSearch()
             results->beginSearch( filePaths_ );
         }
         updateReadyStatus();
+        return;
+    }
+
+    // Validate before submitting any filesystem work. Invalid expressions clear
+    // stale results but never enumerate the folder.
+    const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
+    const RegularExpression validation{ regexpPattern };
+    if ( !validation.isValid() ) {
+        if ( auto* const results = activeResults() ) {
+            results->beginSearch( filePaths_ );
+        }
+        searchToolbar_->setSearchInProgress( false );
+        searchActive_ = false;
+        currentSearchPattern_ = {};
+        lastResultStatusText_.clear();
+        if ( activeFilteredView() != nullptr ) {
+            activeFilteredView()->setSearchPattern( {} );
+        }
+        if ( mainView_ != nullptr ) {
+            mainView_->setSearchPattern( {} );
+        }
+        statusErrorActive_ = true;
+        statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
+        statusLabel_->setAutoFillBackground( true );
+        statusLabel_->setText( tr( "Error in expression: %1" ).arg( validation.errorString() ) );
         return;
     }
 
@@ -1568,46 +1596,16 @@ void FolderCrawlerWidget::startSearch()
     // clears any prior result set so file groups stream into a clean view. This
     // also covers the invalid-pattern path (which never emits searchStarted).
     if ( searchTargetResults_ != nullptr ) {
-        searchTargetResults_->beginSearch( filePaths_ );
-    }
-
-    // Build the pattern from the toolbar's option flags (case / regex / inverse
-    // / boolean). This UPGRADES folder search from the former plain-text
-    // RegularExpressionPattern{ pattern } to honor the toggles for free.
-    const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
-
-    // Parity with CrawlerWidget::replaceCurrentSearch: an invalid pattern
-    // clears stale results (beginSearch above) and surfaces the error instead
-    // of silently scanning to zero matches.
-    const RegularExpression validation{ regexpPattern };
-    if ( !validation.isValid() ) {
-        searchTargetResults_ = nullptr;
-
-        searchToolbar_->setSearchInProgress( false );
-        searchActive_ = false;
-        currentSearchPattern_ = {};
-        lastResultStatusText_.clear();
-        // Parity with CrawlerWidget: clear the stale highlight in both views.
-        if ( activeFilteredView() != nullptr ) {
-            activeFilteredView()->setSearchPattern( {} );
-        }
-        if ( mainView_ != nullptr ) {
-            mainView_->setSearchPattern( {} );
-        }
-        statusErrorActive_ = true;
-        // Same error styling as CrawlerWidget's searchInfoLine_ (dark yellow).
-        statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
-        statusLabel_->setAutoFillBackground( true );
-        statusLabel_->setText( tr( "Error in expression: %1" ).arg( validation.errorString() ) );
-        return;
+        searchTargetResults_->beginSearch( {} );
     }
 
     // Context is a scan-time property: resolve the current -A/-B/-C window from
     // the toolbar so programmatic startSearch (searchFor, session restore) also
     // honors it, not just direct control edits.
     updateContextFromControls();
-    currentSearchGeneration_ = engine_->startSearch(
-        filePaths_, regexpPattern, klogg::folder::ContextOptions{ contextBefore_, contextAfter_ } );
+    currentSearchGeneration_ = engine_->startFolderSearch(
+        folderPath_, regexpPattern,
+        klogg::folder::ContextOptions{ contextBefore_, contextAfter_ } );
     // Store + forward the pattern to BOTH views so that the matched substring
     // is highlighted in the filtered results AND in any file already open in
     // the main view (single-file parity: crawlerwidget.cpp forwards to both
@@ -1629,6 +1627,22 @@ void FolderCrawlerWidget::startSearch()
 void FolderCrawlerWidget::stopSearch()
 {
     engine_->interrupt();
+    currentSearchGeneration_ = engine_->bumpGeneration();
+    searchTargetResults_ = nullptr;
+    searchToolbar_->setSearchInProgress( false );
+    searchActive_ = false;
+    updateReadyStatus();
+}
+
+void FolderCrawlerWidget::onFolderSnapshotReady( QStringList filePaths, quint64 generation )
+{
+    if ( generation != currentSearchGeneration_ ) {
+        return;
+    }
+    filePaths_ = std::move( filePaths );
+    if ( searchTargetResults_ != nullptr ) {
+        searchTargetResults_->beginSearch( filePaths_ );
+    }
 }
 
 void FolderCrawlerWidget::onSearchStarted( quint64 generation )
