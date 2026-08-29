@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import hashlib
 import importlib.util
 import io
@@ -27,6 +29,7 @@ THIRD_PARTY_CMAKE = ROOT / "3rdparty" / "CMakeLists.txt"
 PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 MAC_PACKAGE_ACTION = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
 APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
+IOS_LIVE_SERVICES = ROOT / "src" / "ui" / "src" / "iosliveservices.cpp"
 CI_BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "ci-build.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build_ios_native_stack.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_ios_native_stack.py"
@@ -170,6 +173,15 @@ class IosNativeReleaseContractTest(unittest.TestCase):
             "the lock must describe the complete source-built native dependency closure",
         )
         return by_id
+
+    def test_catalog_dispatch_retains_its_executor_through_service_shutdown(self):
+        source = required_text(IOS_LIVE_SERVICES)
+        self.assertIn(
+            "std::shared_ptr<BoundedSerialExecutor> catalogExecutor_", source
+        )
+        self.assertIn("[ executor = catalogExecutor_ ]", source)
+        self.assertNotIn("[ executor = catalogExecutor_.get() ]", source)
+        self.assertIn("catalogExecutor_->shutdownAsync();", source)
 
     def test_legal_source_archive_rejects_traversal_member_names(self):
         code = """

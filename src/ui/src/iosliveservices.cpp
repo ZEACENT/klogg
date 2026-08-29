@@ -121,13 +121,13 @@ class IosLiveServices::Impl final {
 public:
     explicit Impl( IosLiveServices& owner, IosLiveServicesConfig config )
         : owner_( owner )
-        , catalogExecutor_( std::make_unique<BoundedSerialExecutor>(
+        , catalogExecutor_( std::make_shared<BoundedSerialExecutor>(
               config.catalogShutdownDeadline ) )
     {
         std::string loadError;
         const auto api = loadIosNativeApiFromBundle( config.nativeStackRoot, &loadError );
         auto catalog = std::make_unique<IosDeviceCatalog>(
-            api, [ executor = catalogExecutor_.get() ]( IosCatalogTask task ) {
+            api, [ executor = catalogExecutor_ ]( IosCatalogTask task ) {
                 executor->post( std::move( task ) );
             } );
         auto* const nativeCatalog = catalog.get();
@@ -271,11 +271,14 @@ public:
             nativeCatalog->stop();
         }
         workerFactory_.reset();
-        catalogExecutor_.reset();
+        if ( catalogExecutor_ != nullptr ) {
+            catalogExecutor_->shutdownAsync();
+            catalogExecutor_.reset();
+        }
     }
 
     IosLiveServices& owner_;
-    std::unique_ptr<BoundedSerialExecutor> catalogExecutor_;
+    std::shared_ptr<BoundedSerialExecutor> catalogExecutor_;
     std::unique_ptr<IosCatalogSnapshotProvider> catalog_;
     std::shared_ptr<CatalogMetadataObservation> metadataObservation_;
     std::optional<IosCatalogSnapshotProvider::SubscriptionId> metadataSubscription_;

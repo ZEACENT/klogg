@@ -19,6 +19,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -196,11 +197,37 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         }
 
         bool queued = false;
+        const auto state = weak_from_this().lock();
+        if ( state == nullptr ) {
+            {
+                std::lock_guard<std::mutex> lock( controlMutex );
+                cleanupDispatching = false;
+                cleanupScheduled = false;
+            }
+            callbacksChanged.notify_all();
+            return false;
+        }
         try {
-            const auto state = shared_from_this();
             executor( [ state ] { state->runCleanup(); } );
             queued = true;
         } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+        }
+
+        if ( !queued ) {
+            // Cleanup cannot run inline: if stop is requested from a native
+            // callback it would wait for that same callback and deadlock. Keep a
+            // self-reference before starting an emergency thread so even thread
+            // creation failure fails closed without freeing callback-owned native
+            // state or publishing a false stopped acknowledgement.
+            {
+                std::lock_guard<std::mutex> lock( controlMutex );
+                cleanupRetention = state;
+            }
+            try {
+                std::thread( [ state ] { state->runCleanup(); } ).detach();
+                queued = true;
+            } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+            }
         }
 
         {
@@ -238,9 +265,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             }
         } catch ( ... ) { // NOLINT(bugprone-empty-catch)
         }
-        if ( !state->scheduleCleanup() ) {
-            state->publishStopped();
-        }
+        static_cast<void>( state->scheduleCleanup() );
     }
 
     void publishBoundaryFailure( ErrorCategory category, const char* code, ErrorScope scope,
@@ -740,8 +765,12 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         closingLockdown.reset();
         closingDevice.reset();
         queue.close();
-        publishStopped();
         admissionLease.reset();
+        publishStopped();
+        {
+            std::lock_guard<std::mutex> lock( controlMutex );
+            cleanupRetention.reset();
+        }
     }
 
     IosNativeApi api{};
@@ -749,6 +778,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     IosNativeStreamConfig config;
     IosNativeStreamCallbacks callbacks;
     IosNativeSessionLease admissionLease;
+    std::shared_ptr<State> cleanupRetention;
     LiveDataQueue queue;
 
     mutable std::mutex controlMutex;

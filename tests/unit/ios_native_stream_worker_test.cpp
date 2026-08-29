@@ -1350,6 +1350,71 @@ TEST_CASE( "cleanup waits for an in-flight native callback before stop and free"
     CHECK_FALSE( state.abiViolation.load() );
 }
 
+TEST_CASE( "cleanup rejection falls back asynchronously and waits for active callbacks",
+           "[ios][native][stream][callback][stop][executor-rejection]" )
+{
+    FakeNative state;
+    fake = &state;
+    std::optional<IosNativeStreamTask> startupTask;
+    int dispatchCount = 0;
+    const IosNativeStreamExecutor executor = [ & ]( IosNativeStreamTask task ) {
+        if ( dispatchCount++ == 0 ) {
+            startupTask = std::move( task );
+            return;
+        }
+        throw std::runtime_error( "cleanup rejected" );
+    };
+
+    std::mutex callbackMutex;
+    std::condition_variable callbackChanged;
+    bool callbackEntered = false;
+    bool releaseCallback = false;
+    std::atomic<bool> stopped{ false };
+    IosNativeStreamCallbacks callbacks;
+    callbacks.ready = []( Generation ) {};
+    callbacks.bytesAvailable = [ & ]( Generation ) {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        callbackEntered = true;
+        callbackChanged.notify_all();
+        callbackChanged.wait( lock, [ & ] { return releaseCallback; } );
+    };
+    callbacks.failed = []( Generation, const ClassifiedIosNativeError& ) {};
+    callbacks.stopped = [ & ]( Generation ) { stopped = true; };
+
+    IosNativeStreamWorker worker( makeApi(), executor, config( 74u ), std::move( callbacks ) );
+    REQUIRE( worker.start() );
+    REQUIRE( startupTask.has_value() );
+    std::thread startup( std::move( *startupTask ) );
+    startup.join();
+
+    std::thread callbackThread(
+        [ & ] { state.emitOsTrace( osTracePacket( "in flight" ) ); } );
+    {
+        std::unique_lock<std::mutex> lock( callbackMutex );
+        REQUIRE( callbackChanged.wait_for( lock, 2s, [ & ] { return callbackEntered; } ) );
+    }
+
+    worker.stop( 74u );
+    std::this_thread::sleep_for( 20ms );
+    CHECK_FALSE( stopped.load() );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+
+    {
+        std::lock_guard<std::mutex> lock( callbackMutex );
+        releaseCallback = true;
+    }
+    callbackChanged.notify_all();
+    callbackThread.join();
+    const auto stoppedDeadline = std::chrono::steady_clock::now() + 2s;
+    while ( !stopped.load() && std::chrono::steady_clock::now() < stoppedDeadline ) {
+        std::this_thread::sleep_for( 1ms );
+    }
+
+    CHECK( stopped.load() );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+    CHECK( indexOf( state.calls, "ostrace-stop" ) < indexOf( state.calls, "ostrace-free" ) );
+}
+
 TEST_CASE( "worker ignores stale stop commands without retiring the current generation",
            "[ios][native][stream][generation][stale-command]" )
 {
@@ -1404,7 +1469,9 @@ TEST_CASE( "default worker factory bounds sessions while native startup remains 
         creation.session->stop( 801u );
         state.releaseHandshake();
         std::unique_lock<std::mutex> lock( mutex );
-        changed.wait( lock, [ & ] { return stopped; } );
+        if ( !changed.wait_for( lock, 2s, [ & ] { return stopped; } ) ) {
+            FAIL( "native startup missed the handshake barrier and cleanup timed out" );
+        }
         FAIL( "native startup did not reach the handshake barrier" );
     }
     struct HandshakeRelease final {
@@ -1441,10 +1508,6 @@ TEST_CASE( "default worker factory bounds sessions while native startup remains 
 
     state.releaseHandshake();
     handshakeRelease.state = nullptr;
-    {
-        std::unique_lock<std::mutex> lock( mutex );
-        changed.wait( lock, [ & ] { return stopped; } );
-    }
     std::unique_ptr<IosNativeStreamSession> replacement;
     const auto releaseDeadline = std::chrono::steady_clock::now() + 2s;
     while ( replacement == nullptr && std::chrono::steady_clock::now() < releaseDeadline ) {
@@ -1455,6 +1518,61 @@ TEST_CASE( "default worker factory bounds sessions while native startup remains 
         }
     }
     CHECK( replacement != nullptr );
+    {
+        std::unique_lock<std::mutex> lock( mutex );
+        CHECK( changed.wait_for( lock, 2s, [ & ] { return stopped; } ) );
+    }
+}
+
+TEST_CASE( "default worker factory releases endpoint admission before stopped callback",
+           "[ios][native][stream][factory][admission][reentrant]" )
+{
+    FakeNative state;
+    fake = &state;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool ready = false;
+    bool stopped = false;
+    std::unique_ptr<IosNativeStreamSession> replacement;
+    std::optional<ClassifiedIosNativeError> replacementError;
+
+    DefaultIosNativeStreamWorkerFactory factory( makeApi() );
+    IosNativeStreamCallbacks callbacks;
+    callbacks.ready = [ & ]( Generation ) {
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            ready = true;
+        }
+        changed.notify_all();
+    };
+    callbacks.bytesAvailable = []( Generation ) {};
+    callbacks.failed = []( Generation, const ClassifiedIosNativeError& ) {};
+    callbacks.stopped = [ & ]( Generation ) {
+        auto retried = factory.create( config( 806u ), {} );
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            replacement = std::move( retried.session );
+            replacementError = std::move( retried.error );
+            stopped = true;
+        }
+        changed.notify_all();
+    };
+
+    auto creation = factory.create( config( 805u ), std::move( callbacks ) );
+    REQUIRE( creation.session != nullptr );
+    REQUIRE( creation.session->start() );
+    {
+        std::unique_lock<std::mutex> lock( mutex );
+        REQUIRE( changed.wait_for( lock, 2s, [ & ] { return ready; } ) );
+    }
+    creation.session->stop( 805u );
+    {
+        std::unique_lock<std::mutex> lock( mutex );
+        REQUIRE( changed.wait_for( lock, 2s, [ & ] { return stopped; } ) );
+    }
+
+    CHECK( replacement != nullptr );
+    CHECK_FALSE( replacementError.has_value() );
 }
 
 TEST_CASE( "default worker factory drains cleanup without executor self-join",
