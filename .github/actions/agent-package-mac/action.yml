@@ -72,8 +72,13 @@ runs:
       shell: sh
       run: |
         set -euo pipefail
-        KLOGG_MAC_PACKAGE_ROOT="$KLOGG_BUILD_ROOT/package-stage"
+        build_root_abs="$(cd "$KLOGG_BUILD_ROOT" && pwd)"
+        KLOGG_MAC_PACKAGE_ROOT="$build_root_abs/package-stage"
         KLOGG_MAC_APP="$KLOGG_MAC_PACKAGE_ROOT/klogg.app"
+        case "$KLOGG_MAC_APP" in
+          /*) ;;
+          *) echo "::error::KLOGG_MAC_APP must be absolute: $KLOGG_MAC_APP"; exit 1 ;;
+        esac
         rm -rf "$KLOGG_MAC_PACKAGE_ROOT"
         mkdir -p "$KLOGG_MAC_PACKAGE_ROOT"
         cp -a "$KLOGG_BUILD_ROOT/output/klogg.app" "$KLOGG_MAC_APP"

@@ -1,5 +1,7 @@
 import importlib.util
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -74,7 +76,12 @@ qt.qpa.plugin: Could not load the Qt platform plugin \"cocoa\" even though it wa
 
     def test_packaging_uses_a_fresh_stage_and_pinned_deployment_tool(self):
         action = ACTION.read_text(encoding="utf-8")
-        self.assertIn('KLOGG_MAC_PACKAGE_ROOT="$KLOGG_BUILD_ROOT/package-stage"', action)
+        self.assertIn('build_root_abs="$(cd "$KLOGG_BUILD_ROOT" && pwd)"', action)
+        self.assertIn('KLOGG_MAC_PACKAGE_ROOT="$build_root_abs/package-stage"', action)
+        self.assertNotIn(
+            'KLOGG_MAC_PACKAGE_ROOT="$KLOGG_BUILD_ROOT/package-stage"', action
+        )
+        self.assertIn("KLOGG_MAC_APP must be absolute", action)
         self.assertIn('cp -a "$KLOGG_BUILD_ROOT/output/klogg.app" "$KLOGG_MAC_APP"', action)
         self.assertIn('"$KLOGG_MAC_APP/Contents/Frameworks"', action)
         self.assertIn('"$KLOGG_MAC_APP/Contents/PlugIns"', action)
@@ -84,6 +91,33 @@ qt.qpa.plugin: Could not load the Qt platform plugin \"cocoa\" even though it wa
         self.assertGreaterEqual(action.count("--smoke cocoa"), 2)
         self.assertGreaterEqual(action.count("--smoke-if-present offscreen"), 2)
         self.assertIn("macos-qt-mounted-dmg-smoke.log", action)
+
+    def test_package_stage_path_survives_build_root_working_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = pathlib.Path(directory)
+            app = workspace / "build_root" / "output" / "klogg.app"
+            app.mkdir(parents=True)
+            env = os.environ.copy()
+            env["KLOGG_BUILD_ROOT"] = "build_root"
+            subprocess.run(
+                [
+                    "sh",
+                    "-c",
+                    """
+set -eu
+build_root_abs="$(cd "$KLOGG_BUILD_ROOT" && pwd)"
+KLOGG_MAC_PACKAGE_ROOT="$build_root_abs/package-stage"
+KLOGG_MAC_APP="$KLOGG_MAC_PACKAGE_ROOT/klogg.app"
+mkdir -p "$KLOGG_MAC_PACKAGE_ROOT"
+cp -a "$KLOGG_BUILD_ROOT/output/klogg.app" "$KLOGG_MAC_APP"
+cd "$KLOGG_BUILD_ROOT"
+test -d "$KLOGG_MAC_APP"
+""",
+                ],
+                cwd=workspace,
+                env=env,
+                check=True,
+            )
 
 
 if __name__ == "__main__":
