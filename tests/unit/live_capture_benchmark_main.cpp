@@ -10,6 +10,9 @@
 #include <QCoreApplication>
 
 #include "capturestore.h"
+#include "persistentinfo.h"
+
+const bool PersistentInfo::ForcePortable = true;
 
 int main( int argc, char* argv[] )
 {

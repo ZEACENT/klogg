@@ -455,7 +455,11 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
         producer_source = (
             ROOT / "benchmarks" / "live_capture_fixture_producer.cpp"
         ).read_text(encoding="utf-8")
+        benchmark_test_main = (
+            ROOT / "tests" / "unit" / "live_capture_benchmark_main.cpp"
+        ).read_text(encoding="utf-8")
 
+        self.assertIn("const bool PersistentInfo::ForcePortable = true;", benchmark_test_main)
         for token in (
             "public ProcessLiveSourceTransport",
             "IosNativeTransport",
