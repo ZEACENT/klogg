@@ -320,12 +320,12 @@ TEST_CASE( "iOS os_trace decoder accepts only the documented marker packet types
            "[livecapture][ios][ostrace][protocol][validation]" )
 {
     const std::array<std::pair<std::uint8_t, OsTraceLevel>, 6> levels{
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x00u, OsTraceLevel::Notice },
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x01u, OsTraceLevel::Info },
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x02u, OsTraceLevel::Debug },
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x03u, OsTraceLevel::UserAction },
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x10u, OsTraceLevel::Error },
-        std::pair<std::uint8_t, OsTraceLevel>{ 0x11u, OsTraceLevel::Fault },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x00 }, OsTraceLevel::Notice },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x01 }, OsTraceLevel::Info },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x02 }, OsTraceLevel::Debug },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x03 }, OsTraceLevel::UserAction },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x10 }, OsTraceLevel::Error },
+        std::pair<std::uint8_t, OsTraceLevel>{ std::uint8_t{ 0x11 }, OsTraceLevel::Fault },
     };
     for ( const auto& level : levels ) {
         PacketFixture fixture;
