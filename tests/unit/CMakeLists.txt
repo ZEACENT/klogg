@@ -16,6 +16,25 @@ klogg_configure_test_target(klogg_ios_protocol_tests)
 add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
 set_tests_properties(klogg_ios_protocol_tests PROPERTIES TIMEOUT 120)
 
+# Configuration loads before KloggApp in production, so migrations must not
+# require a QGuiApplication or a platform plugin.
+add_executable(
+  klogg_configuration_preapplication_tests
+  configuration_preapplication_test.cpp
+  pure_catch_main.cpp
+)
+target_link_libraries(
+  klogg_configuration_preapplication_tests
+  PRIVATE klogg_settings Catch2 Qt${QT_VERSION_MAJOR}::Core Qt${QT_VERSION_MAJOR}::Gui
+          project_options project_warnings
+)
+klogg_configure_test_target(klogg_configuration_preapplication_tests)
+add_test(
+  NAME klogg_configuration_preapplication_tests
+  COMMAND klogg_configuration_preapplication_tests
+)
+set_tests_properties(klogg_configuration_preapplication_tests PROPERTIES TIMEOUT 120)
+
 # Native iOS discovery and stream-worker lifecycle are specified against an
 # injected C-ABI table. This target intentionally has no Qt or libimobiledevice
 # linkage: catalog snapshots, passive pairing, callbacks, ownership, event

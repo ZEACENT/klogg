@@ -42,20 +42,7 @@ QString makeTestDir( const QString& prefix )
 
 QStringList legacyFindNextBindings()
 {
-    QStringList bindings;
-    for ( const auto& key : QKeySequence::keyBindings( QKeySequence::FindNext ) ) {
-        const auto portable = key.toString( QKeySequence::PortableText );
-        if ( !portable.isEmpty() && !bindings.contains( portable ) ) {
-            bindings.push_back( portable );
-        }
-    }
-
-    const auto commandG = QKeySequence( commandShortcutModifier() + QStringLiteral( "+G" ) )
-                              .toString( QKeySequence::PortableText );
-    if ( !commandG.isEmpty() && !bindings.contains( commandG ) ) {
-        bindings.push_back( commandG );
-    }
-    return bindings;
+    return { QStringLiteral( "F3" ), QStringLiteral( "Ctrl+G" ) };
 }
 
 QStringList materializedShortcutSlots( QStringList bindings )

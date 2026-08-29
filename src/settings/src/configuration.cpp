@@ -78,25 +78,6 @@ QStringList normalizedShortcutBindings( QStringList bindings )
     return bindings;
 }
 
-QStringList legacyFindNextBindings( const QString& commandModifier )
-{
-    QStringList bindings;
-    for ( const auto& key : QKeySequence::keyBindings( QKeySequence::FindNext ) ) {
-        const auto portable = key.toString( QKeySequence::PortableText );
-        if ( !portable.isEmpty() && !bindings.contains( portable ) ) {
-            bindings.push_back( portable );
-        }
-    }
-
-    const auto commandG
-        = QKeySequence( commandModifier + QStringLiteral( "+G" ), QKeySequence::PortableText )
-              .toString( QKeySequence::PortableText );
-    if ( !commandG.isEmpty() && !bindings.contains( commandG ) ) {
-        bindings.push_back( commandG );
-    }
-    return bindings;
-}
-
 bool matchesLegacyJumpToLineDefault( const QStringList& bindings )
 {
     const auto normalized = normalizedShortcutBindings( bindings );
@@ -109,20 +90,18 @@ bool matchesLegacyJumpToLineDefault( const QStringList& bindings )
 bool matchesLegacyFindNextDefault( const QStringList& bindings )
 {
     const auto normalized = normalizedShortcutBindings( bindings );
-    const auto platformBindings = legacyFindNextBindings( commandShortcutModifier() );
-    const auto literalCtrlBindings = legacyFindNextBindings( QStringLiteral( "Ctrl" ) );
-    const QList<QStringList> candidates{
-        platformBindings,
-        platformBindings.mid( 0, 2 ),
-        literalCtrlBindings,
-        literalCtrlBindings.mid( 0, 2 ),
-        { commandShortcutModifier() + QStringLiteral( "+G" ) },
+    const QList<QStringList> historicalDefaults{
         { QStringLiteral( "Ctrl+G" ) },
+        { QStringLiteral( "Meta+G" ) },
+        { QStringLiteral( "F3" ), QStringLiteral( "Ctrl+G" ) },
+        { QStringLiteral( "Ctrl+G" ), QStringLiteral( "F3" ) },
+        { QStringLiteral( "Meta+G" ), QStringLiteral( "Ctrl+G" ) },
+        { QStringLiteral( "Ctrl+G" ), QStringLiteral( "Meta+G" ) },
     };
-
-    return std::any_of( candidates.cbegin(), candidates.cend(), [ &normalized ]( auto candidate ) {
-        return normalized == normalizedShortcutBindings( std::move( candidate ) );
-    } );
+    return std::any_of(
+        historicalDefaults.cbegin(), historicalDefaults.cend(), [ &normalized ]( auto candidate ) {
+            return normalized == normalizedShortcutBindings( std::move( candidate ) );
+        } );
 }
 
 bool migrateLegacyCtrlGDefaults( ShortcutAction::ConfiguredShortcuts& shortcuts )
