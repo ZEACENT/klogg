@@ -48,14 +48,8 @@ def free_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+def process_terminated(process: subprocess.Popen[bytes]) -> bool:
+    return process.poll() is not None
 
 
 def terminate(process: subprocess.Popen[bytes], timeout: float) -> None:
@@ -187,7 +181,7 @@ def main() -> int:
             except Exception as error:
                 report["cleanup_error"] = str(error)
                 return_code = 1
-            if not process_exists(server.pid):
+            if process_terminated(server):
                 report["passed_probes"].append("no-lingering-process")
             else:
                 report["cleanup_error"] = f"ADB server process {server.pid} is still running"

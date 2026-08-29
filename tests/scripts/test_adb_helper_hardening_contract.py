@@ -17,12 +17,21 @@ ROOT = pathlib.Path(__file__).parents[2]
 PREFETCH_SCRIPT = ROOT / "scripts" / "prefetch_adb_helper_sources.py"
 LEGAL_SCRIPT = ROOT / "scripts" / "build_adb_helper_legal_assets.py"
 BUILD_SCRIPT = ROOT / "scripts" / "build_adb_helper.py"
+SMOKE_SCRIPT = ROOT / "scripts" / "smoke_adb_helper.py"
 LOCK = ROOT / "packaging" / "adb" / "adb-helper.lock.json"
 CANONICAL_TAR_GZ_IDENTITY = "canonical-tar-gz-v1"
 
 
 def load_build_module():
     spec = importlib.util.spec_from_file_location("build_adb_helper", BUILD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_smoke_module():
+    spec = importlib.util.spec_from_file_location("smoke_adb_helper", SMOKE_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -593,6 +602,7 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_build_module()
+        cls.smoke_module = load_smoke_module()
 
     def test_locked_patch_application_requires_explicit_gnu_patch_dispatch(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -625,6 +635,15 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
                     str(patch),
                 ]
             )
+
+    def test_smoke_cleanup_uses_the_owned_child_status_instead_of_windows_pid_probing(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        with mock.patch.object(self.smoke_module.os, "kill") as kill:
+            self.assertTrue(self.smoke_module.process_terminated(process))
+            process.poll.return_value = None
+            self.assertFalse(self.smoke_module.process_terminated(process))
+        kill.assert_not_called()
 
     def test_smoke_failure_surfaces_the_structured_report_error(self):
         with tempfile.TemporaryDirectory() as tempdir:
