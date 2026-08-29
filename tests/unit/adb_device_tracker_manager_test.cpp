@@ -988,6 +988,7 @@ TEST_CASE( "idle lease reacquisition retries a transient terminal supervisor fai
              == InfrastructureStatus::Unavailable );
     REQUIRE( harness.manager.snapshot().error.has_value() );
     CHECK( harness.manager.snapshot().error->retryPolicy == RetryPolicy::WaitForInfrastructure );
+    REQUIRE( harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
 
     firstLease.reset();
     REQUIRE( harness.manager.activeLeaseCount() == 0u );
@@ -995,8 +996,34 @@ TEST_CASE( "idle lease reacquisition retries a transient terminal supervisor fai
 
     CHECK( harness.manager.activeLeaseCount() == 1u );
     CHECK( harness.manager.snapshot().generation == firstGeneration + 1u );
+    CHECK( harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
     REQUIRE( harness.probe.requests.size() == 2u );
     CHECK( harness.probe.requests.back().active );
+}
+
+TEST_CASE( "active manager leases retry a transient terminal supervisor failure",
+           "[livecapture][adb][manager][lease][retry]" )
+{
+    ManagerHarness harness;
+    auto lease = harness.manager.acquireLease();
+    const auto generation = harness.manager.snapshot().generation;
+    REQUIRE( harness.probe.requests.size() == 1u );
+
+    harness.probe.completeFailed( 0, "temporary probe failure" );
+
+    REQUIRE( harness.manager.activeLeaseCount() == 1u );
+    REQUIRE( harness.manager.snapshot().infrastructure.status
+             == InfrastructureStatus::Unavailable );
+    REQUIRE( harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+    CHECK( harness.supervisorScheduler.lastDelay( AdbServerScheduleKind::StartupRetry ) == 10ms );
+
+    harness.supervisorScheduler.fire( AdbServerScheduleKind::StartupRetry );
+
+    REQUIRE( harness.probe.requests.size() == 2u );
+    CHECK( harness.manager.snapshot().generation == generation );
+    harness.probe.completeReady( 1 );
+    CHECK( harness.manager.snapshot().infrastructure.status == InfrastructureStatus::Ready );
+    CHECK( harness.manager.snapshot().generation == generation );
 }
 
 TEST_CASE( "tracker reconnect backoff caps and cancelled timers cannot restart stale epochs",

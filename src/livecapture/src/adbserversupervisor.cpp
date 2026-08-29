@@ -224,6 +224,7 @@ private:
         launchCleanupPermitted_ = false;
         activeLaunchToken_ = 0u;
         activeLaunchInvocation_.reset();
+        startupRetryAttempt_ = 0u;
         reconnectAttempt_ = 0u;
         lastStartupProbeDiagnostic_.clear();
         snapshot_.generation = generation;
@@ -755,6 +756,7 @@ private:
         snapshot_.serverIdentity = std::move( result.serverIdentity );
         snapshot_.protocolVersion = result.protocolVersion;
         snapshot_.error.reset();
+        startupRetryAttempt_ = 0u;
         reconnectAttempt_ = 0u;
         if ( ownership == InfrastructureOwnership::AppShared ) {
             serverPublished_ = true;
@@ -764,6 +766,7 @@ private:
         cancelSchedule( AdbServerScheduleKind::StartupTimeout );
         cancelSchedule( AdbServerScheduleKind::ReadinessProbe );
         cancelSchedule( AdbServerScheduleKind::LockRetry );
+        cancelSchedule( AdbServerScheduleKind::StartupRetry );
         cancelSchedule( AdbServerScheduleKind::ReconnectBackoff );
         releaseStartupLock();
         const auto runSerial = runSerial_;
@@ -801,6 +804,21 @@ private:
         }
     }
 
+    void scheduleStartupRetry( RetryPolicy retryPolicy )
+    {
+        auto delay = std::chrono::milliseconds{ 0 };
+        if ( retryPolicy == RetryPolicy::Backoff ) {
+            const auto index
+                = std::min( startupRetryAttempt_, config_.reconnectBackoff.size() - 1u );
+            delay = config_.reconnectBackoff.at( index );
+            if ( startupRetryAttempt_ < config_.reconnectBackoff.size() ) {
+                ++startupRetryAttempt_;
+            }
+        }
+        schedule( AdbServerScheduleKind::StartupRetry, delay,
+                  []( Impl& self ) { self.beginProbe( ProbePurpose::Initial ); } );
+    }
+
     void scheduleReconnect()
     {
         snapshot_.status = AdbServerSupervisorStatus::RetryWait;
@@ -830,6 +848,13 @@ private:
         if ( runSerial == runSerial_ && snapshot_.generation == generation
              && snapshot_.epoch == epoch && snapshot_.error.has_value() ) {
             Q_EMIT supervisor_.errorOccurred( generation, epoch, *snapshot_.error );
+        }
+        if ( running_ && runSerial == runSerial_ && snapshot_.generation == generation
+             && snapshot_.epoch == epoch && snapshot_.status == AdbServerSupervisorStatus::Failed
+             && snapshot_.error.has_value()
+             && ( snapshot_.error->retryPolicy == RetryPolicy::Immediate
+                  || snapshot_.error->retryPolicy == RetryPolicy::Backoff ) ) {
+            scheduleStartupRetry( snapshot_.error->retryPolicy );
         }
     }
 
@@ -1002,6 +1027,7 @@ private:
     std::shared_ptr<LaunchInvocation> activeLaunchInvocation_;
     std::array<AdbServerToken, scheduleKindCount> scheduleTokens_{};
     std::array<std::uint64_t, scheduleKindCount> scheduleSerials_{};
+    std::size_t startupRetryAttempt_{ 0 };
     std::size_t reconnectAttempt_{ 0 };
     std::string lastStartupProbeDiagnostic_;
 };

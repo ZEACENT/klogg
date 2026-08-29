@@ -122,6 +122,7 @@ enum class AdbServerScheduleKind : std::uint8_t {
     StartupTimeout,
     HealthProbe,
     LockRetry,
+    StartupRetry,
     ReconnectBackoff
 };
 
