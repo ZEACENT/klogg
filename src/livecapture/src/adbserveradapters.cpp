@@ -12,6 +12,7 @@
 #include "adbserversupervisor.h"
 
 #include "adbsmartsocketclient.h"
+#include "platform/platform_files.h"
 
 #include <QDir>
 #include <QFile>
@@ -61,10 +62,6 @@ std::set<QProcess*>& publishedProcesses()
     static auto* const processes = new std::set<QProcess*>;
     return *processes;
 }
-
-constexpr auto privateKeyPermissions = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
-constexpr auto privateDirectoryPermissions
-    = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
 
 } // namespace
 
@@ -598,7 +595,8 @@ AdbServerKeyInspection StandardAdbKeyStore::inspectStandardKey()
             return AdbServerKeyInspection{ AdbServerStandardKeyState::Failed,
                                            "The standard ADB private key is not a readable file." };
         }
-        if ( !QFile::setPermissions( privateKeyPath_, privateKeyPermissions ) ) {
+        if ( !klogg::platform::ensureOwnerOnlyDirectory( keyInfo.absolutePath() )
+             || !klogg::platform::restrictRegularFileToOwner( privateKeyPath_ ) ) {
             return AdbServerKeyInspection{
                 AdbServerStandardKeyState::Failed,
                 "Unable to restrict the standard ADB private key to owner-only access.",
@@ -620,12 +618,7 @@ AdbServerKeyGenerationResult StandardAdbKeyStore::generateStandardKey()
     }
 
     const QFileInfo keyInfo( privateKeyPath_ );
-    QDir keyDirectory;
-    if ( !keyDirectory.mkpath( keyInfo.absolutePath() ) ) {
-        return AdbServerKeyGenerationResult{ false,
-                                             "Unable to create the standard ADB key directory." };
-    }
-    if ( !QFile::setPermissions( keyInfo.absolutePath(), privateDirectoryPermissions ) ) {
+    if ( !klogg::platform::ensureOwnerOnlyDirectory( keyInfo.absolutePath() ) ) {
         return AdbServerKeyGenerationResult{ false,
                                              "Unable to secure the standard ADB key directory." };
     }

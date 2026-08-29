@@ -48,5 +48,6 @@ target_include_directories(klogg_adb_smartsocket PUBLIC "${CMAKE_CURRENT_SOURCE_
 target_link_libraries(
   klogg_adb_smartsocket
   PUBLIC klogg_livecapture project_options project_warnings Qt${QT_VERSION_MAJOR}::Network
+  PRIVATE klogg_utils
 )
 set_target_properties(klogg_adb_smartsocket PROPERTIES AUTOMOC ON)

@@ -35,6 +35,7 @@
 
 #include "adbserversupervisor.h"
 #include "livestate.h"
+#include "platform/platform_files.h"
 
 namespace {
 
@@ -1526,7 +1527,7 @@ TEST_CASE( "startup lock never steals an old lease from a live process",
     heldLock.setStaleLockTime( 0 );
     REQUIRE( heldLock.tryLock( 0 ) );
     QFile lockFile( lockPath );
-    REQUIRE( lockFile.open( QIODevice::ReadOnly ) );
+    REQUIRE( lockFile.open( QIODevice::ReadWrite ) );
     REQUIRE( lockFile.setFileTime( QDateTime::currentDateTimeUtc().addSecs( -60 ),
                                    QFileDevice::FileModificationTime ) );
     lockFile.close();
@@ -1585,11 +1586,21 @@ TEST_CASE( "standard ADB private keys are restricted to owner read and write per
     const auto inspection = keyStore.inspectStandardKey();
 
     CHECK( inspection.state == AdbServerStandardKeyState::Present );
-    const auto permissions = QFileInfo( keyPath ).permissions();
-    CHECK( permissions.testFlag( QFileDevice::ReadOwner ) );
-    CHECK( permissions.testFlag( QFileDevice::WriteOwner ) );
-    const auto nonOwnerPermissions = QFileDevice::ReadGroup | QFileDevice::WriteGroup
-                                     | QFileDevice::ExeGroup | QFileDevice::ReadOther
-                                     | QFileDevice::WriteOther | QFileDevice::ExeOther;
-    CHECK( ( permissions & nonOwnerPermissions ) == QFileDevice::Permissions{} );
+    CHECK( klogg::platform::ownerOnlyAccessIsEnforced( keyDirectory ) );
+    CHECK( klogg::platform::ownerOnlyAccessIsEnforced( keyPath ) );
+}
+
+TEST_CASE( "standard ADB key generation prepares an owner-only directory",
+           "[livecapture][adb][supervisor][keys][security]" )
+{
+    QTemporaryDir temporaryDirectory;
+    REQUIRE( temporaryDirectory.isValid() );
+    const auto keyDirectory = temporaryDirectory.filePath( QStringLiteral( ".android" ) );
+    const auto keyPath = QDir( keyDirectory ).filePath( QStringLiteral( "adbkey" ) );
+
+    StandardAdbKeyStore keyStore( keyPath );
+    const auto generation = keyStore.generateStandardKey();
+
+    REQUIRE( generation.generated );
+    CHECK( klogg::platform::ownerOnlyAccessIsEnforced( keyDirectory ) );
 }

@@ -25,6 +25,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/cpu_info.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/runnable_lambda.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu_info.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_files.cpp
 )
 
 set_target_properties(klogg_utils PROPERTIES AUTOMOC ON)
@@ -44,3 +45,7 @@ target_link_libraries(
          type_safe
          klogg_mimalloc_wrapper
 )
+
+if(WIN32)
+  target_link_libraries(klogg_utils PRIVATE Advapi32)
+endif()

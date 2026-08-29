@@ -21,6 +21,7 @@
 #define KLOGG_PLATFORM_FILES_H
 
 #include <QFile>
+#include <QString>
 
 namespace klogg::platform {
 
@@ -39,6 +40,12 @@ constexpr bool pollingEnabledDefault = true;
 #else
 constexpr bool pollingEnabledDefault = false;
 #endif
+
+// Secure filesystem objects for the current account without exposing platform
+// ACL or mode-bit details to callers.
+bool ensureOwnerOnlyDirectory( const QString& path );
+bool restrictRegularFileToOwner( const QString& path );
+bool ownerOnlyAccessIsEnforced( const QString& path );
 
 } // namespace klogg::platform
 
