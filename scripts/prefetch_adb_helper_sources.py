@@ -183,6 +183,9 @@ def symlink_target_is_directory(
         target = pathlib.PurePosixPath(*link_parts[:-1], linkname)
         return normalized_archive_parts(target.as_posix(), "symlink target")
 
+    if member.linkname.endswith("/"):
+        return True
+
     candidate = target_parts(parts, member.linkname)
     visited: set[tuple[str, ...]] = set()
     while True:
@@ -208,7 +211,9 @@ def symlink_target_is_directory(
             raise RuntimeError(
                 f"archive symlink escapes extraction root after layout normalization: {member.name}"
             )
-        raise RuntimeError(f"archive symlink target type is ambiguous: {member.name}")
+        # Preserve the historical file-link default for intentionally broken
+        # metadata links whose target is absent from the release archive.
+        return False
 
 
 def safe_extract(

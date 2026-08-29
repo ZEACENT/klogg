@@ -283,6 +283,28 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             b"directory symlink payload\n",
         )
 
+    def test_prefetch_preserves_broken_directory_symlink_marked_by_trailing_slash(self):
+        archive = self.root / "broken-directory-symlink.tar"
+        with tarfile.open(archive, "w") as tar:
+            add_bytes(tar, "source/payload", b"payload")
+            link = tarfile.TarInfo("source/testdata-link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "testdata/"
+            tar.addfile(link)
+
+        module = load_prefetch_module()
+        real_symlink = module.os.symlink
+        extract_root = self.root / "extract-broken-directory-link"
+        with mock.patch.object(module.os, "symlink", wraps=real_symlink) as symlink:
+            module.safe_extract(archive, extract_root)
+
+        symlink.assert_called_once_with(
+            "testdata/",
+            self.root / "extract-broken-directory-link/source/testdata-link",
+            target_is_directory=True,
+        )
+        self.assertTrue((extract_root / "testdata-link").is_symlink())
+
     def test_prefetch_omits_only_exact_lock_pinned_build_irrelevant_symlink(self):
         download_root = self.root / "downloads"
         download_root.mkdir()
