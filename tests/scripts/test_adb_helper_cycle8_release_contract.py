@@ -505,6 +505,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertIn("actions/attest-build-provenance", helper_job)
         self.assertIn("adb-helper-${{ matrix.target }}.tar.gz", helper_job)
         self.assertIn("tar -czf", helper_job)
+        self.assertIn("cygpath -u", helper_job)
         for label, job in (
             ("Linux", linux_job),
             ("macOS", mac_job),
@@ -591,8 +592,12 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         if re.search(r"(?:curl|wget|Invoke-WebRequest)", active_lines(combined_build), re.IGNORECASE):
             failures.append("source-build job performs a network download")
 
-        archives_complete_artifact_root = (
-            '-C "$RUNNER_TEMP/adb-helper-artifact" .' in helper_job
+        archives_complete_artifact_root = all(
+            marker in helper_job
+            for marker in (
+                'artifact_root="$RUNNER_TEMP/adb-helper-artifact"',
+                'tar -czf "$archive" -C "$artifact_root" .',
+            )
         )
         for required_file in expected["required_files"]:
             if required_file not in combined_build or not archives_complete_artifact_root:

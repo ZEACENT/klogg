@@ -599,8 +599,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tar -czf "$RUNNER_TEMP/adb-helper-${{ matrix.target }}.tar.gz" \
-            -C "$RUNNER_TEMP/adb-helper-artifact" .
+          artifact_root="$RUNNER_TEMP/adb-helper-artifact"
+          archive="$RUNNER_TEMP/adb-helper-${{ matrix.target }}.tar.gz"
+          if command -v cygpath >/dev/null 2>&1; then
+            artifact_root=$(cygpath -u "$artifact_root")
+            archive=$(cygpath -u "$archive")
+          fi
+          tar -czf "$archive" -C "$artifact_root" .
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
