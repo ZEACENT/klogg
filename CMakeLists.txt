@@ -380,6 +380,14 @@ function(klogg_add_runtime_test test_name target)
 endfunction()
 
 klogg_add_runtime_test(klogg_smoke klogg -v)
+if(APPLE AND KLOGG_ENABLE_IOS_NATIVE_STACK)
+  get_target_property(KLOGG_SMOKE_QT_RPATH klogg KLOGG_QT_BUILD_RPATH)
+  set_tests_properties(
+    klogg_smoke
+    PROPERTIES ENVIRONMENT
+               "DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH};DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}"
+  )
+endif()
 
 if(${KLOGG_BUILD_TESTS})
   add_subdirectory(tests)

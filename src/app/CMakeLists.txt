@@ -163,10 +163,14 @@ elseif(APPLE)
   set_target_properties(klogg PROPERTIES SKIP_INSTALL_RPATH ON)
   set_target_properties(klogg_portable PROPERTIES SKIP_INSTALL_RPATH ON)
   if(KLOGG_ENABLE_IOS_NATIVE_STACK)
-    # The imported thin stack exists only in the producer/download workspace.
-    # Suppress CMake's automatic build-directory rpaths and add only the final
-    # app-relative closure path; macdeployqt resolves and stages Qt separately.
+    # Keep package candidates free of build-machine rpaths. The raw smoke test
+    # receives the configured Qt framework directory through its test environment.
     set_target_properties(klogg PROPERTIES SKIP_BUILD_RPATH ON)
+    set(KLOGG_QT_PACKAGE_DIR_VARIABLE "Qt${QT_VERSION_MAJOR}_DIR")
+    get_filename_component(
+      KLOGG_QT_BUILD_RPATH "${${KLOGG_QT_PACKAGE_DIR_VARIABLE}}/../.." ABSOLUTE
+    )
+    set_target_properties(klogg PROPERTIES KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}")
     target_link_options(
       klogg PRIVATE "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
     )

@@ -14,6 +14,7 @@ from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
+ROOT_CMAKE = ROOT / "CMakeLists.txt"
 LOCK = ROOT / "3rdparty" / "libimobiledevice" / "libimobiledevice.lock.json"
 PATCH = (
     ROOT
@@ -25,6 +26,7 @@ PATCH = (
 THIRD_PARTY_CMAKE = ROOT / "3rdparty" / "CMakeLists.txt"
 PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 MAC_PACKAGE_ACTION = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
+APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 CI_BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "ci-build.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build_ios_native_stack.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_ios_native_stack.py"
@@ -544,6 +546,27 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                     0,
                     "release scope must verify its external archive even without package receipt creation/verification",
                 )
+
+    def test_native_stack_smoke_receives_qt_path_without_packaging_rpath(self):
+        app_cmake = required_text(APP_CMAKE)
+        native_rpath_block = app_cmake.split("if(KLOGG_ENABLE_IOS_NATIVE_STACK)", 1)[
+            1
+        ].split("endif()", 1)[0]
+        self.assertIn("SKIP_BUILD_RPATH ON", native_rpath_block)
+        self.assertIn(
+            'KLOGG_QT_BUILD_RPATH "${${KLOGG_QT_PACKAGE_DIR_VARIABLE}}/../.." ABSOLUTE',
+            native_rpath_block,
+        )
+        self.assertIn(
+            'KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}"', native_rpath_block
+        )
+        self.assertIn(
+            '"LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"',
+            native_rpath_block,
+        )
+        root_cmake = required_text(ROOT_CMAKE)
+        self.assertIn("DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
+        self.assertIn("DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
 
     def test_ci_produces_both_thin_stacks_and_mac_consumes_the_bound_artifact(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
