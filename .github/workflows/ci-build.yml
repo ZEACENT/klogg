@@ -595,16 +595,17 @@ jobs:
           artifact-root: ${{ runner.temp }}/adb-helper-artifact
           container-image: ${{ matrix.container_image }}
 
+      - name: Package ADB helper without losing file modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/adb-helper-${{ matrix.target }}.tar.gz" \
+            -C "$RUNNER_TEMP/adb-helper-artifact" .
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: adb-helper-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/adb-helper-artifact/helpers
-            ${{ runner.temp }}/adb-helper-artifact/receipt.json
-            ${{ runner.temp }}/adb-helper-artifact/smoke.json
-            ${{ runner.temp }}/adb-helper-artifact/package-smoke.json
-            ${{ runner.temp }}/adb-helper-artifact/package-verification.json
-            ${{ runner.temp }}/adb-helper-artifact/SHA256SUMS
+          path: ${{ runner.temp }}/adb-helper-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
       - name: Attest target-bound ADB helper build provenance
@@ -743,7 +744,20 @@ jobs:
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-linux-x86_64
-          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper
+          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
+
+      - name: Extract mode-preserving ADB helper artifact
+        if: ${{ matrix.config.package != false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
+          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
+          archive="$archive_root/adb-helper-linux-x86_64.tar.gz"
+          test -f "$archive"
+          rm -rf "$artifact_root"
+          mkdir -p "$artifact_root"
+          tar -xzf "$archive" -C "$artifact_root"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: ${{ matrix.config.package != false }}
@@ -867,7 +881,7 @@ jobs:
         if: ${{ matrix.config.package != false }}
         shell: sh
         run: |
-          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DKLOGG_ADB_HELPER_REQUIRED=ON -DKLOGG_ADB_HELPER_TARGET=linux-x86_64 -DKLOGG_ADB_HELPER_ARTIFACT_ROOT=$KLOGG_WORKSPACE/prefetch_artifacts/adb-helper" >> $GITHUB_ENV
+          echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DKLOGG_ADB_HELPER_REQUIRED=ON -DKLOGG_ADB_HELPER_TARGET=linux-x86_64 -DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/usr/local/prefetch_artifacts/adb-helper" >> $GITHUB_ENV
 
       - name: Lock CPM downloads to prefetched cache
         shell: sh
@@ -1257,7 +1271,20 @@ jobs:
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-${{ matrix.config.adb_target }}
-          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper
+          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
+
+      - name: Extract mode-preserving ADB helper artifact
+        if: ${{ matrix.config.package != false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
+          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
+          archive="$archive_root/adb-helper-${{ matrix.config.adb_target }}.tar.gz"
+          test -f "$archive"
+          rm -rf "$artifact_root"
+          mkdir -p "$artifact_root"
+          tar -xzf "$archive" -C "$artifact_root"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: ${{ matrix.config.package != false }}
@@ -1568,7 +1595,20 @@ jobs:
         if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
         with:
           name: adb-helper-${{ matrix.config.adb_target }}
-          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper
+          path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
+
+      - name: Extract mode-preserving ADB helper artifact
+        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
+          artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
+          archive="$archive_root/adb-helper-${{ matrix.config.adb_target }}.tar.gz"
+          test -f "$archive"
+          rm -rf "$artifact_root"
+          mkdir -p "$artifact_root"
+          tar -xzf "$archive" -C "$artifact_root"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}

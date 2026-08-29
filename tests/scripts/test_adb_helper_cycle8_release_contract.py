@@ -503,6 +503,8 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         windows_job = section(self.ci_build, "  Windows:\n", "  ci-gate:\n")
 
         self.assertIn("actions/attest-build-provenance", helper_job)
+        self.assertIn("adb-helper-${{ matrix.target }}.tar.gz", helper_job)
+        self.assertIn("tar -czf", helper_job)
         for label, job in (
             ("Linux", linux_job),
             ("macOS", mac_job),
@@ -511,6 +513,12 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             with self.subTest(job=label):
                 self.assertIn("verify_adb_helper_envelope.py", job)
                 self.assertIn("gh attestation verify", job)
+                self.assertIn("prefetch_artifacts/adb-helper-archive", job)
+                self.assertIn("tar -xzf", job)
+        self.assertIn(
+            "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/usr/local/prefetch_artifacts/adb-helper",
+            linux_job,
+        )
 
     def test_windows_rejects_unbundled_mingw_runtime_dlls(self):
         target = self.lock.get("targets", {}).get("windows-x86_64", {})
@@ -583,8 +591,11 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         if re.search(r"(?:curl|wget|Invoke-WebRequest)", active_lines(combined_build), re.IGNORECASE):
             failures.append("source-build job performs a network download")
 
+        archives_complete_artifact_root = (
+            '-C "$RUNNER_TEMP/adb-helper-artifact" .' in helper_job
+        )
         for required_file in expected["required_files"]:
-            if required_file not in helper_job:
+            if required_file not in combined_build or not archives_complete_artifact_root:
                 failures.append(f"helper artifact omits {required_file}")
         if expected["sha256_required"] and not re.search(
             r"sha256(?:sum|sum\.exe|sum -|:)" , helper_job, re.IGNORECASE
