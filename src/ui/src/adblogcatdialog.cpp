@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QFutureWatcher>
 #include <QLabel>
+#include <QPointer>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QUuid>
@@ -205,18 +206,23 @@ void AdbLogcatDialog::refreshDevices()
 
     auto future = runDeviceDiscoveryAsync<AdbDeviceInfo>( discoveryOperation_, generation );
 
-    // The dialog's QObject child tree owns each request-local watcher.
+    // The watcher owns its completion cleanup and outlives the dialog when a
+    // discovery task is still publishing a result during dialog destruction.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>( this );
-    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>::finished, this,
-             [ this, watcher ] {
-                 auto result = watcher->result();
+    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>;
+    const QPointer<AdbLogcatDialog> dialog( this );
+    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<AdbDeviceInfo>>::finished, watcher,
+             [ dialog, watcher ] {
                  watcher->deleteLater();
-                 if ( pendingRefreshCount_ > 0 ) {
-                     --pendingRefreshCount_;
+                 if ( dialog == nullptr ) {
+                     return;
                  }
-                 refreshButton_->setEnabled( pendingRefreshCount_ == 0 );
-                 applyDiscoveryResult( std::move( result ) );
+                 auto result = watcher->result();
+                 if ( dialog->pendingRefreshCount_ > 0 ) {
+                     --dialog->pendingRefreshCount_;
+                 }
+                 dialog->refreshButton_->setEnabled( dialog->pendingRefreshCount_ == 0 );
+                 dialog->applyDiscoveryResult( std::move( result ) );
              } );
     watcher->setFuture( future );
 }

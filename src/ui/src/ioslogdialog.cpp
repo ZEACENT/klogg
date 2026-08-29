@@ -264,18 +264,23 @@ void IosLogDialog::refreshDevices()
 
     auto future = runDeviceDiscoveryAsync<IosDeviceInfo>( discoveryOperation_, generation );
 
-    // The dialog's QObject child tree owns each request-local watcher.
+    // The watcher owns its completion cleanup and outlives the dialog when a
+    // discovery task is still publishing a result during dialog destruction.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>( this );
-    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>::finished, this,
-             [ this, watcher ] {
-                 auto result = watcher->result();
+    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>;
+    const QPointer<IosLogDialog> dialog( this );
+    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>::finished, watcher,
+             [ dialog, watcher ] {
                  watcher->deleteLater();
-                 if ( pendingRefreshCount_ > 0 ) {
-                     --pendingRefreshCount_;
+                 if ( dialog == nullptr ) {
+                     return;
                  }
-                 refreshButton_->setEnabled( pendingRefreshCount_ == 0 );
-                 applyDiscoveryResult( std::move( result ) );
+                 auto result = watcher->result();
+                 if ( dialog->pendingRefreshCount_ > 0 ) {
+                     --dialog->pendingRefreshCount_;
+                 }
+                 dialog->refreshButton_->setEnabled( dialog->pendingRefreshCount_ == 0 );
+                 dialog->applyDiscoveryResult( std::move( result ) );
              } );
     watcher->setFuture( future );
 }

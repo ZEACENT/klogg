@@ -15,6 +15,7 @@
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QEventLoop>
+#include <QFutureWatcher>
 #include <QLabel>
 #include <QPushButton>
 #include <QSemaphore>
@@ -677,6 +678,7 @@ TEST_CASE( "dialog destruction drops pending discovery completions",
             = [ operations ]( Generation generation ) { return operations->run( generation ); };
         auto dialog = std::make_unique<AdbLogcatDialog>( operation );
         REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
+        CHECK( dialog->findChildren<QFutureWatcherBase*>().isEmpty() );
         dialog.reset();
         operations->slot( 0 ).release.release();
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
@@ -693,6 +695,7 @@ TEST_CASE( "dialog destruction drops pending discovery completions",
         QCoreApplication::sendPostedEvents();
         QCoreApplication::processEvents();
         REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
+        CHECK( dialog->findChildren<QFutureWatcherBase*>().isEmpty() );
         dialog.reset();
         operations->slot( 0 ).release.release();
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
