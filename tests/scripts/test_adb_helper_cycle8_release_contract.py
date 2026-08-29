@@ -150,6 +150,42 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
 
         self.assertEqual(violations, [], "\n".join(violations))
 
+    def test_windows_x64_patch_series_honors_the_adb_only_build_boundary(self):
+        adb_only_patches = [
+            patch
+            for patch in self.lock.get("patches", [])
+            if isinstance(patch, dict)
+            and patch.get("target") == "windows-x86_64"
+            and patch.get("applies_to") == "android-tools-release"
+            and patch.get("role") == "windows-adb-only"
+            and patch.get("apply", True) is True
+        ]
+        self.assertEqual(len(adb_only_patches), 1)
+        adb_only_patch = adb_only_patches[0]
+        patch_path = ROOT / adb_only_patch["path"]
+        self.assertTrue(patch_path.is_file())
+        self.assertRegex(str(adb_only_patch.get("sha256", "")), r"^[0-9a-f]{64}$")
+
+        patch_text = read_text(patch_path)
+        self.assertIn('option(KLOGG_ADB_ONLY', patch_text)
+        self.assertRegex(
+            patch_text,
+            re.compile(
+                r"if\(NOT KLOGG_ADB_ONLY\).*?pkg_check_modules\(libpcre2-8",
+                re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            patch_text,
+            re.compile(
+                r"include\(CMakeLists\.adb\.txt\).*?if\(NOT KLOGG_ADB_ONLY\).*?"
+                r"include\(CMakeLists\.fastboot\.txt\)",
+                re.DOTALL,
+            ),
+        )
+        self.assertIn("add_library(libzip STATIC", patch_text)
+        self.assertNotIn("pcre2", records_by_id(self.lock.get("dependencies")))
+
     def test_windows_x64_closure_is_private_dynamic_and_contains_every_source_built_dll(self):
         expected = self.fixture["helper_targets"]["windows-x86_64"]
         target = self.lock.get("targets", {}).get("windows-x86_64", {})

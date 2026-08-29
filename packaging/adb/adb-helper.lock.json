@@ -313,6 +313,17 @@
       "target": "windows-x86_64",
       "role": "private-windows-libusb",
       "apply_tool": "gnu-patch"
+    },
+    {
+      "path": "packaging/adb/patches/0008-windows-adb-only.patch",
+      "sha256": "385fe23bebe899dd158a38a2fed9a74159def2c8351e6918042d4700c7e59ebd",
+      "applies_to": "android-tools-release",
+      "targets": [
+        "windows-x86_64"
+      ],
+      "target": "windows-x86_64",
+      "role": "windows-adb-only",
+      "apply_tool": "gnu-patch"
     }
   ],
   "toolchain_packages": [
