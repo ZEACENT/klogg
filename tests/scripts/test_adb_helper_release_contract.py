@@ -467,7 +467,11 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertRegex(files["appimage"], r"test\s+-x[^\n]*usr/bin/helpers/adb")
         self.assertIn("--maximum-glibc-version 2.31", files["appimage"])
         self.assertIn("--maximum-glibc-version 2.31", files["appimage"])
-        self.assertIn("output/klogg.app/Contents/MacOS/helpers/adb", files["mac-dmg"])
+        self.assertIn("$KLOGG_MAC_APP/Contents/MacOS/helpers/adb", files["mac-dmg"])
+        self.assertIn(
+            'cp -a "$KLOGG_BUILD_ROOT/output/klogg.app" "$KLOGG_MAC_APP"',
+            files["mac-dmg"],
+        )
         self.assertRegex(files["windows-prepare"], r"output\\helpers\\adb\.exe")
         self.assertRegex(files["windows-prepare"], r"release\\helpers\\adb\.exe")
         self.assertRegex(files["windows-prepare"], r"if\s+not\s+exist[^\n]*adb\.exe")
