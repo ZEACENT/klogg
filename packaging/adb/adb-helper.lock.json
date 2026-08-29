@@ -305,7 +305,7 @@
     },
     {
       "path": "packaging/adb/patches/0007-windows-private-libusb.patch",
-      "sha256": "a8bd17ec011b4cb91117d174de5287aefdb782eb359204b5f26e985e8e26dab6",
+      "sha256": "6bac39c7359a55078415d7d82b4721998fb180955ee58080e1c6dda8f0820430",
       "applies_to": "android-tools-release",
       "targets": [
         "windows-x86_64"

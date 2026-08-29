@@ -28,6 +28,21 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> str:
     return result.stdout
 
 
+def run_smoke(command: list[str], report_path: pathlib.Path) -> None:
+    try:
+        run(command)
+    except RuntimeError as error:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            report = None
+        if isinstance(report, dict):
+            detail = report.get("error") or report.get("cleanup_error")
+            if isinstance(detail, str) and detail:
+                raise RuntimeError(f"ADB helper smoke failed: {detail}") from error
+        raise
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -513,16 +528,29 @@ def main() -> int:
             }
         )
 
+    (
+        imports,
+        frameworks,
+        architectures,
+        replacement,
+        deployment_target,
+        glibc_maximum_required,
+        runtime_loads,
+    ) = inspect_binary(args.target, helper, helper_dir, target_plan)
+
     smoke_report = args.artifact_root / "smoke.json"
     if native_build:
-        run([
-            sys.executable,
-            str(args.repository_root / "scripts/smoke_adb_helper.py"),
-            "--adb", str(helper),
-            "--port", "0",
-            "--timeout-seconds", "15",
-            "--json-output", str(smoke_report),
-        ])
+        run_smoke(
+            [
+                sys.executable,
+                str(args.repository_root / "scripts/smoke_adb_helper.py"),
+                "--adb", str(helper),
+                "--port", "0",
+                "--timeout-seconds", "15",
+                "--json-output", str(smoke_report),
+            ],
+            smoke_report,
+        )
         smoke = json.loads(smoke_report.read_text(encoding="utf-8"))
     else:
         smoke = {
@@ -535,15 +563,6 @@ def main() -> int:
         smoke_report.write_text(
             json.dumps(smoke, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    (
-        imports,
-        frameworks,
-        architectures,
-        replacement,
-        deployment_target,
-        glibc_maximum_required,
-        runtime_loads,
-    ) = inspect_binary(args.target, helper, helper_dir, target_plan)
 
     release_assets = json.loads(
         (args.release_assets_root / "adb-helper-release-assets.json").read_text(encoding="utf-8")

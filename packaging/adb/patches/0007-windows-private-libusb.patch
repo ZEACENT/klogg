@@ -9,7 +9,7 @@ index 1682589..8a02703 100644
  	target_link_libraries(adb "${ADBWINAPI_LIBRARY}" ws2_32)
 -	set_target_properties(adb PROPERTIES LINK_FLAGS "-municode")
 +	set_target_properties(adb PROPERTIES
-+		LINK_FLAGS "-municode -static-libgcc -static-libstdc++")
++		LINK_FLAGS "-municode -static -static-libgcc -static-libstdc++")
  endif()
  
  if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)

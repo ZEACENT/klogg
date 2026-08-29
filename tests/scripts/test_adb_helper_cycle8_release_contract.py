@@ -206,6 +206,29 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             patch_text,
         )
 
+    def test_windows_x64_helper_statically_links_the_mingw_runtime(self):
+        patches = [
+            patch
+            for patch in self.lock.get("patches", [])
+            if isinstance(patch, dict)
+            and patch.get("target") == "windows-x86_64"
+            and patch.get("role") == "private-windows-libusb"
+            and patch.get("apply", True) is True
+        ]
+        self.assertEqual(len(patches), 1)
+        patch_text = read_text(ROOT / patches[0]["path"])
+        self.assertIn(
+            'LINK_FLAGS "-municode -static -static-libgcc -static-libstdc++"',
+            patch_text,
+        )
+
+    def test_binary_closure_inspection_precedes_execution_smoke(self):
+        main = self.build_script.split("def main() -> int:", maxsplit=1)[1]
+        self.assertLess(
+            main.index(") = inspect_binary"),
+            main.index("scripts/smoke_adb_helper.py"),
+        )
+
     def test_windows_x64_closure_is_private_dynamic_and_contains_every_source_built_dll(self):
         expected = self.fixture["helper_targets"]["windows-x86_64"]
         target = self.lock.get("targets", {}).get("windows-x86_64", {})

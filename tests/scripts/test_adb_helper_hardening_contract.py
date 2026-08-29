@@ -626,6 +626,23 @@ class AdbHelperBinaryInspectionContractTest(unittest.TestCase):
                 ]
             )
 
+    def test_smoke_failure_surfaces_the_structured_report_error(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            report = pathlib.Path(tempdir) / "smoke.json"
+            report.write_text(
+                json.dumps({"error": "libwinpthread-1.dll is missing"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                self.module,
+                "run",
+                side_effect=RuntimeError("smoke command failed"),
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "ADB helper smoke failed: libwinpthread-1.dll is missing",
+            ):
+                self.module.run_smoke(["adb-smoke"], report)
+
     def test_dependency_resolution_rejects_dynamic_pinned_build_dependencies(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = pathlib.Path(tempdir)
