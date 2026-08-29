@@ -6,6 +6,7 @@ ROOT = pathlib.Path(__file__).parents[2]
 STREAM_SOURCE = ROOT / "src" / "livecapture" / "src" / "iosnativestream.cpp"
 STREAM_TEST = ROOT / "tests" / "unit" / "ios_native_stream_worker_test.cpp"
 PROTOCOL_TEST = ROOT / "tests" / "unit" / "ios_ostrace_protocol_test.cpp"
+UNIT_CMAKE = ROOT / "tests" / "unit" / "CMakeLists.txt"
 
 
 class IosCompilerPortabilityContractTest(unittest.TestCase):
@@ -29,6 +30,13 @@ class IosCompilerPortabilityContractTest(unittest.TestCase):
             "Lease( std::shared_ptr<AdmissionState> owner, IosEndpointKey endpoint )",
             source,
         )
+
+    def test_native_contract_target_links_the_platform_thread_runtime(self):
+        cmake = UNIT_CMAKE.read_text(encoding="utf-8")
+        target = cmake.split("add_executable(\n  klogg_ios_native_contract_tests", 1)[1]
+        target = target.split("klogg_configure_test_target", 1)[0]
+        self.assertIn("find_package(Threads REQUIRED)", cmake)
+        self.assertIn("Threads::Threads", target)
 
     def test_protocol_bounds_check_uses_a_named_fixture_for_gcc15(self):
         source = PROTOCOL_TEST.read_text(encoding="utf-8")
