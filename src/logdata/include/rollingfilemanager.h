@@ -49,6 +49,9 @@ class RollingFileManager {
     // TOCTOU window between that check and the actual open().
     bool openedNewFile() const;
     bool refersToPath( const QString& path ) const;
+    // Truncate through the active handle only when it still owns basePath_.
+    // Returns false without modifying any pathname after external replacement.
+    bool clearIfCurrent();
     bool removeCurrentFile();
     qint64 currentFileSize() const;
     qint64 maxFileSize() const;

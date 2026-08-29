@@ -4,9 +4,9 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QSaveFile>
-#include <QTemporaryFile>
 
 #include "logfiltereddata.h"
+#include "stagedoutputfile.h"
 
 namespace {
 constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
@@ -186,20 +186,16 @@ void StreamingLogData::clearCapture()
     }
     const auto boundPath = boundOutputFile();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundPath.isEmpty() ) {
-        if ( openDisplayOutputFile( boundPath ).success ) {
+        if ( rollingDisplayOutput_.clearIfCurrent() ) {
             reportCaptureOutputHealthy();
         }
         else {
+            closeDisplayOutputFile( false );
             reportCaptureOutputFailure( CaptureOutputError::Reopen );
         }
     }
     else if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve && !boundPath.isEmpty() ) {
-        if ( captureStore_.boundOutputFile().isEmpty() ) {
-            RollingFileManager staleOutput( boundPath, rollingMaxFileSize_, rollingBackupCount_ );
-            staleOutput.deleteAll();
-        }
-        if ( !captureStore_.boundOutputFile().isEmpty()
-             || captureStore_.bindOutputFile( boundPath ) ) {
+        if ( !captureStore_.boundOutputFile().isEmpty() ) {
             reportCaptureOutputHealthy();
         }
         else {
@@ -207,7 +203,6 @@ void StreamingLogData::clearCapture()
         }
     }
 
-    // clear() internally rebinds the output file if one was bound.
     // Only restart the timer if it was running before the clear,
     // so a clearCapture after finishInput does not revive the timer.
     if ( timerWasActive && isOutputFileActive() ) {
@@ -641,34 +636,25 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
             return { true, CaptureOutputError::Open };
         }
 
-        QTemporaryFile stagedOutput(
-            outputDirectory.filePath( QStringLiteral( ".klogg-output-XXXXXX" ) ) );
-        if ( !stagedOutput.open() ) {
+        CaptureOutputError replayError = CaptureOutputError::Write;
+        const auto stagedResult = klogg::stagedoutput::publishSibling(
+            outputPath, [ this, &replayError ]( QIODevice* output ) {
+                const auto replay = writeDisplayLinesToDevice(
+                    0_lnum, captureStore_.lineCount(), output );
+                replayError = replay.error;
+                return replay.success;
+            } );
+        switch ( stagedResult ) {
+        case klogg::stagedoutput::Result::Published:
+        case klogg::stagedoutput::Result::DestinationExists:
+            break;
+        case klogg::stagedoutput::Result::WriteFailure:
+            return failOpen( replayError );
+        case klogg::stagedoutput::Result::FlushFailure:
+            return failOpen( CaptureOutputError::Flush );
+        case klogg::stagedoutput::Result::OpenFailure:
+        case klogg::stagedoutput::Result::PublishFailure:
             return failOpen( CaptureOutputError::Open );
-        }
-        const auto stagedPath = stagedOutput.fileName();
-        stagedOutput.close();
-        stagedOutput.setAutoRemove( false );
-
-        rollingDisplayOutput_
-            = RollingFileManager( stagedPath, rollingMaxFileSize_, rollingBackupCount_ );
-        if ( !rollingDisplayOutput_.open( true ) ) {
-            QFile::remove( stagedPath );
-            return failOpen( CaptureOutputError::Open );
-        }
-        const auto replay
-            = writeDisplayLinesToOutput( 0_lnum, captureStore_.lineCount(), false, false );
-        if ( !replay.success ) {
-            return failOpen( replay.error, true );
-        }
-        rollingDisplayOutput_.resyncSize();
-        if ( !rollingDisplayOutput_.flush() ) {
-            return failOpen( CaptureOutputError::Flush, true );
-        }
-        closeDisplayOutputFile( false );
-
-        if ( !QFile::rename( stagedPath, outputPath ) ) {
-            QFile::remove( stagedPath );
         }
         rollingDisplayOutput_
             = RollingFileManager( outputPath, rollingMaxFileSize_, rollingBackupCount_ );

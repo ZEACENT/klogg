@@ -413,6 +413,64 @@ TEST_CASE( "StreamingLogData clearCapture truncates display output file" )
     output3.close();
 }
 
+TEST_CASE( "StreamingLogData clearCapture preserves an externally replaced output path",
+           "[streaming][capture-output]" )
+{
+    LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
+    SECTION( "Strip output" )
+    {
+        ansiMode = LiveLogSaveAnsiMode::Strip;
+    }
+    SECTION( "Preserve output" )
+    {
+        ansiMode = LiveLogSaveAnsiMode::Preserve;
+    }
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    const auto rotatedPath = tempDir.filePath( QStringLiteral( "capture.rotated.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, ansiMode ) );
+    logData.appendUtf8( QByteArrayLiteral( "owned-before-clear\n" ) );
+    logData.finishInput();
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external-replacement\n" ) ) > 0 );
+    replacement.close();
+
+    loadingSpy.clear();
+    logData.clearCapture();
+    REQUIRE( loadingSpy.safeWait() );
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+    CHECK( logData.boundOutputFile() == outputPath );
+    CHECK( logData.captureOutputError() == CaptureOutputError::Reopen );
+
+    logData.appendUtf8( QByteArrayLiteral( "after-clear\n" ) );
+    logData.finishInput();
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+
+    QFile rotated( rotatedPath );
+    REQUIRE( rotated.open( QIODevice::ReadOnly ) );
+    CHECK( rotated.readAll() == QByteArrayLiteral( "owned-before-clear\n" ) );
+}
+
 TEST_CASE( "StreamingLogData can preserve ANSI while saving current and future live log lines" )
 {
     QTemporaryDir tempDir;

@@ -168,6 +168,30 @@ bool RollingFileManager::refersToPath( const QString& path ) const
 #endif
 }
 
+bool RollingFileManager::clearIfCurrent()
+{
+    if ( !refersToPath( basePath_ ) || !currentFile_.flush() || !currentFile_.resize( 0 ) ) {
+        return false;
+    }
+
+    currentBytes_ = 0;
+    rotated_ = false;
+    openedNewFile_ = false;
+
+    const int searchLimit = ( backupCount_ > 0 ) ? backupCount_ + 10 : 100;
+    for ( int i = 0; i <= searchLimit; ++i ) {
+        const auto path = backupPath( i );
+        if ( QFile::exists( path ) ) {
+            QFile::remove( path );
+        }
+        else if ( i > 0 ) {
+            break;
+        }
+    }
+    QFile::remove( basePath_ + QStringLiteral( ".tmp_rotate" ) );
+    return true;
+}
+
 bool RollingFileManager::removeCurrentFile()
 {
     if ( !refersToPath( basePath_ ) ) {

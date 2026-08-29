@@ -4245,6 +4245,41 @@ TEST_CASE( "CaptureStore clear flushes and resets output" )
     REQUIRE( output.size() == 0 );
 }
 
+TEST_CASE( "CaptureStore clear fails closed when its output path was replaced",
+           "[capturestore][capture-output]" )
+{
+    const auto rootPath = makeTestDir( "capturestore_clear_replaced_output" );
+    const auto outputPath = QDir( rootPath ).filePath( QStringLiteral( "clear.log" ) );
+    const auto rotatedPath = QDir( rootPath ).filePath( QStringLiteral( "clear.rotated.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    REQUIRE( store.bindOutputFile( outputPath ) );
+    store.appendUtf8( QByteArrayLiteral( "owned-before-clear\n" ) );
+    store.flush();
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external-replacement\n" ) ) > 0 );
+    replacement.close();
+
+    store.clear();
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+    CHECK( store.boundOutputFile().isEmpty() );
+    CHECK( store.outputFailure() == CaptureStore::OutputFailure::Open );
+
+    store.appendUtf8( QByteArrayLiteral( "after-clear\n" ) );
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+}
+
 TEST_CASE( "CaptureStore clear resets lastTrimResult" )
 {
     CaptureStore::Limits limits;

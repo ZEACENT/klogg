@@ -24,7 +24,6 @@
 #include <QLockFile>
 #include <QSaveFile>
 #include <QStandardPaths>
-#include <QTemporaryFile>
 #include <QUuid>
 
 #if defined( Q_OS_WIN )
@@ -36,6 +35,7 @@
 #include "log.h"
 #include "readablesize.h"
 #include "securecapturedirectory.h"
+#include "stagedoutputfile.h"
 
 namespace {
 QString makeSegmentFileName( qint64 segmentId )
@@ -2310,12 +2310,14 @@ void CaptureStore::clear()
     lastTrimResult_ = {};
 
     if ( !boundOutputFile_.isEmpty() ) {
-        rollingOutput_.deleteAll();
-        rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
-                                             limits_.rollingBackupCount );
-        if ( !rollingOutput_.open( true ) ) {
-            LOG_WARNING << "CaptureStore::clear: failed to reopen output file: "
+        if ( rollingOutput_.clearIfCurrent() ) {
+            outputFailure_.reset();
+        }
+        else {
+            LOG_WARNING << "CaptureStore::clear: output path no longer refers to the active file: "
                         << boundOutputFile_;
+            rollingOutput_.close();
+            rollingOutput_ = RollingFileManager();
             boundOutputFile_.clear();
             outputFailure_ = OutputFailure::Open;
         }
@@ -2480,35 +2482,25 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
             return true;
         }
 
-        QTemporaryFile stagedOutput(
-            outputDirectory.filePath( QStringLiteral( ".klogg-output-XXXXXX" ) ) );
-        if ( !stagedOutput.open() ) {
+        const auto stagedResult = klogg::stagedoutput::publishSibling(
+            boundOutputFile_, [ this ]( QIODevice* output ) {
+                return std::all_of(
+                    segments_.cbegin(), segments_.cend(),
+                    [ this, output ]( const auto& segment ) {
+                        return writeSegmentToDevice( segment, output );
+                    } );
+            } );
+        switch ( stagedResult ) {
+        case klogg::stagedoutput::Result::Published:
+        case klogg::stagedoutput::Result::DestinationExists:
+            break;
+        case klogg::stagedoutput::Result::WriteFailure:
+            return failBinding( OutputFailure::Write );
+        case klogg::stagedoutput::Result::FlushFailure:
+            return failBinding( OutputFailure::Flush );
+        case klogg::stagedoutput::Result::OpenFailure:
+        case klogg::stagedoutput::Result::PublishFailure:
             return failBinding( OutputFailure::Open );
-        }
-        const auto stagedPath = stagedOutput.fileName();
-        stagedOutput.close();
-        stagedOutput.setAutoRemove( false );
-
-        rollingOutput_ = RollingFileManager( stagedPath, limits_.rollingMaxFileSize,
-                                             limits_.rollingBackupCount );
-        if ( !rollingOutput_.open( true ) ) {
-            QFile::remove( stagedPath );
-            return failBinding( OutputFailure::Open );
-        }
-        for ( const auto& segment : segments_ ) {
-            if ( !writeSegmentToDevice( segment, rollingOutput_.currentFile() ) ) {
-                return failBinding( OutputFailure::Write, true );
-            }
-        }
-        rollingOutput_.resyncSize();
-        if ( !rollingOutput_.flush() ) {
-            return failBinding( OutputFailure::Flush, true );
-        }
-        rollingOutput_.close();
-        rollingOutput_ = RollingFileManager();
-
-        if ( !QFile::rename( stagedPath, boundOutputFile_ ) ) {
-            QFile::remove( stagedPath );
         }
         rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
                                              limits_.rollingBackupCount );
