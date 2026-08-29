@@ -21,6 +21,7 @@
 
 #include <QFileInfo>
 #include <algorithm>
+#include <utility>
 
 namespace {
 // Portable case-insensitive NATURAL compare (digit runs compared by numeric
@@ -78,15 +79,32 @@ int naturalCompare( const QString& a, const QString& b )
 
 std::vector<QString> sortedMergeFilePaths( const QStringList& filePaths )
 {
+    // QFileInfo construction is filesystem-aware and comparatively expensive;
+    // derive each basename once rather than O(N log N) times in the comparator.
+    struct SortEntry {
+        QString path;
+        QString fileName;
+    };
+
+    std::vector<SortEntry> entries;
+    entries.reserve( static_cast<size_t>( filePaths.size() ) );
+    for ( const auto& path : filePaths ) {
+        entries.push_back( SortEntry{ path, QFileInfo( path ).fileName() } );
+    }
+
     // Case-insensitive natural sort by file name (numeric awareness, so
     // "file2" < "file10"), with the full path as a deterministic tiebreaker when
     // two files share a name.
-    std::vector<QString> sortedPaths( filePaths.begin(), filePaths.end() );
-    std::stable_sort( sortedPaths.begin(), sortedPaths.end(),
-                      []( const QString& left, const QString& right ) {
-                          const int cmp = naturalCompare( QFileInfo( left ).fileName(),
-                                                          QFileInfo( right ).fileName() );
-                          return cmp != 0 ? cmp < 0 : left < right;
+    std::stable_sort( entries.begin(), entries.end(),
+                      []( const SortEntry& left, const SortEntry& right ) {
+                          const int cmp = naturalCompare( left.fileName, right.fileName );
+                          return cmp != 0 ? cmp < 0 : left.path < right.path;
                       } );
+
+    std::vector<QString> sortedPaths;
+    sortedPaths.reserve( entries.size() );
+    for ( auto& entry : entries ) {
+        sortedPaths.push_back( std::move( entry.path ) );
+    }
     return sortedPaths;
 }

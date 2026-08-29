@@ -67,5 +67,8 @@ std::vector<QString> enumerateFolderFiles(
         return {};
     }
     auto sorted = sortedMergeFilePaths( collected );
-    return stopped() ? std::vector<QString>{} : sorted;
+    if ( stopped() ) {
+        return {};
+    }
+    return sorted;
 }

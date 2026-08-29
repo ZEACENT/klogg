@@ -166,6 +166,7 @@ class FolderSearchEngine : public QObject {
         klogg::folder::ContextOptions context;
         bool valid = false;
     };
+    quint64 submit( Request request );
     void runFolderSearch( const Request& request );
     Request pendingRequest_; // guarded by requestMutex_
 

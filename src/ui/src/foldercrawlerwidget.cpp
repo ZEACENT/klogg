@@ -899,7 +899,7 @@ void FolderCrawlerWidget::onClosePane( int tabIndex )
     activePaneIndex_ = resultsTabs_->currentIndex();
     if ( searchTargetResults_ == erased ) {
         if ( searchActive_ ) {
-            engine_->interrupt();
+            stopSearch();
         }
         searchTargetResults_ = nullptr;
     }
@@ -1504,7 +1504,6 @@ void FolderCrawlerWidget::startSearch()
     // Supersede the old generation before submitting the next complete
     // enumerate-and-scan operation. Queued old signals are rejected immediately.
     engine_->interrupt();
-    currentSearchGeneration_ = engine_->bumpGeneration();
     searchTargetResults_ = nullptr;
 
     // A new search clears a previous invalid-pattern error state.
@@ -1520,6 +1519,7 @@ void FolderCrawlerWidget::startSearch()
 
     const auto pattern = searchToolbar_->currentSearchText();
     if ( pattern.isEmpty() ) {
+        currentSearchGeneration_ = engine_->bumpGeneration();
         // Parity with CrawlerWidget::replaceCurrentSearch(""): an empty search
         // clears the results pane instead of leaving stale results behind.
         // Folder results panes always use EmptyFilterPolicy::ClearResults --
@@ -1535,31 +1535,6 @@ void FolderCrawlerWidget::startSearch()
             results->beginSearch( filePaths_ );
         }
         updateReadyStatus();
-        return;
-    }
-
-    // Validate before submitting any filesystem work. Invalid expressions clear
-    // stale results but never enumerate the folder.
-    const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
-    const RegularExpression validation{ regexpPattern };
-    if ( !validation.isValid() ) {
-        if ( auto* const results = activeResults() ) {
-            results->beginSearch( filePaths_ );
-        }
-        searchToolbar_->setSearchInProgress( false );
-        searchActive_ = false;
-        currentSearchPattern_ = {};
-        lastResultStatusText_.clear();
-        if ( activeFilteredView() != nullptr ) {
-            activeFilteredView()->setSearchPattern( {} );
-        }
-        if ( mainView_ != nullptr ) {
-            mainView_->setSearchPattern( {} );
-        }
-        statusErrorActive_ = true;
-        statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
-        statusLabel_->setAutoFillBackground( true );
-        statusLabel_->setText( tr( "Error in expression: %1" ).arg( validation.errorString() ) );
         return;
     }
 
@@ -1596,7 +1571,32 @@ void FolderCrawlerWidget::startSearch()
     // clears any prior result set so file groups stream into a clean view. This
     // also covers the invalid-pattern path (which never emits searchStarted).
     if ( searchTargetResults_ != nullptr ) {
-        searchTargetResults_->beginSearch( {} );
+        searchTargetResults_->beginSearch( filePaths_ );
+    }
+
+    // Validate before submitting any filesystem work. Keep Results and history
+    // are already applied so invalid non-empty submissions preserve parity with
+    // the single-file search lifecycle.
+    const auto regexpPattern = searchToolbar_->currentRegularExpressionPattern();
+    const RegularExpression validation{ regexpPattern };
+    if ( !validation.isValid() ) {
+        currentSearchGeneration_ = engine_->bumpGeneration();
+        searchTargetResults_ = nullptr;
+        searchToolbar_->setSearchInProgress( false );
+        searchActive_ = false;
+        currentSearchPattern_ = {};
+        lastResultStatusText_.clear();
+        if ( activeFilteredView() != nullptr ) {
+            activeFilteredView()->setSearchPattern( {} );
+        }
+        if ( mainView_ != nullptr ) {
+            mainView_->setSearchPattern( {} );
+        }
+        statusErrorActive_ = true;
+        statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
+        statusLabel_->setAutoFillBackground( true );
+        statusLabel_->setText( tr( "Error in expression: %1" ).arg( validation.errorString() ) );
+        return;
     }
 
     // Context is a scan-time property: resolve the current -A/-B/-C window from
@@ -1627,8 +1627,6 @@ void FolderCrawlerWidget::startSearch()
 void FolderCrawlerWidget::stopSearch()
 {
     engine_->interrupt();
-    currentSearchGeneration_ = engine_->bumpGeneration();
-    searchTargetResults_ = nullptr;
     searchToolbar_->setSearchInProgress( false );
     searchActive_ = false;
     updateReadyStatus();

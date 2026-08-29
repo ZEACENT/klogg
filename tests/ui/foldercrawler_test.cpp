@@ -2001,6 +2001,30 @@ TEST_CASE( "FolderCrawlerWidget keep results freezes the current pane on a new s
     REQUIRE( widget.paneCount() == 2 ); // still 2, not 3
 }
 
+TEST_CASE( "FolderCrawlerWidget closing the active search pane finalizes its search state",
+           "[folder][keep][stop]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "foo\nbar\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ path } );
+    widget.searchFor( "foo" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchFor( "bar" );
+    REQUIRE( widget.paneCount() == 2 );
+    REQUIRE( widget.isSearchActive() );
+
+    const int activePane = widget.resultsTabs()->currentIndex();
+    Q_EMIT widget.resultsTabs()->tabCloseRequested( activePane );
+
+    CHECK( widget.paneCount() == 1 );
+    CHECK_FALSE( widget.isSearchActive() );
+}
+
 TEST_CASE( "FolderCrawlerWidget explicit re-search discovers newly added files in natural order",
            "[folder][folder-refresh]" )
 {
@@ -3247,6 +3271,40 @@ TEST_CASE( "FolderCrawlerWidget search history and status guards",
         REQUIRE_FALSE( widget.isSearchActive() );
         REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
         REQUIRE( widget.statusText().contains( QStringLiteral( "Error in expression" ) ) );
+    }
+
+    SECTION( "invalid regex is recorded in search history" )
+    {
+        SavedSearchesGuard searchesGuard;
+        auto& searches = SavedSearches::getSynced();
+        searches.clear();
+        searches.save();
+        widget.setSavedSearches( &searches );
+
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 100 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( SavedSearches::getSynced().recentSearches().contains(
+            QStringLiteral( "[invalid" ) ) );
+    }
+
+    SECTION( "Keep Results preserves the previous pane for an invalid regex" )
+    {
+        widget.searchFor( "ERROR" );
+        REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+
+        widget.searchToolbar()->setKeepResultsChecked( true );
+        widget.searchFor( "[invalid" );
+        QTest::qWait( 100 );
+
+        REQUIRE_FALSE( widget.isSearchActive() );
+        REQUIRE( widget.paneCount() == 2 );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        widget.resultsTabs()->setCurrentIndex( 0 );
+        QTest::qWait( 50 );
+        REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
     }
 
     SECTION( "empty search clears the results pane" )
