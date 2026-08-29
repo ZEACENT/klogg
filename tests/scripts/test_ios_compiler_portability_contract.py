@@ -20,6 +20,16 @@ class IosCompilerPortabilityContractTest(unittest.TestCase):
             source,
         )
 
+    def test_admission_constructors_do_not_shadow_members_under_gcc(self):
+        source = STREAM_SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "AdmissionState( std::size_t maximumConcurrentSessions )", source
+        )
+        self.assertNotIn(
+            "Lease( std::shared_ptr<AdmissionState> owner, IosEndpointKey endpoint )",
+            source,
+        )
+
     def test_protocol_bounds_check_uses_a_named_fixture_for_gcc15(self):
         source = PROTOCOL_TEST.read_text(encoding="utf-8")
         self.assertNotIn("PacketFixture{}.message.size()", source)

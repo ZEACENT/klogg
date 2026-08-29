@@ -864,15 +864,15 @@ IosNativeSessionLease::operator bool() const noexcept
 
 struct DefaultIosNativeStreamWorkerFactory::AdmissionState final
     : public std::enable_shared_from_this<AdmissionState> {
-    explicit AdmissionState( std::size_t maximumConcurrentSessions )
-        : maximumConcurrentSessions( maximumConcurrentSessions )
+    explicit AdmissionState( std::size_t sessionLimit )
+        : maximumConcurrentSessions( sessionLimit )
     {
     }
 
     struct Lease final {
-        Lease( std::shared_ptr<AdmissionState> owner, IosEndpointKey endpoint )
-            : owner( std::move( owner ) )
-            , endpoint( std::move( endpoint ) )
+        Lease( std::shared_ptr<AdmissionState> leaseOwner, IosEndpointKey leaseEndpoint )
+            : owner( std::move( leaseOwner ) )
+            , endpoint( std::move( leaseEndpoint ) )
         {
         }
 
