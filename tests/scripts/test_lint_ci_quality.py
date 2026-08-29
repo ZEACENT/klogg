@@ -98,6 +98,252 @@ class CiQualityLintTest(unittest.TestCase):
         )
         self.assertEqual(issues, [])
 
+    def test_workflow_job_needs_parses_inline_and_block_lists(self):
+        workflow = """\
+jobs:
+  Root:
+    runs-on: ubuntu-24.04
+  Inline:
+    needs: [Root, 'Other'] # direct prerequisites
+    runs-on: ubuntu-24.04
+  Block:
+    needs:
+      - Root
+      - "Inline"
+    strategy:
+      matrix:
+        needs: [NotAJobDependency]
+    steps:
+      - run: echo 'needs: [AlsoNotAJobDependency]'
+  Other:
+    runs-on: ubuntu-24.04
+"""
+        self.assertEqual(
+            MODULE.workflow_job_needs(workflow),
+            {
+                "Root": set(),
+                "Inline": {"Root", "Other"},
+                "Block": {"Root", "Inline"},
+                "Other": set(),
+            },
+        )
+        self.assertEqual(
+            MODULE.workflow_job_ancestors(MODULE.workflow_job_needs(workflow), "Block"),
+            {"Root", "Inline", "Other"},
+        )
+
+    def test_workflow_job_ancestors_rejects_cycles_and_unknown_jobs(self):
+        with self.assertRaisesRegex(ValueError, "dependency cycle"):
+            MODULE.workflow_job_ancestors({"One": {"Two"}, "Two": {"One"}}, "One")
+        with self.assertRaisesRegex(ValueError, "unknown job Missing"):
+            MODULE.workflow_job_ancestors({"One": {"Missing"}}, "One")
+
+    def test_workflow_artifact_actions_extracts_names_from_action_steps(self):
+        workflow = f"""\
+jobs:
+  Producer:
+    steps:
+      - name: Upload source closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: locked-sources
+          path: sources
+  Consumer:
+    needs: Producer
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: locked-sources
+          path: sources
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {
+                "Producer": {"uploads": {"locked-sources"}, "downloads": set()},
+                "Consumer": {"uploads": set(), "downloads": {"locked-sources"}},
+            },
+        )
+
+    def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+
+    def test_ci_build_rejects_a_restored_version_proxy_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  SaveVersion:\n",
+            "  SaveVersion:\n    needs: [PrefetchCpmCache, PrefetchWindowsTools]\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertTrue(
+            any(
+                "SaveVersion must need exactly []" in issue
+                for issue in MODULE.ci_build_workflow_issues(mutated)
+            )
+        )
+
+    def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "PrefetchOpenSsl, PrefetchWindowsTools, BuildAdbHelpers",
+            "PrefetchOpenSsl, BuildAdbHelpers",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertTrue(
+            any("Windows must need exactly" in issue for issue in issues),
+            issues,
+        )
+        self.assertIn(
+            "CI artifact msys2-tools producer PrefetchWindowsTools must be an ancestor of Windows",
+            issues,
+        )
+
+    def test_ci_build_rejects_legal_generation_in_source_prefetch(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  BuildAdbHelperLegalAssets:\n",
+            "      - run: python3 scripts/build_adb_helper_legal_assets.py\n\n"
+            "  BuildAdbHelperLegalAssets:\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "ADB source prefetch must not generate version-bound legal assets",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_rejects_duplicate_ios_source_prefetch(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "      - name: Install iOS native source-build tools\n",
+            "      # scripts/prefetch_ios_native_sources.py in a comment is ignored\n"
+            "      - run: python3 scripts/prefetch_ios_native_sources.py --lock duplicate --output duplicate\n\n"
+            "      - name: Install iOS native source-build tools\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "iOS native sources must be prefetched exactly once",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_gate_must_run_after_failures(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace("    if: always()\n", "    if: success()\n", 1)
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI gate must run with if: always()",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_platform_jobs_must_not_continue_on_error(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  Linux:\n",
+            "  Linux:\n    continue-on-error: true\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI build job Linux must not continue on error",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_requires_publication_source_artifact_downloads(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        marker = "      - name: Download architecture-independent iOS source assets\n"
+        start = workflow.index(marker)
+        suffix = workflow[start:]
+        mutated_suffix = suffix.replace(
+            "          name: ios-native-source-assets\n",
+            "          name: missing-ios-native-source-assets\n",
+            1,
+        )
+        self.assertNotEqual(mutated_suffix, suffix)
+        issues = MODULE.ci_build_workflow_issues(workflow[:start] + mutated_suffix)
+        self.assertIn(
+            "CI job CreatePreRelease must download artifact ios-native-source-assets",
+            issues,
+        )
+
+    def test_disabled_artifact_steps_do_not_satisfy_ownership(self):
+        workflow = """\
+jobs:
+  Producer:
+    steps:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: false
+        with:
+          name: locked-sources
+          path: sources
+  Consumer:
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        continue-on-error: true
+        with:
+          name: locked-sources
+          path: sources
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {
+                "Producer": {"uploads": set(), "downloads": set()},
+                "Consumer": {"uploads": set(), "downloads": set()},
+            },
+        )
+
+    def test_run_block_text_cannot_spoof_artifact_ownership(self):
+        workflow = """\
+jobs:
+  Producer:
+    steps:
+      - run: |
+          cat <<'YAML'
+          - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+            with:
+              name: spoofed-artifact
+          YAML
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {"Producer": {"uploads": set(), "downloads": set()}},
+        )
+
+    def test_ci_build_rejects_artifact_conditions_outside_supported_triggers(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        old = (
+            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "        with:\n"
+            "          name: cpm-cache\n"
+        )
+        new = (
+            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "        if: ${{ github.event_name == 'schedule' }}\n"
+            "        with:\n"
+            "          name: cpm-cache\n"
+        )
+        mutated = workflow.replace(old, new, 1)
+        self.assertNotEqual(mutated, workflow)
+        self.assertTrue(
+            any(
+                "PrefetchCpmCache uploads cpm-cache must use condition None" in issue
+                for issue in MODULE.ci_build_workflow_issues(mutated)
+            )
+        )
+
+    def test_explicit_false_continue_on_error_remains_fail_closed(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  Linux:\n",
+            "  Linux:\n    continue-on-error: false\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertEqual(MODULE.ci_build_workflow_issues(mutated), [])
+
     def test_codeql_requires_pinned_matching_actions_and_timeout(self):
         insecure = """\
 jobs:

@@ -38,7 +38,6 @@ env:
 
 jobs:
   SaveVersion:
-    needs: [PrefetchDeps, PrefetchWindowsTools]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
     outputs:
@@ -65,16 +64,12 @@ jobs:
             klogg_commit.txt
           if-no-files-found: error
 
-  PrefetchDeps:
+  PrefetchCpmCache:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    name: "Prefetch shared CPM cache"
+    name: "Prefetch CPM cache"
     runs-on: ubuntu-22.04
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
-      BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
-      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
-      CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
-      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -86,21 +81,35 @@ jobs:
           path: ${{ github.workspace }}/cpm_cache
           key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
 
+      - uses: ./.github/actions/prefetch-cpm-cache
+
+      - name: Archive shared CPM cache
+        shell: bash
+        run: |
+          tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz" \
+            -C "$KLOGG_WORKSPACE" cpm_cache
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpm-cache
+          path: cpm-cache.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+  PrefetchBoost:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch Boost"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      BOOST_URL: https://sourceforge.net/projects/boost/files/boost/1.86.0/boost_1_86_0.tar.bz2/download
+    steps:
       - name: Restore Boost prefetch cache
         id: cache-boost-prefetch
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/prefetch_artifacts/boost
           key: boost-prefetch-1-86-0
-
-      - name: Restore OpenSSL prefetch cache
-        id: cache-openssl-prefetch
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
-          key: openssl-prefetch-1-1-1w
-
-      - uses: ./.github/actions/prefetch-cpm-cache
 
       - name: Prefetch Boost artifact
         if: ${{ steps.cache-boost-prefetch.outputs.cache-hit != 'true' }}
@@ -136,6 +145,37 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - name: Package Boost artifact
+        shell: bash
+        run: |
+          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
+          # Store boost as a single tarball rather than the ~200k-file tree:
+          # download-artifact@v4 intermittently fails to extract zip64
+          # archives with many tiny files. A single-file artifact extracts
+          # reliably and tar is deterministic.
+          tar -czf "$PREFETCH_ROOT/boost.tar.gz" -C "$PREFETCH_ROOT/boost" .
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: boost-root
+          path: prefetch_artifacts/boost.tar.gz
+          if-no-files-found: error
+
+  PrefetchOpenSsl:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch Windows Qt 5 OpenSSL"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      OPENSSL_URL: https://www.firedaemon.com/download-firedaemon-openssl-1.1.1-zip
+    steps:
+      - name: Restore OpenSSL prefetch cache
+        id: cache-openssl-prefetch
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
+          key: openssl-prefetch-1-1-1w
+
       - name: Prefetch OpenSSL artifact
         if: ${{ steps.cache-openssl-prefetch.outputs.cache-hit != 'true' }}
         shell: sh
@@ -163,6 +203,19 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: openssl-archive
+          path: prefetch_artifacts/openssl.zip
+          if-no-files-found: error
+
+  PrefetchLinuxDeployQt:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch linuxdeployqt"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+    steps:
       - name: Prefetch linuxdeployqt artifact
         shell: sh
         run: |
@@ -197,6 +250,21 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linuxdeployqt
+          path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
+          if-no-files-found: error
+
+  PrefetchCmakeInstaller:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch Linux CMake installer"
+    runs-on: ubuntu-22.04
+    env:
+      KLOGG_WORKSPACE: ${{ github.workspace }}
+      CMAKE_INSTALLER_URL: https://github.com/Kitware/CMake/releases/download/v3.20.2/cmake-3.20.2-linux-x86_64.sh
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
+    steps:
       - name: Prefetch CMake installer
         shell: sh
         run: |
@@ -232,48 +300,6 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - name: Archive shared CPM cache
-        shell: bash
-        run: |
-          tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz" \
-            -C "$KLOGG_WORKSPACE" cpm_cache
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: cpm-cache
-          path: cpm-cache.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: Package Boost artifact
-        shell: bash
-        run: |
-          PREFETCH_ROOT="$KLOGG_WORKSPACE/prefetch_artifacts"
-          # Store boost as a single tarball rather than the ~200k-file tree:
-          # download-artifact@v4 intermittently fails to extract zip64
-          # archives with many tiny files (observed on the macOS legs),
-          # silently leaving an empty path while reporting success. A
-          # single-file artifact extracts reliably and tar is deterministic.
-          tar -czf "$PREFETCH_ROOT/boost.tar.gz" -C "$PREFETCH_ROOT/boost" .
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: boost-root
-          path: prefetch_artifacts/boost.tar.gz
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: openssl-archive
-          path: prefetch_artifacts/openssl.zip
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: linuxdeployqt
-          path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
-          if-no-files-found: error
-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cmake-installer
@@ -285,10 +311,6 @@ jobs:
     name: "Prefetch Windows MSYS2 tools"
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
       - name: Restore MSYS2 tools cache
         id: cache-msys2-tools
         uses: actions/cache@v4
@@ -407,12 +429,9 @@ jobs:
           if-no-files-found: error
 
   PrefetchAdbHelperSources:
-    needs: [SaveVersion]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
-    env:
-      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -425,6 +444,39 @@ jobs:
           python3 scripts/prefetch_adb_helper_sources.py \
             --lock packaging/adb/adb-helper.lock.json \
             --download-root prefetch_artifacts/adb-helper-sources
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: adb-helper-source-cache
+          path: prefetch_artifacts/adb-helper-sources/*
+          if-no-files-found: error
+          compression-level: 0
+
+  BuildAdbHelperLegalAssets:
+    needs: [SaveVersion, PrefetchAdbHelperSources]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Build ADB helper legal assets"
+    runs-on: ubuntu-24.04
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: adb-helper-source-cache
+          path: prefetch_artifacts/adb-helper-sources
+
+      - name: Verify source closure and build legal assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/prefetch_adb_helper_sources.py \
+            --lock packaging/adb/adb-helper.lock.json \
+            --download-root prefetch_artifacts/adb-helper-sources \
+            --offline
           python3 scripts/build_adb_helper_legal_assets.py \
             --lock packaging/adb/adb-helper.lock.json \
             --archive-root prefetch_artifacts/adb-helper-sources \
@@ -435,20 +487,13 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: adb-helper-source-cache
-          path: prefetch_artifacts/adb-helper-sources/*
-          if-no-files-found: error
-          compression-level: 0
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
           name: adb-helper-legal-assets
           path: prefetch_artifacts/adb-helper-release/*
           if-no-files-found: error
           compression-level: 0
 
   BuildAdbHelpers:
-    needs: [PrefetchAdbHelperSources]
+    needs: [PrefetchAdbHelperSources, BuildAdbHelperLegalAssets]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Source-built ADB helper ${{ matrix.target }}"
     strategy:
@@ -569,7 +614,7 @@ jobs:
           subject-path: ${{ runner.temp }}/adb-helper-artifact/SHA256SUMS
 
   Linux:
-    needs: [SaveVersion, BuildAdbHelpers]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbHelpers]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -730,6 +775,7 @@ jobs:
       - uses: ./.github/actions/restore-cpm-cache
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ matrix.config.os == 'ubuntu_appimage' }}
         with:
           name: linuxdeployqt
           path: ${{ github.workspace }}/tools
@@ -976,8 +1022,38 @@ jobs:
           path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
+  PrefetchIosNativeSources:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Prefetch locked iOS native sources"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Restore checksum-locked iOS source archives
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ios-native-sources
+          key: ios-native-sources-${{ hashFiles('3rdparty/libimobiledevice/libimobiledevice.lock.json') }}
+
+      - name: Prefetch checksum-locked iOS native sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/prefetch_ios_native_sources.py \
+            --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+            --output "${{ github.workspace }}/ios-native-sources"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-native-source-cache
+          path: ${{ github.workspace }}/ios-native-sources/*
+          if-no-files-found: error
+          compression-level: 0
+
   BuildIosNativeStacks:
-    needs: [SaveVersion]
+    needs: [SaveVersion, PrefetchIosNativeSources]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "iOS native stack ${{ matrix.architecture }}"
     env:
@@ -1008,19 +1084,10 @@ jobs:
           export HOMEBREW_NO_INSTALL_CLEANUP=1
           brew install autoconf automake libtool pkg-config cmake ninja
 
-      - name: Restore checksum-locked iOS source archives
-        uses: actions/cache@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          name: ios-native-source-cache
           path: ${{ github.workspace }}/ios-native-sources
-          key: ios-native-sources-${{ hashFiles('3rdparty/libimobiledevice/libimobiledevice.lock.json') }}
-
-      - name: Prefetch checksum-locked iOS native sources
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/prefetch_ios_native_sources.py \
-            --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
-            --output "${{ github.workspace }}/ios-native-sources"
 
       - name: Build disconnected thin iOS native stack
         shell: bash
@@ -1106,7 +1173,7 @@ jobs:
           subject-path: ${{ runner.temp }}/ios-native-stack/SHA256SUMS
 
   Mac:
-    needs: [SaveVersion, BuildAdbHelpers, BuildIosNativeStacks]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbHelpers, BuildIosNativeStacks]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -1420,7 +1487,7 @@ jobs:
           if-no-files-found: warn
 
   Windows:
-    needs: [SaveVersion, BuildAdbHelpers]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, BuildAdbHelpers]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:

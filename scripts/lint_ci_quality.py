@@ -36,6 +36,105 @@ BROAD_CPPCHECK_IDS = (
     "missingOverride",
 )
 
+CI_BUILD_JOB_NEEDS = {
+    "SaveVersion": set(),
+    "PrefetchCpmCache": set(),
+    "PrefetchBoost": set(),
+    "PrefetchOpenSsl": set(),
+    "PrefetchLinuxDeployQt": set(),
+    "PrefetchCmakeInstaller": set(),
+    "PrefetchWindowsTools": set(),
+    "PrefetchAdbHelperSources": set(),
+    "PrefetchIosNativeSources": set(),
+    "BuildAdbHelperLegalAssets": {
+        "SaveVersion",
+        "PrefetchAdbHelperSources",
+    },
+    "BuildAdbHelpers": {
+        "PrefetchAdbHelperSources",
+        "BuildAdbHelperLegalAssets",
+    },
+    "BuildIosNativeStacks": {
+        "SaveVersion",
+        "PrefetchIosNativeSources",
+    },
+    "Linux": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchLinuxDeployQt",
+        "PrefetchCmakeInstaller",
+        "BuildAdbHelpers",
+    },
+    "Mac": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "BuildAdbHelpers",
+        "BuildIosNativeStacks",
+    },
+    "Windows": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchOpenSsl",
+        "PrefetchWindowsTools",
+        "BuildAdbHelpers",
+    },
+    "ci-gate": {"Linux", "Mac", "Windows"},
+    "CreatePreRelease": {"ci-gate"},
+}
+
+CI_BUILD_ARTIFACT_PRODUCERS = {
+    "klogg_version": "SaveVersion",
+    "cpm-cache": "PrefetchCpmCache",
+    "boost-root": "PrefetchBoost",
+    "openssl-archive": "PrefetchOpenSsl",
+    "linuxdeployqt": "PrefetchLinuxDeployQt",
+    "cmake-installer": "PrefetchCmakeInstaller",
+    "msys2-tools": "PrefetchWindowsTools",
+    "adb-helper-source-cache": "PrefetchAdbHelperSources",
+    "adb-helper-legal-assets": "BuildAdbHelperLegalAssets",
+    "ios-native-source-cache": "PrefetchIosNativeSources",
+    "ios-native-source-assets": "BuildIosNativeStacks",
+}
+
+CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
+    "klogg_version": {"CreatePreRelease"},
+    "cpm-cache": {"Linux", "Mac", "Windows"},
+    "boost-root": {"Mac", "Windows"},
+    "openssl-archive": {"Windows"},
+    "linuxdeployqt": {"Linux"},
+    "cmake-installer": {"Linux"},
+    "msys2-tools": {"Windows"},
+    "adb-helper-source-cache": {"BuildAdbHelperLegalAssets", "BuildAdbHelpers"},
+    "adb-helper-legal-assets": {
+        "BuildAdbHelpers",
+        "Linux",
+        "Mac",
+        "Windows",
+        "CreatePreRelease",
+    },
+    "ios-native-source-cache": {"BuildIosNativeStacks"},
+    "ios-native-source-assets": {"CreatePreRelease"},
+}
+
+CI_BUILD_ARTIFACT_CONDITIONS = {
+    ("BuildIosNativeStacks", "uploads", "ios-native-source-assets"):
+        "${{ matrix.architecture == 'arm64' }}",
+    ("Linux", "downloads", "linuxdeployqt"):
+        "${{ matrix.config.os == 'ubuntu_appimage' }}",
+    ("Linux", "downloads", "cmake-installer"):
+        "${{ matrix.config.sanitizer != 'thread' }}",
+    ("Linux", "downloads", "adb-helper-legal-assets"):
+        "${{ matrix.config.package != false }}",
+    ("Mac", "downloads", "adb-helper-legal-assets"):
+        "${{ matrix.config.package != false }}",
+    ("Windows", "downloads", "openssl-archive"):
+        "${{ startswith(matrix.config.qt_version, '5') }}",
+    ("Windows", "downloads", "adb-helper-legal-assets"):
+        "${{ matrix.config.package != false && github.event_name != 'pull_request' }}",
+}
+
 
 def strip_yaml_comment(value: str) -> str:
     quote: str | None = None
@@ -91,6 +190,358 @@ def workflow_run_blocks(text: str) -> list[str]:
                 active_lines.append(active)
         blocks.append("\n".join(active_lines))
     return blocks
+
+
+def workflow_job_blocks(text: str) -> dict[str, list[str]]:
+    lines = text.splitlines()
+    jobs_index: int | None = None
+    jobs_indent = 0
+    for index, line in enumerate(lines):
+        entry = KEY_VALUE_RE.match(line)
+        if entry is not None and entry.group("key") == "jobs":
+            jobs_index = index
+            jobs_indent = len(entry.group("indent"))
+            break
+    if jobs_index is None:
+        return {}
+
+    job_starts: list[tuple[int, str, int]] = []
+    job_indent: int | None = None
+    for index in range(jobs_index + 1, len(lines)):
+        line = lines[index]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= jobs_indent:
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None:
+            continue
+        if job_indent is None:
+            job_indent = indent
+        if indent == job_indent:
+            job_starts.append((index, entry.group("key"), indent))
+
+    blocks: dict[str, list[str]] = {}
+    for offset, (start, name, _) in enumerate(job_starts):
+        end = job_starts[offset + 1][0] if offset + 1 < len(job_starts) else len(lines)
+        blocks[name] = lines[start:end]
+    return blocks
+
+
+def parse_inline_yaml_list(value: str) -> set[str] | None:
+    candidate = scalar(value)
+    if not candidate.startswith("[") or not candidate.endswith("]"):
+        return None
+    inner = candidate[1:-1].strip()
+    if not inner:
+        return set()
+    return {scalar(item.strip()) for item in inner.split(",") if item.strip()}
+
+
+def workflow_job_needs(text: str) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for name, block in workflow_job_blocks(text).items():
+        header = KEY_VALUE_RE.match(block[0])
+        if header is None:
+            continue
+        job_indent = len(header.group("indent"))
+        needs: set[str] = set()
+        found = False
+        for offset, line in enumerate(block[1:], start=1):
+            entry = KEY_VALUE_RE.match(line)
+            if entry is None or entry.group("key") != "needs":
+                continue
+            indent = len(entry.group("indent"))
+            if indent != job_indent + 2 or found:
+                continue
+            found = True
+            value = scalar(entry.group("value"))
+            inline = parse_inline_yaml_list(value)
+            if inline is not None:
+                needs = inline
+                continue
+            if value:
+                needs = {value}
+                continue
+            for following in block[offset + 1 :]:
+                active = strip_yaml_comment(following)
+                if not active:
+                    continue
+                following_indent = len(following) - len(following.lstrip())
+                if following_indent <= indent:
+                    break
+                item = LIST_ITEM_RE.match(following)
+                if item is None:
+                    continue
+                item_value = scalar(following[item.end() :])
+                if item_value:
+                    needs.add(item_value)
+        result[name] = needs
+    return result
+
+
+def workflow_job_direct_value(block: list[str], key: str) -> str | None:
+    if not block:
+        return None
+    header = KEY_VALUE_RE.match(block[0])
+    if header is None:
+        return None
+    expected_indent = len(header.group("indent")) + 2
+    for offset, line in enumerate(block[1:], start=1):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == key
+            and len(entry.group("indent")) == expected_indent
+        ):
+            return yaml_value(block, offset, entry.group("value"), expected_indent)
+    return None
+
+
+def workflow_job_ancestors(needs: dict[str, set[str]], job: str) -> set[str]:
+    ancestors: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(current: str) -> None:
+        if current in visiting:
+            raise ValueError(f"workflow dependency cycle includes {current}")
+        visiting.add(current)
+        for dependency in needs.get(current, set()):
+            if dependency not in needs:
+                raise ValueError(f"workflow job {current} needs unknown job {dependency}")
+            if dependency not in ancestors:
+                ancestors.add(dependency)
+                visit(dependency)
+        visiting.remove(current)
+
+    visit(job)
+    return ancestors
+
+
+def workflow_step_blocks(job_block: list[str]) -> list[list[str]]:
+    if not job_block:
+        return []
+    header = KEY_VALUE_RE.match(job_block[0])
+    if header is None:
+        return []
+    job_indent = len(header.group("indent"))
+    steps_index: int | None = None
+    steps_indent = 0
+    for index, line in enumerate(job_block[1:], start=1):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "steps"
+            and len(entry.group("indent")) == job_indent + 2
+        ):
+            steps_index = index
+            steps_indent = len(entry.group("indent"))
+            break
+    if steps_index is None:
+        return []
+
+    step_starts: list[int] = []
+    step_indent: int | None = None
+    region_end = len(job_block)
+    for index in range(steps_index + 1, len(job_block)):
+        line = job_block[index]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= steps_indent:
+            region_end = index
+            break
+        item = LIST_ITEM_RE.match(line)
+        if item is None:
+            continue
+        if step_indent is None:
+            step_indent = len(item.group("indent"))
+        if len(item.group("indent")) == step_indent:
+            step_starts.append(index)
+
+    result: list[list[str]] = []
+    for offset, start in enumerate(step_starts):
+        end = step_starts[offset + 1] if offset + 1 < len(step_starts) else region_end
+        result.append(job_block[start:end])
+    return result
+
+
+def workflow_artifact_records(
+    text: str,
+) -> dict[str, list[tuple[str, str, str | None]]]:
+    records: dict[str, list[tuple[str, str, str | None]]] = {}
+    for job, block in workflow_job_blocks(text).items():
+        job_records: list[tuple[str, str, str | None]] = []
+        for step in workflow_step_blocks(block):
+            item = LIST_ITEM_RE.match(step[0])
+            if item is None:
+                continue
+            item_indent = len(item.group("indent"))
+            action: str | None = None
+            with_indent: int | None = None
+            artifact_name: str | None = None
+            condition: str | None = None
+            continue_on_error: str | None = None
+            for offset, step_line in enumerate(step):
+                entry = KEY_VALUE_RE.match(step_line)
+                if entry is None:
+                    continue
+                key = entry.group("key")
+                indent = len(entry.group("indent"))
+                if key == "uses" and indent in {item_indent, item_indent + 2}:
+                    action = yaml_value(step, offset, entry.group("value"), indent)
+                elif key == "if" and indent in {item_indent, item_indent + 2}:
+                    condition = scalar(entry.group("value")).lower()
+                elif key == "continue-on-error" and indent in {item_indent, item_indent + 2}:
+                    continue_on_error = scalar(entry.group("value")).lower()
+                elif key == "with" and indent == item_indent + 2:
+                    inline = scalar(entry.group("value"))
+                    with_indent = indent
+                    if inline.startswith("{") and inline.endswith("}"):
+                        for mapping_item in inline[1:-1].split(","):
+                            inline_key, separator, inline_value = mapping_item.partition(":")
+                            if separator and inline_key.strip() == "name":
+                                artifact_name = scalar(inline_value.strip())
+                elif with_indent is not None and indent <= with_indent:
+                    with_indent = None
+                elif key == "name" and with_indent is not None and indent == with_indent + 2:
+                    artifact_name = scalar(entry.group("value"))
+            if action is None or artifact_name is None:
+                continue
+            if continue_on_error not in {None, "false"}:
+                continue
+            if action.startswith("actions/upload-artifact@"):
+                job_records.append(("uploads", artifact_name, condition))
+            elif action.startswith("actions/download-artifact@"):
+                job_records.append(("downloads", artifact_name, condition))
+        records[job] = job_records
+    return records
+
+
+def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
+    actions: dict[str, dict[str, set[str]]] = {}
+    disabled_conditions = {"false", "${{ false }}"}
+    for job, records in workflow_artifact_records(text).items():
+        uploads = {
+            name
+            for kind, name, condition in records
+            if kind == "uploads" and condition not in disabled_conditions
+        }
+        downloads = {
+            name
+            for kind, name, condition in records
+            if kind == "downloads" and condition not in disabled_conditions
+        }
+        actions[job] = {"uploads": uploads, "downloads": downloads}
+    return actions
+
+
+def ci_build_workflow_issues(text: str) -> list[str]:
+    issues: list[str] = []
+    needs = workflow_job_needs(text)
+    for job, expected in CI_BUILD_JOB_NEEDS.items():
+        if job not in needs:
+            issues.append(f"CI build workflow must define job {job}")
+            continue
+        if needs[job] != expected:
+            issues.append(
+                f"CI build job {job} must need exactly {sorted(expected)}, got {sorted(needs[job])}"
+            )
+
+    if "PrefetchDeps" in needs:
+        issues.append("CI build workflow must split the monolithic PrefetchDeps job")
+
+    try:
+        for job in needs:
+            workflow_job_ancestors(needs, job)
+    except ValueError as error:
+        issues.append(str(error))
+        return issues
+
+    artifact_records = workflow_artifact_records(text)
+    artifacts = workflow_artifact_actions(text)
+    for artifact, producer in CI_BUILD_ARTIFACT_PRODUCERS.items():
+        owners = {
+            job
+            for job, job_actions in artifacts.items()
+            if artifact in job_actions["uploads"]
+        }
+        if owners != {producer}:
+            issues.append(
+                f"CI artifact {artifact} must be uploaded only by {producer}, got {sorted(owners)}"
+            )
+
+    for consumer, job_actions in artifacts.items():
+        for artifact in job_actions["downloads"]:
+            producer = CI_BUILD_ARTIFACT_PRODUCERS.get(artifact)
+            if producer is None or producer not in needs or consumer not in needs:
+                continue
+            if producer not in workflow_job_ancestors(needs, consumer):
+                issues.append(
+                    f"CI artifact {artifact} producer {producer} must be an ancestor of {consumer}"
+                )
+
+    for artifact, consumers in CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS.items():
+        for consumer in consumers:
+            if artifact not in artifacts.get(consumer, {}).get("downloads", set()):
+                issues.append(f"CI job {consumer} must download artifact {artifact}")
+
+    expected_steps = {
+        (producer, "uploads", artifact)
+        for artifact, producer in CI_BUILD_ARTIFACT_PRODUCERS.items()
+    }
+    expected_steps.update(
+        (consumer, "downloads", artifact)
+        for artifact, consumers in CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS.items()
+        for consumer in consumers
+    )
+    for job, kind, artifact in expected_steps:
+        conditions = [
+            condition
+            for record_kind, record_artifact, condition in artifact_records.get(job, [])
+            if record_kind == kind and record_artifact == artifact
+        ]
+        expected_condition = CI_BUILD_ARTIFACT_CONDITIONS.get((job, kind, artifact))
+        if conditions != [expected_condition]:
+            issues.append(
+                f"CI artifact step {job} {kind} {artifact} must use condition "
+                f"{expected_condition!r}, got {conditions!r}"
+            )
+
+    job_blocks = workflow_job_blocks(text)
+    if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != "always()":
+        issues.append("CI gate must run with if: always()")
+    for job in ("Linux", "Mac", "Windows", "ci-gate"):
+        continue_on_error = workflow_job_direct_value(
+            job_blocks.get(job, []), "continue-on-error"
+        )
+        if continue_on_error not in {None, "false"}:
+            issues.append(f"CI build job {job} must not continue on error")
+
+    adb_prefetch = job_blocks.get("PrefetchAdbHelperSources", [])
+    adb_prefetch_active = "\n".join(
+        active
+        for line in adb_prefetch
+        if (active := strip_yaml_comment(line))
+    )
+    if (
+        "KLOGG_VERSION" in adb_prefetch_active
+        or "build_adb_helper_legal_assets.py" in adb_prefetch_active
+    ):
+        issues.append("ADB source prefetch must not generate version-bound legal assets")
+
+    ios_prefetch_count = sum(
+        "prefetch_ios_native_sources.py" in run_block
+        for block in job_blocks.values()
+        for run_block in workflow_run_blocks("\n".join(block))
+    )
+    if ios_prefetch_count != 1:
+        issues.append("iOS native sources must be prefetched exactly once")
+
+    return issues
 
 
 def has_open_shell_quote(value: str) -> bool:
@@ -871,6 +1322,10 @@ def check_repo(root: Path) -> list[str]:
     )
 
     ci_text = (workflows / "ci-build.yml").read_text()
+    issues.extend(
+        f".github/workflows/ci-build.yml: {issue}"
+        for issue in ci_build_workflow_issues(ci_text)
+    )
     if "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" not in ci_text:
         issues.append(
             ".github/workflows/ci-build.yml: master publication runs must not be cancelable"
