@@ -1289,7 +1289,50 @@ def _check_qt_version_macro_in_tests(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+_QFILEINFO_INCLUDE_RE = re.compile(
+    r'^\s*#\s*include\s*[<"](?:QtCore/)?QFileInfo[>"]', re.MULTILINE
+)
+_QFILEINFO_FORWARD_DECL_RE = re.compile(r"\bclass\s+QFileInfo\s*;")
+_QFILEINFO_USE_RE = re.compile(r"\bQFileInfo\b")
+
+
+def _check_qfileinfo_direct_include(text: str, path: Path) -> list[tuple[int, str]]:
+    """Require implementation files using QFileInfo to include its header.
+
+    A QFileInfo use added only inside a Q_OS_WIN branch compiled locally on
+    macOS/Linux through a transitive include, then failed every Windows MSVC
+    build in PR #64. Host compile databases cannot analyze excluded platform
+    branches, so enforce the self-contained include at source level.
+    """
+    if path.suffix not in (".cpp", ".cc"):
+        return []
+
+    comment_free = _strip_cpp_comments(text)
+    if _QFILEINFO_INCLUDE_RE.search(comment_free):
+        return []
+
+    code = _strip_cpp_literals(comment_free)
+    code = _QFILEINFO_FORWARD_DECL_RE.sub("", code)
+    match = _QFILEINFO_USE_RE.search(code)
+    if match is None:
+        return []
+
+    line_num = code.count("\n", 0, match.start()) + 1
+    return [
+        (
+            line_num,
+            "QFileInfo is used without a direct #include <QFileInfo>. Add the "
+            "header explicitly so platform-guarded code does not depend on a "
+            "transitive include that may disappear on another Qt/compiler leg.",
+        )
+    ]
+
+
 MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "qfileinfo-direct-include",
+        "check": _check_qfileinfo_direct_include,
+    },
     {
         "name": "unguarded-platform-helper",
         "check": _check_unguarded_platform_helper,

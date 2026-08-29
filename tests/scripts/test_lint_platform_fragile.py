@@ -50,6 +50,48 @@ class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
         self.assertIsNone(pattern.search("klogg::qtcompat::skipEmptyParts()"))
 
 
+class QFileInfoDirectIncludeTest(unittest.TestCase):
+    def check(self, text, name="src/utils/src/platform_files.cpp"):
+        return lint._check_qfileinfo_direct_include(text, Path(name))
+
+    def test_platform_guarded_use_without_include_is_flagged(self):
+        text = (
+            "#include <QFile>\n"
+            "#if defined( Q_OS_WIN )\n"
+            "const QFileInfo info( path );\n"
+            "#endif\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_direct_include_forms_are_accepted(self):
+        for include in ("#include <QFileInfo>\n", "#include <QtCore/QFileInfo>\n"):
+            with self.subTest(include=include):
+                self.assertEqual(
+                    self.check(include + "const QFileInfo info( path );\n"), []
+                )
+
+    def test_comments_literals_and_forward_declarations_are_ignored(self):
+        text = (
+            "// QFileInfo in documentation\n"
+            'const char* name = "QFileInfo";\n'
+            "class QFileInfo;\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_headers_are_left_to_self_containment_lint(self):
+        self.assertEqual(
+            self.check("class Owner { QFileInfo* info; };\n", name="owner.h"), []
+        )
+
+    def test_current_platform_file_is_clean(self):
+        path = REPO_ROOT / "src" / "utils" / "src" / "platform_files.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
 class VectorscanCapabilityAssertionTest(unittest.TestCase):
     def test_unguarded_require_is_flagged(self):
         # The exact shape that broke the Windows x86-qt5 [QTRegex] job in PR #42.

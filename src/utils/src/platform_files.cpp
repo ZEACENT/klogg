@@ -5,6 +5,7 @@
 
 #include <QByteArray>
 #include <QFile>
+#include <QFileInfo>
 #include <QtGlobal>
 
 #if defined( Q_OS_WIN )
