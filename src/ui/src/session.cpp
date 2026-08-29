@@ -282,25 +282,27 @@ private:
         return endpoint;
     }
 
-    void retryRecoverableIosMetadata(
+    bool retryRecoverableIosMetadata(
         const klogg::livecapture::ios::IosCatalogSnapshot& snapshot )
     {
         auto* const requester
             = dynamic_cast<klogg::livecapture::ios::IosCatalogMetadataRequester*>( iosCatalog_ );
         if ( requester == nullptr ) {
-            return;
+            return false;
         }
         const auto endpoint = iosEndpoint();
         const auto entry = std::find_if(
             snapshot.entries.cbegin(), snapshot.entries.cend(),
             [ &endpoint ]( const auto& candidate ) { return candidate.endpoint == endpoint; } );
-        if ( entry != snapshot.entries.cend() ) {
-            const auto error
-                = entry->error.value_or( klogg::livecapture::ios::IosCatalogError{} );
-            if ( error.error.retryPolicy != klogg::livecapture::RetryPolicy::Never ) {
-                requester->requestMetadata( endpoint );
-            }
+        if ( entry == snapshot.entries.cend() || !entry->error.has_value() ) {
+            return false;
         }
+        const auto error = entry->error.value_or( klogg::livecapture::ios::IosCatalogError{} );
+        if ( error.error.retryPolicy == klogg::livecapture::RetryPolicy::Never ) {
+            return false;
+        }
+        requester->requestMetadata( endpoint );
+        return true;
     }
 
     void startIosObservation()
@@ -350,8 +352,11 @@ private:
             klogg::livecapture::InfrastructureStatus::Ready,
             klogg::livecapture::InfrastructureOwnership::AppShared );
         const auto snapshot = iosCatalog_->snapshot();
-        retryRecoverableIosMetadata( snapshot );
-        observeIosSnapshot( snapshot );
+        // requestMetadata() leaves the old error in this captured snapshot until
+        // asynchronous completion. Do not replay the failure while that retry is pending.
+        if ( !retryRecoverableIosMetadata( snapshot ) ) {
+            observeIosSnapshot( snapshot );
+        }
     }
 
     void observeIosSnapshot( const klogg::livecapture::ios::IosCatalogSnapshot& snapshot )

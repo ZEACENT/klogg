@@ -968,7 +968,9 @@ TEST_CASE( "transient iOS metadata failure remains actionable and retries on rec
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
 
     klogg::livecapture::ios::IosCatalogEntry entry;
     entry.endpoint.udid = spec.device.deviceId.toStdString();
@@ -987,10 +989,19 @@ TEST_CASE( "transient iOS metadata failure remains actionable and retries on rec
     CHECK( controller->snapshot().source.failure->code == "ios-lockdown-timeout" );
     REQUIRE( catalog.metadataRequests.empty() );
 
-    controller->startRequested();
+    REQUIRE( source->reconnectSource() );
 
     REQUIRE( catalog.metadataRequests.size() == 1u );
     CHECK( catalog.metadataRequests.front() == entry.endpoint );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+    CHECK_FALSE( controller->snapshot().source.failure.has_value() );
+
+    entry.epoch = 2u;
+    entry.error.reset();
+    catalog.publish( { 2u, { entry } } );
+
+    CHECK( factory.totalStarts() == 1u );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::OpeningStream );
     closeAndDeleteViews( *appSession, opened );
 }
 
