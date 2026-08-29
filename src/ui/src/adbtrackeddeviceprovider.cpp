@@ -47,15 +47,6 @@ QString displayDescription( const klogg::livecapture::adb::AdbDeviceInfo& device
     return QString::fromStdString( device.serial );
 }
 
-bool hasCurrentDeviceSnapshot(
-    const klogg::livecapture::adb::AdbInfrastructureSnapshot& snapshot ) noexcept
-{
-    return snapshot.infrastructure.status == klogg::livecapture::InfrastructureStatus::Ready
-           && snapshot.devices.generation == snapshot.generation
-           && snapshot.devices.infrastructureEpoch == snapshot.infrastructureEpoch
-           && !snapshot.devices.error.has_value();
-}
-
 std::optional<klogg::livecapture::LiveSourceError>
 presentationError( const std::optional<klogg::livecapture::LiveSourceError>& error )
 {
@@ -79,7 +70,7 @@ DeviceDiscoveryResult<AdbDeviceInfo> mapTrackedAdbInfrastructureSnapshot(
     const klogg::livecapture::adb::AdbInfrastructureSnapshot& snapshot )
 {
     QList<AdbDeviceInfo> devices;
-    if ( hasCurrentDeviceSnapshot( snapshot ) ) {
+    if ( snapshot.hasCurrentDevices() ) {
         devices.reserve(
             static_cast<decltype( devices.size() )>( snapshot.devices.devices.size() ) );
         for ( const auto& device : snapshot.devices.devices ) {

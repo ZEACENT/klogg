@@ -1058,6 +1058,7 @@ TEST_CASE(
     harness.probe.completeAbsent( 1, "shared server disappeared" );
     REQUIRE( harness.manager.snapshot().infrastructure.status
              == InfrastructureStatus::Unavailable );
+    CHECK_FALSE( harness.manager.snapshot().hasCurrentDevices() );
     CHECK_FALSE( harness.manager.defaultOnlineDevice().has_value() );
     requireKnownDevices( harness.manager, { "online-1", "locked-2", "sleeping-3" } );
     CHECK( mapTrackedAdbInfrastructureSnapshot( 81u, harness.manager.snapshot() ).devices.empty() );
@@ -1066,6 +1067,7 @@ TEST_CASE(
     REQUIRE( harness.probe.requests.size() == 3u );
     harness.probe.completeReady( 2, ReplacementServerIdentity );
     REQUIRE( harness.manager.snapshot().infrastructure.status == InfrastructureStatus::Ready );
+    CHECK_FALSE( harness.manager.snapshot().hasCurrentDevices() );
     CHECK_FALSE( harness.manager.defaultOnlineDevice().has_value() );
     CHECK( mapTrackedAdbInfrastructureSnapshot( 82u, harness.manager.snapshot() ).devices.empty() );
 
@@ -1076,6 +1078,7 @@ TEST_CASE(
         const auto selected = harness.manager.defaultOnlineDevice();
         return selected.has_value() && selected->serial == "replacement-online";
     } ) );
+    CHECK( harness.manager.snapshot().hasCurrentDevices() );
     const auto currentDiscovery
         = mapTrackedAdbInfrastructureSnapshot( 83u, harness.manager.snapshot() );
     REQUIRE( currentDiscovery.devices.size() == 1 );

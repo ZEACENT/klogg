@@ -149,10 +149,7 @@ public:
 
     std::optional<AdbDeviceInfo> defaultOnlineDevice() const
     {
-        if ( snapshot_.infrastructure.status != InfrastructureStatus::Ready
-             || snapshot_.devices.generation != snapshot_.generation
-             || snapshot_.devices.infrastructureEpoch != snapshot_.infrastructureEpoch
-             || snapshot_.devices.error.has_value() ) {
+        if ( !snapshot_.hasCurrentDevices() ) {
             return std::nullopt;
         }
 

@@ -45,6 +45,14 @@ struct AdbInfrastructureManagerDependencies {
 };
 
 struct AdbInfrastructureSnapshot {
+    bool hasCurrentDevices() const noexcept
+    {
+        return infrastructure.status == InfrastructureStatus::Ready
+               && devices.generation == generation
+               && devices.infrastructureEpoch == infrastructureEpoch
+               && !devices.error.has_value();
+    }
+
     Generation generation{ 0 };
     std::uint64_t infrastructureEpoch{ 0 };
     InfrastructureState infrastructure;

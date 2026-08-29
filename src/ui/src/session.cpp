@@ -244,6 +244,9 @@ private:
             }
             return;
         }
+        if ( !snapshot.hasCurrentDevices() ) {
+            return;
+        }
 
         const auto serial = spec_.device.deviceId.toStdString();
         const auto device = std::find_if(
