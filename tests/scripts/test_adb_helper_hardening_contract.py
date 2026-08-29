@@ -243,6 +243,19 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes extraction root", (result.stdout + result.stderr).lower())
 
+    def test_prefetch_normalizes_relative_symlink_targets_for_windows(self):
+        module = load_prefetch_module()
+        self.assertEqual(
+            module.platform_symlink_target(
+                "../libcutils/include/cutils/", platform_name="nt"
+            ),
+            r"..\libcutils\include\cutils",
+        )
+        self.assertEqual(
+            module.platform_symlink_target("testdata/", platform_name="nt"),
+            "testdata",
+        )
+
     def test_prefetch_marks_directory_symlinks_for_windows_reparse_points(self):
         archive = self.root / "directory-symlink.tar"
         with tarfile.open(archive, "w") as tar:

@@ -174,6 +174,14 @@ def canonicalize_tar_gz(
         temporary.unlink(missing_ok=True)
 
 
+def platform_symlink_target(linkname: str, platform_name: str = os.name) -> str:
+    if platform_name == "nt":
+        return str(
+            pathlib.PureWindowsPath(*pathlib.PurePosixPath(linkname).parts)
+        )
+    return linkname
+
+
 def symlink_target_is_directory(
     parts: tuple[str, ...],
     member: tarfile.TarInfo,
@@ -263,7 +271,7 @@ def safe_extract(
             if path.exists() or path.is_symlink():
                 raise RuntimeError(f"archive symlink collides with extracted path: {member.name}")
             os.symlink(
-                member.linkname,
+                platform_symlink_target(member.linkname),
                 path,
                 target_is_directory=symlink_target_is_directory(parts, member, by_name),
             )
