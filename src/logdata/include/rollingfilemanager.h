@@ -9,6 +9,8 @@
 #include <optional>
 #include <vector>
 
+#include "platform/platform_files.h"
+
 // Manages a rolling output file that rotates when it reaches a size limit.
 // When the current file exceeds maxFileSize, it is renamed as a numbered backup
 // and a new file is opened with the original name. Old backups beyond backupCount
@@ -29,7 +31,8 @@ class RollingFileManager {
 
     bool isValid() const;
     bool open( bool truncate = false );
-    bool openExisting();
+    bool openExisting(
+        const std::optional<klogg::platform::FileIdentity>& expectedIdentity = std::nullopt );
     void close();
     bool flush();
 

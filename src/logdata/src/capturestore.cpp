@@ -2480,8 +2480,14 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
                             return writeSegmentToDevice( segment, output );
                         } );
                 } );
-            switch ( stagedResult ) {
+            std::optional<klogg::platform::FileIdentity> publishedIdentity;
+            switch ( stagedResult.result ) {
             case klogg::stagedoutput::Result::Published:
+                publishedIdentity = stagedResult.identity;
+                if ( !publishedIdentity.has_value() ) {
+                    return failBinding( OutputFailure::Open );
+                }
+                break;
             case klogg::stagedoutput::Result::DestinationExists:
                 break;
             case klogg::stagedoutput::Result::WriteFailure:
@@ -2494,7 +2500,7 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
             }
             candidateOutput = RollingFileManager(
                 outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
-            if ( !candidateOutput.openExisting() ) {
+            if ( !candidateOutput.openExisting( publishedIdentity ) ) {
                 return failBinding( OutputFailure::Open );
             }
         }
@@ -2512,10 +2518,15 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
                 return failBinding( OutputFailure::Write );
             }
         }
+        const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
+        if ( !publishedIdentity.has_value() ) {
+            stagedOutput.cancelWriting();
+            return failBinding( OutputFailure::Open );
+        }
         if ( !stagedOutput.commit() ) {
             return failBinding( OutputFailure::Flush );
         }
-        if ( !candidateOutput.openExisting() ) {
+        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
             return failBinding( OutputFailure::Open );
         }
     }

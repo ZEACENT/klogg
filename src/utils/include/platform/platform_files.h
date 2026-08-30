@@ -20,10 +20,23 @@
 #ifndef KLOGG_PLATFORM_FILES_H
 #define KLOGG_PLATFORM_FILES_H
 
+#include <cstdint>
+#include <optional>
+
 #include <QFile>
+#include <QFileDevice>
 #include <QString>
 
 namespace klogg::platform {
+
+struct FileIdentity {
+    std::uint64_t device = 0;
+    std::uint64_t file = 0;
+};
+
+bool operator==( const FileIdentity& left, const FileIdentity& right );
+bool operator!=( const FileIdentity& left, const FileIdentity& right );
+std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
 
 // Whether the platform uses exclusive file locks (Windows). When true, the
 // "keep file closed" option is shown in preferences.

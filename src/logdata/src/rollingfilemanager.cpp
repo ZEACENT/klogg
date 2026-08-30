@@ -295,7 +295,8 @@ bool RollingFileManager::open( bool truncate )
     return openNewFile( truncate );
 }
 
-bool RollingFileManager::openExisting()
+bool RollingFileManager::openExisting(
+    const std::optional<klogg::platform::FileIdentity>& expectedIdentity )
 {
     if ( !isValid() ) {
         return false;
@@ -307,6 +308,13 @@ bool RollingFileManager::openExisting()
     if ( !currentFile_->open( QIODevice::WriteOnly | QIODevice::ExistingOnly
                              | QIODevice::Append ) ) {
         return false;
+    }
+    if ( expectedIdentity.has_value() ) {
+        const auto openedIdentity = klogg::platform::fileIdentity( *currentFile_ );
+        if ( !openedIdentity.has_value() || openedIdentity.value() != expectedIdentity.value() ) {
+            currentFile_->close();
+            return false;
+        }
     }
     currentBytes_ = currentFile_->size();
     openedNewFile_ = false;

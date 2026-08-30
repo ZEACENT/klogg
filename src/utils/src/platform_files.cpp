@@ -13,6 +13,7 @@
 #define NOMINMAX
 #endif
 #include <aclapi.h>
+#include <io.h>
 #include <windows.h>
 #else
 #include <cerrno>
@@ -247,6 +248,44 @@ bool securePosixObject( const QString& path, bool directory )
 #endif
 
 } // namespace
+
+bool operator==( const FileIdentity& left, const FileIdentity& right )
+{
+    return left.device == right.device && left.file == right.file;
+}
+
+bool operator!=( const FileIdentity& left, const FileIdentity& right )
+{
+    return !( left == right );
+}
+
+std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
+{
+    if ( !file.isOpen() ) {
+        return std::nullopt;
+    }
+#if defined( Q_OS_WIN )
+    const auto nativeDescriptor = static_cast<int>( file.handle() );
+    const auto nativeHandle = _get_osfhandle( nativeDescriptor );
+    if ( nativeHandle == -1 ) {
+        return std::nullopt;
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if ( !GetFileInformationByHandle( reinterpret_cast<HANDLE>( nativeHandle ), &info ) ) {
+        return std::nullopt;
+    }
+    const auto fileIndex = ( static_cast<std::uint64_t>( info.nFileIndexHigh ) << 32u )
+                           | static_cast<std::uint64_t>( info.nFileIndexLow );
+    return FileIdentity{ info.dwVolumeSerialNumber, fileIndex };
+#else
+    struct stat info{};
+    if ( ::fstat( file.handle(), &info ) != 0 ) {
+        return std::nullopt;
+    }
+    return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
+                         static_cast<std::uint64_t>( info.st_ino ) };
+#endif
+}
 
 bool ensureOwnerOnlyDirectory( const QString& path )
 {
