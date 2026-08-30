@@ -30,6 +30,7 @@ PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 MAC_PACKAGE_ACTION = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
 APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 IOS_LIVE_SERVICES = ROOT / "src" / "ui" / "src" / "iosliveservices.cpp"
+IOS_NATIVE_STREAM = ROOT / "src" / "livecapture" / "src" / "iosnativestream.cpp"
 CI_BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "ci-build.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build_ios_native_stack.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_ios_native_stack.py"
@@ -182,6 +183,18 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         self.assertIn("[ executor = catalogExecutor_ ]", source)
         self.assertNotIn("[ executor = catalogExecutor_.get() ]", source)
         self.assertIn("catalogExecutor_->shutdownAsync();", source)
+
+    def test_stop_acknowledgement_requires_cleanup_dispatch(self):
+        source = required_text(IOS_NATIVE_STREAM)
+        stop = re.search(
+            r"void IosNativeStreamWorker::stop\([^)]*\) noexcept\s*\{(.*?)\n\}",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(stop)
+        body = stop.group(1)
+        self.assertIn("state->scheduleCleanup()", body)
+        self.assertNotIn("publishStopped", body)
 
     def test_legal_source_archive_rejects_traversal_member_names(self):
         code = """
