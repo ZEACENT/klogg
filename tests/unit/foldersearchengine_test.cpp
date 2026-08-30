@@ -27,13 +27,35 @@
 #include "regularexpressionpattern.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
-#include <QSignalSpy>
+#include <QSemaphore>
 #include <QTemporaryDir>
 #include <QTextCodec>
+#include <QThread>
+
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <thread>
 
 namespace {
+
+bool waitUntil( const std::function<bool()>& predicate, int timeoutMilliseconds = 3000 )
+{
+    QElapsedTimer timer;
+    timer.start();
+    while ( !predicate() && timer.elapsed() < timeoutMilliseconds ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+        QThread::msleep( 1 );
+    }
+    QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+    return predicate();
+}
+
 QString writeFile( const QTemporaryDir& dir, const QString& name, const QByteArray& bytes )
 {
     const QString path = QDir( dir.path() ).absoluteFilePath( name );
@@ -321,14 +343,345 @@ TEST_CASE( "FolderSearchEngine emits searchStarted and searchFinished", "[folder
     const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
 
     FolderSearchEngine engine;
-    QSignalSpy startedSpy( &engine, &FolderSearchEngine::searchStarted );
-    QSignalSpy finishedSpy( &engine, &FolderSearchEngine::searchFinished );
+    std::vector<quint64> startedGenerations;
+    std::vector<quint64> finishedGenerations;
+    QObject::connect( &engine, &FolderSearchEngine::searchStarted, &engine,
+                      [ &startedGenerations ]( quint64 generation ) {
+                          startedGenerations.push_back( generation );
+                      } );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedGenerations ]( quint64 generation ) {
+                          finishedGenerations.push_back( generation );
+                      } );
     const auto gen = engine.scanSynchronously( QStringList{ path }, RegularExpressionPattern( "MATCH" ) );
 
-    REQUIRE( startedSpy.count() == 1 );
-    REQUIRE( finishedSpy.count() == 1 );
-    REQUIRE( startedSpy.takeFirst()[ 0 ].toULongLong() == gen );
-    REQUIRE( finishedSpy.takeFirst()[ 0 ].toULongLong() == gen );
+    REQUIRE( startedGenerations == std::vector<quint64>{ gen } );
+    REQUIRE( finishedGenerations == std::vector<quint64>{ gen } );
+}
+
+TEST_CASE( "FolderSearchEngine enumerates folder requests off the caller thread",
+           "[folder][enumeration][async]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
+
+    const auto callerThread = std::this_thread::get_id();
+    std::atomic<bool> ranOffCallerThread{ false };
+    std::atomic<bool> folderMatched{ false };
+    std::atomic<bool> initiallyRunning{ false };
+    std::atomic<int> enumerationCalls{ 0 };
+    FolderSearchEngine engine(
+        [ & ]( const QString& folderPath, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            ++enumerationCalls;
+            ranOffCallerThread = std::this_thread::get_id() != callerThread;
+            folderMatched = folderPath == dir.path();
+            initiallyRunning = !shouldStop();
+            return QStringList{ path };
+        } );
+
+    QStringList events;
+    QStringList snapshotPaths;
+    quint64 snapshotGeneration = 0;
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ & ]( const QStringList& filePaths, quint64 generation ) {
+                          events.append( QStringLiteral( "snapshot" ) );
+                          snapshotPaths = filePaths;
+                          snapshotGeneration = generation;
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchStarted, &engine,
+                      [ &events ]( quint64 ) {
+                          events.append( QStringLiteral( "started" ) );
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+
+    const auto generation
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( waitUntil( [ &finishedCount ] { return finishedCount > 0; } ) );
+
+    REQUIRE( enumerationCalls.load() == 1 );
+    CHECK( ranOffCallerThread.load() );
+    CHECK( folderMatched.load() );
+    CHECK( initiallyRunning.load() );
+    CHECK( snapshotPaths == QStringList{ path } );
+    CHECK( snapshotGeneration == generation );
+    REQUIRE( events.size() >= 2 );
+    CHECK( events.at( 0 ) == QStringLiteral( "snapshot" ) );
+    CHECK( events.at( 1 ) == QStringLiteral( "started" ) );
+}
+
+TEST_CASE( "FolderSearchEngine cancels stale enumeration before publishing its snapshot",
+           "[folder][enumeration][generation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    QSemaphore firstEntered;
+    std::atomic<int> enumerationCalls{ 0 };
+    std::atomic<bool> firstCanceled{ false };
+    FolderSearchEngine engine(
+        [ & ]( const QString&, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            const int call = ++enumerationCalls;
+            if ( call == 1 ) {
+                firstEntered.release();
+                while ( !shouldStop() ) {
+                    std::this_thread::yield();
+                }
+                firstCanceled = true;
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+
+    QStringList snapshotPaths;
+    quint64 snapshotGeneration = 0;
+    int snapshotCount = 0;
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ & ]( const QStringList& filePaths, quint64 generation ) {
+                          ++snapshotCount;
+                          snapshotPaths = filePaths;
+                          snapshotGeneration = generation;
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( firstEntered.tryAcquire( 1, 3000 ) );
+    const auto latestGeneration
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( waitUntil( [ & ] { return snapshotCount == 1 && finishedCount >= 2; } ) );
+
+    CHECK( firstCanceled.load() );
+    CHECK( enumerationCalls.load() == 2 );
+    CHECK( snapshotCount == 1 );
+    CHECK( snapshotPaths == QStringList{ latestPath } );
+    CHECK( snapshotGeneration == latestGeneration );
+}
+
+TEST_CASE( "FolderSearchEngine supersedes an uncooperative blocked enumeration",
+           "[folder][enumeration][generation][lifetime]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    struct BlockedEnumerationState {
+        QSemaphore firstEntered;
+        QSemaphore releaseFirst;
+        std::atomic<int> enumerationCalls{ 0 };
+        std::atomic<bool> firstReturned{ false };
+    };
+    const auto state = std::make_shared<BlockedEnumerationState>();
+    FolderSearchEngine engine(
+        [ state, latestPath ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            const int call = ++state->enumerationCalls;
+            if ( call == 1 ) {
+                state->firstEntered.release();
+                state->releaseFirst.acquire();
+                state->firstReturned = true;
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+
+    QStringList snapshotPaths;
+    quint64 snapshotGeneration = 0;
+    int snapshotCount = 0;
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ & ]( const QStringList& filePaths, quint64 generation ) {
+                          ++snapshotCount;
+                          snapshotPaths = filePaths;
+                          snapshotGeneration = generation;
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( state->firstEntered.tryAcquire( 1, 3000 ) );
+    struct ReleaseBlockedEnumeration {
+        std::shared_ptr<BlockedEnumerationState> state;
+        bool active{ true };
+        ~ReleaseBlockedEnumeration()
+        {
+            if ( active ) {
+                state->releaseFirst.release();
+            }
+        }
+    } releaseGuard{ state };
+
+    const auto latestGeneration
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( waitUntil( [ & ] { return snapshotCount == 1 && finishedCount >= 2; } ) );
+
+    CHECK_FALSE( state->firstReturned.load() );
+    CHECK( state->enumerationCalls.load() == 2 );
+    CHECK( snapshotPaths == QStringList{ latestPath } );
+    CHECK( snapshotGeneration == latestGeneration );
+
+    state->releaseFirst.release();
+    releaseGuard.active = false;
+    REQUIRE( waitUntil( [ state ] { return state->firstReturned.load(); } ) );
+}
+
+TEST_CASE( "FolderSearchEngine bounds quarantined blocked enumerations",
+           "[folder][enumeration][generation][lifetime]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    struct BoundedEnumerationState {
+        QSemaphore enteredFirst;
+        QSemaphore enteredSecond;
+        QSemaphore releaseFirst;
+        QSemaphore releaseSecond;
+        std::atomic<int> calls{ 0 };
+    };
+    const auto state = std::make_shared<BoundedEnumerationState>();
+    struct ReleaseBlockedEnumerations {
+        std::shared_ptr<BoundedEnumerationState> state;
+        ~ReleaseBlockedEnumerations()
+        {
+            state->releaseFirst.release();
+            state->releaseSecond.release();
+        }
+    } releaseGuard{ state };
+
+    FolderSearchEngine engine(
+        [ state, latestPath ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            const int call = ++state->calls;
+            if ( call == 1 ) {
+                state->enteredFirst.release();
+                state->releaseFirst.acquire();
+                return QStringList{};
+            }
+            if ( call == 2 ) {
+                state->enteredSecond.release();
+                state->releaseSecond.acquire();
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+
+    int snapshotCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ &snapshotCount ]( const QStringList&, quint64 ) {
+                          ++snapshotCount;
+                      },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( state->enteredFirst.tryAcquire( 1, 3000 ) );
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "SECOND" ) );
+    REQUIRE( state->enteredSecond.tryAcquire( 1, 3000 ) );
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+
+    QThread::msleep( 200 );
+    QCoreApplication::processEvents();
+    CHECK( state->calls.load() == 2 );
+    CHECK( snapshotCount == 0 );
+
+    state->releaseFirst.release();
+    REQUIRE( waitUntil( [ & ] { return snapshotCount == 1; } ) );
+    CHECK( state->calls.load() == 3 );
+    state->releaseSecond.release();
+}
+
+TEST_CASE( "FolderSearchEngine rejects invalid folder patterns before enumeration",
+           "[folder][enumeration][validation]" )
+{
+    std::atomic<int> enumerationCalls{ 0 };
+    FolderSearchEngine engine(
+        [ & ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            ++enumerationCalls;
+            return QStringList{};
+        } );
+
+    int snapshotCount = 0;
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ &snapshotCount ]( const QStringList&, quint64 ) {
+                          ++snapshotCount;
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( QStringLiteral( "/unused" ),
+                              RegularExpressionPattern( QStringLiteral( "[invalid" ) ) );
+    REQUIRE( waitUntil( [ &finishedCount ] { return finishedCount > 0; } ) );
+
+    CHECK( enumerationCalls.load() == 0 );
+    CHECK( snapshotCount == 0 );
+}
+
+TEST_CASE( "FolderSearchEngine clears stale results when folder enumeration is unavailable",
+           "[folder][enumeration][validation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString path = writeFile( dir, "a.log", QByteArray( "MATCH\n" ) );
+
+    FolderSearchEngine engine;
+    engine.scanSynchronously( QStringList{ path }, RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( engine.matchCount() == 1 );
+    REQUIRE( engine.takeResults().size() == 1 );
+
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( waitUntil( [ &finishedCount ] { return finishedCount > 0; } ) );
+
+    CHECK( engine.matchCount() == 0 );
+    CHECK( engine.takeResults().empty() );
+}
+
+TEST_CASE( "FolderSearchEngine destruction does not wait for blocked enumeration",
+           "[folder][enumeration][lifetime]" )
+{
+    struct BlockingEnumeration {
+        QSemaphore entered;
+        QSemaphore release;
+        std::atomic<bool> cancellationObserved{ false };
+        std::atomic<bool> returned{ false };
+    };
+    const auto state = std::make_shared<BlockingEnumeration>();
+
+    auto engine = std::make_unique<FolderSearchEngine>(
+        [ state ]( const QString&, const FolderSearchEngine::StopPredicate& shouldStop ) {
+            state->entered.release();
+            state->release.acquire();
+            state->cancellationObserved = shouldStop();
+            state->returned = true;
+            return QStringList{};
+        } );
+    engine->startFolderSearch( QStringLiteral( "/blocked" ),
+                               RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( state->entered.tryAcquire( 1, 3000 ) );
+
+    QElapsedTimer destructionTimer;
+    destructionTimer.start();
+    engine.reset();
+    CHECK( destructionTimer.elapsed() < 1000 );
+
+    state->release.release();
+    REQUIRE( waitUntil( [ &state ] { return state->returned.load(); } ) );
+    CHECK( state->cancellationObserved.load() );
 }
 
 TEST_CASE( "FolderSearchEngine stale generation produces no new results", "[folder]" )

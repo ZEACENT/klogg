@@ -48,6 +48,7 @@
 #include <exception>
 
 #include <iterator>
+#include <optional>
 #include <qaction.h>
 #include <qapplication.h>
 
@@ -62,58 +63,64 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QInputDialog>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
-#include <QListWidget>
 #include <QListView>
+#include <QListWidget>
 #include <QMenuBar>
-#include <QPushButton>
-#include <QVBoxLayout>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressDialog>
+#include <QPointer>
+#include <QPushButton>
 #include <QResource>
 #include <QScreen>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSortFilterProxyModel>
+#include <QStatusBar>
 #include <QStringListModel>
 #include <QTemporaryFile>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolTip>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QVBoxLayout>
 #include <QWindow>
 
 #include "mainwindow.h"
 
+#include "abstractlogview.h"
+#include "adbliveservices.h"
 #include "adblogcatdialog.h"
 #include "adblogcatsource.h"
+#include "livelogcontroller.h"
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
-#include "foldercrawlerwidget.h"
-#include "abstractlogview.h"
-#include "folderenumeration.h"
 #include "dispatch_to.h"
 #include "downloader.h"
-#include "filterfavoritesmodel.h"
+#include "droppathclassification.h"
 #include "encodings.h"
 #include "favoritefiles.h"
+#include "filterfavoritesmodel.h"
+#include "foldercrawlerwidget.h"
+#include "folderenumeration.h"
 #include "highlightersdialog.h"
 #include "highlightersmenu.h"
-#include "issuereporter.h"
+#include "iosliveservices.h"
 #include "ioslogdialog.h"
+#include "issuereporter.h"
 #include "klogg_version.h"
 #include "logger.h"
 #include "mainwindowtext.h"
 #include "mergefileorder.h"
-#include "droppathclassification.h"
 #include "openfilehelper.h"
-#include "pathutils.h"
 #include "optionsdialog.h"
+#include "pathutils.h"
 #include "predefinedfilters.h"
 #include "predefinedfiltersdialog.h"
 #include "progress.h"
@@ -123,8 +130,8 @@
 #include "sessioninfo.h"
 #include "shortcuts.h"
 #include "styles.h"
-#include "tabgroup.h"
 #include "tabbedcrawlerwidget.h"
+#include "tabgroup.h"
 #include "uimessage.h"
 
 namespace {
@@ -139,8 +146,30 @@ constexpr int SessionPersistenceDebounceMs = 750;
 
 static constexpr auto ClipboardMaxTry = 5;
 
+std::optional<const char*>
+filterFavoritesImportWarningSource( PredefinedFiltersCollection::LoadStatus status )
+{
+    using LoadStatus = PredefinedFiltersCollection::LoadStatus;
+    switch ( status ) {
+    case LoadStatus::Success:
+        return std::nullopt;
+    case LoadStatus::MissingFile:
+        return QT_TRANSLATE_NOOP( "MainWindow",
+                                  "The selected filter favorites file does not exist." );
+    case LoadStatus::MalformedFile:
+        return QT_TRANSLATE_NOOP( "MainWindow",
+                                  "The selected file is not a valid filter favorites file." );
+    case LoadStatus::UnsupportedVersion:
+        return QT_TRANSLATE_NOOP(
+            "MainWindow",
+            "The selected filter favorites file was created by a newer version of klogg." );
+    }
+
+    Q_UNREACHABLE();
+}
+
 class ScopedMainWindowShortcutSuspender {
-  public:
+public:
     explicit ScopedMainWindowShortcutSuspender( QWidget* window )
     {
         if ( !window ) {
@@ -180,7 +209,7 @@ class ScopedMainWindowShortcutSuspender {
         }
     }
 
-  private:
+private:
     struct ActionShortcuts {
         QAction* action = nullptr;
         QList<QKeySequence> shortcuts;
@@ -196,7 +225,26 @@ QTranslator MainWindow::mTranslator;
 QTranslator MainWindow::mQtTranslator;
 
 MainWindow::MainWindow( WindowSession session )
+    : MainWindow( std::move( session ), nullptr, nullptr )
+{
+}
+
+MainWindow::MainWindow( WindowSession session, AdbLiveServices& adbLiveServices )
+    : MainWindow( std::move( session ), &adbLiveServices, nullptr )
+{
+}
+
+MainWindow::MainWindow( WindowSession session, AdbLiveServices& adbLiveServices,
+                        klogg::livecapture::ios::IosLiveServices& iosLiveServices )
+    : MainWindow( std::move( session ), &adbLiveServices, &iosLiveServices )
+{
+}
+
+MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
+                        klogg::livecapture::ios::IosLiveServices* iosLiveServices )
     : session_( std::move( session ) )
+    , adbLiveServices_( adbLiveServices )
+    , iosLiveServices_( iosLiveServices )
     , mainIcon_()
     , iconLoader_( this )
     , signalMux_()
@@ -263,12 +311,6 @@ MainWindow::MainWindow( WindowSession session )
     signalMux_.connect( SIGNAL( filteredViewChanged() ), this,
                         SLOT( handleFilteredViewChanged() ) );
 
-    // Reconnect countdown timer (fires every second to update the info line)
-    reconnectCountdownTimer_ = new QTimer( this );
-    reconnectCountdownTimer_->setInterval( 1000 );
-    connect( reconnectCountdownTimer_, &QTimer::timeout,
-             this, &MainWindow::updateReconnectCountdown );
-
     // Configure the main tabbed widget
     mainTabWidget_.setDocumentMode( true );
     mainTabWidget_.setMovable( true );
@@ -295,8 +337,7 @@ MainWindow::MainWindow( WindowSession session )
     // into a single write once activity settles. closeEvent flushes directly.
     sessionPersistenceTimer_.setSingleShot( true );
     sessionPersistenceTimer_.setInterval( SessionPersistenceDebounceMs );
-    connect( &sessionPersistenceTimer_, &QTimer::timeout, this,
-             &MainWindow::persistSessionState );
+    connect( &sessionPersistenceTimer_, &QTimer::timeout, this, &MainWindow::persistSessionState );
 
     // Establish the QuickFindWidget and mux ( to send requests from the
     // QFWidget to the right window )
@@ -359,6 +400,26 @@ void MainWindow::reloadSession()
     int current_file_index = -1;
     const auto openedFiles
         = session_.restore( [] { return new CrawlerWidget(); }, &current_file_index );
+
+    // Live tabs this version refuses to restore (structured parse refusals,
+    // e.g. sessions saved with raw command-line options) are reported instead
+    // of silently dropped. Deferred so startup restore can precede show().
+    const auto restoreRejections = session_.lastRestoreRejections();
+    if ( !restoreRejections.isEmpty() ) {
+        QTimer::singleShot( 0, this, [ this, restoreRejections ] {
+            QMessageBox::warning( this, tr( "Live log sessions" ),
+                                  restoreRejections.join( QStringLiteral( "\n\n" ) ) );
+        } );
+    }
+
+    // Non-error live-tab notices (one-time migrations, compatibility-transport
+    // read-only presentation) go through the non-modal status bar: they are
+    // informational, deduplicated per capture id by the session, and must
+    // never block startup behind a dialog.
+    const auto restoreNotices = session_.lastRestoreNotices();
+    if ( !restoreNotices.isEmpty() ) {
+        statusBar()->showMessage( restoreNotices.join( QStringLiteral( "  " ) ), 15000 );
+    }
 
     for ( const auto& open_file : openedFiles ) {
         const auto& documentInfo = open_file.first;
@@ -552,8 +613,7 @@ void MainWindow::reTranslateUI()
     generateDumpAction->setStatusTip( transAction( action::generateDumpStatusTip ) );
 
     checkForNewVersionAction->setText( transAction( action::checkForNewVersionText ) );
-    checkForNewVersionAction->setStatusTip(
-        transAction( action::checkForNewVersionStatusTip ) );
+    checkForNewVersionAction->setStatusTip( transAction( action::checkForNewVersionStatusTip ) );
 
     showScratchPadAction->setText( transAction( action::showScratchPadText ) );
     showScratchPadAction->setStatusTip( transAction( action::showScratchPadStatusTip ) );
@@ -697,7 +757,8 @@ void MainWindow::createActions()
     }
 
     recentFoldersGroup = new QActionGroup( this );
-    connect( recentFoldersGroup, &QActionGroup::triggered, this, &MainWindow::openFolderFromRecent );
+    connect( recentFoldersGroup, &QActionGroup::triggered, this,
+             &MainWindow::openFolderFromRecent );
     for ( auto i = 0u; i < recentFolderActions.size(); ++i ) {
         recentFolderActions[ i ] = new QAction( this );
         connect( recentFolderActions[ i ], &QAction::hovered,
@@ -934,8 +995,7 @@ void MainWindow::createActions()
     mergeTabsAction = new QAction( tr( action::mergeTabsText ), this );
     mergeTabsAction->setObjectName( QStringLiteral( "mergeTabsAction" ) );
     mergeTabsAction->setStatusTip( tr( action::mergeTabsStatusTip ) );
-    connect( mergeTabsAction, &QAction::triggered, this,
-             [ this ]( auto ) { this->mergeTabs(); } );
+    connect( mergeTabsAction, &QAction::triggered, this, [ this ]( auto ) { this->mergeTabs(); } );
 
     encodingGroup = new QActionGroup( this );
     connect( encodingGroup, &QActionGroup::triggered, this, &MainWindow::encodingChanged );
@@ -1072,7 +1132,6 @@ void MainWindow::loadIcons()
     showScratchPadAction->setIcon( iconLoader_.load( "icons8-create" ) );
     addToFavoritesAction->setIcon( iconLoader_.load( "icons8-star" ) );
     addToFavoritesMenuAction->setIcon( iconLoader_.load( "icons8-star" ) );
-
 }
 
 void MainWindow::createMenus()
@@ -1363,8 +1422,8 @@ void MainWindow::openFolderByPath( const QString& folderPath )
         return;
     }
 
-    auto* view = session_.openFolder(
-        folderPath, std::vector<QString>( filePaths.begin(), filePaths.end() ) );
+    auto* view = session_.openFolder( folderPath,
+                                      std::vector<QString>( filePaths.begin(), filePaths.end() ) );
     if ( view == nullptr ) {
         return;
     }
@@ -1381,7 +1440,13 @@ void MainWindow::openFolderByPath( const QString& folderPath )
 
 void MainWindow::openAdbLogcat()
 {
-    AdbLogcatDialog dialog( this );
+    if ( adbLiveServices_ == nullptr ) {
+        QMessageBox::warning( this, tr( "Open ADB Logcat" ),
+                              tr( "Managed ADB services are unavailable." ) );
+        return;
+    }
+
+    AdbLogcatDialog dialog( adbLiveServices_->trackedDeviceProvider(), {}, this );
     if ( dialog.exec() == QDialog::Accepted ) {
         openAdbLogcatSource( dialog.sessionData(), true );
     }
@@ -1390,7 +1455,12 @@ void MainWindow::openAdbLogcat()
 void MainWindow::openIosLogStream()
 {
 #ifdef Q_OS_MAC
-    IosLogDialog dialog( this );
+    if ( iosLiveServices_ == nullptr ) {
+        QMessageBox::warning( this, tr( "Open iOS Log Stream" ),
+                              tr( "Managed native iOS services are unavailable." ) );
+        return;
+    }
+    IosLogDialog dialog( iosLiveServices_->catalogProvider(), this );
     if ( dialog.exec() == QDialog::Accepted ) {
         openAdbLogcatSource( dialog.sessionData(), true );
     }
@@ -1616,14 +1686,15 @@ void MainWindow::clearLog()
 
         if ( userAction == QMessageBox::Yes ) {
             if ( !adbSource->clearAndRestart() ) {
-                QMessageBox::critical(
-                    this,
-                    isIosLogStream ? tr( "klogg - clear iOS log stream" )
-                                   : tr( "klogg - clear logcat buffer" ),
-                    adbSource->lastError().isEmpty()
-                        ? ( isIosLogStream ? tr( "Failed to clear iOS log stream" )
-                                           : tr( "Failed to clear logcat buffer" ) )
-                        : adbSource->lastError() );
+                auto failureMessage = adbSource->lastError();
+                if ( failureMessage.isEmpty() ) {
+                    failureMessage = isIosLogStream ? tr( "Failed to clear iOS log stream" )
+                                                    : tr( "Failed to clear logcat buffer" );
+                }
+                QMessageBox::critical( this,
+                                       isIosLogStream ? tr( "klogg - clear iOS log stream" )
+                                                      : tr( "klogg - clear logcat buffer" ),
+                                       failureMessage );
             }
         }
         return;
@@ -1655,16 +1726,15 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
     auto suggestedPath = adbSource->sessionData().boundOutputFile;
     if ( suggestedPath.isEmpty() ) {
-        suggestedPath
-            = QDir::home().filePath( session_.getDisplayName( crawler ) + QStringLiteral( ".log" ) );
+        suggestedPath = QDir::home().filePath( session_.getDisplayName( crawler )
+                                               + QStringLiteral( ".log" ) );
     }
 
     QString outputPath;
     {
         ScopedMainWindowShortcutSuspender shortcutSuspender( this );
-        outputPath = QFileDialog::getSaveFileName(
-            this, tr( "Save live log" ), suggestedPath,
-            tr( "Log files (*.log *.txt);;All files (*)" ) );
+        outputPath = QFileDialog::getSaveFileName( this, tr( "Save live log" ), suggestedPath,
+                                                   tr( "Log files (*.log *.txt);;All files (*)" ) );
     }
     if ( outputPath.isEmpty() ) {
         return;
@@ -1685,16 +1755,15 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
 void MainWindow::disconnectCurrentSource()
 {
-    stopReconnectCountdown();
-
     auto* crawler = currentCrawlerWidget();
     if ( !crawler || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
         return;
     }
 
-    if ( auto* adbSource = session_.getAdbLogcatSource( crawler ) ) {
-        adbSource->disconnectSource();
+    if ( auto* controller = session_.getLiveLogController( crawler ) ) {
+        controller->stopRequested();
         updateMenuBarFromDocument( crawler );
+        scheduleSessionPersistence();
     }
 }
 
@@ -1705,11 +1774,10 @@ void MainWindow::reconnectCurrentSource()
         return;
     }
 
-    if ( auto* adbSource = session_.getAdbLogcatSource( crawler ) ) {
-        if ( !adbSource->reconnectSource() && !adbSource->lastError().isEmpty() ) {
-            QMessageBox::warning( this, tr( "Reconnect source" ), adbSource->lastError() );
-        }
+    if ( auto* source = session_.getAdbLogcatSource( crawler ) ) {
+        source->reconnectSource();
         updateMenuBarFromDocument( crawler );
+        scheduleSessionPersistence();
     }
 }
 
@@ -1826,9 +1894,8 @@ void MainWindow::editPredefinedFilters( const QString& newFilter )
 
 void MainWindow::importFilterFavorites()
 {
-    const auto file
-        = QFileDialog::getOpenFileName( this, tr( "Select file to import" ), "",
-                                        tr( "Filter favorites (*.conf);;All files (*)" ) );
+    const auto file = QFileDialog::getOpenFileName(
+        this, tr( "Select file to import" ), "", tr( "Filter favorites (*.conf);;All files (*)" ) );
 
     if ( !file.isEmpty() ) {
         importFilterFavoritesFromFile( file );
@@ -1838,9 +1905,9 @@ void MainWindow::importFilterFavorites()
 void MainWindow::importFilterFavoritesFromFile( const QString& file )
 {
     const auto result = PredefinedFiltersCollection::tryLoadFromFile( file );
-    if ( result.status != PredefinedFiltersCollection::LoadStatus::Success ) {
-        klogg::ui::warning( this, tr( "klogg" ),
-                            tr( "Unable to import filter favorites from the selected file." ) );
+    if ( const auto warningSource = filterFavoritesImportWarningSource( result.status );
+         warningSource.has_value() ) {
+        klogg::ui::warning( this, tr( "klogg" ), tr( *warningSource ) );
         return;
     }
 
@@ -1921,11 +1988,13 @@ void MainWindow::about()
         tr( "<h2>klogg %1</h2>"
             "<p>A fast, advanced log explorer.</p>"
             "<p>Built %2 from %3</p>"
-            "<p><a href=\"https://github.com/ZEACENT/klogg\">https://github.com/ZEACENT/klogg</a></p>"
+            "<p><a "
+            "href=\"https://github.com/ZEACENT/klogg\">https://github.com/ZEACENT/klogg</a></p>"
             "<p>This is fork of glogg</p>"
             "<p><a href=\"http://glogg.bonnefon.org/\">http://glogg.bonnefon.org/</a></p>"
             "<p>Using icons from <a href=\"https://icons8.com\">icons8.com</a> project</p>"
-            "<p>Copyright &copy; 2020-%4 ZEACENT, Nicolas Bonnefon, Anton Filimonov and other contributors</p>"
+            "<p>Copyright &copy; 2020-%4 ZEACENT, Nicolas Bonnefon, Anton Filimonov and other "
+            "contributors</p>"
             "<p>You may modify and redistribute the program under the terms of the GPL (version 3 "
             "or later).</p>" )
             .arg( kloggVersion(), kloggBuildDate(), kloggCommit(), kloggBuildYear() ) );
@@ -2029,7 +2098,8 @@ void MainWindow::changeFollowMode( bool follow )
     const auto currentCrawler = currentCrawlerWidget();
     const auto isLiveSource
         = currentCrawler && session_.getDocumentKind( currentCrawler ) == DocumentKind::AdbLogcat;
-    if ( follow && !isLiveSource && !( config.nativeFileWatchEnabled() || config.pollingEnabled() ) ) {
+    if ( follow && !isLiveSource
+         && !( config.nativeFileWatchEnabled() || config.pollingEnabled() ) ) {
         LOG_WARNING << "File watch disabled in settings";
     }
 
@@ -2207,7 +2277,8 @@ void MainWindow::handleFilteredViewChanged()
         // not a CrawlerWidget. registerSelector(nullptr) is the safe folder
         // behavior (quickfindmux.cpp:51 early-returns); the folder's own
         // SearchToolbar is unaffected.
-        auto* crawler_widget = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( currentIndex ) );
+        auto* crawler_widget
+            = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( currentIndex ) );
         if ( crawler_widget != nullptr ) {
             quickFindMux_.registerSelector( crawler_widget );
         }
@@ -2277,11 +2348,6 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
     assert( widget );
 
-    // Stop reconnect countdown if the closing tab is the countdown target
-    if ( widget == reconnectCountdownCrawler_ ) {
-        stopReconnectCountdown();
-    }
-
     const auto documentId = session_.getDocumentId( widget );
     const auto displayName = session_.getDisplayName( widget );
     const auto associatedPath = session_.getAssociatedPath( widget );
@@ -2325,10 +2391,15 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
     }
 
     if ( documentKind == DocumentKind::AdbLogcat ) {
+        if ( auto* controller = session_.getLiveLogController( widget ) ) {
+            controller->stopRequested();
+        }
         if ( auto* adbSource = session_.getAdbLogcatSource( widget ) ) {
-            adbSource->disconnectSource();
-            // Preserve captures during app shutdown so restored ADB tabs keep their history.
-            if ( initiator == ActionInitiator::User && !session_.exitRequested() ) {
+            // Preserve captures only while this window remains in the shutdown
+            // session. User-closed tabs and discarded multi-window sessions are final.
+            const bool discardsCapture = initiator == ActionInitiator::User
+                                         || initiator == ActionInitiator::WindowDiscard;
+            if ( discardsCapture && !session_.exitRequested() ) {
                 adbSource->deleteCaptureFiles();
             }
         }
@@ -2367,11 +2438,7 @@ void MainWindow::currentTabChanged( int index )
             updateTitleBar( session_.getDisplayName( crawler_widget ) );
             updateFavoritesMenu();
 
-            // Update infoLine when switching to a tab that isn't the countdown target
-            if ( reconnectCountdownTimer_->isActive()
-                 && crawler_widget != reconnectCountdownCrawler_ ) {
-                updateInfoLine();
-            }
+            updateInfoLine();
 
             editMenu->setEnabled( true );
         }
@@ -2524,7 +2591,8 @@ void MainWindow::currentTabChanged( int index )
     scheduleSessionPersistence();
 }
 
-void MainWindow::changeQFPattern( const QString& newPattern, bool ignoreCase, bool isRegex, bool isWholeWord )
+void MainWindow::changeQFPattern( const QString& newPattern, bool ignoreCase, bool isRegex,
+                                  bool isWholeWord )
 {
     quickFindWidget_.changeDisplayedPattern( newPattern, ignoreCase, isRegex, isWholeWord );
 }
@@ -2583,14 +2651,17 @@ void MainWindow::closeEvent( QCloseEvent* event )
         this->hide();
     }
     else {
-        session_.close();
+        // The last window remains persisted for normal application shutdown;
+        // closing one of several windows removes that session permanently.
+        const bool preserveWindowSession = session_.close();
 
         shutdownInProgress_ = true;
         suspendSessionPersistence_ = true;
         writeSettings();
         TabGroupManager::get().save();
 
-        closeAll( ActionInitiator::App );
+        closeAll( preserveWindowSession ? ActionInitiator::App
+                                         : ActionInitiator::WindowDiscard );
         trayIcon_->hide();
         Q_EMIT windowClosed();
 
@@ -2755,9 +2826,9 @@ bool MainWindow::extractAndLoadFile( const QString& fileName )
         auto tempFile = new QTemporaryFile(
             this->tempDir_.filePath( QFileInfo( fileName ).fileName() ), this );
 
-        const bool decompressOk = tempFile->open()
-                                  && decompressor.decompress( fileName, tempFile,
-                                                              decompressInterrupt );
+        const bool decompressOk
+            = tempFile->open()
+              && decompressor.decompress( fileName, tempFile, decompressInterrupt );
         const bool decompressAccepted = decompressOk && !progressDialog.exec();
 
         // Drain stale Cocoa events while the dialog's NSWindow is still alive.
@@ -2919,8 +2990,14 @@ bool MainWindow::loadFile( const QString& fileName, bool followFile )
 
 bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, bool startConnected )
 {
-    CrawlerWidget* crawlerWidget = static_cast<CrawlerWidget*>(
-        session_.openAdbLogcat( sessionData, []() { return new CrawlerWidget(); }, startConnected ) );
+    auto* crawlerWidget = dynamic_cast<CrawlerWidget*>( session_.openAdbLogcat(
+        sessionData,
+        []() {
+            // Ownership transfers to Session/openAdbLogcat.
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            return new CrawlerWidget();
+        },
+        startConnected ) );
 
     if ( !crawlerWidget ) {
         return false;
@@ -2931,9 +3008,10 @@ bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, b
     const auto toolTip = session_.getAssociatedPath( crawlerWidget ).isEmpty()
                              ? session_.getDisplayName( crawlerWidget )
                              : session_.getAssociatedPath( crawlerWidget );
-    const auto index = mainTabWidget_.addCrawler(
-        crawlerWidget, session_.getDocumentId( crawlerWidget ), session_.getDisplayName( crawlerWidget ),
-        toolTip );
+    const auto index
+        = mainTabWidget_.addCrawler( crawlerWidget, session_.getDocumentId( crawlerWidget ),
+                                     session_.getDisplayName( crawlerWidget ), toolTip,
+                                     session_.getAssociatedPath( crawlerWidget ) );
     mainTabWidget_.setCurrentIndex( index );
 
     registerAdbLogcatSource( crawlerWidget );
@@ -2943,10 +3021,15 @@ bool MainWindow::openAdbLogcatSource( const AdbLogcatSessionData& sessionData, b
     updateOpenedFilesMenu();
     scheduleSessionPersistence();
 
-    if ( auto* adbSource = session_.getAdbLogcatSource( crawlerWidget );
-         adbSource != nullptr && adbSource->state() == AdbLogcatSource::State::Error
+    const auto* controller = session_.getLiveLogController( crawlerWidget );
+    const auto* adbSource = session_.getAdbLogcatSource( crawlerWidget );
+    if ( controller != nullptr && adbSource != nullptr
+         && klogg::livecapture::projectLiveState( controller->snapshot() ).status
+                == klogg::livecapture::PresentationStatus::Failed
          && !adbSource->lastError().isEmpty() ) {
-        QMessageBox::warning( this, tr( "Open ADB Logcat" ), adbSource->lastError() );
+        // This shared entry point serves both Android and iOS live sources;
+        // the dialog title stays source-neutral.
+        QMessageBox::warning( this, tr( "Live log source error" ), adbSource->lastError() );
     }
 
     return true;
@@ -3051,37 +3134,96 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
         return;
     }
 
-    auto* source = session_.getAdbLogcatSource( crawler );
+    const auto* controller = session_.getLiveLogController( crawler );
     const auto displayName = session_.getDisplayName( crawler );
     const auto baseTip = session_.getAssociatedPath( crawler ).isEmpty()
                              ? displayName
                              : session_.getAssociatedPath( crawler );
 
     QString toolTip = baseTip;
-    if ( source ) {
-        const auto state = source->state();
-        LiveTabStatus liveStatus = LiveTabStatus::Connected;
-        if ( state == AdbLogcatSource::State::Error ) {
-            if ( source->isAutoReconnectActive() ) {
-                liveStatus = LiveTabStatus::Reconnecting;
+    LiveTabStatus liveStatus = LiveTabStatus::Disconnected;
+    if ( controller != nullptr ) {
+        const auto& snapshot = controller->snapshot();
+        const auto projection = klogg::livecapture::projectLiveState( snapshot );
+        switch ( projection.status ) {
+        case klogg::livecapture::PresentationStatus::Connected:
+            liveStatus = LiveTabStatus::Connected;
+            break;
+        case klogg::livecapture::PresentationStatus::RetryWait:
+            liveStatus = LiveTabStatus::Reconnecting;
+            if ( projection.retryAttempt.has_value() ) {
                 toolTip = tr( "%1\nReconnecting... (attempt %2)" )
                               .arg( baseTip )
-                              .arg( source->reconnectAttempt() + 1 );
+                              .arg( *projection.retryAttempt );
             }
-            else {
-                liveStatus = LiveTabStatus::Error;
-                if ( !source->lastError().isEmpty() ) {
-                    toolTip = tr( "%1\nError: %2" ).arg( baseTip, source->lastError() );
-                }
+            break;
+        case klogg::livecapture::PresentationStatus::Failed:
+            liveStatus = LiveTabStatus::Error;
+            if ( !projection.failureMessage.empty() ) {
+                toolTip = tr( "%1\nError: %2" )
+                              .arg( baseTip,
+                                    QString::fromStdString( projection.failureMessage ) );
             }
-        }
-        else if ( state == AdbLogcatSource::State::Disconnected ) {
+            break;
+        case klogg::livecapture::PresentationStatus::AwaitingUser:
             liveStatus = LiveTabStatus::Disconnected;
+            if ( projection.awaitingUserReason.has_value() ) {
+                QString action;
+                switch ( *projection.awaitingUserReason ) {
+                case klogg::livecapture::AwaitingUserReason::Authorize:
+                    action = tr( "Authorize this computer on the device." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Pair:
+                    action = tr( "Pair the device with this computer." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Trust:
+                    action = tr( "Trust this computer on the device." );
+                    break;
+                case klogg::livecapture::AwaitingUserReason::Unlock:
+                    action = tr( "Unlock the device." );
+                    break;
+                }
+                toolTip = tr( "%1\nAction required: %2" ).arg( baseTip, action );
+            }
+            break;
+        case klogg::livecapture::PresentationStatus::Stopped:
+        case klogg::livecapture::PresentationStatus::WaitingForInfrastructure:
+        case klogg::livecapture::PresentationStatus::WaitingForDevice:
+        case klogg::livecapture::PresentationStatus::OpeningStream:
+        case klogg::livecapture::PresentationStatus::Stopping:
+            liveStatus = LiveTabStatus::Disconnected;
+            break;
         }
-        mainTabWidget_.setLiveTabStatus( tabIndex, liveStatus );
+
+        if ( projection.outputBinding == klogg::livecapture::OutputBindingState::Degraded ) {
+            liveStatus = LiveTabStatus::Error;
+            if ( snapshot.outputBindingError.has_value() ) {
+                QString outputError;
+                const auto& error = *snapshot.outputBindingError;
+                if ( error.code == "output-open-failed" ) {
+                    outputError = tr( "The bound capture output could not be opened." );
+                }
+                else if ( error.code == "output-write-failed" ) {
+                    outputError = tr( "The bound capture output could not be written." );
+                }
+                else if ( error.code == "output-flush-failed" ) {
+                    outputError = tr( "The bound capture output could not be flushed." );
+                }
+                else if ( error.code == "output-reopen-failed" ) {
+                    outputError
+                        = tr( "The bound capture output could not be reopened after clearing." );
+                }
+                else {
+                    outputError = QString::fromStdString( error.message );
+                }
+                toolTip = tr( "%1\nOutput error: %2" ).arg( toolTip, outputError );
+            }
+        }
     }
 
-    mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip );
+    mainTabWidget_.setLiveTabStatus( tabIndex, liveStatus );
+    mainTabWidget_.updateCrawler( tabIndex, displayName, toolTip,
+                                  session_.getAssociatedPath( crawler ) );
 }
 
 void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
@@ -3091,104 +3233,53 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
     }
 
     auto* adbSource = session_.getAdbLogcatSource( crawler );
-    if ( !adbSource ) {
+    auto* controller = session_.getLiveLogController( crawler );
+    if ( !adbSource || !controller ) {
         return;
     }
 
-    // Apply auto-reconnect and capture limit configuration from session data
-    // (populated by the open dialog or session restore).
-    const auto& sessionData = adbSource->sessionData();
-    adbSource->setAutoReconnectEnabled( sessionData.autoReconnectEnabled );
-    adbSource->setAutoReconnectMaxAttempts( sessionData.maxReconnectAttempts );
-    adbSource->setCaptureLimits( sessionData.captureMaxFileSize,
-                                 sessionData.captureBackupCount );
+    const QPointer<MainWindow> windowGuard( this );
+    const QPointer<CrawlerWidget> crawlerGuard( crawler );
+    controller->setChangedCallback( [ windowGuard, crawlerGuard ] {
+        if ( windowGuard == nullptr || crawlerGuard == nullptr ) {
+            return;
+        }
+        if ( windowGuard->currentCrawlerWidget() == crawlerGuard ) {
+            windowGuard->updateMenuBarFromDocument( crawlerGuard );
+            windowGuard->updateInfoLine();
+        }
+        windowGuard->updateOpenedFilesMenu();
+        windowGuard->updateLiveTabAppearance( crawlerGuard );
+    } );
 
-    connect( adbSource, &AdbLogcatSource::stateChanged, this,
-             [ this, crawler ]( AdbLogcatSource::State state ) {
-                 if ( currentCrawlerWidget() == crawler ) {
-                     updateMenuBarFromDocument( crawler );
-                     if ( state == AdbLogcatSource::State::Connected ) {
-                         stopReconnectCountdown();
-                     }
-                     updateInfoLine();
+    connect( adbSource, &AdbLogcatSource::clearFailed, this,
+             [ windowGuard, crawlerGuard ]( const QString& error ) {
+                 if ( windowGuard == nullptr || crawlerGuard == nullptr ) {
+                     return;
                  }
-                 updateOpenedFilesMenu();
-                 updateLiveTabAppearance( crawler );
-             } );
-    connect( adbSource, &AdbLogcatSource::errorOccurred, this,
-             [ this, crawler ]( const QString& ) {
-                 if ( currentCrawlerWidget() == crawler ) {
-                     updateInfoLine();
+                 const auto* source
+                     = windowGuard->session_.getAdbLogcatSource( crawlerGuard.data() );
+                 if ( !source ) {
+                     return;
                  }
-                 updateLiveTabAppearance( crawler );
-             } );
-    connect( adbSource, &AdbLogcatSource::reconnectAttemptStarted, this,
-             [ this, crawler ]( int ) {
-                 updateLiveTabAppearance( crawler );
-                 const auto* source = session_.getAdbLogcatSource( crawler );
-                 if ( source ) {
-                     startReconnectCountdown( crawler, source->reconnectRemainingMs() );
+
+                 const auto isIosLogStream
+                     = source->sessionData().sourceType == LiveLogSourceType::IosLogStream;
+                 auto displayedError = error;
+                 if ( displayedError.isEmpty() ) {
+                     displayedError
+                         = isIosLogStream
+                               ? MainWindow::tr( "Failed to clear iOS log stream" )
+                               : MainWindow::tr( "Failed to clear logcat buffer" );
                  }
+                 QMessageBox::critical(
+                     windowGuard.data(),
+                     isIosLogStream ? MainWindow::tr( "klogg - clear iOS log stream" )
+                                    : MainWindow::tr( "klogg - clear logcat buffer" ),
+                     displayedError );
              } );
 
-    // Sync tab appearance immediately in case the source is already
-    // in Error or Disconnected state (e.g. during session restore).
     updateLiveTabAppearance( crawler );
-}
-
-void MainWindow::startReconnectCountdown( CrawlerWidget* crawler, int delayMs )
-{
-    reconnectCountdownCrawler_ = crawler;
-    reconnectCountdownTotalMs_ = delayMs;
-    reconnectCountdownEndMs_ = QDateTime::currentMSecsSinceEpoch() + delayMs;
-    reconnectCountdownTimer_->start();
-    updateReconnectCountdown(); // immediate first update
-}
-
-void MainWindow::stopReconnectCountdown()
-{
-    if ( !reconnectCountdownTimer_->isActive() ) {
-        return;
-    }
-    reconnectCountdownTimer_->stop();
-    reconnectCountdownCrawler_ = nullptr;
-    reconnectCountdownEndMs_ = 0;
-    reconnectCountdownTotalMs_ = 0;
-    infoLine->hideGauge();
-    // Restore normal infoLine if the current tab matches
-    if ( currentCrawlerWidget() ) {
-        updateInfoLine();
-    }
-}
-
-void MainWindow::updateReconnectCountdown()
-{
-    if ( !reconnectCountdownCrawler_
-         || currentCrawlerWidget() != reconnectCountdownCrawler_ ) {
-        return;
-    }
-
-    const auto now = QDateTime::currentMSecsSinceEpoch();
-    const auto remainingMs = static_cast<int>( reconnectCountdownEndMs_ - now );
-    const auto displayName = session_.getDisplayName( reconnectCountdownCrawler_ );
-
-    if ( remainingMs <= 0 ) {
-        // Timer expired — the reconnect attempt is about to fire.
-        // Keep showing "Reconnecting..." until state changes.
-        infoLine->setText( QDir::toNativeSeparators( displayName )
-                           + tr( " - Reconnecting..." ) );
-        infoLine->displayGauge( 100 );
-        return;
-    }
-
-    const auto remainingSec = ( remainingMs + 999 ) / 1000; // round up
-    infoLine->setText( QDir::toNativeSeparators( displayName )
-                       + tr( " - Reconnect in %1 seconds..." ).arg( remainingSec ) );
-
-    // Gauge: percentage of delay elapsed (fills left-to-right as time passes)
-    const auto elapsedMs = reconnectCountdownTotalMs_ - remainingMs;
-    const auto pct = static_cast<int>( elapsedMs * 100 / reconnectCountdownTotalMs_ );
-    infoLine->displayGauge( pct );
 }
 
 // Updates the actions for the recent files.
@@ -3247,9 +3338,8 @@ void MainWindow::updateRecentFolderActions()
             const auto actionIndex = static_cast<size_t>( j );
             if ( j < recent_folders_max_items ) {
                 int key = j + ( ( j < 9 ) ? 0x31 : ( 0x61 - 9 ) ); // shortcuts: 1..9 next a,b...
-                QString text = tr( "&%1 %2" )
-                                   .arg( QChar( key ) )
-                                   .arg( strippedName( recent_folders[ j ] ) );
+                QString text
+                    = tr( "&%1 %2" ).arg( QChar( key ) ).arg( strippedName( recent_folders[ j ] ) );
                 recentFolderActions[ actionIndex ]->setText( text );
                 recentFolderActions[ actionIndex ]->setToolTip( recent_folders[ j ] );
                 recentFolderActions[ actionIndex ]->setData( recent_folders[ j ] );
@@ -3303,13 +3393,18 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
     addToFavoritesMenuAction->setEnabled( isFileDocument );
     saveCurrentLiveLogMenu->setEnabled( isLiveDocument );
 
-    auto* adbSource = isLiveDocument ? session_.getAdbLogcatSource( crawler ) : nullptr;
-    const auto sourceState
-        = adbSource ? adbSource->state() : AdbLogcatSource::State::Disconnected;
-    disconnectSourceAction->setEnabled( isLiveDocument
-                                        && sourceState != AdbLogcatSource::State::Disconnected );
-    reconnectSourceAction->setEnabled( isLiveDocument
-                                       && sourceState != AdbLogcatSource::State::Connected );
+    const auto* adbSource = isLiveDocument ? session_.getAdbLogcatSource( crawler ) : nullptr;
+    const auto* controller
+        = isLiveDocument ? session_.getLiveLogController( crawler ) : nullptr;
+    const auto isReadOnlyCompatibility
+        = adbSource != nullptr && adbSource->isReadOnlyCompatibility();
+    const auto projection = controller != nullptr
+                                ? klogg::livecapture::projectLiveState( controller->snapshot() )
+                                : klogg::livecapture::LiveStatePresentation{};
+    disconnectSourceAction->setEnabled( isLiveDocument && !isReadOnlyCompatibility
+                                        && projection.disconnectEnabled );
+    reconnectSourceAction->setEnabled( isLiveDocument && !isReadOnlyCompatibility
+                                       && projection.reconnectEnabled );
 }
 
 void MainWindow::syncEncodingMenuCheck( const std::optional<int>& encodingMib )
@@ -3317,13 +3412,13 @@ void MainWindow::syncEncodingMenuCheck( const std::optional<int>& encodingMib )
     // The auto-detect action is the only one with an invalid QVariant data
     // (encodings.h); every specific encoding action carries its mib.
     auto encodingActions = encodingGroup->actions();
-    const auto encodingItem = std::find_if(
-        encodingActions.begin(), encodingActions.end(),
-        [ &encodingMib ]( const auto& encodingAction ) {
-            return ( !encodingMib && !encodingAction->data().isValid() )
-                   || ( encodingMib && encodingAction->data().isValid()
-                        && *encodingMib == encodingAction->data().toInt() );
-        } );
+    const auto encodingItem
+        = std::find_if( encodingActions.begin(), encodingActions.end(),
+                        [ &encodingMib ]( const auto& encodingAction ) {
+                            return ( !encodingMib && !encodingAction->data().isValid() )
+                                   || ( encodingMib && encodingAction->data().isValid()
+                                        && *encodingMib == encodingAction->data().toInt() );
+                        } );
 
     if ( encodingItem != encodingActions.end() ) {
         ( *encodingItem )->setChecked( true );
@@ -3367,12 +3462,6 @@ void MainWindow::onFolderFollowModeChanged( bool follow )
 // Update the top info line from the session
 void MainWindow::updateInfoLine()
 {
-    // Don't overwrite the reconnect countdown display when on the countdown tab
-    if ( reconnectCountdownTimer_ && reconnectCountdownTimer_->isActive()
-         && currentCrawlerWidget() == reconnectCountdownCrawler_ ) {
-        return;
-    }
-
     QLocale defaultLocale;
 
     auto* crawler = currentCrawlerWidget();
@@ -3392,7 +3481,8 @@ void MainWindow::updateInfoLine()
             encodingField->setText( info->encodingText );
             if ( info->lastModified.isValid() ) {
                 dateField->setText( tr( "modified on %1" )
-                                        .arg( defaultLocale.toString( info->lastModified, QLocale::NarrowFormat ) ) );
+                                        .arg( defaultLocale.toString( info->lastModified,
+                                                                      QLocale::NarrowFormat ) ) );
                 dateField->show();
             }
             else {
@@ -3411,6 +3501,20 @@ void MainWindow::updateInfoLine()
         }
         return;
     }
+
+    if ( const auto* controller = session_.getLiveLogController( crawler ) ) {
+        const auto projection
+            = klogg::livecapture::projectLiveState( controller->snapshot() );
+        if ( projection.retryCountdownVisible ) {
+            const auto remainingMs = projection.retryRemaining.count();
+            const auto remainingSec = ( remainingMs + 999 ) / 1000;
+            infoLine->setText( QDir::toNativeSeparators( session_.getDisplayName( crawler ) )
+                               + tr( " - Reconnect in %1 seconds..." ).arg( remainingSec ) );
+            infoLine->displayGauge( 0 );
+            return;
+        }
+    }
+    infoLine->hideGauge();
 
     const auto associatedPath = session_.getAssociatedPath( crawler );
     const auto currentFile = QDir::toNativeSeparators(
@@ -3598,14 +3702,13 @@ void MainWindow::selectOpenedFile()
 {
     const auto openedDocuments = session_.openedDocuments();
     QStringList filesToShow;
-    std::transform(
-        openedDocuments.cbegin(), openedDocuments.cend(), std::back_inserter( filesToShow ),
-        []( const auto& info ) {
-            if ( info.toolTip.isEmpty() || info.toolTip == info.displayName ) {
-                return info.displayName;
-            }
-            return QStringLiteral( "%1 (%2)" ).arg( info.displayName, info.toolTip );
-        } );
+    std::transform( openedDocuments.cbegin(), openedDocuments.cend(),
+                    std::back_inserter( filesToShow ), []( const auto& info ) {
+                        if ( info.toolTip.isEmpty() || info.toolTip == info.displayName ) {
+                            return info.displayName;
+                        }
+                        return QStringLiteral( "%1 (%2)" ).arg( info.displayName, info.toolTip );
+                    } );
 
     auto selectFileDialog = std::make_unique<QDialog>( this );
     selectFileDialog->setWindowTitle( tr( "klogg -- switch to file" ) );
@@ -3657,7 +3760,8 @@ void MainWindow::selectOpenedFile()
                          const auto* crawler
                              = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
                          if ( crawler
-                              && session_.getDocumentId( crawler ) == selectedDocument.documentId ) {
+                              && session_.getDocumentId( crawler )
+                                     == selectedDocument.documentId ) {
                              mainTabWidget_.setCurrentIndex( index );
                              activateWindow();
                              break;
@@ -3778,7 +3882,8 @@ void MainWindow::displayQuickFindBar( QuickFindMux::QFDirection direction )
     if ( document != nullptr && document->isPartialSelection() ) {
         const auto selection = document->getSelectedText();
         if ( !selection.isEmpty() ) {
-            quickFindWidget_.changeDisplayedPattern( selection, Configuration::get().qfIgnoreCase(), false, false );
+            quickFindWidget_.changeDisplayedPattern( selection, Configuration::get().qfIgnoreCase(),
+                                                     false, false );
         }
     }
 
@@ -3827,7 +3932,8 @@ std::vector<QString> MainWindow::showMergeFilesDialog( const QStringList& filePa
     layout->addWidget( new QLabel( tr( "Check files in desired merge order:" ) ) );
 
     auto* listWidget = new QListWidget( &dialog );
-    // Qt::UserRole = file path, Qt::UserRole+1 = original display name, Qt::UserRole+2 = check order
+    // Qt::UserRole = file path, Qt::UserRole+1 = original display name, Qt::UserRole+2 = check
+    // order
     int checkCounter = 0;
 
     for ( const auto& filePath : sortedPaths ) {

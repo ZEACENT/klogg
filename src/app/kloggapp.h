@@ -21,6 +21,7 @@
 #define KLOGG_KLOGGAPP_H
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <iterator>
 #include <numeric>
@@ -52,7 +53,9 @@
 #include <windows.h>
 #endif
 
+#include "adbliveservices.h"
 #include "configuration.h"
+#include "iosliveservices.h"
 #include "crashhandler.h"
 #include "klogg_version.h"
 #include "log.h"
@@ -67,6 +70,65 @@
 #include "updatedownloadhelper.h"
 #include "versionchecker.h"
 
+using klogg::livecapture::ios::IosLiveServices;
+using klogg::livecapture::ios::IosLiveServicesConfig;
+
+inline AdbLiveServicesConfig applicationAdbLiveServicesConfig()
+{
+    using namespace std::chrono_literals;
+    AdbLiveServicesConfig config;
+    config.applicationDirPath = QCoreApplication::applicationDirPath();
+    config.perUserRuntimeDir
+        = QStandardPaths::writableLocation( QStandardPaths::AppLocalDataLocation );
+    if ( config.perUserRuntimeDir.isEmpty() ) {
+        config.perUserRuntimeDir
+            = QDir( QDir::homePath() ).filePath( QStringLiteral( ".klogg/runtime" ) );
+    }
+    config.endpoint
+        = klogg::livecapture::adb::AdbServerEndpoint{ QHostAddress::LocalHost, 5037 };
+    config.minimumProtocolVersion = 0x29u;
+    config.requiredFeatures = { "shell_v2" };
+    config.readinessProbeInterval = 100ms;
+    config.startupTimeout = 5s;
+    config.healthProbeInterval = 1s;
+    return config;
+}
+
+inline IosLiveServicesConfig applicationIosLiveServicesConfig()
+{
+    IosLiveServicesConfig config;
+#ifdef Q_OS_MAC
+    config.nativeStackRoot
+        = QDir( QCoreApplication::applicationDirPath() )
+              .absoluteFilePath( QStringLiteral( "../Frameworks/ios-native" ) )
+              .toStdString();
+#endif
+    return config;
+}
+
+class ApplicationLiveSourceTransportFactory final : public LiveSourceTransportFactory {
+public:
+    ApplicationLiveSourceTransportFactory( AdbLiveServices& adbServices,
+                                           IosLiveServices& iosServices )
+        : adbServices_( &adbServices )
+        , iosServices_( &iosServices )
+    {
+    }
+
+    std::unique_ptr<LiveSourceTransport>
+    create( const LiveSourceTransportConfig& config ) const override
+    {
+        if ( config.sourceType == LiveLogSourceType::IosLogStream ) {
+            return iosServices_->create( config );
+        }
+        return adbServices_->create( config );
+    }
+
+private:
+    AdbLiveServices* adbServices_;
+    IosLiveServices* iosServices_;
+};
+
 class KloggApp : public QApplication {
 
     Q_OBJECT
@@ -76,6 +138,23 @@ class KloggApp : public QApplication {
         : QApplication( argc, argv)
     {
         QFontDatabase::addApplicationFont( ":/fonts/DejaVuSansMono.ttf" );
+
+        adbLiveServices_
+            = std::make_unique<AdbLiveServices>( applicationAdbLiveServicesConfig(), this );
+        iosLiveServices_
+            = std::make_unique<IosLiveServices>( applicationIosLiveServicesConfig(), this );
+        liveTransportFactory_ = std::make_unique<ApplicationLiveSourceTransportFactory>(
+            *adbLiveServices_, *iosLiveServices_ );
+        connect( adbLiveServices_.get(), &AdbLiveServices::keyGenerationConsentRequested, this,
+                 [ this ]( klogg::livecapture::Generation generation, std::uint64_t epoch ) {
+                     const auto answer = QMessageBox::question(
+                         activeWindow(), tr( "Prepare ADB authentication" ),
+                         tr( "klogg needs to create the standard per-user ADB authentication key. "
+                             "Create it now?" ),
+                         QMessageBox::Yes | QMessageBox::No, QMessageBox::No );
+                     adbLiveServices_->answerKeyGenerationConsent( generation, epoch,
+                                                                   answer == QMessageBox::Yes );
+                 } );
 
         qRegisterMetaType<LoadingStatus>( "LoadingStatus" );
         qRegisterMetaType<LinesCount>( "LinesCount" );
@@ -170,7 +249,8 @@ class KloggApp : public QApplication {
     MainWindow* reloadSession()
     {
         if ( !session_ ) {
-            session_ = std::make_shared<Session>();
+            session_ = std::make_shared<Session>( *liveTransportFactory_, &adbLiveServices_->manager(),
+                                                  &iosLiveServices_->catalogProvider() );
         }
 
         for ( auto&& windowSession : session_->windowSessions() ) {
@@ -212,7 +292,8 @@ class KloggApp : public QApplication {
     MainWindow* newWindow()
     {
         if ( !session_ ) {
-            session_ = std::make_shared<Session>();
+            session_ = std::make_shared<Session>( *liveTransportFactory_, &adbLiveServices_->manager(),
+                                                  &iosLiveServices_->catalogProvider() );
         }
 
         const auto previousSessions = session_->windowSessions();
@@ -272,7 +353,12 @@ class KloggApp : public QApplication {
   private:
     MainWindow* newWindow( WindowSession&& session )
     {
-        mainWindows_.emplace_back( session, new MainWindow( session ) );
+        // MainWindow participates in Qt top-level lifetime management; this list
+        // is a non-owning registry pruned by handleWindowClose().
+        mainWindows_.emplace_back(
+            session,
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            new MainWindow( session, *adbLiveServices_, *iosLiveServices_ ) );
 
         auto& window = mainWindows_.back().second;
 
@@ -434,6 +520,11 @@ class KloggApp : public QApplication {
 
     MessageReceiver messageReceiver_;
 
+    // Declared before Session so reverse destruction retires all live tabs and
+    // the routing factory before either application-owned service root.
+    std::unique_ptr<AdbLiveServices> adbLiveServices_;
+    std::unique_ptr<IosLiveServices> iosLiveServices_;
+    std::unique_ptr<ApplicationLiveSourceTransportFactory> liveTransportFactory_;
     std::shared_ptr<Session> session_;
 
     std::list<std::pair<WindowSession, MainWindow*>> mainWindows_;

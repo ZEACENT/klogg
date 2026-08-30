@@ -58,6 +58,7 @@
 #include "logdata.h"
 #include "logfiltereddata.h"
 #include "persistentinfo.h"
+#include "qtcompat/qtcompat.h"
 #include "regularexpressionpattern.h"
 #include "streaminglogdata.h"
 
@@ -268,11 +269,8 @@ QVector<ProfileSpec> availableProfiles()
 template <typename T>
 QVector<T> selectByIds( const QVector<T>& all, const QString& csv, const char* kind )
 {
-#if QT_VERSION >= QT_VERSION_CHECK( 5, 15, 0 )
-    const auto wantedIds = csv.split( QLatin1Char( ',' ), Qt::SkipEmptyParts );
-#else
-    const auto wantedIds = csv.split( QLatin1Char( ',' ), QString::SkipEmptyParts );
-#endif
+    const auto wantedIds
+        = csv.split( QLatin1Char( ',' ), klogg::qtcompat::skipEmptyParts() );
     QVector<T> selected;
     selected.reserve( wantedIds.size() );
 

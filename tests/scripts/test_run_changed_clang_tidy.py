@@ -82,8 +82,16 @@ class ChangedClangTidyTest(unittest.TestCase):
             pathlib.Path("/workspace/src/example.H"),
             '[{"name":"src/example.H","lines":[[3,3]]}]',
             ["-nostdinc++"],
+            ["-std=c++17", "-I/workspace/src/example/include", "-x", "c++"],
         )
-        self.assertEqual(command[-1], "/workspace/src/example.H")
+        self.assertEqual(command[-5:], [
+            "--",
+            "-std=c++17",
+            "-I/workspace/src/example/include",
+            "-x",
+            "c++",
+        ])
+        self.assertIn("/workspace/src/example.H", command)
         self.assertIn("--line-filter=[{\"name\":\"src/example.H\",\"lines\":[[3,3]]}]", command)
         self.assertIn("-extra-arg=-nostdinc++", command)
 
@@ -105,6 +113,8 @@ class ChangedClangTidyTest(unittest.TestCase):
                 4,
                 ["-nostdinc++"],
                 {"PATH": "/usr/bin"},
+                [],
+                [],
                 fast=True,
             )
 
@@ -127,6 +137,8 @@ class ChangedClangTidyTest(unittest.TestCase):
                 4,
                 [],
                 {"PATH": "/usr/bin"},
+                [],
+                [],
                 fast=False,
             )
 

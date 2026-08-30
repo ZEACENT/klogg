@@ -55,16 +55,21 @@ void FolderSearchResults::setResults( std::vector<klogg::folder::FileGroup> grou
 {
     {
         UniqueLock lock( dataMutex_ );
-        groups_ = std::move( groups );
-        // A new result set invalidates any cached file handles; size to the new
-        // group count so fileForGroup() can index by fileId directly.
-        openFiles_.clear();
-        openFiles_.resize( groups_.size() );
         // Defensive: drop groups with no matches (the engine/caller already filters
         // them, but FolderSearchResults must never emit an empty group's header).
-        groups_.erase( std::remove_if( groups_.begin(), groups_.end(),
-                                       []( const klogg::folder::FileGroup& g ) { return g.matches.empty(); } ),
-                       groups_.end() );
+        groups.erase( std::remove_if( groups.begin(), groups.end(),
+                                      []( const klogg::folder::FileGroup& group ) {
+                                          return group.matches.empty();
+                                      } ),
+                      groups.end() );
+        groups_ = std::move( groups );
+
+        // setResults has no full folder-membership input, so retain its legacy
+        // unrestricted marks-only behavior. Folder streaming searches use
+        // beginSearch(expectedFileOrder) for membership-aware filtering.
+        expectedFilePaths_.clear();
+        restrictMarksToExpectedFiles_ = false;
+        resetFileCaches();
 
         // NOTE: setResults resets collapse (it is a full result-set replacement, not
         // the live re-search path -- startSearch uses beginSearch, which preserves
@@ -126,7 +131,12 @@ void FolderSearchResults::beginSearch( const QStringList& expectedFileOrder )
         // change (which re-scans via beginSearch) would expand every collapsed group.
         snapshotCollapsedPaths();
         groups_.clear();
-        openFiles_.clear();
+        expectedFilePaths_.clear();
+        for ( const auto& filePath : expectedFileOrder ) {
+            expectedFilePaths_.insert( filePath );
+        }
+        restrictMarksToExpectedFiles_ = true;
+        resetFileCaches();
         collapsed_.clear();
         pendingByIndex_.assign( static_cast<size_t>( expectedFileOrder.size() ),
                                 std::nullopt );
@@ -155,9 +165,6 @@ void FolderSearchResults::addFileGroup( int fileIndex, klogg::folder::FileGroup 
             if ( !opt->matches.empty() ) {
                 groups_.push_back( std::move( *opt ) );
                 reapplyCollapseForLastGroup();
-                // Keep file-handle slots aligned to fileId (== group index), matching
-                // the setResults contract so fileForGroup() can index directly.
-                openFiles_.resize( groups_.size() );
                 appended = true;
             }
             ++nextExpectedIndex_;
@@ -183,7 +190,6 @@ void FolderSearchResults::flushPending()
             if ( opt.has_value() && !opt->matches.empty() ) {
                 groups_.push_back( std::move( *opt ) );
                 reapplyCollapseForLastGroup();
-                openFiles_.resize( groups_.size() );
                 appended = true;
             }
             ++nextExpectedIndex_;
@@ -620,6 +626,20 @@ void FolderSearchResults::doDetachReader() const
 
 // --- private ---
 
+void FolderSearchResults::resetFileCaches()
+{
+    // Full replacement boundary. The caller holds dataMutex_ uniquely, so the
+    // documented lock order remains dataMutex_ -> fileIoMutex_. Encoding choices
+    // and the external marks store are pane state, not file-content caches, and
+    // deliberately survive this reset. File-handle slots grow lazily on reads so
+    // streaming commits never wait behind potentially slow marked-line I/O.
+    std::lock_guard<std::mutex> ioLock( fileIoMutex_ );
+    openFiles_.clear();
+    markLineCache_.clear();
+    markTextCache_.clear();
+    markTextCacheBytes_ = 0;
+}
+
 const FolderSearchResults::VisibleRow* FolderSearchResults::visibleRowAt( LineNumber line ) const
 {
     if ( line.get() >= visibleRows_.size() ) {
@@ -660,7 +680,9 @@ void FolderSearchResults::rebuildVisibleRows()
             groupFiles.insert( g.filePath );
         }
         for ( auto it = marksStore_->constBegin(); it != marksStore_->constEnd(); ++it ) {
-            if ( it.value().empty() || groupFiles.contains( it.key() ) ) {
+            if ( it.value().empty() || groupFiles.contains( it.key() )
+                 || ( restrictMarksToExpectedFiles_
+                      && !expectedFilePaths_.contains( it.key() ) ) ) {
                 continue;
             }
             MarksGroup mg;
@@ -948,8 +970,11 @@ QString FolderSearchResults::readMatchLine( klogg::folder::FileId fileId, size_t
 
 QFile* FolderSearchResults::fileForGroup( klogg::folder::FileId fileId ) const
 {
-    if ( fileId < 0 || fileId >= static_cast<int>( openFiles_.size() ) ) {
+    if ( fileId < 0 || fileId >= static_cast<int>( groups_.size() ) ) {
         return nullptr;
+    }
+    if ( openFiles_.size() < groups_.size() ) {
+        openFiles_.resize( groups_.size() );
     }
 
     auto& slot = openFiles_[ static_cast<size_t>( fileId ) ];

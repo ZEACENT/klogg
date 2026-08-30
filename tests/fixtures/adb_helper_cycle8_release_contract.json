@@ -1,0 +1,149 @@
+{
+  "schema_version": 2,
+  "validation_classes": {
+    "locally-buildable": {
+      "release_qualified": false,
+      "required_receipts": [
+        "binary-build",
+        "binary-smoke",
+        "package-verification"
+      ]
+    },
+    "cross-build-only": {
+      "release_qualified": false,
+      "required_receipts": [
+        "binary-build",
+        "native-binary-smoke",
+        "package-verification"
+      ]
+    },
+    "native-device-qualified": {
+      "release_qualified": true,
+      "required_receipts": [
+        "binary-build",
+        "binary-smoke",
+        "package-verification",
+        "native-device"
+      ]
+    }
+  },
+  "qualification_receipts": [
+    "binary-build",
+    "binary-smoke",
+    "package-verification"
+  ],
+  "helper_targets": {
+    "windows-x86_64": {
+      "validation_class": "locally-buildable",
+      "android_baseline": "android-17.0.0_r1",
+      "nmeum_commit": "0c15591afc76852efea2f46f29f94b60aac44750",
+      "platform_development_commit": "4dafd114fab3c3d9543a5aff0ad097f479915176",
+      "required_patch_roles": [
+        "nmeum-msys2-windows-build",
+        "platform-development-adbwinapi",
+        "private-windows-libusb"
+      ],
+      "required_source_components": [
+        "AdbWinApi",
+        "AdbWinUsbApi"
+      ],
+      "required_direct_imports": [
+        "AdbWinApi.dll",
+        "libusb-1.0.dll"
+      ],
+      "required_runtime_files": [
+        "AdbWinApi.dll",
+        "AdbWinUsbApi.dll",
+        "libusb-1.0.dll"
+      ],
+      "required_delayed_runtime_loads": [
+        {
+          "runtime_file": "AdbWinUsbApi.dll",
+          "loaded_by": "AdbWinApi.dll",
+          "source": "windows-platform-development/host/windows/usb/api/AdbWinApi.cpp",
+          "expression": "LoadLibrary(L\"AdbWinUsbApi.dll\")",
+          "source_sha256": "36c5adeb60ccc06fb748d1d7cbb10d6941d0b5f43ea0ee244449e22aa62339e1",
+          "loader_symbol": "LoadLibraryW"
+        }
+      ],
+      "forbidden_inputs": [
+        "prebuilt-adb",
+        "prebuilt-dll",
+        "android-sdk",
+        "path-adb",
+        "package-manager-artifact"
+      ],
+      "required_private_imports_by_binary": {
+        "adb.exe": [
+          "AdbWinApi.dll",
+          "libusb-1.0.dll"
+        ],
+        "AdbWinApi.dll": [],
+        "AdbWinUsbApi.dll": [
+          "AdbWinApi.dll"
+        ],
+        "libusb-1.0.dll": []
+      }
+    },
+    "linux-x86_64": {
+      "validation_class": "locally-buildable",
+      "glibc_maximum": "2.31",
+      "required_runtime_files": [
+        "libusb-1.0.so.0"
+      ]
+    },
+    "linux-arm64": {
+      "validation_class": "cross-build-only",
+      "glibc_maximum": "2.31",
+      "required_runtime_files": [
+        "libusb-1.0.so.0"
+      ]
+    },
+    "macos-arm64": {
+      "validation_class": "locally-buildable",
+      "architecture": "arm64",
+      "deployment_target": "14.0",
+      "required_frameworks": [
+        "CoreFoundation",
+        "IOKit"
+      ],
+      "forbidden_imports": [
+        "libusb"
+      ]
+    }
+  },
+  "package_targets": {
+    "linux-appimage-x86_64": {
+      "helper_target": "linux-x86_64",
+      "architecture": "x86_64",
+      "maximum_glibc": "2.31"
+    },
+    "macos-arm64-dmg": {
+      "helper_target": "macos-arm64",
+      "architecture": "arm64",
+      "deployment_target": "14.0",
+      "signing_required": true,
+      "notarization_required": true
+    },
+    "windows-x86_64": {
+      "helper_target": "windows-x86_64",
+      "architecture": "x86_64"
+    },
+    "windows-x86": {
+      "architecture": "x86",
+      "matching_helper_or_fail_closed": true
+    }
+  },
+  "artifact_envelope": {
+    "disconnected_source_build": true,
+    "target_bound": true,
+    "sha256_required": true,
+    "signature_or_attestation_required": true,
+    "required_files": [
+      "receipt.json",
+      "smoke.json",
+      "package-smoke.json",
+      "SHA256SUMS"
+    ]
+  }
+}

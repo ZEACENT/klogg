@@ -1,5 +1,5 @@
 name: "Prepare windows packages"
-description: ""
+description: Verify and package the target-matched Windows application and ADB helper
 inputs:
   s3-key-id:
     required: true
@@ -15,6 +15,38 @@ runs:
       run: |
         packaging\windows\prepare_release.cmd
 
+    - name: Verify source-built ADB helper before Windows packages
+      shell: pwsh
+      run: |
+        $helper = Join-Path $env:KLOGG_WORKSPACE "release\helpers\adb.exe"
+        if (!(Test-Path $helper)) {
+          Write-Error "source-built ADB helper missing: $helper"
+          exit 1
+        }
+        foreach ($runtime in @("AdbWinApi.dll", "AdbWinUsbApi.dll", "libusb-1.0.dll")) {
+          $runtimePath = Join-Path (Split-Path $helper -Parent) $runtime
+          if (!(Test-Path $runtimePath)) {
+            Write-Error "source-built ADB runtime missing: $runtimePath"
+            exit 1
+          }
+        }
+        python scripts/smoke_adb_helper.py `
+          --adb $helper --port 0 --timeout-seconds 15 `
+          --json-output "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts/verify_adb_helper_artifact.py `
+          --lock packaging/adb/adb-helper.lock.json `
+          --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
+          --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json" `
+          --package-root release `
+          --asset-scope package `
+          --source-assets-root release/adb-helper-assets `
+          --layout nsis `
+          --expected-target $env:KLOGG_ADB_HELPER_TARGET `
+          --checksum-envelope "$env:KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" `
+          --require-lock-binding
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Win installer
       uses: joncloud/makensis-action@v3.3
       with:
@@ -28,4 +60,27 @@ runs:
         copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-portable.zip"
         copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-pdb.zip" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-pdb.zip"
         copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-setup.exe" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-setup.exe"
-      
+
+    - name: Bind Windows qualification receipt to final packages
+      shell: pwsh
+      run: |
+        $packageRoot = Join-Path $env:KLOGG_BUILD_ROOT "packages"
+        $portable = Join-Path $packageRoot "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-$env:KLOGG_PACKAGE_TAG-portable.zip"
+        $setup = Join-Path $packageRoot "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-$env:KLOGG_PACKAGE_TAG-setup.exe"
+        python scripts/verify_adb_helper_artifact.py `
+          --lock packaging/adb/adb-helper.lock.json `
+          --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
+          --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json" `
+          --package-root release `
+          --asset-scope package `
+          --source-assets-root release/adb-helper-assets `
+          --layout nsis `
+          --expected-target $env:KLOGG_ADB_HELPER_TARGET `
+          --package-target windows-x86_64 `
+          --package-file $portable `
+          --package-file $setup `
+          --package-verification-receipt "$packageRoot/adb-helper-windows-package-verification.json" `
+          --checksum-envelope "$env:KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" `
+          --require-lock-binding
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+

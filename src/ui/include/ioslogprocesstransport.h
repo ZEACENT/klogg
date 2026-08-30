@@ -23,10 +23,10 @@ class IosLogProcessTransport : public ProcessLiveSourceTransport {
     // Access the device list provider for async enumeration.
     IosDeviceListProvider* deviceListProvider() const;
 
-    bool clearRemote( QString* error ) override;
-    bool connectTransport() override;
+    void clearRemoteAsync( Generation generation, ClearRequestId requestId ) override;
 
-  protected:
+protected:
+    void prepareStreamingSession() override;
     Command streamingCommand() const override;
     Command clearCommand() const override;
     void filterReceivedBytes( QByteArray& data ) override;

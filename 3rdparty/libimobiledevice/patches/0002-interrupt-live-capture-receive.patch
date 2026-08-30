@@ -1,0 +1,177 @@
+From: klogg maintainers <noreply@klogg.dev>
+Date: Mon, 24 Aug 2026 00:00:00 +0000
+Subject: [PATCH] ostrace: interrupt bounded incremental live capture receive
+
+Poll message-type, length, and payload reads in bounded increments so
+intentional stop can join promptly without treating ordinary slow or
+fragmented frames as terminal. Cap live packet allocation at 16 MiB, release
+every partial allocation, and expose an additive terminal callback API for
+natural worker failures.
+
+---
+diff --git a/include/libimobiledevice/ostrace.h b/include/libimobiledevice/ostrace.h
+index f083ba7..ddfa573 100644
+--- a/include/libimobiledevice/ostrace.h
++++ b/include/libimobiledevice/ostrace.h
+@@ -88,6 +88,9 @@ struct ostrace_packet_header_t {
+ /** Receives unparsed ostrace data from the ostrace service */
+ typedef void (*ostrace_activity_cb_t)(const void* buf, size_t len, void *user_data);
+ 
++/** Reports why the live activity worker terminated. */
++typedef void (*ostrace_terminal_cb_t)(ostrace_error_t error, void *user_data);
++
+ /** Receives archive data from the ostrace service */
+ typedef int (*ostrace_archive_write_cb_t)(const void* buf, size_t len, void *user_data);
+ 
+@@ -153,6 +156,9 @@ LIBIMOBILEDEVICE_API ostrace_error_t ostrace_client_free(ostrace_client_t client
+  */
+ LIBIMOBILEDEVICE_API ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data);
+ 
++/** Starts activity capture and reports terminal worker errors. */
++LIBIMOBILEDEVICE_API ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data);
++
+ /**
+  * Stops the ostrace activity.
+  *
+diff --git a/src/ostrace.c b/src/ostrace.c
+index c73ee7f..9fd8ea9 100644
+--- a/src/ostrace.c
++++ b/src/ostrace.c
+@@ -35,6 +35,7 @@
+ struct ostrace_worker_thread {
+ 	ostrace_client_t client;
+ 	ostrace_activity_cb_t cbfunc;
++	ostrace_terminal_cb_t terminal_callback;
+ 	void *user_data;
+ };
+ 
+@@ -68,6 +69,36 @@ static ostrace_error_t ostrace_error(service_error_t err)
+ 	return OSTRACE_E_UNKNOWN_ERROR;
+ }
+ 
++#define OSTRACE_RECEIVE_POLL_INTERVAL_MS 100
++#define OSTRACE_MAX_LIVE_PACKET_SIZE (16 * 1024 * 1024)
++
++static ostrace_error_t ostrace_receive_interruptible(struct ostrace_worker_thread *oswt, char *data, uint32_t size, uint32_t *received)
++{
++	ostrace_error_t res = OSTRACE_E_UNKNOWN_ERROR;
++	*received = 0;
++	while (*received < size) {
++		if (!oswt->client->parent) {
++			return OSTRACE_E_UNKNOWN_ERROR;
++		}
++		uint32_t chunk = 0;
++		res = ostrace_error(service_receive_with_timeout(oswt->client->parent, data + *received, size - *received, &chunk, OSTRACE_RECEIVE_POLL_INTERVAL_MS));
++		if (chunk > size - *received) {
++			return OSTRACE_E_NOT_ENOUGH_DATA;
++		}
++		*received += chunk;
++		if (res == OSTRACE_E_TIMEOUT) {
++			continue;
++		}
++		if (res != OSTRACE_E_SUCCESS) {
++			return res;
++		}
++		if (chunk == 0) {
++			return OSTRACE_E_NOT_ENOUGH_DATA;
++		}
++	}
++	return OSTRACE_E_SUCCESS;
++}
++
+ ostrace_error_t ostrace_client_new(idevice_t device, lockdownd_service_descriptor_t service, ostrace_client_t * client)
+ {
+ 	*client = NULL;
+@@ -214,20 +245,21 @@ void *ostrace_worker(void *arg)
+ 	debug_info("Running");
+ 
+ 	while (oswt->client->parent) {
+-		res = ostrace_error(service_receive_with_timeout(oswt->client->parent, (char*)&msgtype, 1, &received, 100));
+-		if (res == OSTRACE_E_TIMEOUT) {
+-			continue;
+-		}
++		res = ostrace_receive_interruptible(oswt, (char*)&msgtype, 1, &received);
+ 		if (res != OSTRACE_E_SUCCESS) {
+ 			debug_info("Failed to read message type from service");
+ 			break;
+ 		}
+ 		uint32_t rlen = 0;
+-		res = ostrace_error(service_receive(oswt->client->parent, (char*)&rlen, 4, &received));
++		res = ostrace_receive_interruptible(oswt, (char*)&rlen, 4, &received);
+ 		if (res != OSTRACE_E_SUCCESS) {
+ 			debug_info("Failed to read message size from service");
+ 			break;
+ 		}
++		if (received < 4) {
++			res = OSTRACE_E_NOT_ENOUGH_DATA;
++			break;
++		}
+ 
+ 		if (msgtype == 1) {
+ 			rlen = be32toh(rlen);
+@@ -235,19 +267,32 @@ void *ostrace_worker(void *arg)
+ 			rlen = le32toh(rlen);
+ 		} else {
+ 			debug_info("Unexpected message type %d", msgtype);
++			res = OSTRACE_E_REQUEST_FAILED;
+ 			break;
+ 		}
+ 
+ 		debug_info("got length %d", rlen);
+ 
++		if (rlen == 0 || rlen > OSTRACE_MAX_LIVE_PACKET_SIZE) {
++			debug_info("Invalid live packet length %d", rlen);
++			res = OSTRACE_E_REQUEST_FAILED;
++			break;
++		}
+ 		void* buf = malloc(rlen);
+-		res = ostrace_error(service_receive(oswt->client->parent, (char*)buf, rlen, &received));
++		if (!buf) {
++			res = OSTRACE_E_UNKNOWN_ERROR;
++			break;
++		}
++		res = ostrace_receive_interruptible(oswt, (char*)buf, rlen, &received);
+ 		if (res != OSTRACE_E_SUCCESS) {
+ 			debug_info("Failed to receive %d bytes, error %d", rlen, res);
++			free(buf);
+ 			break;
+ 		}
+ 		if (received < rlen) {
+ 			debug_info("Failed to receive all data, got %d/%d", received, rlen);
++			free(buf);
++			res = OSTRACE_E_NOT_ENOUGH_DATA;
+ 			break;
+ 		}
+ 		oswt->cbfunc(buf, received, oswt->user_data);
+@@ -255,6 +300,9 @@ void *ostrace_worker(void *arg)
+ 	}
+ 
+ 	if (oswt) {
++		if (oswt->terminal_callback && oswt->client->parent && res != OSTRACE_E_SUCCESS) {
++			oswt->terminal_callback(res, oswt->user_data);
++		}
+ 		free(oswt);
+ 	}
+ 
+@@ -264,6 +312,11 @@ void *ostrace_worker(void *arg)
+ }
+ 
+ ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data)
++{
++	return ostrace_start_activity_with_error(client, options, callback, NULL, user_data);
++}
++
++ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
+ {
+ 	if (!client || !callback)
+ 		return OSTRACE_E_INVALID_ARG;
+@@ -305,6 +358,7 @@ ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options,
+ 	if (oswt) {
+ 		oswt->client = client;
+ 		oswt->cbfunc = callback;
++		oswt->terminal_callback = terminal_callback;
+ 		oswt->user_data = user_data;
+ 
+ 		if (thread_new(&client->worker, ostrace_worker, oswt) == 0) {
+--
+2.50.1

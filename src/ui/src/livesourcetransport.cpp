@@ -1,8 +1,8 @@
 #include "livesourcetransport.h"
 
-#include <QCoreApplication>
+#include <utility>
+
 #include <QDir>
-#include <QElapsedTimer>
 #include <QFile>
 #include <QMetaType>
 #include <QPointer>
@@ -14,16 +14,67 @@
 #include "platform/platform_process.h"
 
 namespace {
-constexpr int StartupFailureGracePeriodMs
-    = klogg::platform::startupFailureGracePeriod().count();
-constexpr int StartupFailurePollIntervalMs = 10;
+constexpr int StartupFailureGracePeriodMs = klogg::platform::startupFailureGracePeriod().count();
+constexpr int ClearTimeoutMs = 5000;
+
+QString processErrorText( QProcess& process, const QString& fallback )
+{
+    auto stdErr = QString::fromUtf8( process.readAllStandardError() ).trimmed();
+    if ( !stdErr.isEmpty() ) {
+        return stdErr;
+    }
+    if ( !process.errorString().isEmpty() ) {
+        return process.errorString();
+    }
+    return fallback;
+}
+} // namespace
+
+struct ProcessLiveSourceTransport::ProcessContext {
+    Generation generation{ 0 };
+};
+
+LiveSourceTransport::LiveSourceTransport( QObject* parent )
+    : QObject( parent )
+{
+    static const auto registeredState
+        = qRegisterMetaType<LiveSourceTransport::State>( "LiveSourceTransport::State" );
+    static const auto registeredGeneration
+        = qRegisterMetaType<LiveSourceTransport::Generation>( "LiveSourceTransport::Generation" );
+    static const auto registeredRequest = qRegisterMetaType<LiveSourceTransport::ClearRequestId>(
+        "LiveSourceTransport::ClearRequestId" );
+    Q_UNUSED( registeredState );
+    Q_UNUSED( registeredGeneration );
+    Q_UNUSED( registeredRequest );
 }
 
-LiveSourceTransport::LiveSourceTransport( QObject* parent ) : QObject( parent )
+std::optional<klogg::livecapture::LiveSourceError> LiveSourceTransport::lastStructuredError() const
 {
-    static const auto registered = qRegisterMetaType<LiveSourceTransport::State>(
-        "LiveSourceTransport::State" );
-    Q_UNUSED( registered );
+    return std::nullopt;
+}
+
+klogg::livecapture::LiveDataStatistics LiveSourceTransport::statistics() const
+{
+    std::lock_guard<std::mutex> lock( statisticsMutex_ );
+    return statistics_;
+}
+
+void LiveSourceTransport::resetStatistics( Generation generation )
+{
+    std::lock_guard<std::mutex> lock( statisticsMutex_ );
+    statistics_ = klogg::livecapture::LiveDataStatistics{};
+    statistics_.generation = generation;
+}
+
+void LiveSourceTransport::recordDeliveredChunk( Generation generation, std::size_t byteCount )
+{
+    std::lock_guard<std::mutex> lock( statisticsMutex_ );
+    if ( statistics_.generation != generation ) {
+        return;
+    }
+
+    klogg::livecapture::recordLiveDataReceived( statistics_, byteCount );
+    klogg::livecapture::recordLiveDataDelivered( statistics_, byteCount );
 }
 
 ProcessLiveSourceTransport::ProcessLiveSourceTransport( QObject* parent )
@@ -35,34 +86,39 @@ ProcessLiveSourceTransport::ProcessLiveSourceTransport( QObject* parent )
 void ProcessLiveSourceTransport::createProcess()
 {
     process_ = std::make_unique<QProcess>();
+    processContext_ = std::make_shared<ProcessContext>();
     process_->setProcessChannelMode( QProcess::SeparateChannels );
     auto* const currentProcess = process_.get();
     const QPointer<QProcess> processGuard( currentProcess );
+    const auto context = processContext_;
 
-    // Create the capture path exclusively before exposing it to a subprocess
-    // command. QTemporaryFile keeps the randomized, private file owned by this
-    // transport until the process has finished.
+    // Every process context owns a distinct private stderr capture from birth.
+    // This keeps retirement ownership exact even before the process is started.
     prepareStderrCapture();
 
     connect( currentProcess, &QProcess::readyReadStandardOutput, this,
-             [ this, processGuard ] {
-        if ( !processGuard || process_.get() != processGuard.data() ) {
-            return;
-        }
+             [ this, processGuard, context ] {
+                 if ( !processGuard || !isCurrentProcess( processGuard.data(), context ) ) {
+                     return;
+                 }
 
-        auto data = processGuard->readAllStandardOutput();
-        if ( !data.isEmpty() ) {
-            filterReceivedBytes( data );
-            if ( !data.isEmpty() ) {
-                Q_EMIT bytesReceived( data );
-            }
-        }
-    } );
+                 auto data = processGuard->readAllStandardOutput();
+                 if ( !data.isEmpty() ) {
+                     filterReceivedBytes( data );
+                     if ( !processGuard || !isCurrentProcess( processGuard.data(), context ) ) {
+                         return;
+                     }
+                     if ( !data.isEmpty() ) {
+                         recordDeliveredChunk( context->generation,
+                                               static_cast<std::size_t>( data.size() ) );
+                         Q_EMIT bytesReceived( context->generation, data );
+                     }
+                 }
+             } );
 
-    connect( currentProcess, &QProcess::started, this, [ this, processGuard ] {
-        if ( destroyed_ || !processGuard || process_.get() != processGuard.data()
-             || state_ != State::Connecting
-             || asyncStartupPhase_ != AsyncStartupPhase::Starting ) {
+    connect( currentProcess, &QProcess::started, this, [ this, processGuard, context ] {
+        if ( !processGuard || !isCurrentProcess( processGuard.data(), context )
+             || state_ != State::Connecting || asyncStartupPhase_ != AsyncStartupPhase::Starting ) {
             return;
         }
 
@@ -70,44 +126,51 @@ void ProcessLiveSourceTransport::createProcess()
         cancelStartupTimer();
         asyncStartupPhase_ = AsyncStartupPhase::PostStartGrace;
         armStartupTimer( AsyncStartupPhase::PostStartGrace, timing.postStartGraceMs,
-                         processGuard.data() );
+                         processGuard.data(), context );
     } );
 
     connect( currentProcess, &QProcess::errorOccurred, this,
-             [ this, processGuard ]( QProcess::ProcessError error ) {
-        if ( destroyed_ || !processGuard || process_.get() != processGuard.data()
-             || ( state_ != State::Connecting && state_ != State::Connected ) ) {
-            return;
-        }
+             [ this, processGuard, context ]( QProcess::ProcessError error ) {
+                 if ( !processGuard || !isCurrentProcess( processGuard.data(), context )
+                      || ( state_ != State::Connecting && state_ != State::Connected ) ) {
+                     return;
+                 }
 
-        lastError_ = processGuard->errorString();
-        // Crashed is followed by finished(), which can recover redirected stderr.
-        if ( error != QProcess::Crashed ) {
-            failCurrentProcess( lastError_, true );
-        }
-    } );
+                 lastError_ = processGuard->errorString();
+                 // Crashed is normally followed by finished(), which can recover the
+                 // redirected stderr. Other errors need immediate completion.
+                 if ( error != QProcess::Crashed ) {
+                     failCurrentProcess( context->generation, lastError_ );
+                 }
+             } );
 
-    connect( currentProcess,
-             qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this,
-             [ this, processGuard ]( int exitCode, QProcess::ExitStatus exitStatus ) {
-        if ( destroyed_ || !processGuard || process_.get() != processGuard.data() ) {
-            return;
-        }
+    connect( currentProcess, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this,
+             [ this, processGuard, context ]( int exitCode, QProcess::ExitStatus exitStatus ) {
+                 if ( !processGuard || !isCurrentProcess( processGuard.data(), context ) ) {
+                     return;
+                 }
 
-        cancelStartupTimer();
-        asyncStartupPhase_ = AsyncStartupPhase::Idle;
-        if ( state_ == State::Connected || state_ == State::Connecting ) {
-            const auto fallback = exitStatus == QProcess::NormalExit
-                                      ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
-                                      : tr( "Live source crashed" );
-            failCurrentProcess( fallback, true );
-        }
-        else {
-            // Even after finished(), QProcess can retain redirected Windows
-            // handles until destruction. Retire it before releasing the capture.
-            retireCurrentProcess();
-        }
-    } );
+                 cancelStartupTimer();
+                 asyncStartupPhase_ = AsyncStartupPhase::Idle;
+                 if ( state_ == State::Connected || state_ == State::Connecting ) {
+                     const auto fallback
+                         = exitStatus == QProcess::NormalExit
+                               ? tr( "Live source exited unexpectedly (%1)" ).arg( exitCode )
+                               : tr( "Live source crashed" );
+                     failCurrentProcess( context->generation, fallback );
+                 }
+                 else {
+                     retireCurrentProcess();
+                 }
+             } );
+}
+
+bool ProcessLiveSourceTransport::isCurrentProcess(
+    const QProcess* process, const std::shared_ptr<ProcessContext>& context ) const
+{
+    return !destroyed_ && process != nullptr && process_.get() == process
+           && processContext_ == context && activeGeneration_.has_value()
+           && *activeGeneration_ == context->generation;
 }
 
 void ProcessLiveSourceTransport::retireCurrentProcess()
@@ -117,6 +180,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
     }
 
     auto dyingProcess = std::move( process_ );
+    processContext_.reset();
     auto* const dying = dyingProcess.get();
     dying->disconnect( this );
 
@@ -124,9 +188,9 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
     // even after state() becomes NotRunning. Keep the QTemporaryFile owner and
     // path attached to that exact process lifetime.
     const auto detachedStderrFilePath = stderrFilePath_;
-    std::shared_ptr<QTemporaryFile> detachedStderrFile( std::move( stderrFile_ ) );
 
     if ( destroyed_ ) {
+        auto detachedStderrFile = std::move( stderrFile_ );
         if ( dying->state() != QProcess::NotRunning ) {
             if ( dying->processId() > 0 ) {
                 dying->terminate();
@@ -137,23 +201,32 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
             }
         }
         dyingProcess.reset();
-        QFile::remove( detachedStderrFilePath );
+        if ( !detachedStderrFilePath.isEmpty() ) {
+            QFile::remove( detachedStderrFilePath );
+        }
         detachedStderrFile.reset();
         return;
     }
 
-    // Future connects must never reuse the process whose finished/error signal
-    // is currently unwinding. A reentrant error handler therefore sees a fresh
-    // process and capture pair.
+    std::shared_ptr<QTemporaryFile> detachedStderrFile( std::move( stderrFile_ ) );
+
+    // Keep asynchronous retirement owned by the transport. finished() normally
+    // schedules prompt deletion, while QObject parentage closes the lifetime if
+    // the event loop stops or the transport is destroyed first.
+    dying->setParent( this );
+
+    // A new generation must never reuse the QProcess whose callbacks are
+    // currently unwinding. Create the fresh process before external callbacks
+    // can request a reentrant start.
     createProcess();
 
-    QObject::connect(
-        dying, &QObject::destroyed,
-        [ detachedStderrFile,
-          detachedStderrFilePath ]( QObject* ) mutable {
-        QFile::remove( detachedStderrFilePath );
-        detachedStderrFile.reset();
-    } );
+    QObject::connect( dying, &QObject::destroyed,
+                      [ detachedStderrFile, detachedStderrFilePath ]( QObject* ) mutable {
+                          if ( !detachedStderrFilePath.isEmpty() ) {
+                              QFile::remove( detachedStderrFilePath );
+                          }
+                          detachedStderrFile.reset();
+                      } );
 
     if ( dying->state() == QProcess::NotRunning ) {
         auto* const qtOwnedProcess = dyingProcess.release();
@@ -184,8 +257,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
 bool ProcessLiveSourceTransport::prepareStderrCapture()
 {
     auto stderrFile = std::make_unique<QTemporaryFile>(
-        QDir( QDir::tempPath() ).filePath(
-            QStringLiteral( "klogg_stderr_XXXXXX.log" ) ) );
+        QDir( QDir::tempPath() ).filePath( QStringLiteral( "klogg_stderr_XXXXXX.log" ) ) );
     if ( !stderrFile->open() ) {
         lastError_ = tr( "Failed to create a private stderr capture file: %1" )
                          .arg( stderrFile->errorString() );
@@ -200,154 +272,181 @@ bool ProcessLiveSourceTransport::prepareStderrCapture()
     return true;
 }
 
+// Qt child teardown is explicitly contained below; clang-tidy still models
+// QObject/QProcess destructors as potentially throwing.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 ProcessLiveSourceTransport::~ProcessLiveSourceTransport()
 {
     destroyed_ = true;
-    disconnectTransport();
+    cancelStartupTimer();
+    activeGeneration_.reset();
+    retireCurrentProcess();
+    stopOwnedChildProcesses();
 }
 
-bool ProcessLiveSourceTransport::connectTransport()
+void ProcessLiveSourceTransport::stopOwnedChildProcesses()
 {
-    if ( state_ == State::Connected ) {
-        return true;
+    // Retired streams and asynchronous clear commands are QObject children.
+    // Quiesce them before QObject tears down its child list so QProcess is never
+    // destroyed while the operating-system process is still running.
+    for ( auto* child : children() ) {
+        auto* const childProcess = qobject_cast<QProcess*>( child );
+        if ( !childProcess ) {
+            continue;
+        }
+
+        childProcess->disconnect( this );
+        if ( childProcess->state() != QProcess::NotRunning ) {
+            childProcess->kill();
+            childProcess->waitForFinished( 1500 );
+        }
+    }
+}
+
+void ProcessLiveSourceTransport::start( Generation generation )
+{
+    if ( activeGeneration_ == generation
+         && ( state_ == State::Connecting || state_ == State::Connected ) ) {
+        return;
     }
 
+    resetStatistics( generation );
+
+    // Invalidate the old generation before retiring its process. Any synchronous
+    // callbacks caused by cancellation therefore fail isCurrentProcess().
+    if ( activeGeneration_.has_value() && *activeGeneration_ != generation ) {
+        activeGeneration_.reset();
+        cancelStartupTimer();
+        asyncStartupPhase_ = AsyncStartupPhase::Idle;
+        retireCurrentProcess();
+    }
+
+    if ( !process_ ) {
+        createProcess();
+    }
+
+    activeGeneration_ = generation;
+    processContext_->generation = generation;
+    const auto context = processContext_;
+    auto* const currentProcess = process_.get();
+    cancelStartupTimer();
+    asyncStartupPhase_ = AsyncStartupPhase::Idle;
     lastError_.clear();
+    prepareStreamingSession();
+
     if ( !prepareStderrCapture() ) {
-        setState( State::Error );
-        Q_EMIT errorOccurred( lastError_ );
-        return false;
+        failCurrentProcess( generation, lastError_ );
+        return;
     }
 
     // streamingCommand() may embed stderrFilePath_ in a PTY wrapper, so the
     // fresh private path must exist before the command is assembled.
     const auto command = streamingCommand();
-    auto* const currentProcess = process_.get();
     currentProcess->setStandardErrorFile( stderrFilePath_ );
     currentProcess->setProgram( command.program );
     currentProcess->setArguments( command.arguments );
-    setState( State::Connecting );
-    currentProcess->start();
+    setState( generation, State::Connecting );
 
-    const auto started = currentProcess->waitForStarted( 3000 );
-    if ( process_.get() != currentProcess ) {
-        return false;
-    }
-    if ( !started ) {
-        lastError_ = currentProcess->errorString();
-        failCurrentProcess( lastError_, true );
-        return false;
-    }
-
-    QElapsedTimer startupTimer;
-    startupTimer.start();
-    while ( process_.get() == currentProcess && state_ != State::Error
-            && currentProcess->state() != QProcess::NotRunning
-            && startupTimer.elapsed() < StartupFailureGracePeriodMs ) {
-        currentProcess->waitForFinished( StartupFailurePollIntervalMs );
-        QCoreApplication::processEvents();
-
-        // A disconnect or failure may have been processed during processEvents(),
-        // swapping process_ with a fresh idle instance. Bail out without touching
-        // the retired QProcess again.
-        if ( process_.get() != currentProcess || state_ == State::Disconnected ) {
-            return false;
-        }
-    }
-
-    if ( process_.get() != currentProcess ) {
-        return false;
-    }
-    if ( state_ == State::Error || currentProcess->state() == QProcess::NotRunning ) {
-        if ( lastError_.isEmpty() ) {
-            // stderr is redirected to stderrFilePath_ via setStandardErrorFile(),
-            // so readAllStandardError() is always empty here. Read the temp file
-            // instead so the real startup error surfaces (matches the finished
-            // handler).
-            QString stdErr;
-            QFile stderrFile( stderrFilePath_ );
-            if ( stderrFile.open( QIODevice::ReadOnly ) ) {
-                stdErr = QString::fromUtf8( stderrFile.readAll() ).trimmed();
-                stderrFile.close();
-            }
-            lastError_ = stdErr.isEmpty() ? tr( "Live source terminated during startup" ) : stdErr;
-            setState( State::Error );
-            Q_EMIT errorOccurred( lastError_ );
-        }
-        return false;
-    }
-
-    setState( State::Connected );
-    return true;
-}
-
-void ProcessLiveSourceTransport::connectTransportAsync()
-{
-    if ( state_ == State::Connected || state_ == State::Connecting ) {
+    // stateChanged is intentionally synchronous. A listener may replace or stop
+    // this generation reentrantly, so never continue startup through whatever
+    // process happens to be current after the signal returns.
+    if ( !isCurrentProcess( currentProcess, context ) || state_ != State::Connecting ) {
         return;
     }
-
-    cancelStartupTimer();
-    asyncStartupPhase_ = AsyncStartupPhase::Idle;
-
-    lastError_.clear();
-    if ( !prepareStderrCapture() ) {
-        setState( State::Error );
-        Q_EMIT errorOccurred( lastError_ );
-        return;
-    }
-
-    // streamingCommand() may embed stderrFilePath_ in a PTY wrapper, so the
-    // fresh private path must exist before the command is assembled.
-    const auto command = streamingCommand();
-    process_->setStandardErrorFile( stderrFilePath_ );
-    process_->setProgram( command.program );
-    process_->setArguments( command.arguments );
-    setState( State::Connecting );
 
     const auto timing = asyncStartupTiming();
     asyncStartupPhase_ = AsyncStartupPhase::Starting;
-    armStartupTimer( AsyncStartupPhase::Starting, timing.startTimeoutMs, process_.get() );
-    startProcessAsync( *process_ );
+    armStartupTimer( AsyncStartupPhase::Starting, timing.startTimeoutMs, currentProcess, context );
+    startProcessAsync( *currentProcess );
 }
 
-void ProcessLiveSourceTransport::disconnectTransport()
+void ProcessLiveSourceTransport::stop( Generation generation )
 {
-    // Cancel pending startup work before replacing or terminating the process.
+    if ( !activeGeneration_.has_value() || *activeGeneration_ != generation ) {
+        return;
+    }
+
+    // Generation invalidation is deliberately the first mutation. QProcess
+    // cancellation may synchronously dispatch platform callbacks.
+    activeGeneration_.reset();
     cancelStartupTimer();
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
-
-    if ( !process_ ) {
-        setState( State::Disconnected );
-        return;
-    }
-    if ( !destroyed_ && state_ == State::Disconnected
-         && process_->state() == QProcess::NotRunning ) {
-        return;
-    }
-
     retireCurrentProcess();
-    setState( State::Disconnected );
+    setState( generation, State::Disconnected );
 }
 
-bool ProcessLiveSourceTransport::clearRemote( QString* error )
+void ProcessLiveSourceTransport::clearRemoteAsync( Generation generation, ClearRequestId requestId )
 {
-    QByteArray stdErr;
-    const auto ok = runBlockingCommand( clearCommand(), &stdErr );
-    if ( !ok ) {
-        lastError_ = stdErr.isEmpty() ? tr( "Failed to clear remote source" )
-                                      : QString::fromUtf8( stdErr ).trimmed();
-        if ( error ) {
-            *error = lastError_;
-        }
-        return false;
-    }
+    const auto command = clearCommand();
+    // QObject parentage owns the operation independently from the streaming
+    // process. Completion remains correlated even when results arrive out of
+    // order or the stream generation has already retired.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* const process = new QProcess( this );
+    process->setProcessChannelMode( QProcess::SeparateChannels );
 
-    if ( error ) {
-        error->clear();
-    }
-    lastError_.clear();
-    return true;
+    struct CompletionState {
+        bool completed = false;
+    };
+    const auto completionState = std::make_shared<CompletionState>();
+    const QPointer<ProcessLiveSourceTransport> self( this );
+    const QPointer<QProcess> processGuard( process );
+
+    const auto complete = [ self, processGuard, completionState, generation,
+                            requestId ]( bool succeeded, QString error ) {
+        if ( completionState->completed ) {
+            return;
+        }
+        completionState->completed = true;
+
+        if ( self ) {
+            Q_EMIT self->clearRemoteFinished( generation, requestId, succeeded, error );
+        }
+        if ( processGuard ) {
+            if ( processGuard->state() == QProcess::NotRunning ) {
+                processGuard->deleteLater();
+            }
+            else {
+                QObject::connect( processGuard.data(),
+                                  qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+                                  processGuard.data(), &QObject::deleteLater );
+            }
+        }
+    };
+
+    connect( process, &QProcess::errorOccurred, this,
+             [ processGuard, complete ]( QProcess::ProcessError ) {
+                 if ( !processGuard ) {
+                     return;
+                 }
+                 complete( false,
+                           processErrorText( *processGuard,
+                                             QObject::tr( "Failed to clear remote source" ) ) );
+             } );
+    connect( process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ), this,
+             [ processGuard, complete ]( int exitCode, QProcess::ExitStatus exitStatus ) {
+                 if ( !processGuard ) {
+                     return;
+                 }
+                 const auto succeeded = exitStatus == QProcess::NormalExit && exitCode == 0;
+                 auto error
+                     = succeeded
+                           ? QString{}
+                           : processErrorText( *processGuard,
+                                               QObject::tr( "Failed to clear remote source" ) );
+                 complete( succeeded, std::move( error ) );
+             } );
+    QTimer::singleShot( ClearTimeoutMs, process, [ processGuard, complete, command ] {
+        if ( !processGuard ) {
+            return;
+        }
+        if ( processGuard->state() != QProcess::NotRunning ) {
+            processGuard->kill();
+        }
+        complete( false, QObject::tr( "Timed out waiting for %1" ).arg( command.program ) );
+    } );
+
+    process->start( command.program, command.arguments );
 }
 
 QString ProcessLiveSourceTransport::lastError() const
@@ -355,44 +454,20 @@ QString ProcessLiveSourceTransport::lastError() const
     return lastError_;
 }
 
-bool ProcessLiveSourceTransport::runBlockingCommand( const Command& command, QByteArray* stdErr ) const
-{
-    QProcess process;
-    process.start( command.program, command.arguments );
-    if ( !process.waitForStarted( 3000 ) ) {
-        if ( stdErr ) {
-            *stdErr = process.errorString().toUtf8();
-        }
-        return false;
-    }
-
-    if ( !process.waitForFinished( 5000 ) ) {
-        process.kill();
-        process.waitForFinished( 1500 );
-        if ( stdErr ) {
-            *stdErr = QObject::tr( "Timed out waiting for %1" ).arg( command.program ).toUtf8();
-        }
-        return false;
-    }
-    if ( stdErr ) {
-        *stdErr = process.readAllStandardError();
-    }
-
-    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
-}
-
 void ProcessLiveSourceTransport::startProcessAsync( QProcess& process )
 {
     process.start();
 }
 
-ProcessLiveSourceTransport::AsyncStartupTiming ProcessLiveSourceTransport::asyncStartupTiming() const
+ProcessLiveSourceTransport::AsyncStartupTiming
+ProcessLiveSourceTransport::asyncStartupTiming() const
 {
     return { 3000, StartupFailureGracePeriodMs };
 }
 
 void ProcessLiveSourceTransport::armStartupTimer( AsyncStartupPhase phase, int timeoutMs,
-                                                  QProcess* process )
+                                                  QProcess* process,
+                                                  std::shared_ptr<ProcessContext> context )
 {
     cancelStartupTimer();
 
@@ -405,31 +480,33 @@ void ProcessLiveSourceTransport::armStartupTimer( AsyncStartupPhase phase, int t
     timer->setSingleShot( true );
     timer->setTimerType( Qt::PreciseTimer );
     connect( timer, &QTimer::timeout, this,
-             [ this, self, processGuard, timer, phase ] {
-        if ( startupTimer_ != timer ) {
-            timer->deleteLater();
-            return;
-        }
+             [ this, self, processGuard, context = std::move( context ), timer, phase ] {
+                 if ( startupTimer_ != timer ) {
+                     timer->deleteLater();
+                     return;
+                 }
 
-        startupTimer_ = nullptr;
-        timer->deleteLater();
-        if ( !self || destroyed_ || !processGuard || process_.get() != processGuard.data()
-             || state_ != State::Connecting || asyncStartupPhase_ != phase ) {
-            return;
-        }
+                 startupTimer_ = nullptr;
+                 timer->deleteLater();
+                 if ( !self || !processGuard || !isCurrentProcess( processGuard.data(), context )
+                      || state_ != State::Connecting || asyncStartupPhase_ != phase ) {
+                     return;
+                 }
 
-        asyncStartupPhase_ = AsyncStartupPhase::Idle;
-        if ( phase == AsyncStartupPhase::Starting ) {
-            failCurrentProcess( tr( "Timed out waiting for the live source process to start" ),
-                                true );
-        }
-        else if ( processGuard->state() == QProcess::Running ) {
-            setState( State::Connected );
-        }
-        else {
-            failCurrentProcess( tr( "Live source terminated during startup" ), true );
-        }
-    } );
+                 asyncStartupPhase_ = AsyncStartupPhase::Idle;
+                 if ( phase == AsyncStartupPhase::Starting ) {
+                     failCurrentProcess(
+                         context->generation,
+                         tr( "Timed out waiting for the live source process to start" ) );
+                 }
+                 else if ( processGuard->state() == QProcess::Running ) {
+                     setState( context->generation, State::Connected );
+                 }
+                 else {
+                     failCurrentProcess( context->generation,
+                                         tr( "Live source terminated during startup" ) );
+                 }
+             } );
     timer->start( timeoutMs );
 }
 
@@ -451,8 +528,13 @@ QString ProcessLiveSourceTransport::capturedStderr() const
     return QString::fromUtf8( stderrFile.readAll() ).trimmed();
 }
 
-void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback, bool retireProcess )
+void ProcessLiveSourceTransport::failCurrentProcess( Generation generation,
+                                                     const QString& fallback )
 {
+    if ( activeGeneration_ != generation ) {
+        return;
+    }
+
     cancelStartupTimer();
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
 
@@ -465,25 +547,31 @@ void ProcessLiveSourceTransport::failCurrentProcess( const QString& fallback, bo
         lastError_ = fallback;
     }
 
-    if ( retireProcess ) {
-        retireCurrentProcess();
-    }
+    // Failure retires this run just as decisively as an intentional stop.
+    // Invalidate before process teardown so any synchronous or queued callback
+    // from the failed process is stale by construction.
+    const auto error = lastError_;
+    activeGeneration_.reset();
+    retireCurrentProcess();
 
-    if ( state_ != State::Error ) {
-        setState( State::Error );
-        Q_EMIT errorOccurred( lastError_ );
+    if ( stateGeneration_ != generation || state_ != State::Error ) {
+        setState( generation, State::Error );
+        Q_EMIT errorOccurred( generation, error );
     }
 }
 
-void ProcessLiveSourceTransport::setState( State state )
+void ProcessLiveSourceTransport::setState( Generation generation, State state )
 {
-    if ( state_ == state ) {
+    if ( stateGeneration_ == generation && state_ == state ) {
         return;
     }
 
+    stateGeneration_ = generation;
     state_ = state;
-    Q_EMIT stateChanged( state_ );
+    Q_EMIT stateChanged( generation, state_ );
 }
+
+void ProcessLiveSourceTransport::prepareStreamingSession() {}
 
 void ProcessLiveSourceTransport::filterReceivedBytes( QByteArray& data )
 {

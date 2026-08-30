@@ -60,6 +60,7 @@ namespace {
 constexpr QLatin1String PathKey = QLatin1String( "path", 4 );
 constexpr QLatin1String TitleKey = QLatin1String( "title", 5 );
 constexpr QLatin1String ToolTipKey = QLatin1String( "toolTip", 7 );
+constexpr QLatin1String AssociatedPathKey = QLatin1String( "associatedPath", 14 );
 constexpr QLatin1String StatusKey = QLatin1String( "status", 6 );
 constexpr QLatin1String LiveStatusKey = QLatin1String( "liveStatus", 10 );
 constexpr QLatin1String GroupIdKey = QLatin1String( "groupId", 7 );
@@ -416,7 +417,8 @@ void TabbedCrawlerWidget::changeEvent( QEvent* event )
 }
 
 void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
-                                         const QString& displayName, const QString& toolTip )
+                                         const QString& displayName, const QString& toolTip,
+                                         const QString& associatedPath )
 {
     // Robust to trailing-slash document paths (drag-dropped folders): Qt's
     // QFileInfo(path).fileName() returns "" for "/.../Logs/". The label must
@@ -435,6 +437,7 @@ void TabbedCrawlerWidget::addTabBarItem( int index, const QString& documentId,
     tabData[ PathKey ] = documentId;
     tabData[ TitleKey ] = tabLabel;
     tabData[ ToolTipKey ] = nativeToolTip;
+    tabData[ AssociatedPathKey ] = associatedPath;
     tabData[ StatusKey ] = static_cast<int>( DataStatus::OLD_DATA );
     tabData[ LiveStatusKey ] = static_cast<int>( LiveTabStatus::None );
 
@@ -459,7 +462,8 @@ void TabbedCrawlerWidget::removeCrawler( int index )
 }
 
 void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
-                                         const QString& toolTip )
+                                         const QString& toolTip,
+                                         std::optional<QString> associatedPath )
 {
     if ( index < 0 || index >= count() ) {
         return;
@@ -468,6 +472,9 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     auto tabData = myTabBar_.tabData( index ).toMap();
     tabData[ TitleKey ] = displayName;
     tabData[ ToolTipKey ] = QDir::toNativeSeparators( toolTip );
+    if ( associatedPath.has_value() ) {
+        tabData[ AssociatedPathKey ] = *associatedPath;
+    }
     myTabBar_.setTabData( index, tabData );
     myTabBar_.setTabToolTip( index, QDir::toNativeSeparators( toolTip ) );
 
@@ -546,9 +553,9 @@ void TabbedCrawlerWidget::setTabVisibleCompat( int index, bool visible )
     klogg::qtcompat::setTabVisible( &myTabBar_, index, visible );
 }
 
-void TabbedCrawlerWidget::handleTabMoved( int from, int to )
+void TabbedCrawlerWidget::handleTabMoved( int fromIndex, int toIndex )
 {
-    if ( from < 0 || to < 0 || to >= count() ) {
+    if ( fromIndex < 0 || toIndex < 0 || toIndex >= count() ) {
         return;
     }
 
@@ -559,9 +566,9 @@ void TabbedCrawlerWidget::handleTabMoved( int from, int to )
     }
 
     if ( draggedTabPath_.isEmpty() ) {
-        draggedTabPath_ = tabPathAt( to );
+        draggedTabPath_ = tabPathAt( toIndex );
         if ( draggedTabPath_.isEmpty() ) {
-            draggedTabPath_ = tabPathAt( from );
+            draggedTabPath_ = tabPathAt( fromIndex );
         }
     }
 
@@ -836,6 +843,8 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
     buildGroupSubmenu( groupMenu, tab );
 
     const auto tabPath = tabPathAt( tab );
+    const auto associatedPath
+        = myTabBar_.tabData( tab ).toMap().value( AssociatedPathKey ).toString();
     auto& groupManager = TabGroupManager::get();
     const auto currentGroupId = groupManager.groupIdForTab( tabPath );
     if ( !currentGroupId.isEmpty() ) {
@@ -892,11 +901,12 @@ void TabbedCrawlerWidget::showContextMenu( int tab, QPoint globalPoint )
     }
 
     connect( copyFullPath, &QAction::triggered, this,
-             [ this, tab ] { sendTextToClipboard( tabToolTip( tab ) ); } );
+             [ associatedPath ] { sendTextToClipboard( associatedPath ); } );
+    copyFullPath->setEnabled( !associatedPath.isEmpty() );
 
     connect( openContainingFolder, &QAction::triggered, this,
-             [ this, tab ] { showPathInFileExplorer( tabToolTip( tab ) ); } );
-    openContainingFolder->setEnabled( QFileInfo( tabToolTip( tab ) ).isAbsolute() );
+             [ associatedPath ] { showPathInFileExplorer( associatedPath ); } );
+    openContainingFolder->setEnabled( QFileInfo( associatedPath ).isAbsolute() );
 
     connect( renameTab, &QAction::triggered, this, [ this, tab, tabPath ] {
         const auto currentName = TabNameMapping::getSynced().tabName( tabPath );

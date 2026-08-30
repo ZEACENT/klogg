@@ -4,21 +4,37 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
-#include <QHBoxLayout>
+#include <QFutureWatcher>
 #include <QLabel>
-#include <QLineEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTimer>
-#include <QVBoxLayout>
 #include <QUuid>
+#include <QVBoxLayout>
+#include <QVariantMap>
 
 #include "configuration.h"
 #include "iosdevicelistprovider.h"
-#include "ioslogprocesstransport.h"
+
+namespace {
+
+QString discoveryMessage( const klogg::livecapture::LiveSourceError& error )
+{
+    return QString::fromUtf8( error.message.data(), static_cast<int>( error.message.size() ) );
+}
+
+} // namespace
 
 IosLogDialog::IosLogDialog( QWidget* parent )
+    : IosLogDialog( DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation{}, parent )
+{
+}
+
+IosLogDialog::IosLogDialog(
+    DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation discoveryOperation, QWidget* parent )
     : QDialog( parent )
+    , discoveryOperation_( std::move( discoveryOperation ) )
 {
     setWindowTitle( tr( "Open iOS Log Stream" ) );
     setModal( true );
@@ -27,22 +43,15 @@ IosLogDialog::IosLogDialog( QWidget* parent )
     auto* rootLayout = new QVBoxLayout( this );
     auto* formLayout = new QFormLayout();
 
-    auto* executableRowLayout = new QHBoxLayout();
-    executableEdit_ = new QLineEdit( this );
-    executableEdit_->setObjectName( QStringLiteral( "iosLogExecutableEdit" ) );
-    executableEdit_->setPlaceholderText( QStringLiteral( "pymobiledevice3" ) );
+    // The dialog composes typed native sessions exclusively through the
+    // bundled services: no sidecar executable or free-form argument field
+    // exists.
     refreshButton_ = new QPushButton( tr( "Refresh Devices" ), this );
     refreshButton_->setObjectName( QStringLiteral( "refreshDevicesButton" ) );
-    executableRowLayout->addWidget( executableEdit_ );
-    executableRowLayout->addWidget( refreshButton_ );
 
     deviceCombo_ = new QComboBox( this );
     deviceCombo_->setObjectName( QStringLiteral( "deviceCombo" ) );
     deviceCombo_->setSizeAdjustPolicy( QComboBox::AdjustToContents );
-    extraArgsEdit_ = new QLineEdit( this );
-    extraArgsEdit_->setObjectName( QStringLiteral( "extraArgsEdit" ) );
-    extraArgsEdit_->setPlaceholderText(
-        tr( "Optional args, appended after 'pymobiledevice3 syslog live --udid <udid>'" ) );
     ansiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), this );
     ansiOutputCheckBox_->setObjectName( QStringLiteral( "ansiOutputCheckBox" ) );
 
@@ -85,11 +94,10 @@ IosLogDialog::IosLogDialog( QWidget* parent )
             "Older files beyond this count are deleted. "
             "Set to 0 to keep all rotated files indefinitely." ) );
 
-    formLayout->addRow( tr( "pymobiledevice3 executable" ), executableRowLayout );
+    formLayout->addRow( refreshButton_ );
     formLayout->addRow( tr( "Device" ), deviceCombo_ );
-    formLayout->addRow( tr( "Extra iOS log args" ), extraArgsEdit_ );
-    formLayout->addRow( QString{}, ansiOutputCheckBox_ );
-    formLayout->addRow( QString{}, autoReconnectCheckBox_ );
+    formLayout->addRow( ansiOutputCheckBox_ );
+    formLayout->addRow( autoReconnectCheckBox_ );
     formLayout->addRow( tr( "Max reconnect attempts" ), maxAttemptsSpinBox_ );
     formLayout->addRow( tr( "Max capture file size" ), maxFileSizeSpinBox_ );
     formLayout->addRow( tr( "Rolling backup count" ), backupCountSpinBox_ );
@@ -114,57 +122,197 @@ IosLogDialog::IosLogDialog( QWidget* parent )
     } );
     connect( buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject );
 
-    deviceRefreshWatcher_ = new QFutureWatcher<QList<IosDeviceInfo>>( this );
-    connect( deviceRefreshWatcher_, &QFutureWatcher<QList<IosDeviceInfo>>::finished, this,
-             &IosLogDialog::onDevicesEnumerated );
-
     loadSettings();
     QTimer::singleShot( 0, this, &IosLogDialog::refreshDevices );
 }
 
+IosLogDialog::IosLogDialog( klogg::livecapture::ios::IosCatalogSnapshotProvider& catalogProvider,
+                            QWidget* parent )
+    : IosLogDialog( DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation{}, parent )
+{
+    catalogProvider_ = &catalogProvider;
+    const QPointer<IosLogDialog> guard( this );
+    catalogSubscription_ = catalogProvider.subscribe(
+        [ guard ]( const klogg::livecapture::ios::IosCatalogSnapshot& ) {
+            if ( guard == nullptr ) {
+                return;
+            }
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [ guard ] {
+                    if ( guard != nullptr ) {
+                        guard->refreshDevices();
+                    }
+                },
+                Qt::QueuedConnection );
+        } );
+}
+
+IosLogDialog::~IosLogDialog()
+{
+    if ( catalogProvider_ != nullptr && catalogSubscription_.has_value() ) {
+        catalogProvider_->unsubscribe( *catalogSubscription_ );
+    }
+}
+
 AdbLogcatSessionData IosLogDialog::sessionData() const
 {
+    // Only the built-in native transport is composed: sidecar executable and
+    // free-form argument fields were retired with the compatibility backend.
     AdbLogcatSessionData sessionData;
-    sessionData.adbExecutable = executableEdit_->text().trimmed();
-    sessionData.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
     sessionData.deviceDescription = deviceCombo_->currentText();
-    sessionData.extraArgs = extraArgsEdit_->text().trimmed();
+    if ( catalogProvider_ != nullptr ) {
+        const auto endpoint = deviceCombo_->currentData( Qt::UserRole ).toMap();
+        sessionData.deviceSerial = endpoint.value( QStringLiteral( "udid" ) ).toString();
+        sessionData.iosEndpoint.connectionType
+            = endpoint.value( QStringLiteral( "connection" ) ).toString()
+                      == QStringLiteral( "network" )
+                  ? klogg::livecapture::ios::NativeConnectionType::Network
+                  : klogg::livecapture::ios::NativeConnectionType::Usb;
+    }
+    else {
+        sessionData.deviceSerial = deviceCombo_->currentData( Qt::UserRole ).toString();
+    }
+    sessionData.iosBackend = IosTransportBackend::Native;
+    sessionData.iosEndpoint.udid = sessionData.deviceSerial.toStdString();
     sessionData.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
     sessionData.sourceType = LiveLogSourceType::IosLogStream;
+    sessionData.runIntent = klogg::livecapture::RunIntent::Running;
     sessionData.ansiOutputEnabled = ansiOutputCheckBox_->isChecked();
     sessionData.autoReconnectEnabled = autoReconnectCheckBox_->isChecked();
     sessionData.maxReconnectAttempts = maxAttemptsSpinBox_->value();
-    sessionData.captureMaxFileSize = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
+    sessionData.captureMaxFileSize
+        = static_cast<qint64>( maxFileSizeSpinBox_->value() ) * 1024 * 1024;
     sessionData.captureBackupCount = backupCountSpinBox_->value();
     return sessionData;
 }
 
 void IosLogDialog::refreshDevices()
 {
-    deviceCombo_->clear();
-    updateAcceptState();
+    if ( catalogProvider_ != nullptr ) {
+        const auto selectedEndpoint = deviceCombo_->currentData( Qt::UserRole );
+        if ( const auto startupError = catalogProvider_->startupError();
+             startupError.has_value() ) {
+            deviceCombo_->clear();
+            statusLabel_->setText(
+                tr( "Native iOS device service is unavailable: %1" )
+                    .arg( QString::fromStdString( startupError->message ) ) );
+            statusLabel_->setToolTip( QString::fromStdString( startupError->nativeDetail ) );
+            refreshButton_->setEnabled( true );
+            updateAcceptState();
+            return;
+        }
+
+        const auto snapshot = catalogProvider_->snapshot();
+        deviceCombo_->clear();
+        statusLabel_->setToolTip( {} );
+        for ( const auto& entry : snapshot.entries ) {
+            QVariantMap endpoint;
+            endpoint.insert( QStringLiteral( "udid" ),
+                             QString::fromStdString( entry.endpoint.udid ) );
+            endpoint.insert( QStringLiteral( "connection" ),
+                             entry.endpoint.connectionType
+                                     == klogg::livecapture::ios::NativeConnectionType::Network
+                                 ? QStringLiteral( "network" )
+                                 : QStringLiteral( "usb" ) );
+            const auto displayName
+                = entry.metadata.has_value() && !entry.metadata->displayName.empty()
+                      ? QString::fromStdString( entry.metadata->displayName )
+                      : QString::fromStdString( entry.endpoint.udid );
+            const auto connectionName
+                = entry.endpoint.connectionType
+                          == klogg::livecapture::ios::NativeConnectionType::Network
+                      ? tr( "Network" )
+                      : tr( "USB" );
+            deviceCombo_->addItem( QStringLiteral( "%1 (%2)" ).arg( displayName, connectionName ),
+                                   endpoint );
+            if ( entry.metadata.has_value() ) {
+                deviceCombo_->setItemData(
+                    deviceCombo_->count() - 1,
+                    QStringLiteral( "%1 · iOS %2" )
+                        .arg( QString::fromStdString( entry.metadata->productType ),
+                              QString::fromStdString( entry.metadata->productVersion ) ),
+                    Qt::ToolTipRole );
+            }
+        }
+        const auto selectedIndex = deviceCombo_->findData( selectedEndpoint );
+        if ( selectedIndex >= 0 ) {
+            deviceCombo_->setCurrentIndex( selectedIndex );
+        }
+        statusLabel_->setText(
+            snapshot.entries.empty()
+                ? tr( "No iOS devices detected by the bundled native service." )
+                : tr( "Using the bundled native iOS transport. No Python process is started." ) );
+        refreshButton_->setEnabled( true );
+        updateAcceptState();
+        return;
+    }
+
+    const auto generation = discoveryCoordinator_.beginRefresh();
+    ++pendingRefreshCount_;
+    refreshButton_->setEnabled( false );
     statusLabel_->setText( tr( "Detecting iOS devices..." ) );
 
-    // The provider snapshots an immutable enumeration plan before returning the
-    // future, so the local provider can be destroyed while the task continues.
-    IosDeviceListProvider provider( executableEdit_->text() );
-    deviceRefreshWatcher_->setFuture( provider.listDevicesAsync() );
+    if ( !discoveryOperation_ ) {
+        --pendingRefreshCount_;
+        refreshButton_->setEnabled( true );
+        statusLabel_->setText( tr( "No iOS devices detected." ) );
+        deviceCombo_->clear();
+        updateAcceptState();
+        return;
+    }
+
+    auto future = runDeviceDiscoveryAsync<IosDeviceInfo>( discoveryOperation_, generation );
+
+    // The watcher owns its completion cleanup and outlives the dialog when a
+    // discovery task is still publishing a result during dialog destruction.
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+    auto* watcher = new QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>;
+    const QPointer<IosLogDialog> dialog( this );
+    connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>::finished, watcher,
+             [ dialog, watcher ] {
+                 auto result = watcher->result();
+                 watcher->deleteLater();
+                 if ( dialog == nullptr ) {
+                     return;
+                 }
+                 if ( dialog->pendingRefreshCount_ > 0 ) {
+                     --dialog->pendingRefreshCount_;
+                 }
+                 dialog->refreshButton_->setEnabled( dialog->pendingRefreshCount_ == 0 );
+                 dialog->applyDiscoveryResult( std::move( result ) );
+             } );
+    watcher->setFuture( future );
 }
 
-void IosLogDialog::onDevicesEnumerated()
+void IosLogDialog::applyDiscoveryResult( DeviceDiscoveryResult<IosDeviceInfo> result )
 {
-    const auto devices = deviceRefreshWatcher_->result();
-    for ( const auto& device : devices ) {
+    if ( !discoveryCoordinator_.accept( std::move( result ) ) ) {
+        return;
+    }
+
+    const auto selectedDeviceId = deviceCombo_->currentData( Qt::UserRole );
+    deviceCombo_->clear();
+    for ( const auto& device : discoveryCoordinator_.currentDevices() ) {
         deviceCombo_->addItem( device.displayName, device.udid );
         deviceCombo_->setItemData( deviceCombo_->count() - 1, device.description, Qt::ToolTipRole );
     }
 
-    if ( devices.isEmpty() ) {
+    const auto selectedIndex = deviceCombo_->findData( selectedDeviceId );
+    if ( selectedIndex >= 0 ) {
+        deviceCombo_->setCurrentIndex( selectedIndex );
+    }
+
+    if ( const auto error = discoveryCoordinator_.currentError(); error.has_value() ) {
+        statusLabel_->setText(
+            discoveryMessage( error.value_or( klogg::livecapture::LiveSourceError{} ) ) );
+    }
+    else if ( discoveryCoordinator_.currentDevices().isEmpty() ) {
         statusLabel_->setText( tr( "No iOS devices detected." ) );
     }
     else {
-        statusLabel_->setText(
-            tr( "Data stays in temp capture storage until you explicitly save or close the tab." ) );
+        statusLabel_->setText( tr(
+            "Data stays in temp capture storage until you explicitly save or close the tab." ) );
     }
 
     updateAcceptState();
@@ -180,8 +328,6 @@ void IosLogDialog::updateAcceptState()
 void IosLogDialog::loadSettings()
 {
     const auto& config = Configuration::get();
-    executableEdit_->setText( config.iosLogExecutable() );
-    extraArgsEdit_->setText( config.iosLogExtraArgs() );
     ansiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
     autoReconnectCheckBox_->setChecked( config.liveAutoReconnectEnabled() );
     maxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
@@ -192,8 +338,6 @@ void IosLogDialog::loadSettings()
 void IosLogDialog::saveSettings() const
 {
     auto& config = Configuration::get();
-    config.setIosLogExecutable( executableEdit_->text().trimmed() );
-    config.setIosLogExtraArgs( extraArgsEdit_->text().trimmed() );
     config.setIosLogAnsiOutputEnabled( ansiOutputCheckBox_->isChecked() );
     config.setLiveAutoReconnectEnabled( autoReconnectCheckBox_->isChecked() );
     config.setLiveAutoReconnectMaxAttempts( maxAttemptsSpinBox_->value() );

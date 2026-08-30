@@ -480,7 +480,61 @@
     </message>
 </context>
 <context>
+    <name>IosLogDialog</name>
+    <message>
+        <location filename="../../ui/src/ioslogdialog.cpp" line="198"/>
+        <source>Native iOS device service is unavailable: %1</source>
+        <translation>原生 iOS 设备服务不可用：%1</translation>
+    </message>
+</context>
+<context>
     <name>MainWindow</name>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3173"/>
+        <source>Authorize this computer on the device.</source>
+        <translation>在设备上授权这台电脑。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3176"/>
+        <source>Pair the device with this computer.</source>
+        <translation>将设备与这台电脑配对。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3179"/>
+        <source>Trust this computer on the device.</source>
+        <translation>在设备上信任这台电脑。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3182"/>
+        <source>Unlock the device.</source>
+        <translation>解锁设备。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3185"/>
+        <source>%1\nAction required: %2</source>
+        <translation>%1\n需要操作：%2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="3201"/>
+        <source>%1\nOutput error: %2</source>
+        <translation>%1\n输出错误：%2</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be opened.</source>
+        <translation>无法打开绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be written.</source>
+        <translation>无法写入绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be flushed.</source>
+        <translation>无法刷新绑定的采集输出文件。</translation>
+    </message>
+    <message>
+        <source>The bound capture output could not be reopened after clearing.</source>
+        <translation>清除日志后无法重新打开绑定的采集输出文件。</translation>
+    </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1147"/>
         <source>Open URL as log file</source>
@@ -687,9 +741,19 @@
         <translation>从收藏中移除</translation>
     </message>
     <message>
-        <location filename="../../ui/src/mainwindow.cpp" line="1813"/>
-        <source>Unable to import filter favorites from the selected file.</source>
-        <translation>无法从所选文件导入筛选器收藏。</translation>
+        <location filename="../../ui/src/mainwindow.cpp" line="151"/>
+        <source>The selected filter favorites file does not exist.</source>
+        <translation>所选筛选器收藏文件不存在。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="154"/>
+        <source>The selected file is not a valid filter favorites file.</source>
+        <translation>所选文件不是有效的筛选器收藏文件。</translation>
+    </message>
+    <message>
+        <location filename="../../ui/src/mainwindow.cpp" line="157"/>
+        <source>The selected filter favorites file was created by a newer version of klogg.</source>
+        <translation>所选筛选器收藏文件由较新版本的 klogg 创建。</translation>
     </message>
     <message>
         <location filename="../../ui/src/mainwindow.cpp" line="1842"/>
@@ -705,6 +769,14 @@
         <location filename="../../ui/src/mainwindow.cpp" line="1860"/>
         <source>Unable to save filter favorites. Try again.</source>
         <translation>无法保存筛选器收藏。请重试。</translation>
+    </message>
+    <message>
+        <source>Live log sessions</source>
+        <translation>实时日志会话</translation>
+    </message>
+    <message>
+        <source>Live log source error</source>
+        <translation>实时日志源错误</translation>
     </message>
 </context>
 <context>
@@ -1094,6 +1166,18 @@
         <source>Secondary shortcut</source>
         <translation type="unfinished">备选快捷键</translation>
     </message>
+    <message>
+        <source>Keep all</source>
+        <translation>保留全部</translation>
+    </message>
+    <message>
+        <source>Number of old capture files to keep when rolling. Older files beyond this count are automatically deleted. Set to 0 to keep all rotated files.</source>
+        <translation>滚动时保留的旧捕获文件数量。超过此数量的旧文件将自动删除。设为 0 可保留所有滚动文件。</translation>
+    </message>
+    <message>
+        <source>Number of backup capture files to retain during rotation. Older files beyond this count are deleted. Set to 0 to keep all rotated files.</source>
+        <translation>滚动期间保留的捕获备份文件数量。超过此数量的旧文件将被删除。设为 0 可保留所有滚动文件。</translation>
+    </message>
 </context>
 <context>
     <name>PathLine</name>
@@ -1139,9 +1223,9 @@
 <context>
     <name>PredefinedFiltersComboBox</name>
     <message>
-        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="108"/>
-        <source>Predefined filters</source>
-        <translation type="unfinished">预定义的过滤器</translation>
+        <location filename="../../ui/src/predefinedfilterscombobox.cpp" line="85"/>
+        <source>Filter favorites</source>
+        <translation>筛选器收藏</translation>
     </message>
 </context>
 <context>
@@ -2317,6 +2401,92 @@
         <location filename="../../ui/src/searchtoolbar.cpp" line="548"/>
         <source>A favorite named &quot;%1&quot; already exists. Choose a different name.</source>
         <translation>名为“%1”的筛选器收藏已存在。请选择其他名称。</translation>
+    </message>
+</context>
+<context>
+    <name>klogg::livelog::messages</name>
+    <message>
+        <source>The saved live-log session payload is not a valid session object.</source>
+        <translation>保存的实时日志会话载荷不是有效的会话对象。</translation>
+    </message>
+    <message>
+        <source>This live log session was saved with a custom executable or free-form command line arguments, which this version of klogg no longer restores for security reasons. Please reopen the source (File &gt; Open Android Logcat / Open iOS Log Stream) to recreate the session with a built-in transport.</source>
+        <translation>此实时日志会话使用自定义可执行文件或自由格式命令行参数保存；出于安全原因，此版本的 klogg 不再还原此类会话。请重新打开日志源（文件 &gt; 打开 Android Logcat / 打开 iOS 日志流），以使用内置传输重新创建会话。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has a malformed schema version; it cannot be restored safely.</source>
+        <translation>保存的实时日志会话的架构版本格式错误，无法安全还原。</translation>
+    </message>
+    <message>
+        <source>This session was written by a newer version of klogg (schema %1); it cannot be restored by this version.</source>
+        <translation>此会话由较新版本的 klogg 写入（架构 %1），当前版本无法还原。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has an unrecognized source type; it cannot be restored safely.</source>
+        <translation>保存的实时日志会话包含无法识别的源类型，无法安全还原。</translation>
+    </message>
+    <message>
+        <source>This session predates transport selection and was migrated once to the built-in transport.</source>
+        <translation>此会话早于传输选择功能，已一次性迁移到内置传输。</translation>
+    </message>
+    <message>
+        <source>Saved Android transport &#x27;%1&#x27; is not recognized; using the built-in smart socket transport.</source>
+        <translation>无法识别保存的 Android 传输“%1”；将使用内置智能套接字传输。</translation>
+    </message>
+    <message>
+        <source>Saved iOS transport &#x27;%1&#x27; is not recognized; using the built-in native transport.</source>
+        <translation>无法识别保存的 iOS 传输“%1”；将使用内置原生传输。</translation>
+    </message>
+    <message>
+        <source>The saved live-log session has no usable capture identifier; it cannot be restored.</source>
+        <translation>保存的实时日志会话没有可用的捕获标识符，无法还原。</translation>
+    </message>
+    <message>
+        <source>New sessions cannot use compatibility process transports. Choose a device detected by the built-in services.</source>
+        <translation>新会话不能使用兼容进程传输。请选择内置服务检测到的设备。</translation>
+    </message>
+    <message>
+        <source>A detected device is required before the session can run or start on restore.</source>
+        <translation>会话需要选择已检测到的设备，才能运行或在还原时启动。</translation>
+    </message>
+    <message>
+        <source>The session has no usable capture identifier.</source>
+        <translation>会话没有可用的捕获标识符。</translation>
+    </message>
+    <message>
+        <source>The saved Android process filter must be a non-negative PID.</source>
+        <translation>保存的 Android 进程筛选器必须是非负 PID。</translation>
+    </message>
+    <message>
+        <source>The saved Android buffers, priority, or filter expression is invalid.</source>
+        <translation>保存的 Android 缓冲区、优先级或筛选表达式无效。</translation>
+    </message>
+    <message>
+        <source>Saved iOS level, category, subsystem, and JSON options are not supported by the native stream yet.</source>
+        <translation>原生流暂不支持保存的 iOS 级别、类别、子系统和 JSON 选项。</translation>
+    </message>
+    <message>
+        <source>This session uses a compatibility transport and opens read-only; reconnect it through the built-in services to stream again.</source>
+        <translation>此会话使用兼容传输并以只读方式打开；请通过内置服务重新连接以继续流式传输。</translation>
+    </message>
+    <message>
+        <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
+        <translation>已有另一个实时日志会话使用此捕获标识符；无法在不覆盖捕获存储的情况下还原保存的会话。</translation>
+    </message>
+    <message>
+        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
+        <translation>保存的实时日志传输不可用；请通过内置服务重新打开日志源。</translation>
+    </message>
+</context>
+<context>
+    <name>AdbLogcatSource</name>
+    <message>
+        <source>This compatibility session is read-only.</source>
+        <translation>此兼容会话为只读。</translation>
+    </message>
+    <message>
+        <source>Live log transport is unavailable.</source>
+        <translation>实时日志传输不可用。</translation>
     </message>
 </context>
 </TS>

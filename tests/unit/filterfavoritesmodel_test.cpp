@@ -567,6 +567,25 @@ TEST_CASE( "Filter favorites dialog rejects a concurrent full-table overwrite",
     requireFavoritesEqual( PredefinedFiltersCollection::getSynced().getFilters(), concurrent );
 }
 
+TEST_CASE( "Filter favorites picker clears its current selection silently",
+           "[filter-favorites][predefined-filters-combobox]" )
+{
+    PersistedFavoritesGuard guard;
+    auto& model = FilterFavoritesModel::instance();
+    model.replaceFavorites( twoFavorites() );
+
+    PredefinedFiltersComboBox picker( nullptr );
+    REQUIRE( picker.count() == 2 );
+    picker.setCurrentIndex( 0 );
+    REQUIRE( picker.currentIndex() == 0 );
+
+    QSignalSpy indexChangedSpy( &picker, qOverload<int>( &QComboBox::currentIndexChanged ) );
+    picker.clearCurrentSelection();
+
+    CHECK( picker.currentIndex() == -1 );
+    CHECK( indexChangedSpy.isEmpty() );
+}
+
 TEST_CASE( "Filter favorites dialog updates visible and hidden pickers after every Apply",
            "[filter-favorites][predefined-filters-dialog]" )
 {

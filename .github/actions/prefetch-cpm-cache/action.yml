@@ -7,14 +7,20 @@ runs:
       shell: sh
       run: |
         PREFETCH_BUILD_ROOT="$KLOGG_WORKSPACE/build_root_prefetch"
+        CROARING_CACHE="$KLOGG_WORKSPACE/cpm_cache/croaring"
+        if ! "$KLOGG_WORKSPACE/scripts/check_cpm_cache_contract.sh" --root "$KLOGG_WORKSPACE"; then
+          rm -rf "$CROARING_CACHE"
+        fi
         attempt=1
         max_attempts=3
         while [ $attempt -le $max_attempts ]; do
           rm -rf "$PREFETCH_BUILD_ROOT"
 
-          if cmake -S "$KLOGG_WORKSPACE/cmake/prefetch_cpm" -B "$PREFETCH_BUILD_ROOT" -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" -DCMAKE_POLICY_VERSION_MINIMUM=3.5; then
+          if cmake -S "$KLOGG_WORKSPACE/cmake/prefetch_cpm" -B "$PREFETCH_BUILD_ROOT" -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+             && "$KLOGG_WORKSPACE/scripts/check_cpm_cache_contract.sh" --root "$KLOGG_WORKSPACE"; then
             exit 0
           fi
+          rm -rf "$CROARING_CACHE"
 
           if [ $attempt -eq $max_attempts ]; then
             exit 1

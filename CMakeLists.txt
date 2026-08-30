@@ -62,13 +62,21 @@ project(
   LANGUAGES C CXX ASM
 )
 
-set(PROJECT_HOMEPAGE_URL "https://github.com/ZEACENT/klogg")
+set(KLOGG_REPOSITORY_OWNER ZEACENT)
+string(TOLOWER ${KLOGG_REPOSITORY_OWNER} KLOGG_REPOSITORY_OWNER_LOWER)
+set(PROJECT_HOMEPAGE_URL "https://github.com/${KLOGG_REPOSITORY_OWNER}/${PROJECT_NAME}")
+set(KLOGG_APPLICATION_ID "com.github.${KLOGG_REPOSITORY_OWNER_LOWER}.${PROJECT_NAME}")
 
 string(TIMESTAMP PRODUCT_CURRENT_YEAR "%Y")
 set(COMPANY "Anton Filimonov")
 set(COPYRIGHT "Copyright (c) 2020-${PRODUCT_CURRENT_YEAR} ZEACENT, Nicolas Bonnefon, Anton Filimonov and other contributors.")
-set(IDENTIFIER "com.github.variar.klogg")
 set(PROJECT_DESCRIPTION "${PROJECT_NAME} log viewer")
+
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/distribution.xml.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/distribution.xml
+  @ONLY
+)
 
 option(KLOGG_BUILD_TESTS "Build tests" ON)
 option(KLOGG_BUILD_BENCHMARKS "Build benchmark tools" ON)
@@ -77,6 +85,7 @@ option(KLOGG_USE_SENTRY "Use Sentry" OFF)
 option(KLOGG_GENERIC_CPU "Build for generic CPU" OFF)
 option(KLOGG_PERF_MEASURE_STREAMING "Enable streaming pipeline performance meters (off by default, for local perf profiling)" OFF)
 option(KLOGG_OSX_DEPLOYMENT_TARGET "Override target MacOS version" "")
+set(KLOGG_RUNTIME_INSTALL_COMPONENT klogg-runtime)
 set(KLOGG_TSAN_QT_PREFIX "" CACHE PATH "Required TSan-instrumented Qt installation prefix")
 set(KLOGG_TSAN_QT_VERSION "" CACHE STRING "Required TSan-instrumented Qt version")
 
@@ -139,6 +148,14 @@ include(ucm)
 # ucm declares an older standalone minimum; keep the enclosing project on the
 # CMake 3.14 policy baseline after returning from the bundled module.
 cmake_policy(VERSION 3.14)
+# Modern CMake deduplicates only for linkers known to rescan static archives;
+# traditional linkers retain required repetition. Guards keep CMake 3.14 valid.
+if(POLICY CMP0156)
+  cmake_policy(SET CMP0156 NEW)
+endif()
+if(POLICY CMP0179)
+  cmake_policy(SET CMP0179 NEW)
+endif()
 include(prepare_version)
 include(FindPkgConfig)
 include(GNUInstallDirs)
@@ -321,6 +338,9 @@ set(BUILD_SHARED_LIBS OFF)
 
 add_custom_target(ci_build)
 
+# The app/package build never downloads ADB. It consumes only a source-built,
+# hash-verified helper artifact produced by the explicit prefetch/superbuild jobs.
+add_subdirectory(packaging/adb)
 add_subdirectory(3rdparty)
 # Static analysis options are scoped to the project's own targets: enabled
 # AFTER third-party is added so vendored subprojects (CPM deps, Vectorscan,
@@ -360,6 +380,14 @@ function(klogg_add_runtime_test test_name target)
 endfunction()
 
 klogg_add_runtime_test(klogg_smoke klogg -v)
+if(APPLE AND KLOGG_ENABLE_IOS_NATIVE_STACK)
+  get_target_property(KLOGG_SMOKE_QT_RPATH klogg KLOGG_QT_BUILD_RPATH)
+  set_tests_properties(
+    klogg_smoke
+    PROPERTIES ENVIRONMENT
+               "DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH};DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}"
+  )
+endif()
 
 if(${KLOGG_BUILD_TESTS})
   add_subdirectory(tests)
@@ -393,18 +421,22 @@ if(UNIX)
   else()
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/16x16/klogg.png
             DESTINATION share/icons/hicolor/16x16/apps
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
 
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/32x32/klogg.png
             DESTINATION share/icons/hicolor/32x32/apps
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
 
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/48x48/klogg.png
             DESTINATION share/icons/hicolor/48x48/apps
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
 
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/app/images/hicolor/scalable/klogg.svg
             DESTINATION share/icons/hicolor/scalable/apps
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
 
     install(
@@ -414,16 +446,25 @@ if(UNIX)
             ${DOCUMENTATION_HTML}
             ${DOCUMENTATION_FILE}
       DESTINATION ${CMAKE_INSTALL_DOCDIR}
+      COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
 
-    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/klogg.desktop DESTINATION share/applications)
+    install(
+      FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/klogg.desktop
+      DESTINATION share/applications
+      COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
+    )
 
+    # Source-built ADB helper CPack install DESTINATION bin/helpers is defined
+    # centrally in packaging/adb/CMakeLists.txt for DEB and AppImage parity.
+    set(CPACK_COMPONENTS_ALL "${KLOGG_RUNTIME_INSTALL_COMPONENT}")
+    set(CPACK_INSTALL_CMAKE_PROJECTS "${CMAKE_BINARY_DIR};${PROJECT_NAME};${KLOGG_RUNTIME_INSTALL_COMPONENT};/")
     set(CPACK_GENERATOR DEB)
 
     #deb
     set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
     set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "http://github.com/ZEACENT/klogg")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE ${PROJECT_HOMEPAGE_URL})
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Anton Filimonov <${CPACK_PACKAGE_CONTACT}>")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS YES)
 
@@ -432,7 +473,7 @@ if(UNIX)
     set(CPACK_RPM_PACKAGE_LICENSE "GPLv3")
     set(CPACK_RPM_PACKAGE_AUTOREQ YES)
     #set(CPACK_RPM_PACKAGE_REQUIRES "qt5-qtbase >= ${KLOGG_QT_VERSION}")
-    set(CPACK_RPM_PACKAGE_URL "http://github.com/ZEACENT/klogg")
+    set(CPACK_RPM_PACKAGE_URL ${PROJECT_HOMEPAGE_URL})
     set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
         /usr/share/applications
         /usr/share/icons
@@ -453,6 +494,8 @@ add_custom_target(
   installation
   SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/klogg.nsi
           ${CMAKE_CURRENT_SOURCE_DIR}/packaging/linux/klogg.desktop
+          ${CMAKE_CURRENT_SOURCE_DIR}/packaging/osx/distribution.xml.in
+          ${CMAKE_CURRENT_BINARY_DIR}/generated/distribution.xml
           ${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in
 )
 

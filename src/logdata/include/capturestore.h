@@ -1,10 +1,12 @@
 #ifndef CAPTURESTORE_H
 #define CAPTURESTORE_H
 
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include <QByteArray>
@@ -66,6 +68,8 @@ class CaptureStore {
         klogg::vector<qint64> endOfLines;
     };
 
+    enum class OutputFailure : std::uint8_t { Open, Write, Flush };
+
     explicit CaptureStore( QString captureId, QString rootPath = {} );
     CaptureStore( QString captureId, QString rootPath, Limits limits );
     ~CaptureStore();
@@ -102,6 +106,8 @@ class CaptureStore {
     bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
     void setLimits( Limits limits );
     QString boundOutputFile() const;
+    bool outputRefersToPath( const QString& path ) const;
+    std::optional<OutputFailure> outputFailure() const;
     QString captureId() const;
     QString capturePath() const;
     QString rootPath() const;
@@ -156,6 +162,7 @@ class CaptureStore {
     static void setAfterCandidateRecursiveRemovalQuarantineCallbackForTesting(
         const CleanupCandidate& candidate, std::function<void()> callback );
     void failNextSegmentWriteForTesting();
+    void failNextOutputReplayWriteForTesting();
     void setAfterCaptureFilesRetiredCallbackForTesting(
         std::function<void()> callback );
     bool contendForCapturePathAfterGateForTesting(
@@ -190,7 +197,7 @@ class CaptureStore {
     bool scanSegment( Segment& segment );
     qint64 takeNextSegmentId();
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
-    bool writeSegmentToDevice( const Segment& segment, QIODevice* device ) const;
+    bool writeSegmentToDevice( const Segment& segment, QIODevice* device );
     void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();
@@ -221,8 +228,10 @@ class CaptureStore {
     bool persistBufferedSegmentsOnDestroy_ = true;
     bool preserveTailDuringTrim_ = false;
     bool failNextSegmentWriteForTesting_ = false;
+    bool failNextOutputReplayWriteForTesting_ = false;
     mutable std::recursive_mutex mutex_;
 
+    std::optional<OutputFailure> outputFailure_;
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
     mutable std::function<void()> beforeRawSnapshotCopyCallbackForTesting_;

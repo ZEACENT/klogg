@@ -82,7 +82,7 @@ jobs:
       - name: Build tests
         shell: bash
         run: |
-          cmake --build "$KLOGG_BUILD_ROOT" -t klogg klogg_grep klogg_tests klogg_itests -j"$(nproc)"
+          cmake --build "$KLOGG_BUILD_ROOT" -t klogg klogg_grep klogg_test_build -j"$(nproc)"
 
       - name: Run tests
         shell: bash

@@ -20,13 +20,44 @@ jobs:
         persist-credentials: false
         fetch-depth: 0
 
-    - name: Download artifacts for last successful CI workflow
-      if: ${{ !github.event.inputs.ci-run-id }}
+    - name: Select trusted CI run
+      shell: bash
+      run: |
+        set -euo pipefail
+        repo="${GITHUB_REPOSITORY}"
+        requested_run_id="${{ github.event.inputs.ci-run-id }}"
+        if [ -n "$requested_run_id" ]; then
+          run_id="$requested_run_id"
+        else
+          run_id="$(gh api "/repos/${repo}/actions/workflows/ci-build.yml/runs?branch=master&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')"
+        fi
+        test -n "$run_id" || { echo "::error::No successful master CI run found"; exit 1; }
+        run_api="/repos/${repo}/actions/runs/${run_id}"
+        run_path="$(gh api "$run_api" --jq '.path')"
+        run_repository="$(gh api "$run_api" --jq '.head_repository.full_name // empty')"
+        run_branch="$(gh api "$run_api" --jq '.head_branch // empty')"
+        run_event="$(gh api "$run_api" --jq '.event')"
+        run_conclusion="$(gh api "$run_api" --jq '.conclusion')"
+        run_sha="$(gh api "$run_api" --jq '.head_sha')"
+        test "$run_path" = ".github/workflows/ci-build.yml" || { echo "::error::Selected run uses ${run_path}"; exit 1; }
+        test "$run_repository" = "${GITHUB_REPOSITORY}" || { echo "::error::Selected run is from ${run_repository}"; exit 1; }
+        test "$run_branch" = "master" || { echo "::error::Selected run branch is ${run_branch}"; exit 1; }
+        case "$run_event" in
+          push|workflow_dispatch) ;;
+          *) echo "::error::Selected run event is ${run_event}"; exit 1 ;;
+        esac
+        test "$run_conclusion" = "success" || { echo "::error::Selected run conclusion is ${run_conclusion}"; exit 1; }
+        test "$run_sha" != "null" && test -n "$run_sha"
+        {
+          echo "KLOGG_CI_RUN_ID=${run_id}"
+          echo "KLOGG_CI_RUN_SHA=${run_sha}"
+        } >> "$GITHUB_ENV"
+
+    - name: Download artifacts for selected CI workflow
       uses: dawidd6/action-download-artifact@v2
       with:
         workflow: ci-build.yml
-        workflow_conclusion: success
-        check_artifacts: true
+        run_id: ${{ env.KLOGG_CI_RUN_ID }}
         # Download only the artifacts the release consumes. Without a filter,
         # dawidd6 downloads ALL run artifacts, including the
         # "<owner>~<repo>~<id>.dockerbuild" build records that
@@ -34,41 +65,129 @@ jobs:
         # cache (added in 1ddee61d). Those are gzipped OCI tarballs, not
         # zips, so dawidd6's unzip step fails the release with "Invalid or
         # unsupported zip format. No END header found" (run 31241902650).
-        name: '^(packages-.*|klogg_version)$'
+        name: '^(packages-.*|klogg_version|adb-helper-legal-assets|ios-native-source-assets)$'
         name_is_regexp: true
 
-    - name: Download artifacts for CI workflow with provided run id
-      if: ${{ github.event.inputs.ci-run-id }}
-      uses: dawidd6/action-download-artifact@v2
-      with:
-        workflow: ci-build.yml
-        run_id: ${{ github.event.inputs.ci-run-id }}
-        # Same filter as the default-path download above; keep both in sync.
-        name: '^(packages-.*|klogg_version)$'
-        name_is_regexp: true
+    - name: Initialize selected CI metadata and checkout
+      shell: bash
+      run: |
+        set -euo pipefail
+        KLOGG_VERSION=$(cat klogg_version/klogg_version.txt)
+        KLOGG_SOURCE_COMMIT=$(cat klogg_version/klogg_commit.txt)
+        test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}" || {
+          echo "::error::Artifact commit ${KLOGG_SOURCE_COMMIT} does not match selected run ${KLOGG_CI_RUN_SHA}"
+          exit 1
+        }
+        git fetch --no-tags origin master
+        git merge-base --is-ancestor "${KLOGG_SOURCE_COMMIT}" origin/master || {
+          echo "::error::Selected CI commit is not in trusted master history"
+          exit 1
+        }
+        echo "KLOGG_VERSION=${KLOGG_VERSION}" >> "$GITHUB_ENV"
+        echo "KLOGG_SOURCE_COMMIT=${KLOGG_SOURCE_COMMIT}" >> "$GITHUB_ENV"
+        git checkout --detach "${KLOGG_SOURCE_COMMIT}"
+        test "$(git rev-parse HEAD)" = "${KLOGG_SOURCE_COMMIT}"
 
     # Package artifacts are uploaded as single-file tarballs (not raw
     # multi-file directories) to avoid GitHub's artifact backend intermittently
     # corrupting multi-file zip64 archives ("No END header found" on extract).
     # Restore the ./packages-*/ directory layout the steps below expect.
     - name: Extract package tarballs
+      shell: bash
+      run: |
+        set -euo pipefail
+        while IFS= read -r -d '' t; do
+          echo "Extracting: $t"
+          staging=$(mktemp -d)
+          python3 scripts/extract_verified_tar.py --archive "$t" --destination "$staging"
+          cp -a "$staging"/. "$(dirname "$t")"/
+          rm -rf "$staging" "$t"
+        done < <(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f -print0)
+
+    - name: Require package qualification receipts before publication
       shell: sh
       run: |
-        set -e
-        for t in $(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f); do
-          echo "Extracting: $t"
-          tar -xzf "$t" -C "$(dirname "$t")"
-          rm -f "$t"
+        set -eu
+        required="
+          packages-jammy-vs-gen/adb-helper-deb-package-verification.json
+          packages-noble-vs-gen/adb-helper-deb-package-verification.json
+          packages-resolute-vs-gen/adb-helper-deb-package-verification.json
+          packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
+          packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-signing-receipt.json
+          packages-macos-intel-qt6-vs-gen/adb-helper-notarization-receipt.json
+          packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-signing-receipt.json
+          packages-macos-arm-qt6-vs-arm64/adb-helper-notarization-receipt.json
+          packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
+        "
+        for receipt in $required; do
+          test -f "$receipt" || { echo "Missing release qualification receipt: $receipt"; exit 1; }
         done
-
-    - name: Initialize version
-      run: echo "KLOGG_VERSION=`cat klogg_version/klogg_version.txt`" >> $GITHUB_ENV
+        python3 - <<'PY'
+        import hashlib, json, pathlib
+        package_receipts = [
+            pathlib.Path("packages-jammy-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-noble-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-resolute-vs-gen/adb-helper-deb-package-verification.json"),
+            pathlib.Path("packages-appimage-vs-gen/adb-helper-appimage-package-verification.json"),
+            pathlib.Path("packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json"),
+            pathlib.Path("packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json"),
+            pathlib.Path("packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json"),
+        ]
+        for path in package_receipts:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            if receipt.get("receipt_kind") != "package-verification":
+                raise SystemExit(f"invalid package qualification receipt kind: {path}")
+            if receipt.get("release_qualified") is not True:
+                raise SystemExit(f"package is not evidence-qualified for release: {path}")
+            required = set(receipt.get("required_receipts", []))
+            verified = set(receipt.get("verified_receipts", []))
+            if not required or not required.issubset(verified):
+                raise SystemExit(f"package qualification receipt is incomplete: {path}")
+            packages = receipt.get("packages")
+            if not isinstance(packages, list) or not packages:
+                raise SystemExit(f"package qualification receipt has no final package hashes: {path}")
+            for package in packages:
+                name = package.get("name") if isinstance(package, dict) else None
+                if not isinstance(name, str) or pathlib.PurePath(name).name != name:
+                    raise SystemExit(f"unsafe qualified package name in {path}: {name}")
+                published = path.parent / name
+                if not published.is_file():
+                    raise SystemExit(f"qualified package is missing: {published}")
+                actual = hashlib.sha256(published.read_bytes()).hexdigest()
+                if package.get("sha256") != actual:
+                    raise SystemExit(f"qualified package hash mismatch: {published}")
+        for package_dir in ("packages-macos-intel-qt6-vs-gen", "packages-macos-arm-qt6-vs-arm64"):
+            directory = pathlib.Path(package_dir)
+            dmgs = list(directory.glob("*.dmg"))
+            if len(dmgs) != 1:
+                raise SystemExit(f"expected one qualified DMG in {directory}, got {len(dmgs)}")
+            dmg_hash = hashlib.sha256(dmgs[0].read_bytes()).hexdigest()
+            qualification_path = directory / "adb-helper-dmg-package-verification.json"
+            qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+            if qualification.get("package_sha256") != dmg_hash:
+                raise SystemExit(f"macOS qualification receipt is not bound to published DMG: {qualification_path}")
+            for name in ("signing", "notarization"):
+                path = directory / f"adb-helper-{name}-receipt.json"
+                receipt = json.loads(path.read_text(encoding="utf-8"))
+                if receipt.get("receipt_kind") != name or receipt.get("status") != "passed":
+                    raise SystemExit(f"invalid macOS {name} receipt: {path}")
+                if receipt.get("package_sha256", receipt.get("dmg_sha256")) != dmg_hash:
+                    raise SystemExit(f"macOS {name} receipt is not bound to published DMG: {path}")
+                if receipt.get("signed_helper_sha256") != qualification.get("helper_sha256"):
+                    raise SystemExit(f"macOS {name} receipt is not bound to qualified helper: {path}")
+                if receipt.get("source_helper_sha256") != qualification.get("source_helper_sha256"):
+                    raise SystemExit(f"macOS {name} receipt is not bound to source-built helper: {path}")
+        PY
 
     - name: Generate Changelog
       id: changelog
       shell: bash
       run: |
-        CHANGELOG="$(python3 scripts/gen_changelog.py --mode release --current-tag "v${KLOGG_VERSION}" --to-ref HEAD --print-range)"
+        CHANGELOG="$(python3 scripts/gen_changelog.py --mode release --current-tag "v${KLOGG_VERSION}" --to-ref "${KLOGG_SOURCE_COMMIT}" --print-range)"
 
         # Escape newlines for GITHUB_ENV
         EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
@@ -164,7 +283,6 @@ jobs:
       if: env.SENTRY_TOKEN != ''
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-windows-x86-qt5-QTRegex/klogg-$KLOGG_VERSION-x86-Qt5-QTRegex-pdb.zip 
         sentry-cli upload-dif ./packages-windows-x64-qt6-vs-avx2/klogg-$KLOGG_VERSION-x64-Qt6-vs-avx2-pdb.zip
 
     - name: Cleanup release artifacts
@@ -206,10 +324,43 @@ jobs:
         mkdir ./packages-bin
         mv ./packages-appimage-vs-gen/klogg_deps.tar.xz ./packages-bin/klogg-$KLOGG_VERSION-vs-gen-deps.tar.xz
         mv ./klogg_version/klogg_version.txt ./packages-bin
+        test -d ./adb-helper-legal-assets || { echo "Required adb-helper legal/source assets are missing"; exit 1; }
+        test -d ./ios-native-source-assets || { echo "Required iOS native source assets are missing"; exit 1; }
+        (cd ./adb-helper-legal-assets && sha256sum --check --strict ./*.sha256)
 
+    - name: Prepare coherent stable package and source publication
+      shell: bash
+      run: |
+        set -euo pipefail
+        qualification_args=(
+          --qualification-receipt packages-jammy-vs-gen/adb-helper-deb-package-verification.json
+          --qualification-receipt packages-noble-vs-gen/adb-helper-deb-package-verification.json
+          --qualification-receipt packages-resolute-vs-gen/adb-helper-deb-package-verification.json
+          --qualification-receipt packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
+          --qualification-receipt packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
+          --qualification-receipt packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
+          --qualification-receipt packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
+          --ios-qualification-receipt packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
+          --ios-qualification-receipt packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
+        )
+        python3 scripts/prepare_source_publication.py \
+          --channel stable \
+          --tag "v${KLOGG_VERSION}" \
+          --version "${KLOGG_VERSION}" \
+          --commit "${KLOGG_SOURCE_COMMIT}" \
+          --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+          --adb-source-root ./adb-helper-legal-assets \
+          --ios-source-root ./ios-native-source-assets \
+          "${qualification_args[@]}" \
+          --output ./packages-publication
+
+    # Required adb-helper release asset kinds: source-archive, licenses, notices,
+    # sbom, source-offer, and source-manifest.
     - name: Prepare checksums
       shell: sh
       run: |
+        (cd ./packages-publication && sha256sum --binary ./*adb-helper* ./ADB-HELPER-* > ../packages-bin/adb-helper-release-sha256.txt)
+        (cd ./packages-publication && sha256sum --binary ./* > ../packages-bin/source-publication-sha256.txt)
         sha256sum --binary ./packages-bin/* > ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
         if [ -d ./packages-jammy-vs-gen ] && [ -n "$(ls -A ./packages-jammy-vs-gen/* 2>/dev/null)" ]; then
           sha256sum --binary ./packages-jammy-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
@@ -223,13 +374,46 @@ jobs:
         if [ -d ./packages-appimage-vs-gen ] && [ -n "$(ls -A ./packages-appimage-vs-gen/* 2>/dev/null)" ]; then
           sha256sum --binary ./packages-appimage-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
         fi
-        
+
+    - name: Clean stale stable draft
+      if: env.GITHUB_TOKEN != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        repo="${GITHUB_REPOSITORY}"
+        tag="v${KLOGG_VERSION}"
+        lookup_error=$(mktemp)
+        if release_id=$(gh api "/repos/${repo}/releases/tags/${tag}" --jq '.id' 2>"$lookup_error"); then
+          draft=$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')
+          test "${draft}" = "true" || {
+            echo "::error::refusing to replace existing published release ${tag}"
+            exit 1
+          }
+          gh api -X DELETE "/repos/${repo}/releases/${release_id}"
+          ref_error=$(mktemp)
+          if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$ref_error"; then
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+          elif ! grep -Eq '404|Not Found' "$ref_error"; then
+            cat "$ref_error"
+            exit 1
+          fi
+          rm -f "$ref_error"
+        elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+          cat "$lookup_error"
+          exit 1
+        fi
+        rm -f "$lookup_error"
+
     - name: Create GitHub Release
+      id: create_release
       if: env.GITHUB_TOKEN != ''
       uses: softprops/action-gh-release@v1
       with:
         token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         tag_name: v${{ env.KLOGG_VERSION }}
+        target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
         name: Release v${{ env.KLOGG_VERSION }}
         body: |
           Release v${{ env.KLOGG_VERSION }}
@@ -242,8 +426,6 @@ jobs:
           ### Windows
           - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
           - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
-          - Windows x86 (Qt 5, QT Regex engine): [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-setup.exe)
-          - Windows x86 (Qt 5, QT Regex engine) portable: [klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x86-Qt5-QTRegex-portable.zip)
 
           ### Linux
           - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
@@ -255,24 +437,89 @@ jobs:
           - Intel (x64, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg)
           - Apple Silicon (ARM64, Vectorscan): [klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg)
         prerelease: false
+        draft: true
         files: |
-          ./packages-windows-x86-qt5-QTRegex/*
           ./packages-windows-x64-qt6-vs-avx2/*
           ./packages-jammy-vs-gen/*
           ./packages-noble-vs-gen/*
           ./packages-resolute-vs-gen/*
           ./packages-appimage-vs-gen/*
           ./packages-bin/*
+          ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz
+          ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz.sha256
+          ./packages-publication/klogg-v*-ios-native-source-*.tar.gz
+          ./packages-publication/klogg-v*-ios-native-source-*.tar.gz.sha256
+          ./packages-publication/adb-helper-source-set-receipt.json
+          ./packages-publication/ios-native-source-set-receipt.json
+          ./packages-publication/ios-native-*.sha256
+          ./packages-publication/NOTICE-ios-native.txt.sha256
+          ./packages-publication/klogg-source-publication-manifest.json
+          ./packages-publication/*.qualification.json
+          ./packages-publication/*.ios-qualification.json
+          ./packages-publication/adb-helper-licenses.tar.gz
+          ./packages-publication/adb-helper-notices.tar.gz
+          ./packages-publication/adb-helper-sbom.spdx.json
+          ./packages-publication/ADB-HELPER-SOURCE-OFFER.txt
+          ./packages-publication/adb-helper-source-manifest.json
+          ./packages-publication/adb-helper-*.sha256
+          ./packages-publication/ADB-HELPER-*.sha256
+          ./packages-publication/ios-native-source-offer.txt
+          ./packages-publication/ios-native-lgpl-replacement.txt
+          ./packages-publication/NOTICE-ios-native.txt
           ./linux-debug/*
           ./packages-macos-intel-qt6-vs-gen/*.dmg
           ./packages-macos-arm-qt6-vs-arm64/*.dmg
+
+    - name: Verify stable source publication after upload
+      if: env.GITHUB_TOKEN != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        RELEASE_ID: ${{ steps.create_release.outputs.id }}
+      run: |
+        set -euo pipefail
+        test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
+        release_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.tag_name')"
+        test "${release_tag}" = "v${KLOGG_VERSION}" || { echo "::error::Stable release tag mismatch"; exit 1; }
+        ref_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/v${KLOGG_VERSION}" --jq '.object.sha')"
+        test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
+          echo "::error::Stable release ref ${ref_sha} != source commit ${KLOGG_SOURCE_COMMIT}"
+          exit 1
+        }
+        verification_root=$(mktemp -d)
+        while IFS=$'\t' read -r asset_id asset_name; do
+          gh api -H "Accept: application/octet-stream" \
+            "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
+        done < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
+          --jq '.[] | [.id, .name] | @tsv')
+        python3 scripts/verify_source_publication_manifest.py \
+          --manifest "$verification_root/klogg-source-publication-manifest.json" \
+          --assets-root "$verification_root" \
+          --expected-channel stable \
+          --expected-tag "v${KLOGG_VERSION}" \
+          --expected-version "${KLOGG_VERSION}" \
+          --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+          --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+
+    - name: Publish verified stable release
+      if: env.GITHUB_TOKEN != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        RELEASE_ID: ${{ steps.create_release.outputs.id }}
+      run: |
+        set -euo pipefail
+        test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
+        gh api -X PATCH "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+          -f draft=false \
+          -f prerelease=false >/dev/null
 
     - name: Discord notification
       if: env.DISCORD_NEW_VERSIONS_WEBHOOK != ''
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
         DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
-      uses: Ilshidur/action-discord@master
+      uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
       with:
         args: 'New release v${{ env.KLOGG_VERSION }} has been published!'
 

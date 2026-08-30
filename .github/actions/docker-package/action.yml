@@ -7,8 +7,40 @@ runs:
       if: ${{ matrix.config.cpack_gen }}
       shell: sh
       run: |
-        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && cpack -G ${{ matrix.config.cpack_gen }} "
-        docker run --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && mv ./packages/klogg-$KLOGG_VERSION-Linux.${{ matrix.config.package_suffix }} ./packages/klogg-$KLOGG_VERSION-${{ matrix.config.artifacts_id }}-$KLOGG_PACKAGE_TAG.${{ matrix.config.package_suffix }}"
+        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && cpack -G ${{ matrix.config.cpack_gen }} "
+        docker run --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && mv ./packages/klogg-$KLOGG_VERSION-Linux.${{ matrix.config.package_suffix }} ./packages/klogg-$KLOGG_VERSION-${{ matrix.config.artifacts_id }}-$KLOGG_PACKAGE_TAG.${{ matrix.config.package_suffix }}"
+
+    - name: Verify source-built ADB helper in DEB
+      if: ${{ matrix.config.cpack_gen == 'DEB' }}
+      shell: sh
+      run: |
+        docker run --rm -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c '
+          set -euo pipefail
+          cd /usr/local/build_root
+          package=$(find packages -maxdepth 1 -name "*.deb" -type f -print -quit)
+          test -n "$package" || { echo "ERROR: DEB package missing before ADB verification"; exit 1; }
+          rm -rf adb-deb-root
+          mkdir adb-deb-root
+          dpkg-deb -x "$package" adb-deb-root
+          python3 ../scripts/smoke_adb_helper.py \
+            --adb adb-deb-root/usr/bin/helpers/adb \
+            --port 0 --timeout-seconds 15 \
+            --json-output adb-helper-deb-smoke.json
+          python3 ../scripts/verify_adb_helper_artifact.py \
+            --lock ../packaging/adb/adb-helper.lock.json \
+            --receipt adb-helper-staged/receipt.json \
+            --binary-smoke-receipt adb-helper-deb-smoke.json \
+            --package-root adb-deb-root \
+            --asset-scope package \
+            --source-assets-root adb-deb-root/usr/share/doc/klogg/adb-helper \
+            --layout deb \
+            --expected-target linux-x86_64 \
+            --package-target linux-${{ matrix.config.artifacts_id }}-x86_64 \
+            --package-file "$package" \
+            --package-verification-receipt packages/adb-helper-deb-package-verification.json \
+            --checksum-envelope adb-helper-staged/SHA256SUMS \
+            --require-lock-binding
+        '
 
     - name: Check package
       if: ${{ matrix.config.check_command }}
@@ -22,17 +54,17 @@ runs:
       if: ${{ matrix.config.os == 'ubuntu_appimage' }}
       shell: sh
       run: |
-        docker run --device /dev/fuse --privileged --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && ../packaging/linux/appimage/generate_appimage.sh"
+        docker run --device /dev/fuse --privileged --env KLOGG_VERSION=$KLOGG_VERSION --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && ../packaging/linux/appimage/generate_appimage.sh"
 
     - name: Copy sym
       shell: sh
       run: |
-        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && xz ./output/klogg.debug"
-        docker run --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && mv ./output/klogg.debug.xz ./packages/klogg_${{ matrix.config.artifacts_id }}_$KLOGG_PACKAGE_TAG.debug.xz"
-        docker run --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && cp ./output/klogg ./packages/klogg_${{ matrix.config.artifacts_id }}_$KLOGG_PACKAGE_TAG"
+        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && xz ./output/klogg.debug"
+        docker run --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && mv ./output/klogg.debug.xz ./packages/klogg_${{ matrix.config.artifacts_id }}_$KLOGG_PACKAGE_TAG.debug.xz"
+        docker run --env KLOGG_PACKAGE_TAG=$KLOGG_PACKAGE_TAG -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local/build_root && cp ./output/klogg ./packages/klogg_${{ matrix.config.artifacts_id }}_$KLOGG_PACKAGE_TAG"
 
     - name: Copy deps
       if: ${{ matrix.config.os == 'ubuntu_appimage' }}
       shell: sh
       run: |
-        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local && tar -cJf ./build_root/packages/klogg_deps.tar.xz ./cpm_cache"
+        docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} /bin/bash -c "cd /usr/local && tar -cJf ./build_root/packages/klogg_deps.tar.xz ./cpm_cache"

@@ -1,6 +1,7 @@
 #ifndef STREAMINGLOGDATA_H
 #define STREAMINGLOGDATA_H
 
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,13 @@
 enum class LiveLogSaveAnsiMode {
     Strip,
     Preserve,
+};
+
+enum class CaptureOutputError : std::uint8_t {
+    Open,
+    Write,
+    Flush,
+    Reopen,
 };
 
 // How bindOutputFile treats an existing destination file.
@@ -49,6 +57,7 @@ class StreamingLogData : public SearchableLogData {
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode, OutputBindMode mode );
     QString boundOutputFile() const;
+    std::optional<CaptureOutputError> captureOutputError() const;
     QString captureId() const;
     QString capturePath() const;
     void deleteCaptureFiles();
@@ -63,6 +72,9 @@ class StreamingLogData : public SearchableLogData {
     void setAnsiProcessingMode( AnsiProcessingMode mode ) override;
     RawLines getLinesRaw( LineNumber first, LinesCount number ) const override;
     bool isLiveSource() const override;
+
+  Q_SIGNALS:
+      void captureOutputChanged( bool healthy, CaptureOutputError error );
 
   protected:
     QString doGetLineString( LineNumber line ) const override;
@@ -80,6 +92,11 @@ class StreamingLogData : public SearchableLogData {
     void doDetachReader() const override;
 
   private:
+      struct OutputBindResult {
+          bool success = false;
+          CaptureOutputError error = CaptureOutputError::Open;
+      };
+
     struct CachedRawBatch {
         LineNumber firstLine = 0_lnum;
         LinesCount lineCount = 0_lcount;
@@ -96,9 +113,21 @@ class StreamingLogData : public SearchableLogData {
     CaptureStore::TrimResult consumeTrimResult();
     void startOutputFlushTimer();
     void stopOutputFlushTimer();
-    bool openDisplayOutputFile( const QString& outputPath, bool preserveExisting = false );
-    void closeDisplayOutputFile();
-    bool writeDisplayLinesToOutput( LineNumber first, LinesCount count );
+    OutputBindResult openDisplayOutputFile( const QString& outputPath,
+                                            bool preserveExisting = false );
+    void closeDisplayOutputFile( bool clearBinding = true );
+    static CaptureOutputError
+    captureStoreOutputError( std::optional<CaptureStore::OutputFailure> failure );
+    OutputBindResult writeDisplayLinesToDevice( LineNumber first, LinesCount count,
+                                                QIODevice* output );
+    OutputBindResult writeDisplayLinesToOutput( LineNumber first, LinesCount count,
+                                                bool reportFailures = true,
+                                                bool allowRotation = true );
+    bool isOutputFileActive() const;
+    bool outputRefersToPath( const QString& path ) const;
+    void reportCaptureOutputHealthy();
+    void reportCaptureOutputFailure( CaptureOutputError error );
+    void checkPreservedOutputState();
     // Writes the lines appended in `appendResult` to the Strip-mode display
     // file.  Addresses the appended lines by their current tail position so it
     // is correct even when trimming has shifted line numbers — never by a
@@ -126,6 +155,7 @@ class StreamingLogData : public SearchableLogData {
     qint64 rollingMaxFileSize_ = 0;
     int rollingBackupCount_ = 0;
     LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
+    std::optional<CaptureOutputError> captureOutputError_;
     mutable std::mutex cachedRawBatchesMutex_;
     std::deque<CachedRawBatch> cachedRawBatches_;
     qint64 cachedRawBytes_ = 0;

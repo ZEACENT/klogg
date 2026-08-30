@@ -1,0 +1,311 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 27664cc..18d969b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,9 @@
+ cmake_minimum_required(VERSION 3.12.0)
+ project(android-tools)
+ 
++# Klogg must not let implicit /usr/local headers shadow the pinned dependency prefix.
++set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
++
+ # To ease installation of utility files such as bash completions, etc.
+ # See: https://cmake.org/cmake/help/latest/module/GNUInstallDirs.html
+ include(GNUInstallDirs)
+@@ -12,10 +15,14 @@ option(ANDROID_TOOLS_PATCH_VENDOR "Patch vendor projects using patches directory
+ option(ANDROID_TOOLS_USE_BUNDLED_FMT "Use bundled fmt library instead of system provided one" OFF)
+ option(ANDROID_TOOLS_USE_BUNDLED_LIBUSB "Use bundled libusb library instead of system provided one" OFF)
+ option(ANDROID_TOOLS_LIBUSB_ENABLE_UDEV "Enable udev for device enumeration and hotplug support" OFF)
++option(KLOGG_ADB_ONLY "Build and install only the complete adb client/server executable" OFF)
++option(KLOGG_ADB_PRIVATE_LIBUSB "Build a private shared libusb beside adb" OFF)
+ 
+ # Install bash/zsh completion files.
+ set(COMPLETION_COMMON_DIR "${CMAKE_INSTALL_FULL_DATADIR}/android-tools/completions")
+-add_subdirectory(completions)
++if(NOT KLOGG_ADB_ONLY)
++	add_subdirectory(completions)
++endif()
+ 
+ # Android provides it's own version of mke2fs which is incompatible with
+ # the version shipped by e2fsprogs. To prevent a name clash we install
+diff --git a/vendor/CMakeLists.adb.txt b/vendor/CMakeLists.adb.txt
+index b2afaba..c58a72b 100644
+--- a/vendor/CMakeLists.adb.txt
++++ b/vendor/CMakeLists.adb.txt
+@@ -1,3 +1,18 @@
++add_library(libzip STATIC
++	libziparchive/zip_archive.cc
++	libziparchive/zip_archive_stream_entry.cc
++	libziparchive/zip_cd_entry_map.cc
++	libziparchive/zip_error.cpp
++	libziparchive/zip_writer.cc)
++
++target_compile_definitions(libzip PRIVATE -DZLIB_CONST)
++target_include_directories(libzip PUBLIC
++	libziparchive/include
++	libziparchive/incfs_support/include
++	core/include
++	logging/liblog/include
++	libbase/include)
++
+ protobuf_generate_cpp(ADB_APP_PROCESSES_PROTO_SRCS ADB_APP_PROCESSES_PROTO_HDRS
+ 	adb/proto/app_processes.proto)
+ protobuf_generate_cpp(ADB_HOST_PROTO_SRCS ADB_HOST_PROTO_HDRS
+@@ -27,10 +42,6 @@ set(libadb_SOURCES
+ 	adb/client/line_printer.cpp
+ 	adb/client/main.cpp
+ 	adb/client/pairing/pairing_client.cpp
+-	adb/client/usb_libusb.cpp
+-	adb/client/usb_libusb_device.cpp
+-	adb/client/usb_libusb_hotplug.cpp
+-	adb/client/usb_libusb_inhouse_hotplug.cpp
+ 	adb/client/transport_emulator.cpp
+ 	adb/client/mdns_tracker.cpp
+ 	adb/client/mdns_utils.cpp
+@@ -56,6 +67,10 @@ if(APPLE)
+ 		adb/client/usb_osx.cpp)
+ else()
+ 	list(APPEND libadb_SOURCES
++		adb/client/usb_libusb.cpp
++		adb/client/usb_libusb_device.cpp
++		adb/client/usb_libusb_hotplug.cpp
++		adb/client/usb_libusb_inhouse_hotplug.cpp
+ 		adb/client/usb_linux.cpp
+ 		adb/client/usb_linux_netlink.cpp)
+ endif()
+@@ -217,16 +232,22 @@ target_link_libraries(adb
+ 	protobuf::libprotobuf
+-	PkgConfig::libbrotlicommon
+ 	PkgConfig::libbrotlidec
+ 	PkgConfig::libbrotlienc
++	PkgConfig::libbrotlicommon
+ 	PkgConfig::liblz4
+ 	Threads::Threads
+-	z
++	ZLIB::ZLIB
+ 	PkgConfig::libzstd)
+ 
+-if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
+-	target_link_libraries(adb android_tools_libusb)
+-else()
+-	target_link_libraries(adb PkgConfig::libusb-1.0)
++if(NOT APPLE)
++	if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
++		target_link_libraries(adb android_tools_libusb)
++	else()
++		target_link_libraries(adb PkgConfig::libusb-1.0)
++	endif()
++endif()
++
++if(KLOGG_ADB_PRIVATE_LIBUSB AND NOT APPLE)
++	set_target_properties(adb PROPERTIES BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
+ endif()
+ 
+ if(APPLE)
+diff --git a/vendor/CMakeLists.libusb.txt b/vendor/CMakeLists.libusb.txt
+index 86ca90c..31cbf0e 100644
+--- a/vendor/CMakeLists.libusb.txt
++++ b/vendor/CMakeLists.libusb.txt
+@@ -33,7 +33,11 @@ else()
+ 	endif()
+ endif()
+ 
+-add_library(android_tools_libusb STATIC ${android_tools_libusb_SOURCES})
++if(KLOGG_ADB_PRIVATE_LIBUSB)
++	add_library(android_tools_libusb SHARED ${android_tools_libusb_SOURCES})
++else()
++	add_library(android_tools_libusb STATIC ${android_tools_libusb_SOURCES})
++endif()
+ 
+ target_include_directories(android_tools_libusb PRIVATE libusb/libusb libusb/libusb/os)
+ 
+@@ -54,3 +58,12 @@ else()
+ 	endif()
+ 	target_include_directories(android_tools_libusb PRIVATE libusb/linux)
+ endif()
++
++if(KLOGG_ADB_PRIVATE_LIBUSB)
++	if(WIN32)
++		set_target_properties(android_tools_libusb PROPERTIES OUTPUT_NAME "libusb-1.0")
++	else()
++		set_target_properties(android_tools_libusb PROPERTIES OUTPUT_NAME "usb-1.0" VERSION 0.3.0 SOVERSION 0)
++	endif()
++	install(TARGETS android_tools_libusb RUNTIME DESTINATION bin LIBRARY DESTINATION bin)
++endif()
+diff --git a/vendor/CMakeLists.txt b/vendor/CMakeLists.txt
+index 47d53eb..c6b9657 100644
+--- a/vendor/CMakeLists.txt
++++ b/vendor/CMakeLists.txt
+@@ -1,4 +1,8 @@
+ enable_language(C CXX)
++
++if(WIN32 AND KLOGG_ADB_ONLY)
++	message(FATAL_ERROR "windows-x86_64 source-build-incomplete: the locked nmeum baseline does not yet provide native Win32 sysdeps/adbwinapi wiring")
++endif()
+ include(CheckSymbolExists)
+ 
+ # Use C11 with GNU extensions.
+@@ -90,21 +94,36 @@ pkg_check_modules(libbrotlicommon REQUIRED IMPORTED_TARGET libbrotlicommon)
+ pkg_check_modules(libbrotlidec REQUIRED IMPORTED_TARGET libbrotlidec)
+ pkg_check_modules(libbrotlienc REQUIRED IMPORTED_TARGET libbrotlienc)
+ pkg_check_modules(liblz4 REQUIRED IMPORTED_TARGET liblz4)
+-pkg_check_modules(libpcre2-8 REQUIRED IMPORTED_TARGET libpcre2-8)
+-if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
+-	include(CMakeLists.libusb.txt)
+-	if(ANDROID_TOOLS_LIBUSB_ENABLE_UDEV)
+-		pkg_check_modules(libudev REQUIRED IMPORTED_TARGET libudev)
++if(NOT KLOGG_ADB_ONLY)
++	pkg_check_modules(libpcre2-8 REQUIRED IMPORTED_TARGET libpcre2-8)
++endif()
++if(NOT APPLE)
++	if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
++		include(CMakeLists.libusb.txt)
++		if(ANDROID_TOOLS_LIBUSB_ENABLE_UDEV)
++			pkg_check_modules(libudev REQUIRED IMPORTED_TARGET libudev)
++		endif()
++	else()
++		pkg_check_modules(libusb-1.0 REQUIRED IMPORTED_TARGET libusb-1.0)
+ 	endif()
+-else()
+-	pkg_check_modules(libusb-1.0 REQUIRED IMPORTED_TARGET libusb-1.0)
+ endif()
+ pkg_check_modules(libzstd REQUIRED IMPORTED_TARGET libzstd)
+ 
++set(ZLIB_USE_STATIC_LIBS ON)
+ find_package(Protobuf CONFIG)
+ find_package(Protobuf REQUIRED)
+ set(THREADS_PREFER_PTHREAD_FLAG ON)
+ find_package(Threads REQUIRED)
++find_package(ZLIB REQUIRED)
++
++set(KLOGG_ADB_GTEST_INCLUDE_DIR "" CACHE PATH "Locked GoogleTest include directory")
++if(KLOGG_ADB_ONLY)
++	find_path(KLOGG_ADB_GTEST_PROD_HEADER gtest/gtest_prod.h
++		PATHS "${KLOGG_ADB_GTEST_INCLUDE_DIR}"
++		NO_DEFAULT_PATH
++		REQUIRED)
++	include_directories("${KLOGG_ADB_GTEST_INCLUDE_DIR}")
++endif()
+ 
+ check_symbol_exists(strlcpy "string.h" HAVE_STRLCPY)
+ check_symbol_exists(reallocarray "stdlib.h" HAVE_REALLOCARRAY)
+@@ -114,41 +133,45 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
+ 
+ include(CMakeLists.libbase.txt)
+ include(CMakeLists.adb.txt)
+-include(CMakeLists.sparse.txt)
+-include(CMakeLists.fastboot.txt)
+-include(CMakeLists.f2fstools.txt)
+-include(CMakeLists.mke2fs.txt)
+-include(CMakeLists.partition.txt)
+-include(CMakeLists.mkbootimg.txt)
+-include(CMakeLists.libufdt.txt)
+-include(CMakeLists.avb.txt)
++if(NOT KLOGG_ADB_ONLY)
++	include(CMakeLists.sparse.txt)
++	include(CMakeLists.fastboot.txt)
++	include(CMakeLists.f2fstools.txt)
++	include(CMakeLists.mke2fs.txt)
++	include(CMakeLists.partition.txt)
++	include(CMakeLists.mkbootimg.txt)
++	include(CMakeLists.libufdt.txt)
++	include(CMakeLists.avb.txt)
++endif()
+ 
+ # Targets which should be installed by `make install`.
+-install(TARGETS
+-	"${ANDROID_MKE2FS_NAME}"
+-	adb
+-	append2simg
+-	fastboot
+-	img2simg
+-	lpadd
+-	lpdump
+-	lpflash
+-	lpmake
+-	lpunpack
+-	make_f2fs
+-	sload_f2fs
+-	simg2img
+-	ext2simg
+-	DESTINATION bin)
+-
+-if(NOT APPLE)
++if(KLOGG_ADB_ONLY)
++	install(TARGETS adb DESTINATION bin)
++else()
+ 	install(TARGETS
+-		e2fsdroid
++		"${ANDROID_MKE2FS_NAME}"
++		adb
++		append2simg
++		fastboot
++		img2simg
++		lpadd
++		lpdump
++		lpflash
++		lpmake
++		lpunpack
++		make_f2fs
++		sload_f2fs
++		simg2img
++		ext2simg
+ 		DESTINATION bin)
+-endif()
+ 
+-# Install common completion files.
+-install(FILES adb/adb.bash RENAME adb DESTINATION "${COMPLETION_COMMON_DIR}")
++	if(NOT APPLE)
++		install(TARGETS e2fsdroid DESTINATION bin)
++	endif()
++
++	# Install common completion files.
++	install(FILES adb/adb.bash RENAME adb DESTINATION "${COMPLETION_COMMON_DIR}")
++endif()
+ install(FILES core/fastboot/fastboot.bash RENAME fastboot DESTINATION "${COMPLETION_COMMON_DIR}")
+ 
+ # Install license files.
+diff --git a/vendor/adb/client/main.cpp b/vendor/adb/client/main.cpp
+index 50a53b0..d61f42d 100644
+--- a/vendor/adb/client/main.cpp
++++ b/vendor/adb/client/main.cpp
+@@ -40,7 +40,9 @@
+ #include "client/mdns_utils.h"
+ #include "client/transport_client.h"
+ #include "client/usb.h"
++#if !defined(__APPLE__)
+ #include "client/usb_libusb_hotplug.h"
++#endif
+ #include "commandline.h"
+ #include "sysdeps/chrono.h"
+ #include "transport.h"
+@@ -134,11 +136,15 @@ int adb_server_main(int is_daemon, const std::string& socket_spec, const char* o
+     init_reconnect_handler();
+ 
+     if (is_usb_enabled()) {
++#if defined(__APPLE__)
++        usb_init();
++#else
+         if (is_libusb_enabled()) {
+             libusb::usb_init();
+         } else {
+             usb_init();
+         }
++#endif
+     } else {
+         adb_notify_device_scan_complete();
+     }
+diff --git a/vendor/adb/client/transport_usb.cpp b/vendor/adb/client/transport_usb.cpp
+index d3b4929..9975e6a 100644
+--- a/vendor/adb/client/transport_usb.cpp
++++ b/vendor/adb/client/transport_usb.cpp
+@@ -179,7 +179,8 @@ bool is_adb_interface(int usb_class, int usb_subclass, int usb_protocol) {
+ bool is_libusb_enabled() {
+     bool enable = false;
+ #if defined(__APPLE__)
+-    enable = true;
++    // Klogg ships the native IOKit backend on macOS and never loads libusb.
++    enable = false;
+ #endif
+     char* env = getenv("ADB_LIBUSB");
+     if (env) {

@@ -15,6 +15,7 @@ add_custom_command(
 set(TS_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/i18n/en.ts
   ${CMAKE_CURRENT_SOURCE_DIR}/i18n/zh_CN.ts
+  ${CMAKE_CURRENT_SOURCE_DIR}/i18n/zh_TW.ts
 )
 
 find_package(Qt${QT_VERSION_MAJOR}LinguistTools REQUIRED)
@@ -37,7 +38,7 @@ add_custom_target(lupdate
 
 include(TranslationUtils)
 add_app_translations_resource(KLOGG_I18N_RES ${QM_FILES})
-add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN)
+add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN zh_TW)
 
 set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h
                  ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc 
@@ -50,6 +51,8 @@ set(KLOGG_UI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
     ${DOCUMENTATION_RESOURCE}
     ${ICON_FILE}
+    ${COPYING_FILE}
+    ${NOTICE_FILE}
 )
 
 set(KLOGG_GREP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/klogg_grep.cpp)
@@ -65,7 +68,62 @@ add_executable(klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
 add_executable(klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
 add_executable(klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES})
 
+add_dependencies(klogg klogg_adb_helper)
+add_dependencies(klogg_portable klogg_adb_helper)
+if(KLOGG_ADB_HELPER_AVAILABLE)
+  function(klogg_stage_adb_helper target_name)
+    add_custom_command(
+      TARGET ${target_name}
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${target_name}>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:${target_name}>/helpers"
+      VERBATIM
+    )
+    if(APPLE)
+      add_custom_command(
+        TARGET ${target_name}
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:${target_name}>/SharedSupport/adb-helper"
+        VERBATIM
+      )
+    endif()
+  endfunction()
+  klogg_stage_adb_helper(klogg)
+  klogg_stage_adb_helper(klogg_portable)
+
+  add_custom_target(klogg_stage_adb_helpers ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg>/helpers"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg>/helpers"
+    DEPENDS klogg klogg_adb_helper
+    VERBATIM
+  )
+  if(APPLE)
+    add_custom_command(
+      TARGET klogg_stage_adb_helpers
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_PACKAGE_STAGE}" "$<TARGET_BUNDLE_CONTENT_DIR:klogg>/SharedSupport/adb-helper"
+      VERBATIM
+    )
+  elseif(WIN32)
+    add_dependencies(klogg_stage_adb_helpers klogg_portable)
+    add_custom_command(
+      TARGET klogg_stage_adb_helpers
+      POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:klogg_portable>/helpers"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${KLOGG_ADB_HELPER_STAGE}/helpers" "$<TARGET_FILE_DIR:klogg_portable>/helpers"
+      VERBATIM
+    )
+  endif()
+endif()
+
 add_dependencies(ci_build klogg klogg_grep)
+if(TARGET klogg_stage_adb_helpers)
+  add_dependencies(ci_build klogg_stage_adb_helpers)
+endif()
 
 if(WIN32)
   add_dependencies(ci_build klogg_portable)
@@ -104,6 +162,21 @@ elseif(APPLE)
   # so there is no install step that needs rpath manipulation.
   set_target_properties(klogg PROPERTIES SKIP_INSTALL_RPATH ON)
   set_target_properties(klogg_portable PROPERTIES SKIP_INSTALL_RPATH ON)
+  if(KLOGG_ENABLE_IOS_NATIVE_STACK)
+    # Keep package candidates free of build-machine rpaths. The raw smoke test
+    # receives the configured Qt framework directory through its test environment.
+    set_target_properties(klogg PROPERTIES SKIP_BUILD_RPATH ON)
+    set(KLOGG_QT_PACKAGE_DIR_VARIABLE "Qt${QT_VERSION_MAJOR}_DIR")
+    get_filename_component(
+      KLOGG_QT_BUILD_RPATH "${${KLOGG_QT_PACKAGE_DIR_VARIABLE}}/../.." ABSOLUTE
+    )
+    set_target_properties(klogg PROPERTIES KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}")
+    target_link_options(
+      klogg PRIVATE
+      "LINKER:-rpath,@executable_path/../Frameworks"
+      "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
+    )
+  endif()
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
   set_source_files_properties(${COPYING_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
@@ -118,15 +191,17 @@ elseif(APPLE)
   set(MACOSX_BUNDLE_LONG_VERSION_STRING ${PROJECT_VERSION})
   set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
   set(MACOSX_BUNDLE_COPYRIGHT ${COPYRIGHT})
-  set(MACOSX_BUNDLE_GUI_IDENTIFIER ${IDENTIFIER})
+  set(MACOSX_BUNDLE_GUI_IDENTIFIER ${KLOGG_APPLICATION_ID})
   set(MACOSX_BUNDLE_ICON_FILE ${ICON_NAME})
 
 endif()
 
 install(
   TARGETS klogg
-  DESTINATION ${CMAKE_INSTALL_BINDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+          COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
   BUNDLE DESTINATION .
+         COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
 )
 
 if(WIN32)
@@ -254,10 +329,12 @@ if(KLOGG_USE_SENTRY)
   if(APPLE)
     install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION $<TARGET_BUNDLE_CONTENT_DIR:klogg>/MacOS
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
   elseif(NOT WIN32)
     install(PROGRAMS $<TARGET_FILE_DIR:klogg>/klogg_crashpad_handler
             DESTINATION ${CMAKE_INSTALL_BINDIR}
+            COMPONENT ${KLOGG_RUNTIME_INSTALL_COMPONENT}
     )
   endif()
 endif(KLOGG_USE_SENTRY)

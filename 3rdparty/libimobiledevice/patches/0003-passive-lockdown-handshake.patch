@@ -1,0 +1,90 @@
+From: klogg maintainers <noreply@klogg.dev>
+Date: Mon, 24 Aug 2026 00:00:00 +0000
+Subject: [PATCH] lockdown: add existing-pair-only session helper
+
+Expose a narrowly scoped helper that reads an existing host pair record,
+validates it where required, and starts a lockdownd session. Missing or stale
+records are returned as errors. The helper never pairs, saves, deletes, or
+replaces a pair record.
+
+---
+diff --git a/include/libimobiledevice/lockdown.h b/include/libimobiledevice/lockdown.h
+index 21669ef..fa60744 100644
+--- a/include/libimobiledevice/lockdown.h
++++ b/include/libimobiledevice/lockdown.h
+@@ -152,4 +152,7 @@ LIBIMOBILEDEVICE_API lockdownd_error_t lockdownd_client_new(idevice_t device, lo
+ LIBIMOBILEDEVICE_API lockdownd_error_t lockdownd_client_new_with_handshake(idevice_t device, lockdownd_client_t *client, const char *label);
+
++/** Opens a lockdownd session only when an existing host pair record validates. */
++LIBIMOBILEDEVICE_API lockdownd_error_t lockdownd_client_new_with_existing_pair(idevice_t device, lockdownd_client_t *client, const char *label);
++
+ /**
+  * Closes the lockdownd client session if one is running and frees up the
+diff --git a/src/lockdown.c b/src/lockdown.c
+index 32389c9..5be667c 100644
+--- a/src/lockdown.c
++++ b/src/lockdown.c
+@@ -790,4 +790,61 @@ lockdownd_error_t lockdownd_client_new_with_handshake(idevice_t device, lockdown
+ }
+
++lockdownd_error_t lockdownd_client_new_with_existing_pair(idevice_t device, lockdownd_client_t *client, const char *label)
++{
++	if (!device || !client)
++		return LOCKDOWN_E_INVALID_ARG;
++
++	*client = NULL;
++	lockdownd_client_t client_loc = NULL;
++	plist_t pair_record = NULL;
++	char *host_id = NULL;
++	lockdownd_error_t ret = lockdownd_client_new(device, &client_loc, label);
++	if (ret != LOCKDOWN_E_SUCCESS)
++		return ret;
++
++	userpref_error_t uerr = userpref_read_pair_record(client_loc->device->udid, &pair_record);
++	if (uerr == USERPREF_E_NOENT) {
++		ret = LOCKDOWN_E_MISSING_PAIR_RECORD;
++		goto leave;
++	}
++	if (uerr == USERPREF_E_READ_ERROR) {
++		ret = LOCKDOWN_E_RECEIVE_TIMEOUT;
++		goto leave;
++	}
++	if (uerr != USERPREF_E_SUCCESS) {
++		ret = LOCKDOWN_E_INVALID_PAIR_RECORD;
++		goto leave;
++	}
++	if (!pair_record) {
++		ret = LOCKDOWN_E_MISSING_PAIR_RECORD;
++		goto leave;
++	}
++
++	pair_record_get_host_id(pair_record, &host_id);
++	if (!host_id) {
++		ret = LOCKDOWN_E_MISSING_HOST_ID;
++		goto leave;
++	}
++
++	if (device->version < IDEVICE_DEVICE_VERSION(7,0,0) && device->device_class != DEVICE_CLASS_WATCH) {
++		ret = lockdownd_validate_pair(client_loc, NULL);
++		if (ret != LOCKDOWN_E_SUCCESS)
++			goto leave;
++	}
++
++	ret = lockdownd_start_session(client_loc, host_id, NULL, NULL);
++	if (ret == LOCKDOWN_E_SUCCESS) {
++		*client = client_loc;
++		client_loc = NULL;
++	}
++
++leave:
++	plist_free(pair_record);
++	free(host_id);
++	if (client_loc)
++		lockdownd_client_free(client_loc);
++	return ret;
++}
++
+ /**
+  * Returns a new plist from the supplied lockdownd pair record. The caller is
+--
+2.50.1

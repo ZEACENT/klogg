@@ -71,6 +71,26 @@ Section "klogg" klogg
 
     SetOutPath $INSTDIR
     File release\klogg.exe
+
+    SetOutPath $INSTDIR\helpers
+    File release\helpers\adb.exe
+    File release\helpers\AdbWinApi.dll
+    File release\helpers\AdbWinUsbApi.dll
+    File release\helpers\libusb-1.0.dll
+    SetOutPath $INSTDIR\adb-helper-assets
+    File release\adb-helper-assets\adb-helper-licenses.tar.gz
+    File release\adb-helper-assets\adb-helper-licenses.tar.gz.sha256
+    File release\adb-helper-assets\adb-helper-notices.tar.gz
+    File release\adb-helper-assets\adb-helper-notices.tar.gz.sha256
+    File release\adb-helper-assets\adb-helper-sbom.spdx.json
+    File release\adb-helper-assets\adb-helper-sbom.spdx.json.sha256
+    File release\adb-helper-assets\ADB-HELPER-SOURCE-OFFER.txt
+    File release\adb-helper-assets\ADB-HELPER-SOURCE-OFFER.txt.sha256
+    File release\adb-helper-assets\adb-helper-source-manifest.json
+    File release\adb-helper-assets\adb-helper-source-manifest.json.sha256
+    File release\adb-helper-assets\adb-helper-source-set-receipt.json
+    File release\adb-helper-assets\adb-helper-source-set-receipt.json.sha256
+    SetOutPath $INSTDIR
 !if ${PLATFORM} == "x64"
     File release\klogg_crashpad_handler.exe
 !endif
@@ -189,6 +209,12 @@ Section "Uninstall"
     Delete "$INSTDIR\Uninstall.exe"
 
     Delete "$INSTDIR\klogg.exe"
+    Delete "$INSTDIR\helpers\adb.exe"
+    Delete "$INSTDIR\helpers\AdbWinApi.dll"
+    Delete "$INSTDIR\helpers\AdbWinUsbApi.dll"
+    Delete "$INSTDIR\helpers\libusb-1.0.dll"
+    RMDir "$INSTDIR\helpers"
+    RMDir /r "$INSTDIR\adb-helper-assets"
     Delete "$INSTDIR\klogg_crashpad_handler.exe"
     ; Keep deleting the retired crash-stackwalker helper. New installs no longer
     ; stage it (the install File line was removed), but released builds shipped

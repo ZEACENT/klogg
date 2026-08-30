@@ -3,16 +3,21 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QJsonValue>
+
+#include <utility>
+
+#include "livestate.h"
 
 namespace {
 
 constexpr ushort Escape = 0x1B;
 constexpr ushort Csi = '[';
 
-bool isCsiFinalByte( const QChar ch )
+bool isCsiFinalByte( const QChar character )
 {
-    const auto value = ch.unicode();
+    const auto value = character.unicode();
     return value >= 0x40 && value <= 0x7e;
 }
 
@@ -50,6 +55,21 @@ QString buildDisplayName( const QString& name, const QString& udid, const QStrin
     return parts.join( QStringLiteral( " " ) );
 }
 
+DeviceDiscoveryResult<IosDeviceInfo> protocolError( klogg::livecapture::Generation generation,
+                                                    const QString& detail )
+{
+    const auto nativeDetail = detail.toUtf8();
+    return { generation,
+             {},
+             klogg::livecapture::LiveSourceError{
+                 klogg::livecapture::ErrorCategory::Backend, "ios-device-list-protocol-error",
+                 klogg::livecapture::ErrorScope::Service,
+                 klogg::livecapture::RetryPolicy::Immediate,
+                 "The iOS discovery service returned an invalid response; retry discovery.",
+                 std::string( nativeDetail.constData(),
+                              static_cast<std::size_t>( nativeDetail.size() ) ) } };
+}
+
 } // namespace
 
 QString stripAnsiSequences( const QString& text )
@@ -62,9 +82,10 @@ QString stripAnsiSequences( const QString& text )
     result.reserve( text.size() );
 
     for ( int i = 0; i < text.size(); ) {
-        const auto ch = text[ i ];
-        if ( ch.unicode() != Escape || i + 1 >= text.size() || text[ i + 1 ].unicode() != Csi ) {
-            result.append( ch );
+        const auto character = text[ i ];
+        if ( character.unicode() != Escape || i + 1 >= text.size()
+             || text[ i + 1 ].unicode() != Csi ) {
+            result.append( character );
             ++i;
             continue;
         }
@@ -75,7 +96,7 @@ QString stripAnsiSequences( const QString& text )
         }
 
         if ( end >= text.size() ) {
-            result.append( ch );
+            result.append( character );
             ++i;
             continue;
         }
@@ -110,14 +131,12 @@ QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
         else if ( value.isObject() ) {
             const auto object = value.toObject();
             udid = stripAnsiSequences(
-                firstStringValue( object, { "Identifier", "UDID", "UniqueDeviceID",
-                                            "SerialNumber", "serial", "udid" } ) );
+                firstStringValue( object, { "Identifier", "UDID", "UniqueDeviceID", "SerialNumber",
+                                            "serial", "udid" } ) );
             name = stripAnsiSequences(
                 firstStringValue( object, { "DeviceName", "Name", "ProductName", "name" } ) );
-            productType = stripAnsiSequences(
-                firstStringValue( object, { "ProductType" } ) );
-            productVersion = stripAnsiSequences(
-                firstStringValue( object, { "ProductVersion" } ) );
+            productType = stripAnsiSequences( firstStringValue( object, { "ProductType" } ) );
+            productVersion = stripAnsiSequences( firstStringValue( object, { "ProductVersion" } ) );
         }
 
         if ( udid.isEmpty() ) {
@@ -126,7 +145,8 @@ QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
 
         const auto displayName = buildDisplayName( name, udid, productType, productVersion );
         const auto description = name.isEmpty() ? udid : name;
-        devices.push_back( IosDeviceInfo{ udid, displayName, description, productType, productVersion } );
+        devices.push_back(
+            IosDeviceInfo{ udid, displayName, description, productType, productVersion } );
     }
 
     return devices;
@@ -134,7 +154,7 @@ QList<IosDeviceInfo> parsePymobiledeviceDeviceList( const QByteArray& output )
 
 QList<IosDeviceInfo> parsePymobiledeviceSimpleDeviceList( const QByteArray& output )
 {
-    const auto parsed = parsePymobiledeviceDeviceList( output );
+    auto parsed = parsePymobiledeviceDeviceList( output );
     if ( !parsed.isEmpty() ) {
         return parsed;
     }
@@ -152,4 +172,27 @@ QList<IosDeviceInfo> parsePymobiledeviceSimpleDeviceList( const QByteArray& outp
     }
 
     return devices;
+}
+
+DeviceDiscoveryResult<IosDeviceInfo>
+parsePymobiledeviceDeviceDiscovery( klogg::livecapture::Generation generation,
+                                    const QByteArray& output )
+{
+    const auto cleanedOutput = stripAnsiSequences( QString::fromUtf8( output ) ).toUtf8();
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson( cleanedOutput, &parseError );
+    if ( parseError.error != QJsonParseError::NoError ) {
+        return protocolError( generation, parseError.errorString() );
+    }
+    if ( !document.isArray() ) {
+        return protocolError( generation, QStringLiteral( "Expected a JSON device array." ) );
+    }
+
+    auto devices = parsePymobiledeviceDeviceList( cleanedOutput );
+    if ( !document.array().isEmpty() && devices.isEmpty() ) {
+        return protocolError(
+            generation, QStringLiteral( "The device array contained no usable identifiers." ) );
+    }
+
+    return { generation, std::move( devices ), std::nullopt };
 }

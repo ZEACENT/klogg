@@ -13,6 +13,204 @@ def check(text, name="foldersearchengine_test.cpp"):
     return lint._check_vectorscan_capability_assertion(text, Path(name))
 
 
+class QtryVerifyMacroPatternTest(unittest.TestCase):
+    def test_all_qtry_verify_variants_are_flagged(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qtry-verify-macro"
+        )["regex"]
+        self.assertIsNotNone(pattern.search("QTRY_VERIFY( ready );"))
+        self.assertIsNotNone(
+            pattern.search("QTRY_VERIFY_WITH_TIMEOUT( ready, AsyncWaitTimeoutMs );")
+        )
+        self.assertIsNotNone(pattern.search("QTRY_VERIFY_FUTURE_VARIANT( ready );"))
+
+    def test_similarly_named_helpers_are_allowed(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qtry-verify-macro"
+        )["regex"]
+        self.assertIsNone(pattern.search("waitForQtCondition( ready );"))
+        self.assertIsNone(pattern.search("QTRY_COMPARE( actual, expected );"))
+
+
+class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
+    def test_qt_namespace_skip_empty_parts_is_flagged(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qt-5.12-split-behavior"
+        )["regex"]
+        self.assertIsNotNone(
+            pattern.search(
+                "const auto parts = value.split( QLatin1Char( ' ' ), Qt::SkipEmptyParts );"
+            )
+        )
+
+    def test_qtcompat_split_behavior_is_allowed(self):
+        pattern = next(
+            item for item in lint.PATTERNS if item["name"] == "qt-5.12-split-behavior"
+        )["regex"]
+        self.assertIsNone(pattern.search("klogg::qtcompat::skipEmptyParts()"))
+
+
+class WritableLiveQLockFileTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/example_test.cpp"):
+        return lint._check_writable_reopen_of_live_qlockfile(text, Path(name))
+
+    def test_write_reopen_before_unlock_is_flagged(self):
+        text = (
+            "QLockFile heldLock( lockPath );\n"
+            "REQUIRE( heldLock.tryLock( 0 ) );\n"
+            "QFile file( lockPath );\n"
+            "REQUIRE( file.open( QIODevice::ReadWrite ) );\n"
+            "heldLock.unlock();\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_read_only_or_post_unlock_access_is_allowed(self):
+        read_only = (
+            "QLockFile heldLock( lockPath );\n"
+            "heldLock.tryLock( 0 );\n"
+            "QFile file( lockPath );\n"
+            "file.open( QIODevice::ReadOnly );\n"
+            "heldLock.unlock();\n"
+        )
+        self.assertEqual(self.check(read_only), [])
+        post_unlock = (
+            "QLockFile heldLock( lockPath );\n"
+            "heldLock.tryLock( 0 );\n"
+            "heldLock.unlock();\n"
+            "QFile file( lockPath );\n"
+            "file.open( QIODevice::WriteOnly );\n"
+        )
+        self.assertEqual(self.check(post_unlock), [])
+
+    def test_current_supervisor_fixture_is_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "adb_server_supervisor_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
+class FolderEngineQSignalSpyTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/foldersearchengine_test.cpp"):
+        return lint._check_folder_engine_qsignalspy(text, Path(name))
+
+    def test_direct_spy_on_worker_signal_is_flagged(self):
+        text = (
+            "QSignalSpy snapshotSpy(\n"
+            "    &engine, &FolderSearchEngine::folderSnapshotReady );\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 1)
+
+    def test_queued_lambda_recorder_is_allowed(self):
+        text = (
+            "QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, "
+            "&engine, callback, Qt::QueuedConnection );\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_comments_and_non_test_code_are_ignored(self):
+        comment = "// QSignalSpy spy( &engine, &FolderSearchEngine::searchFinished );\n"
+        self.assertEqual(self.check(comment), [])
+        self.assertEqual(
+            self.check(
+                "QSignalSpy spy( &engine, &FolderSearchEngine::searchFinished );\n",
+                name="src/logdata/src/example.cpp",
+            ),
+            [],
+        )
+
+    def test_current_folder_engine_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "foldersearchengine_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
+class IosCompletionNotifyLifetimeTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/ios_native_stream_worker_test.cpp"):
+        return lint._check_ios_completion_notify_lifetime(text, Path(name))
+
+    def test_completion_notify_after_unlock_is_flagged(self):
+        text = (
+            "{\n"
+            "    std::lock_guard<std::mutex> lock( mutex );\n"
+            "    destroyed = true;\n"
+            "}\n"
+            "changed.notify_all();\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 1)
+
+    def test_completion_notify_under_lock_is_allowed(self):
+        text = (
+            "{\n"
+            "    std::lock_guard<std::mutex> lock( mutex );\n"
+            "    destroyed = true;\n"
+            "    changed.notify_all();\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_other_files_are_ignored(self):
+        text = (
+            "{ std::lock_guard<std::mutex> lock( mutex ); stopped = true; }\n"
+            "changed.notify_all();\n"
+        )
+        self.assertEqual(self.check(text, name="tests/unit/other_test.cpp"), [])
+
+    def test_current_native_ios_worker_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "ios_native_stream_worker_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
+class QFileInfoDirectIncludeTest(unittest.TestCase):
+    def check(self, text, name="src/utils/src/platform_files.cpp"):
+        return lint._check_qfileinfo_direct_include(text, Path(name))
+
+    def test_platform_guarded_use_without_include_is_flagged(self):
+        text = (
+            "#include <QFile>\n"
+            "#if defined( Q_OS_WIN )\n"
+            "const QFileInfo info( path );\n"
+            "#endif\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_direct_include_forms_are_accepted(self):
+        for include in ("#include <QFileInfo>\n", "#include <QtCore/QFileInfo>\n"):
+            with self.subTest(include=include):
+                self.assertEqual(
+                    self.check(include + "const QFileInfo info( path );\n"), []
+                )
+
+    def test_comments_literals_and_forward_declarations_are_ignored(self):
+        text = (
+            "// QFileInfo in documentation\n"
+            'const char* name = "QFileInfo";\n'
+            "class QFileInfo;\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_headers_are_left_to_self_containment_lint(self):
+        self.assertEqual(
+            self.check("class Owner { QFileInfo* info; };\n", name="owner.h"), []
+        )
+
+    def test_current_platform_file_is_clean(self):
+        path = REPO_ROOT / "src" / "utils" / "src" / "platform_files.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
 class VectorscanCapabilityAssertionTest(unittest.TestCase):
     def test_unguarded_require_is_flagged(self):
         # The exact shape that broke the Windows x86-qt5 [QTRegex] job in PR #42.
@@ -349,6 +547,84 @@ class TestWatchdogTimerInCatchTests(unittest.TestCase):
                     "}\n"
                 )
                 self.assertEqual(len(self.check(text)), 1)
+
+
+class TestInstrumentedPerformanceBudget(unittest.TestCase):
+    def check(self, text, name="tests/unit/capturestore_test.cpp"):
+        return lint._check_uninstrumented_performance_budget(text, Path(name))
+
+    def test_unguarded_budget_assertion_is_flagged(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    QElapsedTimer timer;\n"
+            "    timer.start();\n"
+            "    appendLargeBatch();\n"
+            "    const auto elapsedMs = timer.elapsed();\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 7)
+
+    def test_optimized_non_sanitized_guard_is_accepted(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_unoptimized_guard_does_not_count_as_release_only(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && !defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < 2000 );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_non_budget_latency_contract_is_not_flagged(self):
+        text = (
+            'TEST_CASE( "async scheduling returns promptly" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureScheduling();\n"
+            "    CHECK( elapsedMs < 200 );\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_guard_text_in_comment_does_not_cover_assertion(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    // KLOGG_SANITIZER_BUILD should be handled someday.\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_non_test_file_is_ignored(self):
+        text = "CHECK( elapsedMs < 2000 );\n"
+        self.assertEqual(self.check(text, name="src/logdata/src/capturestore.cpp"), [])
+
+    def test_current_capturestore_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "capturestore_test.cpp"
+        self.assertEqual(
+            lint._check_uninstrumented_performance_budget(
+                path.read_text(encoding="utf-8", errors="replace"), path
+            ),
+            [],
+        )
 
 
 class Qt6IfReTest(unittest.TestCase):

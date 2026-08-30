@@ -280,6 +280,26 @@ PATTERNS: list[dict] = [
             "mainwindow_test.cpp folder-dispatch test.)"
         ),
     },
+    {
+        "name": "qt-5.12-split-behavior",
+        # Qt::SkipEmptyParts was added after the supported Qt 5.12 baseline.
+        # Keep the version split in the shared compatibility layer.
+        "regex": re.compile(r"\bQt::SkipEmptyParts\b"),
+        "fix": (
+            "Qt::SkipEmptyParts is unavailable on the Qt 5.12 baseline. Include "
+            "qtcompat/qtcompat.h and use klogg::qtcompat::skipEmptyParts() so the "
+            "Qt version split remains isolated in the compatibility layer."
+        ),
+    },
+    {
+        "name": "qtry-verify-macro",
+        "regex": re.compile(r"\bQTRY_VERIFY[A-Z0-9_]*\s*\("),
+        "fix": (
+            "Use a QElapsedTimer/QTest::qWait polling helper instead of QTRY_VERIFY. "
+            "Qt 6.9's retry macros pass chrono duration reps through int timeout "
+            "internals, which GCC 13 rejects under -Werror=conversion."
+        ),
+    },
 ]
 
 # Multi-line patterns: checked separately via whole-file analysis.
@@ -624,6 +644,93 @@ def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]
                 "Wall-clock watchdogs make test success depend on CI runner speed; "
                 "wait on a deterministic state/signal or invoke the dispatch path "
                 "directly instead.",
+            )
+        )
+
+    return findings
+
+
+_PERFORMANCE_ASSERTION_RE = re.compile(
+    r"\b(?:CHECK|REQUIRE)\s*\(\s*elapsedMs\s*<\s*"
+    r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))\s*\)"
+)
+_CATCH_CASE_RE = re.compile(
+    r"\b(?:TEST_CASE|SCENARIO|TEST_CASE_METHOD|TEMPLATE_TEST_CASE)\s*\("
+)
+_SANITIZER_EXCLUSION_RE = re.compile(
+    r"^\s*#\s*(?:if\s+.*!\s*defined\s*\(\s*KLOGG_SANITIZER_BUILD\s*\)"
+    r"|ifndef\s+KLOGG_SANITIZER_BUILD)"
+)
+_NDEBUG_DEFINED_RE = re.compile(r"defined\s*\(\s*NDEBUG\s*\)")
+_NDEBUG_IFDEF_RE = re.compile(r"^\s*#\s*ifdef\s+NDEBUG\b")
+
+
+def _requires_optimized_build(guard_line: str) -> bool:
+    if _NDEBUG_IFDEF_RE.search(guard_line):
+        return True
+    for match in _NDEBUG_DEFINED_RE.finditer(guard_line):
+        if not guard_line[: match.start()].rstrip().endswith("!"):
+            return True
+    return False
+
+
+def _check_uninstrumented_performance_budget(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Require strict performance budgets to exclude instrumented builds.
+
+    Absolute wall-clock limits in algorithmic performance tests are useful on
+    optimized builds, but TSan/ASan, coverage, and Debug instrumentation distort
+    those timings and make hosted-runner load decide whether CI passes. The
+    correctness assertions still run everywhere; only the performance budget is
+    gated.
+    """
+    if "tests" not in path.parts:
+        return []
+
+    source_lines = text.splitlines()
+    code_lines = _strip_cpp_literals(_strip_cpp_comments(text)).splitlines()
+    findings: list[tuple[int, str]] = []
+
+    for line_num, line in enumerate(code_lines, start=1):
+        if not _PERFORMANCE_ASSERTION_RE.search(line):
+            continue
+        if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
+            continue
+
+        case_start = 1
+        for candidate in range(line_num, 0, -1):
+            if _CATCH_CASE_RE.search(source_lines[candidate - 1]):
+                case_start = candidate
+                break
+
+        case_header = " ".join(
+            source_lines[case_start - 1 : min(line_num, case_start + 3)]
+        )
+        if "budget" not in case_header.lower():
+            continue
+
+        guard_lines = [
+            _strip_line_comment(source_lines[index - 1])
+            for index in range(case_start, line_num)
+        ]
+        excludes_sanitizers = any(
+            _SANITIZER_EXCLUSION_RE.search(guard_line) for guard_line in guard_lines
+        )
+        requires_optimized = any(
+            _requires_optimized_build(guard_line) for guard_line in guard_lines
+        )
+        if excludes_sanitizers and requires_optimized:
+            continue
+
+        findings.append(
+            (
+                line_num,
+                "Strict wall-clock performance budgets must run only in optimized "
+                "non-sanitized builds. TSan/ASan, coverage, and Debug instrumentation "
+                "make hosted-runner speed part of the result. Keep correctness checks "
+                "on every build, and guard the timing assertion with "
+                "#if !defined(KLOGG_SANITIZER_BUILD) && defined(NDEBUG).",
             )
         )
 
@@ -1182,7 +1289,178 @@ def _check_qt_version_macro_in_tests(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+_QLOCKFILE_DECL_RE = re.compile(
+    r"\bQLockFile\s+(?P<lock>[A-Za-z_]\w*)\s*\(\s*(?P<path>[A-Za-z_]\w*)\s*\)"
+)
+
+
+def _check_writable_reopen_of_live_qlockfile(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Reject write-capable QFile reopens while a QLockFile owns the path.
+
+    Windows QLockFile grants shared read access only. A test that acquires the
+    lock and then reopens its path ReadWrite/WriteOnly passes on POSIX but fails
+    deterministically with a Windows sharing violation.
+    """
+    if "tests" not in path.parts:
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    findings: list[tuple[int, str]] = []
+    for declaration in _QLOCKFILE_DECL_RE.finditer(code):
+        lock_name = declaration.group("lock")
+        path_name = declaration.group("path")
+        try_lock = re.search(rf"\b{re.escape(lock_name)}\s*\.\s*tryLock\s*\(",
+                             code[declaration.end():])
+        if try_lock is None:
+            continue
+        live_start = declaration.end() + try_lock.end()
+        unlock = re.search(rf"\b{re.escape(lock_name)}\s*\.\s*unlock\s*\(",
+                           code[live_start:])
+        live_end = live_start + unlock.start() if unlock is not None else len(code)
+        live_segment = code[live_start:live_end]
+        file_declaration = re.search(
+            rf"\bQFile\s+(?P<file>[A-Za-z_]\w*)\s*\(\s*{re.escape(path_name)}\s*\)",
+            live_segment,
+        )
+        if file_declaration is None:
+            continue
+        file_name = file_declaration.group("file")
+        writable_open = re.search(
+            rf"\b{re.escape(file_name)}\s*\.\s*open\s*\([^;]*"
+            r"QIODevice::(?:ReadWrite|WriteOnly|Append)",
+            live_segment[file_declaration.end():],
+        )
+        if writable_open is None:
+            continue
+        absolute = live_start + file_declaration.start()
+        findings.append(
+            (
+                code.count("\n", 0, absolute) + 1,
+                "Do not reopen a live QLockFile path with write access. Windows "
+                "shares the held marker for readers only; snapshot it ReadOnly, "
+                "unlock, then recreate/age a synthetic marker.",
+            )
+        )
+    return findings
+
+
+_FOLDER_ENGINE_QSIGNALSPY_RE = re.compile(
+    r"\bQSignalSpy\b[^;]*\bFolderSearchEngine::", re.DOTALL
+)
+
+
+def _check_folder_engine_qsignalspy(text: str, path: Path) -> list[tuple[int, str]]:
+    """Reject direct QSignalSpy recording of FolderSearchEngine signals.
+
+    QSignalSpy installs a DirectConnection. FolderSearchEngine emits from its
+    coordinator thread for asynchronous requests, so the spy mutates its QList
+    on that thread while test assertions read it on the main thread. PR #64's
+    Linux TSan leg caught this race only because Qt itself was instrumented.
+    """
+    if "tests" not in path.parts:
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    match = _FOLDER_ENGINE_QSIGNALSPY_RE.search(code)
+    if match is None:
+        return []
+    return [
+        (
+            code.count("\n", 0, match.start()) + 1,
+            "QSignalSpy uses a direct connection and is unsafe for "
+            "FolderSearchEngine worker-thread signals. Record through an explicit "
+            "Qt::QueuedConnection and assert after draining the event loop.",
+        )
+    ]
+
+
+_IOS_COMPLETION_NOTIFY_AFTER_UNLOCK_RE = re.compile(
+    r"\{\s*std::lock_guard<std::mutex>\s+\w+\(\s*\w+\s*\);"
+    r"\s*(?:destroyed|stopped|ready)\s*=\s*true\s*;"
+    r"\s*\}\s*\w+\.notify_all\(\s*\)\s*;",
+    re.DOTALL,
+)
+
+
+def _check_ios_completion_notify_lifetime(text: str, path: Path) -> list[tuple[int, str]]:
+    """Keep completion notification inside the protected lifetime boundary.
+
+    Native iOS callbacks run on cleanup executors. If a test publishes its final
+    completion flag, unlocks, and only then notifies, the waiter may leave scope
+    and destroy the stack condition_variable before notify_all() enters libc.
+    PR #64's instrumented-Qt TSan leg caught this race repeatedly.
+    """
+    if path.name != "ios_native_stream_worker_test.cpp":
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    return [
+        (
+            code.count("\n", 0, match.start()) + 1,
+            "Notify the native-iOS test completion condition while still holding "
+            "the mutex that protects the final completion flag. Unlocking first "
+            "allows the waiter to destroy the stack condition_variable before "
+            "notify_all() completes.",
+        )
+        for match in _IOS_COMPLETION_NOTIFY_AFTER_UNLOCK_RE.finditer(code)
+    ]
+
+
+_QFILEINFO_INCLUDE_RE = re.compile(
+    r'^\s*#\s*include\s*[<"](?:QtCore/)?QFileInfo[>"]', re.MULTILINE
+)
+_QFILEINFO_FORWARD_DECL_RE = re.compile(r"\bclass\s+QFileInfo\s*;")
+_QFILEINFO_USE_RE = re.compile(r"\bQFileInfo\b")
+
+
+def _check_qfileinfo_direct_include(text: str, path: Path) -> list[tuple[int, str]]:
+    """Require implementation files using QFileInfo to include its header.
+
+    A QFileInfo use added only inside a Q_OS_WIN branch compiled locally on
+    macOS/Linux through a transitive include, then failed every Windows MSVC
+    build in PR #64. Host compile databases cannot analyze excluded platform
+    branches, so enforce the self-contained include at source level.
+    """
+    if path.suffix not in (".cpp", ".cc"):
+        return []
+
+    comment_free = _strip_cpp_comments(text)
+    if _QFILEINFO_INCLUDE_RE.search(comment_free):
+        return []
+
+    code = _strip_cpp_literals(comment_free)
+    code = _QFILEINFO_FORWARD_DECL_RE.sub("", code)
+    match = _QFILEINFO_USE_RE.search(code)
+    if match is None:
+        return []
+
+    line_num = code.count("\n", 0, match.start()) + 1
+    return [
+        (
+            line_num,
+            "QFileInfo is used without a direct #include <QFileInfo>. Add the "
+            "header explicitly so platform-guarded code does not depend on a "
+            "transitive include that may disappear on another Qt/compiler leg.",
+        )
+    ]
+
+
 MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "writable-reopen-of-live-qlockfile",
+        "check": _check_writable_reopen_of_live_qlockfile,
+    },
+    {
+        "name": "folder-engine-qsignalspy",
+        "check": _check_folder_engine_qsignalspy,
+    },
+    {
+        "name": "ios-completion-notify-lifetime",
+        "check": _check_ios_completion_notify_lifetime,
+    },
+    {
+        "name": "qfileinfo-direct-include",
+        "check": _check_qfileinfo_direct_include,
+    },
     {
         "name": "unguarded-platform-helper",
         "check": _check_unguarded_platform_helper,
@@ -1234,6 +1512,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "nonzero-watchdog-timer",
         "check": _check_nonzero_watchdog_timer,
+    },
+    {
+        "name": "uninstrumented-performance-budget",
+        "check": _check_uninstrumented_performance_budget,
     },
 ]
 

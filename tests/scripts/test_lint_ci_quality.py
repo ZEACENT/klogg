@@ -98,6 +98,252 @@ class CiQualityLintTest(unittest.TestCase):
         )
         self.assertEqual(issues, [])
 
+    def test_workflow_job_needs_parses_inline_and_block_lists(self):
+        workflow = """\
+jobs:
+  Root:
+    runs-on: ubuntu-24.04
+  Inline:
+    needs: [Root, 'Other'] # direct prerequisites
+    runs-on: ubuntu-24.04
+  Block:
+    needs:
+      - Root
+      - "Inline"
+    strategy:
+      matrix:
+        needs: [NotAJobDependency]
+    steps:
+      - run: echo 'needs: [AlsoNotAJobDependency]'
+  Other:
+    runs-on: ubuntu-24.04
+"""
+        self.assertEqual(
+            MODULE.workflow_job_needs(workflow),
+            {
+                "Root": set(),
+                "Inline": {"Root", "Other"},
+                "Block": {"Root", "Inline"},
+                "Other": set(),
+            },
+        )
+        self.assertEqual(
+            MODULE.workflow_job_ancestors(MODULE.workflow_job_needs(workflow), "Block"),
+            {"Root", "Inline", "Other"},
+        )
+
+    def test_workflow_job_ancestors_rejects_cycles_and_unknown_jobs(self):
+        with self.assertRaisesRegex(ValueError, "dependency cycle"):
+            MODULE.workflow_job_ancestors({"One": {"Two"}, "Two": {"One"}}, "One")
+        with self.assertRaisesRegex(ValueError, "unknown job Missing"):
+            MODULE.workflow_job_ancestors({"One": {"Missing"}}, "One")
+
+    def test_workflow_artifact_actions_extracts_names_from_action_steps(self):
+        workflow = f"""\
+jobs:
+  Producer:
+    steps:
+      - name: Upload source closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: locked-sources
+          path: sources
+  Consumer:
+    needs: Producer
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: locked-sources
+          path: sources
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {
+                "Producer": {"uploads": {"locked-sources"}, "downloads": set()},
+                "Consumer": {"uploads": set(), "downloads": {"locked-sources"}},
+            },
+        )
+
+    def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+
+    def test_ci_build_rejects_a_restored_version_proxy_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  SaveVersion:\n",
+            "  SaveVersion:\n    needs: [PrefetchCpmCache, PrefetchWindowsTools]\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertTrue(
+            any(
+                "SaveVersion must need exactly []" in issue
+                for issue in MODULE.ci_build_workflow_issues(mutated)
+            )
+        )
+
+    def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "PrefetchOpenSsl, PrefetchWindowsTools, BuildAdbHelpers",
+            "PrefetchOpenSsl, BuildAdbHelpers",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertTrue(
+            any("Windows must need exactly" in issue for issue in issues),
+            issues,
+        )
+        self.assertIn(
+            "CI artifact msys2-tools producer PrefetchWindowsTools must be an ancestor of Windows",
+            issues,
+        )
+
+    def test_ci_build_rejects_legal_generation_in_source_prefetch(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  BuildAdbHelperLegalAssets:\n",
+            "      - run: python3 scripts/build_adb_helper_legal_assets.py\n\n"
+            "  BuildAdbHelperLegalAssets:\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "ADB source prefetch must not generate version-bound legal assets",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_rejects_duplicate_ios_source_prefetch(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "      - name: Install iOS native source-build tools\n",
+            "      # scripts/prefetch_ios_native_sources.py in a comment is ignored\n"
+            "      - run: python3 scripts/prefetch_ios_native_sources.py --lock duplicate --output duplicate\n\n"
+            "      - name: Install iOS native source-build tools\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "iOS native sources must be prefetched exactly once",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_gate_must_run_after_failures(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace("    if: always()\n", "    if: success()\n", 1)
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI gate must run with if: always()",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_platform_jobs_must_not_continue_on_error(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  Linux:\n",
+            "  Linux:\n    continue-on-error: true\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI build job Linux must not continue on error",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
+    def test_ci_build_requires_publication_source_artifact_downloads(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        marker = "      - name: Download architecture-independent iOS source assets\n"
+        start = workflow.index(marker)
+        suffix = workflow[start:]
+        mutated_suffix = suffix.replace(
+            "          name: ios-native-source-assets\n",
+            "          name: missing-ios-native-source-assets\n",
+            1,
+        )
+        self.assertNotEqual(mutated_suffix, suffix)
+        issues = MODULE.ci_build_workflow_issues(workflow[:start] + mutated_suffix)
+        self.assertIn(
+            "CI job CreatePreRelease must download artifact ios-native-source-assets",
+            issues,
+        )
+
+    def test_disabled_artifact_steps_do_not_satisfy_ownership(self):
+        workflow = """\
+jobs:
+  Producer:
+    steps:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: false
+        with:
+          name: locked-sources
+          path: sources
+  Consumer:
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        continue-on-error: true
+        with:
+          name: locked-sources
+          path: sources
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {
+                "Producer": {"uploads": set(), "downloads": set()},
+                "Consumer": {"uploads": set(), "downloads": set()},
+            },
+        )
+
+    def test_run_block_text_cannot_spoof_artifact_ownership(self):
+        workflow = """\
+jobs:
+  Producer:
+    steps:
+      - run: |
+          cat <<'YAML'
+          - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+            with:
+              name: spoofed-artifact
+          YAML
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {"Producer": {"uploads": set(), "downloads": set()}},
+        )
+
+    def test_ci_build_rejects_artifact_conditions_outside_supported_triggers(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        old = (
+            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "        with:\n"
+            "          name: cpm-cache\n"
+        )
+        new = (
+            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "        if: ${{ github.event_name == 'schedule' }}\n"
+            "        with:\n"
+            "          name: cpm-cache\n"
+        )
+        mutated = workflow.replace(old, new, 1)
+        self.assertNotEqual(mutated, workflow)
+        self.assertTrue(
+            any(
+                "PrefetchCpmCache uploads cpm-cache must use condition None" in issue
+                for issue in MODULE.ci_build_workflow_issues(mutated)
+            )
+        )
+
+    def test_explicit_false_continue_on_error_remains_fail_closed(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  Linux:\n",
+            "  Linux:\n    continue-on-error: false\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertEqual(MODULE.ci_build_workflow_issues(mutated), [])
+
     def test_codeql_requires_pinned_matching_actions_and_timeout(self):
         insecure = """\
 jobs:
@@ -119,6 +365,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{'a' * 40}
 """
         issues = MODULE.codeql_workflow_issues(text)
@@ -133,6 +380,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{CODEQL_PINNED}
 """
         issues = MODULE.codeql_workflow_issues(text)
@@ -146,9 +394,40 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - uses: github/codeql-action/analyze@{CODEQL_PINNED}
 """
         self.assertEqual(MODULE.codeql_workflow_issues(text), [])
+
+    def test_codeql_configure_requires_the_restored_cpm_source_cache(self):
+        text = f"""\
+jobs:
+  analyze:
+    timeout-minutes: 30
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build
+      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
+"""
+        self.assertIn(
+            "CodeQL configure must use the restored CPM source cache fully disconnected",
+            MODULE.codeql_workflow_issues(text),
+        )
+
+    def test_agent_setup_self_populates_cold_cpm_caches(self):
+        action = (
+            ROOT / ".github" / "actions" / "agent-setup" / "action.yml"
+        ).read_text()
+        self.assertEqual(MODULE.agent_setup_cpm_issues(action), [])
+
+        without_prefetch = action.replace(
+            "      uses: ./.github/actions/prefetch-cpm-cache\n", "", 1
+        )
+        self.assertNotEqual(without_prefetch, action)
+        self.assertIn(
+            "agent setup must populate the CPM source cache after restore",
+            MODULE.agent_setup_cpm_issues(without_prefetch),
+        )
 
     def test_scans_yaml_workflows_and_composite_actions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -203,14 +482,14 @@ steps:
       --filter '.*/src/.*'
       --filter '.*/src/.*'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(insecure)), 6)
 
         secure = """\
 env:
   EVENT_NAME: ${{ github.event_name }}
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
       git fetch --no-tags origin "$base_sha"
@@ -218,6 +497,10 @@ steps:
       echo "coverage ratchet base commit"
 """
         self.assertEqual(MODULE.coverage_workflow_issues(secure), [])
+
+    def test_configured_test_targets_join_the_coverage_aggregate(self):
+        options = (ROOT / "cmake" / "TestTargetOptions.cmake").read_text()
+        self.assertIn("add_dependencies(klogg_test_build ${target})", options)
 
     def test_coverage_ratchet_requires_the_authoritative_event_base(self):
         workflow = (
@@ -241,13 +524,13 @@ steps:
     def test_coverage_comments_cannot_spoof_scope_or_targets(self):
         workflow = """\
 steps:
-  # cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+  # cmake --build build_root -t klogg klogg_grep klogg_test_build
   - run: |
       # --filter '^src/'
       # --filter '^src/'
       cmake --build build_root -t klogg_tests klogg_itests
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
 
     def test_inline_shell_comments_cannot_spoof_coverage_policy(self):
         workflow = """\
@@ -257,13 +540,13 @@ steps:
       true # --filter '^src/'
       true # --filter '^src/'
 """
-        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 5)
+        self.assertEqual(len(MODULE.coverage_workflow_issues(workflow)), 6)
 
     def test_coverage_noop_tokens_cannot_spoof_report_policy(self):
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
       echo "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file"
       gcovr --filter '^src/' --html
@@ -279,7 +562,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file
       gcovr --filter '^src/' --json
 """
@@ -293,7 +576,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html || echo ignored
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json || :
 """
@@ -304,7 +587,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index-2.html
 """
@@ -329,7 +612,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --html-details --print-summary -o coverage_report/index.html
       gcovr --html-title "--filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file" --json -o coverage_report/coverage.json
 """
@@ -347,7 +630,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html && :
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
 """
@@ -360,7 +643,7 @@ steps:
         workflow = """\
 steps:
   - run: |
-      cmake --build build_root -t klogg klogg_grep klogg_tests klogg_itests
+      cmake --build build_root -t klogg klogg_grep klogg_test_build
       gcovr --filter '^src/' --filter '.*' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --html-details --print-summary -o coverage_report/index.html -o /tmp/redirected.html
       gcovr --filter '^src/' --gcov-ignore-parse-errors negative_hits.warn_once_per_file --json -o coverage_report/coverage.json
 """
@@ -443,7 +726,7 @@ env:
   KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
 steps:
   - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
+      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
       xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
@@ -466,6 +749,24 @@ steps:
             "static analysis must configure optional Vectorscan production code",
             MODULE.static_analysis_workflow_issues(insecure),
         )
+
+    def test_static_analysis_configure_requires_the_prefetched_cpm_cache(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "static-analysis.yml"
+        ).read_text()
+        message = (
+            "static analysis configure must use the prefetched CPM cache "
+            "fully disconnected"
+        )
+        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(workflow))
+
+        without_cache = workflow.replace(
+            '            -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \\\n',
+            "",
+            1,
+        )
+        self.assertNotEqual(without_cache, workflow)
+        self.assertIn(message, MODULE.static_analysis_workflow_issues(without_cache))
 
     def test_static_analysis_changed_path_discovery_excludes_deleted_files(self):
         # A PR that deletes a src/ file must not feed the deleted path to

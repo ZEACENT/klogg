@@ -2,43 +2,52 @@
 #define IOSLOGDIALOG_H
 
 #include <QDialog>
-#include <QFutureWatcher>
+
+#include <optional>
 
 #include "adblogcatsource.h"
-#include "iosdeviceparser.h"
+#include "ioscatalogprovider.h"
+#include "iosdevicelistprovider.h"
 
 class QComboBox;
 class QDialogButtonBox;
 class QCheckBox;
 class QLabel;
-class QLineEdit;
 class QPushButton;
 class QSpinBox;
 
 class IosLogDialog : public QDialog {
     Q_OBJECT
 
-  public:
+public:
     explicit IosLogDialog( QWidget* parent = nullptr );
+    explicit IosLogDialog(
+        DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation discoveryOperation,
+        QWidget* parent = nullptr );
+    explicit IosLogDialog( klogg::livecapture::ios::IosCatalogSnapshotProvider& catalogProvider,
+                           QWidget* parent = nullptr );
+    ~IosLogDialog() override;
 
     AdbLogcatSessionData sessionData() const;
 
-  private Q_SLOTS:
+private Q_SLOTS:
     void refreshDevices();
 
-  private:
+private:
     void updateAcceptState();
     void loadSettings();
     void saveSettings() const;
-    // Populates the device combo from the async refresh result.
-    void onDevicesEnumerated();
+    void applyDiscoveryResult( DeviceDiscoveryResult<IosDeviceInfo> result );
 
-  private:
-    QFutureWatcher<QList<IosDeviceInfo>>* deviceRefreshWatcher_ = nullptr;
-    QLineEdit* executableEdit_ = nullptr;
+private:
+    DeviceListProviderBase<IosDeviceInfo>::AsyncListOperation discoveryOperation_;
+    klogg::livecapture::ios::IosCatalogSnapshotProvider* catalogProvider_{ nullptr };
+    std::optional<klogg::livecapture::ios::IosCatalogSnapshotProvider::SubscriptionId>
+        catalogSubscription_;
+    DeviceDiscoveryCoordinator<IosDeviceInfo> discoveryCoordinator_;
+    unsigned pendingRefreshCount_{ 0 };
     QPushButton* refreshButton_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
-    QLineEdit* extraArgsEdit_ = nullptr;
     QCheckBox* ansiOutputCheckBox_ = nullptr;
     QCheckBox* autoReconnectCheckBox_ = nullptr;
     QSpinBox* maxAttemptsSpinBox_ = nullptr;

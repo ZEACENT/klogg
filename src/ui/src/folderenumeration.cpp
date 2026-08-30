@@ -26,10 +26,12 @@
 #include <QFileInfo>
 #include <QStringList>
 
-std::vector<QString> enumerateFolderFiles( const QString& folder,
-                                            const FolderEnumerationOptions& options )
+std::vector<QString> enumerateFolderFiles(
+    const QString& folder, const FolderEnumerationOptions& options,
+    FolderEnumerationStopPredicate shouldStop )
 {
-    if ( folder.isEmpty() ) {
+    const auto stopped = [ &shouldStop ] { return shouldStop && shouldStop(); };
+    if ( stopped() || folder.isEmpty() ) {
         return {};
     }
     if ( !QFileInfo( folder ).isDir() ) {
@@ -44,8 +46,14 @@ std::vector<QString> enumerateFolderFiles( const QString& folder,
     QStringList collected;
     collected.reserve( 64 );
     QDirIterator iterator( folder, filters, QDirIterator::Subdirectories );
-    while ( iterator.hasNext() ) {
+    while ( !stopped() && iterator.hasNext() ) {
+        if ( stopped() ) {
+            return {};
+        }
         const QString path = iterator.next();
+        if ( stopped() ) {
+            return {};
+        }
         // QDir::NoSymLinks is best-effort and is not honoured consistently on
         // Windows; skip symlinks explicitly so enumeration never follows a link
         // when the caller did not ask to.
@@ -55,5 +63,12 @@ std::vector<QString> enumerateFolderFiles( const QString& folder,
         collected << path;
     }
 
-    return sortedMergeFilePaths( collected );
+    if ( stopped() ) {
+        return {};
+    }
+    auto sorted = sortedMergeFilePaths( collected );
+    if ( stopped() ) {
+        return {};
+    }
+    return sorted;
 }

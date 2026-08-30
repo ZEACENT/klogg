@@ -23,7 +23,10 @@
 #include <QTextCodec>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <string_view>
 #include <utility>
 
@@ -41,6 +44,8 @@ namespace {
 // folder of many large logs cannot blow up memory; bigger files stream through
 // the per-line path below.
 constexpr qint64 FastPathMaxBytes = 16LL * 1024 * 1024; // 16 MiB
+constexpr int MaxDetachedEnumerations = 1;
+constexpr auto CooperativeEnumerationStopGrace = std::chrono::milliseconds( 100 );
 
 // True if `shouldStop` is set and reports stop. A null predicate never stops.
 bool stopped( const std::function<bool()>& shouldStop )
@@ -48,10 +53,27 @@ bool stopped( const std::function<bool()>& shouldStop )
     return shouldStop && shouldStop();
 }
 
+struct FolderEnumerationState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::atomic<bool> canceled{ false };
+    std::shared_ptr<std::atomic<int>> detachedCount;
+    bool done{ false };
+    bool detached{ false };
+    QStringList filePaths;
+    std::exception_ptr failure;
+};
+
 } // namespace
 
 FolderSearchEngine::FolderSearchEngine( QObject* parent )
+    : FolderSearchEngine( FolderEnumerator{}, parent )
+{
+}
+
+FolderSearchEngine::FolderSearchEngine( FolderEnumerator folderEnumerator, QObject* parent )
     : QObject( parent )
+    , folderEnumerator_( std::move( folderEnumerator ) )
 {
     workerThread_ = std::thread( [ this ] { workerLoop(); } );
 }
@@ -70,18 +92,42 @@ FolderSearchEngine::~FolderSearchEngine()
     }
 }
 
+quint64 FolderSearchEngine::submit( Request request )
+{
+    request.generation = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
+    request.valid = true;
+    interruptRequested_ = false;
+    const auto generation = request.generation;
+    {
+        std::lock_guard<std::mutex> lock( requestMutex_ );
+        pendingRequest_ = std::move( request );
+    }
+    requestCv_.notify_one();
+    return generation;
+}
+
 quint64 FolderSearchEngine::startSearch( const QStringList& filePaths,
                                          const RegularExpressionPattern& pattern,
                                          klogg::folder::ContextOptions context )
 {
-    const quint64 gen = generation_.fetch_add( 1, std::memory_order_relaxed ) + 1;
-    interruptRequested_ = false;
-    {
-        std::lock_guard<std::mutex> lock( requestMutex_ );
-        pendingRequest_ = Request{ gen, filePaths, pattern, context, true };
-    }
-    requestCv_.notify_one();
-    return gen;
+    Request request;
+    request.source = RequestSource::FilePaths;
+    request.filePaths = filePaths;
+    request.pattern = pattern;
+    request.context = context;
+    return submit( std::move( request ) );
+}
+
+quint64 FolderSearchEngine::startFolderSearch(
+    const QString& folderPath, const RegularExpressionPattern& pattern,
+    klogg::folder::ContextOptions context )
+{
+    Request request;
+    request.source = RequestSource::Folder;
+    request.folderPath = folderPath;
+    request.pattern = pattern;
+    request.context = context;
+    return submit( std::move( request ) );
 }
 
 quint64 FolderSearchEngine::scanSynchronously( const QStringList& filePaths,
@@ -270,6 +316,143 @@ void FolderSearchEngine::runSearch( quint64 gen, const QStringList& filePaths,
     Q_EMIT searchFinished( gen );
 }
 
+void FolderSearchEngine::runFolderSearch( const Request& request )
+{
+    const auto requestStopped = [ this, generation = request.generation ]() {
+        return shutdown_.load( std::memory_order_relaxed )
+               || generation_.load( std::memory_order_relaxed ) != generation
+               || interruptRequested_.load( std::memory_order_relaxed );
+    };
+    if ( requestStopped() ) {
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    matchCount_ = 0;
+    {
+        std::lock_guard<std::mutex> lock( resultsMutex_ );
+        results_.clear();
+        pending_.clear();
+    }
+
+    const RegularExpression validation( request.pattern );
+    if ( !validation.isValid() || !folderEnumerator_ ) {
+        LOG_WARNING << "FolderSearchEngine: folder request has no valid enumerator or pattern";
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    auto state = std::make_shared<FolderEnumerationState>();
+    state->detachedCount = detachedEnumerationCount_;
+    const auto enumerator = folderEnumerator_;
+    const auto folderPath = request.folderPath;
+    std::thread enumerationThread;
+    try {
+        enumerationThread = std::thread( [ state, enumerator, folderPath ] {
+            try {
+                auto filePaths = enumerator( folderPath, [ state ] {
+                    return state->canceled.load( std::memory_order_relaxed );
+                } );
+                std::lock_guard<std::mutex> lock( state->mutex );
+                state->filePaths = std::move( filePaths );
+            } catch ( ... ) {
+                std::lock_guard<std::mutex> lock( state->mutex );
+                state->failure = std::current_exception();
+            }
+            {
+                std::lock_guard<std::mutex> lock( state->mutex );
+                state->done = true;
+                if ( state->detached ) {
+                    state->detachedCount->fetch_sub( 1, std::memory_order_relaxed );
+                }
+            }
+            state->changed.notify_all();
+        } );
+    } catch ( const std::exception& error ) {
+        LOG_WARNING << "FolderSearchEngine: failed to start folder enumeration: " << error.what();
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    QStringList filePaths;
+    std::exception_ptr enumerationFailure;
+    bool cancellationRequested = false;
+    while ( true ) {
+        {
+            std::unique_lock<std::mutex> lock( state->mutex );
+            state->changed.wait_for( lock, std::chrono::milliseconds( 25 ),
+                                     [ &state ] { return state->done; } );
+            if ( state->done ) {
+                filePaths = std::move( state->filePaths );
+                enumerationFailure = state->failure;
+                break;
+            }
+        }
+
+        if ( requestStopped() ) {
+            state->canceled = true;
+            if ( !cancellationRequested ) {
+                cancellationRequested = true;
+                std::unique_lock<std::mutex> lock( state->mutex );
+                state->changed.wait_for( lock, CooperativeEnumerationStopGrace,
+                                         [ &state ] { return state->done; } );
+                if ( state->done ) {
+                    break;
+                }
+            }
+
+            // Permit one quarantined filesystem call so a latest request can
+            // bypass a stalled mount, but bound ordinary supersession so repeated
+            // searches cannot create an unbounded detached-thread pileup. Shutdown
+            // may force one additional detach for the active coordinator request.
+            int detached = detachedEnumerationCount_->load( std::memory_order_relaxed );
+            while ( detached < MaxDetachedEnumerations
+                    && !detachedEnumerationCount_->compare_exchange_weak(
+                        detached, detached + 1, std::memory_order_relaxed ) ) {
+            }
+            bool reservedDetach = detached < MaxDetachedEnumerations;
+            if ( !reservedDetach && shutdown_.load( std::memory_order_relaxed ) ) {
+                detachedEnumerationCount_->fetch_add( 1, std::memory_order_relaxed );
+                reservedDetach = true;
+            }
+            if ( reservedDetach ) {
+                {
+                    std::lock_guard<std::mutex> lock( state->mutex );
+                    if ( state->done ) {
+                        detachedEnumerationCount_->fetch_sub( 1,
+                                                              std::memory_order_relaxed );
+                        break;
+                    }
+                    state->detached = true;
+                }
+                enumerationThread.detach();
+                Q_EMIT searchFinished( request.generation );
+                return;
+            }
+        }
+    }
+    enumerationThread.join();
+
+    if ( requestStopped() ) {
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+    if ( enumerationFailure != nullptr ) {
+        try {
+            std::rethrow_exception( enumerationFailure );
+        } catch ( const std::exception& error ) {
+            LOG_WARNING << "FolderSearchEngine: folder enumeration failed: " << error.what();
+        } catch ( ... ) {
+            LOG_WARNING << "FolderSearchEngine: folder enumeration failed";
+        }
+        Q_EMIT searchFinished( request.generation );
+        return;
+    }
+
+    Q_EMIT folderSnapshotReady( filePaths, request.generation );
+    runSearch( request.generation, filePaths, request.pattern, request.context );
+}
+
 void FolderSearchEngine::workerLoop()
 {
     while ( true ) {
@@ -285,7 +468,12 @@ void FolderSearchEngine::workerLoop()
             req = std::move( pendingRequest_ );
             pendingRequest_.valid = false;
         }
-        runSearch( req.generation, req.filePaths, req.pattern, req.context );
+        if ( req.source == RequestSource::Folder ) {
+            runFolderSearch( req );
+        }
+        else {
+            runSearch( req.generation, req.filePaths, req.pattern, req.context );
+        }
     }
 }
 

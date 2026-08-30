@@ -476,8 +476,7 @@ void CrawlerWidget::startNewSearch()
 
 void CrawlerWidget::updatePredefinedFiltersWidget()
 {
-    searchToolbar_->predefinedFilters()->updateSearchPattern( searchToolbar_->currentSearchText(),
-                                                              searchToolbar_->isBoolean() );
+    searchToolbar_->predefinedFilters()->clearCurrentSelection();
 }
 
 void CrawlerWidget::stopSearch()

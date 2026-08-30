@@ -1,0 +1,43 @@
+diff --git a/vendor/CMakeLists.adb.txt b/vendor/CMakeLists.adb.txt
+index 1682589..8a02703 100644
+--- a/vendor/CMakeLists.adb.txt
++++ b/vendor/CMakeLists.adb.txt
+@@ -260,9 +260,10 @@ target_link_libraries(adb
+ 	PkgConfig::libzstd)
+ if(WIN32)
+ 	add_dependencies(adb AdbWinApi)
+ 	target_link_libraries(adb "${ADBWINAPI_LIBRARY}" ws2_32)
+-	set_target_properties(adb PROPERTIES LINK_FLAGS "-municode")
++	set_target_properties(adb PROPERTIES
++		LINK_FLAGS "-municode -static -static-libgcc -static-libstdc++")
+ endif()
+ 
+ if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
+ 	target_link_libraries(adb android_tools_libusb)
+diff --git a/vendor/CMakeLists.libusb.txt b/vendor/CMakeLists.libusb.txt
+index 86ca90c..181221c 100644
+--- a/vendor/CMakeLists.libusb.txt
++++ b/vendor/CMakeLists.libusb.txt
+@@ -33,7 +33,13 @@ else()
+ 	endif()
+ endif()
+ 
+-add_library(android_tools_libusb STATIC ${android_tools_libusb_SOURCES})
++if(WIN32)
++	add_library(android_tools_libusb SHARED ${android_tools_libusb_SOURCES})
++	set_target_properties(android_tools_libusb PROPERTIES
++		OUTPUT_NAME "libusb-1.0" PREFIX "")
++else()
++	add_library(android_tools_libusb STATIC ${android_tools_libusb_SOURCES})
++endif()
+ 
+ target_include_directories(android_tools_libusb PRIVATE libusb/libusb libusb/libusb/os)
+ 
+@@ -54,3 +60,7 @@ else()
+ 	endif()
+ 	target_include_directories(android_tools_libusb PRIVATE libusb/linux)
+ endif()
++
++if(WIN32)
++	install(TARGETS android_tools_libusb RUNTIME DESTINATION bin)
++endif()

@@ -36,8 +36,8 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QColorDialog>
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QKeySequenceEdit>
@@ -47,12 +47,10 @@
 
 #include <algorithm>
 
-#include "adbprocesstransport.h"
 #include "encodings.h"
 #include "fontutils.h"
 #include "highlighteredit.h"
 #include "highlighterset.h"
-#include "ioslogprocesstransport.h"
 #include "log.h"
 #include "logger.h"
 #include "mainwindow.h"
@@ -93,7 +91,8 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     // it; QLineEdit::setValidator() does not take ownership, so an unparented
     // validator would leak for every OptionsDialog instance (seen as an
     // LeakSanitizer exit leak in the unit tests).
-    QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax, this );
+    QValidator* pollingIntervalValidator
+        = new QIntValidator( PollIntervalMin, PollIntervalMax, this );
     pollIntervalLineEdit->setValidator( pollingIntervalValidator );
 
     connect( buttonBox, &QDialogButtonBox::clicked, this, &OptionsDialog::onButtonBoxClicked );
@@ -120,28 +119,6 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     connect( mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
     connect( quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
 
-    connect( adbDetectButton, &QPushButton::clicked, this, [ this ] {
-        const auto resolved = AdbProcessTransport::detectAdbExecutable();
-        if ( resolved.isEmpty() ) {
-            QMessageBox::information(
-                this, tr( "Detect ADB executable" ),
-                tr( "No adb found at well-known install locations. Set the path manually." ) );
-            return;
-        }
-        const auto current = adbExecutableLineEdit->text().trimmed();
-        if ( !current.isEmpty() && current != resolved ) {
-            const auto answer = QMessageBox::question(
-                this, tr( "Detect ADB executable" ),
-                tr( "Replace the configured path\n\n    %1\n\nwith the auto-detected path?\n\n    %2" )
-                    .arg( current, resolved ),
-                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
-            if ( answer != QMessageBox::Yes ) {
-                return;
-            }
-        }
-        adbExecutableLineEdit->setText( resolved );
-    } );
-
     restoreShortcutsDefaults->setText( tr( "Reset to defaults" ) );
     connect( restoreShortcutsDefaults, &QPushButton::clicked, this,
              &OptionsDialog::resetShortcutsDefaults );
@@ -161,9 +138,9 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 // Setups the tabs depending on the configuration
 void OptionsDialog::setupTabs()
 {
-if ( !klogg::platform::hasExclusiveFileLocks ) {
-    keepFileClosedCheckBox->setVisible( false );
-}
+    if ( !klogg::platform::hasExclusiveFileLocks ) {
+        keepFileClosedCheckBox->setVisible( false );
+    }
 
 #ifdef Q_OS_MAC
     minimizeToTrayCheckBox->setVisible( false );
@@ -214,23 +191,21 @@ void OptionsDialog::setupStyles()
     // "Classic Dark" is an inherently dark style; the theme mode selector has
     // no effect on it, so disable it (and explain why) instead of presenting a
     // dead control. The theme mode still applies to "Modern" and "System".
-    connect( styleComboBox, qOverload<int>( &QComboBox::currentIndexChanged ),
-             this, [ this ]( int ) { updateThemeModeAvailability(); } );
+    connect( styleComboBox, qOverload<int>( &QComboBox::currentIndexChanged ), this,
+             [ this ]( int ) { updateThemeModeAvailability(); } );
     updateThemeModeAvailability();
 }
 
 void OptionsDialog::updateThemeModeAvailability()
 {
-    const bool classicDark
-        = styleComboBox->currentData() == StyleManager::DarkStyleKey;
+    const bool classicDark = styleComboBox->currentData() == StyleManager::DarkStyleKey;
 
     if ( classicDark && !themeModePinnedToDark_ ) {
         // Entering Classic Dark: remember the theme-mode the user had selected
         // so it can be restored when leaving, then pin the selector to Dark.
         // An inherently dark style makes the mode selector a no-op, and leaving
         // it showing e.g. "Auto" is confusing.
-        themeModeRestore_
-            = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
+        themeModeRestore_ = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
         const int darkModeIndex
             = themeModeComboBox->findData( static_cast<int>( ThemeMode::Dark ) );
         if ( darkModeIndex != -1 ) {
@@ -300,10 +275,14 @@ void OptionsDialog::setupLanguageList()
 
 void OptionsDialog::setupIosLogSettings()
 {
+    // New live sessions are composed exclusively through application-owned
+    // transports. Preferences expose presentation policy only; executable
+    // paths, environment detection and free-form arguments are compatibility-
+    // backend concerns and have no editable UI.
     adbAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), adbGroupBox );
     adbAnsiOutputCheckBox_->setObjectName( QStringLiteral( "adbAnsiOutputCheckBox" ) );
     if ( auto* adbLayout = qobject_cast<QVBoxLayout*>( adbGroupBox->layout() ) ) {
-        adbLayout->insertWidget( std::max( 0, adbLayout->count() - 1 ), adbAnsiOutputCheckBox_ );
+        adbLayout->addWidget( adbAnsiOutputCheckBox_ );
     }
 
     iosLogGroupBox_ = new QGroupBox( tr( "iOS Log Stream" ), liveSourceTab );
@@ -311,67 +290,12 @@ void OptionsDialog::setupIosLogSettings()
 
     auto* layout = new QVBoxLayout( iosLogGroupBox_ );
     layout->setSpacing( 6 );
-
-    auto* executableRow = new QHBoxLayout();
-    auto* executableLabel = new QLabel( tr( "pymobiledevice3 executable" ), iosLogGroupBox_ );
-    iosLogExecutableLineEdit_ = new QLineEdit( iosLogGroupBox_ );
-    iosLogExecutableLineEdit_->setObjectName( QStringLiteral( "iosLogExecutableLineEdit" ) );
-    iosLogExecutableLineEdit_->setPlaceholderText( QStringLiteral( "pymobiledevice3" ) );
-    auto* detectButton = new QPushButton( tr( "Detect" ), iosLogGroupBox_ );
-    detectButton->setObjectName( QStringLiteral( "iosLogDetectButton" ) );
-    detectButton->setToolTip(
-        tr( "Probe well-known Homebrew install locations and fill the path automatically." ) );
-    executableRow->addWidget( executableLabel );
-    executableRow->addWidget( iosLogExecutableLineEdit_ );
-    executableRow->addWidget( detectButton );
-
-    auto* argsRow = new QHBoxLayout();
-    auto* argsLabel = new QLabel( tr( "Extra iOS log args" ), iosLogGroupBox_ );
-    iosLogArgsLineEdit_ = new QLineEdit( iosLogGroupBox_ );
-    iosLogArgsLineEdit_->setObjectName( QStringLiteral( "iosLogArgsLineEdit" ) );
-    argsRow->addWidget( argsLabel );
-    argsRow->addWidget( iosLogArgsLineEdit_ );
-
     iosLogAnsiOutputCheckBox_ = new QCheckBox( tr( "Enable ANSI color output" ), iosLogGroupBox_ );
     iosLogAnsiOutputCheckBox_->setObjectName( QStringLiteral( "iosLogAnsiOutputCheckBox" ) );
-
-    auto* helpLabel = new QLabel( iosLogGroupBox_ );
-    helpLabel->setWordWrap( true );
-    helpLabel->setText( tr( "Extra arguments are appended after "
-                            "'pymobiledevice3 syslog live --udid <udid>'. This feature is "
-                            "available only on macOS." ) );
-
-    layout->addLayout( executableRow );
-    layout->addLayout( argsRow );
     layout->addWidget( iosLogAnsiOutputCheckBox_ );
-    layout->addWidget( helpLabel );
 
     const auto insertIndex = std::max( 0, verticalLayout_liveSource->count() - 1 );
     verticalLayout_liveSource->insertWidget( insertIndex, iosLogGroupBox_ );
-
-    connect( detectButton, &QPushButton::clicked, this, [ this ] {
-        const auto resolved = IosLogProcessTransport::detectIosSyslogExecutable();
-        if ( resolved.isEmpty() ) {
-            QMessageBox::information(
-                this, tr( "Detect iOS log executable" ),
-                tr( "No pymobiledevice3 found at well-known install locations. Set the path "
-                    "manually or install pymobiledevice3." ) );
-            return;
-        }
-
-        const auto current = iosLogExecutableLineEdit_->text().trimmed();
-        if ( !current.isEmpty() && current != resolved ) {
-            const auto answer = QMessageBox::question(
-                this, tr( "Detect iOS log executable" ),
-                tr( "Replace the configured path\n\n    %1\n\nwith the auto-detected path?\n\n    %2" )
-                    .arg( current, resolved ),
-                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
-            if ( answer != QMessageBox::Yes ) {
-                return;
-            }
-        }
-        iosLogExecutableLineEdit_->setText( resolved );
-    } );
 
 #ifndef Q_OS_MAC
     iosLogGroupBox_->setVisible( false );
@@ -394,8 +318,8 @@ void OptionsDialog::setupLiveSourceSettings()
     // live source unexpectedly disconnects or encounters an error. Uses
     // exponential backoff starting at 1 second and capping at 30 seconds
     // between attempts.
-    liveSourceAutoReconnectCheckBox_ = new QCheckBox(
-        tr( "Enable auto-reconnect on connection loss" ), liveSourceGroupBox_ );
+    liveSourceAutoReconnectCheckBox_ // NOLINT(cppcoreguidelines-owning-memory)
+        = new QCheckBox( tr( "Enable auto-reconnect on connection loss" ), liveSourceGroupBox_ );
     liveSourceAutoReconnectCheckBox_->setObjectName(
         QStringLiteral( "liveSourceAutoReconnectCheckBox" ) );
     liveSourceAutoReconnectCheckBox_->setToolTip(
@@ -428,9 +352,8 @@ void OptionsDialog::setupLiveSourceSettings()
     // started. Set to 0 to disable size-based rolling.
     auto* maxFileSizeRow = new QHBoxLayout();
     auto* maxFileSizeLabel = new QLabel( tr( "Max capture file size (MB)" ), liveSourceGroupBox_ );
-    maxFileSizeLabel->setToolTip(
-        tr( "When the capture file exceeds this size, it is rotated. "
-            "Set to 0 for unlimited size (no rotation by size)." ) );
+    maxFileSizeLabel->setToolTip( tr( "When the capture file exceeds this size, it is rotated. "
+                                      "Set to 0 for unlimited size (no rotation by size)." ) );
     liveSourceRollingMaxFileSizeSpinBox_ = new QSpinBox( liveSourceGroupBox_ );
     liveSourceRollingMaxFileSizeSpinBox_->setObjectName(
         QStringLiteral( "liveSourceRollingMaxFileSizeSpinBox" ) );
@@ -446,23 +369,22 @@ void OptionsDialog::setupLiveSourceSettings()
     maxFileSizeRow->addStretch();
 
     // Rolling backup count — number of old capture files to retain during
-    // rotation. Files beyond this count are deleted. Set to 0 to disable
-    // rolling backup (no backup files retained, only the current file).
+    // rotation. Files beyond this count are deleted. Set to 0 to keep every
+    // rotated file.
     auto* backupCountRow = new QHBoxLayout();
     auto* backupCountLabel = new QLabel( tr( "Rolling backup count" ), liveSourceGroupBox_ );
-    backupCountLabel->setToolTip(
-        tr( "Number of old capture files to keep when rolling. "
-            "Older files beyond this count are automatically deleted. "
-            "Set to 0 to disable rolling backup (only the current file is kept)." ) );
+    backupCountLabel->setToolTip( tr( "Number of old capture files to keep when rolling. "
+                                      "Older files beyond this count are automatically deleted. "
+                                      "Set to 0 to keep all rotated files." ) );
     liveSourceRollingBackupCountSpinBox_ = new QSpinBox( liveSourceGroupBox_ );
     liveSourceRollingBackupCountSpinBox_->setObjectName(
         QStringLiteral( "liveSourceRollingBackupCountSpinBox" ) );
     liveSourceRollingBackupCountSpinBox_->setRange( 0, 999 );
-    liveSourceRollingBackupCountSpinBox_->setSpecialValueText( tr( "No rolling" ) );
+    liveSourceRollingBackupCountSpinBox_->setSpecialValueText( tr( "Keep all" ) );
     liveSourceRollingBackupCountSpinBox_->setToolTip(
         tr( "Number of backup capture files to retain during rotation. "
             "Older files beyond this count are deleted. "
-            "Set to 0 to disable rolling backup." ) );
+            "Set to 0 to keep all rotated files." ) );
     backupCountRow->addWidget( backupCountLabel );
     backupCountRow->addWidget( liveSourceRollingBackupCountSpinBox_ );
     backupCountRow->addStretch();
@@ -521,8 +443,8 @@ void OptionsDialog::standardizeLayoutSpacing()
     static constexpr int kGroupBoxLayoutSpacing = 6;
     static constexpr int kTabLayoutSpacing = 6;
 
-    const QList<QWidget*> tabs = { general_tab, viewTab, file_watch_tab,
-                                   liveSourceTab, shortcutsTab, advanced_tab };
+    const QList<QWidget*> tabs
+        = { general_tab, viewTab, file_watch_tab, liveSourceTab, shortcutsTab, advanced_tab };
 
     for ( auto* tab : tabs ) {
         if ( !tab ) {
@@ -557,7 +479,7 @@ void OptionsDialog::setupSearchResultsCache()
 void OptionsDialog::setupLogging()
 {
     verbositySpinBox->setEnabled( loggingCheckBox->isChecked() );
-    
+
     // Update log file path display
     if ( loggingCheckBox->isChecked() ) {
         const auto logFilePath = logging::getLogFilePath();
@@ -730,8 +652,7 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
     HighlighterEdit::updateIcon( quickFindColorButton, qfSearchColor_ );
     regexpEngineComboBox->setCurrentIndex( getRegexpEngineIndex( config.regexpEngine() ) );
     autoRunSearchOnAddCheckBox->setChecked( config.autoRunSearchOnPatternChange() );
-    showAllFilteredWhenEmptyCheckBox->setChecked(
-        config.showAllInFilteredViewWhenSearchEmpty() );
+    showAllFilteredWhenEmptyCheckBox->setChecked( config.showAllInFilteredViewWhenSearchEmpty() );
 
     highlightMainSearchCheckBox->setChecked( config.mainSearchHighlight() );
     variateHighlightCheckBox->setChecked( config.variateMainSearchHighlight() );
@@ -763,11 +684,11 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
 
     loggingCheckBox->setChecked( config.enableLogging() );
     verbositySpinBox->setValue( config.loggingLevel() );
-    
+
     // Apply logging settings to get log file path
     logging::enableFileLogging( config.enableLogging(),
                                 static_cast<logging::LogLevel>( config.loggingLevel() ) );
-    
+
     // Update log file path display immediately
     setupLogging();
 
@@ -789,16 +710,8 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
 
     // downloads
     verifySslCheckBox->setChecked( config.verifySslPeers() );
-    adbExecutableLineEdit->setText( config.adbExecutable() );
-    adbLogcatArgsLineEdit->setText( config.adbLogcatExtraArgs() );
     if ( adbAnsiOutputCheckBox_ ) {
         adbAnsiOutputCheckBox_->setChecked( config.adbLogcatAnsiOutputEnabled() );
-    }
-    if ( iosLogExecutableLineEdit_ ) {
-        iosLogExecutableLineEdit_->setText( config.iosLogExecutable() );
-    }
-    if ( iosLogArgsLineEdit_ ) {
-        iosLogArgsLineEdit_->setText( config.iosLogExtraArgs() );
     }
     if ( iosLogAnsiOutputCheckBox_ ) {
         iosLogAnsiOutputCheckBox_->setChecked( config.iosLogAnsiOutputEnabled() );
@@ -810,9 +723,8 @@ void OptionsDialog::updateDialogFromConfiguration( const Configuration& config )
         liveSourceMaxAttemptsSpinBox_->setValue( config.liveAutoReconnectMaxAttempts() );
     }
     if ( liveSourceRollingMaxFileSizeSpinBox_ ) {
-        // Configuration stores bytes, UI displays MB
         liveSourceRollingMaxFileSizeSpinBox_->setValue(
-            static_cast<int>( config.liveCaptureRollingMaxFileSize() / ( 1024 * 1024 ) ) );
+            config.liveCaptureRollingMaxFileSizeMb() );
     }
     if ( liveSourceRollingBackupCountSpinBox_ ) {
         liveSourceRollingBackupCountSpinBox_->setValue( config.liveCaptureRollingBackupCount() );
@@ -907,8 +819,7 @@ void OptionsDialog::resetGeneralDefaults()
     logicalCombiningCheckBox->setChecked( defaults.isSearchLogicalCombiningDefault() );
     autoRefreshCheckBox->setChecked( defaults.isSearchAutoRefreshDefault() );
     autoRunSearchOnAddCheckBox->setChecked( defaults.autoRunSearchOnPatternChange() );
-    showAllFilteredWhenEmptyCheckBox->setChecked(
-        defaults.showAllInFilteredViewWhenSearchEmpty() );
+    showAllFilteredWhenEmptyCheckBox->setChecked( defaults.showAllInFilteredViewWhenSearchEmpty() );
 
     // Compiled defaults (ignore case on, whole word off) come from the
     // QuickHighlighterDefaults struct itself, not from the stored collection.
@@ -989,16 +900,8 @@ void OptionsDialog::resetLiveSourceDefaults()
 {
     const Configuration defaults;
 
-    adbExecutableLineEdit->setText( defaults.adbExecutable() );
-    adbLogcatArgsLineEdit->setText( defaults.adbLogcatExtraArgs() );
     if ( adbAnsiOutputCheckBox_ ) {
         adbAnsiOutputCheckBox_->setChecked( defaults.adbLogcatAnsiOutputEnabled() );
-    }
-    if ( iosLogExecutableLineEdit_ ) {
-        iosLogExecutableLineEdit_->setText( defaults.iosLogExecutable() );
-    }
-    if ( iosLogArgsLineEdit_ ) {
-        iosLogArgsLineEdit_->setText( defaults.iosLogExtraArgs() );
     }
     if ( iosLogAnsiOutputCheckBox_ ) {
         iosLogAnsiOutputCheckBox_->setChecked( defaults.iosLogAnsiOutputEnabled() );
@@ -1131,8 +1034,7 @@ void OptionsDialog::updateConfigFromDialog()
     config.setQuickfindIncremental( incrementalCheckBox->isChecked() );
     config.setRegexpEnging( getRegexpEngineFromIndex( regexpEngineComboBox->currentIndex() ) );
     config.setAutoRunSearchOnPatternChange( autoRunSearchOnAddCheckBox->isChecked() );
-    config.setShowAllInFilteredViewWhenSearchEmpty(
-        showAllFilteredWhenEmptyCheckBox->isChecked() );
+    config.setShowAllInFilteredViewWhenSearchEmpty( showAllFilteredWhenEmptyCheckBox->isChecked() );
 
     config.setNativeFileWatchEnabled( nativeFileWatchCheckBox->isChecked() );
     config.setPollingEnabled( pollingCheckBox->isChecked() );
@@ -1153,11 +1055,11 @@ void OptionsDialog::updateConfigFromDialog()
     config.setConfirmTabClose( confirmTabCloseCheckBox->isChecked() );
     config.setEnableLogging( loggingCheckBox->isChecked() );
     config.setLoggingLevel( verbositySpinBox->value() );
-    
+
     // Apply logging settings immediately
     logging::enableFileLogging( config.enableLogging(),
                                 static_cast<logging::LogLevel>( config.loggingLevel() ) );
-    
+
     // Update log file path display
     setupLogging();
 
@@ -1177,16 +1079,8 @@ void OptionsDialog::updateConfigFromDialog()
     config.setVersionCheckingEnabled( checkForNewVersionCheckBox->isChecked() );
 
     config.setVerifySslPeers( verifySslCheckBox->isChecked() );
-    config.setAdbExecutable( adbExecutableLineEdit->text().trimmed() );
-    config.setAdbLogcatExtraArgs( adbLogcatArgsLineEdit->text().trimmed() );
     if ( adbAnsiOutputCheckBox_ ) {
         config.setAdbLogcatAnsiOutputEnabled( adbAnsiOutputCheckBox_->isChecked() );
-    }
-    if ( iosLogExecutableLineEdit_ ) {
-        config.setIosLogExecutable( iosLogExecutableLineEdit_->text().trimmed() );
-    }
-    if ( iosLogArgsLineEdit_ ) {
-        config.setIosLogExtraArgs( iosLogArgsLineEdit_->text().trimmed() );
     }
     if ( iosLogAnsiOutputCheckBox_ ) {
         config.setIosLogAnsiOutputEnabled( iosLogAnsiOutputCheckBox_->isChecked() );
@@ -1210,7 +1104,7 @@ void OptionsDialog::updateConfigFromDialog()
     restartAppMessage = config.style() != selectedStyle;
 
     config.setStyle( selectedStyle );
-    
+
     // Theme mode: while Classic Dark is active the selector is pinned to Dark,
     // so persist the mode the user selected before the pin (themeModeRestore_)
     // rather than the disabled selector's value. Otherwise an Apply/OK while
@@ -1218,17 +1112,16 @@ void OptionsDialog::updateConfigFromDialog()
     // later switch away from Classic Dark could never restore the earlier mode.
     const auto selectedThemeMode
         = static_cast<ThemeMode>( themeModeComboBox->currentData().toInt() );
-    const auto themeMode = themeModePinnedToDark_ && themeModeRestore_
-                               ? *themeModeRestore_
-                               : selectedThemeMode;
+    const auto themeMode
+        = themeModePinnedToDark_ && themeModeRestore_ ? *themeModeRestore_ : selectedThemeMode;
     const bool themeModeChanged = config.themeMode() != themeMode;
     config.setThemeMode( themeMode );
-    
+
     // Apply theme immediately if changed
     if ( themeModeChanged ) {
         StyleManager::applyStyle( config.style() );
     }
-    
+
     config.setHideAnsiColorSequences( hideAnsiColorsCheckBox->isChecked() );
     config.setRenderAnsiColorSequences( !hideAnsiColorsCheckBox->isChecked()
                                         && renderAnsiColorsCheckBox->isChecked() );
@@ -1278,8 +1171,7 @@ void OptionsDialog::updateConfigFromDialog()
     // above: HighlighterSetCollection owns the color-label match defaults.
     auto& highlighterSetCollection = HighlighterSetCollection::get();
     highlighterSetCollection.setQuickHighlighterDefaults(
-        { colorLabelsIgnoreCaseCheckBox->isChecked(),
-          colorLabelsWholeWordCheckBox->isChecked() } );
+        { colorLabelsIgnoreCaseCheckBox->isChecked(), colorLabelsWholeWordCheckBox->isChecked() } );
     highlighterSetCollection.save();
 
     if ( restartAppMessage ) {

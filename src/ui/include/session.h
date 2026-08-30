@@ -29,6 +29,8 @@
 
 #include <QByteArray>
 #include <QDateTime>
+#include <QSet>
+#include <QStringList>
 
 #include "log.h"
 #include "quickfindpattern.h"
@@ -39,7 +41,18 @@ class SearchableLogData;
 class LogFilteredData;
 class SavedSearches;
 class AdbLogcatSource;
+class LiveSourceTransportFactory;
 struct AdbLogcatSessionData;
+namespace klogg::livecapture::adb {
+class AdbInfrastructureManager;
+}
+namespace klogg::livecapture::ios {
+class IosCatalogSnapshotProvider;
+}
+namespace klogg::livelog {
+class LiveLogController;
+class LiveLogControllerEffects;
+}
 
 enum class DocumentKind {
     File,
@@ -55,8 +68,7 @@ struct OpenedDocumentInfo {
 };
 
 // File unreadable error
-class FileUnreadableErr {
-};
+class FileUnreadableErr {};
 
 // The session is responsible for maintaining the list of open log files
 // and their association with Views.
@@ -66,9 +78,15 @@ class FileUnreadableErr {
 class WindowSession;
 
 class Session : public std::enable_shared_from_this<Session> {
-  public:
+public:
     Session();
+    explicit Session( const LiveSourceTransportFactory& transportFactory );
+    Session( const LiveSourceTransportFactory& transportFactory,
+             klogg::livecapture::adb::AdbInfrastructureManager* adbInfrastructure,
+             klogg::livecapture::ios::IosCatalogSnapshotProvider* iosCatalog );
     ~Session();
+
+    const LiveSourceTransportFactory& transportFactory() const;
 
     // No copy/assignment please
     Session( const Session& ) = delete;
@@ -112,6 +130,18 @@ class Session : public std::enable_shared_from_this<Session> {
     QString getAssociatedPath( const ViewInterface* view ) const;
     DocumentKind getDocumentKind( const ViewInterface* view ) const;
     AdbLogcatSource* getAdbLogcatSource( const ViewInterface* view ) const;
+    klogg::livelog::LiveLogController* getLiveLogController( const ViewInterface* view ) const;
+
+    // Human-readable refusals recorded during the most recent restore pass,
+    // one per skipped live tab (e.g. sessions saved with raw command-line
+    // options). Surfaced by the UI after restore completes; empty otherwise.
+    QStringList lastRestoreRejections() const;
+
+    // Non-error informational messages recorded during the most recent restore
+    // pass (the one-time pre-discriminator migration, compatibility-transport
+    // read-only presentation). Never failures: surfaced by the UI through a
+    // non-modal channel after restore completes; empty otherwise.
+    QStringList lastRestoreNotices() const;
 
     // Get the size (in bytes) and number of lines in the current file.
     // The file is identified by the view attached to it.
@@ -144,7 +174,7 @@ class Session : public std::enable_shared_from_this<Session> {
         exitRequested_ = isRequested;
     }
 
-  private:
+private:
     struct OpenFile {
         QString fileName;
         QString documentId;
@@ -155,6 +185,8 @@ class Session : public std::enable_shared_from_this<Session> {
         std::shared_ptr<LogFilteredData> logFilteredData;
         std::shared_ptr<AdbLogcatSource> adbLogcatSource;
         ViewInterface* view;
+        std::shared_ptr<klogg::livelog::LiveLogControllerEffects> liveLogEffects;
+        std::shared_ptr<klogg::livelog::LiveLogController> liveLogController;
     };
 
     // Open a file without checking if it is existing/readable
@@ -164,10 +196,16 @@ class Session : public std::enable_shared_from_this<Session> {
     ViewInterface* openAdbAlways( const AdbLogcatSessionData& sessionData,
                                   const std::function<ViewInterface*()>& view_factory,
                                   bool startConnected, const QString& viewContext );
+    bool isLiveCaptureIdOpen( const QString& captureId ) const;
 
     // Find an open file from its associated view
     OpenFile* findOpenFileFromView( const ViewInterface* view );
     const OpenFile* findOpenFileFromView( const ViewInterface* view ) const;
+
+    // Restore-notice recording. The dedup identity includes the source-neutral
+    // document id and notice text: Android/iOS captures may legitimately reuse
+    // capture-id text, and distinct notice kinds for one tab must both surface.
+    void appendRestoreNoticeOncePerDocument( const QString& documentId, QString notice );
 
     // List of open files
     typedef std::unordered_map<const ViewInterface*, OpenFile> OpenFileMap;
@@ -179,7 +217,18 @@ class Session : public std::enable_shared_from_this<Session> {
     // Global quickfind pattern
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 
+    // Non-owning application composition dependency. Null keeps the legacy
+    // process/session path available for transitional and isolated callers.
+    const LiveSourceTransportFactory* transportFactory_{ nullptr };
+    klogg::livecapture::adb::AdbInfrastructureManager* adbInfrastructure_{ nullptr };
+    klogg::livecapture::ios::IosCatalogSnapshotProvider* iosCatalog_{ nullptr };
     bool exitRequested_ = false;
+
+    QStringList restoreRejections_;
+    QStringList restoreNotices_;
+    // Composite document-id + notice keys already surfaced. Runtime-only: never
+    // persisted, so a fresh app run re-notices once per session as intended.
+    QSet<QString> restoreNotifiedNoticeKeys_;
 
     friend class WindowSession;
 };
@@ -190,7 +239,7 @@ using SaveFileInfo
     = std::tuple<const ViewInterface*, uint64_t, std::shared_ptr<const ViewContextInterface>>;
 
 class WindowSession {
-  public:
+public:
     WindowSession( std::shared_ptr<Session> appSession, const QString& id, size_t index );
 
     ViewInterface* getViewIfOpen( const QString& file_name ) const
@@ -207,9 +256,10 @@ class WindowSession {
 
     void close( const ViewInterface* view )
     {
-        auto it = std::find( openedDocuments_.begin(), openedDocuments_.end(), getDocumentId( view ) );
-        if ( it != openedDocuments_.end() ) {
-            openedDocuments_.erase( it );
+        const auto position
+            = std::find( openedDocuments_.begin(), openedDocuments_.end(), getDocumentId( view ) );
+        if ( position != openedDocuments_.end() ) {
+            openedDocuments_.erase( position );
         }
 
         appSession_->close( view );
@@ -276,6 +326,21 @@ class WindowSession {
         return appSession_->getAdbLogcatSource( view );
     }
 
+    klogg::livelog::LiveLogController* getLiveLogController( const ViewInterface* view ) const
+    {
+        return appSession_->getLiveLogController( view );
+    }
+
+    QStringList lastRestoreRejections() const
+    {
+        return appSession_->lastRestoreRejections();
+    }
+
+    QStringList lastRestoreNotices() const
+    {
+        return appSession_->lastRestoreNotices();
+    }
+
     void getFileInfo( const ViewInterface* view, uint64_t* fileSize, uint64_t* fileNbLine,
                       QDateTime* lastModified ) const
     {
@@ -287,13 +352,14 @@ class WindowSession {
         std::vector<OpenedDocumentInfo> documents;
         documents.reserve( openedDocuments_.size() );
         for ( const auto& documentId : openedDocuments_ ) {
-            const auto it = std::find_if(
-                appSession_->openFiles_.cbegin(), appSession_->openFiles_.cend(),
-                [ &documentId ]( const auto& openFile ) {
-                    return openFile.second.documentId == documentId;
-                } );
-            if ( it != appSession_->openFiles_.cend() ) {
-                documents.push_back( appSession_->openedDocumentInfo( it->first ) );
+            const auto openFilePosition
+                = std::find_if( appSession_->openFiles_.cbegin(), appSession_->openFiles_.cend(),
+                                [ &documentId ]( const auto& openFile ) {
+                                    return openFile.second.documentId == documentId;
+                                } );
+            if ( openFilePosition != appSession_->openFiles_.cend() ) {
+                documents.push_back(
+                    appSession_->openedDocumentInfo( openFilePosition->first ) );
             }
         }
         return documents;
@@ -341,7 +407,7 @@ class WindowSession {
     // returns true if caller needs to save settings
     bool close();
 
-  private:
+private:
     std::shared_ptr<Session> appSession_;
     QString windowId_;
     size_t windowIndex_;

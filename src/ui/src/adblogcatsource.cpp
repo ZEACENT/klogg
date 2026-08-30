@@ -1,287 +1,331 @@
 #include "adblogcatsource.h"
 
-#include <QDateTime>
-#include <QJsonDocument>
-#include <QRandomGenerator>
+#include <limits>
+#include <utility>
+
+#include <QTimer>
 
 #include "adbprocesstransport.h"
+#include "adbsmartsockettransport.h"
 #include "capturestore.h"
 #include "ioslogprocesstransport.h"
-#include "log.h"
+#include "livelogcontroller.h"
 #include "livesourcetransport.h"
+#include "log.h"
 #include "streaminglogdata.h"
 
+std::unique_ptr<LiveSourceTransport>
+DefaultLiveSourceTransportFactory::create( const LiveSourceTransportConfig& config ) const
+{
+    if ( config.sourceType == LiveLogSourceType::IosLogStream ) {
+        if ( config.iosBackend != IosTransportBackend::LegacyProcess
+             || config.executable.trimmed().isEmpty() ) {
+            return nullptr;
+        }
+        return std::make_unique<IosLogProcessTransport>(
+            config.executable, config.deviceId, config.extraArgs, config.ansiOutputEnabled );
+    }
+
+    if ( config.adbBackend == AdbTransportBackend::SmartSocket ) {
+        auto smartSocketConfig = klogg::livelog::makeAdbSmartSocketTransportConfig( config );
+        if ( !smartSocketConfig.has_value() ) {
+            return nullptr;
+        }
+        return std::make_unique<klogg::livecapture::adb::AdbSmartSocketTransport>(
+            std::move( *smartSocketConfig ) );
+    }
+
+    if ( config.executable.trimmed().isEmpty() ) {
+        return nullptr;
+    }
+    return std::make_unique<AdbProcessTransport>( config.executable, config.deviceId,
+                                                  config.extraArgs, config.ansiOutputEnabled );
+}
+
 namespace {
-LiveLogSourceType sourceTypeFromString( const QString& sourceType )
-{
-    if ( sourceType == AdbLogcatSessionData::persistedSourceType(
-                           LiveLogSourceType::IosLogStream ) ) {
-        return LiveLogSourceType::IosLogStream;
-    }
 
-    return LiveLogSourceType::AdbLogcat;
+LiveSourceTransportConfig transportConfigFromSessionData( const AdbLogcatSessionData& sessionData )
+{
+    LiveSourceTransportConfig config;
+    config.sourceType = sessionData.sourceType;
+    config.adbBackend = sessionData.adbBackend;
+    config.iosBackend = sessionData.iosBackend;
+    config.iosEndpoint = sessionData.iosEndpoint;
+    config.executable = sessionData.adbExecutable;
+    config.deviceId = sessionData.deviceSerial;
+    config.extraArgs = sessionData.extraArgs;
+    config.ansiOutputEnabled = sessionData.ansiOutputEnabled;
+    config.androidBuffers = sessionData.androidBuffers;
+    config.androidFilterSpec = sessionData.androidFilterSpec;
+    config.androidPriority = sessionData.androidPriority;
+    config.androidPid = sessionData.androidPid;
+    config.iosLevel = sessionData.iosLevel;
+    config.iosCategories = sessionData.iosCategories;
+    config.iosSubsystem = sessionData.iosSubsystem;
+    config.iosJsonOutput = sessionData.iosJsonOutput;
+    return config;
 }
 
-std::unique_ptr<LiveSourceTransport> makeTransport( const AdbLogcatSessionData& sessionData )
+const LiveSourceTransportFactory& defaultTransportFactory()
 {
-    if ( sessionData.sourceType == LiveLogSourceType::IosLogStream ) {
-        return std::make_unique<IosLogProcessTransport>( sessionData.adbExecutable,
-                                                         sessionData.deviceSerial,
-                                                         sessionData.extraArgs,
-                                                         sessionData.ansiOutputEnabled );
-    }
-
-    return std::make_unique<AdbProcessTransport>( sessionData.adbExecutable,
-                                                  sessionData.deviceSerial,
-                                                  sessionData.extraArgs,
-                                                  sessionData.ansiOutputEnabled );
+    static const DefaultLiveSourceTransportFactory factory;
+    return factory;
 }
 
-QString iosDeviceNameOnly( const QString& deviceDescription, const QString& deviceSerial )
-{
-    const auto label = deviceDescription.trimmed();
-    if ( label.isEmpty() ) {
-        return deviceSerial;
-    }
-
-    const auto serialOffset = deviceSerial.isEmpty() ? -1 : label.indexOf( deviceSerial );
-    if ( serialOffset > 0 ) {
-        return label.left( serialOffset ).trimmed();
-    }
-
-    return label;
-}
 } // namespace
-
-QString AdbLogcatSessionData::displayName() const
-{
-    if ( sourceType == LiveLogSourceType::IosLogStream ) {
-        return iosDeviceNameOnly( deviceDescription, deviceSerial );
-    }
-
-    return deviceDescription.isEmpty() ? deviceSerial : deviceDescription;
-}
-
-QString AdbLogcatSessionData::documentId() const
-{
-    const auto scheme = sourceType == LiveLogSourceType::IosLogStream ? QStringLiteral( "ios-log" )
-                                                                      : QStringLiteral( "adb" );
-    return QStringLiteral( "%1://%2" ).arg( scheme, captureId );
-}
-
-QString AdbLogcatSessionData::associatedPath() const
-{
-    return boundOutputFile;
-}
-
-QString AdbLogcatSessionData::persistedSourceType() const
-{
-    return persistedSourceType( sourceType );
-}
-
-bool AdbLogcatSessionData::isValid() const
-{
-    return CaptureStore::isValidCaptureId( captureId );
-}
-
-QString AdbLogcatSessionData::persistedSourceType( LiveLogSourceType sourceType )
-{
-    switch ( sourceType ) {
-    case LiveLogSourceType::IosLogStream:
-        return QStringLiteral( "ios_log_stream" );
-    case LiveLogSourceType::AdbLogcat:
-        return QStringLiteral( "adb_logcat" );
-    }
-
-    return QStringLiteral( "adb_logcat" );
-}
-
-bool AdbLogcatSessionData::isPersistedSourceType( const QString& sourceType )
-{
-    return sourceType == persistedSourceType( LiveLogSourceType::AdbLogcat )
-           || sourceType == persistedSourceType( LiveLogSourceType::IosLogStream );
-}
-
-QJsonObject AdbLogcatSessionData::toJson() const
-{
-    return QJsonObject{
-        { QStringLiteral( "sourceType" ), persistedSourceType() },
-        { QStringLiteral( "adbExecutable" ), adbExecutable },
-        { QStringLiteral( "deviceSerial" ), deviceSerial },
-        { QStringLiteral( "deviceDescription" ), deviceDescription },
-        { QStringLiteral( "extraArgs" ), extraArgs },
-        { QStringLiteral( "captureId" ), captureId },
-        { QStringLiteral( "boundOutputFile" ), boundOutputFile },
-        { QStringLiteral( "outputPreserveAnsi" ),
-          outputAnsiMode == LiveLogSaveAnsiMode::Preserve },
-        { QStringLiteral( "ansiOutputEnabled" ), ansiOutputEnabled },
-        { QStringLiteral( "autoReconnectEnabled" ), autoReconnectEnabled },
-        { QStringLiteral( "maxReconnectAttempts" ), maxReconnectAttempts },
-        { QStringLiteral( "captureMaxFileSize" ), static_cast<qint64>( captureMaxFileSize ) },
-        { QStringLiteral( "captureBackupCount" ), captureBackupCount },
-    };
-}
-
-AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
-{
-    const auto jsonObject = QJsonDocument::fromJson( json.toUtf8() ).object();
-    AdbLogcatSessionData data;
-    data.adbExecutable = jsonObject.value( QStringLiteral( "adbExecutable" ) ).toString();
-    data.deviceSerial = jsonObject.value( QStringLiteral( "deviceSerial" ) ).toString();
-    data.deviceDescription = jsonObject.value( QStringLiteral( "deviceDescription" ) ).toString();
-    data.extraArgs = jsonObject.value( QStringLiteral( "extraArgs" ) ).toString();
-    data.captureId = jsonObject.value( QStringLiteral( "captureId" ) ).toString();
-    data.boundOutputFile = jsonObject.value( QStringLiteral( "boundOutputFile" ) ).toString();
-    data.outputAnsiMode = jsonObject.value( QStringLiteral( "outputPreserveAnsi" ) ).toBool( false )
-                              ? LiveLogSaveAnsiMode::Preserve
-                              : LiveLogSaveAnsiMode::Strip;
-    data.sourceType
-        = sourceTypeFromString( jsonObject.value( QStringLiteral( "sourceType" ) ).toString() );
-    data.ansiOutputEnabled
-        = jsonObject.value( QStringLiteral( "ansiOutputEnabled" ) ).toBool( false );
-    data.autoReconnectEnabled
-        = jsonObject.value( QStringLiteral( "autoReconnectEnabled" ) ).toBool( false );
-    data.maxReconnectAttempts
-        = jsonObject.value( QStringLiteral( "maxReconnectAttempts" ) ).toInt( 0 );
-    data.captureMaxFileSize
-        = jsonObject.value( QStringLiteral( "captureMaxFileSize" ) ).toVariant().toLongLong();
-    data.captureBackupCount
-        = jsonObject.value( QStringLiteral( "captureBackupCount" ) ).toInt( 0 );
-    return data;
-}
 
 AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
                                   std::shared_ptr<StreamingLogData> logData, QObject* parent )
+    : AdbLogcatSource( std::move( sessionData ), std::move( logData ), defaultTransportFactory(),
+                       parent )
+{
+}
+
+AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
+                                  std::shared_ptr<StreamingLogData> logData,
+                                  const LiveSourceTransportFactory& transportFactory,
+                                  QObject* parent )
     : QObject( parent )
     , sessionData_( std::move( sessionData ) )
     , logData_( std::move( logData ) )
-    , transport_( makeTransport( sessionData_ ) )
+    , transportFactory_( &transportFactory )
 {
-    reconnectTimer_.setSingleShot( true );
-    connect( &reconnectTimer_, &QTimer::timeout, this, &AdbLogcatSource::attemptReconnect );
-
-    connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
-             [ this ]( const QByteArray& data ) {
-                 if ( logData_ ) {
-                     logData_->appendUtf8( data );
-                 }
-                 // First stdout data after a reconnect proves the connection
-                 // is truly working — reset the backoff counter.  Reconnect
-                 // progress is surfaced via the status bar only; nothing is
-                 // written to the log view (fully silent retries).
-                 if ( !reconnectionProven_ && reconnectAttempt_ > 0 ) {
-                     reconnectionProven_ = true;
-                     LOG_INFO << "Auto-reconnect succeeded after " << reconnectAttempt_
-                              << " attempt(s)";
-                     reconnectAttempt_ = 0;
-                 }
-             } );
-    connect( transport_.get(), &LiveSourceTransport::stateChanged, this,
-             [ this ]( LiveSourceTransport::State state ) { setStateFromTransport( state ); } );
-    connect( transport_.get(), &LiveSourceTransport::errorOccurred, this, [ this ]( const QString& error ) {
-        if ( error.isEmpty() ) {
-            return;
-        }
-        lastError_ = error;
-        LOG_WARNING << "adb logcat transport error " << error;
-        Q_EMIT errorOccurred( lastError_ );
-    } );
+    if ( logData_ ) {
+        connect( logData_.get(), &StreamingLogData::captureOutputChanged, this,
+                 &AdbLogcatSource::captureOutputChanged );
+    }
 }
 
 AdbLogcatSource::~AdbLogcatSource()
 {
-    reconnectTimer_.stop();
-    disconnectSource();
+    const auto generation = activeGeneration_;
+    activeGeneration_.reset();
+    if ( transport_ && generation.has_value() ) {
+        transport_->stop( *generation );
+    }
+}
+
+AdbLogcatSource::Generation AdbLogcatSource::nextGeneration()
+{
+    if ( generationCounter_ == std::numeric_limits<Generation>::max() ) {
+        generationCounter_ = 0;
+    }
+    return ++generationCounter_;
+}
+
+AdbLogcatSource::ClearRequestId AdbLogcatSource::nextClearRequestId()
+{
+    if ( clearRequestCounter_ == std::numeric_limits<ClearRequestId>::max() ) {
+        clearRequestCounter_ = 0;
+    }
+    return ++clearRequestCounter_;
+}
+
+void AdbLogcatSource::wireTransport()
+{
+    if ( !transport_ ) {
+        return;
+    }
+    connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
+             [ this ]( Generation generation, const QByteArray& data ) {
+                 if ( activeGeneration_ != generation ) {
+                     return;
+                 }
+                 if ( controllerBytes_ ) {
+                     controllerBytes_( generation, data );
+                 }
+                 else if ( logData_ ) {
+                     logData_->appendUtf8( data );
+                 }
+             } );
+    connect( transport_.get(), &LiveSourceTransport::stateChanged, this,
+             [ this ]( Generation generation, LiveSourceTransport::State state ) {
+                 if ( activeGeneration_ == generation ) {
+                     setStateFromTransport( generation, state );
+                 }
+             } );
+    connect( transport_.get(), &LiveSourceTransport::errorOccurred, this,
+             [ this ]( Generation generation, const QString& error ) {
+                 if ( activeGeneration_ != generation || error.isEmpty() ) {
+                     return;
+                 }
+                 lastError_ = error;
+                 LOG_WARNING << "live log transport error " << error;
+                 Q_EMIT errorOccurred( lastError_ );
+             } );
+    connect( transport_.get(), &LiveSourceTransport::clearRemoteFinished, this,
+             &AdbLogcatSource::finishClear );
+}
+
+void AdbLogcatSource::retireTransport()
+{
+    if ( !transport_ ) {
+        return;
+    }
+    QObject::disconnect( transport_.get(), nullptr, this, nullptr );
+    retiredTransports_.push_back( std::move( transport_ ) );
+    if ( retiredCleanupScheduled_ ) {
+        return;
+    }
+    retiredCleanupScheduled_ = true;
+    QTimer::singleShot( 0, this, [ this ] {
+        retiredCleanupScheduled_ = false;
+        retiredTransports_.clear();
+    } );
+}
+
+void AdbLogcatSource::startTransport()
+{
+    const auto generation = nextGeneration();
+    activeGeneration_ = generation;
+    connecting_ = true;
+    transport_->start( generation );
 }
 
 bool AdbLogcatSource::connectSource()
 {
-    if ( !transport_ ) {
-        lastError_ = tr( "ADB transport is unavailable" );
+    if ( sessionData_.readOnlyCompatibility ) {
+        lastError_ = tr( "This compatibility session is read-only." );
         setState( State::Error );
         return false;
     }
-
-    if ( state_ == State::Connected ) {
+    if ( state_ == State::Connected || connecting_ ) {
         return true;
     }
-
-    manualDisconnect_ = false;
-
-    // A fresh (re)connect starts a new reconnect cycle: reset the attempt
-    // counter and cancel any pending auto-reconnect. Without this, a manual
-    // Reconnect after auto-reconnect exhaustion left reconnectAttempt_ at its
-    // stale high value, suppressing further retries.
-    reconnectTimer_.stop();
-    reconnectAttempt_ = 0;
-
-    // connectTransport() handles device-not-found errors directly.
-    // The isDeviceAvailable() pre-check was removed because it runs a
-    // blocking subprocess (adb devices / pymobiledevice3 usbmux list)
-    // on the UI thread for up to 8 seconds.
-    if ( !transport_->connectTransport() ) {
-        lastError_ = transport_->lastError();
+    if ( pendingClearGeneration_.has_value() && pendingClearRequestId_.has_value() ) {
+        restartAfterClear_ = true;
+        lastError_.clear();
+        return true;
+    }
+    restartAfterClear_ = false;
+    lastError_.clear();
+    if ( !transport_ && transportFactory_ != nullptr ) {
+        transport_ = transportFactory_->create( transportConfigFromSessionData( sessionData_ ) );
+        wireTransport();
+    }
+    if ( !transport_ ) {
+        lastError_ = tr( "Live log transport is unavailable." );
+        setState( State::Error );
         return false;
     }
-
-    lastError_.clear();
+    sessionData_.runIntent = klogg::livecapture::RunIntent::Running;
+    startTransport();
     return true;
 }
 
 void AdbLogcatSource::disconnectSource()
 {
-    if ( !transport_ ) {
-        setState( State::Disconnected );
-        return;
+    if ( !sessionData_.readOnlyCompatibility ) {
+        sessionData_.runIntent = klogg::livecapture::RunIntent::Stopped;
     }
-
-    manualDisconnect_ = true;
-    reconnectTimer_.stop();
-    transport_->disconnectTransport();
+    connecting_ = false;
+    restartAfterClear_ = false;
+    const auto generation = activeGeneration_;
+    activeGeneration_.reset();
+    if ( transport_ && generation.has_value() ) {
+        transport_->stop( *generation );
+    }
+    if ( logData_ ) {
+        logData_->finishInput();
+    }
+    setState( State::Disconnected );
 }
 
 bool AdbLogcatSource::reconnectSource()
 {
-    disconnectSource();
-    if ( logData_ ) {
-        const auto marker = QStringLiteral( "----- reconnected %1 -----\n" )
-                                .arg( QDateTime::currentDateTime().toString( Qt::ISODate ) );
-        logData_->appendUtf8( marker.toUtf8() );
+    if ( sessionData_.readOnlyCompatibility ) {
+        lastError_ = tr( "This compatibility session is read-only." );
+        return false;
     }
-    manualDisconnect_ = false;
+    if ( controllerRestart_ ) {
+        lastError_.clear();
+        if ( pendingClearGeneration_.has_value() && pendingClearRequestId_.has_value() ) {
+            restartAfterClear_ = true;
+            return true;
+        }
+        controllerRestart_();
+        return true;
+    }
+    disconnectSource();
     return connectSource();
 }
 
 bool AdbLogcatSource::clearAndRestart()
 {
-    const auto wasConnected = state_ == State::Connected;
-    const auto isIosLogStream = sessionData_.sourceType == LiveLogSourceType::IosLogStream;
-    disconnectSource();
-
-    bool remoteClearFailed = false;
-    if ( !isIosLogStream && wasConnected ) {
-        QString error;
-        if ( !transport_ || !transport_->clearRemote( &error ) ) {
-            lastError_ = error.isEmpty() ? tr( "Failed to clear logcat buffer" ) : error;
-            setState( State::Error );
-            remoteClearFailed = true;
-        }
+    if ( sessionData_.readOnlyCompatibility ) {
+        lastError_ = tr( "This compatibility session is read-only." );
+        return false;
     }
-
+    if ( pendingClearGeneration_.has_value() && pendingClearRequestId_.has_value() ) {
+        restartAfterClear_ = true;
+        lastError_.clear();
+        if ( logData_ ) {
+            logData_->clearCapture();
+        }
+        return true;
+    }
+    const auto shouldRestart = state_ == State::Connected || connecting_;
+    const auto isIosLogStream = sessionData_.sourceType == LiveLogSourceType::IosLogStream;
+    if ( controllerStop_ ) {
+        controllerStop_();
+    }
+    else {
+        disconnectSource();
+    }
     if ( logData_ ) {
         logData_->clearCapture();
     }
-
-    if ( remoteClearFailed ) {
+    if ( !shouldRestart ) {
+        lastError_.clear();
+        return true;
+    }
+    if ( isIosLogStream ) {
+        if ( controllerRestart_ ) {
+            controllerRestart_();
+            return true;
+        }
+        return connectSource();
+    }
+    if ( !transport_ ) {
+        lastError_ = tr( "Failed to clear logcat buffer" );
+        setState( State::Error );
         return false;
     }
+    const auto generation = nextGeneration();
+    const auto requestId = nextClearRequestId();
+    pendingClearGeneration_ = generation;
+    pendingClearRequestId_ = requestId;
+    restartAfterClear_ = true;
+    lastError_.clear();
+    transport_->clearRemoteAsync( generation, requestId );
+    return true;
+}
 
-    if ( wasConnected ) {
-        const auto restarted = connectSource();
-        return restarted || isIosLogStream;
+void AdbLogcatSource::finishClear( Generation generation, ClearRequestId requestId, bool succeeded,
+                                   const QString& error )
+{
+    if ( pendingClearGeneration_ != generation || pendingClearRequestId_ != requestId ) {
+        return;
+    }
+    pendingClearGeneration_.reset();
+    pendingClearRequestId_.reset();
+    const auto shouldRestart = std::exchange( restartAfterClear_, false );
+    if ( !succeeded ) {
+        lastError_ = error.isEmpty() ? tr( "Failed to clear logcat buffer" ) : error;
+        setState( State::Error );
+        Q_EMIT errorOccurred( lastError_ );
+        Q_EMIT clearFailed( lastError_ );
+        return;
     }
     lastError_.clear();
-    return true;
+    if ( shouldRestart ) {
+        if ( controllerRestart_ ) {
+            controllerRestart_();
+        }
+        else {
+            connectSource();
+        }
+    }
 }
 
 bool AdbLogcatSource::bindOutputFile( const QString& outputPath )
@@ -291,15 +335,10 @@ bool AdbLogcatSource::bindOutputFile( const QString& outputPath )
 
 bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
 {
-    if ( !logData_ ) {
+    if ( !logData_ || !logData_->bindOutputFile( outputPath, ansiMode ) ) {
         return false;
     }
-
-    if ( !logData_->bindOutputFile( outputPath, ansiMode ) ) {
-        return false;
-    }
-
-    sessionData_.boundOutputFile = outputPath;
+    sessionData_.boundOutputFile = logData_->boundOutputFile();
     sessionData_.outputAnsiMode = ansiMode;
     return true;
 }
@@ -311,106 +350,133 @@ void AdbLogcatSource::deleteCaptureFiles()
     }
 }
 
-const AdbLogcatSessionData& AdbLogcatSource::sessionData() const
+const AdbLogcatSessionData& AdbLogcatSource::sessionData() const { return sessionData_; }
+AdbLogcatSource::State AdbLogcatSource::state() const { return state_; }
+QString AdbLogcatSource::lastError() const { return lastError_; }
+bool AdbLogcatSource::isTransportAvailable() const { return transport_ != nullptr; }
+bool AdbLogcatSource::isReadOnlyCompatibility() const { return sessionData_.readOnlyCompatibility; }
+
+void AdbLogcatSource::setControllerCallbacks( BytesCallback bytes, StateCallback state,
+                                              FailureCallback failure, ControlCallback stop,
+                                              ControlCallback restart )
 {
-    return sessionData_;
+    controllerBytes_ = std::move( bytes );
+    controllerState_ = std::move( state );
+    controllerFailure_ = std::move( failure );
+    controllerStop_ = std::move( stop );
+    controllerRestart_ = std::move( restart );
 }
 
-AdbLogcatSource::State AdbLogcatSource::state() const
+void AdbLogcatSource::invalidateTransportGeneration( Generation generation )
 {
-    return state_;
+    Q_UNUSED( generation );
 }
 
-QString AdbLogcatSource::lastError() const
+void AdbLogcatSource::cancelTransport( Generation generation )
 {
-    return lastError_;
+    if ( activeGeneration_ != generation ) {
+        return;
+    }
+    activeGeneration_.reset();
+    connecting_ = false;
+    if ( transport_ ) {
+        transport_->stop( generation );
+    }
+    if ( logData_ ) {
+        logData_->finishInput();
+    }
+    setState( State::Disconnected );
+}
+
+void AdbLogcatSource::openTransport( Generation generation,
+                                     const LiveSourceTransportConfig& config )
+{
+    if ( sessionData_.readOnlyCompatibility || transportFactory_ == nullptr ) {
+        const auto error = klogg::livecapture::LiveSourceError{
+            klogg::livecapture::ErrorCategory::Configuration, "live-transport-unavailable",
+            klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Never,
+            "The live log transport is unavailable.",
+            "The session is read-only or has no transport factory." };
+        lastError_ = QString::fromStdString( error.message );
+        setState( State::Error );
+        if ( controllerFailure_ ) {
+            controllerFailure_( generation, error );
+        }
+        return;
+    }
+
+    activeGeneration_.reset();
+    connecting_ = false;
+    retireTransport();
+    transport_ = transportFactory_->create( config );
+    wireTransport();
+    if ( !transport_ ) {
+        const auto error = klogg::livecapture::LiveSourceError{
+            klogg::livecapture::ErrorCategory::Configuration, "live-transport-create-failed",
+            klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Never,
+            "The live log transport could not be created.",
+            "The typed transport configuration was rejected." };
+        lastError_ = QString::fromStdString( error.message );
+        setState( State::Error );
+        if ( controllerFailure_ ) {
+            controllerFailure_( generation, error );
+        }
+        return;
+    }
+    activeGeneration_ = generation;
+    connecting_ = true;
+    lastError_.clear();
+    transport_->start( generation );
+}
+
+void AdbLogcatSource::appendTransportBytes( Generation generation, const QByteArray& bytes )
+{
+    if ( activeGeneration_ == generation && logData_ ) {
+        logData_->appendUtf8( bytes );
+    }
 }
 
 void AdbLogcatSource::setState( State state )
 {
-    if ( state_ == state ) {
-        return;
-    }
+    if ( state_ == state ) { return; }
     state_ = state;
     Q_EMIT stateChanged( state_ );
 }
 
-void AdbLogcatSource::setStateFromTransport( LiveSourceTransport::State state )
+void AdbLogcatSource::setStateFromTransport( Generation generation,
+                                             LiveSourceTransport::State state )
 {
+    if ( controllerState_ ) { controllerState_( generation, state ); }
     switch ( state ) {
     case LiveSourceTransport::State::Connected:
-        reconnectTimer_.stop();
-        reconnectingActive_ = false;
-        // The connection is not yet proven — we wait for the first stdout
-        // data before declaring success (see bytesReceived handler above).
-        // If the process dies without producing data, the failure is surfaced
-        // via the status bar / lastError_ (see setStateFromTransport(Error)).
-        reconnectionProven_ = false;
+        connecting_ = false;
         setState( State::Connected );
         break;
-    case LiveSourceTransport::State::Error:
-        // Reconnect failures are surfaced via the status bar / lastError_
-        // only — nothing is written to the log view (fully silent retries).
-        if ( logData_ ) {
-            logData_->finishInput();
-        }
-        reconnectionProven_ = false;
-        reconnectingActive_ = false;
-        if ( transport_ ) {
-            lastError_ = transport_->lastError();
-        }
+    case LiveSourceTransport::State::Error: {
+        connecting_ = false;
+        if ( logData_ ) { logData_->finishInput(); }
+        auto structured = transport_ ? transport_->lastStructuredError() : std::nullopt;
+        if ( transport_ ) { lastError_ = transport_->lastError(); }
         setState( State::Error );
-        if ( !manualDisconnect_ && autoReconnectEnabled_ ) {
-            scheduleReconnect();
+        if ( controllerFailure_ ) {
+            controllerFailure_( generation, structured.value_or( klogg::livecapture::LiveSourceError{
+                klogg::livecapture::ErrorCategory::Stream, "live-stream-failed",
+                klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
+                lastError_.isEmpty() ? "The live stream failed." : lastError_.toStdString(),
+                lastError_.toStdString() } ) );
         }
         break;
+    }
     case LiveSourceTransport::State::Connecting:
+        connecting_ = true;
         setState( State::Disconnected );
         break;
     case LiveSourceTransport::State::Disconnected:
-        reconnectionProven_ = false;
-        if ( logData_ ) {
-            logData_->finishInput();
-        }
+        connecting_ = false;
+        if ( logData_ ) { logData_->finishInput(); }
         setState( State::Disconnected );
         break;
     }
-}
-
-void AdbLogcatSource::setAutoReconnectEnabled( bool enabled )
-{
-    autoReconnectEnabled_ = enabled;
-    if ( !enabled ) {
-        reconnectTimer_.stop();
-        reconnectAttempt_ = 0;
-    }
-}
-
-void AdbLogcatSource::setAutoReconnectMaxAttempts( int maxAttempts )
-{
-    autoReconnectMaxAttempts_ = maxAttempts;
-}
-
-bool AdbLogcatSource::isAutoReconnectActive() const
-{
-    return reconnectTimer_.isActive() || reconnectingActive_;
-}
-
-int AdbLogcatSource::reconnectAttempt() const
-{
-    return reconnectAttempt_;
-}
-
-int AdbLogcatSource::reconnectRemainingMs() const
-{
-    return reconnectTimer_.isActive() ? reconnectTimer_.remainingTime() : 0;
-}
-
-void AdbLogcatSource::cancelAutoReconnect()
-{
-    reconnectTimer_.stop();
-    reconnectAttempt_ = 0;
-    reconnectingActive_ = false;
 }
 
 void AdbLogcatSource::setCaptureLimits( qint64 rollingMaxFileSize, int rollingBackupCount,
@@ -424,54 +490,3 @@ void AdbLogcatSource::setCaptureLimits( qint64 rollingMaxFileSize, int rollingBa
         logData_->setCaptureLimits( std::move( limits ) );
     }
 }
-
-void AdbLogcatSource::scheduleReconnect()
-{
-    if ( autoReconnectMaxAttempts_ > 0 && reconnectAttempt_ >= autoReconnectMaxAttempts_ ) {
-        // Reconnect exhaustion is surfaced via the status bar (state becomes
-        // Error with lastError_) — nothing is written to the log view.
-        LOG_INFO << "Auto-reconnect max attempts (" << autoReconnectMaxAttempts_ << ") reached, giving up";
-        return;
-    }
-
-    // Exponential backoff with ±10% jitter
-    const auto baseDelay
-        = qMin( InitialReconnectDelayMs * ( 1 << qMin( reconnectAttempt_, 15 ) ),
-                MaxReconnectDelayMs );
-    const auto jitter = QRandomGenerator::global()->bounded( baseDelay / 5 ); // [0, 20%)
-    const auto delay = baseDelay + jitter - ( baseDelay / 10 ); // baseDelay ±10%
-
-    LOG_INFO << "Scheduling auto-reconnect attempt " << ( reconnectAttempt_ + 1 ) << " in " << delay
-             << "ms";
-    reconnectTimer_.start( delay );
-    Q_EMIT reconnectAttemptStarted( reconnectAttempt_ + 1 );
-}
-
-void AdbLogcatSource::attemptReconnect()
-{
-    if ( !autoReconnectEnabled_ ) {
-        return;
-    }
-
-    ++reconnectAttempt_;
-    reconnectingActive_ = true;
-    LOG_INFO << "Auto-reconnect attempt " << reconnectAttempt_;
-
-    if ( !transport_ ) {
-        LOG_WARNING << "Auto-reconnect: transport unavailable";
-        return;
-    }
-
-    // Reset manualDisconnect_ so setStateFromTransport() can trigger
-    // another scheduleReconnect() on failure.
-    manualDisconnect_ = false;
-
-    // Use the non-blocking async path: connectTransportAsync() starts the
-    // subprocess and sets up signal-driven startup detection (grace timer +
-    // error/finished handlers) instead of blocking the GUI thread for up to
-    // 3.25 seconds.  The result (Connected or Error) arrives via stateChanged
-    // → setStateFromTransport, which handles the reconnect cycle.
-    transport_->connectTransportAsync();
-    LOG_INFO << "Auto-reconnect attempt " << reconnectAttempt_ << " started (async)";
-}
-

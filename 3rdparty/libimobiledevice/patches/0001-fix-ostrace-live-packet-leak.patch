@@ -1,0 +1,22 @@
+From 5ca453f9e3950b1f24b51e4cdf255236e34254c4 Mon Sep 17 00:00:00 2001
+From: Nikias Bassen <nikias@gmx.li>
+Date: Thu, 21 May 2026 20:31:54 +0200
+Subject: [PATCH] ostrace: Fix memory leak (#1677)
+
+Thanks to @mickelluchko for reporting
+---
+ src/ostrace.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/ostrace.c b/src/ostrace.c
+index 68eb6bf1b..c73ee7fc2 100644
+--- a/src/ostrace.c
++++ b/src/ostrace.c
+@@ -251,6 +251,7 @@ void *ostrace_worker(void *arg)
+ 			break;
+ 		}
+ 		oswt->cbfunc(buf, received, oswt->user_data);
++		free(buf);
+ 	}
+
+ 	if (oswt) {

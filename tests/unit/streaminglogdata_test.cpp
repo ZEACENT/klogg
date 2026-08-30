@@ -31,6 +31,7 @@
 #include <QThread>
 #include <QUuid>
 
+#include <filesystem>
 #include <string_view>
 
 #include "capturestore.h"
@@ -412,6 +413,64 @@ TEST_CASE( "StreamingLogData clearCapture truncates display output file" )
     output3.close();
 }
 
+TEST_CASE( "StreamingLogData clearCapture preserves an externally replaced output path",
+           "[streaming][capture-output]" )
+{
+    LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
+    SECTION( "Strip output" )
+    {
+        ansiMode = LiveLogSaveAnsiMode::Strip;
+    }
+    SECTION( "Preserve output" )
+    {
+        ansiMode = LiveLogSaveAnsiMode::Preserve;
+    }
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    const auto rotatedPath = tempDir.filePath( QStringLiteral( "capture.rotated.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, ansiMode ) );
+    logData.appendUtf8( QByteArrayLiteral( "owned-before-clear\n" ) );
+    logData.finishInput();
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external-replacement\n" ) ) > 0 );
+    replacement.close();
+
+    loadingSpy.clear();
+    logData.clearCapture();
+    REQUIRE( loadingSpy.safeWait() );
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+    CHECK( logData.boundOutputFile() == outputPath );
+    CHECK( logData.captureOutputError() == CaptureOutputError::Reopen );
+
+    logData.appendUtf8( QByteArrayLiteral( "after-clear\n" ) );
+    logData.finishInput();
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+
+    QFile rotated( rotatedPath );
+    REQUIRE( rotated.open( QIODevice::ReadOnly ) );
+    CHECK( rotated.readAll() == QByteArrayLiteral( "owned-before-clear\n" ) );
+}
+
 TEST_CASE( "StreamingLogData can preserve ANSI while saving current and future live log lines" )
 {
     QTemporaryDir tempDir;
@@ -440,6 +499,227 @@ TEST_CASE( "StreamingLogData can preserve ANSI while saving current and future l
     REQUIRE( outputFile.readAll()
              == QByteArrayLiteral( "\x1b[32mI/App\x1b[0m first\n"
                                    "\x1b[31mE/App\x1b[0m second\n" ) );
+}
+
+TEST_CASE( "StreamingLogData keeps the previous Strip binding after a failed Preserve rebind",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "strip.log" ) );
+    const auto rotatedPath = tempDir.filePath( QStringLiteral( "strip.rotated.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "owned-before-rebind\n" ) );
+    logData.finishInput();
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external-replacement\n" ) ) > 0 );
+    replacement.close();
+
+    const auto invalidOutputPath = tempDir.filePath( QStringLiteral( "directory" ) );
+    REQUIRE( QDir().mkpath( invalidOutputPath ) );
+    REQUIRE_FALSE( logData.bindOutputFile( invalidOutputPath, LiveLogSaveAnsiMode::Preserve ) );
+    CHECK( logData.boundOutputFile() == outputPath );
+
+    logData.appendUtf8( QByteArrayLiteral( "after-failed-rebind\n" ) );
+    logData.finishInput();
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+    QFile ownedOutput( rotatedPath );
+    REQUIRE( ownedOutput.open( QIODevice::ReadOnly ) );
+    CHECK( ownedOutput.readAll()
+           == QByteArrayLiteral( "owned-before-rebind\nafter-failed-rebind\n" ) );
+}
+
+TEST_CASE( "StreamingLogData keeps the previous Preserve binding after a failed Strip rebind",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "preserve.log" ) );
+    const auto rotatedPath = tempDir.filePath( QStringLiteral( "preserve.rotated.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+    logData.appendUtf8( QByteArrayLiteral( "owned-before-rebind\n" ) );
+    logData.finishInput();
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external-replacement\n" ) ) > 0 );
+    replacement.close();
+
+    const auto invalidOutputPath = tempDir.filePath( QStringLiteral( "directory" ) );
+    REQUIRE( QDir().mkpath( invalidOutputPath ) );
+    REQUIRE_FALSE( logData.bindOutputFile( invalidOutputPath, LiveLogSaveAnsiMode::Strip ) );
+    CHECK( logData.boundOutputFile() == outputPath );
+
+    logData.appendUtf8( QByteArrayLiteral( "after-failed-rebind\n" ) );
+    logData.finishInput();
+
+    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+    CHECK( replacement.readAll() == QByteArrayLiteral( "external-replacement\n" ) );
+    replacement.close();
+    QFile ownedOutput( rotatedPath );
+    REQUIRE( ownedOutput.open( QIODevice::ReadOnly ) );
+    CHECK( ownedOutput.readAll()
+           == QByteArrayLiteral( "owned-before-rebind\nafter-failed-rebind\n" ) );
+}
+
+TEST_CASE( "StreamingLogData keeps a failed Restore degraded after another failed bind",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto firstInvalidPath = tempDir.filePath( QStringLiteral( "first-directory" ) );
+    const auto secondInvalidPath = tempDir.filePath( QStringLiteral( "second-directory" ) );
+    REQUIRE( QDir().mkpath( firstInvalidPath ) );
+    REQUIRE( QDir().mkpath( secondInvalidPath ) );
+    REQUIRE_FALSE( logData.bindOutputFile( firstInvalidPath, LiveLogSaveAnsiMode::Strip,
+                                           OutputBindMode::Restore ) );
+    REQUIRE( logData.captureOutputError() == CaptureOutputError::Open );
+
+    REQUIRE_FALSE( logData.bindOutputFile( secondInvalidPath,
+                                           LiveLogSaveAnsiMode::Preserve ) );
+    CHECK( logData.captureOutputError() == CaptureOutputError::Open );
+    CHECK( logData.boundOutputFile() == firstInvalidPath );
+}
+
+TEST_CASE( "StreamingLogData rejects a destructive same-path mode change",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "before\n" ) );
+
+    REQUIRE_FALSE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+    logData.appendUtf8( QByteArrayLiteral( "after\n" ) );
+    logData.finishInput();
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    CHECK( outputFile.readAll() == QByteArrayLiteral( "before\nafter\n" ) );
+}
+
+TEST_CASE( "StreamingLogData accepts an unchanged same-path binding",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "before\n" ) );
+
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "after\n" ) );
+    logData.finishInput();
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    CHECK( outputFile.readAll() == QByteArrayLiteral( "before\nafter\n" ) );
+}
+
+TEST_CASE( "StreamingLogData treats a hard-link alias as the active output",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    const auto aliasPath = tempDir.filePath( QStringLiteral( "capture-alias.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "before\n" ) );
+
+    std::error_code linkError;
+    std::filesystem::create_hard_link( std::filesystem::u8path( outputPath.toUtf8().toStdString() ),
+                                       std::filesystem::u8path( aliasPath.toUtf8().toStdString() ),
+                                       linkError );
+    if ( linkError ) {
+        SUCCEED( "Platform does not permit a hard-link output alias" );
+        return;
+    }
+
+    REQUIRE( logData.bindOutputFile( aliasPath, LiveLogSaveAnsiMode::Strip ) );
+    CHECK( logData.boundOutputFile() == outputPath );
+    logData.appendUtf8( QByteArrayLiteral( "after\n" ) );
+    logData.finishInput();
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    CHECK( outputFile.readAll() == QByteArrayLiteral( "before\nafter\n" ) );
+}
+
+TEST_CASE( "StreamingLogData rebinds when the active output pathname was replaced",
+           "[streaming][capture-output]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    SafeQSignalSpy loadingSpy( &logData, SIGNAL( loadingFinished( LoadingStatus ) ) );
+    REQUIRE( loadingSpy.safeWait() );
+
+    const auto outputPath = tempDir.filePath( QStringLiteral( "capture.log" ) );
+    const auto rotatedPath = tempDir.filePath( QStringLiteral( "capture.rotated.log" ) );
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "before\n" ) );
+
+    if ( !QFile::rename( outputPath, rotatedPath ) ) {
+        SUCCEED( "Platform does not allow external replacement of an open file" );
+        return;
+    }
+    QFile replacement( outputPath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "external\n" ) ) > 0 );
+    replacement.close();
+
+    REQUIRE( logData.bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
+    logData.appendUtf8( QByteArrayLiteral( "after\n" ) );
+    logData.finishInput();
+
+    QFile outputFile( outputPath );
+    REQUIRE( outputFile.open( QIODevice::ReadOnly ) );
+    CHECK( outputFile.readAll() == QByteArrayLiteral( "before\nafter\n" ) );
 }
 
 TEST_CASE( "StreamingLogData reports accurate fileSize and lastModifiedDate" )
@@ -1138,6 +1418,10 @@ TEST_CASE( "StreamingLogData Restore replays the capture when the saved file is 
     SafeQSignalSpy loadingSpyB( &logDataB, SIGNAL( loadingFinished( LoadingStatus ) ) );
     REQUIRE( loadingSpyB.safeWait() );
     REQUIRE( logDataB.getNbLine().get() == 3 );
+    CaptureStore::Limits limits;
+    limits.rollingMaxFileSize = 8;
+    limits.rollingBackupCount = 2;
+    logDataB.setCaptureLimits( limits );
 
     // Restoring the binding must rebuild the missing file from the reloaded
     // capture instead of leaving it empty and dropping all history.
@@ -1147,4 +1431,5 @@ TEST_CASE( "StreamingLogData Restore replays the capture when the saved file is 
     QFile after( outputPath );
     REQUIRE( after.open( QIODevice::ReadOnly ) );
     CHECK( after.readAll() == QByteArrayLiteral( "line1\nline2\nline3\n" ) );
+    CHECK_FALSE( QFileInfo::exists( outputPath + QStringLiteral( ".0" ) ) );
 }

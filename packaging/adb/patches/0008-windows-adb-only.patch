@@ -1,0 +1,169 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,10 +12,13 @@
+ option(ANDROID_TOOLS_USE_BUNDLED_FMT "Use bundled fmt library instead of system provided one" OFF)
+ option(ANDROID_TOOLS_USE_BUNDLED_LIBUSB "Use bundled libusb library instead of system provided one" OFF)
+ option(ANDROID_TOOLS_LIBUSB_ENABLE_UDEV "Enable udev for device enumeration and hotplug support" OFF)
++option(KLOGG_ADB_ONLY "Build and install only the complete adb client/server executable" OFF)
+ 
+ # Install bash/zsh completion files.
+ set(COMPLETION_COMMON_DIR "${CMAKE_INSTALL_FULL_DATADIR}/android-tools/completions")
+-add_subdirectory(completions)
++if(NOT KLOGG_ADB_ONLY)
++	add_subdirectory(completions)
++endif()
+ 
+ # Android provides it's own version of mke2fs which is incompatible with
+ # the version shipped by e2fsprogs. To prevent a name clash we install
+diff --git a/vendor/CMakeLists.adb.txt b/vendor/CMakeLists.adb.txt
+--- a/vendor/CMakeLists.adb.txt
++++ b/vendor/CMakeLists.adb.txt
+@@ -1,3 +1,18 @@
++add_library(libzip STATIC
++	libziparchive/zip_archive.cc
++	libziparchive/zip_archive_stream_entry.cc
++	libziparchive/zip_cd_entry_map.cc
++	libziparchive/zip_error.cpp
++	libziparchive/zip_writer.cc)
++
++target_compile_definitions(libzip PRIVATE -DZLIB_CONST)
++target_include_directories(libzip PUBLIC
++	libziparchive/include
++	libziparchive/incfs_support/include
++	core/include
++	logging/liblog/include
++	libbase/include)
++
+ protobuf_generate_cpp(ADB_APP_PROCESSES_PROTO_SRCS ADB_APP_PROCESSES_PROTO_HDRS
+ 	adb/proto/app_processes.proto)
+ protobuf_generate_cpp(ADB_HOST_PROTO_SRCS ADB_HOST_PROTO_HDRS
+diff --git a/vendor/CMakeLists.fastboot.txt b/vendor/CMakeLists.fastboot.txt
+--- a/vendor/CMakeLists.fastboot.txt
++++ b/vendor/CMakeLists.fastboot.txt
+@@ -1,18 +1,3 @@
+-add_library(libzip STATIC
+-	libziparchive/zip_archive.cc
+-	libziparchive/zip_archive_stream_entry.cc
+-	libziparchive/zip_cd_entry_map.cc
+-	libziparchive/zip_error.cpp
+-	libziparchive/zip_writer.cc)
+-
+-target_compile_definitions(libzip PRIVATE -DZLIB_CONST)
+-target_include_directories(libzip PUBLIC
+-	libziparchive/include
+-	libziparchive/incfs_support/include
+-	core/include
+-	logging/liblog/include
+-	libbase/include)
+-
+ add_library(libutil STATIC
+ 	core/libutils/FileMap.cpp)
+ 
+diff --git a/vendor/CMakeLists.txt b/vendor/CMakeLists.txt
+--- a/vendor/CMakeLists.txt
++++ b/vendor/CMakeLists.txt
+@@ -90,7 +90,9 @@
+ pkg_check_modules(libbrotlidec REQUIRED IMPORTED_TARGET libbrotlidec)
+ pkg_check_modules(libbrotlienc REQUIRED IMPORTED_TARGET libbrotlienc)
+ pkg_check_modules(liblz4 REQUIRED IMPORTED_TARGET liblz4)
+-pkg_check_modules(libpcre2-8 REQUIRED IMPORTED_TARGET libpcre2-8)
++if(NOT KLOGG_ADB_ONLY)
++	pkg_check_modules(libpcre2-8 REQUIRED IMPORTED_TARGET libpcre2-8)
++endif()
+ if(ANDROID_TOOLS_USE_BUNDLED_LIBUSB)
+ 	include(CMakeLists.libusb.txt)
+ 	if(ANDROID_TOOLS_LIBUSB_ENABLE_UDEV)
+@@ -123,48 +125,54 @@
+ 
+ include(CMakeLists.libbase.txt)
+ include(CMakeLists.adb.txt)
+-include(CMakeLists.sparse.txt)
+-include(CMakeLists.fastboot.txt)
+-include(CMakeLists.partition.txt)
+-include(CMakeLists.mkbootimg.txt)
+-include(CMakeLists.libufdt.txt)
+-include(CMakeLists.avb.txt)
+-if(NOT WIN32)
+-	include(CMakeLists.f2fstools.txt)
+-	include(CMakeLists.mke2fs.txt)
++if(NOT KLOGG_ADB_ONLY)
++	include(CMakeLists.sparse.txt)
++	include(CMakeLists.fastboot.txt)
++	include(CMakeLists.partition.txt)
++	include(CMakeLists.mkbootimg.txt)
++	include(CMakeLists.libufdt.txt)
++	include(CMakeLists.avb.txt)
++	if(NOT WIN32)
++		include(CMakeLists.f2fstools.txt)
++		include(CMakeLists.mke2fs.txt)
++	endif()
+ endif()
+ 
+ # Targets which should be installed by `make install`.
+-install(TARGETS
+-	adb
+-	append2simg
+-	fastboot
+-	img2simg
+-	simg2img
+-	DESTINATION bin)
+-if(NOT WIN32)
+-install(TARGETS
+-	"${ANDROID_MKE2FS_NAME}"
+-	lpadd
+-	lpdump
+-	lpflash
+-	lpmake
+-	lpunpack
+-	make_f2fs
+-	sload_f2fs
+-	ext2simg
+-	DESTINATION bin)
++if(KLOGG_ADB_ONLY)
++	install(TARGETS adb DESTINATION bin)
++else()
++	install(TARGETS
++		adb
++		append2simg
++		fastboot
++		img2simg
++		simg2img
++		DESTINATION bin)
++	if(NOT WIN32)
++		install(TARGETS
++			"${ANDROID_MKE2FS_NAME}"
++			lpadd
++			lpdump
++			lpflash
++			lpmake
++			lpunpack
++			make_f2fs
++			sload_f2fs
++			ext2simg
++			DESTINATION bin)
++	endif()
++
++	if(NOT APPLE AND NOT WIN32)
++		install(TARGETS
++			e2fsdroid
++			DESTINATION bin)
++	endif()
++
++	# Install common completion files.
++	install(FILES adb/adb.bash RENAME adb DESTINATION "${COMPLETION_COMMON_DIR}")
++	install(FILES core/fastboot/fastboot.bash RENAME fastboot DESTINATION "${COMPLETION_COMMON_DIR}")
+ endif()
+-
+-if(NOT APPLE AND NOT WIN32)
+-	install(TARGETS
+-		e2fsdroid
+-		DESTINATION bin)
+-endif()
+-
+-# Install common completion files.
+-install(FILES adb/adb.bash RENAME adb DESTINATION "${COMPLETION_COMMON_DIR}")
+-install(FILES core/fastboot/fastboot.bash RENAME fastboot DESTINATION "${COMPLETION_COMMON_DIR}")
+ 
+ # Install license files.
+ # Disabled for now, see https://github.com/nmeum/android-tools/issues/30#issuecomment-855365636

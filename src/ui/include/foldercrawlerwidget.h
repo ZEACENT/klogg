@@ -269,6 +269,7 @@ class FolderCrawlerWidget : public QWidget,
   private Q_SLOTS:
     void startSearch();
     void stopSearch() override;
+    void onFolderSnapshotReady( QStringList filePaths, quint64 generation );
     void onSearchStarted( quint64 generation );
     void onSearchProgressed( quint64 nbMatches, int percent, quint64 generation );
     void onSearchFinished( quint64 generation );
@@ -322,6 +323,8 @@ class FolderCrawlerWidget : public QWidget,
     void applyDetectedEncoding();
 
     QString folderPath_;
+    // Naturally sorted filesystem membership snapshot, refreshed at the start of
+    // every explicit search (setFolder seeds it for the initial Ready status).
     QStringList filePaths_;
     std::shared_ptr<QuickFindPattern> quickFindPattern_;
 

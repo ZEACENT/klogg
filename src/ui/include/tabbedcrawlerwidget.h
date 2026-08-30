@@ -20,6 +20,8 @@
 #ifndef TABBEDCRAWLERWIDGET_H
 #define TABBEDCRAWLERWIDGET_H
 
+#include <optional>
+
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -87,7 +89,8 @@ class TabbedCrawlerWidget : public QTabWidget {
 
     template <typename T>
     int addCrawler( T* crawler, const QString& documentId, const QString& displayName = {},
-                    const QString& toolTip = {} )
+                    const QString& toolTip = {},
+                    std::optional<QString> associatedPath = std::nullopt )
     {
         const auto index = QTabWidget::addTab( crawler, QString{} );
 
@@ -102,13 +105,15 @@ class TabbedCrawlerWidget : public QTabWidget {
                      }
                  } );
 
-        addTabBarItem( index, documentId, displayName, toolTip );
+        addTabBarItem( index, documentId, displayName, toolTip,
+                       associatedPath.value_or( toolTip ) );
 
         return index;
     }
 
     void removeCrawler( int index );
-    void updateCrawler( int index, const QString& displayName, const QString& toolTip );
+    void updateCrawler( int index, const QString& displayName, const QString& toolTip,
+                        std::optional<QString> associatedPath = std::nullopt );
     void selectNextTab();
     void selectPreviousTab();
 
@@ -129,25 +134,25 @@ class TabbedCrawlerWidget : public QTabWidget {
     void changeEvent( QEvent* event ) override;
 
   private:
-    void addTabBarItem( int index, const QString& documentId, const QString& displayName,
-                        const QString& toolTip );
-    QString tabPathAt( int index ) const;
-    int tabIndexForPath( const QString& tabPath ) const;
-    void setTabVisibleCompat( int index, bool visible );
-    void handleTabMoved( int from, int to );
-    void handleTabDragFinished();
-    void handleDragSettleTimeout();
-    void applyPendingDragGrouping();
-    QString resolveDropTargetGroupId( int droppedIndex, const QString& droppedTabPath,
-                                      const QString& currentGroupId ) const;
-    QString resolveCollapsedAnchorPath( const QString& groupId, const TabGroup& group );
-    bool updateGroupChip( int tabIndex, const TabGroup* group );
-    void clearGroupChip( int tabIndex );
-    void populateGroupActions( QMenu* menu, const QString& groupId );
+      void addTabBarItem( int index, const QString& documentId, const QString& displayName,
+                          const QString& toolTip, const QString& associatedPath );
+      QString tabPathAt( int index ) const;
+      int tabIndexForPath( const QString& tabPath ) const;
+      void setTabVisibleCompat( int index, bool visible );
+      void handleTabMoved( int fromIndex, int toIndex );
+      void handleTabDragFinished();
+      void handleDragSettleTimeout();
+      void applyPendingDragGrouping();
+      QString resolveDropTargetGroupId( int droppedIndex, const QString& droppedTabPath,
+                                        const QString& currentGroupId ) const;
+      QString resolveCollapsedAnchorPath( const QString& groupId, const TabGroup& group );
+      bool updateGroupChip( int tabIndex, const TabGroup* group );
+      void clearGroupChip( int tabIndex );
+      void populateGroupActions( QMenu* menu, const QString& groupId );
 
-    void updateTabBarStyle();
-    void loadIcons();
-    void updateIcon( int index );
+      void updateTabBarStyle();
+      void loadIcons();
+      void updateIcon( int index );
 
   public Q_SLOTS:
     void onGroupsChanged();

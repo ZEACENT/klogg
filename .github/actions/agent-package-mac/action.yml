@@ -1,5 +1,5 @@
 name: "Prepare klogg mac packages"
-description: ""
+description: Deploy, verify, sign, notarize, and package the macOS application
 inputs:
   p12-file-base64:
     required: false
@@ -19,47 +19,91 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # macOS signing/notarization is disabled until the CI account has a paid
-    # Apple Developer Program membership and Developer ID certificates.
-    #
-    # - name: Mac signing preflight
-    #   if: ${{ github.event_name != 'pull_request' }}
-    #   shell: sh
-    #   run: |
-    #     missing=0
-    #     require_input() {
-    #       name="$1"
-    #       value="$2"
-    #       if [ -z "${value}" ]; then
-    #         echo "::error::Missing macOS signing input: ${name}"
-    #         missing=1
-    #       fi
-    #     }
-    #
-    #     require_input "p12-file-base64 (GitHub secret CODESIGN_BASE64)" "${{ inputs.p12-file-base64 }}"
-    #     require_input "p12-password (GitHub secret CODESIGN_PASSWORD)" "${{ inputs.p12-password }}"
-    #     require_input "codesign-identity (GitHub secret APPLE_DEVELOPER_ID_APPLICATION)" "${{ inputs.codesign-identity }}"
-    #     require_input "notarization-username (GitHub secret NOTARIZATION_USERNAME)" "${{ inputs.notarization-username }}"
-    #     require_input "notarization-team (GitHub secret NOTARIZATION_TEAM)" "${{ inputs.notarization-team }}"
-    #     require_input "notarization-password (GitHub secret NOTARIZATION_PASSWORD)" "${{ inputs.notarization-password }}"
-    #
-    #     if [ "${missing}" -ne 0 ]; then
-    #       exit 1
-    #     fi
-    #
-    # - name: Mac prepare codesign
-    #   id: prepare-codesign
-    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-    #   uses: apple-actions/import-codesign-certs@v1
-    #   with:
-    #     p12-file-base64: ${{ inputs.p12-file-base64 }}
-    #     p12-password: ${{ inputs.p12-password }}
+    - name: Mac release signing and notarization preflight
+      if: ${{ github.event_name != 'pull_request' }}
+      shell: sh
+      run: |
+        set -eu
+        missing=0
+        require_input() {
+          name="$1"
+          value="$2"
+          if [ -z "${value}" ]; then
+            echo "::error::Missing macOS release qualification input: ${name}"
+            missing=1
+          fi
+        }
+        require_input "p12-file-base64" "${{ inputs.p12-file-base64 }}"
+        require_input "p12-password" "${{ inputs.p12-password }}"
+        require_input "codesign-identity" "${{ inputs.codesign-identity }}"
+        require_input "notarization-username" "${{ inputs.notarization-username }}"
+        require_input "notarization-team" "${{ inputs.notarization-team }}"
+        require_input "notarization-password" "${{ inputs.notarization-password }}"
+        test "${missing}" -eq 0
+
+    - name: Import macOS release signing certificate
+      if: ${{ github.event_name != 'pull_request' }}
+      uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+      with:
+        p12-file-base64: ${{ inputs.p12-file-base64 }}
+        p12-password: ${{ inputs.p12-password }}
      
+    - name: Verify disconnected iOS native stack
+      shell: sh
+      run: |
+        set -euo pipefail
+        export FETCHCONTENT_FULLY_DISCONNECTED=ON
+        test "${FETCHCONTENT_FULLY_DISCONNECTED}" = "ON"
+        test -n "${KLOGG_IOS_NATIVE_STACK_ROOT:-}" || {
+          echo "::error::KLOGG_IOS_NATIVE_STACK_ROOT is required for macOS release packaging"
+          exit 1
+        }
+        case "${KLOGG_ARCH}" in
+          x64) ios_arch=x86_64 ;;
+          arm64) ios_arch=arm64 ;;
+          *) echo "::error::unsupported iOS native stack architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$KLOGG_IOS_NATIVE_STACK_ROOT" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json"
+    - name: Prepare fresh macOS package stage
+      shell: sh
+      run: |
+        set -euo pipefail
+        build_root_abs="$(cd "$KLOGG_BUILD_ROOT" && pwd)"
+        KLOGG_MAC_PACKAGE_ROOT="$build_root_abs/package-stage"
+        KLOGG_MAC_APP="$KLOGG_MAC_PACKAGE_ROOT/klogg.app"
+        case "$KLOGG_MAC_APP" in
+          /*) ;;
+          *) echo "::error::KLOGG_MAC_APP must be absolute: $KLOGG_MAC_APP"; exit 1 ;;
+        esac
+        rm -rf "$KLOGG_MAC_PACKAGE_ROOT"
+        mkdir -p "$KLOGG_MAC_PACKAGE_ROOT"
+        cp -a "$KLOGG_BUILD_ROOT/output/klogg.app" "$KLOGG_MAC_APP"
+        # A previous local packaging run may have deployed Qt into the build
+        # bundle. The package stage must start from the newly linked executable,
+        # not from stale frameworks/plugins retained beside it.
+        rm -rf \
+          "$KLOGG_MAC_APP/Contents/Frameworks" \
+          "$KLOGG_MAC_APP/Contents/PlugIns" \
+          "$KLOGG_MAC_APP/Contents/Resources/qml"
+        rm -f "$KLOGG_MAC_APP/Contents/Resources/qt.conf"
+        {
+          echo "KLOGG_MAC_PACKAGE_ROOT=$KLOGG_MAC_PACKAGE_ROOT"
+          echo "KLOGG_MAC_APP=$KLOGG_MAC_APP"
+        } >> "$GITHUB_ENV"
+
     - name: Mac deploy Qt
       shell: sh
       run: |
-        cd $KLOGG_BUILD_ROOT
-        macdeployqt ./output/klogg.app -always-overwrite -verbose=2
+        set -euo pipefail
+        test -x "$KLOGG_QT_DIR/bin/macdeployqt" || {
+          echo "::error::macdeployqt is missing from configured Qt: $KLOGG_QT_DIR"
+          exit 1
+        }
+        "$KLOGG_QT_DIR/bin/macdeployqt" "$KLOGG_MAC_APP" -always-overwrite -verbose=2
 
     - name: Mac deploy Qt fixing
       if: "startsWith(matrix.config.qt_version, '5')"
@@ -71,7 +115,7 @@ runs:
         test -f "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" || { echo "::error::macdeployqtfix.py not found at ${KLOGG_BUILD_ROOT}/macdeployqtfix.py"; exit 1; }
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_BUILD_ROOT}/output/klogg.app/Contents/MacOS/klogg" "${KLOGG_QT_DIR}" || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_MAC_APP}/Contents/MacOS/klogg" "${KLOGG_QT_DIR}"
 
     - name: Mac deploy Qt fixing
       if: "startsWith(matrix.config.qt_version, '6')"
@@ -83,23 +127,169 @@ runs:
         test -f "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" || { echo "::error::macdeployqtfix.py not found at ${KLOGG_BUILD_ROOT}/macdeployqtfix.py"; exit 1; }
         # macdeployqtfix.py may try to delete rpaths that don't exist (already removed by macdeployqt)
         # This is harmless, so we ignore the error if it occurs
-        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_BUILD_ROOT}/output/klogg.app/Contents/MacOS/klogg" "${KLOGG_QT_DIR}" || echo "Warning: macdeployqtfix.py completed with errors (may be harmless)"
+        python3 "${KLOGG_BUILD_ROOT}/macdeployqtfix.py" "${KLOGG_MAC_APP}/Contents/MacOS/klogg" "${KLOGG_QT_DIR}"
     
+    - name: Verify staged iOS native bundle
+      shell: sh
+      run: |
+        set -euo pipefail
+        app_frameworks="$KLOGG_MAC_APP/Contents/Frameworks"
+        bundled_stack="$KLOGG_MAC_APP/Contents/Frameworks/ios-native"
+        ios_support="$KLOGG_MAC_APP/Contents/SharedSupport/ios-native"
+        rm -rf "$bundled_stack" "$ios_support"
+        mkdir -p "$bundled_stack/lib" "$ios_support"
+        cp -a "$KLOGG_IOS_NATIVE_STACK_ROOT/lib/"*.dylib "$bundled_stack/lib/"
+        for receipt in \
+          ios-native-build-receipt.json \
+          ios-native-source-set-receipt.json \
+          ios-native-legal-receipt.json \
+          ios-native-sbom.spdx.json; do
+          test -f "$KLOGG_IOS_NATIVE_STACK_ROOT/$receipt" || {
+            echo "::error::missing required iOS native release receipt: $receipt"
+            exit 1
+          }
+          cp "$KLOGG_IOS_NATIVE_STACK_ROOT/$receipt" "$ios_support/$receipt"
+        done
+        for asset in \
+          ios-native-source-offer.txt \
+          ios-native-lgpl-replacement.txt \
+          NOTICE-ios-native.txt; do
+          test -f "$KLOGG_IOS_NATIVE_STACK_ROOT/$asset" || {
+            echo "::error::missing required iOS native legal/source asset: $asset"
+            exit 1
+          }
+          cp "$KLOGG_IOS_NATIVE_STACK_ROOT/$asset" "$ios_support/$asset"
+        done
+        test -d "$KLOGG_IOS_NATIVE_STACK_ROOT/licenses" || {
+          echo "::error::missing iOS native license directory"
+          exit 1
+        }
+        cp -a "$KLOGG_IOS_NATIVE_STACK_ROOT/licenses" "$ios_support/licenses"
+        if find "$app_frameworks" -maxdepth 1 -type f \
+             \( -name 'libimobiledevice*.dylib' -o -name 'libplist*.dylib' \
+                -o -name 'libusbmuxd*.dylib' -o -name 'libimobiledevice-glue*.dylib' \
+                -o -name 'libtatsu*.dylib' \) | grep .; then
+          echo "::error::macdeployqt created an iOS native dylib outside the private closure"
+          exit 1
+        fi
+        case "${KLOGG_ARCH}" in
+          x64) ios_arch=x86_64 ;;
+          arm64) ios_arch=arm64 ;;
+          *) echo "::error::unsupported iOS native stack architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$bundled_stack" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$KLOGG_MAC_APP/Contents/MacOS/klogg" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
+          --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
+          --sbom "$ios_support/ios-native-sbom.spdx.json" \
+          --package-receipt "$ios_support/ios-native-package-receipt.json"
+
+    - name: Verify source-built ADB helper before DMG
+      shell: sh
+      run: |
+        set -euo pipefail
+        test -x "$KLOGG_MAC_APP/Contents/MacOS/helpers/adb" || {
+          echo "::error::source-built ADB helper missing from staged klogg.app/Contents/MacOS/helpers/adb"
+          exit 1
+        }
+        python3 scripts/smoke_adb_helper.py \
+          --adb "$KLOGG_MAC_APP/Contents/MacOS/helpers/adb" \
+          --port 0 --timeout-seconds 15 \
+          --json-output "$KLOGG_BUILD_ROOT/adb-helper-dmg-smoke.json"
+        python3 scripts/verify_adb_helper_artifact.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
+          --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-smoke.json" \
+          --package-root "$KLOGG_MAC_PACKAGE_ROOT" \
+          --asset-scope package \
+          --source-assets-root "$KLOGG_MAC_APP/Contents/SharedSupport/adb-helper" \
+          --layout dmg \
+          --expected-target "${{ matrix.config.adb_target }}" \
+          --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
+          --require-lock-binding
+
+    - name: Verify and smoke staged macOS Qt bundle
+      shell: sh
+      run: |
+        set -euo pipefail
+        case "${KLOGG_ARCH}" in
+          x64) qt_arch=x86_64 ;;
+          arm64) qt_arch=arm64 ;;
+          *) echo "::error::unsupported macOS Qt bundle architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_macos_qt_bundle.py \
+          --app "$KLOGG_MAC_APP" \
+          --expected-architecture "$qt_arch" \
+          --smoke cocoa \
+          --smoke-if-present offscreen \
+          --runtime-log-output "$KLOGG_BUILD_ROOT/macos-qt-startup-smoke.log"
+
     - name: Set packaging env
       shell: sh
       run: |
-        # echo "KLOGG_CODESIGN=${{ inputs.codesign-identity }}" >> $GITHUB_ENV
-        # echo "KLOGG_INSTALLERSIGN=${{ inputs.installer-sign-identity }}" >> $GITHUB_ENV
+        echo "KLOGG_CODESIGN=${{ inputs.codesign-identity }}" >> $GITHUB_ENV
+        echo "KLOGG_INSTALLERSIGN=${{ inputs.installer-sign-identity }}" >> $GITHUB_ENV
         echo "KLOGG_DMG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.dmg" >> $GITHUB_ENV
         echo "KLOGG_PKG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.pkg" >> $GITHUB_ENV
 
-    # - name: Mac codesign binaries
-    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-    #   shell: sh
-    #   run: |
-    #     cd $KLOGG_BUILD_ROOT
-    #     codesign -v -f -o runtime --deep --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./output/klogg.app;
-    #     codesign --verify --deep --strict --verbose=2 ./output/klogg.app
+    - name: Sign and verify macOS application bundle
+      if: ${{ github.event_name != 'pull_request' }}
+      shell: sh
+      run: |
+        set -euo pipefail
+        cd "$KLOGG_BUILD_ROOT"
+        codesign -v -f -o runtime --deep --timestamp -s "$KLOGG_CODESIGN" "$KLOGG_MAC_APP"
+        codesign --verify --deep --strict --verbose=2 "$KLOGG_MAC_APP"
+
+    - name: Bind and reverify signed iOS native closure
+      if: ${{ github.event_name != 'pull_request' }}
+      shell: sh
+      run: |
+        set -euo pipefail
+        case "${KLOGG_ARCH}" in
+          x64) ios_arch=x86_64 ;;
+          arm64) ios_arch=arm64 ;;
+          *) echo "::error::unsupported iOS native stack architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        app="$KLOGG_MAC_APP"
+        bundled_stack="$app/Contents/Frameworks/ios-native"
+        ios_support="$app/Contents/SharedSupport/ios-native"
+        package_receipt="$ios_support/ios-native-package-receipt.json"
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$bundled_stack" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$app/Contents/MacOS/klogg" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
+          --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
+          --sbom "$ios_support/ios-native-sbom.spdx.json" \
+          --signed-package-stage \
+          --package-receipt "$package_receipt"
+        # Updating the package receipt changes bundle resources, so seal the root
+        # again without touching the already verified nested dylib signatures.
+        codesign -v -f -o runtime --timestamp -s "$KLOGG_CODESIGN" "$app"
+        codesign --verify --deep --strict --verbose=2 "$app"
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$bundled_stack" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$app/Contents/MacOS/klogg" \
+          --source-receipt "$ios_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$ios_support" \
+          --legal-receipt "$ios_support/ios-native-legal-receipt.json" \
+          --sbom "$ios_support/ios-native-sbom.spdx.json" \
+          --verify-package-receipt "$package_receipt"
 
     - name: Mac pack dmg
       shell: sh
@@ -109,15 +299,19 @@ runs:
         # Aggressive cleanup: orphan diskimages-helper processes can hold
         # locks on disk image resources across runs, causing "hdiutil: create
         # failed - Resource busy".  Kill them before we start.
-        killall diskimages-helper 2>/dev/null || true
+        if pgrep -x diskimages-helper >/dev/null 2>&1; then
+          killall diskimages-helper
+        fi
 
         # Detach any leftover mounted klogg volumes from previous runs
         for vol in /Volumes/klogg /Volumes/klogg-*; do
           if [ -d "${vol}" ]; then
-            hdiutil detach "${vol}" -force 2>/dev/null || true
+            if ! hdiutil detach "${vol}" -force; then
+              echo "Continuing after stale volume detach cleanup failed: ${vol}"
+            fi
           fi
         done
-        rm -f ./packages/*.dmg 2>/dev/null || true
+        rm -f ./packages/*.dmg
         mkdir -p ./packages
 
         # Let the system release disk image resources after cleanup
@@ -137,7 +331,7 @@ runs:
         # operations, zero conflicts.
 
         DMG_STAGING=$(mktemp -d)
-        cp -a ./output/klogg.app "${DMG_STAGING}/"
+        cp -a "$KLOGG_MAC_APP" "${DMG_STAGING}/"
         ln -s /Applications "${DMG_STAGING}/Applications"
 
         # Copy background image for the DMG window
@@ -161,7 +355,9 @@ runs:
             exit 1
           fi
           echo "hdiutil create attempt ${attempt} failed, retrying after cleanup..."
-          killall diskimages-helper 2>/dev/null || true
+          if pgrep -x diskimages-helper >/dev/null 2>&1; then
+          killall diskimages-helper
+        fi
           sleep 5
         done
 
@@ -181,30 +377,166 @@ runs:
         mv ./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg ./packages/${{ env.KLOGG_DMG }}
         echo "Renamed DMG to: ${{ env.KLOGG_DMG }}"
 
-    # - name: Mac codesign dmg
-    #   if: ${{ github.event_name != 'pull_request' && inputs.p12-file-base64 != '' }}
-    #   shell: sh
-    #   run: |
-    #     cd $KLOGG_BUILD_ROOT
-    #     codesign -v -f -o runtime --timestamp -s "${{ env.KLOGG_CODESIGN }}" ./packages/${{ env.KLOGG_DMG }}
-    #     codesign --verify --strict --verbose=2 ./packages/${{ env.KLOGG_DMG }}
-    #
-    # - name: Mac notarize DMG
-    #   if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
-    #   shell: sh
-    #   run: |
-    #     xcrun notarytool submit --wait --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}" | tee dmg_notary.log
-    #     dmg_notary_id=$(awk '$1=="id:"{id=$2} END{print id}' dmg_notary.log)
-    #     xcrun notarytool log --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "$dmg_notary_id" "dmg_notary.log.json"
-    #     cat "dmg_notary.log.json"
-    #
-    # - name: Mac staple DMG
-    #   if: ${{ github.event_name != 'pull_request' && inputs.notarization-username != '' }}
-    #   shell: sh
-    #   run: |
-    #     xcrun stapler staple "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
-    #     xcrun stapler validate "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
-    #     spctl --assess --type open --context context:primary-signature --verbose "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_DMG }}"
+    - name: Sign and verify macOS disk image
+      if: ${{ github.event_name != 'pull_request' }}
+      shell: sh
+      run: |
+        set -euo pipefail
+        cd "$KLOGG_BUILD_ROOT"
+        codesign -v -f -o runtime --timestamp -s "$KLOGG_CODESIGN" "./packages/$KLOGG_DMG"
+        codesign --verify --strict --verbose=2 "./packages/$KLOGG_DMG"
+
+    - name: Notarize staple and validate macOS disk image
+      if: ${{ github.event_name != 'pull_request' }}
+      shell: sh
+      run: |
+        set -euo pipefail
+        dmg="$KLOGG_BUILD_ROOT/packages/$KLOGG_DMG"
+        xcrun notarytool submit --wait --output-format json \
+          --apple-id "${{ inputs.notarization-username }}" \
+          --team-id "${{ inputs.notarization-team }}" \
+          --password "${{ inputs.notarization-password }}" \
+          "$dmg" | tee "$KLOGG_BUILD_ROOT/dmg-notarytool-receipt.json"
+        xcrun stapler staple "$dmg"
+        xcrun stapler validate "$dmg"
+        spctl --assess --type open --context context:primary-signature --verbose "$dmg"
+        codesign --verify --strict --verbose=2 "$dmg"
+        python3 - \
+          "$dmg" \
+          "$KLOGG_MAC_APP/Contents/MacOS/helpers/adb" \
+          "$KLOGG_BUILD_ROOT/dmg-notarytool-receipt.json" \
+          "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
+          "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" \
+          "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" \
+          "$KLOGG_CODESIGN" \
+          "${{ inputs.notarization-team }}" \
+          "${{ matrix.config.adb_target }}" <<'PY'
+        import hashlib, json, pathlib, sys
+        dmg, helper, notary_path, build_receipt_path, signing_path, notarization_path = map(pathlib.Path, sys.argv[1:7])
+        identity, team, target = sys.argv[7:10]
+        def sha256(path):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        notary = json.loads(notary_path.read_text(encoding="utf-8"))
+        if str(notary.get("status", "")).lower() != "accepted" or not notary.get("id"):
+            raise SystemExit(f"notarization was not accepted: {notary}")
+        build_receipt = json.loads(build_receipt_path.read_text(encoding="utf-8"))
+        source_helper_sha256 = build_receipt.get("helper", {}).get("sha256")
+        if not source_helper_sha256:
+            raise SystemExit("binary-build receipt lacks source helper sha256")
+        package_sha256 = sha256(dmg)
+        evidence = {
+            "schema_version": 1,
+            "target": target,
+            "dmg_sha256": package_sha256,
+            "package_sha256": package_sha256,
+            "source_helper_sha256": source_helper_sha256,
+            "signed_helper_sha256": sha256(helper),
+        }
+        signing_path.write_text(json.dumps({
+            **evidence,
+            "receipt_kind": "signing",
+            "status": "passed",
+            "identity": identity,
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        notarization_path.write_text(json.dumps({
+            **evidence,
+            "receipt_kind": "notarization",
+            "status": "passed",
+            "team_id": team,
+            "submission_id": notary["id"],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        PY
+        python3 scripts/smoke_adb_helper.py \
+          --adb "$KLOGG_MAC_APP/Contents/MacOS/helpers/adb" \
+          --port 0 --timeout-seconds 15 \
+          --json-output "$KLOGG_BUILD_ROOT/adb-helper-dmg-signed-smoke.json"
+        python3 scripts/verify_adb_helper_artifact.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
+          --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-signed-smoke.json" \
+          --package-root "$KLOGG_MAC_PACKAGE_ROOT" \
+          --asset-scope package \
+          --source-assets-root "$KLOGG_MAC_APP/Contents/SharedSupport/adb-helper" \
+          --layout dmg \
+          --expected-target "${{ matrix.config.adb_target }}" \
+          --package-target "${{ matrix.config.adb_target }}-dmg" \
+          --signing-receipt "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" \
+          --notarization-receipt "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" \
+          --package-file "$dmg" \
+          --package-verification-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" \
+          --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
+          --require-lock-binding
+        mount_dir=$(mktemp -d)
+        mounted_device=""
+        cleanup_mounted_dmg() {
+          if [ -n "${mounted_device}" ]; then
+            hdiutil detach "${mounted_device}" -force >/dev/null
+          fi
+          rm -rf "${mount_dir}"
+        }
+        trap cleanup_mounted_dmg EXIT
+        attach_output=$(hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir")
+        mounted_device=$(printf '%s\n' "$attach_output" | awk '$1 ~ /^\/dev\// { device=$1 } END { print device }')
+        test -n "$mounted_device" || { echo "::error::failed to identify mounted DMG device"; exit 1; }
+        mounted_app=$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)
+        test -n "$mounted_app" || { echo "::error::mounted DMG has no application bundle"; exit 1; }
+        mounted_stack="$mounted_app/Contents/Frameworks/ios-native"
+        mounted_support="$mounted_app/Contents/SharedSupport/ios-native"
+        test ! -e "$mounted_support/ios-native-corresponding-source.tar.gz" || {
+          echo "::error::release-only iOS source archive leaked into final DMG"
+          exit 1
+        }
+        case "${KLOGG_ARCH}" in
+          x64) ios_arch=x86_64 ;;
+          arm64) ios_arch=arm64 ;;
+          *) echo "::error::unsupported iOS native stack architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_macos_qt_bundle.py \
+          --app "$mounted_app" \
+          --expected-architecture "$ios_arch" \
+          --smoke cocoa \
+          --smoke-if-present offscreen \
+          --runtime-log-output "$KLOGG_BUILD_ROOT/macos-qt-mounted-dmg-smoke.log"
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$mounted_stack" \
+          --architecture "$ios_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$mounted_app/Contents/MacOS/klogg" \
+          --source-receipt "$mounted_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$mounted_support" \
+          --legal-receipt "$mounted_support/ios-native-legal-receipt.json" \
+          --sbom "$mounted_support/ios-native-sbom.spdx.json" \
+          --verify-package-receipt "$mounted_support/ios-native-package-receipt.json"
+        python3 - \
+          "$dmg" \
+          "$mounted_support/ios-native-package-receipt.json" \
+          "$mounted_support/ios-native-source-set-receipt.json" \
+          "$KLOGG_BUILD_ROOT/packages/ios-native-dmg-package-verification.json" <<'PY'
+        import hashlib, json, pathlib, sys
+        dmg, package_receipt_path, source_set_path, output = map(pathlib.Path, sys.argv[1:5])
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        package_receipt = json.loads(package_receipt_path.read_text(encoding="utf-8"))
+        source_set_hash = digest(source_set_path)
+        if package_receipt.get("source_set_receipt_sha256") != source_set_hash:
+            raise SystemExit("iOS package receipt source-set binding mismatch")
+        output.write_text(json.dumps({
+            "schema_version": 1,
+            "receipt_kind": "ios-native-package-verification",
+            "release_qualified": True,
+            "source_set_receipt_sha256": source_set_hash,
+            "ios_native_package_receipt_sha256": digest(package_receipt_path),
+            "packages": [{"name": dmg.name, "sha256": digest(dmg)}],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        PY
+        cp "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" "$KLOGG_BUILD_ROOT/packages/"
+        cp "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
+        cp "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
 
     #- name: "Mac build pkg"
     #  if: ${{ github.event_name != 'pull_request' }}
@@ -215,8 +547,8 @@ runs:
     #    mkdir -p pkg_resources/en.lproj
     #    cp ../COPYING pkg_resources/en.lproj
     #    cp ../packaging/description.txt pkg_resources/en.lproj
-    #    sed -e s/%klogg_version%/${{ env.KLOGG_VERSION }}/ -e s/%klogg_pkg%/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg/ ../packaging/osx/distribution.xml > distribution.xml
-    #    pkgbuild --component ./output/klogg.app --install-location /Applications --version ${{ env.KLOGG_VERSION }} --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg
+    #    sed -e s/%klogg_version%/${{ env.KLOGG_VERSION }}/ -e s/%klogg_pkg%/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg/ ./generated/distribution.xml > distribution.xml
+    #    pkgbuild --component "$KLOGG_MAC_APP" --install-location /Applications --version ${{ env.KLOGG_VERSION }} --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg
     #    productbuild --package-path ./output --distribution distribution.xml --resources ./pkg_resources --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg
     #    pkgutil --expand ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg ./output/klogg_product_pkg
     #    pkgutil --flatten ./output/klogg_product_pkg ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-flatten.pkg
@@ -246,8 +578,8 @@ runs:
         else
           echo "Warning: klogg.dSym not found - skipping dSYM copy"
         fi
-        if [ -d ./output/klogg.app ]; then
-          cp -a ./output/klogg.app ./packages/klogg-${{ env.KLOGG_ARCH }}.app
+        if [ -d "$KLOGG_MAC_APP" ]; then
+          cp -a "$KLOGG_MAC_APP" ./packages/klogg-${{ env.KLOGG_ARCH }}.app
         else
           echo "Warning: klogg.app not found - skipping app copy"
         fi

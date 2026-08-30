@@ -34,7 +34,7 @@
 class IosDeviceListProvider : public DeviceListProviderBase<IosDeviceInfo> {
     Q_OBJECT
 
-  public:
+public:
     explicit IosDeviceListProvider( QString executable, QObject* parent = nullptr );
 
     // Probe well-known pymobiledevice3 install locations and return the
@@ -44,12 +44,11 @@ class IosDeviceListProvider : public DeviceListProviderBase<IosDeviceInfo> {
     // Normalize the pymobiledevice3 executable path.
     static QString normalizedExecutable( const QString& executable );
 
-  protected:
+protected:
     QList<IosDeviceInfo> doListDevices( QString* error ) const override;
-    bool deviceMatches( const IosDeviceInfo& device,
-                        const QString& deviceId ) const override;
+    bool deviceMatches( const IosDeviceInfo& device, const QString& deviceId ) const override;
 
-  private:
+private:
     QString executable_;
 };
 

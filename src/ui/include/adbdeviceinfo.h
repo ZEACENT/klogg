@@ -22,10 +22,21 @@
 
 #include <QString>
 
+#include <cstdint>
+
+enum class AdbDeviceState : std::uint8_t { Online, Unauthorized, Offline, Other };
+
 struct AdbDeviceInfo {
     QString serial;
     QString displayName;
     QString description;
+    AdbDeviceState state{ AdbDeviceState::Online };
+    QString stateText{ QStringLiteral( "device" ) };
+
+    bool isOnline() const
+    {
+        return state == AdbDeviceState::Online;
+    }
 };
 
 #endif // KLOGG_ADBDEVICEINFO_H
