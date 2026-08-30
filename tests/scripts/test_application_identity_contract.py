@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import subprocess
@@ -52,9 +53,21 @@ GENERATED_ROOTS = {
     "build_root",
     "cpm_cache",
     "prefetch_artifacts",
+    "ios-native-sources",
+    "packages-all",
     "test_tmp",
 }
 GENERATED_PATHS = {("3rdparty", "boost")}
+
+
+def is_generated_path(relative: pathlib.Path) -> bool:
+    if not relative.parts:
+        return False
+    if relative.parts[0] in GENERATED_ROOTS:
+        return True
+    return any(
+        relative.parts[: len(prefix)] == prefix for prefix in GENERATED_PATHS
+    )
 
 
 def repository_files(root: pathlib.Path = ROOT) -> list[pathlib.Path]:
@@ -88,15 +101,20 @@ def repository_files(root: pathlib.Path = ROOT) -> list[pathlib.Path]:
         ]
     else:
         files = []
-        for path in root.rglob("*"):
-            relative = path.relative_to(root)
-            if relative.parts[0] in GENERATED_ROOTS:
-                continue
-            if any(relative.parts[: len(prefix)] == prefix for prefix in GENERATED_PATHS):
-                continue
-            if path.is_file():
-                files.append(relative)
+        for directory, names, file_names in os.walk(root):
+            relative_directory = pathlib.Path(directory).relative_to(root)
+            names[:] = [
+                name
+                for name in names
+                if not is_generated_path(relative_directory / name)
+            ]
+            files.extend(
+                relative_directory / name
+                for name in file_names
+                if not is_generated_path(relative_directory / name)
+            )
 
+    files = [relative for relative in files if not is_generated_path(relative)]
     files = sorted(set(files), key=lambda path: path.as_posix())
     if not files:
         raise RuntimeError(f"source inventory is empty: {root}")
@@ -216,6 +234,27 @@ class RepositoryInventoryFallbackTest(unittest.TestCase):
                 args=["git"], returncode=128, stdout=b"", stderr=b"not a repository"
             ),
         )
+
+    def test_git_inventory_excludes_generated_artifact_roots(self):
+        root = self.make_root()
+        generated = root / "prefetch_artifacts" / "large-source.txt"
+        generated.parent.mkdir()
+        generated.write_text(f"generated {LEGACY_OWNER}\n", encoding="utf-8")
+        source = root / "future-component" / "nested.txt"
+        source.parent.mkdir()
+        source.write_text("first-party\n", encoding="utf-8")
+        inventory = b"CMakeLists.txt\0prefetch_artifacts/large-source.txt\0future-component/nested.txt\0"
+
+        with mock.patch.object(
+            subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout=inventory, stderr=b""
+            ),
+        ):
+            files = repository_files(root)
+
+        self.assertEqual(files, [pathlib.Path("CMakeLists.txt"), pathlib.Path("future-component/nested.txt")])
 
     def test_gitless_inventory_audits_unknown_first_party_roots(self):
         root = self.make_root()

@@ -118,11 +118,42 @@ protected:
 };
 
 template <typename DeviceInfo>
-struct ControlledDiscoverySlot {
+class ControlledDiscoverySlot {
+public:
+    template <typename Update>
+    void updateResult( Update&& update )
+    {
+        const std::lock_guard<std::mutex> lock( resultMutex_ );
+        update( result_ );
+    }
+
+    DeviceDiscoveryResult<DeviceInfo> result() const
+    {
+        const std::lock_guard<std::mutex> lock( resultMutex_ );
+        return result_;
+    }
+
+    void setDevices( QList<DeviceInfo> devices )
+    {
+        updateResult( [ &devices ]( auto& result ) {
+            result.devices = std::move( devices );
+        } );
+    }
+
+    void setError( klogg::livecapture::LiveSourceError error )
+    {
+        updateResult( [ &error ]( auto& result ) {
+            result.error = std::move( error );
+        } );
+    }
+
     QSemaphore entered;
     QSemaphore release;
     QSemaphore completed;
-    DeviceDiscoveryResult<DeviceInfo> result;
+
+private:
+    mutable std::mutex resultMutex_;
+    DeviceDiscoveryResult<DeviceInfo> result_;
 };
 
 template <typename DeviceInfo>
@@ -140,10 +171,12 @@ public:
     {
         const auto index = nextSlot_.fetch_add( 1 );
         auto& slot = *slots_.at( index );
-        slot.result.generation = generation;
+        slot.updateResult( [ generation ]( auto& result ) {
+            result.generation = generation;
+        } );
         slot.entered.release();
         slot.release.acquire();
-        auto result = slot.result;
+        auto result = slot.result();
         slot.completed.release();
         return result;
     }
@@ -355,13 +388,16 @@ TEST_CASE( "ADB duplicate refresh cannot replace current devices or re-enable Ac
     REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
     REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
     REQUIRE( operations->slot( 1 ).entered.tryAcquire( 1, 3000 ) );
-    REQUIRE( operations->slot( 0 ).result.generation > 0 );
-    REQUIRE( operations->slot( 1 ).result.generation
-             == operations->slot( 0 ).result.generation + 1 );
+    const auto firstGeneration = operations->slot( 0 ).result().generation;
+    const auto secondGeneration = operations->slot( 1 ).result().generation;
+    REQUIRE( firstGeneration > 0 );
+    REQUIRE( secondGeneration == firstGeneration + 1 );
 
-    operations->slot( 1 ).result.devices
-        = { adbDevice( QStringLiteral( "locked-current" ), QStringLiteral( "unauthorized" ) ),
-            adbDevice( QStringLiteral( "offline-current" ), QStringLiteral( "offline" ) ) };
+    operations->slot( 1 ).updateResult( []( auto& result ) {
+        result.devices
+            = { adbDevice( QStringLiteral( "locked-current" ), QStringLiteral( "unauthorized" ) ),
+                adbDevice( QStringLiteral( "offline-current" ), QStringLiteral( "offline" ) ) };
+    } );
     operations->slot( 1 ).release.release();
     REQUIRE( operations->slot( 1 ).completed.tryAcquire( 1, 3000 ) );
 
@@ -376,8 +412,10 @@ TEST_CASE( "ADB duplicate refresh cannot replace current devices or re-enable Ac
     CHECK( combo->itemText( 1 ).contains( QStringLiteral( "offline-current" ) ) );
     CHECK_FALSE( buttons->button( QDialogButtonBox::Ok )->isEnabled() );
 
-    operations->slot( 0 ).result.devices
-        = { adbDevice( QStringLiteral( "stale-online" ), QStringLiteral( "device" ) ) };
+    operations->slot( 0 ).updateResult( []( auto& result ) {
+        result.devices
+            = { adbDevice( QStringLiteral( "stale-online" ), QStringLiteral( "device" ) ) };
+    } );
     operations->slot( 0 ).release.release();
     REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
     QCoreApplication::sendPostedEvents();
@@ -405,8 +443,10 @@ TEST_CASE( "refresh remains disabled until every overlapping request finishes",
 
     REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
     REQUIRE( operations->slot( 1 ).entered.tryAcquire( 1, 3000 ) );
-    operations->slot( 1 ).result.devices
-        = { adbDevice( QStringLiteral( "current-online" ), QStringLiteral( "device" ) ) };
+    operations->slot( 1 ).updateResult( []( auto& result ) {
+        result.devices
+            = { adbDevice( QStringLiteral( "current-online" ), QStringLiteral( "device" ) ) };
+    } );
     operations->slot( 1 ).release.release();
     REQUIRE( operations->slot( 1 ).completed.tryAcquire( 1, 3000 ) );
     drainEventsUntil( [ combo ] { return combo->count() == 1; } );
@@ -494,8 +534,8 @@ TEST_CASE( "dialog request owns generation reported by injected discovery work",
     AdbLogcatDialog dialog( operation );
 
     REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
-    operations->slot( 0 ).result.devices
-        = { adbDevice( QStringLiteral( "current-online" ), QStringLiteral( "device" ) ) };
+    operations->slot( 0 ).setDevices(
+        { adbDevice( QStringLiteral( "current-online" ), QStringLiteral( "device" ) ) } );
     operations->slot( 0 ).release.release();
     REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
 
@@ -517,9 +557,9 @@ TEST_CASE( "successful refresh preserves the selected device and Accept state",
         AdbLogcatDialog dialog( operation );
 
         REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
-        operations->slot( 0 ).result.devices
-            = { adbDevice( QStringLiteral( "first-online" ), QStringLiteral( "device" ) ),
-                adbDevice( QStringLiteral( "selected-online" ), QStringLiteral( "device" ) ) };
+        operations->slot( 0 ).setDevices(
+            { adbDevice( QStringLiteral( "first-online" ), QStringLiteral( "device" ) ),
+              adbDevice( QStringLiteral( "selected-online" ), QStringLiteral( "device" ) ) } );
         operations->slot( 0 ).release.release();
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
 
@@ -539,10 +579,10 @@ TEST_CASE( "successful refresh preserves the selected device and Accept state",
         CHECK( combo->currentData().toString() == QStringLiteral( "selected-online" ) );
         CHECK( buttons->button( QDialogButtonBox::Ok )->isEnabled() );
 
-        operations->slot( 1 ).result.devices
-            = { adbDevice( QStringLiteral( "selected-online" ), QStringLiteral( "device" ) ),
-                adbDevice( QStringLiteral( "first-online" ), QStringLiteral( "device" ) ),
-                adbDevice( QStringLiteral( "new-online" ), QStringLiteral( "device" ) ) };
+        operations->slot( 1 ).setDevices(
+            { adbDevice( QStringLiteral( "selected-online" ), QStringLiteral( "device" ) ),
+              adbDevice( QStringLiteral( "first-online" ), QStringLiteral( "device" ) ),
+              adbDevice( QStringLiteral( "new-online" ), QStringLiteral( "device" ) ) } );
         operations->slot( 1 ).release.release();
         REQUIRE( operations->slot( 1 ).completed.tryAcquire( 1, 3000 ) );
         drainEventsUntil( [ combo ] { return combo->count() == 3; } );
@@ -562,16 +602,17 @@ TEST_CASE( "successful refresh preserves the selected device and Accept state",
         QCoreApplication::processEvents();
 
         REQUIRE( operations->slot( 0 ).entered.tryAcquire( 1, 3000 ) );
-        operations->slot( 0 ).result.devices = { IosDeviceInfo{ QStringLiteral( "first-ios" ),
-                                                                QStringLiteral( "first-ios" ),
-                                                                QStringLiteral( "first-ios" ),
-                                                                {},
-                                                                {} },
-                                                 IosDeviceInfo{ QStringLiteral( "selected-ios" ),
-                                                                QStringLiteral( "selected-ios" ),
-                                                                QStringLiteral( "selected-ios" ),
-                                                                {},
-                                                                {} } };
+        operations->slot( 0 ).setDevices(
+            { IosDeviceInfo{ QStringLiteral( "first-ios" ),
+                             QStringLiteral( "first-ios" ),
+                             QStringLiteral( "first-ios" ),
+                             {},
+                             {} },
+              IosDeviceInfo{ QStringLiteral( "selected-ios" ),
+                             QStringLiteral( "selected-ios" ),
+                             QStringLiteral( "selected-ios" ),
+                             {},
+                             {} } } );
         operations->slot( 0 ).release.release();
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
 
@@ -591,21 +632,22 @@ TEST_CASE( "successful refresh preserves the selected device and Accept state",
         CHECK( combo->currentData().toString() == QStringLiteral( "selected-ios" ) );
         CHECK( buttons->button( QDialogButtonBox::Ok )->isEnabled() );
 
-        operations->slot( 1 ).result.devices = { IosDeviceInfo{ QStringLiteral( "selected-ios" ),
-                                                                QStringLiteral( "selected-ios" ),
-                                                                QStringLiteral( "selected-ios" ),
-                                                                {},
-                                                                {} },
-                                                 IosDeviceInfo{ QStringLiteral( "first-ios" ),
-                                                                QStringLiteral( "first-ios" ),
-                                                                QStringLiteral( "first-ios" ),
-                                                                {},
-                                                                {} },
-                                                 IosDeviceInfo{ QStringLiteral( "new-ios" ),
-                                                                QStringLiteral( "new-ios" ),
-                                                                QStringLiteral( "new-ios" ),
-                                                                {},
-                                                                {} } };
+        operations->slot( 1 ).setDevices(
+            { IosDeviceInfo{ QStringLiteral( "selected-ios" ),
+                             QStringLiteral( "selected-ios" ),
+                             QStringLiteral( "selected-ios" ),
+                             {},
+                             {} },
+              IosDeviceInfo{ QStringLiteral( "first-ios" ),
+                             QStringLiteral( "first-ios" ),
+                             QStringLiteral( "first-ios" ),
+                             {},
+                             {} },
+              IosDeviceInfo{ QStringLiteral( "new-ios" ),
+                             QStringLiteral( "new-ios" ),
+                             QStringLiteral( "new-ios" ),
+                             {},
+                             {} } } );
         operations->slot( 1 ).release.release();
         REQUIRE( operations->slot( 1 ).completed.tryAcquire( 1, 3000 ) );
         drainEventsUntil( [ combo ] { return combo->count() == 3; } );
@@ -638,12 +680,12 @@ TEST_CASE( "iOS dialog presents no-device executable and protocol outcomes diffe
 
     REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
     REQUIRE( operations->slot( 1 ).entered.tryAcquire( 1, 3000 ) );
-    REQUIRE( operations->slot( 1 ).result.generation
-             == operations->slot( 0 ).result.generation + 1 );
-    operations->slot( 1 ).result.error
-        = actionableError( ErrorCategory::Configuration, ErrorScope::Service, RetryPolicy::Never,
-                           "ios-executable-not-found",
-                           "pymobiledevice3 executable was not found; configure it and retry." );
+    REQUIRE( operations->slot( 1 ).result().generation
+             == operations->slot( 0 ).result().generation + 1 );
+    operations->slot( 1 ).setError(
+        actionableError( ErrorCategory::Configuration, ErrorScope::Service, RetryPolicy::Never,
+                         "ios-executable-not-found",
+                         "pymobiledevice3 executable was not found; configure it and retry." ) );
     operations->slot( 1 ).release.release();
     REQUIRE( operations->slot( 1 ).completed.tryAcquire( 1, 3000 ) );
     drainEventsUntil(
@@ -654,12 +696,12 @@ TEST_CASE( "iOS dialog presents no-device executable and protocol outcomes diffe
 
     REQUIRE( QMetaObject::invokeMethod( &dialog, "refreshDevices", Qt::DirectConnection ) );
     REQUIRE( operations->slot( 2 ).entered.tryAcquire( 1, 3000 ) );
-    REQUIRE( operations->slot( 2 ).result.generation
-             == operations->slot( 1 ).result.generation + 1 );
-    operations->slot( 2 ).result.error = actionableError(
+    REQUIRE( operations->slot( 2 ).result().generation
+             == operations->slot( 1 ).result().generation + 1 );
+    operations->slot( 2 ).setError( actionableError(
         ErrorCategory::Backend, ErrorScope::Service, RetryPolicy::Immediate,
         "ios-device-list-protocol-error",
-        "The iOS discovery service returned an invalid response; retry discovery." );
+        "The iOS discovery service returned an invalid response; retry discovery." ) );
     operations->slot( 2 ).release.release();
     REQUIRE( operations->slot( 2 ).completed.tryAcquire( 1, 3000 ) );
     drainEventsUntil(
