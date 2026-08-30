@@ -3312,11 +3312,15 @@ TEST_CASE( "FolderCrawlerWidget search history and status guards",
         widget.searchFor( "ERROR" );
         REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
         REQUIRE( widget.folderResults()->getNbLine() == 3_lcount );
+        REQUIRE( widget.filteredView()->searchPattern().pattern == QStringLiteral( "ERROR" ) );
+        REQUIRE( widget.mainView()->searchPattern().pattern == QStringLiteral( "ERROR" ) );
 
         widget.searchFor( "" );
         QTest::qWait( 50 );
 
         REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( widget.filteredView()->searchPattern().pattern.isEmpty() );
+        REQUIRE( widget.mainView()->searchPattern().pattern.isEmpty() );
         REQUIRE( widget.statusText().startsWith( QStringLiteral( "Ready" ) ) );
     }
 

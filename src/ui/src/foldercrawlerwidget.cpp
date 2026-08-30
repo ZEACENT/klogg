@@ -1531,6 +1531,12 @@ void FolderCrawlerWidget::startSearch()
         searchActive_ = false;
         currentSearchPattern_ = {};
         lastResultStatusText_.clear();
+        if ( activeFilteredView() != nullptr ) {
+            activeFilteredView()->setSearchPattern( {} );
+        }
+        if ( mainView_ != nullptr ) {
+            mainView_->setSearchPattern( {} );
+        }
         if ( auto* const results = activeResults() ) {
             results->beginSearch( filePaths_ );
         }

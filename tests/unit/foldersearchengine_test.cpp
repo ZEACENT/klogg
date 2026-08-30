@@ -467,6 +467,138 @@ TEST_CASE( "FolderSearchEngine cancels stale enumeration before publishing its s
     CHECK( snapshotGeneration == latestGeneration );
 }
 
+TEST_CASE( "FolderSearchEngine supersedes an uncooperative blocked enumeration",
+           "[folder][enumeration][generation][lifetime]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    struct BlockedEnumerationState {
+        QSemaphore firstEntered;
+        QSemaphore releaseFirst;
+        std::atomic<int> enumerationCalls{ 0 };
+        std::atomic<bool> firstReturned{ false };
+    };
+    const auto state = std::make_shared<BlockedEnumerationState>();
+    FolderSearchEngine engine(
+        [ state, latestPath ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            const int call = ++state->enumerationCalls;
+            if ( call == 1 ) {
+                state->firstEntered.release();
+                state->releaseFirst.acquire();
+                state->firstReturned = true;
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+
+    QStringList snapshotPaths;
+    quint64 snapshotGeneration = 0;
+    int snapshotCount = 0;
+    int finishedCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ & ]( const QStringList& filePaths, quint64 generation ) {
+                          ++snapshotCount;
+                          snapshotPaths = filePaths;
+                          snapshotGeneration = generation;
+                      },
+                      Qt::QueuedConnection );
+    QObject::connect( &engine, &FolderSearchEngine::searchFinished, &engine,
+                      [ &finishedCount ]( quint64 ) { ++finishedCount; },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( state->firstEntered.tryAcquire( 1, 3000 ) );
+    struct ReleaseBlockedEnumeration {
+        std::shared_ptr<BlockedEnumerationState> state;
+        bool active{ true };
+        ~ReleaseBlockedEnumeration()
+        {
+            if ( active ) {
+                state->releaseFirst.release();
+            }
+        }
+    } releaseGuard{ state };
+
+    const auto latestGeneration
+        = engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+    REQUIRE( waitUntil( [ & ] { return snapshotCount == 1 && finishedCount >= 2; } ) );
+
+    CHECK_FALSE( state->firstReturned.load() );
+    CHECK( state->enumerationCalls.load() == 2 );
+    CHECK( snapshotPaths == QStringList{ latestPath } );
+    CHECK( snapshotGeneration == latestGeneration );
+
+    state->releaseFirst.release();
+    releaseGuard.active = false;
+    REQUIRE( waitUntil( [ state ] { return state->firstReturned.load(); } ) );
+}
+
+TEST_CASE( "FolderSearchEngine bounds quarantined blocked enumerations",
+           "[folder][enumeration][generation][lifetime]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString latestPath = writeFile( dir, "latest.log", QByteArray( "MATCH\n" ) );
+
+    struct BoundedEnumerationState {
+        QSemaphore enteredFirst;
+        QSemaphore enteredSecond;
+        QSemaphore releaseFirst;
+        QSemaphore releaseSecond;
+        std::atomic<int> calls{ 0 };
+    };
+    const auto state = std::make_shared<BoundedEnumerationState>();
+    struct ReleaseBlockedEnumerations {
+        std::shared_ptr<BoundedEnumerationState> state;
+        ~ReleaseBlockedEnumerations()
+        {
+            state->releaseFirst.release();
+            state->releaseSecond.release();
+        }
+    } releaseGuard{ state };
+
+    FolderSearchEngine engine(
+        [ state, latestPath ]( const QString&, const FolderSearchEngine::StopPredicate& ) {
+            const int call = ++state->calls;
+            if ( call == 1 ) {
+                state->enteredFirst.release();
+                state->releaseFirst.acquire();
+                return QStringList{};
+            }
+            if ( call == 2 ) {
+                state->enteredSecond.release();
+                state->releaseSecond.acquire();
+                return QStringList{};
+            }
+            return QStringList{ latestPath };
+        } );
+
+    int snapshotCount = 0;
+    QObject::connect( &engine, &FolderSearchEngine::folderSnapshotReady, &engine,
+                      [ &snapshotCount ]( const QStringList&, quint64 ) {
+                          ++snapshotCount;
+                      },
+                      Qt::QueuedConnection );
+
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "FIRST" ) );
+    REQUIRE( state->enteredFirst.tryAcquire( 1, 3000 ) );
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "SECOND" ) );
+    REQUIRE( state->enteredSecond.tryAcquire( 1, 3000 ) );
+    engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
+
+    QThread::msleep( 200 );
+    QCoreApplication::processEvents();
+    CHECK( state->calls.load() == 2 );
+    CHECK( snapshotCount == 0 );
+
+    state->releaseFirst.release();
+    REQUIRE( waitUntil( [ & ] { return snapshotCount == 1; } ) );
+    CHECK( state->calls.load() == 3 );
+    state->releaseSecond.release();
+}
+
 TEST_CASE( "FolderSearchEngine rejects invalid folder patterns before enumeration",
            "[folder][enumeration][validation]" )
 {

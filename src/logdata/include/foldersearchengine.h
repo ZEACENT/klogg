@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -63,6 +64,9 @@ class FolderSearchEngine : public QObject {
     static constexpr int BinaryDetectionWindow = 32 * 1024;
 
     using StopPredicate = std::function<bool()>;
+    // A stalled request may overlap one replacement request. Implementations must
+    // therefore be safe for at most two concurrent invocations and must own any
+    // captured state until each invocation returns.
     using FolderEnumerator
         = std::function<QStringList( const QString&, const StopPredicate& )>;
 
@@ -171,6 +175,8 @@ class FolderSearchEngine : public QObject {
     Request pendingRequest_; // guarded by requestMutex_
 
     FolderEnumerator folderEnumerator_;
+    std::shared_ptr<std::atomic<int>> detachedEnumerationCount_
+        = std::make_shared<std::atomic<int>>( 0 );
     std::thread workerThread_;
 
     std::mutex resultsMutex_;

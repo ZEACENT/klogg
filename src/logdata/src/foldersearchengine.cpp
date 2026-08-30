@@ -44,6 +44,8 @@ namespace {
 // folder of many large logs cannot blow up memory; bigger files stream through
 // the per-line path below.
 constexpr qint64 FastPathMaxBytes = 16LL * 1024 * 1024; // 16 MiB
+constexpr int MaxDetachedEnumerations = 1;
+constexpr auto CooperativeEnumerationStopGrace = std::chrono::milliseconds( 100 );
 
 // True if `shouldStop` is set and reports stop. A null predicate never stops.
 bool stopped( const std::function<bool()>& shouldStop )
@@ -55,7 +57,9 @@ struct FolderEnumerationState {
     std::mutex mutex;
     std::condition_variable changed;
     std::atomic<bool> canceled{ false };
+    std::shared_ptr<std::atomic<int>> detachedCount;
     bool done{ false };
+    bool detached{ false };
     QStringList filePaths;
     std::exception_ptr failure;
 };
@@ -339,6 +343,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
     }
 
     auto state = std::make_shared<FolderEnumerationState>();
+    state->detachedCount = detachedEnumerationCount_;
     const auto enumerator = folderEnumerator_;
     const auto folderPath = request.folderPath;
     std::thread enumerationThread;
@@ -357,6 +362,9 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
             {
                 std::lock_guard<std::mutex> lock( state->mutex );
                 state->done = true;
+                if ( state->detached ) {
+                    state->detachedCount->fetch_sub( 1, std::memory_order_relaxed );
+                }
             }
             state->changed.notify_all();
         } );
@@ -368,6 +376,7 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
 
     QStringList filePaths;
     std::exception_ptr enumerationFailure;
+    bool cancellationRequested = false;
     while ( true ) {
         {
             std::unique_lock<std::mutex> lock( state->mutex );
@@ -382,7 +391,40 @@ void FolderSearchEngine::runFolderSearch( const Request& request )
 
         if ( requestStopped() ) {
             state->canceled = true;
-            if ( shutdown_.load( std::memory_order_relaxed ) ) {
+            if ( !cancellationRequested ) {
+                cancellationRequested = true;
+                std::unique_lock<std::mutex> lock( state->mutex );
+                state->changed.wait_for( lock, CooperativeEnumerationStopGrace,
+                                         [ &state ] { return state->done; } );
+                if ( state->done ) {
+                    break;
+                }
+            }
+
+            // Permit one quarantined filesystem call so a latest request can
+            // bypass a stalled mount, but bound ordinary supersession so repeated
+            // searches cannot create an unbounded detached-thread pileup. Shutdown
+            // may force one additional detach for the active coordinator request.
+            int detached = detachedEnumerationCount_->load( std::memory_order_relaxed );
+            while ( detached < MaxDetachedEnumerations
+                    && !detachedEnumerationCount_->compare_exchange_weak(
+                        detached, detached + 1, std::memory_order_relaxed ) ) {
+            }
+            bool reservedDetach = detached < MaxDetachedEnumerations;
+            if ( !reservedDetach && shutdown_.load( std::memory_order_relaxed ) ) {
+                detachedEnumerationCount_->fetch_add( 1, std::memory_order_relaxed );
+                reservedDetach = true;
+            }
+            if ( reservedDetach ) {
+                {
+                    std::lock_guard<std::mutex> lock( state->mutex );
+                    if ( state->done ) {
+                        detachedEnumerationCount_->fetch_sub( 1,
+                                                              std::memory_order_relaxed );
+                        break;
+                    }
+                    state->detached = true;
+                }
                 enumerationThread.detach();
                 Q_EMIT searchFinished( request.generation );
                 return;
