@@ -623,6 +623,13 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
 
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    trigger_prefix = text.split("jobs:", 1)[0]
+    push_section = trigger_prefix.partition("  push:")[2].partition("  pull_request:")[0]
+    if any(
+        strip_yaml_comment(line).startswith("paths-ignore:")
+        for line in push_section.splitlines()
+    ):
+        issues.append("master pushes must not skip CI Build by path")
     needs = workflow_job_needs(text)
     missing_jobs = CI_BUILD_REQUIRED_JOBS - set(needs)
     unexpected_jobs = set(needs) - CI_BUILD_REQUIRED_JOBS
@@ -664,6 +671,10 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         output_dependencies = set(
             re.findall(r"needs\.([A-Za-z0-9_-]+)\.outputs\.", block)
         )
+        for dependency in sorted(output_dependencies - direct_dependencies):
+            issues.append(
+                f"CI build job {job} references outputs from {dependency} without a direct need"
+            )
         for dependency in direct_dependencies - output_dependencies:
             other_ancestors: set[str] = set()
             for other in direct_dependencies - {dependency}:
@@ -1910,6 +1921,16 @@ def stable_release_workflow_issues(text: str) -> list[str]:
         or "[[ \"$requested_run_id\" =~ ^[0-9]+$ ]]" not in text
     ):
         issues.append("stable release run ID must use validated environment input")
+    if '.inputs["qualification-mode"]' in text:
+        issues.append("stable release evidence must come from downloaded receipts, not run API inputs")
+    draft_verification = text.partition(
+        "- name: Verify stable source publication after upload"
+    )[2].partition("- name: Recheck master tip before stable promotion")[0]
+    if (
+        ".target_commitish" not in draft_verification
+        or "/git/ref/tags/" in draft_verification
+    ):
+        issues.append("stable draft verification must not require an unpublished Git tag")
     if (
         "rollback_stable_promotion" not in text
         or "trap rollback_stable_promotion ERR" not in text

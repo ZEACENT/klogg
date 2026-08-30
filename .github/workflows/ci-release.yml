@@ -29,9 +29,9 @@ jobs:
       actions: read
       contents: write
     env:
-      SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN }}
+      KLOGG_HAS_SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN != '' && 'true' || 'false' }}
+      KLOGG_HAS_DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK != '' && 'true' || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
-      DISCORD_NEW_VERSIONS_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
       KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}
       KLOGG_EVIDENCE_LEVEL: ${{ github.event.inputs.evidence-level }}
     steps:
@@ -70,7 +70,6 @@ jobs:
         run_repository="$(gh api "$run_api" --jq '.head_repository.full_name // empty')"
         run_branch="$(gh api "$run_api" --jq '.head_branch // empty')"
         run_event="$(gh api "$run_api" --jq '.event')"
-        run_qualification="$(gh api "$run_api" --jq '.inputs["qualification-mode"] // empty')"
         run_conclusion="$(gh api "$run_api" --jq '.conclusion')"
         run_sha="$(gh api "$run_api" --jq '.head_sha')"
         test "$run_path" = ".github/workflows/ci-build.yml" || { echo "::error::Selected run uses ${run_path}"; exit 1; }
@@ -84,21 +83,9 @@ jobs:
             }
             ;;
           workflow_dispatch)
-            case "$run_qualification" in
-              validation|release) ;;
-              *) echo "::error::Selected dispatch has unknown qualification mode: ${run_qualification}"; exit 1 ;;
-            esac
-            if [ "$run_qualification" = release ]; then
-              test "$KLOGG_EVIDENCE_LEVEL" = signed || {
-                echo "::error::Release-qualified CI artifacts must be published with signed evidence"
-                exit 1
-              }
-            else
-              test "$KLOGG_EVIDENCE_LEVEL" = validation || {
-                echo "::error::Validation CI artifacts cannot satisfy signed evidence"
-                exit 1
-              }
-            fi
+            # The workflow-run API does not expose workflow_dispatch inputs.
+            # Bind the requested evidence level after download from the SHA-bound
+            # package, iOS, signing, and notarization receipts instead.
             ;;
           *) echo "::error::Selected run event is ${run_event}"; exit 1 ;;
         esac
@@ -245,6 +232,13 @@ jobs:
             qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
             if qualification.get("package_sha256") != dmg_hash:
                 raise SystemExit(f"macOS qualification receipt is not bound to published DMG: {qualification_path}")
+            ios_path = directory / "ios-native-dmg-package-verification.json"
+            ios_qualification = json.loads(ios_path.read_text(encoding="utf-8"))
+            if (
+                ios_qualification.get("qualification") != evidence_level
+                or ios_qualification.get("release_qualified") != (evidence_level == "signed")
+            ):
+                raise SystemExit(f"iOS qualification evidence level mismatch: {ios_path}")
             if evidence_level != "signed":
                 continue
             for name in ("signing", "notarization"):
@@ -300,7 +294,7 @@ jobs:
         fi
 
     - name: Setup Sentry CLI
-      if: env.SENTRY_TOKEN != ''
+      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
       uses: mathrix-education/setup-sentry-cli@ff4fff773f5e628fa214ebd19e46fb7289454ee2 # v3.0.0
       with:
         token: ${{ secrets.SENTRY_TOKEN }}
@@ -308,14 +302,14 @@ jobs:
         project: klogg
 
     - name: Create Sentry release
-      if: env.SENTRY_TOKEN != ''
+      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
       shell: sh
       run: |
         sentry-cli releases new $KLOGG_VERSION
         sentry-cli releases set-commits --auto $KLOGG_VERSION
 
     - name: Upload symbols linux
-      if: env.SENTRY_TOKEN != ''
+      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
       shell: sh
       run: |
         if [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug ] && [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen ]; then
@@ -340,7 +334,7 @@ jobs:
         fi
 
     - name: Upload symbols mac
-      if: env.SENTRY_TOKEN != ''
+      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
       shell: sh
       run: |
         if [ -d ./packages-macos-intel-qt6-vs-gen ] && [ -f ./packages-macos-intel-qt6-vs-gen/klogg-x64.app/Contents/MacOS/klogg ]; then
@@ -355,7 +349,7 @@ jobs:
         fi
 
     - name: Upload symbols win
-      if: env.SENTRY_TOKEN != ''
+      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
       shell: sh
       run: |
         sentry-cli upload-dif ./packages-windows-x64-qt6-vs-avx2/klogg-$KLOGG_VERSION-x64-Qt6-vs-avx2-pdb.zip
@@ -580,9 +574,9 @@ jobs:
         test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
         release_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.tag_name')"
         test "${release_tag}" = "v${KLOGG_VERSION}-candidate" || { echo "::error::Stable candidate tag mismatch"; exit 1; }
-        ref_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/v${KLOGG_VERSION}-candidate" --jq '.object.sha')"
-        test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
-          echo "::error::Stable release ref ${ref_sha} != source commit ${KLOGG_SOURCE_COMMIT}"
+        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.target_commitish')"
+        test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}" || {
+          echo "::error::Stable candidate target ${candidate_target} != source commit ${KLOGG_SOURCE_COMMIT}"
           exit 1
         }
         verification_root=$(mktemp -d)
@@ -692,7 +686,7 @@ jobs:
         trap - ERR
 
     - name: Discord notification
-      if: env.DISCORD_NEW_VERSIONS_WEBHOOK != ''
+      if: env.KLOGG_HAS_DISCORD_WEBHOOK == 'true'
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
         DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'

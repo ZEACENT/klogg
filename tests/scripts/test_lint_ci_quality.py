@@ -269,6 +269,23 @@ jobs:
             },
         )
 
+    def test_master_pushes_never_skip_ci_build_by_path(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertNotIn(
+            "master pushes must not skip CI Build by path",
+            MODULE.ci_build_workflow_issues(workflow),
+        )
+        mutated = workflow.replace(
+            "  push:\n    branches: [ master ]\n",
+            "  push:\n    branches: [ master ]\n    paths-ignore: [README.md]\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "master pushes must not skip CI Build by path",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
     def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
@@ -449,6 +466,19 @@ jobs:
                 "CI root job SaveVersion must not have dependencies" in issue
                 for issue in MODULE.ci_build_workflow_issues(mutated)
             )
+        )
+
+    def test_ci_build_output_references_require_direct_needs(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  BuildIosNativeArm64:\n    needs: [SaveVersion, PrefetchIosNativeSources]",
+            "  BuildIosNativeArm64:\n    needs: [PrefetchIosNativeSources]",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI build job BuildIosNativeArm64 references outputs from SaveVersion without a direct need",
+            MODULE.ci_build_workflow_issues(mutated),
         )
 
     def test_ci_build_rejects_missing_dynamic_native_artifact_ancestry(self):
@@ -788,6 +818,22 @@ jobs:
         self.assertIn(
             "stable release dispatch must fail closed outside master",
             MODULE.stable_release_workflow_issues(bypassed),
+        )
+        run_api_inputs = workflow.replace(
+            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n',
+            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n'
+            '        run_qualification="$(gh api "$run_api" --jq \'.inputs["qualification-mode"] // empty\')"\n',
+            1,
+        )
+        self.assertNotEqual(run_api_inputs, workflow)
+        self.assertIn(
+            "stable release evidence must come from downloaded receipts, not run API inputs",
+            MODULE.stable_release_workflow_issues(run_api_inputs),
+        )
+        draft_tag_lookup = workflow.replace(".target_commitish", ".tag_name", 1)
+        self.assertIn(
+            "stable draft verification must not require an unpublished Git tag",
+            MODULE.stable_release_workflow_issues(draft_tag_lookup),
         )
         without_rollback = workflow.replace(
             "        trap rollback_stable_promotion ERR\n", "", 1

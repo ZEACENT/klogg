@@ -3,13 +3,6 @@ name: "CI Build"
 on:
   push:
     branches: [ master ]
-    paths-ignore:
-      - 'website/**'
-      - BUILD.md
-      - CODE_OF_CONDUCT.md
-      - CONTRIBUTING.md
-      - README.md
-      - .gitignore
   pull_request:
     branches: [ master ]
     paths-ignore:

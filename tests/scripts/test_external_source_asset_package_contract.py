@@ -474,7 +474,6 @@ publish_component(
             'run_repository="$(gh api',
             'run_branch="$(gh api',
             'run_event="$(gh api',
-            'run_qualification="$(gh api',
             'run_conclusion="$(gh api',
             'KLOGG_CI_RUN_ID=',
             'KLOGG_CI_RUN_SHA=',
@@ -483,13 +482,12 @@ publish_component(
             '"master"',
             '"success"',
             "event=push",
-            'run_qualification" = release',
-            'KLOGG_EVIDENCE_LEVEL" = signed',
-            "validation|release",
             'KLOGG_EVIDENCE_LEVEL" = validation',
+            "workflow-run API does not expose workflow_dispatch inputs",
             "/branches/master",
         ):
             self.assertIn(marker, selection)
+        self.assertNotIn('.inputs["qualification-mode"]', selection)
         self.assertIn("run_id: ${{ env.KLOGG_CI_RUN_ID }}", workflow)
 
         metadata = workflow.index("klogg_commit.txt")
@@ -535,8 +533,13 @@ publish_component(
         self.assertIn("draft: true", publication[create:verify])
         self.assertIn("tag_name: v${{ env.KLOGG_VERSION }}-candidate", publication[create:verify])
         verification = publication[verify:]
-        self.assertIn('/git/ref/tags/v${KLOGG_VERSION}-candidate', verification)
-        self.assertIn('test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}"', verification)
+        draft_verification = verification[: verification.index("- name: Recheck master tip")]
+        self.assertIn(".target_commitish", draft_verification)
+        self.assertIn(
+            'test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}"',
+            draft_verification,
+        )
+        self.assertNotIn("/git/ref/tags/", draft_verification)
         promotion = publication.find("draft=false", verify)
         self.assertGreater(promotion, verify, "stable release must publish only after verification")
 
