@@ -41,10 +41,15 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Win installer
-      uses: joncloud/makensis-action@971ef20f43e4f9f3af2c7f276cb7348d033da1cd # v5.0
-      with:
-        script-file: klogg.nsi
-        arguments: "-DVERSION=%KLOGG_VERSION% -DPLATFORM=%KLOGG_ARCH% -DQT_MAJOR=%KLOGG_QT%" 
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $makensis = (Get-Command makensis.exe -ErrorAction Stop).Source
+        & $makensis "/V3" "/DVERSION=$env:KLOGG_VERSION" `
+          "/DPLATFORM=$env:KLOGG_ARCH" "/DQT_MAJOR=$env:KLOGG_QT" "klogg.nsi"
+        if ($LASTEXITCODE -ne 0) {
+          throw "makensis failed with exit code $LASTEXITCODE"
+        }
     
     - name: Win package
       shell: cmd

@@ -463,6 +463,22 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertNotRegex(adb_cmake, r"find_program\([^)]*\badb\b")
         self.assertNotRegex(adb_cmake, r"(?:find_package|pkg_check_modules|find_library)\([^)]*libusb")
 
+    def test_windows_installer_runs_makensis_directly_and_fail_closed(self):
+        action = self.required_text(WIN_PACKAGE)
+        installer = action.split("    - name: Win installer", 1)[1].split(
+            "    - name: Win package", 1
+        )[0]
+        self.assertNotIn("joncloud/makensis-action", installer)
+        for marker in (
+            "makensis.exe",
+            "/DVERSION=$env:KLOGG_VERSION",
+            "/DPLATFORM=$env:KLOGG_ARCH",
+            "/DQT_MAJOR=$env:KLOGG_QT",
+            "klogg.nsi",
+            "$LASTEXITCODE",
+        ):
+            self.assertIn(marker, installer)
+
     def test_package_definitions_stage_exact_resolver_paths_and_verify_first(self):
         files = {
             "linux-cpack": self.required_text(ROOT_CMAKE),
