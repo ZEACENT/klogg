@@ -105,11 +105,28 @@ xcopy %KLOGG_WORKSPACE%\README.md %KLOGG_WORKSPACE%\release\ /y
 xcopy %KLOGG_WORKSPACE%\DOCUMENTATION.md %KLOGG_WORKSPACE%\release\ /y
 
 echo "Copying vc runtime..."
-xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\msvcp140.dll" %KLOGG_WORKSPACE%\release\ /y
-xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\msvcp140_1.dll" %KLOGG_WORKSPACE%\release\ /y
-xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\msvcp140_2.dll" %KLOGG_WORKSPACE%\release\ /y
-xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\vcruntime140.dll" %KLOGG_WORKSPACE%\release\ /y
-xcopy "%VCToolsRedistDir%%platform%\Microsoft.VC143.CRT\vcruntime140_1.dll" %KLOGG_WORKSPACE%\release\ /y
+set "KLOGG_VC_RUNTIME_DIR=%VCToolsRedistDir%%KLOGG_ARCH%\Microsoft.VC143.CRT"
+for %%R in (
+    msvcp140.dll
+    msvcp140_1.dll
+    msvcp140_2.dll
+    vcruntime140.dll
+    vcruntime140_1.dll
+) do (
+    if not exist "%KLOGG_VC_RUNTIME_DIR%\%%R" (
+        echo ERROR: required VC runtime missing: %KLOGG_VC_RUNTIME_DIR%\%%R
+        exit /b 1
+    )
+    xcopy "%KLOGG_VC_RUNTIME_DIR%\%%R" "%KLOGG_WORKSPACE%\release\" /y
+    if errorlevel 1 (
+        echo ERROR: failed to stage required VC runtime: %%R
+        exit /b 1
+    )
+    if not exist "%KLOGG_WORKSPACE%\release\%%R" (
+        echo ERROR: staged VC runtime missing: %KLOGG_WORKSPACE%\release\%%R
+        exit /b 1
+    )
+)
 
 echo "Copying ssl..."
 if "%KLOGG_QT%"=="Qt5" (

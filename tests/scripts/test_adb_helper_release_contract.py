@@ -479,6 +479,37 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, installer)
 
+    def test_windows_runtime_staging_uses_package_architecture_and_fails_closed(self):
+        prepare = self.required_text(WIN_PREPARE)
+        runtime_section = prepare.split('echo "Copying vc runtime..."', 1)[1].split(
+            'echo "Copying ssl..."', 1
+        )[0]
+
+        self.assertIn(
+            r"%VCToolsRedistDir%%KLOGG_ARCH%\Microsoft.VC143.CRT",
+            runtime_section,
+        )
+        self.assertNotIn("%platform%", runtime_section)
+        for runtime in (
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+        ):
+            self.assertIn(runtime, runtime_section)
+        self.assertRegex(
+            runtime_section,
+            re.compile(
+                r"for\s+%%R\s+in\s*\([^)]*\)\s+do\s*\(.*?"
+                r'if\s+not\s+exist\s+"%KLOGG_VC_RUNTIME_DIR%\\%%R".*?'
+                r'xcopy\s+"%KLOGG_VC_RUNTIME_DIR%\\%%R".*?'
+                r"if\s+errorlevel\s+1.*?"
+                r'if\s+not\s+exist\s+"%KLOGG_WORKSPACE%\\release\\%%R"',
+                re.DOTALL | re.IGNORECASE,
+            ),
+        )
+
     def test_package_definitions_stage_exact_resolver_paths_and_verify_first(self):
         files = {
             "linux-cpack": self.required_text(ROOT_CMAKE),
