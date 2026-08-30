@@ -50,6 +50,47 @@ class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
         self.assertIsNone(pattern.search("klogg::qtcompat::skipEmptyParts()"))
 
 
+class WritableLiveQLockFileTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/example_test.cpp"):
+        return lint._check_writable_reopen_of_live_qlockfile(text, Path(name))
+
+    def test_write_reopen_before_unlock_is_flagged(self):
+        text = (
+            "QLockFile heldLock( lockPath );\n"
+            "REQUIRE( heldLock.tryLock( 0 ) );\n"
+            "QFile file( lockPath );\n"
+            "REQUIRE( file.open( QIODevice::ReadWrite ) );\n"
+            "heldLock.unlock();\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 3)
+
+    def test_read_only_or_post_unlock_access_is_allowed(self):
+        read_only = (
+            "QLockFile heldLock( lockPath );\n"
+            "heldLock.tryLock( 0 );\n"
+            "QFile file( lockPath );\n"
+            "file.open( QIODevice::ReadOnly );\n"
+            "heldLock.unlock();\n"
+        )
+        self.assertEqual(self.check(read_only), [])
+        post_unlock = (
+            "QLockFile heldLock( lockPath );\n"
+            "heldLock.tryLock( 0 );\n"
+            "heldLock.unlock();\n"
+            "QFile file( lockPath );\n"
+            "file.open( QIODevice::WriteOnly );\n"
+        )
+        self.assertEqual(self.check(post_unlock), [])
+
+    def test_current_supervisor_fixture_is_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "adb_server_supervisor_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
 class FolderEngineQSignalSpyTest(unittest.TestCase):
     def check(self, text, name="tests/unit/foldersearchengine_test.cpp"):
         return lint._check_folder_engine_qsignalspy(text, Path(name))

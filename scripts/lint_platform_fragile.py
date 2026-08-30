@@ -1289,6 +1289,62 @@ def _check_qt_version_macro_in_tests(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
+_QLOCKFILE_DECL_RE = re.compile(
+    r"\bQLockFile\s+(?P<lock>[A-Za-z_]\w*)\s*\(\s*(?P<path>[A-Za-z_]\w*)\s*\)"
+)
+
+
+def _check_writable_reopen_of_live_qlockfile(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Reject write-capable QFile reopens while a QLockFile owns the path.
+
+    Windows QLockFile grants shared read access only. A test that acquires the
+    lock and then reopens its path ReadWrite/WriteOnly passes on POSIX but fails
+    deterministically with a Windows sharing violation.
+    """
+    if "tests" not in path.parts:
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    findings: list[tuple[int, str]] = []
+    for declaration in _QLOCKFILE_DECL_RE.finditer(code):
+        lock_name = declaration.group("lock")
+        path_name = declaration.group("path")
+        try_lock = re.search(rf"\b{re.escape(lock_name)}\s*\.\s*tryLock\s*\(",
+                             code[declaration.end():])
+        if try_lock is None:
+            continue
+        live_start = declaration.end() + try_lock.end()
+        unlock = re.search(rf"\b{re.escape(lock_name)}\s*\.\s*unlock\s*\(",
+                           code[live_start:])
+        live_end = live_start + unlock.start() if unlock is not None else len(code)
+        live_segment = code[live_start:live_end]
+        file_declaration = re.search(
+            rf"\bQFile\s+(?P<file>[A-Za-z_]\w*)\s*\(\s*{re.escape(path_name)}\s*\)",
+            live_segment,
+        )
+        if file_declaration is None:
+            continue
+        file_name = file_declaration.group("file")
+        writable_open = re.search(
+            rf"\b{re.escape(file_name)}\s*\.\s*open\s*\([^;]*"
+            r"QIODevice::(?:ReadWrite|WriteOnly|Append)",
+            live_segment[file_declaration.end():],
+        )
+        if writable_open is None:
+            continue
+        absolute = live_start + file_declaration.start()
+        findings.append(
+            (
+                code.count("\n", 0, absolute) + 1,
+                "Do not reopen a live QLockFile path with write access. Windows "
+                "shares the held marker for readers only; snapshot it ReadOnly, "
+                "unlock, then recreate/age a synthetic marker.",
+            )
+        )
+    return findings
+
+
 _FOLDER_ENGINE_QSIGNALSPY_RE = re.compile(
     r"\bQSignalSpy\b[^;]*\bFolderSearchEngine::", re.DOTALL
 )
@@ -1358,6 +1414,10 @@ def _check_qfileinfo_direct_include(text: str, path: Path) -> list[tuple[int, st
 
 
 MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "writable-reopen-of-live-qlockfile",
+        "check": _check_writable_reopen_of_live_qlockfile,
+    },
     {
         "name": "folder-engine-qsignalspy",
         "check": _check_folder_engine_qsignalspy,

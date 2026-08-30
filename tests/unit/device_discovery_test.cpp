@@ -14,6 +14,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QEventLoop>
 #include <QFutureWatcher>
 #include <QLabel>
@@ -684,6 +685,8 @@ TEST_CASE( "dialog destruction drops pending discovery completions",
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
         QCoreApplication::sendPostedEvents();
         QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+        QCoreApplication::processEvents();
     }
 
     SECTION( "iOS" )
@@ -700,6 +703,8 @@ TEST_CASE( "dialog destruction drops pending discovery completions",
         operations->slot( 0 ).release.release();
         REQUIRE( operations->slot( 0 ).completed.tryAcquire( 1, 3000 ) );
         QCoreApplication::sendPostedEvents();
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
         QCoreApplication::processEvents();
     }
 }

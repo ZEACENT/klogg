@@ -1523,11 +1523,20 @@ TEST_CASE( "startup lock never steals an old lease from a live process",
     QTemporaryDir temporaryDirectory;
     REQUIRE( temporaryDirectory.isValid() );
     const auto lockPath = temporaryDirectory.filePath( QStringLiteral( "adb-server.lock" ) );
-    QLockFile heldLock( lockPath );
-    heldLock.setStaleLockTime( 0 );
-    REQUIRE( heldLock.tryLock( 0 ) );
+    const auto templatePath
+        = temporaryDirectory.filePath( QStringLiteral( "template.lock" ) );
+    QLockFile templateLock( templatePath );
+    templateLock.setStaleLockTime( 0 );
+    REQUIRE( templateLock.tryLock( 0 ) );
+    QFile templateFile( templatePath );
+    REQUIRE( templateFile.open( QIODevice::ReadOnly ) );
+    const auto liveProcessRecord = templateFile.readAll();
+    templateFile.close();
+    templateLock.unlock();
+
     QFile lockFile( lockPath );
-    REQUIRE( lockFile.open( QIODevice::ReadWrite ) );
+    REQUIRE( lockFile.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+    REQUIRE( lockFile.write( liveProcessRecord ) == liveProcessRecord.size() );
     REQUIRE( lockFile.setFileTime( QDateTime::currentDateTimeUtc().addSecs( -60 ),
                                    QFileDevice::FileModificationTime ) );
     lockFile.close();
@@ -1542,7 +1551,7 @@ TEST_CASE( "startup lock never steals an old lease from a live process",
     REQUIRE( waitForQtCondition( [ &result ] { return result.has_value(); } ) );
     CHECK( result->state == AdbServerStartupLockState::Contended );
     startupLock.cancel( token );
-    heldLock.unlock();
+    CHECK( QFile::remove( lockPath ) );
 }
 
 TEST_CASE( "startup lock adapter distinguishes permanent path failures from contention",

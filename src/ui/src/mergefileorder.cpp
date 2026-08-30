@@ -21,6 +21,7 @@
 
 #include <QFileInfo>
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace {
@@ -88,9 +89,10 @@ std::vector<QString> sortedMergeFilePaths( const QStringList& filePaths )
 
     std::vector<SortEntry> entries;
     entries.reserve( static_cast<size_t>( filePaths.size() ) );
-    for ( const auto& path : filePaths ) {
-        entries.push_back( SortEntry{ path, QFileInfo( path ).fileName() } );
-    }
+    std::transform( filePaths.cbegin(), filePaths.cend(), std::back_inserter( entries ),
+                    []( const QString& path ) {
+                        return SortEntry{ path, QFileInfo( path ).fileName() };
+                    } );
 
     // Case-insensitive natural sort by file name (numeric awareness, so
     // "file2" < "file10"), with the full path as a deterministic tiebreaker when
@@ -103,8 +105,7 @@ std::vector<QString> sortedMergeFilePaths( const QStringList& filePaths )
 
     std::vector<QString> sortedPaths;
     sortedPaths.reserve( entries.size() );
-    for ( auto& entry : entries ) {
-        sortedPaths.push_back( std::move( entry.path ) );
-    }
+    std::transform( entries.begin(), entries.end(), std::back_inserter( sortedPaths ),
+                    []( SortEntry& entry ) { return std::move( entry.path ); } );
     return sortedPaths;
 }

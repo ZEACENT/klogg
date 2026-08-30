@@ -1460,8 +1460,8 @@ TEST_CASE( "default worker factory bounds sessions while native startup remains 
         {
             std::lock_guard<std::mutex> lock( mutex );
             stopped = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     DefaultIosNativeStreamWorkerFactory factory( makeApi(), 2u );
@@ -1557,8 +1557,8 @@ TEST_CASE( "default worker factory releases endpoint admission before stopped ca
             replacement = std::move( retried.session );
             replacementError = std::move( retried.error );
             stopped = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     auto creation = factory.create( config( 805u ), std::move( callbacks ) );
@@ -1601,8 +1601,8 @@ TEST_CASE( "default worker factory drains cleanup without executor self-join",
         {
             std::lock_guard<std::mutex> lock( mutex );
             stopped = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
@@ -1653,8 +1653,8 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
         {
             std::lock_guard<std::mutex> lock( mutex );
             stopped = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     auto options = config( 811u );
@@ -1735,8 +1735,8 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
         {
             std::lock_guard<std::mutex> lock( mutex );
             stopped = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     auto options = config( 812u );

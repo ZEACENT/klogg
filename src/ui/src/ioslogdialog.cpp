@@ -271,11 +271,11 @@ void IosLogDialog::refreshDevices()
     const QPointer<IosLogDialog> dialog( this );
     connect( watcher, &QFutureWatcher<DeviceDiscoveryResult<IosDeviceInfo>>::finished, watcher,
              [ dialog, watcher ] {
+                 auto result = watcher->result();
                  watcher->deleteLater();
                  if ( dialog == nullptr ) {
                      return;
                  }
-                 auto result = watcher->result();
                  if ( dialog->pendingRefreshCount_ > 0 ) {
                      --dialog->pendingRefreshCount_;
                  }
