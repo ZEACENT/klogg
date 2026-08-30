@@ -131,8 +131,8 @@ struct FakeNative {
         {
             std::lock_guard<std::mutex> lock( receiveMutex );
             receiveInterrupted = true;
+            receiveChanged.notify_all();
         }
-        receiveChanged.notify_all();
         if ( receiveThread.joinable() ) {
             receiveThread.join();
         }
@@ -160,10 +160,8 @@ struct FakeNative {
 
     void releaseHandshake()
     {
-        {
-            std::lock_guard<std::mutex> lock( handshakeMutex );
-            handshakeReleased = true;
-        }
+        std::lock_guard<std::mutex> lock( handshakeMutex );
+        handshakeReleased = true;
         handshakeChanged.notify_all();
     }
 
@@ -205,10 +203,8 @@ struct FakeNative {
 
     void releaseCallbackReturn()
     {
-        {
-            std::lock_guard<std::mutex> lock( callbackMutex );
-            callbackReturnReleased = true;
-        }
+        std::lock_guard<std::mutex> lock( callbackMutex );
+        callbackReturnReleased = true;
         callbackChanged.notify_all();
     }
 
@@ -1345,8 +1341,8 @@ TEST_CASE( "cleanup waits for an in-flight native callback before stop and free"
     {
         std::lock_guard<std::mutex> lock( callbackMutex );
         releaseCallback = true;
+        callbackChanged.notify_all();
     }
-    callbackChanged.notify_all();
     callbackThread.join();
     cleanupThread.join();
 
@@ -1405,8 +1401,8 @@ TEST_CASE( "cleanup rejection falls back asynchronously and waits for active cal
     {
         std::lock_guard<std::mutex> lock( callbackMutex );
         releaseCallback = true;
+        callbackChanged.notify_all();
     }
-    callbackChanged.notify_all();
     callbackThread.join();
     const auto stoppedDeadline = std::chrono::steady_clock::now() + 2s;
     while ( !stopped.load() && std::chrono::steady_clock::now() < stoppedDeadline ) {
@@ -1542,10 +1538,8 @@ TEST_CASE( "default worker factory releases endpoint admission before stopped ca
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
     IosNativeStreamCallbacks callbacks;
     callbacks.ready = [ & ]( Generation ) {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            ready = true;
-        }
+        std::lock_guard<std::mutex> lock( mutex );
+        ready = true;
         changed.notify_all();
     };
     callbacks.bytesAvailable = []( Generation ) {};
@@ -1589,10 +1583,8 @@ TEST_CASE( "default worker factory drains cleanup without executor self-join",
     bool stopped = false;
     IosNativeStreamCallbacks callbacks;
     callbacks.ready = [ & ]( Generation ) {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            ready = true;
-        }
+        std::lock_guard<std::mutex> lock( mutex );
+        ready = true;
         changed.notify_all();
     };
     callbacks.bytesAvailable = []( Generation ) {};
@@ -1636,10 +1628,8 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
     bool destroyed = false;
     IosNativeStreamCallbacks callbacks;
     callbacks.ready = [ & ]( Generation ) {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            ready = true;
-        }
+        std::lock_guard<std::mutex> lock( mutex );
+        ready = true;
         changed.notify_all();
     };
     callbacks.bytesAvailable = [ & ]( Generation ) {
@@ -1681,8 +1671,8 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
         {
             std::lock_guard<std::mutex> lock( mutex );
             destroyed = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     } );
 
     bool destroyedPromptly = false;
@@ -1690,8 +1680,8 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
         std::unique_lock<std::mutex> lock( mutex );
         destroyedPromptly = changed.wait_for( lock, 250ms, [ & ] { return destroyed; } );
         releaseCallback = true;
+        changed.notify_all();
     }
-    changed.notify_all();
     CHECK( destroyedPromptly );
 
     callbackThread.join();
@@ -1716,10 +1706,8 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
     std::unique_ptr<IosNativeStreamSession> session;
     IosNativeStreamCallbacks callbacks;
     callbacks.ready = [ & ]( Generation ) {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            ready = true;
-        }
+        std::lock_guard<std::mutex> lock( mutex );
+        ready = true;
         changed.notify_all();
     };
     callbacks.bytesAvailable = [ & ]( Generation ) {
@@ -1727,8 +1715,8 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
         {
             std::lock_guard<std::mutex> lock( mutex );
             destroyed = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
     callbacks.failed = []( Generation, const ClassifiedIosNativeError& ) {};
     callbacks.stopped = [ & ]( Generation ) {
@@ -1784,10 +1772,8 @@ TEST_CASE( "default worker session may be destroyed from its stopped callback",
     std::unique_ptr<IosNativeStreamSession> session;
     IosNativeStreamCallbacks callbacks;
     callbacks.ready = [ & ]( Generation ) {
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-            ready = true;
-        }
+        std::lock_guard<std::mutex> lock( mutex );
+        ready = true;
         changed.notify_all();
     };
     callbacks.bytesAvailable = []( Generation ) {};
@@ -1801,8 +1787,8 @@ TEST_CASE( "default worker session may be destroyed from its stopped callback",
         {
             std::lock_guard<std::mutex> lock( mutex );
             destroyed = true;
+            changed.notify_all();
         }
-        changed.notify_all();
     };
 
     DefaultIosNativeStreamWorkerFactory factory( makeApi() );
@@ -1818,8 +1804,8 @@ TEST_CASE( "default worker session may be destroyed from its stopped callback",
     {
         std::lock_guard<std::mutex> lock( mutex );
         allowDestroy = true;
+        changed.notify_all();
     }
-    changed.notify_all();
     {
         std::unique_lock<std::mutex> lock( mutex );
         REQUIRE( changed.wait_for( lock, 2s, [ & ] { return destroyed; } ) );

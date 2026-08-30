@@ -85,23 +85,25 @@ QString keepAllPendingPath( const QString& basePath )
     return basePath + QStringLiteral( ".klogg-rolling-pending" );
 }
 
-std::optional<qint64> readKeepAllPendingIndex( const QString& basePath )
+bool readKeepAllPendingIndex( const QString& basePath, qint64& result )
 {
     QFile pending( keepAllPendingPath( basePath ) );
     if ( !pending.open( QIODevice::ReadOnly ) ) {
-        return std::nullopt;
+        return false;
     }
     const auto record = pending.readAll();
     if ( record.isEmpty() || !record.endsWith( '\n' ) ) {
-        return std::nullopt;
+        return false;
     }
     const auto line = record.left( record.size() - 1 );
     bool parsed = false;
     const auto index = QString::fromLatin1( line ).toLongLong( &parsed );
-    return parsed && index >= 0 && index != std::numeric_limits<qint64>::max()
-                   && line == QByteArray::number( index )
-               ? std::optional<qint64>{ index }
-               : std::nullopt;
+    if ( !parsed || index < 0 || index == std::numeric_limits<qint64>::max()
+         || line != QByteArray::number( index ) ) {
+        return false;
+    }
+    result = index;
+    return true;
 }
 
 bool writeKeepAllPendingIndex( const QString& basePath, qint64 index )
@@ -115,7 +117,7 @@ bool writeKeepAllPendingIndex( const QString& basePath, qint64 index )
 }
 
 std::optional<std::vector<qint64>> readKeepAllBackupIndices(
-    const QString& basePath, const std::optional<qint64>& pendingIndex )
+    const QString& basePath, const qint64* pendingIndex )
 {
     QFile manifest( keepAllManifestPath( basePath ) );
     if ( !manifest.open( QIODevice::ReadOnly ) ) {
@@ -126,8 +128,8 @@ std::optional<std::vector<qint64>> readKeepAllBackupIndices(
     if ( !contents.isEmpty() && !contents.endsWith( '\n' ) ) {
         const auto finalSeparator = contents.lastIndexOf( '\n' );
         const auto fragment = contents.mid( finalSeparator + 1 );
-        if ( !pendingIndex.has_value()
-             || !QByteArray::number( pendingIndex.value() ).startsWith( fragment ) ) {
+        if ( pendingIndex == nullptr
+             || !QByteArray::number( *pendingIndex ).startsWith( fragment ) ) {
             return std::nullopt;
         }
         contents.truncate( finalSeparator + 1 );
@@ -200,13 +202,15 @@ bool clearKeepAllOwnershipMetadata( const QString& basePath )
 
 std::optional<std::vector<qint64>> loadKeepAllBackupIndices( const QString& basePath )
 {
-    const auto pendingIndex = readKeepAllPendingIndex( basePath );
-    auto indices = readKeepAllBackupIndices( basePath, pendingIndex );
-    if ( !pendingIndex.has_value() ) {
+    qint64 pendingIndex = 0;
+    const auto hasPendingIndex = readKeepAllPendingIndex( basePath, pendingIndex );
+    auto indices = readKeepAllBackupIndices(
+        basePath, hasPendingIndex ? &pendingIndex : nullptr );
+    if ( !hasPendingIndex ) {
         return indices;
     }
 
-    const auto pendingPath = basePath + QStringLiteral( ".%1" ).arg( pendingIndex.value() );
+    const auto pendingPath = basePath + QStringLiteral( ".%1" ).arg( pendingIndex );
     if ( !QFile::exists( pendingPath ) ) {
         QFile::remove( keepAllPendingPath( basePath ) );
         return indices;
@@ -216,12 +220,12 @@ std::optional<std::vector<qint64>> loadKeepAllBackupIndices( const QString& base
     }
 
     const auto found = std::lower_bound( indices->cbegin(), indices->cend(),
-                                         pendingIndex.value() );
-    if ( found == indices->cend() || *found != pendingIndex.value() ) {
+                                         pendingIndex );
+    if ( found == indices->cend() || *found != pendingIndex ) {
         if ( found != indices->cend() ) {
             return std::nullopt;
         }
-        indices->push_back( pendingIndex.value() );
+        indices->push_back( pendingIndex );
     }
     if ( writeKeepAllBackupIndices( basePath, indices.value() ) ) {
         QFile::remove( keepAllPendingPath( basePath ) );

@@ -129,6 +129,46 @@ class FolderEngineQSignalSpyTest(unittest.TestCase):
         )
 
 
+class IosCompletionNotifyLifetimeTest(unittest.TestCase):
+    def check(self, text, name="tests/unit/ios_native_stream_worker_test.cpp"):
+        return lint._check_ios_completion_notify_lifetime(text, Path(name))
+
+    def test_completion_notify_after_unlock_is_flagged(self):
+        text = (
+            "{\n"
+            "    std::lock_guard<std::mutex> lock( mutex );\n"
+            "    destroyed = true;\n"
+            "}\n"
+            "changed.notify_all();\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 1)
+
+    def test_completion_notify_under_lock_is_allowed(self):
+        text = (
+            "{\n"
+            "    std::lock_guard<std::mutex> lock( mutex );\n"
+            "    destroyed = true;\n"
+            "    changed.notify_all();\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_other_files_are_ignored(self):
+        text = (
+            "{ std::lock_guard<std::mutex> lock( mutex ); stopped = true; }\n"
+            "changed.notify_all();\n"
+        )
+        self.assertEqual(self.check(text, name="tests/unit/other_test.cpp"), [])
+
+    def test_current_native_ios_worker_tests_are_clean(self):
+        path = REPO_ROOT / "tests" / "unit" / "ios_native_stream_worker_test.cpp"
+        self.assertEqual(
+            self.check(path.read_text(encoding="utf-8"), name=str(path)), []
+        )
+
+
 class QFileInfoDirectIncludeTest(unittest.TestCase):
     def check(self, text, name="src/utils/src/platform_files.cpp"):
         return lint._check_qfileinfo_direct_include(text, Path(name))

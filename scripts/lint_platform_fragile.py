@@ -1374,6 +1374,37 @@ def _check_folder_engine_qsignalspy(text: str, path: Path) -> list[tuple[int, st
     ]
 
 
+_IOS_COMPLETION_NOTIFY_AFTER_UNLOCK_RE = re.compile(
+    r"\{\s*std::lock_guard<std::mutex>\s+\w+\(\s*\w+\s*\);"
+    r"\s*(?:destroyed|stopped|ready)\s*=\s*true\s*;"
+    r"\s*\}\s*\w+\.notify_all\(\s*\)\s*;",
+    re.DOTALL,
+)
+
+
+def _check_ios_completion_notify_lifetime(text: str, path: Path) -> list[tuple[int, str]]:
+    """Keep completion notification inside the protected lifetime boundary.
+
+    Native iOS callbacks run on cleanup executors. If a test publishes its final
+    completion flag, unlocks, and only then notifies, the waiter may leave scope
+    and destroy the stack condition_variable before notify_all() enters libc.
+    PR #64's instrumented-Qt TSan leg caught this race repeatedly.
+    """
+    if path.name != "ios_native_stream_worker_test.cpp":
+        return []
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    return [
+        (
+            code.count("\n", 0, match.start()) + 1,
+            "Notify the native-iOS test completion condition while still holding "
+            "the mutex that protects the final completion flag. Unlocking first "
+            "allows the waiter to destroy the stack condition_variable before "
+            "notify_all() completes.",
+        )
+        for match in _IOS_COMPLETION_NOTIFY_AFTER_UNLOCK_RE.finditer(code)
+    ]
+
+
 _QFILEINFO_INCLUDE_RE = re.compile(
     r'^\s*#\s*include\s*[<"](?:QtCore/)?QFileInfo[>"]', re.MULTILINE
 )
@@ -1421,6 +1452,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "folder-engine-qsignalspy",
         "check": _check_folder_engine_qsignalspy,
+    },
+    {
+        "name": "ios-completion-notify-lifetime",
+        "check": _check_ios_completion_notify_lifetime,
     },
     {
         "name": "qfileinfo-direct-include",
