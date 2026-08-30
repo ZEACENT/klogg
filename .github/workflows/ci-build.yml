@@ -1353,11 +1353,23 @@ jobs:
           tar -czf "${{ runner.temp }}/${{ matrix.artifact }}.tar.gz" \
             -C "${{ runner.temp }}/ios-native-stack" .
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload iOS native stack
+        id: upload_ios_stack
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
+
+      - name: Retry iOS native stack upload after artifact-service failure
+        if: ${{ steps.upload_ios_stack.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          overwrite: true
 
       - name: Upload architecture-independent iOS source set
         if: ${{ matrix.architecture == 'arm64' }}

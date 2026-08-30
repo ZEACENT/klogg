@@ -664,7 +664,14 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         self.assertIn("tar -xzf", workflow)
         self.assertIn("prefetch_artifacts/ios-native-archive", workflow)
         producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]
-        self.assertNotIn("continue-on-error: true", producer)
+        for marker in (
+            "id: upload_ios_stack",
+            "continue-on-error: true",
+            "steps.upload_ios_stack.outcome == 'failure'",
+            "overwrite: true",
+        ):
+            self.assertIn(marker, producer)
+        self.assertEqual(producer.count("continue-on-error: true"), 1)
 
     def test_commit_archives_receive_locked_autotools_tarball_versions(self):
         build = required_text(BUILD_SCRIPT)
