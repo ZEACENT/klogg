@@ -76,6 +76,35 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         cls.superbuild = read_text(SUPERBUILD)
         cls.verify_script = read_text(VERIFY_SCRIPT)
 
+    def test_ci_reuses_only_the_exact_locked_adb_source_closure(self):
+        prefetch = section(
+            self.ci_build,
+            "  PrefetchAdbHelperSources:\n",
+            "  BuildAdbHelperLegalAssets:\n",
+        )
+        active = active_lines(prefetch)
+        exact_key = (
+            "adb-helper-sources-v1-${{ hashFiles("
+            "'packaging/adb/adb-helper.lock.json', "
+            "'scripts/prefetch_adb_helper_sources.py') }}"
+        )
+        self.assertIn("actions/cache/restore@", active)
+        self.assertIn("actions/cache/save@", active)
+        self.assertIn(exact_key, active)
+        self.assertNotIn("restore-keys:", active)
+        self.assertRegex(
+            active,
+            r"if:.*github\.event_name == 'push'.*cache-adb-sources\.outputs\.cache-hit != 'true'",
+        )
+        self.assertGreater(
+            active.index("python3 scripts/prefetch_adb_helper_sources.py"),
+            active.index("actions/cache/restore@"),
+        )
+        self.assertGreater(
+            active.index("actions/upload-artifact@"),
+            active.index("python3 scripts/prefetch_adb_helper_sources.py"),
+        )
+
     def test_fixture_distinguishes_buildability_from_native_device_qualification(self):
         classes = self.fixture.get("validation_classes")
         self.assertIsInstance(classes, dict)
@@ -351,7 +380,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         mac_arm_entry = section(
             self.ci_build,
             "artifacts_id: macos-arm-qt6",
-            "# Sanitizer legs:",
+            "    runs-on:",
         )
 
         self.assertEqual(target.get("arch"), expected["architecture"])
@@ -429,11 +458,13 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
     def test_windows_x86_package_never_consumes_the_x64_helper(self):
-        windows_matrix = section(self.ci_build, "  Windows:\n", "  ci-gate:\n")
+        windows_matrix = section(
+            self.ci_build, "  WindowsX86:\n", "  WindowsAsan:\n"
+        )
         x86_entry = section(
             windows_matrix,
             "artifacts_id: windows-x86-qt5",
-            "# Sanitizer leg:",
+            "    runs-on:",
         )
         matching_helper = re.search(r"^\s*adb_target:\s*windows-x86\s*$", x86_entry, re.MULTILINE)
         fail_closed = re.search(r"^\s*package:\s*false\s*$", x86_entry, re.MULTILINE)
@@ -499,10 +530,10 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
     def test_cross_job_helper_consumers_verify_checksum_envelope_and_attestation(self):
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  Linux:\n")
-        linux_job = section(self.ci_build, "  Linux:\n", "  Mac:\n")
-        mac_job = section(self.ci_build, "  Mac:\n", "  Windows:\n")
-        windows_job = section(self.ci_build, "  Windows:\n", "  ci-gate:\n")
+        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
+        linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
+        mac_job = section(self.ci_build, "  MacPackages:\n", "  MacSanitizers:\n")
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
 
         self.assertIn("actions/attest-build-provenance", helper_job)
         self.assertIn("adb-helper-${{ matrix.target }}.tar.gz", helper_job)
@@ -522,6 +553,19 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/usr/local/prefetch_artifacts/adb-helper",
             linux_job,
         )
+
+    def test_windows_uses_shared_verified_tar_extractor_for_native_paths(self):
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
+        extract = section(
+            windows_job,
+            "      - name: Extract mode-preserving ADB helper artifact\n",
+            "      - uses: actions/download-artifact@",
+        )
+        active = active_lines(extract)
+        self.assertIn("python3 scripts/extract_verified_tar.py", active)
+        self.assertIn('--archive "$archive"', active)
+        self.assertIn('--destination "$artifact_root"', active)
+        self.assertNotIn('tar -xzf "$archive"', active)
 
     def test_windows_rejects_unbundled_mingw_runtime_dlls(self):
         target = self.lock.get("targets", {}).get("windows-x86_64", {})
@@ -561,7 +605,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                     rf"^https://mirror\.msys2\.org/{repository}/.+\.pkg\.tar\.zst$",
                 )
                 self.assertIs(package.get("build_input"), False)
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  Linux:\n")
+        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
         windows_setup = section(
             helper_job,
             "Prepare pinned MinGW compiler for the MSYS2 source patch series",
@@ -580,10 +624,10 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
 
     def test_source_build_artifacts_are_disconnected_hashed_attested_and_target_bound(self):
         expected = self.fixture["artifact_envelope"]
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  Linux:\n")
-        linux_job = section(self.ci_build, "  Linux:\n", "  Mac:\n")
-        mac_job = section(self.ci_build, "  Mac:\n", "  Windows:\n")
-        windows_job = section(self.ci_build, "  Windows:\n", "  ci-gate:\n")
+        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
+        linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
+        mac_job = section(self.ci_build, "  MacPackages:\n", "  MacSanitizers:\n")
+        windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
         combined_build = "\n".join((helper_job, self.build_action, self.superbuild))
         failures = []
 

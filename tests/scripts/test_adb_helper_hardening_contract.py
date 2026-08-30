@@ -591,11 +591,11 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             published_name,
             archive_hash,
             f"/releases/download/v26.08.27/{published_name}",
-            f"/releases/download/continuous/{published_name}",
-            "rolling",
             "shasum -a 256",
         ):
             self.assertIn(term, offer)
+        self.assertNotIn("/releases/download/continuous/", offer)
+        self.assertNotIn("rolling", offer)
 
 
 class AdbHelperBinaryInspectionContractTest(unittest.TestCase):

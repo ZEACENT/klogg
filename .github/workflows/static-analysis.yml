@@ -1,17 +1,15 @@
 name: "Static analysis"
 
-# Per-PR clang-tidy + cppcheck gate.  Configures once
+# Event-aware clang-tidy + cppcheck gate. Configures once
 # (CMAKE_EXPORT_COMPILE_COMMANDS) to produce build_root/compile_commands.json,
 # then runs two independent analyses:
-#   * clang-tidy via clang-tidy-diff on PRs with a CHANGED-LINES-ONLY policy:
-#     strict on NEW code while ignoring the pre-existing style findings (hundreds
-#     of them across transitively-included headers) that make whole-file
-#     --warnings-as-errors unworkable on a legacy codebase.  On push-to-master /
-#     workflow_dispatch the full src/ audit runs NON-FATAL (report-only).
+#   * clang-tidy via clang-tidy-diff on PRs, pushes, and manual runs with a
+#     CHANGED-LINES-ONLY policy that is strict on new code. A weekly schedule
+#     performs the legacy full-source report-only audit outside the merge path.
 #   * cppcheck --enable=warning,style --error-exitcode=1 over the first-party
 #     src/ compile units.
-# cppcheck returning non-zero, or a clang-tidy-diff finding on a changed PR
-# line, fails the job.  Setup mirrors the Coverage workflow (gcc-13 leg +
+# cppcheck returning non-zero, or a clang-tidy-diff finding on a changed
+# PR/push/manual line, fails the job. Setup mirrors Coverage (gcc-13 leg +
 # agent-setup for Qt/Boost/CPM cache).
 
 on:
@@ -34,20 +32,35 @@ on:
       - README.md
       - .gitignore
   workflow_dispatch:
+    inputs:
+      analysis-mode:
+        description: Run the full report-only audit, or a strict diff from an explicit base SHA
+        required: true
+        default: full-report
+        type: choice
+        options:
+          - full-report
+          - changed-strict
+      base-sha:
+        description: Required only for changed-strict manual analysis
+        required: false
+        type: string
+  schedule:
+    - cron: '17 4 * * 0'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Full audits and strict event qualification must never cancel one another.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   static-analysis:
     name: "clang-tidy + cppcheck"
     runs-on: ubuntu-24.04
-    # Historical full-run ceiling is ~22 min (cold cache); 45 min leaves
-    # headroom while bounding runner-side apt/network hangs that would
-    # otherwise sit in_progress forever (2026-08-19: two jobs spent 30+ min
-    # stuck in apt-get on dead mirror connections).
-    timeout-minutes: 45
+    # Strict changed-scope runs normally finish well below this bound. The
+    # weekly full report-only audit gets enough cold-cache headroom without
+    # forcing master pushes through the same whole-tree workload.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -62,16 +75,54 @@ jobs:
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
       KLOGG_BUILD_ROOT: build_root
-      # Sentry/Crashpad expands the CPM dependency set. Keep this cache mutable
-      # independently from the smaller default profile used by Coverage.
-      KLOGG_CPM_CACHE_KEY_SUFFIX: -sentry-vectorscan
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history so the clang-tidy-diff step can diff the PR branch
           # against its exact base SHA (changed-LINES-ONLY policy).
           fetch-depth: 0
+
+      - name: Resolve authoritative analysis base
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          MANUAL_MODE: ${{ inputs.analysis-mode }}
+          MANUAL_BASE_SHA: ${{ inputs.base-sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base_sha="$PR_BASE_SHA" ;;
+            push) base_sha="$PUSH_BASE_SHA" ;;
+            workflow_dispatch)
+              if [ "$MANUAL_MODE" = "full-report" ]; then
+                echo "KLOGG_ANALYSIS_MODE=full-report" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              test "$MANUAL_MODE" = "changed-strict" || {
+                echo "::error::unsupported manual analysis mode: $MANUAL_MODE"
+                exit 1
+              }
+              base_sha="$MANUAL_BASE_SHA"
+              ;;
+            schedule)
+              echo "KLOGG_ANALYSIS_MODE=full-report" >> "$GITHUB_ENV"
+              exit 0
+              ;;
+            *) echo "::error::unsupported static-analysis event: $EVENT_NAME"; exit 1 ;;
+          esac
+          test -n "$base_sha" && test "$base_sha" != "0000000000000000000000000000000000000000" || {
+            echo "::error::changed-strict analysis requires an authoritative non-zero base SHA"
+            exit 1
+          }
+          if ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$base_sha"
+          fi
+          git cat-file -e "$base_sha^{commit}"
+          echo "KLOGG_ANALYSIS_BASE=$base_sha" >> "$GITHUB_ENV"
+          echo "KLOGG_ANALYSIS_MODE=changed-strict" >> "$GITHUB_ENV"
 
       - name: Install gcc-13, clang-tidy and cppcheck
         run: |
@@ -99,67 +150,6 @@ jobs:
 
       - uses: ./.github/actions/agent-setup
 
-      - name: Build clang-tidy review scope
-        id: targets
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # CHANGED-LINES-ONLY policy: source and header scopes are independent.
-            # A mixed PR must run both passes so a changed header included only by
-            # unchanged translation units cannot bypass analysis.
-            BASE='${{ github.event.pull_request.base.sha }}'
-            changed_paths_file=$(mktemp)
-            trap 'rm -f "$changed_paths_file"' EXIT
-            if ! git -c core.quotePath=false diff --name-only -z --diff-filter=d "$BASE" HEAD -- src/ \
-                 > "$changed_paths_file"; then
-              echo "::error::failed to discover changed C/C++ analysis paths"
-              exit 1
-            fi
-            mapfile -d '' -t changed_paths < "$changed_paths_file"
-            source_count=0
-            header_count=0
-            for file in "${changed_paths[@]}"; do
-              if [[ "$file" == *[[:cntrl:]]* || "$file" == *'"'* || "$file" == *'\'* ]]; then
-                echo "::error file=$file::C/C++ analysis does not support quoted/control characters in paths"
-                exit 1
-              fi
-              case "${file,,}" in
-                *.c|*.cc|*.cpp|*.cxx) ((source_count+=1)) ;;
-                *.h|*.hh|*.hpp|*.hxx) ((header_count+=1)) ;;
-              esac
-            done
-            if ! git -c core.quotePath=false diff -U0 "$BASE" HEAD -- src/ \
-                 > tidy_patch.diff; then
-              echo "::error::failed to build the changed-line analysis patch"
-              exit 1
-            fi
-            echo "source_count=$source_count" >> "$GITHUB_OUTPUT"
-            echo "header_count=$header_count" >> "$GITHUB_OUTPUT"
-            header_lines=false
-
-            if [ "$header_count" -gt 0 ]; then
-              python3 scripts/clang_tidy_header_filter.py tidy_patch.diff > tidy_header_filter.json
-              if [ "$(cat tidy_header_filter.json)" != "[]" ]; then
-                header_lines=true
-              fi
-              echo "clang-tidy: $header_count changed header(s); checking added lines through all configured first-party TUs."
-            fi
-            echo "header_lines=$header_lines" >> "$GITHUB_OUTPUT"
-
-            if [ "$source_count" -eq 0 ] && [ "$header_count" -eq 0 ]; then
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "No changed C/C++ files under src/; skipping clang-tidy."
-            else
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              echo "clang-tidy-diff: $source_count changed src/ TU(s)."
-            fi
-          else
-            # push-to-master / workflow_dispatch: audit every configured first-party
-            # translation unit, NON-FATAL (report-only), so pre-existing findings
-            # never block the branch.
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Configure (generate compile_commands.json)
         shell: bash
         run: |
@@ -177,7 +167,6 @@ jobs:
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build first-party clang-tidy TU list
-        if: steps.targets.outputs.skip != 'true'
         shell: bash
         run: |
           python3 scripts/first_party_compile_units.py \
@@ -188,35 +177,26 @@ jobs:
           echo "clang-tidy: configured first-party TU list is ready."
 
       - name: Generate Qt UI headers for analysis
-        if: steps.targets.outputs.skip != 'true'
         shell: bash
         run: cmake --build "$KLOGG_BUILD_ROOT" --target klogg_ui_autogen -j"$(nproc)"
 
-      - name: Run clang-tidy (changed lines on PRs; report-only on master)
-        if: steps.targets.outputs.skip != 'true'
+      - name: Run clang-tidy
         shell: bash
         run: |
-          set -u
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # Use the same PR-base-aware changed-line gate locally and in CI.
-            # The helper runs clang-tidy-diff for changed source files, analyzes
-            # added header lines through every configured first-party TU, and
-            # fails only for diagnostics in this PR's changed src/ paths.
-            python3 scripts/run_changed_clang_tidy.py \
-              --base '${{ github.event.pull_request.base.sha }}' \
-              --build-dir "$KLOGG_BUILD_ROOT" \
-              --clang-tidy-diff "$CLANG_TIDY_DIFF" \
-              --jobs "$(nproc)"
-          else
-            # Full src/ audit on push-to-master / workflow_dispatch is
-            # report-only for diagnostics because warnings-as-errors is absent,
-            # but compiler/configuration/tool failures still fail the job.
+          set -euo pipefail
+          if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then
             export KLOGG_BUILD_ROOT
             xargs -0 -P "$(nproc)" -n 1 bash -c '
               clang-tidy -p "$KLOGG_BUILD_ROOT" \
                 --extra-arg=-Wno-unknown-warning-option "$1"
             ' _ < tidy_files.nul
-            echo "clang-tidy: full src/ audit complete (findings report-only)."
+            echo "clang-tidy: scheduled full src/ audit complete (findings report-only)."
+          else
+            python3 scripts/run_changed_clang_tidy.py \
+              --base "$KLOGG_ANALYSIS_BASE" \
+              --build-dir "$KLOGG_BUILD_ROOT" \
+              --clang-tidy-diff "$CLANG_TIDY_DIFF" \
+              --jobs "$(nproc)"
           fi
 
       - name: Run cppcheck (warning+style over src/)
@@ -230,14 +210,14 @@ jobs:
           # are cppcheck Qt/preprocessor limitations. Every legacy warning/style
           # baseline entry is location-qualified in tests/cppcheck_suppressions.txt
           # so the same diagnostic ID at any new location still fails the gate.
-          BASE='${{ github.event.pull_request.base.sha }}'
+          BASE="${KLOGG_ANALYSIS_BASE:-}"
           # Filter compile_commands.json to first-party src/ TUs (cppcheck's -i
           # does not exclude paths under --project, so we hand it a filtered DB).
           python3 -c "import json,os,sys; src=os.path.abspath(os.path.join(os.getcwd(),'src'))+os.sep; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if g(e).startswith(src)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)}/{len(db)} first-party src/ TUs')" "$KLOGG_BUILD_ROOT/compile_commands.json" /tmp/cc_src.json
 
-          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$BASE" ]; then
-            # PR: scope cppcheck to THIS PR's changed src/ TUs (consistent with
-            # the clang-tidy-diff changed-lines policy) so pre-existing findings
+          if [ "$KLOGG_ANALYSIS_MODE" = "changed-strict" ] && [ -n "$BASE" ]; then
+            # PRs and pushes scope cppcheck to their authoritative changed src/
+            # TUs so the same strict policy protects both event paths.
             # in UNCHANGED files -- e.g. a redundantInitialization false positive
             # in styles.cpp's theme logic -- don't block the gate. New issues in
             # touched files are still caught (the whole changed TU is checked).
@@ -273,8 +253,8 @@ jobs:
             fi
             CC_EXTRA="--error-exitcode=1"
           else
-            # push-to-master / workflow_dispatch: full src/ audit, REPORT-ONLY
-            # (no --error-exitcode) so pre-existing findings never block master.
+            # The weekly whole-tree audit reports legacy findings without making
+            # them a merge gate; configuration and tool failures remain fatal.
             CC_PROJECT=/tmp/cc_src.json
             CC_EXTRA=""
           fi

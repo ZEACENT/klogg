@@ -12,8 +12,35 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-PINNED = "11d5960a326750d5838078e36cf38b85af677262"
-CODEQL_PINNED = "4187e74d05793876e9989daffde9c3e66b4acd07"
+PINNED = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+NODE20_CHECKOUT_PINNED = "11d5960a326750d5838078e36cf38b85af677262"
+CACHE_PINNED = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+UPLOAD_ARTIFACT_PINNED = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+DOWNLOAD_ARTIFACT_PINNED = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+CODEQL_PINNED = "cdf488f595d80d6e07e03d4674febd5ab45fa938"
+NODE20_CODEQL_PINNED = "4187e74d05793876e9989daffde9c3e66b4acd07"
+
+
+def secure_codeql_workflow() -> str:
+    return f"""\
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  analyze:
+    timeout-minutes: 30
+    steps:
+      - uses: github/codeql-action/init@{CODEQL_PINNED}
+        with:
+          languages: c-cpp
+          build-mode: manual
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - run: cmake --build build -t klogg
+      - uses: github/codeql-action/analyze@{CODEQL_PINNED} # v4.37.9
+"""
 
 
 class CiQualityLintTest(unittest.TestCase):
@@ -98,6 +125,77 @@ class CiQualityLintTest(unittest.TestCase):
         )
         self.assertEqual(issues, [])
 
+    def test_all_remote_actions_require_reviewed_commit_shas(self):
+        path = pathlib.Path(".github/workflows/test.yml")
+        bad_refs = (
+            "actions/cache@v5",
+            "actions/cache@v5 # actions/cache@" + CACHE_PINNED,
+            ">-\n      actions/cache@v5",
+        )
+        for action_ref in bad_refs:
+            with self.subTest(action_ref=action_ref):
+                issues = MODULE.check_checkout_blocks(
+                    path,
+                    "steps:\n  - uses: " + action_ref + "\n",
+                )
+                self.assertTrue(
+                    any("remote actions must use a reviewed 40-char SHA" in issue for issue in issues),
+                    issues,
+                )
+
+    def test_sha_pinned_but_unreviewed_remote_action_is_rejected(self):
+        path = pathlib.Path(".github/workflows/test.yml")
+        issues = MODULE.check_checkout_blocks(
+            path,
+            f"steps:\n  - uses: actions/cache@{'a' * 40}\n",
+        )
+        self.assertTrue(
+            any("remote action SHA is not the reviewed revision" in issue for issue in issues),
+            issues,
+        )
+
+    def test_current_remote_action_sha_and_local_actions_are_accepted(self):
+        path = pathlib.Path(".github/workflows/test.yml")
+        text = (
+            "steps:\n"
+            f"  - uses: actions/cache@{CACHE_PINNED}\n"
+            f"  - uses: actions/upload-artifact@{UPLOAD_ARTIFACT_PINNED}\n"
+            f"  - uses: actions/download-artifact@{DOWNLOAD_ARTIFACT_PINNED}\n"
+            "  - uses: ./.github/actions/agent-setup\n"
+        )
+        self.assertEqual(MODULE.check_checkout_blocks(path, text), [])
+
+    def test_known_node20_action_generations_are_rejected_even_when_sha_pinned(self):
+        path = pathlib.Path(".github/workflows/test.yml")
+        node20_actions = (
+            (
+                f"actions/checkout@{NODE20_CHECKOUT_PINNED}",
+                "    with:\n      persist-credentials: false\n",
+            ),
+            (
+                "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+                "",
+            ),
+            (
+                "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+                "",
+            ),
+            (
+                "ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+                "",
+            ),
+        )
+        for action_ref, suffix in node20_actions:
+            with self.subTest(action_ref=action_ref):
+                issues = MODULE.check_checkout_blocks(
+                    path,
+                    f"steps:\n  - uses: {action_ref}\n{suffix}",
+                )
+                self.assertTrue(
+                    any("known Node20 action generation" in issue for issue in issues),
+                    issues,
+                )
+
     def test_workflow_job_needs_parses_inline_and_block_lists(self):
         workflow = """\
 jobs:
@@ -168,6 +266,155 @@ jobs:
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
 
+    def test_ci_build_splits_package_and_package_free_platform_jobs(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        needs = MODULE.workflow_job_needs(workflow)
+        expected_package_free = {
+            "LinuxSanitizers": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchCmakeInstaller",
+            },
+            "LinuxTsan": {"SaveVersion", "PrefetchCpmCache"},
+            "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost"},
+            "WindowsX86": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "PrefetchOpenSsl",
+                "PrefetchWindowsTools",
+            },
+            "WindowsAsan": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "PrefetchWindowsTools",
+            },
+        }
+        mobile_jobs = {
+            "BuildAdbHelpers",
+            "BuildAdbLinuxArm64",
+            "BuildAdbWindowsX64",
+            "BuildAdbMacX64",
+            "BuildAdbMacArm64",
+            "BuildIosNativeStacks",
+            "BuildIosNativeArm64",
+        }
+        for job, expected_needs in expected_package_free.items():
+            with self.subTest(job=job):
+                self.assertEqual(needs.get(job), expected_needs)
+                self.assertTrue(
+                    MODULE.workflow_job_ancestors(needs, job).isdisjoint(mobile_jobs)
+                )
+
+        expected_package_jobs = {
+            "LinuxPackages": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchLinuxDeployQt",
+                "PrefetchCmakeInstaller",
+                "BuildAdbHelpers",
+            },
+            "MacPackages": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "BuildAdbMacX64",
+                "BuildIosNativeStacks",
+            },
+            "MacArmPackages": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "BuildAdbMacArm64",
+                "BuildIosNativeArm64",
+            },
+            "WindowsPackages": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "PrefetchWindowsTools",
+                "BuildAdbWindowsX64",
+            },
+        }
+        for job, expected_needs in expected_package_jobs.items():
+            with self.subTest(job=job):
+                self.assertEqual(needs.get(job), expected_needs)
+                self.assertEqual(
+                    MODULE.workflow_job_ancestors(needs, job) & mobile_jobs,
+                    expected_needs & mobile_jobs,
+                )
+
+        self.assertEqual(
+            needs.get("ci-gate"),
+            mobile_jobs
+            | {
+                "LinuxPackages",
+                "LinuxSanitizers",
+                "LinuxTsan",
+                "MacPackages",
+                "MacArmPackages",
+                "MacSanitizers",
+                "WindowsPackages",
+                "WindowsX86",
+                "WindowsAsan",
+            },
+        )
+
+    def test_artifact_parser_resolves_anchored_platform_steps(self):
+        workflow = f"""\
+jobs:
+  Producer:
+    steps:
+      - uses: actions/upload-artifact@{UPLOAD_ARTIFACT_PINNED}
+        with:
+          name: locked-sources
+          path: sources
+  Package:
+    needs: Producer
+    steps: &platform_steps
+      - uses: actions/download-artifact@{DOWNLOAD_ARTIFACT_PINNED}
+        with:
+          name: locked-sources
+          path: sources
+  Sanitizer:
+    needs: Producer
+    steps: *platform_steps
+"""
+        self.assertEqual(
+            MODULE.workflow_artifact_actions(workflow),
+            {
+                "Producer": {"uploads": {"locked-sources"}, "downloads": set()},
+                "Package": {"uploads": set(), "downloads": {"locked-sources"}},
+                "Sanitizer": {"uploads": set(), "downloads": {"locked-sources"}},
+            },
+        )
+
+    def test_unknown_or_spoofed_steps_aliases_fail_closed(self):
+        unknown = """\
+jobs:
+  Consumer:
+    steps: *missing_steps
+"""
+        self.assertIn(
+            "workflow job Consumer uses unknown steps alias missing_steps",
+            MODULE.ci_build_workflow_issues(unknown),
+        )
+
+        comment_spoof = """\
+jobs:
+  Producer:
+    # steps: &missing_steps
+    steps:
+      - run: true
+  Consumer:
+    steps: *missing_steps
+"""
+        self.assertIn(
+            "workflow job Consumer uses unknown steps alias missing_steps",
+            MODULE.ci_build_workflow_issues(comment_spoof),
+        )
+
     def test_ci_build_rejects_a_restored_version_proxy_gate(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
@@ -178,7 +425,7 @@ jobs:
         self.assertNotEqual(mutated, workflow)
         self.assertTrue(
             any(
-                "SaveVersion must need exactly []" in issue
+                "SaveVersion must need exactly ['ReleaseQualificationPreflight']" in issue
                 for issue in MODULE.ci_build_workflow_issues(mutated)
             )
         )
@@ -186,18 +433,18 @@ jobs:
     def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "PrefetchOpenSsl, PrefetchWindowsTools, BuildAdbHelpers",
-            "PrefetchOpenSsl, BuildAdbHelpers",
+            "PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools",
+            "PrefetchBoost, PrefetchOpenSsl",
             1,
         )
         self.assertNotEqual(mutated, workflow)
         issues = MODULE.ci_build_workflow_issues(mutated)
         self.assertTrue(
-            any("Windows must need exactly" in issue for issue in issues),
+            any("WindowsX86 must need exactly" in issue for issue in issues),
             issues,
         )
         self.assertIn(
-            "CI artifact msys2-tools producer PrefetchWindowsTools must be an ancestor of Windows",
+            "CI artifact msys2-tools producer PrefetchWindowsTools must be an ancestor of WindowsX86",
             issues,
         )
 
@@ -230,6 +477,28 @@ jobs:
             MODULE.ci_build_workflow_issues(mutated),
         )
 
+    def test_appimage_package_row_does_not_enable_cpack_or_dummy_install_checks(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        row = workflow.split("- os: ubuntu_appimage", 1)[1].split("\n\n    runs-on:", 1)[0]
+        self.assertIn("cpack_gen:\n", row)
+        self.assertIn("check_container:\n", row)
+        self.assertIn("check_command:\n", row)
+        self.assertNotIn("NONE", row)
+        self.assertNotIn("unused", row)
+
+    def test_ci_build_rejects_unmodeled_jobs_outside_ci_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow + """\
+  UnmodeledPlatform:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: exit 1
+"""
+        self.assertIn(
+            "CI build workflow contains unmodeled jobs outside the reviewed gate",
+            MODULE.ci_build_workflow_issues(mutated),
+        )
+
     def test_ci_build_gate_must_run_after_failures(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace("    if: always()\n", "    if: success()\n", 1)
@@ -242,31 +511,32 @@ jobs:
     def test_ci_build_platform_jobs_must_not_continue_on_error(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "  Linux:\n",
-            "  Linux:\n    continue-on-error: true\n",
+            "  LinuxSanitizers:\n",
+            "  LinuxSanitizers:\n    continue-on-error: true\n",
             1,
         )
         self.assertNotEqual(mutated, workflow)
         self.assertIn(
-            "CI build job Linux must not continue on error",
+            "CI build job LinuxSanitizers must not continue on error",
             MODULE.ci_build_workflow_issues(mutated),
         )
 
-    def test_ci_build_requires_publication_source_artifact_downloads(self):
+    def test_ci_build_has_no_release_publication_job(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        marker = "      - name: Download architecture-independent iOS source assets\n"
-        start = workflow.index(marker)
-        suffix = workflow[start:]
-        mutated_suffix = suffix.replace(
-            "          name: ios-native-source-assets\n",
-            "          name: missing-ios-native-source-assets\n",
-            1,
+        self.assertNotIn(
+            "release publication must run outside the required CI workflow",
+            MODULE.ci_build_workflow_issues(workflow),
         )
-        self.assertNotEqual(mutated_suffix, suffix)
-        issues = MODULE.ci_build_workflow_issues(workflow[:start] + mutated_suffix)
+
+        mutated = workflow + """\
+  CreatePreRelease:
+    needs: [ci-gate]
+    steps:
+      - uses: softprops/action-gh-release@0123456789012345678901234567890123456789
+"""
         self.assertIn(
-            "CI job CreatePreRelease must download artifact ios-native-source-assets",
-            issues,
+            "release publication must run outside the required CI workflow",
+            MODULE.ci_build_workflow_issues(mutated),
         )
 
     def test_disabled_artifact_steps_do_not_satisfy_ownership(self):
@@ -315,12 +585,12 @@ jobs:
     def test_ci_build_rejects_artifact_conditions_outside_supported_triggers(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         old = (
-            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
             "        with:\n"
             "          name: cpm-cache\n"
         )
         new = (
-            "      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
+            "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n"
             "        if: ${{ github.event_name == 'schedule' }}\n"
             "        with:\n"
             "          name: cpm-cache\n"
@@ -337,12 +607,248 @@ jobs:
     def test_explicit_false_continue_on_error_remains_fail_closed(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "  Linux:\n",
-            "  Linux:\n    continue-on-error: false\n",
+            "  LinuxSanitizers:\n",
+            "  LinuxSanitizers:\n    continue-on-error: false\n",
             1,
         )
         self.assertNotEqual(mutated, workflow)
         self.assertEqual(MODULE.ci_build_workflow_issues(mutated), [])
+
+    def test_windows_package_preparation_and_artifact_upload_run_on_pull_requests(self):
+        message = "Windows package preparation and artifact upload must run on pull requests"
+        good = """\
+jobs:
+  WindowsPackages:
+    strategy:
+      matrix:
+        config:
+          - package: true
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: ${{ matrix.config.package != false }}
+        with:
+          name: adb-helper-${{ matrix.config.adb_target }}
+      - uses: ./.github/actions/agent-package-win
+        if: ${{ matrix.config.package != false }}
+      - name: Package tarball for upload
+        if: ${{ matrix.config.package != false }}
+        run: tar -czf packages-windows.tar.gz packages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ matrix.config.package != false }}
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+
+        bad = good.replace(
+            "if: ${{ matrix.config.package != false }}",
+            "if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}",
+            1,
+        )
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+        spoofed = bad.replace(
+            "  WindowsPackages:\n",
+            "  WindowsPackages:\n    # Package preparation runs on pull_request\n",
+            1,
+        )
+        self.assertIn(message, MODULE.ci_build_workflow_issues(spoofed))
+
+        job_level = good.replace(
+            "  WindowsPackages:\n",
+            "  WindowsPackages:\n    if: ${{ github.event_name == 'push' }}\n",
+            1,
+        )
+        self.assertIn(message, MODULE.ci_build_workflow_issues(job_level))
+
+    def test_windows_package_composite_must_not_hide_validation_by_event(self):
+        message = "Windows package composite must remain event-neutral"
+        good = """\
+runs:
+  using: composite
+  steps:
+    - run: package-windows
+      shell: pwsh
+"""
+        self.assertEqual(MODULE.windows_package_action_issues(good), [])
+        bad = good.replace(
+            "    - run: package-windows\n",
+            "    - if: ${{ github.event_name == 'push' }}\n      run: package-windows\n",
+        )
+        self.assertIn(message, MODULE.windows_package_action_issues(bad))
+
+    def test_required_ci_validation_is_decoupled_from_signing_and_notarization(self):
+        message = "required CI validation must not require signing or notarization secrets"
+        good = """\
+jobs:
+  MacValidation:
+    steps:
+      - uses: ./.github/actions/agent-build
+      - uses: ./.github/actions/agent-run-tests
+  ci-gate:
+    needs: [MacValidation]
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+
+        bad = good.replace(
+            "      - uses: ./.github/actions/agent-run-tests\n",
+            "      - uses: ./.github/actions/agent-run-tests\n"
+            "      - uses: ./.github/actions/agent-package-mac\n"
+            "        with:\n"
+            "          codesign-identity: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}\n"
+            "          notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}\n",
+            1,
+        )
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+    def test_release_secrets_are_confined_to_explicit_dispatch_qualification(self):
+        message = "required CI validation must not require signing or notarization secrets"
+        good = """\
+on:
+  workflow_dispatch:
+    inputs:
+      qualification-mode:
+        type: choice
+        options:
+          - validation
+          - release
+jobs:
+  MacPackages:
+    steps:
+      - uses: ./.github/actions/agent-package-mac
+        with:
+          qualification-mode: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release' && 'release' || 'validation' }}
+          codesign-identity: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+        bad = good.replace(
+            "${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release' && 'release' || 'validation' }}",
+            "validation",
+            1,
+        )
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+    def test_publication_runs_outside_the_required_ci_workflow(self):
+        message = "release publication must run outside the required CI workflow"
+        good = """\
+jobs:
+  ci-gate:
+    steps:
+      - run: test validation-only = validation-only
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+
+        bad = good + """\
+  CreatePreRelease:
+    needs: [ci-gate]
+    steps:
+      - uses: softprops/action-gh-release@0123456789012345678901234567890123456789
+"""
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+    def test_package_free_sanitizer_aggregates_do_not_need_mobile_producers(self):
+        message = "package-free CI legs must not depend on mobile artifact producers"
+        good = """\
+jobs:
+  BuildAdbHelpers:
+    steps:
+      - run: build-mobile-helper
+  LinuxPackages:
+    needs: [BuildAdbHelpers]
+    strategy:
+      matrix:
+        config:
+          - package: true
+  LinuxSanitizers:
+    strategy:
+      matrix:
+        config:
+          - sanitizer: address
+            package: false
+  ci-gate:
+    needs: [LinuxPackages, LinuxSanitizers]
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+
+        bad = good.replace(
+            "  LinuxSanitizers:\n",
+            "  LinuxSanitizers:\n    needs: [BuildAdbHelpers]\n",
+            1,
+        )
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+        comment_spoof = bad.replace(
+            "    needs: [BuildAdbHelpers]\n",
+            "    # package-free legs do not need BuildAdbHelpers\n"
+            "    needs: [BuildAdbHelpers]\n",
+            1,
+        )
+        self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
+
+    def test_ccache_keys_are_bounded_and_do_not_use_run_ids(self):
+        message = "ccache keys must be bounded and must not use github.run_id"
+        good = """\
+jobs:
+  Linux:
+    steps:
+      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: linux-ccache-v2-${{ hashFiles('CMakeLists.txt', '3rdparty/CMakeLists.txt') }}
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+
+        bad = good.replace(
+            "${{ hashFiles('CMakeLists.txt', '3rdparty/CMakeLists.txt') }}",
+            "${{ github.run_id }}",
+            1,
+        )
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+
+        comment_spoof = bad.replace(
+            "          key:",
+            "          # bounded key: hashFiles('CMakeLists.txt')\n          key:",
+            1,
+        )
+        self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
+
+    def test_ccache_refreshes_daily_without_unbounded_per_run_keys(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(workflow.count("current={today.isoformat()}"), 2)
+        self.assertEqual(workflow.count("days=1"), 2)
+        self.assertNotIn("isocalendar()", workflow)
+
+    def test_ccache_is_saved_only_after_tests_and_package_qualification(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        linux = workflow.split("  LinuxPackages:", 1)[1].split("\n  LinuxSanitizers:", 1)[0]
+        self.assertGreater(
+            linux.index("- name: Save ccache for the Linux build"),
+            linux.index("- uses: ./.github/actions/docker-run-tests"),
+        )
+        mac = workflow.split("  MacPackages:", 1)[1].split("\n  MacArmPackages:", 1)[0]
+        self.assertGreater(
+            mac.index("- name: Save ccache for the macOS build"),
+            mac.index("- uses: ./.github/actions/agent-package-mac"),
+        )
+
+    def test_ccache_entries_are_capped_to_the_repository_budget(self):
+        message = "ccache entries must be capped at 250M"
+        good = """\
+jobs:
+  Linux:
+    steps:
+      - run: ccache --max-size=250M && ccache --cleanup
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: linux-ccache-v2-week
+"""
+        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+        bad = good.replace("--max-size=250M", "--max-size=500M")
+        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
 
     def test_codeql_requires_pinned_matching_actions_and_timeout(self):
         insecure = """\
@@ -359,56 +865,80 @@ jobs:
         self.assertTrue(any("timeout-minutes" in issue for issue in issues))
 
     def test_codeql_rejects_mismatched_action_revisions(self):
-        text = f"""\
-jobs:
-  analyze:
-    timeout-minutes: 30
-    steps:
-      - uses: github/codeql-action/init@{CODEQL_PINNED}
-      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      - uses: github/codeql-action/analyze@{'a' * 40}
-"""
+        text = secure_codeql_workflow().replace(
+            f"github/codeql-action/analyze@{CODEQL_PINNED}",
+            f"github/codeql-action/analyze@{'a' * 40}",
+            1,
+        )
         issues = MODULE.codeql_workflow_issues(text)
         self.assertEqual(len(issues), 1)
         self.assertIn("same reviewed SHA", issues[0])
 
     def test_codeql_rejects_continue_on_error(self):
-        text = f"""\
-jobs:
-  analyze:
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - uses: github/codeql-action/init@{CODEQL_PINNED}
-      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
-"""
+        text = secure_codeql_workflow().replace(
+            "    timeout-minutes: 30\n",
+            "    timeout-minutes: 30\n    continue-on-error: true\n",
+            1,
+        )
         issues = MODULE.codeql_workflow_issues(text)
         self.assertEqual(len(issues), 1)
         self.assertIn("continue-on-error", issues[0])
 
     def test_secure_codeql_workflow_is_accepted(self):
-        text = f"""\
-jobs:
-  analyze:
-    timeout-minutes: 30
-    steps:
-      - uses: github/codeql-action/init@{CODEQL_PINNED}
-      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
-"""
-        self.assertEqual(MODULE.codeql_workflow_issues(text), [])
+        self.assertEqual(MODULE.codeql_workflow_issues(secure_codeql_workflow()), [])
+
+    def test_codeql_runs_on_master_pushes(self):
+        message = "CodeQL workflow must run on pushes to master"
+        good = secure_codeql_workflow()
+        self.assertNotIn(message, MODULE.codeql_workflow_issues(good))
+
+        bad = good.replace("  push:\n    branches: [master]\n", "", 1)
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.codeql_workflow_issues(bad))
+
+        comment_spoof = bad.replace(
+            "on:\n",
+            "on:\n  # push:\n  #   branches: [master]\n",
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(comment_spoof))
+
+    def test_codeql_init_uses_explicit_manual_build_mode(self):
+        message = "CodeQL init must set build-mode: manual"
+        good = secure_codeql_workflow()
+        self.assertNotIn(message, MODULE.codeql_workflow_issues(good))
+
+        bad = good.replace("          build-mode: manual\n", "", 1)
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.codeql_workflow_issues(bad))
+
+        misplaced = bad.replace(
+            f"      - uses: github/codeql-action/analyze@{CODEQL_PINNED}",
+            f"      - uses: github/codeql-action/analyze@{CODEQL_PINNED}\n"
+            "        with:\n"
+            "          build-mode: manual",
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(misplaced))
+
+    def test_codeql_uses_the_current_action_generation(self):
+        message = "CodeQL actions must use the current reviewed generation"
+        good = secure_codeql_workflow()
+        self.assertNotIn(message, MODULE.codeql_workflow_issues(good))
+
+        bad = good.replace(CODEQL_PINNED, NODE20_CODEQL_PINNED)
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.codeql_workflow_issues(bad))
+
+        comment_spoof = bad.replace("# v4.37.9", "# current v4 generation")
+        self.assertIn(message, MODULE.codeql_workflow_issues(comment_spoof))
 
     def test_codeql_configure_requires_the_restored_cpm_source_cache(self):
-        text = f"""\
-jobs:
-  analyze:
-    timeout-minutes: 30
-    steps:
-      - uses: github/codeql-action/init@{CODEQL_PINNED}
-      - run: cmake -S "$GITHUB_WORKSPACE" -B build
-      - uses: github/codeql-action/analyze@{CODEQL_PINNED}
-"""
+        text = secure_codeql_workflow().replace(
+            ' -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache"',
+            "",
+            1,
+        )
         self.assertIn(
             "CodeQL configure must use the restored CPM source cache fully disconnected",
             MODULE.codeql_workflow_issues(text),
@@ -669,12 +1199,51 @@ steps:
         self.assertIn("libcurl4-openssl-dev", workflow)
         self.assertIn("ragel", workflow)
 
+    def test_static_analysis_full_audit_and_changed_events_do_not_cancel_each_other(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertIn("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}", workflow)
+        self.assertIn("cancel-in-progress: ${{ github.event_name != 'schedule' }}", workflow)
+
+    def test_static_analysis_dispatch_is_full_by_default_or_uses_an_explicit_base(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertIn("analysis-mode:", workflow)
+        self.assertIn("default: full-report", workflow)
+        self.assertIn("MANUAL_BASE_SHA: ${{ inputs.base-sha }}", workflow)
+        self.assertNotIn('workflow_dispatch) base_sha="$(git rev-parse HEAD^)"', workflow)
+        self.assertIn('git fetch --no-tags origin "$base_sha"', workflow)
+
     def test_static_analysis_uses_reusable_changed_line_runner(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
         self.assertIn("python3 scripts/run_changed_clang_tidy.py", workflow)
-        self.assertIn("--base '${{ github.event.pull_request.base.sha }}'", workflow)
+        self.assertIn('--base "$KLOGG_ANALYSIS_BASE"', workflow)
+        self.assertIn("PUSH_BASE_SHA: ${{ github.event.before }}", workflow)
         self.assertIn('--build-dir "$KLOGG_BUILD_ROOT"', workflow)
         self.assertIn('--clang-tidy-diff "$CLANG_TIDY_DIFF"', workflow)
+
+    def test_static_analysis_is_equally_strict_on_pull_requests_and_master_pushes(self):
+        message = "clang-tidy findings must fail both pull requests and master pushes"
+        good = """\
+steps:
+  - name: Run clang-tidy
+    run: |
+      if [ "${{ github.event_name }}" = "pull_request" ]; then
+        python3 scripts/run_changed_clang_tidy.py --base '${{ github.event.pull_request.base.sha }}' --build-dir "$KLOGG_BUILD_ROOT" --clang-tidy-diff "$CLANG_TIDY_DIFF"
+      else
+        xargs -0 -n 1 bash -c 'clang-tidy --warnings-as-errors="*" -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
+      fi
+"""
+        self.assertNotIn(message, MODULE.static_analysis_workflow_issues(good))
+
+        bad = good.replace(' --warnings-as-errors="*"', "", 1)
+        self.assertNotEqual(bad, good)
+        self.assertIn(message, MODULE.static_analysis_workflow_issues(bad))
+
+        echo_spoof = bad.replace(
+            "      else\n",
+            "      else\n        echo 'clang-tidy --warnings-as-errors=\"*\"'\n",
+            1,
+        )
+        self.assertIn(message, MODULE.static_analysis_workflow_issues(echo_spoof))
 
     def test_static_analysis_rejects_masked_report_only_tool_failures(self):
         workflow = (
@@ -1006,19 +1575,9 @@ steps:
                     MODULE.static_analysis_workflow_issues(workflow),
                 )
 
-    def test_static_analysis_uses_a_sentry_specific_cpm_cache_key(self):
-        workflow = """\
-steps:
-  - run: |
-      cmake -S "$KLOGG_WORKSPACE" -B "$KLOGG_BUILD_ROOT" -DKLOGG_USE_SENTRY=ON -DKLOGG_USE_VECTORSCAN=ON
-      python3 scripts/first_party_compile_units.py "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE/src" --null > tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" --line-filter="$TIDY_LINE_FILTER" "$1"' _ < tidy_files.nul
-      xargs -0 -n 1 bash -c 'clang-tidy -p "$KLOGG_BUILD_ROOT" "$1"' _ < tidy_files.nul
-"""
-        self.assertIn(
-            "static analysis must use a Sentry-and-Vectorscan-specific CPM cache key",
-            MODULE.static_analysis_workflow_issues(workflow),
-        )
+    def test_static_analysis_uses_the_shared_complete_cpm_cache_key(self):
+        workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
+        self.assertNotIn("KLOGG_CPM_CACHE_KEY_SUFFIX", workflow)
 
     def test_cppcheck_baselines_require_path_and_line(self):
         self.assertEqual(

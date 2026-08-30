@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       ci-run-id:
-        description: "Run ID of CI workflow"
-        required: false
+        description: "Run ID of an explicit CI Build workflow_dispatch with qualification-mode=release"
+        required: true
 
 jobs:
   release:
@@ -15,7 +15,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
       DISCORD_NEW_VERSIONS_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
     steps:
-    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
         fetch-depth: 0
@@ -25,13 +25,8 @@ jobs:
       run: |
         set -euo pipefail
         repo="${GITHUB_REPOSITORY}"
-        requested_run_id="${{ github.event.inputs.ci-run-id }}"
-        if [ -n "$requested_run_id" ]; then
-          run_id="$requested_run_id"
-        else
-          run_id="$(gh api "/repos/${repo}/actions/workflows/ci-build.yml/runs?branch=master&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')"
-        fi
-        test -n "$run_id" || { echo "::error::No successful master CI run found"; exit 1; }
+        run_id="${{ github.event.inputs.ci-run-id }}"
+        test -n "$run_id" || { echo "::error::A release-qualified CI run ID is required"; exit 1; }
         run_api="/repos/${repo}/actions/runs/${run_id}"
         run_path="$(gh api "$run_api" --jq '.path')"
         run_repository="$(gh api "$run_api" --jq '.head_repository.full_name // empty')"
@@ -42,10 +37,10 @@ jobs:
         test "$run_path" = ".github/workflows/ci-build.yml" || { echo "::error::Selected run uses ${run_path}"; exit 1; }
         test "$run_repository" = "${GITHUB_REPOSITORY}" || { echo "::error::Selected run is from ${run_repository}"; exit 1; }
         test "$run_branch" = "master" || { echo "::error::Selected run branch is ${run_branch}"; exit 1; }
-        case "$run_event" in
-          push|workflow_dispatch) ;;
-          *) echo "::error::Selected run event is ${run_event}"; exit 1 ;;
-        esac
+        test "$run_event" = "workflow_dispatch" || {
+          echo "::error::Selected run must be an explicit release-qualification dispatch, got ${run_event}"
+          exit 1
+        }
         test "$run_conclusion" = "success" || { echo "::error::Selected run conclusion is ${run_conclusion}"; exit 1; }
         test "$run_sha" != "null" && test -n "$run_sha"
         {
@@ -54,7 +49,7 @@ jobs:
         } >> "$GITHUB_ENV"
 
     - name: Download artifacts for selected CI workflow
-      uses: dawidd6/action-download-artifact@v2
+      uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
       with:
         workflow: ci-build.yml
         run_id: ${{ env.KLOGG_CI_RUN_ID }}
@@ -224,9 +219,7 @@ jobs:
 
     - name: Setup Sentry CLI
       if: env.SENTRY_TOKEN != ''
-      uses: mathrix-education/setup-sentry-cli@0.1.0
-      env:
-        ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
+      uses: mathrix-education/setup-sentry-cli@ff4fff773f5e628fa214ebd19e46fb7289454ee2 # v3.0.0
       with:
         token: ${{ secrets.SENTRY_TOKEN }}
         organization: anton-filimonov
@@ -409,7 +402,7 @@ jobs:
     - name: Create GitHub Release
       id: create_release
       if: env.GITHUB_TOKEN != ''
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
       with:
         token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         tag_name: v${{ env.KLOGG_VERSION }}

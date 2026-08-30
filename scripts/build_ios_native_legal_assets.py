@@ -218,7 +218,6 @@ def main() -> int:
     source_archive_hash = sha256(source_archive)
     published_archive = published_source_name(version, "ios-native", source_archive_hash)
     stable_url = source_asset_url(base_url, f"v{version}", published_archive)
-    continuous_url = source_asset_url(base_url, "continuous", published_archive)
     (args.output / "ios-native-source-offer.txt").write_text(
         "Klogg iOS Native Stack Corresponding Source Offer\n"
         "================================================\n\n"
@@ -229,11 +228,8 @@ def main() -> int:
         "framework, or command-line tool is included in the application package.\n\n"
         f"Published archive: {published_archive}\n"
         f"SHA-256: {source_archive_hash}\n"
-        f"Stable release URL: {stable_url}\n"
-        f"Rolling continuous URL: {continuous_url}\n\n"
+        f"Stable release URL: {stable_url}\n\n"
         "Stable versioned releases retain their matching source asset for at least three years.\n"
-        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
-        "replaces its packages and source assets together and does not provide archival retention.\n"
         "Verify downloaded bytes with:\n"
         f"  shasum -a 256 {published_archive}\n"
         "and compare the result with the SHA-256 above. See ios-native-lgpl-replacement.txt for\n"

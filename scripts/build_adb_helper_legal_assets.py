@@ -280,7 +280,6 @@ def main() -> int:
     source_archive_hash = sha256(source_archive)
     published_archive = published_source_name(version, "adb-helper", source_archive_hash)
     stable_url = source_asset_url(base_url, f"v{version}", published_archive)
-    continuous_url = source_asset_url(base_url, "continuous", published_archive)
     source_offer.write_text(
         "Klogg ADB Helper Corresponding Source Offer\n"
         "==========================================\n\n"
@@ -290,11 +289,8 @@ def main() -> int:
         "Google Platform-Tools binary is redistributed.\n\n"
         f"Published archive: {published_archive}\n"
         f"SHA-256: {source_archive_hash}\n"
-        f"Stable release URL: {stable_url}\n"
-        f"Rolling continuous URL: {continuous_url}\n\n"
+        f"Stable release URL: {stable_url}\n\n"
         "Stable versioned releases retain their matching source asset for at least three years.\n"
-        "The continuous endpoint is rolling and mutable: each successful continuous publication\n"
-        "replaces its packages and source assets together and does not provide archival retention.\n"
         "Verify downloaded bytes with:\n"
         f"  shasum -a 256 {published_archive}\n"
         "and compare the result with the SHA-256 above. Build instructions are included in the\n"

@@ -12,9 +12,40 @@ from pathlib import Path
 
 
 CHECKOUT_SHA_RE = re.compile(r"actions/checkout@[0-9a-f]{40}")
+REMOTE_ACTION_SHA_RE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
 CODEQL_ACTION_SHA_RE = re.compile(
     r"github/codeql-action/(?P<action>init|analyze)@(?P<sha>[0-9a-f]{40})"
 )
+CODEQL_CURRENT_SHA = "cdf488f595d80d6e07e03d4674febd5ab45fa938"
+REVIEWED_ACTION_REVISIONS = {
+    "actions/attest-build-provenance": "4d101475d8b20a2381f78447822ac1eab6504dd8",
+    "actions/cache": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "apple-actions/import-codesign-certs": "5142e029c445c10ffc7149d172e540235a065466",
+    "dawidd6/action-download-artifact": "d63b86af1b34672e53c440b1b83979861906bad7",
+    "docker/build-push-action": "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+    "docker/setup-buildx-action": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+    "github/codeql-action": "cdf488f595d80d6e07e03d4674febd5ab45fa938",
+    "ilshidur/action-discord": "d2594079a10f1d6739ee50a2471f0ca57418b554",
+    "joncloud/makensis-action": "971ef20f43e4f9f3af2c7f276cb7348d033da1cd",
+    "jurplel/install-qt-action": "48d3ad6db93f3627c8ee7a0454bc6f3744f7e730",
+    "lukka/get-cmake": "fffaaafeea488556c2c12dad60690008bc1caacb",
+    "mathrix-education/setup-sentry-cli": "ff4fff773f5e628fa214ebd19e46fb7289454ee2",
+    "msys2/setup-msys2": "66cd2cce69caa17b53920067426061ca1de3a884",
+    "softprops/action-gh-release": "efb35369e0ad2afab669f228072c1b0d510eae64",
+}
+
+KNOWN_NODE20_ACTION_REFS = {
+    "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07",
+    "github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07",
+    "ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+}
 LIST_ITEM_RE = re.compile(r"^(?P<indent>\s*)-(?:\s+|$)")
 KEY_VALUE_RE = re.compile(r"^(?P<indent>\s*)(?:-\s*)?(?P<key>[\w-]+):\s*(?P<value>.*)$")
 BROAD_SUPPRESSION_RE = re.compile(
@@ -37,15 +68,16 @@ BROAD_CPPCHECK_IDS = (
 )
 
 CI_BUILD_JOB_NEEDS = {
-    "SaveVersion": set(),
-    "PrefetchCpmCache": set(),
-    "PrefetchBoost": set(),
-    "PrefetchOpenSsl": set(),
-    "PrefetchLinuxDeployQt": set(),
-    "PrefetchCmakeInstaller": set(),
-    "PrefetchWindowsTools": set(),
-    "PrefetchAdbHelperSources": set(),
-    "PrefetchIosNativeSources": set(),
+    "ReleaseQualificationPreflight": set(),
+    "SaveVersion": {"ReleaseQualificationPreflight"},
+    "PrefetchCpmCache": {"ReleaseQualificationPreflight"},
+    "PrefetchBoost": {"ReleaseQualificationPreflight"},
+    "PrefetchOpenSsl": {"ReleaseQualificationPreflight"},
+    "PrefetchLinuxDeployQt": {"ReleaseQualificationPreflight"},
+    "PrefetchCmakeInstaller": {"ReleaseQualificationPreflight"},
+    "PrefetchWindowsTools": {"ReleaseQualificationPreflight"},
+    "PrefetchAdbHelperSources": {"ReleaseQualificationPreflight"},
+    "PrefetchIosNativeSources": {"ReleaseQualificationPreflight"},
     "BuildAdbHelperLegalAssets": {
         "SaveVersion",
         "PrefetchAdbHelperSources",
@@ -54,34 +86,103 @@ CI_BUILD_JOB_NEEDS = {
         "PrefetchAdbHelperSources",
         "BuildAdbHelperLegalAssets",
     },
+    "BuildAdbLinuxArm64": {
+        "PrefetchAdbHelperSources",
+        "BuildAdbHelperLegalAssets",
+    },
+    "BuildAdbWindowsX64": {
+        "PrefetchAdbHelperSources",
+        "BuildAdbHelperLegalAssets",
+    },
+    "BuildAdbMacX64": {
+        "PrefetchAdbHelperSources",
+        "BuildAdbHelperLegalAssets",
+    },
+    "BuildAdbMacArm64": {
+        "PrefetchAdbHelperSources",
+        "BuildAdbHelperLegalAssets",
+    },
     "BuildIosNativeStacks": {
         "SaveVersion",
         "PrefetchIosNativeSources",
     },
-    "Linux": {
+    "BuildIosNativeArm64": {
+        "SaveVersion",
+        "PrefetchIosNativeSources",
+    },
+    "LinuxPackages": {
         "SaveVersion",
         "PrefetchCpmCache",
         "PrefetchLinuxDeployQt",
         "PrefetchCmakeInstaller",
         "BuildAdbHelpers",
     },
-    "Mac": {
+    "LinuxSanitizers": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchCmakeInstaller",
+    },
+    "LinuxTsan": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+    },
+    "MacPackages": {
         "SaveVersion",
         "PrefetchCpmCache",
         "PrefetchBoost",
-        "BuildAdbHelpers",
+        "BuildAdbMacX64",
         "BuildIosNativeStacks",
     },
-    "Windows": {
+    "MacArmPackages": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "BuildAdbMacArm64",
+        "BuildIosNativeArm64",
+    },
+    "MacSanitizers": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+    },
+    "WindowsPackages": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchWindowsTools",
+        "BuildAdbWindowsX64",
+    },
+    "WindowsX86": {
         "SaveVersion",
         "PrefetchCpmCache",
         "PrefetchBoost",
         "PrefetchOpenSsl",
         "PrefetchWindowsTools",
-        "BuildAdbHelpers",
     },
-    "ci-gate": {"Linux", "Mac", "Windows"},
-    "CreatePreRelease": {"ci-gate"},
+    "WindowsAsan": {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchWindowsTools",
+    },
+    "ci-gate": {
+        "BuildAdbHelpers",
+        "BuildAdbLinuxArm64",
+        "BuildAdbWindowsX64",
+        "BuildAdbMacX64",
+        "BuildAdbMacArm64",
+        "BuildIosNativeStacks",
+        "BuildIosNativeArm64",
+        "LinuxPackages",
+        "LinuxSanitizers",
+        "LinuxTsan",
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan",
+    },
 }
 
 CI_BUILD_ARTIFACT_PRODUCERS = {
@@ -95,44 +196,74 @@ CI_BUILD_ARTIFACT_PRODUCERS = {
     "adb-helper-source-cache": "PrefetchAdbHelperSources",
     "adb-helper-legal-assets": "BuildAdbHelperLegalAssets",
     "ios-native-source-cache": "PrefetchIosNativeSources",
-    "ios-native-source-assets": "BuildIosNativeStacks",
+    "ios-native-source-assets": "BuildIosNativeArm64",
 }
 
 CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
-    "klogg_version": {"CreatePreRelease"},
-    "cpm-cache": {"Linux", "Mac", "Windows"},
-    "boost-root": {"Mac", "Windows"},
-    "openssl-archive": {"Windows"},
-    "linuxdeployqt": {"Linux"},
-    "cmake-installer": {"Linux"},
-    "msys2-tools": {"Windows"},
-    "adb-helper-source-cache": {"BuildAdbHelperLegalAssets", "BuildAdbHelpers"},
+    "cpm-cache": {
+        "LinuxPackages",
+        "LinuxSanitizers",
+        "LinuxTsan",
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan",
+    },
+    "boost-root": {
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan",
+    },
+    "openssl-archive": {"WindowsX86"},
+    "linuxdeployqt": {"LinuxPackages"},
+    "cmake-installer": {"LinuxPackages", "LinuxSanitizers"},
+    "msys2-tools": {"WindowsPackages", "WindowsX86", "WindowsAsan"},
+    "adb-helper-source-cache": {
+        "BuildAdbHelperLegalAssets",
+        "BuildAdbHelpers",
+        "BuildAdbLinuxArm64",
+        "BuildAdbWindowsX64",
+        "BuildAdbMacX64",
+        "BuildAdbMacArm64",
+    },
     "adb-helper-legal-assets": {
         "BuildAdbHelpers",
-        "Linux",
-        "Mac",
-        "Windows",
-        "CreatePreRelease",
+        "BuildAdbLinuxArm64",
+        "BuildAdbWindowsX64",
+        "BuildAdbMacX64",
+        "BuildAdbMacArm64",
+        "LinuxPackages",
+        "MacPackages",
+        "MacArmPackages",
+        "WindowsPackages",
     },
-    "ios-native-source-cache": {"BuildIosNativeStacks"},
-    "ios-native-source-assets": {"CreatePreRelease"},
+    "ios-native-source-cache": {"BuildIosNativeStacks", "BuildIosNativeArm64"},
 }
 
 CI_BUILD_ARTIFACT_CONDITIONS = {
-    ("BuildIosNativeStacks", "uploads", "ios-native-source-assets"):
+    ("BuildIosNativeArm64", "uploads", "ios-native-source-assets"):
         "${{ matrix.architecture == 'arm64' }}",
-    ("Linux", "downloads", "linuxdeployqt"):
+    ("LinuxPackages", "downloads", "linuxdeployqt"):
         "${{ matrix.config.os == 'ubuntu_appimage' }}",
-    ("Linux", "downloads", "cmake-installer"):
+    ("LinuxPackages", "downloads", "cmake-installer"):
         "${{ matrix.config.sanitizer != 'thread' }}",
-    ("Linux", "downloads", "adb-helper-legal-assets"):
+    ("LinuxSanitizers", "downloads", "cmake-installer"):
+        "${{ matrix.config.sanitizer != 'thread' }}",
+    ("LinuxPackages", "downloads", "adb-helper-legal-assets"):
         "${{ matrix.config.package != false }}",
-    ("Mac", "downloads", "adb-helper-legal-assets"):
+    ("MacPackages", "downloads", "adb-helper-legal-assets"):
         "${{ matrix.config.package != false }}",
-    ("Windows", "downloads", "openssl-archive"):
+    ("MacArmPackages", "downloads", "adb-helper-legal-assets"):
+        "${{ matrix.config.package != false }}",
+    ("WindowsX86", "downloads", "openssl-archive"):
         "${{ startswith(matrix.config.qt_version, '5') }}",
-    ("Windows", "downloads", "adb-helper-legal-assets"):
-        "${{ matrix.config.package != false && github.event_name != 'pull_request' }}",
+    ("WindowsPackages", "downloads", "adb-helper-legal-assets"):
+        "${{ matrix.config.package != false }}",
 }
 
 
@@ -369,13 +500,130 @@ def workflow_step_blocks(job_block: list[str]) -> list[list[str]]:
     return result
 
 
+def workflow_job_matrix_values(block: list[str]) -> dict[str, set[str]]:
+    if not block:
+        return {}
+    header = KEY_VALUE_RE.match(block[0])
+    if header is None:
+        return {}
+    job_indent = len(header.group("indent"))
+    matrix_index: int | None = None
+    matrix_indent = 0
+    for index, line in enumerate(block[1:], start=1):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "matrix"
+            and len(entry.group("indent")) == job_indent + 4
+        ):
+            matrix_index = index
+            matrix_indent = len(entry.group("indent"))
+            break
+    if matrix_index is None:
+        return {}
+
+    values: dict[str, set[str]] = {}
+    for line in block[matrix_index + 1 :]:
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= matrix_indent:
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or entry.group("key") in {"config", "include", "exclude"}:
+            continue
+        value = scalar(entry.group("value")).lower()
+        values.setdefault(entry.group("key"), set()).add(value)
+    return values
+
+
+def workflow_job_is_package_free(block: list[str]) -> bool:
+    return workflow_job_matrix_values(block).get("package") == {"false"}
+
+
+def artifact_condition_is_statically_false(
+    condition: str | None, matrix_values: dict[str, set[str]]
+) -> bool:
+    if condition is None or "||" in condition:
+        return False
+
+    equality = re.compile(
+        r"matrix\.(?:config\.)?(?P<key>[\w-]+)\s*(?P<operator>==|!=)\s*"
+        r"(?P<value>'[^']*'|\"[^\"]*\"|true|false)"
+    )
+    for match in equality.finditer(condition):
+        values = matrix_values.get(match.group("key"))
+        if not values:
+            continue
+        expected = scalar(match.group("value")).lower()
+        if match.group("operator") == "==" and all(
+            value != expected for value in values
+        ):
+            return True
+        if match.group("operator") == "!=" and all(
+            value == expected for value in values
+        ):
+            return True
+
+    startswith = re.compile(
+        r"startswith\(matrix\.(?:config\.)?(?P<key>[\w-]+),\s*"
+        r"(?P<prefix>'[^']*'|\"[^\"]*\")\)"
+    )
+    for match in startswith.finditer(condition):
+        values = matrix_values.get(match.group("key"))
+        prefix = scalar(match.group("prefix")).lower()
+        if values and all(not value.startswith(prefix) for value in values):
+            return True
+
+    return False
+
+
+def workflow_job_steps(
+    text: str,
+) -> dict[str, list[list[str]]]:
+    job_blocks = workflow_job_blocks(text)
+    anchors: dict[str, list[list[str]]] = {}
+    direct_steps: dict[str, list[list[str]]] = {}
+    aliases: dict[str, str] = {}
+
+    for job, block in job_blocks.items():
+        steps_value = workflow_job_direct_value(block, "steps")
+        if steps_value is None:
+            direct_steps[job] = []
+            continue
+        if steps_value.startswith("&"):
+            anchor = steps_value[1:].strip()
+            if not anchor or anchor in anchors:
+                raise ValueError(f"workflow steps anchor is invalid or duplicated: {steps_value}")
+            steps = workflow_step_blocks(block)
+            anchors[anchor] = steps
+            direct_steps[job] = steps
+        elif steps_value.startswith("*"):
+            alias = steps_value[1:].strip()
+            if not alias:
+                raise ValueError(f"workflow steps alias is invalid: {steps_value}")
+            aliases[job] = alias
+        else:
+            direct_steps[job] = workflow_step_blocks(block)
+
+    for job, alias in aliases.items():
+        if alias not in anchors:
+            raise ValueError(f"workflow job {job} uses unknown steps alias {alias}")
+        direct_steps[job] = anchors[alias]
+
+    return direct_steps
+
+
 def workflow_artifact_records(
     text: str,
 ) -> dict[str, list[tuple[str, str, str | None]]]:
     records: dict[str, list[tuple[str, str, str | None]]] = {}
-    for job, block in workflow_job_blocks(text).items():
+    job_blocks = workflow_job_blocks(text)
+    for job, steps in workflow_job_steps(text).items():
         job_records: list[tuple[str, str, str | None]] = []
-        for step in workflow_step_blocks(block):
+        matrix_values = workflow_job_matrix_values(job_blocks.get(job, []))
+        for step in steps:
             item = LIST_ITEM_RE.match(step[0])
             if item is None:
                 continue
@@ -413,6 +661,8 @@ def workflow_artifact_records(
                 continue
             if continue_on_error not in {None, "false"}:
                 continue
+            if artifact_condition_is_statically_false(condition, matrix_values):
+                continue
             if action.startswith("actions/upload-artifact@"):
                 job_records.append(("uploads", artifact_name, condition))
             elif action.startswith("actions/download-artifact@"):
@@ -442,6 +692,9 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     needs = workflow_job_needs(text)
+    unexpected_jobs = set(needs) - set(CI_BUILD_JOB_NEEDS)
+    if unexpected_jobs:
+        issues.append("CI build workflow contains unmodeled jobs outside the reviewed gate")
     for job, expected in CI_BUILD_JOB_NEEDS.items():
         if job not in needs:
             issues.append(f"CI build workflow must define job {job}")
@@ -461,8 +714,12 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         issues.append(str(error))
         return issues
 
-    artifact_records = workflow_artifact_records(text)
-    artifacts = workflow_artifact_actions(text)
+    try:
+        artifact_records = workflow_artifact_records(text)
+        artifacts = workflow_artifact_actions(text)
+    except ValueError as error:
+        issues.append(str(error))
+        return issues
     for artifact, producer in CI_BUILD_ARTIFACT_PRODUCERS.items():
         owners = {
             job
@@ -514,7 +771,18 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     job_blocks = workflow_job_blocks(text)
     if workflow_job_direct_value(job_blocks.get("ci-gate", []), "if") != "always()":
         issues.append("CI gate must run with if: always()")
-    for job in ("Linux", "Mac", "Windows", "ci-gate"):
+    for job in (
+        "LinuxPackages",
+        "LinuxSanitizers",
+        "LinuxTsan",
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan",
+        "ci-gate",
+    ):
         continue_on_error = workflow_job_direct_value(
             job_blocks.get(job, []), "continue-on-error"
         )
@@ -540,6 +808,107 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     )
     if ios_prefetch_count != 1:
         issues.append("iOS native sources must be prefetched exactly once")
+
+    active_text = "\n".join(
+        active for line in text.splitlines() if (active := strip_yaml_comment(line))
+    )
+    windows_active = "\n".join(
+        active
+        for line in job_blocks.get("WindowsPackages", [])
+        if (active := strip_yaml_comment(line))
+    )
+    if "github.event_name" in windows_active and any(
+        marker in windows_active
+        for marker in (
+            "adb-helper-",
+            "agent-package-win",
+            "Package tarball for upload",
+            "upload-artifact@",
+        )
+    ):
+        issues.append(
+            "Windows package preparation and artifact upload must run on pull requests"
+        )
+
+    release_secret_re = re.compile(
+        r"secrets\.(?:CODESIGN|NOTARIZATION|APPLE_DEVELOPER)"
+    )
+    release_mode_expression = (
+        "qualification-mode: ${{ github.event_name == 'workflow_dispatch' && "
+        "github.ref == 'refs/heads/master' && inputs.qualification-mode == "
+        "'release' && 'release' || 'validation' }}"
+    )
+    active_lines = [
+        active for line in text.splitlines() if (active := strip_yaml_comment(line))
+    ]
+    has_release_dispatch_input = all(
+        marker in active_text
+        for marker in (
+            "workflow_dispatch:",
+            "qualification-mode:",
+            "type: choice",
+            "- validation",
+            "- release",
+        )
+    )
+    unsafe_release_secret = False
+    for index, line in enumerate(active_lines):
+        if release_secret_re.search(line) is None:
+            continue
+        context = "\n".join(active_lines[max(0, index - 12) : index + 1])
+        mac_qualification_input = (
+            "uses: ./.github/actions/agent-package-mac" in context
+            and release_mode_expression in context
+        )
+        release_preflight_input = (
+            "name: Verify release qualification inputs" in context
+            and "inputs.qualification-mode == 'release'" in context
+        )
+        if not (mac_qualification_input or release_preflight_input):
+            unsafe_release_secret = True
+            break
+    if release_secret_re.search(active_text) and (
+        not has_release_dispatch_input or unsafe_release_secret
+    ):
+        issues.append(
+            "required CI validation must not require signing or notarization secrets"
+        )
+
+    if "CreatePreRelease" in job_blocks or "softprops/action-gh-release@" in active_text:
+        issues.append("release publication must run outside the required CI workflow")
+
+    mobile_jobs = {
+        job
+        for job in needs
+        if job.startswith("BuildAdb") or job.startswith("BuildIos")
+    }
+    package_free_with_mobile = False
+    for job, block in job_blocks.items():
+        block_active = "\n".join(
+            active for line in block if (active := strip_yaml_comment(line))
+        )
+        if "package: false" not in block_active:
+            continue
+        ancestors = workflow_job_ancestors(needs, job) if job in needs else set()
+        if ancestors & mobile_jobs:
+            package_free_with_mobile = True
+            break
+    if package_free_with_mobile:
+        issues.append("package-free CI legs must not depend on mobile artifact producers")
+
+    if any(
+        "github.run_id" in line and "ccache" in line.lower()
+        for line in active_lines
+    ):
+        issues.append("ccache keys must be bounded and must not use github.run_id")
+
+    if ".ccache" in active_text and "actions/cache/save@" in active_text:
+        ccache_limits = [
+            int(value)
+            for value in re.findall(r"ccache\s+--max-size=(\d+)M", active_text)
+        ]
+        if not ccache_limits or any(value > 250 for value in ccache_limits):
+            issues.append("ccache entries must be capped at 250M")
 
     return issues
 
@@ -693,6 +1062,42 @@ def unique_cmake_option_value(tokens: list[str], option: str) -> str | None:
     return values[0] if len(values) == 1 else None
 
 
+def yaml_scalar_body_lines(lines: list[str]) -> set[int]:
+    body: set[int] = set()
+    for index, line in enumerate(lines):
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or scalar(entry.group("value")) not in {"|", "|-", "|+", ">", ">-", ">+"}:
+            continue
+        indent = len(entry.group("indent"))
+        for following in range(index + 1, len(lines)):
+            candidate = lines[following]
+            if not candidate.strip():
+                body.add(following)
+                continue
+            candidate_indent = len(candidate) - len(candidate.lstrip())
+            if candidate_indent <= indent:
+                break
+            body.add(following)
+    return body
+
+
+def workflow_action_refs(text: str) -> list[tuple[int, str]]:
+    lines = text.splitlines()
+    scalar_body = yaml_scalar_body_lines(lines)
+    actions: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        if index in scalar_body:
+            continue
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or entry.group("key") != "uses":
+            continue
+        value = yaml_value(lines, index, entry.group("value"), len(entry.group("indent")))
+        value = value.strip()
+        if value:
+            actions.append((index + 1, value))
+    return actions
+
+
 def checkout_steps(text: str) -> list[tuple[int, str, str | None]]:
     lines = text.splitlines()
     checkouts: list[tuple[int, str, str | None]] = []
@@ -772,6 +1177,28 @@ def check_checkout_blocks(path: Path, text: str) -> list[str]:
             issues.append(
                 f"{path}:{line}: checkout must set with.persist-credentials to false"
             )
+
+    for line, uses in workflow_action_refs(text):
+        if uses.startswith("./") or uses.startswith("docker://"):
+            continue
+        if uses in KNOWN_NODE20_ACTION_REFS:
+            issues.append(f"{path}:{line}: remote action uses a known Node20 action generation")
+            continue
+        pinned = REMOTE_ACTION_SHA_RE.fullmatch(uses)
+        if uses.startswith("actions/checkout@") and pinned is None:
+            continue
+        if pinned is None:
+            issues.append(
+                f"{path}:{line}: remote actions must use a reviewed 40-char SHA"
+            )
+            continue
+        action, sha = uses.rsplit("@", 1)
+        repository = "/".join(action.split("/")[:2]).lower()
+        expected = REVIEWED_ACTION_REVISIONS.get(repository)
+        if expected is None or sha != expected:
+            issues.append(
+                f"{path}:{line}: remote action SHA is not the reviewed revision"
+            )
     return issues
 
 
@@ -832,6 +1259,20 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if any(key == "continue-on-error" for key, _ in nested_entries):
         issues.append("CodeQL workflow must not use continue-on-error")
 
+    jobs_position = next(
+        (index for index, line in enumerate(lines) if re.match(r"^jobs:\s*(?:#.*)?$", line)),
+        len(lines),
+    )
+    trigger_text = "\n".join(
+        f"{' ' * (len(line) - len(line.lstrip()))}{active}"
+        for line in lines[:jobs_position]
+        if (active := strip_yaml_comment(line))
+    )
+    if not re.search(r"(?m)^\s{2}push:\s*$", trigger_text) or not re.search(
+        r"(?m)^\s{4}branches:\s*\[\s*master\s*\]\s*$", trigger_text
+    ):
+        issues.append("CodeQL workflow must run on pushes to master")
+
     action_refs: dict[str, list[str]] = {"init": [], "analyze": []}
     for key, value in nested_entries:
         if key != "uses" or not value.startswith("github/codeql-action/"):
@@ -852,8 +1293,29 @@ def codeql_workflow_issues(text: str) -> list[str]:
             continue
         pinned_shas[action] = match.group("sha")
 
-    if len(pinned_shas) == 2 and pinned_shas["init"] != pinned_shas["analyze"]:
+    matching_codeql_revision = (
+        len(pinned_shas) == 2 and pinned_shas["init"] == pinned_shas["analyze"]
+    )
+    if len(pinned_shas) == 2 and not matching_codeql_revision:
         issues.append("CodeQL init and analyze must use the same reviewed SHA")
+    if (
+        matching_codeql_revision
+        and pinned_shas["init"] != CODEQL_CURRENT_SHA
+    ):
+        issues.append("CodeQL actions must use the current reviewed generation")
+
+    active_text = "\n".join(
+        active for line in text.splitlines() if (active := strip_yaml_comment(line))
+    )
+    init_position = active_text.find("github/codeql-action/init@")
+    analyze_position = active_text.find("github/codeql-action/analyze@")
+    build_mode_position = active_text.find("build-mode: manual")
+    if not (
+        init_position >= 0
+        and build_mode_position > init_position
+        and analyze_position > build_mode_position
+    ):
+        issues.append("CodeQL init must set build-mode: manual")
 
     cmake_configures = []
     for command in shell_commands(text):
@@ -924,6 +1386,15 @@ def has_unsupported_macos_lsan(text: str) -> bool:
     return re.search(r"ASAN_OPTIONS=.*detect_leaks=1", text) is not None
 
 
+def windows_package_action_issues(text: str) -> list[str]:
+    active = "\n".join(
+        line for line in text.splitlines() if strip_yaml_comment(line)
+    )
+    if "github.event_name" in active:
+        return ["Windows package composite must remain event-neutral"]
+    return []
+
+
 def static_analysis_workflow_issues(text: str) -> list[str]:
     commands = shell_commands(text)
     issues: list[str] = []
@@ -958,7 +1429,7 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
             and tokens[:2]
             == ["python3", "scripts/run_changed_clang_tidy.py"]
             and unique_option_value(tokens, "--base")
-            == "${{ github.event.pull_request.base.sha }}"
+            in {"${{ github.event.pull_request.base.sha }}", "$KLOGG_ANALYSIS_BASE"}
             and unique_option_value(tokens, "--build-dir") == "$KLOGG_BUILD_ROOT"
             and unique_option_value(tokens, "--clang-tidy-diff")
             == "$CLANG_TIDY_DIFF"
@@ -1085,14 +1556,25 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
             "static analysis configure must use the prefetched CPM cache fully disconnected"
         )
 
-    if not re.search(
-        r"^\s*KLOGG_CPM_CACHE_KEY_SUFFIX:\s*-sentry-vectorscan\s*$",
-        text,
-        re.MULTILINE,
-    ):
-        issues.append(
-            "static analysis must use a Sentry-and-Vectorscan-specific CPM cache key"
+    full_audit_isolated = all(
+        marker in text
+        for marker in (
+            "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}",
+            "cancel-in-progress: ${{ github.event_name != 'schedule' }}",
+            'if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then',
+            'pull_request) base_sha="$PR_BASE_SHA"',
+            'push) base_sha="$PUSH_BASE_SHA"',
+            'MANUAL_BASE_SHA: ${{ inputs.base-sha }}',
+            'git fetch --no-tags origin "$base_sha"',
         )
+    )
+    if (
+        report_only_consumers
+        and "github.event_name" in text
+        and "pull_request" in text
+        and not full_audit_isolated
+    ):
+        issues.append("clang-tidy findings must fail both pull requests and master pushes")
 
     # A PR that deletes a src/ file must not feed the deleted path to
     # clang-tidy/cppcheck: both tools fail on the nonexistent file and the
@@ -1263,7 +1745,7 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/coverage.yml: {issue}"
         for issue in coverage_workflow_issues(coverage_text)
     )
-    if "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" not in coverage_text:
+    if "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" not in coverage_text:
         issues.append(
             ".github/workflows/coverage.yml: coverage artifact upload must use a reviewed commit SHA"
         )
@@ -1281,6 +1763,13 @@ def check_repo(root: Path) -> list[str]:
         f".github/actions/agent-setup/action.yml: {issue}"
         for issue in agent_setup_cpm_issues(agent_setup_path.read_text())
     )
+    windows_package_path = (
+        root / ".github" / "actions" / "agent-package-win" / "action.yml"
+    )
+    issues.extend(
+        f".github/actions/agent-package-win/action.yml: {issue}"
+        for issue in windows_package_action_issues(windows_package_path.read_text())
+    )
 
     static_text = (workflows / "static-analysis.yml").read_text()
     issues.extend(
@@ -1294,10 +1783,11 @@ def check_repo(root: Path) -> list[str]:
         issues.append(
             ".github/workflows/static-analysis.yml: clang-tidy-diff must use the discovered Ubuntu tool path"
         )
-    for extension in ("*.cxx", "*.hh", "*.hxx"):
-        if extension not in static_text:
+    changed_tidy_runner = (root / "scripts" / "run_changed_clang_tidy.py").read_text()
+    for extension in (".cxx", ".hh", ".hxx"):
+        if extension not in changed_tidy_runner:
             issues.append(
-                f".github/workflows/static-analysis.yml: static analysis must include {extension} files"
+                f"scripts/run_changed_clang_tidy.py: static analysis must include {extension} files"
             )
     if not re.search(
         r"git(?: -c core\.quotePath=false)? diff --name-only -z", static_text
@@ -1326,15 +1816,21 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/ci-build.yml: {issue}"
         for issue in ci_build_workflow_issues(ci_text)
     )
-    if "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" not in ci_text:
+    if not all(
+        marker in ci_text
+        for marker in (
+            "github.event_name == 'workflow_dispatch' && github.run_id || github.ref",
+            "inputs.qualification-mode == 'validation'",
+        )
+    ):
         issues.append(
-            ".github/workflows/ci-build.yml: master publication runs must not be cancelable"
+            ".github/workflows/ci-build.yml: release qualification must use an isolated non-cancelable concurrency group"
         )
     if "detect_container_overflow=0" in ci_text:
         issues.append(
             ".github/workflows/ci-build.yml: container-overflow detection must not be disabled globally"
         )
-    mac_section = ci_text.partition("  Mac:")[2].partition("  Windows:")[0]
+    mac_section = ci_text.partition("  MacPackages:")[2].partition("  WindowsPackages:")[0]
     if has_unsupported_macos_lsan(mac_section):
         issues.append(
             ".github/workflows/ci-build.yml: Apple ASan does not support detect_leaks=1"

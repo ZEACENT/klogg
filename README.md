@@ -92,9 +92,7 @@ This project uses [Calendar Versioning](https://calver.org/). For a list of avai
 
 Binaries for all platforms are available from [GitHub Releases](https://github.com/ZEACENT/klogg/releases/latest).
 
-### Continuous builds
-
-Automated pre-release builds for all platforms are available from the [continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous).
+CI validates unsigned packages on every pull request and master update. Signed and notarized binaries are published only through an explicit release-qualification run and appear on the [GitHub Releases](https://github.com/ZEACENT/klogg/releases) page.
 
 ## Building
 

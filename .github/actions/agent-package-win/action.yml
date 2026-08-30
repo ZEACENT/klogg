@@ -1,12 +1,5 @@
 name: "Prepare windows packages"
 description: Verify and package the target-matched Windows application and ADB helper
-inputs:
-  s3-key-id:
-    required: true
-  s3-secret:
-    required: true
-  s3-bucket:
-    required: true
 runs:
   using: "composite"
   steps:
@@ -48,7 +41,7 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Win installer
-      uses: joncloud/makensis-action@v3.3
+      uses: joncloud/makensis-action@971ef20f43e4f9f3af2c7f276cb7348d033da1cd # v5.0
       with:
         script-file: klogg.nsi
         arguments: "-DVERSION=%KLOGG_VERSION% -DPLATFORM=%KLOGG_ARCH% -DQT_MAJOR=%KLOGG_QT%" 

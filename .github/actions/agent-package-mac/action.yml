@@ -1,6 +1,9 @@
 name: "Prepare klogg mac packages"
 description: Deploy, verify, sign, notarize, and package the macOS application
 inputs:
+  qualification-mode:
+    description: validation for secret-neutral CI, release for signing and notarization
+    required: true
   p12-file-base64:
     required: false
   p12-password:
@@ -19,9 +22,24 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Mac release signing and notarization preflight
-      if: ${{ github.event_name != 'pull_request' }}
+    - name: Validate macOS qualification mode
       shell: sh
+      run: |
+        case "${{ inputs.qualification-mode }}" in
+          validation|release) ;;
+          *) echo "::error::qualification-mode must be validation or release"; exit 1 ;;
+        esac
+
+    - name: Mac release signing and notarization preflight
+      if: ${{ inputs.qualification-mode == 'release' }}
+      shell: sh
+      env:
+        KLOGG_P12_FILE_BASE64: ${{ inputs.p12-file-base64 }}
+        KLOGG_P12_PASSWORD: ${{ inputs.p12-password }}
+        KLOGG_CODESIGN_IDENTITY_INPUT: ${{ inputs.codesign-identity }}
+        KLOGG_NOTARIZATION_USERNAME: ${{ inputs.notarization-username }}
+        KLOGG_NOTARIZATION_TEAM: ${{ inputs.notarization-team }}
+        KLOGG_NOTARIZATION_PASSWORD: ${{ inputs.notarization-password }}
       run: |
         set -eu
         missing=0
@@ -33,17 +51,17 @@ runs:
             missing=1
           fi
         }
-        require_input "p12-file-base64" "${{ inputs.p12-file-base64 }}"
-        require_input "p12-password" "${{ inputs.p12-password }}"
-        require_input "codesign-identity" "${{ inputs.codesign-identity }}"
-        require_input "notarization-username" "${{ inputs.notarization-username }}"
-        require_input "notarization-team" "${{ inputs.notarization-team }}"
-        require_input "notarization-password" "${{ inputs.notarization-password }}"
+        require_input "p12-file-base64" "$KLOGG_P12_FILE_BASE64"
+        require_input "p12-password" "$KLOGG_P12_PASSWORD"
+        require_input "codesign-identity" "$KLOGG_CODESIGN_IDENTITY_INPUT"
+        require_input "notarization-username" "$KLOGG_NOTARIZATION_USERNAME"
+        require_input "notarization-team" "$KLOGG_NOTARIZATION_TEAM"
+        require_input "notarization-password" "$KLOGG_NOTARIZATION_PASSWORD"
         test "${missing}" -eq 0
 
     - name: Import macOS release signing certificate
-      if: ${{ github.event_name != 'pull_request' }}
-      uses: apple-actions/import-codesign-certs@253ddeeac23f2bdad1646faac5c8c2832e800071 # v1
+      if: ${{ inputs.qualification-mode == 'release' }}
+      uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
       with:
         p12-file-base64: ${{ inputs.p12-file-base64 }}
         p12-password: ${{ inputs.p12-password }}
@@ -232,14 +250,17 @@ runs:
 
     - name: Set packaging env
       shell: sh
+      env:
+        KLOGG_CODESIGN_IDENTITY_INPUT: ${{ inputs.codesign-identity }}
+        KLOGG_INSTALLERSIGN_IDENTITY_INPUT: ${{ inputs.installer-sign-identity }}
       run: |
-        echo "KLOGG_CODESIGN=${{ inputs.codesign-identity }}" >> $GITHUB_ENV
-        echo "KLOGG_INSTALLERSIGN=${{ inputs.installer-sign-identity }}" >> $GITHUB_ENV
+        printf 'KLOGG_CODESIGN=%s\n' "$KLOGG_CODESIGN_IDENTITY_INPUT" >> "$GITHUB_ENV"
+        printf 'KLOGG_INSTALLERSIGN=%s\n' "$KLOGG_INSTALLERSIGN_IDENTITY_INPUT" >> "$GITHUB_ENV"
         echo "KLOGG_DMG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.dmg" >> $GITHUB_ENV
         echo "KLOGG_PKG=klogg-${{ env.KLOGG_VERSION }}-mac-${{ env.KLOGG_ARCH }}-${{ env.KLOGG_PACKAGE_TAG }}.pkg" >> $GITHUB_ENV
 
     - name: Sign and verify macOS application bundle
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ inputs.qualification-mode == 'release' }}
       shell: sh
       run: |
         set -euo pipefail
@@ -248,7 +269,7 @@ runs:
         codesign --verify --deep --strict --verbose=2 "$KLOGG_MAC_APP"
 
     - name: Bind and reverify signed iOS native closure
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ inputs.qualification-mode == 'release' }}
       shell: sh
       run: |
         set -euo pipefail
@@ -377,8 +398,97 @@ runs:
         mv ./packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg ./packages/${{ env.KLOGG_DMG }}
         echo "Renamed DMG to: ${{ env.KLOGG_DMG }}"
 
+    - name: Validate unsigned macOS disk image
+      if: ${{ inputs.qualification-mode == 'validation' }}
+      shell: sh
+      run: |
+        set -euo pipefail
+        dmg="$KLOGG_BUILD_ROOT/packages/$KLOGG_DMG"
+        mount_dir=$(mktemp -d)
+        mounted_device=""
+        cleanup_mounted_dmg() {
+          if [ -n "${mounted_device}" ]; then
+            if ! hdiutil detach "${mounted_device}" -force >/dev/null; then
+              echo "warning: failed to detach mounted DMG device ${mounted_device}" >&2
+            fi
+          fi
+          rm -rf "${mount_dir}"
+        }
+        trap cleanup_mounted_dmg EXIT
+        attach_output=$(hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir")
+        mounted_device=$(printf '%s\n' "$attach_output" | awk '$1 ~ /^\/dev\// { device=$1 } END { print device }')
+        test -n "$mounted_device" || { echo "::error::failed to identify mounted DMG device"; exit 1; }
+        mounted_app=$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)
+        test -n "$mounted_app" || { echo "::error::mounted DMG has no application bundle"; exit 1; }
+        mounted_stack="$mounted_app/Contents/Frameworks/ios-native"
+        mounted_support="$mounted_app/Contents/SharedSupport/ios-native"
+        case "${KLOGG_ARCH}" in
+          x64) native_arch=x86_64 ;;
+          arm64) native_arch=arm64 ;;
+          *) echo "::error::unsupported macOS validation architecture: ${KLOGG_ARCH}"; exit 1 ;;
+        esac
+        python3 scripts/verify_macos_qt_bundle.py \
+          --app "$mounted_app" \
+          --expected-architecture "$native_arch" \
+          --smoke cocoa \
+          --smoke-if-present offscreen \
+          --runtime-log-output "$KLOGG_BUILD_ROOT/macos-qt-mounted-dmg-smoke.log"
+        python3 scripts/verify_ios_native_stack.py \
+          --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
+          --stack-root "$mounted_stack" \
+          --architecture "$native_arch" \
+          --receipt "$KLOGG_IOS_NATIVE_STACK_ROOT/ios-native-build-receipt.json" \
+          --app-executable "$mounted_app/Contents/MacOS/klogg" \
+          --source-receipt "$mounted_support/ios-native-source-set-receipt.json" \
+          --asset-scope package \
+          --source-assets-root "$mounted_support" \
+          --legal-receipt "$mounted_support/ios-native-legal-receipt.json" \
+          --sbom "$mounted_support/ios-native-sbom.spdx.json" \
+          --verify-package-receipt "$mounted_support/ios-native-package-receipt.json" \
+          --unsigned-package-stage
+        mounted_helper="$mounted_app/Contents/MacOS/helpers/adb"
+        python3 scripts/smoke_adb_helper.py \
+          --adb "$mounted_helper" --port 0 --timeout-seconds 15 \
+          --json-output "$KLOGG_BUILD_ROOT/adb-helper-dmg-validation-smoke.json"
+        python3 scripts/verify_adb_helper_artifact.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
+          --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-validation-smoke.json" \
+          --package-root "$mount_dir" \
+          --asset-scope package \
+          --source-assets-root "$mounted_app/Contents/SharedSupport/adb-helper" \
+          --layout dmg \
+          --expected-target "${{ matrix.config.adb_target }}" \
+          --package-target "${{ matrix.config.adb_target }}-dmg" \
+          --package-file "$dmg" \
+          --package-verification-receipt "$KLOGG_BUILD_ROOT/packages/adb-helper-dmg-package-verification.json" \
+          --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
+          --require-lock-binding
+        python3 - \
+          "$dmg" \
+          "$mounted_support/ios-native-package-receipt.json" \
+          "$mounted_support/ios-native-source-set-receipt.json" \
+          "$KLOGG_BUILD_ROOT/packages/ios-native-dmg-package-verification.json" <<'PY'
+        import hashlib, json, pathlib, sys
+        dmg, package_receipt_path, source_set_path, output = map(pathlib.Path, sys.argv[1:5])
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        package_receipt = json.loads(package_receipt_path.read_text(encoding="utf-8"))
+        source_set_hash = digest(source_set_path)
+        if package_receipt.get("source_set_receipt_sha256") != source_set_hash:
+            raise SystemExit("iOS package receipt source-set binding mismatch")
+        output.write_text(json.dumps({
+            "schema_version": 1,
+            "receipt_kind": "ios-native-package-verification",
+            "qualification": "validation",
+            "release_qualified": False,
+            "source_set_receipt_sha256": source_set_hash,
+            "ios_native_package_receipt_sha256": digest(package_receipt_path),
+            "packages": [{"name": dmg.name, "sha256": digest(dmg)}],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        PY
+
     - name: Sign and verify macOS disk image
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ inputs.qualification-mode == 'release' }}
       shell: sh
       run: |
         set -euo pipefail
@@ -387,15 +497,19 @@ runs:
         codesign --verify --strict --verbose=2 "./packages/$KLOGG_DMG"
 
     - name: Notarize staple and validate macOS disk image
-      if: ${{ github.event_name != 'pull_request' }}
+      if: ${{ inputs.qualification-mode == 'release' }}
       shell: sh
+      env:
+        KLOGG_NOTARIZATION_USERNAME: ${{ inputs.notarization-username }}
+        KLOGG_NOTARIZATION_TEAM: ${{ inputs.notarization-team }}
+        KLOGG_NOTARIZATION_PASSWORD: ${{ inputs.notarization-password }}
       run: |
         set -euo pipefail
         dmg="$KLOGG_BUILD_ROOT/packages/$KLOGG_DMG"
         xcrun notarytool submit --wait --output-format json \
-          --apple-id "${{ inputs.notarization-username }}" \
-          --team-id "${{ inputs.notarization-team }}" \
-          --password "${{ inputs.notarization-password }}" \
+          --apple-id "$KLOGG_NOTARIZATION_USERNAME" \
+          --team-id "$KLOGG_NOTARIZATION_TEAM" \
+          --password "$KLOGG_NOTARIZATION_PASSWORD" \
           "$dmg" | tee "$KLOGG_BUILD_ROOT/dmg-notarytool-receipt.json"
         xcrun stapler staple "$dmg"
         xcrun stapler validate "$dmg"
@@ -409,7 +523,7 @@ runs:
           "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" \
           "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" \
           "$KLOGG_CODESIGN" \
-          "${{ inputs.notarization-team }}" \
+          "$KLOGG_NOTARIZATION_TEAM" \
           "${{ matrix.config.adb_target }}" <<'PY'
         import hashlib, json, pathlib, sys
         dmg, helper, notary_path, build_receipt_path, signing_path, notarization_path = map(pathlib.Path, sys.argv[1:7])
@@ -474,7 +588,9 @@ runs:
         mounted_device=""
         cleanup_mounted_dmg() {
           if [ -n "${mounted_device}" ]; then
-            hdiutil detach "${mounted_device}" -force >/dev/null
+            if ! hdiutil detach "${mounted_device}" -force >/dev/null; then
+              echo "warning: failed to detach mounted DMG device ${mounted_device}" >&2
+            fi
           fi
           rm -rf "${mount_dir}"
         }
@@ -537,37 +653,6 @@ runs:
         cp "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
-
-    #- name: "Mac build pkg"
-    #  if: ${{ github.event_name != 'pull_request' }}
-    #  shell: sh
-    #  run: |
-    #    cd $KLOGG_BUILD_ROOT
-    #    mkdir -p packages
-    #    mkdir -p pkg_resources/en.lproj
-    #    cp ../COPYING pkg_resources/en.lproj
-    #    cp ../packaging/description.txt pkg_resources/en.lproj
-    #    sed -e s/%klogg_version%/${{ env.KLOGG_VERSION }}/ -e s/%klogg_pkg%/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg/ ./generated/distribution.xml > distribution.xml
-    #    pkgbuild --component "$KLOGG_MAC_APP" --install-location /Applications --version ${{ env.KLOGG_VERSION }} --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX.pkg
-    #    productbuild --package-path ./output --distribution distribution.xml --resources ./pkg_resources --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg
-    #    pkgutil --expand ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-product.pkg ./output/klogg_product_pkg
-    #    pkgutil --flatten ./output/klogg_product_pkg ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-flatten.pkg
-    #    productsign --sign "${{ env.KLOGG_INSTALLERSIGN }}" --timestamp ./output/klogg-${{ env.KLOGG_VERSION }}-OSX-flatten.pkg ./packages/${{ env.KLOGG_PKG }}
-
-    #- name: Mac notarize PKG 
-    #  if: ${{ github.event_name != 'pull_request' }} 
-    #  shell: sh
-    #  run: |
-    #    xcrun notarytool submit  --wait --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_PKG }}" | tee pkg_notary.log
-    #    pkg_notary_id=$(awk '$1=="id:"{id=$2} END{print id}' pkg_notary.log)
-    #    xcrun notarytool log --apple-id "${{ inputs.notarization-username }}" --team-id "${{ inputs.notarization-team }}" --password "${{ inputs.notarization-password }}" "$pkg_notary_id" "pkg_notary.log.json"
-    #    cat "pkg_notary.log.json"
-
-    #- name: Mac staple PKG 
-    #  if: ${{ github.event_name != 'pull_request' }} 
-    #  shell: sh 
-    #  run: |
-    #    xcrun stapler staple "${{ env.KLOGG_BUILD_ROOT }}/packages/${{ env.KLOGG_PKG }}"
 
     - name: Mac symbols
       shell: sh

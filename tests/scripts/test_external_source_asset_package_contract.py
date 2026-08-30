@@ -322,41 +322,49 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         self.assertGreater(post_upload, upload, "stable publication must verify after upload")
         self.assertRegex(workflow[upload:], r"gh\s+(?:api|release\s+download)")
 
-    def test_continuous_release_publishes_one_mutable_coherent_package_and_source_set(self):
-        workflow = required_text(CI_BUILD)
-        preparer = required_text(PUBLICATION_PREPARER)
-        manifest = self.contract["publication_manifest"]["file_name"]
-        publication = workflow[workflow.index("  CreatePreRelease:") :]
-        for name in (
-            self.adb["receipt_file"],
-            self.ios["receipt_file"],
-            manifest,
-            "prepare_source_publication.py",
-            "verify_source_publication_manifest.py",
-        ):
-            self.assertIn(name, publication)
-        self.assertRegex(publication, r"(?i)channel[^\n]*continuous")
-        self.assertRegex(publication, r"(?i)mutable[^\n]*(?:true|True)")
-        self.assertRegex(publication, r"(?i)rolling")
+    def test_release_qualification_has_an_explicit_signed_ci_caller(self):
+        build = required_text(CI_BUILD)
+        release = required_text(CI_RELEASE)
+        self.assertIn("qualification-mode:", build)
+        self.assertIn("- release", build)
         self.assertIn(
-            "published_source_name(version, component, archive_hash)",
-            preparer,
+            "qualification-mode: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release' && 'release' || 'validation' }}",
+            build,
         )
-        for component in ("adb-helper", "ios-native"):
-            self.assertIn(f'"{component}"', preparer)
-        create_release = publication.index("- name: Create continuous candidate draft")
-        verification = publication.find("verify_source_publication_manifest.py", create_release)
-        self.assertGreater(
-            verification,
-            create_release,
-            "continuous publication must verify the uploaded rolling package/source set",
-        )
+        for secret in (
+            "CODESIGN_BASE64",
+            "CODESIGN_PASSWORD",
+            "APPLE_DEVELOPER_ID_APPLICATION",
+            "NOTARIZATION_USERNAME",
+            "NOTARIZATION_TEAM",
+            "NOTARIZATION_PASSWORD",
+        ):
+            self.assertIn(f"secrets.{secret}", build)
+        self.assertIn("qualification-mode=release", release)
+        self.assertIn("required: true", release.split("ci-run-id:", 1)[1].split("jobs:", 1)[0])
+        self.assertIn("github.event_name == 'workflow_dispatch' && github.run_id || github.ref", build)
+        self.assertIn("inputs.qualification-mode == 'validation'", build)
+        self.assertIn("github.ref == 'refs/heads/master'", build)
+        self.assertIn("ReleaseQualificationPreflight:", build)
+        self.assertIn("SaveVersion:\n    needs: [ReleaseQualificationPreflight]", build)
+        self.assertIn("Missing release qualification secret", build)
+
+    def test_required_ci_does_not_publish_a_continuous_release(self):
+        workflow = required_text(CI_BUILD)
+        for marker in (
+            "CreatePreRelease:",
+            "Create continuous candidate draft",
+            "tag_name=continuous",
+            "softprops/action-gh-release",
+        ):
+            self.assertNotIn(marker, workflow)
+        self.assertIn("workflow_dispatch:", required_text(CI_RELEASE))
 
     def test_source_asset_producers_bind_release_version_and_flat_checksums(self):
         build = required_text(CI_BUILD)
         stable = required_text(CI_RELEASE)
         adb_producer = section(build, "  PrefetchAdbHelperSources:", "  BuildAdbHelpers:")
-        ios_producer = section(build, "  BuildIosNativeStacks:", "  Mac:")
+        ios_producer = section(build, "  BuildIosNativeStacks:", "  MacPackages:")
         for producer in (adb_producer, ios_producer):
             self.assertRegex(producer, r"needs:\s*\[[^\]]*SaveVersion")
             self.assertIn("--version", producer)
@@ -379,10 +387,9 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         ):
             self.assertIn(marker, preparer)
         stable = required_text(CI_RELEASE)
-        continuous = required_text(CI_BUILD)
-        for workflow in (stable, continuous):
-            self.assertIn("ios-native-dmg-package-verification.json", workflow)
-            self.assertIn("--ios-qualification-receipt", workflow)
+        self.assertIn("ios-native-dmg-package-verification.json", stable)
+        self.assertIn("--ios-qualification-receipt", stable)
+        self.assertNotIn("--ios-qualification-receipt", required_text(CI_BUILD))
 
     def test_stable_release_checks_out_selected_ci_commit_before_release_processing(self):
         workflow = required_text(CI_RELEASE)
@@ -392,7 +399,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
             "- name: Download artifacts for selected CI workflow",
         )
         for marker in (
-            "actions/workflows/ci-build.yml/runs",
+            'run_id="${{ github.event.inputs.ci-run-id }}"',
             'run_path="$(gh api',
             'run_repository="$(gh api',
             'run_branch="$(gh api',
@@ -406,7 +413,8 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
             '"success"',
         ):
             self.assertIn(marker, selection)
-        self.assertIn("push|workflow_dispatch", selection)
+        self.assertIn('test "$run_event" = "workflow_dispatch"', selection)
+        self.assertIn("qualification-mode=release", workflow)
         self.assertIn("run_id: ${{ env.KLOGG_CI_RUN_ID }}", workflow)
 
         metadata = workflow.index("klogg_commit.txt")
@@ -420,7 +428,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         changelog = section(workflow, "- name: Generate Changelog", "- name: Display structure")
         self.assertIn('--to-ref "${KLOGG_SOURCE_COMMIT}"', changelog)
 
-    def test_stable_and_continuous_retries_recreate_clean_draft_asset_sets(self):
+    def test_stable_retry_recreates_a_clean_draft_asset_set(self):
         stable = required_text(CI_RELEASE)
         stable_cleanup = stable.index("- name: Clean stale stable draft")
         stable_create = stable.index("- name: Create GitHub Release")
@@ -434,15 +442,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
             cleanup,
             "stale stable tag deletion must fail closed",
         )
-
-        continuous = required_text(CI_BUILD)
-        publication = continuous[continuous.index("  CreatePreRelease:") :]
-        candidate_tag = "continuous-candidate-${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertIn(candidate_tag, publication)
-        candidate_cleanup = publication.index("- name: Clean stale continuous candidate draft")
-        candidate_create = publication.index("- name: Create continuous candidate draft")
-        self.assertLess(candidate_cleanup, candidate_create)
-        self.assertIn("gh api -X DELETE", publication[candidate_cleanup:candidate_create])
+        self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
 
     def test_stable_release_uses_selected_ci_commit_and_remains_draft_until_verified(self):
         workflow = required_text(CI_RELEASE)
@@ -463,52 +463,16 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         promotion = publication.find("draft=false", verify)
         self.assertGreater(promotion, verify, "stable release must publish only after verification")
 
-    def test_continuous_verifies_draft_candidate_before_replacing_public_release(self):
-        workflow = required_text(CI_BUILD)
-        publication = workflow[workflow.index("  CreatePreRelease:") :]
-        candidate = publication.index("- name: Create continuous candidate draft")
-        verification = publication.index("- name: Verify rolling source publication after upload")
-        parking = publication.index("- name: Park existing continuous release for rollback")
-        promotion = publication.index("- name: Promote verified continuous candidate")
-        self.assertLess(candidate, verification)
-        self.assertLess(verification, parking)
-        self.assertLess(parking, promotion)
-        self.assertIn("draft: true", publication[candidate:verification])
-        promoted = publication[promotion:]
-        self.assertIn("tag_name=continuous", promoted)
-        self.assertIn("draft=false", promoted)
-        self.assertIn("prerelease=true", promoted)
-        final_verification = publication.index("- name: Reverify promoted continuous release")
-        self.assertGreater(final_verification, promotion)
-        final_block = publication[final_verification:]
-        for marker in (
-            "tag_name",
-            "/git/ref/tags/continuous",
-            "KLOGG_SOURCE_COMMIT",
-            "continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
-            "verify_source_publication_manifest.py",
-            "--expected-tag continuous",
-            "- name: Roll back failed continuous promotion",
-            "KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID",
-            "KLOGG_PREVIOUS_CONTINUOUS_SHA",
-            "- name: Remove parked continuous release after promotion",
-        ):
-            self.assertIn(marker, final_block)
-
-        rollback = section(
-            publication,
-            "- name: Roll back failed continuous promotion",
-            "- name: Remove parked continuous release after promotion",
-        )
-        no_previous_guard = rollback.index('if [ -z "$previous_id" ]')
-        live_tag_delete = rollback.index(
-            'git/refs/tags/continuous" >/dev/null 2>&1 || true'
-        )
-        self.assertGreater(
-            live_tag_delete,
-            no_previous_guard,
-            "a failure before parking must leave the existing continuous tag untouched",
-        )
+    def test_release_publication_is_explicit_and_verifies_before_promotion(self):
+        self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
+        release = required_text(CI_RELEASE)
+        create = release.index("- name: Create GitHub Release")
+        verify = release.index("- name: Verify stable source publication after upload")
+        promote = release.index("- name: Publish verified stable release")
+        self.assertLess(create, verify)
+        self.assertLess(verify, promote)
+        self.assertIn("draft: true", release[create:verify])
+        self.assertIn("draft=false", release[promote:])
 
 
 class SourcePublicationManifestVerifierContractTest(unittest.TestCase):

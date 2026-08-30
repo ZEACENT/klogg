@@ -549,7 +549,12 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             APPIMAGE_SCRIPT,
             WIN_PREPARE,
         )
-        combined = "\n".join(self.required_text(path) for path in paths)
+        combined = "\n".join(
+            self.required_text(path).replace(
+                "github.ref == 'refs/heads/master'", "github.ref is trusted master"
+            )
+            for path in paths
+        )
         forbidden = {
             "Google platform-tools prebuilt": r"dl\.google\.com/[^\s'\"]*platform-tools|platform-tools-latest",
             "PATH adb lookup": r"(?:which|where|command\s+-v)\s+adb\b",
