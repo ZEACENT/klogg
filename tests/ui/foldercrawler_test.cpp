@@ -4062,30 +4062,37 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
     widget.selectResultRow( matchRowForFile( a ) );
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
     QTest::qWait( 200 );
+    auto* cachedAData = const_cast<AbstractLogData*>(
+        AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) );
+    REQUIRE( cachedAData != nullptr );
 
     const LineNumber bRow = matchRowForFile( b );
     const LineNumber bLocalLine = widget.folderResults()->sourceForLine( bRow ).localLine;
     REQUIRE( bLocalLine.get() == static_cast<uint64_t>( bMatchLine ) );
 
     // Append to A on disk and IMMEDIATELY start B's open, then keep nudging A
-    // while B indexes, so at least one re-index of A completes inside B's
-    // pending window regardless of watcher latency (native watcher on
-    // Linux/macOS, 1s polling on Windows -- B's size keeps the window wide on
-    // native watchers; under 1s polling the clobber may not be exercised, but
-    // the healthy end state asserted below must hold either way).
+    // while B indexes. Deliver each change through the exact queued LogData slot
+    // used by FileWatcher so at least one A re-index completes inside B's pending
+    // window without depending on platform watcher latency.
     const auto appendLine = []( const QString& path ) {
         QFile f( path );
         REQUIRE( f.open( QIODevice::WriteOnly | QIODevice::Append ) );
         f.write( "nudge\n" );
         f.flush();
     };
+    const auto notifyChanged = []( AbstractLogData* data, const QString& path ) {
+        return QMetaObject::invokeMethod( data, "fileChangedOnDisk", Qt::QueuedConnection,
+                                          Q_ARG( QString, path ) );
+    };
     appendLine( a );
+    REQUIRE( notifyChanged( cachedAData, a ) );
     widget.selectResultRow( bRow );
     QElapsedTimer openBudget;
     openBudget.start();
     while ( widget.currentMainFilePath() != b && openBudget.elapsed() < 30000 ) {
         QTest::qWait( 100 );
         appendLine( a );
+        REQUIRE( notifyChanged( cachedAData, a ) );
     }
     REQUIRE( widget.currentMainFilePath() == b );
 
@@ -4114,9 +4121,8 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
 
     // B's follow data-flow must be bound (bindMainViewDataSignals at B's real
     // completion): enable follow through the same dispatch MainWindow uses,
-    // grow B on disk, and the view must track the tail -- mirrors the
-    // follow-tail test above (same FileWatcher seam, same 15s budget for the
-    // 1s polling watcher on Windows).
+    // grow B on disk, queue the same LogData slot FileWatcher calls, and require
+    // the view to track the new tail.
     static_cast<AbstractCrawlerWidget*>( &widget )->followSet( true );
     REQUIRE( waitFor( [ & ]() { return widget.mainView()->isFollowEnabled(); } ) );
     LineNumber topBefore = 0_lnum;
@@ -4135,6 +4141,10 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
         f.write( payload );
         f.flush();
     }
+    auto* mainData = const_cast<AbstractLogData*>(
+        AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) );
+    REQUIRE( mainData != nullptr );
+    REQUIRE( notifyChanged( mainData, b ) );
     REQUIRE( waitFor( [ & ]() { return widget.mainView()->getTopLine() > topBefore; },
                       15000 ) );
 }
