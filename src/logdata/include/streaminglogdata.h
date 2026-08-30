@@ -116,7 +116,6 @@ class StreamingLogData : public SearchableLogData {
     OutputBindResult openDisplayOutputFile( const QString& outputPath,
                                             bool preserveExisting = false );
     void closeDisplayOutputFile( bool clearBinding = true );
-    OutputBindResult restoreOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     static CaptureOutputError
     captureStoreOutputError( std::optional<CaptureStore::OutputFailure> failure );
     OutputBindResult writeDisplayLinesToDevice( LineNumber first, LinesCount count,

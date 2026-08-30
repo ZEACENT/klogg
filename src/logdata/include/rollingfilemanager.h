@@ -5,6 +5,10 @@
 #include <QString>
 #include <QStringList>
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 // Manages a rolling output file that rotates when it reaches a size limit.
 // When the current file exceeds maxFileSize, it is renamed as a numbered backup
 // and a new file is opened with the original name. Old backups beyond backupCount
@@ -58,7 +62,7 @@ class RollingFileManager {
     int backupCount() const;
     QFile* currentFile();
 
-    // List backup files in order (oldest first).
+    // List backup files in numeric suffix order.
     QStringList backupFiles() const;
 
     // Re-read the current file's size from disk.  Call this after writing
@@ -70,18 +74,23 @@ class RollingFileManager {
     void deleteAll();
 
   private:
-    QString backupPath( int index ) const;
-    void cleanupOldBackups();
+    QString backupPath( qint64 index ) const;
     bool openNewFile( bool truncate = false );
     bool rotateInternal();
+    bool removeManagedBackups();
 
     QString basePath_;
     qint64 maxFileSize_ = 0;
     int backupCount_ = 0;
-    QFile currentFile_;
+    std::unique_ptr<QFile> currentFile_ = std::make_unique<QFile>();
     qint64 currentBytes_ = 0;
     bool rotated_ = false;
     bool openedNewFile_ = false;
+    std::optional<qint64> nextKeepAllBackupIndex_;
+    std::vector<qint64> keepAllBackupIndices_;
+    bool keepAllBackupIndicesLoaded_ = false;
+    bool keepAllManifestNeedsRewrite_ = false;
+    bool finiteBackupsCleaned_ = false;
 };
 
 #endif

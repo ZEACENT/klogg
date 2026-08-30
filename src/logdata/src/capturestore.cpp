@@ -2452,84 +2452,81 @@ void CaptureStore::clearTrimResult()
 bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExisting )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    rollingOutput_.close();
-    rollingOutput_ = RollingFileManager();
-    boundOutputFile_ = outputPath;
-    outputFailure_.reset();
-    resetOutputFlushCounters();
-    if ( boundOutputFile_.isEmpty() ) {
-        return true;
-    }
-
-    const auto outputDirectory = QFileInfo( boundOutputFile_ ).absoluteDir();
-    QDir().mkpath( outputDirectory.absolutePath() );
-    const auto failBinding = [ this ]( OutputFailure failure, bool removeCurrent = false ) {
-        if ( removeCurrent ) {
-            rollingOutput_.removeCurrentFile();
-        }
+    if ( outputPath.isEmpty() ) {
         rollingOutput_.close();
         rollingOutput_ = RollingFileManager();
         boundOutputFile_.clear();
+        outputFailure_.reset();
         resetOutputFlushCounters();
-        outputFailure_ = failure;
-        return false;
-    };
-
-    if ( preserveExisting ) {
-        rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
-                                             limits_.rollingBackupCount );
-        if ( rollingOutput_.openExisting() ) {
-            return true;
-        }
-
-        const auto stagedResult = klogg::stagedoutput::publishSibling(
-            boundOutputFile_, [ this ]( QIODevice* output ) {
-                return std::all_of(
-                    segments_.cbegin(), segments_.cend(),
-                    [ this, output ]( const auto& segment ) {
-                        return writeSegmentToDevice( segment, output );
-                    } );
-            } );
-        switch ( stagedResult ) {
-        case klogg::stagedoutput::Result::Published:
-        case klogg::stagedoutput::Result::DestinationExists:
-            break;
-        case klogg::stagedoutput::Result::WriteFailure:
-            return failBinding( OutputFailure::Write );
-        case klogg::stagedoutput::Result::FlushFailure:
-            return failBinding( OutputFailure::Flush );
-        case klogg::stagedoutput::Result::OpenFailure:
-        case klogg::stagedoutput::Result::PublishFailure:
-            return failBinding( OutputFailure::Open );
-        }
-        rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
-                                             limits_.rollingBackupCount );
-        if ( !rollingOutput_.openExisting() ) {
-            return failBinding( OutputFailure::Open );
-        }
         return true;
     }
 
-    // FreshSave publishes through QSaveFile after overwrite confirmation, so a
-    // replay or commit failure cannot expose a truncated public destination.
-    QSaveFile stagedOutput( boundOutputFile_ );
-    if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
-        return failBinding( OutputFailure::Open );
-    }
-    for ( const auto& segment : segments_ ) {
-        if ( !writeSegmentToDevice( segment, &stagedOutput ) ) {
-            stagedOutput.cancelWriting();
-            return failBinding( OutputFailure::Write );
+    const auto outputDirectory = QFileInfo( outputPath ).absoluteDir();
+    QDir().mkpath( outputDirectory.absolutePath() );
+    const auto failBinding = [ this ]( OutputFailure failure ) {
+        outputFailure_ = failure;
+        return false;
+    };
+    RollingFileManager candidateOutput( outputPath, limits_.rollingMaxFileSize,
+                                        limits_.rollingBackupCount );
+
+    if ( preserveExisting ) {
+        if ( !candidateOutput.openExisting() ) {
+            const auto stagedResult = klogg::stagedoutput::publishSibling(
+                outputPath, [ this ]( QIODevice* output ) {
+                    return std::all_of(
+                        segments_.cbegin(), segments_.cend(),
+                        [ this, output ]( const auto& segment ) {
+                            return writeSegmentToDevice( segment, output );
+                        } );
+                } );
+            switch ( stagedResult ) {
+            case klogg::stagedoutput::Result::Published:
+            case klogg::stagedoutput::Result::DestinationExists:
+                break;
+            case klogg::stagedoutput::Result::WriteFailure:
+                return failBinding( OutputFailure::Write );
+            case klogg::stagedoutput::Result::FlushFailure:
+                return failBinding( OutputFailure::Flush );
+            case klogg::stagedoutput::Result::OpenFailure:
+            case klogg::stagedoutput::Result::PublishFailure:
+                return failBinding( OutputFailure::Open );
+            }
+            candidateOutput = RollingFileManager(
+                outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
+            if ( !candidateOutput.openExisting() ) {
+                return failBinding( OutputFailure::Open );
+            }
         }
     }
-    if ( !stagedOutput.commit() ) {
-        return failBinding( OutputFailure::Flush );
+    else {
+        // FreshSave publishes through QSaveFile after overwrite confirmation, so
+        // a replay or commit failure cannot expose a truncated public destination.
+        QSaveFile stagedOutput( outputPath );
+        if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
+            return failBinding( OutputFailure::Open );
+        }
+        for ( const auto& segment : segments_ ) {
+            if ( !writeSegmentToDevice( segment, &stagedOutput ) ) {
+                stagedOutput.cancelWriting();
+                return failBinding( OutputFailure::Write );
+            }
+        }
+        if ( !stagedOutput.commit() ) {
+            return failBinding( OutputFailure::Flush );
+        }
+        if ( !candidateOutput.openExisting() ) {
+            return failBinding( OutputFailure::Open );
+        }
     }
-    rollingOutput_ = RollingFileManager( boundOutputFile_, limits_.rollingMaxFileSize,
-                                         limits_.rollingBackupCount );
-    if ( !rollingOutput_.openExisting() ) {
-        return failBinding( OutputFailure::Open );
-    }
+
+    // Commit only after the candidate is fully published and opened. Moving the
+    // manager transfers its live QFile handle, so failure leaves the previous
+    // output identity and flush counters untouched.
+    rollingOutput_ = std::move( candidateOutput );
+    boundOutputFile_ = outputPath;
+    outputFailure_.reset();
+    resetOutputFlushCounters();
     return true;
 }
 

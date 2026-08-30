@@ -4703,6 +4703,217 @@ TEST_CASE( "RollingFileManager zero backupCount keeps all rotated files" )
     manager.deleteAll();
 }
 
+TEST_CASE( "RollingFileManager clear removes every keep-all backup", "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_clear_keep_all" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    RollingFileManager manager( filePath, 16, 0 );
+    REQUIRE( manager.open( true ) );
+
+    constexpr int LastBackupIndex = 101;
+    for ( int index = 0; index <= LastBackupIndex; ++index ) {
+        QFile backup( filePath + QStringLiteral( ".%1" ).arg( index ) );
+        REQUIRE( backup.open( QIODevice::WriteOnly ) );
+        REQUIRE( backup.write( QByteArrayLiteral( "retained" ) ) > 0 );
+    }
+
+    REQUIRE( manager.clearIfCurrent() );
+    for ( int index = 0; index <= LastBackupIndex; ++index ) {
+        CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".%1" ).arg( index ) ) );
+    }
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager retains ownership metadata after backup removal fails",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_clear_failed_backup_removal" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    RollingFileManager manager( filePath, 8, 0 );
+    REQUIRE( manager.open( true ) );
+    REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+
+    const auto backupPath = filePath + QStringLiteral( ".0" );
+    REQUIRE( QFile::remove( backupPath ) );
+    REQUIRE( QDir().mkdir( backupPath ) );
+    CHECK_FALSE( manager.clearIfCurrent() );
+    CHECK( QFile::exists( filePath + QStringLiteral( ".klogg-rolling-backups" ) ) );
+
+    REQUIRE( QDir().rmdir( backupPath ) );
+    REQUIRE( manager.clearIfCurrent() );
+    CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".klogg-rolling-backups" ) ) );
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager reports ownership metadata cleanup failure",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_clear_failed_metadata_removal" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    RollingFileManager manager( filePath, 8, 0 );
+    REQUIRE( manager.open( true ) );
+    REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+
+    const auto manifestPath = filePath + QStringLiteral( ".klogg-rolling-backups" );
+    REQUIRE( QFile::remove( manifestPath ) );
+    REQUIRE( QDir().mkdir( manifestPath ) );
+    CHECK_FALSE( manager.clearIfCurrent() );
+    CHECK( QFileInfo( manifestPath ).isDir() );
+
+    REQUIRE( QDir().rmdir( manifestPath ) );
+    REQUIRE( manager.clearIfCurrent() );
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager keep-all rotation preserves backups beyond index 1000",
+           "[rolling]" )
+{
+    const auto rootPath = makeTestDir( "rolling_keep_all_large_history" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    RollingFileManager manager( filePath, 1024, 0 );
+    REQUIRE( manager.open( true ) );
+    REQUIRE( manager.write( QByteArrayLiteral( "current" ) ) > 0 );
+
+    constexpr int LastBackupIndex = 1000;
+    for ( int index = 0; index <= LastBackupIndex; ++index ) {
+        QFile backup( filePath + QStringLiteral( ".%1" ).arg( index ) );
+        REQUIRE( backup.open( QIODevice::WriteOnly ) );
+        const auto contents = index == LastBackupIndex
+                                  ? QByteArrayLiteral( "oldest" )
+                                  : QByteArrayLiteral( "retained" );
+        REQUIRE( backup.write( contents ) == contents.size() );
+    }
+
+    manager.rotate();
+    QFile oldest( filePath + QStringLiteral( ".1000" ) );
+    REQUIRE( oldest.open( QIODevice::ReadOnly ) );
+    CHECK( oldest.readAll() == QByteArrayLiteral( "oldest" ) );
+    QFile newest( filePath + QStringLiteral( ".1001" ) );
+    REQUIRE( newest.open( QIODevice::ReadOnly ) );
+    CHECK( newest.readAll() == QByteArrayLiteral( "current" ) );
+    CHECK( manager.backupFiles().size() == LastBackupIndex + 2 );
+    manager.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager keep-all index survives restart and backup gaps",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_keep_all_gap" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    {
+        RollingFileManager manager( filePath, 8, 0 );
+        REQUIRE( manager.open( true ) );
+        for ( int index = 0; index < 4; ++index ) {
+            REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+        }
+    }
+    REQUIRE( QFile::remove( filePath + QStringLiteral( ".1" ) ) );
+    REQUIRE( QFile::remove( filePath + QStringLiteral( ".3" ) ) );
+    const auto unrelatedNumericSibling = filePath + QStringLiteral( ".1000" );
+    QFile unrelated( unrelatedNumericSibling );
+    REQUIRE( unrelated.open( QIODevice::WriteOnly ) );
+    REQUIRE( unrelated.write( QByteArrayLiteral( "unrelated" ) ) > 0 );
+    unrelated.close();
+
+    RollingFileManager restored( filePath, 8, 0 );
+    REQUIRE( restored.openExisting() );
+    REQUIRE( restored.clearIfCurrent() );
+    CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".0" ) ) );
+    CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".2" ) ) );
+    CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".3" ) ) );
+    CHECK( QFile::exists( unrelatedNumericSibling ) );
+    restored.deleteAll();
+    REQUIRE( QFile::remove( unrelatedNumericSibling ) );
+}
+
+TEST_CASE( "RollingFileManager recovers an interrupted keep-all publication",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_keep_all_interrupted_publication" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    {
+        RollingFileManager manager( filePath, 8, 0 );
+        REQUIRE( manager.open( true ) );
+        REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+        REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+    }
+
+    QFile publishedBackup( filePath + QStringLiteral( ".2" ) );
+    REQUIRE( publishedBackup.open( QIODevice::WriteOnly ) );
+    REQUIRE( publishedBackup.write( QByteArrayLiteral( "published" ) ) > 0 );
+    publishedBackup.close();
+
+    QFile manifest( filePath + QStringLiteral( ".klogg-rolling-backups" ) );
+    REQUIRE( manifest.open( QIODevice::WriteOnly | QIODevice::Append ) );
+    REQUIRE( manifest.write( QByteArrayLiteral( "2" ) ) == 1 );
+    manifest.close();
+    QFile pending( filePath + QStringLiteral( ".klogg-rolling-pending" ) );
+    REQUIRE( pending.open( QIODevice::WriteOnly ) );
+    REQUIRE( pending.write( QByteArrayLiteral( "2\n" ) ) == 2 );
+    pending.close();
+
+    RollingFileManager restored( filePath, 8, 0 );
+    CHECK( restored.backupFiles().size() == 3 );
+    CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".klogg-rolling-pending" ) ) );
+    REQUIRE( restored.openExisting() );
+    REQUIRE( restored.clearIfCurrent() );
+    for ( int index = 0; index < 3; ++index ) {
+        CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".%1" ).arg( index ) ) );
+    }
+    restored.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager recreates a removed keep-all manifest",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_keep_all_removed_manifest" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    {
+        RollingFileManager manager( filePath, 8, 0 );
+        REQUIRE( manager.open( true ) );
+        REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+        REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+        REQUIRE( QFile::remove( filePath + QStringLiteral( ".klogg-rolling-backups" ) ) );
+        REQUIRE( manager.write( QByteArrayLiteral( "12345678" ) ) > 0 );
+    }
+
+    RollingFileManager restored( filePath, 8, 0 );
+    REQUIRE( restored.openExisting() );
+    REQUIRE( restored.clearIfCurrent() );
+    for ( int index = 0; index < 3; ++index ) {
+        CHECK_FALSE( QFile::exists( filePath + QStringLiteral( ".%1" ).arg( index ) ) );
+    }
+    restored.deleteAll();
+}
+
+TEST_CASE( "RollingFileManager rejects an implausible keep-all index marker",
+           "[rolling][clear]" )
+{
+    const auto rootPath = makeTestDir( "rolling_keep_all_large_marker" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    RollingFileManager manager( filePath, 8, 0 );
+    REQUIRE( manager.open( true ) );
+
+    const auto sparseBackup = filePath + QStringLiteral( ".1000000" );
+    for ( const auto& backupPath : { filePath + QStringLiteral( ".0" ), sparseBackup } ) {
+        QFile backup( backupPath );
+        REQUIRE( backup.open( QIODevice::WriteOnly ) );
+        REQUIRE( backup.write( QByteArrayLiteral( "retained" ) ) > 0 );
+    }
+    QFile manifest( filePath + QStringLiteral( ".klogg-rolling-backups" ) );
+    REQUIRE( manifest.open( QIODevice::WriteOnly ) );
+    REQUIRE( manifest.write( QByteArrayLiteral( "1000000" ) ) > 0 );
+    manifest.close();
+
+    const auto backups = manager.backupFiles();
+    REQUIRE( backups.size() == 1 );
+    CHECK( backups.front() == filePath + QStringLiteral( ".0" ) );
+
+    manager.deleteAll();
+    CHECK( QFile::exists( sparseBackup ) );
+    REQUIRE( QFile::remove( sparseBackup ) );
+}
+
 TEST_CASE( "RollingFileManager reopen after rotation preserves data" )
 {
     const auto rootPath = makeTestDir( "rolling_reopen" );
