@@ -92,7 +92,11 @@ This project uses [Calendar Versioning](https://calver.org/). For a list of avai
 
 Binaries for all platforms are available from [GitHub Releases](https://github.com/ZEACENT/klogg/releases/latest).
 
-CI validates unsigned packages on every pull request and master update. Signed and notarized binaries are published only through an explicit release-qualification run and appear on the [GitHub Releases](https://github.com/ZEACENT/klogg/releases) page.
+### Continuous builds
+
+Automated rolling builds are available from the [continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous). Windows and Linux packages are CI-validated; macOS disk images are unsigned CI validation artifacts and may require local Gatekeeper approval.
+
+Stable releases default to the same secret-neutral validation evidence. A stable release explicitly published with signed evidence requires both macOS signing and notarization receipts; unsigned macOS artifacts are never described as signed or notarized.
 
 ## Building
 

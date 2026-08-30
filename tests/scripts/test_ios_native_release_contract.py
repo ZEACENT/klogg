@@ -740,15 +740,16 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             "--version",
             "--base-url",
             "not included in the installer",
-            'source_asset_url(base_url, f"v{version}"',
+            'f"{base_url}/releases"',
             "shasum -a 256",
             "validated_relative_path(",
             'patch.get("path"), "locked patch"',
             'f"3rdparty/libimobiledevice/{patch_path}"',
         ):
             self.assertIn(token, legal)
+        self.assertIn('f"{base_url}/releases/tag/continuous"', legal)
         self.assertNotIn('source_asset_url(base_url, "continuous"', legal)
-        self.assertNotIn("rolling and mutable", legal)
+        self.assertIn("rolling and mutable", legal)
         self.assertNotIn(
             "The accompanying ios-native-corresponding-source.tar.gz",
             legal,

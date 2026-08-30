@@ -213,7 +213,12 @@ jobs:
           BASE="${KLOGG_ANALYSIS_BASE:-}"
           # Filter compile_commands.json to first-party src/ TUs (cppcheck's -i
           # does not exclude paths under --project, so we hand it a filtered DB).
-          python3 -c "import json,os,sys; src=os.path.abspath(os.path.join(os.getcwd(),'src'))+os.sep; db=json.load(open(sys.argv[1])); g=lambda e: e['file'] if 'file' in e else (e.get('files') or [''])[0]; kept=[e for e in db if g(e).startswith(src)]; json.dump(kept, open(sys.argv[2],'w')); print(f'cppcheck: {len(kept)}/{len(db)} first-party src/ TUs')" "$KLOGG_BUILD_ROOT/compile_commands.json" /tmp/cc_src.json
+          python3 scripts/first_party_compile_units.py \
+            "$KLOGG_BUILD_ROOT/compile_commands.json" \
+            "$KLOGG_WORKSPACE/src" --null > /tmp/cppcheck_files.nul
+          python3 scripts/filter_compile_database.py \
+            "$KLOGG_BUILD_ROOT/compile_commands.json" "$KLOGG_WORKSPACE" \
+            /tmp/cppcheck_files.nul /tmp/cc_src.json
 
           if [ "$KLOGG_ANALYSIS_MODE" = "changed-strict" ] && [ -n "$BASE" ]; then
             # PRs and pushes scope cppcheck to their authoritative changed src/

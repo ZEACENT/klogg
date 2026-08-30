@@ -548,7 +548,8 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                 self.assertIn("verify_adb_helper_envelope.py", job)
                 self.assertIn("gh attestation verify", job)
                 self.assertIn("prefetch_artifacts/adb-helper-archive", job)
-                self.assertIn("tar -xzf", job)
+                self.assertIn("python3 scripts/extract_verified_tar.py", job)
+                self.assertNotIn('tar -xzf "$archive"', job)
         self.assertIn(
             "-DKLOGG_ADB_HELPER_ARTIFACT_ROOT=/usr/local/prefetch_artifacts/adb-helper",
             linux_job,

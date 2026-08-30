@@ -486,6 +486,8 @@ runs:
             "packages": [{"name": dmg.name, "sha256": digest(dmg)}],
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         PY
+        cp "$mounted_support/ios-native-package-receipt.json" \
+          "$KLOGG_BUILD_ROOT/packages/ios-native-package-receipt.json"
 
     - name: Sign and verify macOS disk image
       if: ${{ inputs.qualification-mode == 'release' }}
@@ -581,7 +583,6 @@ runs:
           --signing-receipt "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" \
           --notarization-receipt "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" \
           --package-file "$dmg" \
-          --package-verification-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" \
           --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
           --require-lock-binding
         mount_dir=$(mktemp -d)
@@ -629,6 +630,26 @@ runs:
           --legal-receipt "$mounted_support/ios-native-legal-receipt.json" \
           --sbom "$mounted_support/ios-native-sbom.spdx.json" \
           --verify-package-receipt "$mounted_support/ios-native-package-receipt.json"
+        mounted_helper="$mounted_app/Contents/MacOS/helpers/adb"
+        python3 scripts/smoke_adb_helper.py \
+          --adb "$mounted_helper" --port 0 --timeout-seconds 15 \
+          --json-output "$KLOGG_BUILD_ROOT/adb-helper-dmg-signed-mounted-smoke.json"
+        python3 scripts/verify_adb_helper_artifact.py \
+          --lock packaging/adb/adb-helper.lock.json \
+          --receipt "$KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" \
+          --binary-smoke-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-signed-mounted-smoke.json" \
+          --package-root "$mount_dir" \
+          --asset-scope package \
+          --source-assets-root "$mounted_app/Contents/SharedSupport/adb-helper" \
+          --layout dmg \
+          --expected-target "${{ matrix.config.adb_target }}" \
+          --package-target "${{ matrix.config.adb_target }}-dmg" \
+          --signing-receipt "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" \
+          --notarization-receipt "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" \
+          --package-file "$dmg" \
+          --package-verification-receipt "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" \
+          --checksum-envelope "$KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" \
+          --require-lock-binding
         python3 - \
           "$dmg" \
           "$mounted_support/ios-native-package-receipt.json" \
@@ -644,12 +665,15 @@ runs:
         output.write_text(json.dumps({
             "schema_version": 1,
             "receipt_kind": "ios-native-package-verification",
+            "qualification": "signed",
             "release_qualified": True,
             "source_set_receipt_sha256": source_set_hash,
             "ios_native_package_receipt_sha256": digest(package_receipt_path),
             "packages": [{"name": dmg.name, "sha256": digest(dmg)}],
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         PY
+        cp "$mounted_support/ios-native-package-receipt.json" \
+          "$KLOGG_BUILD_ROOT/packages/ios-native-package-receipt.json"
         cp "$KLOGG_BUILD_ROOT/adb-helper-dmg-package-verification.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" "$KLOGG_BUILD_ROOT/packages/"

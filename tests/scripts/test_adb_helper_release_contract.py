@@ -549,12 +549,20 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             APPIMAGE_SCRIPT,
             WIN_PREPARE,
         )
-        combined = "\n".join(
-            self.required_text(path).replace(
-                "github.ref == 'refs/heads/master'", "github.ref is trusted master"
-            )
-            for path in paths
-        )
+        normalized_sources = []
+        for path in paths:
+            lines = []
+            for line in self.required_text(path).splitlines():
+                if (
+                    "GITHUB_REF" in line
+                    or "github.ref == 'refs/heads/master'" in line
+                    or "Stable releases must be dispatched from refs/heads/master" in line
+                    or "Signed release qualification must run from master" in line
+                ):
+                    line = line.replace("refs/heads/master", "trusted-master-ref")
+                lines.append(line)
+            normalized_sources.append("\n".join(lines))
+        combined = "\n".join(normalized_sources)
         forbidden = {
             "Google platform-tools prebuilt": r"dl\.google\.com/[^\s'\"]*platform-tools|platform-tools-latest",
             "PATH adb lookup": r"(?:which|where|command\s+-v)\s+adb\b",

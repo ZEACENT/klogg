@@ -1,6 +1,7 @@
 #include "platform/platform_files.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <QByteArray>
@@ -265,7 +266,11 @@ std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
         return std::nullopt;
     }
 #if defined( Q_OS_WIN )
-    const auto nativeDescriptor = static_cast<int>( file.handle() );
+    const auto fileHandle = file.handle();
+    if ( fileHandle < 0 || fileHandle > std::numeric_limits<int>::max() ) {
+        return std::nullopt;
+    }
+    const auto nativeDescriptor = static_cast<int>( fileHandle );
     const auto nativeHandle = _get_osfhandle( nativeDescriptor );
     if ( nativeHandle == -1 ) {
         return std::nullopt;

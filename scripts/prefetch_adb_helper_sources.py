@@ -83,12 +83,24 @@ def validated_archive_members(
     *,
     omit_excluded_symlinks: bool,
     validate_symlink_targets: bool,
-) -> tuple[dict[tuple[str, ...], tarfile.TarInfo], list[dict[str, str]]]:
+) -> tuple[
+    dict[tuple[str, ...], tarfile.TarInfo], list[dict[str, str]], bool
+]:
     exclusions = locked_symlink_exclusions(excluded_build_symlinks)
     matched_exclusions: set[tuple[str, ...]] = set()
     seen: set[tuple[str, ...]] = set()
     by_name: dict[tuple[str, ...], tarfile.TarInfo] = {}
+    root_directory_seen = False
     for member in tar.getmembers():
+        if member.name.rstrip("/") == ".":
+            if not member.isdir():
+                raise RuntimeError(
+                    f"archive contains normalized-empty non-directory member: {member.name}"
+                )
+            if root_directory_seen:
+                raise RuntimeError("archive contains duplicate root directory member")
+            root_directory_seen = True
+            continue
         parts = normalized_archive_parts(member.name, "member")
         if parts in seen:
             raise RuntimeError(f"archive contains duplicate member path: {member.name}")
@@ -110,11 +122,18 @@ def validated_archive_members(
                 normalized_archive_parts(link_path.as_posix(), "symlink target")
         by_name[parts] = member
 
+    if not by_name:
+        raise RuntimeError("archive contains no real members")
+
     missing_exclusions = exclusions.keys() - matched_exclusions
     if missing_exclusions:
         missing = ", ".join(exclusions[parts]["path"] for parts in missing_exclusions)
         raise RuntimeError(f"excluded build symlink is missing from archive: {missing}")
-    return by_name, [exclusions[parts] for parts in exclusions if parts in matched_exclusions]
+    return (
+        by_name,
+        [exclusions[parts] for parts in exclusions if parts in matched_exclusions],
+        root_directory_seen,
+    )
 
 
 @contextlib.contextmanager
@@ -140,7 +159,7 @@ def canonicalize_tar_gz(
         temporary = pathlib.Path(stream.name)
     try:
         with tarfile.open(archive, "r:*") as source:
-            members, _ = validated_archive_members(
+            members, _, _ = validated_archive_members(
                 source,
                 excluded_build_symlinks,
                 omit_excluded_symlinks=False,
@@ -244,7 +263,7 @@ def safe_extract(
         raise RuntimeError(f"archive extraction destination must be an empty directory: {destination}")
 
     with tarfile.open(archive, "r:*") as tar:
-        by_name, matched_exclusions = validated_archive_members(
+        by_name, matched_exclusions, explicit_root = validated_archive_members(
             tar,
             excluded_build_symlinks,
             omit_excluded_symlinks=True,
@@ -287,7 +306,7 @@ def safe_extract(
             )
 
     children = [path for path in destination.iterdir() if path.name != ".DS_Store"]
-    if len(children) == 1 and children[0].is_dir():
+    if not explicit_root and len(children) == 1 and children[0].is_dir():
         top = children[0]
         temporary = destination.with_name(destination.name + ".flatten")
         if temporary.exists():

@@ -84,6 +84,61 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         path.write_text(json.dumps({"sources": [record], "dependencies": []}), encoding="utf-8")
         return path
 
+    def test_verified_extractor_accepts_tar_of_current_directory_contents(self):
+        artifact_root = self.root / "artifact"
+        nested = artifact_root / "bin"
+        nested.mkdir(parents=True)
+        executable = nested / "adb"
+        executable.write_bytes(b"adb helper\n")
+        executable.chmod(0o755)
+        (artifact_root / "SHA256SUMS").write_text("receipt\n", encoding="utf-8")
+        archive = self.root / "artifact.tar.gz"
+        subprocess.run(
+            ["tar", "-czf", str(archive), "-C", str(artifact_root), "."],
+            check=True,
+        )
+
+        extract_root = self.root / "extract-artifact"
+        load_prefetch_module().safe_extract(archive, extract_root)
+
+        extracted = extract_root / "bin" / "adb"
+        self.assertEqual(extracted.read_bytes(), b"adb helper\n")
+        self.assertEqual(extracted.stat().st_mode & 0o777, 0o755)
+
+    def test_verified_extractor_preserves_sole_directory_below_explicit_root(self):
+        archive = self.root / "explicit-root-directory.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            tar.addfile(root)
+            directory = tarfile.TarInfo("./helpers")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            tar.addfile(directory)
+            add_bytes(tar, "./helpers/adb", b"adb helper\n")
+
+        extract_root = self.root / "extract-explicit-root-directory"
+        load_prefetch_module().safe_extract(archive, extract_root)
+
+        self.assertEqual(
+            (extract_root / "helpers" / "adb").read_bytes(), b"adb helper\n"
+        )
+        self.assertFalse((extract_root / "adb").exists())
+
+    def test_verified_extractor_rejects_root_only_archive(self):
+        archive = self.root / "empty-artifact.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            tar.addfile(root)
+
+        with self.assertRaisesRegex(RuntimeError, "no real members"):
+            load_prefetch_module().safe_extract(
+                archive, self.root / "extract-empty-artifact"
+            )
+
     def run_prefetch(self, lock: pathlib.Path, download_root: pathlib.Path, extract_root=None):
         command = [
             sys.executable,
@@ -590,12 +645,14 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "not included in the installer",
             published_name,
             archive_hash,
-            f"/releases/download/v26.08.27/{published_name}",
+            "/releases",
             "shasum -a 256",
         ):
             self.assertIn(term, offer)
-        self.assertNotIn("/releases/download/continuous/", offer)
-        self.assertNotIn("rolling", offer)
+        self.assertNotIn(f"/releases/download/v26.08.27/{published_name}", offer)
+        self.assertIn("/releases/tag/continuous", offer)
+        self.assertNotIn(f"/releases/download/continuous/{published_name}", offer)
+        self.assertIn("rolling and mutable", offer)
 
 
 class AdbHelperBinaryInspectionContractTest(unittest.TestCase):

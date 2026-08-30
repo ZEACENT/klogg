@@ -16,7 +16,6 @@ REMOTE_ACTION_SHA_RE = re.compile(r"[^\s@]+@[0-9a-f]{40}")
 CODEQL_ACTION_SHA_RE = re.compile(
     r"github/codeql-action/(?P<action>init|analyze)@(?P<sha>[0-9a-f]{40})"
 )
-CODEQL_CURRENT_SHA = "cdf488f595d80d6e07e03d4674febd5ab45fa938"
 REVIEWED_ACTION_REVISIONS = {
     "actions/attest-build-provenance": "4d101475d8b20a2381f78447822ac1eab6504dd8",
     "actions/cache": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
@@ -67,122 +66,47 @@ BROAD_CPPCHECK_IDS = (
     "missingOverride",
 )
 
-CI_BUILD_JOB_NEEDS = {
-    "ReleaseQualificationPreflight": set(),
-    "SaveVersion": {"ReleaseQualificationPreflight"},
-    "PrefetchCpmCache": {"ReleaseQualificationPreflight"},
-    "PrefetchBoost": {"ReleaseQualificationPreflight"},
-    "PrefetchOpenSsl": {"ReleaseQualificationPreflight"},
-    "PrefetchLinuxDeployQt": {"ReleaseQualificationPreflight"},
-    "PrefetchCmakeInstaller": {"ReleaseQualificationPreflight"},
-    "PrefetchWindowsTools": {"ReleaseQualificationPreflight"},
-    "PrefetchAdbHelperSources": {"ReleaseQualificationPreflight"},
-    "PrefetchIosNativeSources": {"ReleaseQualificationPreflight"},
-    "BuildAdbHelperLegalAssets": {
-        "SaveVersion",
-        "PrefetchAdbHelperSources",
-    },
-    "BuildAdbHelpers": {
-        "PrefetchAdbHelperSources",
-        "BuildAdbHelperLegalAssets",
-    },
-    "BuildAdbLinuxArm64": {
-        "PrefetchAdbHelperSources",
-        "BuildAdbHelperLegalAssets",
-    },
-    "BuildAdbWindowsX64": {
-        "PrefetchAdbHelperSources",
-        "BuildAdbHelperLegalAssets",
-    },
-    "BuildAdbMacX64": {
-        "PrefetchAdbHelperSources",
-        "BuildAdbHelperLegalAssets",
-    },
-    "BuildAdbMacArm64": {
-        "PrefetchAdbHelperSources",
-        "BuildAdbHelperLegalAssets",
-    },
-    "BuildIosNativeStacks": {
-        "SaveVersion",
-        "PrefetchIosNativeSources",
-    },
-    "BuildIosNativeArm64": {
-        "SaveVersion",
-        "PrefetchIosNativeSources",
-    },
-    "LinuxPackages": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchLinuxDeployQt",
-        "PrefetchCmakeInstaller",
-        "BuildAdbHelpers",
-    },
-    "LinuxSanitizers": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchCmakeInstaller",
-    },
-    "LinuxTsan": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-    },
-    "MacPackages": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "BuildAdbMacX64",
-        "BuildIosNativeStacks",
-    },
-    "MacArmPackages": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "BuildAdbMacArm64",
-        "BuildIosNativeArm64",
-    },
-    "MacSanitizers": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-    },
-    "WindowsPackages": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "PrefetchWindowsTools",
-        "BuildAdbWindowsX64",
-    },
-    "WindowsX86": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "PrefetchOpenSsl",
-        "PrefetchWindowsTools",
-    },
-    "WindowsAsan": {
-        "SaveVersion",
-        "PrefetchCpmCache",
-        "PrefetchBoost",
-        "PrefetchWindowsTools",
-    },
-    "ci-gate": {
-        "BuildAdbHelpers",
-        "BuildAdbLinuxArm64",
-        "BuildAdbWindowsX64",
-        "BuildAdbMacX64",
-        "BuildAdbMacArm64",
-        "BuildIosNativeStacks",
-        "BuildIosNativeArm64",
-        "LinuxPackages",
-        "LinuxSanitizers",
-        "LinuxTsan",
-        "MacPackages",
-        "MacArmPackages",
-        "MacSanitizers",
-        "WindowsPackages",
-        "WindowsX86",
-        "WindowsAsan",
-    },
+CI_BUILD_REQUIRED_JOBS = {
+    "ReleaseQualificationPreflight",
+    "SaveVersion",
+    "PrefetchCpmCache",
+    "PrefetchBoost",
+    "PrefetchOpenSsl",
+    "PrefetchLinuxDeployQt",
+    "PrefetchCmakeInstaller",
+    "PrefetchWindowsTools",
+    "PrefetchAdbHelperSources",
+    "PrefetchIosNativeSources",
+    "BuildAdbHelperLegalAssets",
+    "BuildAdbHelpers",
+    "BuildAdbLinuxArm64",
+    "BuildAdbWindowsX64",
+    "BuildAdbMacX64",
+    "BuildAdbMacArm64",
+    "BuildIosNativeStacks",
+    "BuildIosNativeArm64",
+    "LinuxPackages",
+    "LinuxSanitizers",
+    "LinuxTsan",
+    "MacPackages",
+    "MacArmPackages",
+    "MacSanitizers",
+    "WindowsPackages",
+    "WindowsX86",
+    "WindowsAsan",
+    "ci-gate",
+}
+
+CI_BUILD_ROOT_JOBS = {
+    "SaveVersion",
+    "PrefetchCpmCache",
+    "PrefetchBoost",
+    "PrefetchOpenSsl",
+    "PrefetchLinuxDeployQt",
+    "PrefetchCmakeInstaller",
+    "PrefetchWindowsTools",
+    "PrefetchAdbHelperSources",
+    "PrefetchIosNativeSources",
 }
 
 CI_BUILD_ARTIFACT_PRODUCERS = {
@@ -244,6 +168,14 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
     },
     "ios-native-source-cache": {"BuildIosNativeStacks", "BuildIosNativeArm64"},
 }
+
+CI_BUILD_REQUIRED_MOBILE_ANCESTORS = {
+    "LinuxPackages": {"BuildAdbHelpers"},
+    "MacPackages": {"BuildAdbMacX64", "BuildIosNativeStacks"},
+    "MacArmPackages": {"BuildAdbMacArm64", "BuildIosNativeArm64"},
+    "WindowsPackages": {"BuildAdbWindowsX64"},
+}
+
 
 CI_BUILD_ARTIFACT_CONDITIONS = {
     ("BuildIosNativeArm64", "uploads", "ios-native-source-assets"):
@@ -692,27 +624,75 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     needs = workflow_job_needs(text)
-    unexpected_jobs = set(needs) - set(CI_BUILD_JOB_NEEDS)
+    missing_jobs = CI_BUILD_REQUIRED_JOBS - set(needs)
+    unexpected_jobs = set(needs) - CI_BUILD_REQUIRED_JOBS
+    for job in sorted(missing_jobs):
+        issues.append(f"CI build workflow must define job {job}")
     if unexpected_jobs:
-        issues.append("CI build workflow contains unmodeled jobs outside the reviewed gate")
-    for job, expected in CI_BUILD_JOB_NEEDS.items():
-        if job not in needs:
-            issues.append(f"CI build workflow must define job {job}")
-            continue
-        if needs[job] != expected:
-            issues.append(
-                f"CI build job {job} must need exactly {sorted(expected)}, got {sorted(needs[job])}"
-            )
+        issues.append(
+            "CI build workflow contains unmodeled jobs outside the reviewed gate: "
+            + ", ".join(sorted(unexpected_jobs))
+        )
 
     if "PrefetchDeps" in needs:
         issues.append("CI build workflow must split the monolithic PrefetchDeps job")
 
     try:
-        for job in needs:
-            workflow_job_ancestors(needs, job)
+        ancestors = {
+            job: workflow_job_ancestors(needs, job)
+            for job in needs
+        }
     except ValueError as error:
         issues.append(str(error))
         return issues
+
+    job_blocks = workflow_job_blocks(text)
+    for consumer, producers in CI_BUILD_REQUIRED_MOBILE_ANCESTORS.items():
+        if consumer not in needs:
+            continue
+        missing_producers = producers - ancestors[consumer]
+        for producer in sorted(missing_producers):
+            issues.append(
+                f"CI native artifact producer {producer} must be an ancestor of {consumer}"
+            )
+    for job in CI_BUILD_ROOT_JOBS & set(needs):
+        if needs[job]:
+            issues.append(f"CI root job {job} must not have dependencies")
+
+    for job, direct_dependencies in needs.items():
+        block = "\n".join(job_blocks.get(job, []))
+        output_dependencies = set(
+            re.findall(r"needs\.([A-Za-z0-9_-]+)\.outputs\.", block)
+        )
+        for dependency in direct_dependencies - output_dependencies:
+            other_ancestors: set[str] = set()
+            for other in direct_dependencies - {dependency}:
+                other_ancestors.add(other)
+                other_ancestors.update(ancestors.get(other, set()))
+            if dependency in other_ancestors:
+                issues.append(
+                    f"CI build job {job} directly needs transitive ancestor {dependency}"
+                )
+
+    gate = "ci-gate"
+    if gate in needs:
+        consumed_before_gate = {
+            dependency
+            for job, dependencies in needs.items()
+            if job != gate
+            for dependency in dependencies
+        }
+        terminal_jobs = (set(needs) - {gate}) - consumed_before_gate
+        if needs[gate] != terminal_jobs:
+            issues.append(
+                "CI gate must directly need exactly terminal validation jobs, got "
+                f"{sorted(needs[gate])}, expected {sorted(terminal_jobs)}"
+            )
+        missing_from_gate = (set(needs) - {gate}) - ancestors[gate]
+        if missing_from_gate:
+            issues.append(
+                "CI gate does not cover jobs: " + ", ".join(sorted(missing_from_gate))
+            )
 
     try:
         artifact_records = workflow_artifact_records(text)
@@ -841,6 +821,62 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     active_lines = [
         active for line in text.splitlines() if (active := strip_yaml_comment(line))
     ]
+    workflow_permissions: list[str] = []
+    workflow_lines = text.splitlines()
+    jobs_index = next(
+        (
+            index
+            for index, line in enumerate(workflow_lines)
+            if re.match(r"^jobs:\s*(?:#.*)?$", line)
+        ),
+        len(workflow_lines),
+    )
+    for index, line in enumerate(workflow_lines[:jobs_index]):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is None
+            or entry.group("key") != "permissions"
+            or len(entry.group("indent")) != 0
+        ):
+            continue
+        for permission_line in workflow_lines[index + 1 : jobs_index]:
+            active = strip_yaml_comment(permission_line)
+            if not active:
+                continue
+            if len(permission_line) - len(permission_line.lstrip()) == 0:
+                break
+            workflow_permissions.append(active)
+        break
+    if "id-token: write" in workflow_permissions or "attestations: write" in workflow_permissions:
+        issues.append("CI attestation write permissions must be scoped to producer jobs")
+
+    workflow_lines = text.splitlines()
+    cache_to_values = [
+        yaml_value(
+            workflow_lines,
+            index,
+            entry.group("value"),
+            len(entry.group("indent")),
+        )
+        for index, line in enumerate(workflow_lines)
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+        and entry.group("key") == "cache-to"
+    ]
+    if not cache_to_values:
+        issues.append("BuildKit cache exports must run only on default-branch pushes")
+    elif any(
+        not value.startswith(
+            "${{ github.event_name == 'push' && matrix.config.cache_write && "
+        )
+        or not value.endswith(" || '' }}")
+        or value.count("github.event_name") != 1
+        or "pull_request" in value
+        for value in cache_to_values
+    ):
+        issues.append("BuildKit cache exports must run only on default-branch pushes")
+    if any("matrix.config.cache_write" not in value for value in cache_to_values):
+        issues.append("shared BuildKit scopes must have one designated exporter")
+
     has_release_dispatch_input = all(
         marker in active_text
         for marker in (
@@ -873,6 +909,12 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         issues.append(
             "required CI validation must not require signing or notarization secrets"
         )
+    release_master_guard = 'test "$GITHUB_REF" = "refs/heads/master" || {'
+    if (
+        "Signed release qualification must run from master" not in active_text
+        or shell_commands(text).count(release_master_guard) != 1
+    ):
+        issues.append("signed release qualification must reject non-master dispatches")
 
     if "CreatePreRelease" in job_blocks or "softprops/action-gh-release@" in active_text:
         issues.append("release publication must run outside the required CI workflow")
@@ -1259,19 +1301,80 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if any(key == "continue-on-error" for key, _ in nested_entries):
         issues.append("CodeQL workflow must not use continue-on-error")
 
+    permission_entries: list[tuple[str, str]] = []
+    permission_blocks = []
+    for index, line in enumerate(job_lines):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "permissions"
+            and len(entry.group("indent")) == direct_indent
+        ):
+            permission_blocks.append(index)
+    if len(permission_blocks) == 1:
+        permission_index = permission_blocks[0]
+        for line in job_lines[permission_index + 1 :]:
+            active = strip_yaml_comment(line)
+            if not active:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= direct_indent:
+                break
+            entry = KEY_VALUE_RE.match(line)
+            if entry is not None and indent == direct_indent + 2:
+                permission_entries.append(
+                    (entry.group("key"), scalar(entry.group("value")).lower())
+                )
+    expected_permissions = {
+        "contents": "read",
+        "security-events": "write",
+    }
+    permission_issue = (
+        "CodeQL analyze job must grant only contents: read and "
+        "security-events: write permissions"
+    )
+    if (
+        len(permission_blocks) != 1
+        or len(permission_entries) != len(expected_permissions)
+        or dict(permission_entries) != expected_permissions
+    ):
+        issues.append(permission_issue)
+
     jobs_position = next(
         (index for index, line in enumerate(lines) if re.match(r"^jobs:\s*(?:#.*)?$", line)),
         len(lines),
     )
+    workflow_scoped_permissions = any(
+        entry.group("key") == "permissions" and len(entry.group("indent")) == 0
+        for line in lines[:jobs_position]
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+    )
+    if workflow_scoped_permissions and permission_issue not in issues:
+        issues.append(permission_issue)
+
     trigger_text = "\n".join(
         f"{' ' * (len(line) - len(line.lstrip()))}{active}"
         for line in lines[:jobs_position]
         if (active := strip_yaml_comment(line))
     )
-    if not re.search(r"(?m)^\s{2}push:\s*$", trigger_text) or not re.search(
-        r"(?m)^\s{4}branches:\s*\[\s*master\s*\]\s*$", trigger_text
-    ):
+    master_branch_blocks = re.compile(
+        r"(?m)^\s{2}(?P<trigger>push|pull_request):\s*$\n"
+        r"(?P<body>(?:^\s{4,}.*$\n?)*)"
+    )
+    configured_branches = {
+        match.group("trigger")
+        for match in master_branch_blocks.finditer(trigger_text)
+        if re.search(
+            r"(?m)^\s{4}branches:\s*\[\s*master\s*\]\s*$",
+            match.group("body"),
+        )
+    }
+    if "push" not in configured_branches:
         issues.append("CodeQL workflow must run on pushes to master")
+    if "pull_request" not in configured_branches:
+        issues.append("CodeQL workflow must run on pull requests to master")
+    if re.search(r"(?m)^\s{2}workflow_dispatch:\s*$", trigger_text) is None:
+        issues.append("CodeQL workflow must support manual dispatch")
 
     action_refs: dict[str, list[str]] = {"init": [], "analyze": []}
     for key, value in nested_entries:
@@ -1300,33 +1403,83 @@ def codeql_workflow_issues(text: str) -> list[str]:
         issues.append("CodeQL init and analyze must use the same reviewed SHA")
     if (
         matching_codeql_revision
-        and pinned_shas["init"] != CODEQL_CURRENT_SHA
+        and pinned_shas["init"] != REVIEWED_ACTION_REVISIONS["github/codeql-action"]
     ):
         issues.append("CodeQL actions must use the current reviewed generation")
 
-    active_text = "\n".join(
-        active for line in text.splitlines() if (active := strip_yaml_comment(line))
-    )
-    init_position = active_text.find("github/codeql-action/init@")
-    analyze_position = active_text.find("github/codeql-action/analyze@")
-    build_mode_position = active_text.find("build-mode: manual")
-    if not (
-        init_position >= 0
-        and build_mode_position > init_position
-        and analyze_position > build_mode_position
-    ):
+    job_block = lines[job_start:job_end]
+    step_actions: list[tuple[str, list[str], int]] = []
+    has_run_step = False
+    for step in workflow_step_blocks(job_block):
+        item = LIST_ITEM_RE.match(step[0])
+        if item is None:
+            continue
+        item_indent = len(item.group("indent"))
+        action = None
+        with_indent = None
+        for offset, line in enumerate(step):
+            entry = KEY_VALUE_RE.match(line)
+            if entry is None:
+                continue
+            key = entry.group("key")
+            indent = len(entry.group("indent"))
+            if key == "uses" and indent in {item_indent, item_indent + 2}:
+                action = yaml_value(step, offset, entry.group("value"), indent)
+            elif key == "run" and indent in {item_indent, item_indent + 2}:
+                has_run_step = True
+            elif key == "with" and indent == item_indent + 2:
+                with_indent = indent
+        if action is not None:
+            step_actions.append((action, step, with_indent or -1))
+
+    init_steps = [
+        (step, with_indent)
+        for action, step, with_indent in step_actions
+        if action.startswith("github/codeql-action/init@")
+    ]
+    init_build_modes: list[str] = []
+    if len(init_steps) == 1:
+        init_step, with_indent = init_steps[0]
+        for line in init_step:
+            entry = KEY_VALUE_RE.match(line)
+            if (
+                entry is not None
+                and entry.group("key") == "build-mode"
+                and len(entry.group("indent")) == with_indent + 2
+            ):
+                init_build_modes.append(scalar(entry.group("value")).lower())
+    if init_build_modes != ["manual"]:
         issues.append("CodeQL init must set build-mode: manual")
 
+    job_active = "\n".join(
+        active for line in job_lines if (active := strip_yaml_comment(line))
+    )
+    for marker in (
+        'CODEQL_ACTION_OVERLAY_ANALYSIS: "false"',
+        'CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP: "false"',
+    ):
+        if marker not in job_active:
+            issues.append(
+                "CodeQL traced build must explicitly disable overlay analysis"
+            )
+            break
+
+    if "uses: ./.github/actions/agent-setup" not in job_active:
+        issues.append("CodeQL manual build must restore the shared dependency closure")
+
     cmake_configures = []
-    for command in shell_commands(text):
+    has_application_build = False
+    for command in shell_commands("\n".join(job_block)):
         tokens = shell_tokens(command)
-        if (
-            tokens
-            and tokens[0] == "cmake"
-            and "--build" not in tokens
-            and "-P" not in tokens
-        ):
+        if not tokens or tokens[0] != "cmake":
+            continue
+        if "--build" in tokens:
+            if "build" in tokens and "klogg" in tokens:
+                has_application_build = True
+            continue
+        if "-P" not in tokens:
             cmake_configures.append(tokens)
+
     cpm_source_caches = [
         value
         for tokens in cmake_configures
@@ -1346,6 +1499,8 @@ def codeql_workflow_issues(text: str) -> list[str]:
         issues.append(
             "CodeQL configure must use the restored CPM source cache fully disconnected"
         )
+    if not has_application_build:
+        issues.append("CodeQL manual build must trace the klogg application target")
 
     return issues
 
@@ -1418,6 +1573,33 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
         issues.append(
             "clang-tidy TU scope must come from the configured compile database"
         )
+
+    if "/tmp/cc_src.json" in text:
+        has_cppcheck_unit_list = any(
+            tokens[:2] == ["python3", "scripts/first_party_compile_units.py"]
+            and "$KLOGG_BUILD_ROOT/compile_commands.json" in tokens
+            and "$KLOGG_WORKSPACE/src" in tokens
+            and "--null" in tokens
+            and option_value(tokens, ">") == "/tmp/cppcheck_files.nul"
+            for command in commands
+            if (tokens := shell_tokens(command))
+        )
+        has_cppcheck_database_filter = any(
+            tokens[:2] == ["python3", "scripts/filter_compile_database.py"]
+            and tokens[2:6]
+            == [
+                "$KLOGG_BUILD_ROOT/compile_commands.json",
+                "$KLOGG_WORKSPACE",
+                "/tmp/cppcheck_files.nul",
+                "/tmp/cc_src.json",
+            ]
+            for command in commands
+            if (tokens := shell_tokens(command))
+        )
+        if not has_cppcheck_unit_list or not has_cppcheck_database_filter:
+            issues.append(
+                "cppcheck TU scope must resolve relative compile database entries"
+            )
 
     strict_consumers = []
     strict_runners = []
@@ -1717,6 +1899,51 @@ def cppcheck_suppression_issues(text: str) -> list[str]:
     return issues
 
 
+def stable_release_workflow_issues(text: str) -> list[str]:
+    issues: list[str] = []
+    commands = shell_commands(text)
+    master_guard = 'test "${GITHUB_REF}" = "refs/heads/master" || {'
+    if commands.count(master_guard) != 1:
+        issues.append("stable release dispatch must fail closed outside master")
+    if (
+        "KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}" not in text
+        or "[[ \"$requested_run_id\" =~ ^[0-9]+$ ]]" not in text
+    ):
+        issues.append("stable release run ID must use validated environment input")
+    if (
+        "rollback_stable_promotion" not in text
+        or "trap rollback_stable_promotion ERR" not in text
+    ):
+        issues.append("stable release promotion must roll back every post-publish failure")
+    return issues
+
+
+def continuous_release_workflow_issues(text: str) -> list[str]:
+    issues: list[str] = []
+    blocks = workflow_job_blocks(text)
+    select = blocks.get("select")
+    publish = blocks.get("publish")
+    expected_select = (
+        "github.event.workflow_run.conclusion == 'success' "
+        "&& github.event.workflow_run.event == 'push' "
+        "&& github.event.workflow_run.head_branch == 'master' "
+        "&& github.event.workflow_run.head_repository.full_name == github.repository"
+    )
+    if select is None or workflow_job_direct_value(select, "if") != expected_select:
+        issues.append("continuous release selection must require a trusted successful master push")
+    if (
+        publish is None
+        or workflow_job_direct_value(publish, "if")
+        != "${{ needs.select.outputs.should-publish == 'true' }}"
+    ):
+        issues.append("continuous release publication must require the verified selection output")
+    if "cancel-in-progress: false" not in text:
+        issues.append("continuous release transaction must not be canceled in progress")
+    if "${{ failure() || cancelled() }}" not in text:
+        issues.append("continuous release rollback must cover failure and cancellation")
+    return issues
+
+
 def ci_manifests(root: Path) -> list[Path]:
     paths = set()
     for pattern in ("*.yml", "*.yaml"):
@@ -1809,6 +2036,17 @@ def check_repo(root: Path) -> list[str]:
         cppcheck_suppression_issues(
             (root / "tests" / "cppcheck_suppressions.txt").read_text()
         )
+    )
+
+    stable_release_text = (workflows / "ci-release.yml").read_text()
+    issues.extend(
+        f".github/workflows/ci-release.yml: {issue}"
+        for issue in stable_release_workflow_issues(stable_release_text)
+    )
+    continuous_release_text = (workflows / "ci-continuous.yml").read_text()
+    issues.extend(
+        f".github/workflows/ci-continuous.yml: {issue}"
+        for issue in continuous_release_workflow_issues(continuous_release_text)
     )
 
     ci_text = (workflows / "ci-build.yml").read_text()

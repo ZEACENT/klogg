@@ -7,15 +7,20 @@ on:
     branches: [master]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # CodeQL's remotely enabled overlay experiment supports only build-mode:none.
+      # Disable it explicitly so the required traced CMake build remains warning-free
+      # and continues to cover generated MOC/RCC units and configuration branches.
+      CODEQL_ACTION_OVERLAY_ANALYSIS: "false"
+      CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP: "false"
 
     # Expose values that agent-setup reads via matrix.config.*
     strategy:
@@ -29,44 +34,44 @@ jobs:
             qt_archives: qtbase icu qtsvg qttools qttranslations
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        persist-credentials: false
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-      with:
-        languages: c-cpp
-        build-mode: manual
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: c-cpp
+          build-mode: manual
 
-    - uses: ./.github/actions/agent-setup
-    - name: Install Linux deps
-      run: |
-        # Explicit timeouts/retries: apt's default can hold a dead mirror
-        # TCP connection open for tens of minutes (seen 2026-08-19).
-        sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
-        sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y libxkbcommon-dev libxkbcommon-x11-dev
+      - uses: ./.github/actions/agent-setup
 
-    - name: Prepare compiler env
-      run: |
-        echo "CC=gcc-13" >> $GITHUB_ENV
-        echo "CXX=g++-13" >> $GITHUB_ENV
+      - name: Install Linux deps
+        run: |
+          # Explicit timeouts/retries: apt's default can hold a dead mirror
+          # TCP connection open for tens of minutes (seen 2026-08-19).
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 install -y libxkbcommon-dev libxkbcommon-x11-dev
 
-    - name: configure
-      run: |
-        cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-          -DKLOGG_GENERIC_CPU=ON \
-          -DKLOGG_USE_SENTRY=OFF \
-          -DKLOGG_USE_VECTORSCAN=OFF \
-          -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" \
-          -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - name: Prepare compiler env
+        run: |
+          echo "CC=gcc-13" >> "$GITHUB_ENV"
+          echo "CXX=g++-13" >> "$GITHUB_ENV"
 
-    - name: build
-      run: |
-        cmake --build build -t klogg
+      - name: Configure traced build
+        run: |
+          cmake -S "$GITHUB_WORKSPACE" -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DKLOGG_GENERIC_CPU=ON \
+            -DKLOGG_USE_SENTRY=OFF \
+            -DKLOGG_USE_VECTORSCAN=OFF \
+            -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" \
+            -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - name: Build traced application
+        run: cmake --build build -t klogg
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
