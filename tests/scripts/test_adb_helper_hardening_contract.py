@@ -103,7 +103,8 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
 
         extracted = extract_root / "bin" / "adb"
         self.assertEqual(extracted.read_bytes(), b"adb helper\n")
-        self.assertEqual(extracted.stat().st_mode & 0o777, 0o755)
+        if sys.platform != "win32":
+            self.assertEqual(extracted.stat().st_mode & 0o777, 0o755)
 
     def test_verified_extractor_preserves_sole_directory_below_explicit_root(self):
         archive = self.root / "explicit-root-directory.tar.gz"
