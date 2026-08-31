@@ -285,6 +285,16 @@ jobs:
             "master pushes must not skip CI Build by path",
             MODULE.ci_build_workflow_issues(mutated),
         )
+        flow_mutated = workflow.replace(
+            "  push:\n    branches: [ master ]\n",
+            "  push: { branches: [ master ], paths-ignore: [README.md] }\n",
+            1,
+        )
+        self.assertNotEqual(flow_mutated, workflow)
+        self.assertIn(
+            "master pushes must not skip CI Build by path",
+            MODULE.ci_build_workflow_issues(flow_mutated),
+        )
 
     def test_ci_build_uses_the_optimized_prefetch_and_native_build_dag(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
@@ -809,6 +819,16 @@ jobs:
     def test_stable_release_master_guard_and_promotion_are_fail_closed(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-release.yml").read_text()
         self.assertEqual(MODULE.stable_release_workflow_issues(workflow), [])
+        misnamed = workflow.replace(
+            'name: "Publish Release (Stable)"',
+            'name: "Make CI Release"',
+            1,
+        )
+        self.assertNotEqual(misnamed, workflow)
+        self.assertIn(
+            'stable release workflow must be named "Publish Release (Stable)"',
+            MODULE.stable_release_workflow_issues(misnamed),
+        )
         bypassed = workflow.replace(
             '        test "${GITHUB_REF}" = "refs/heads/master" || {',
             '        true || test "${GITHUB_REF}" = "refs/heads/master" || {',
@@ -830,10 +850,35 @@ jobs:
             "stable release evidence must come from downloaded receipts, not run API inputs",
             MODULE.stable_release_workflow_issues(run_api_inputs),
         )
-        draft_tag_lookup = workflow.replace(".target_commitish", ".tag_name", 1)
+        run_api_inputs_alias = workflow.replace(
+            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n',
+            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n'
+            '        run_qualification="$(gh api "$run_api" --jq \'.inputs | .["qualification-mode"] // empty\')"\n',
+            1,
+        )
+        self.assertNotEqual(run_api_inputs_alias, workflow)
+        self.assertIn(
+            "stable release evidence must come from downloaded receipts, not run API inputs",
+            MODULE.stable_release_workflow_issues(run_api_inputs_alias),
+        )
+        draft_target_swap = workflow.replace(
+            "--jq '.target_commitish'", "--jq '.tag_name'", 1
+        )
+        self.assertNotEqual(draft_target_swap, workflow)
+        self.assertIn(
+            "stable draft verification must compare the candidate target commit",
+            MODULE.stable_release_workflow_issues(draft_target_swap),
+        )
+        draft_ref_lookup = workflow.replace(
+            '        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq \'.target_commitish\')"',
+            '        ref_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/v${KLOGG_VERSION}-candidate" --jq \'.object.sha\')"\n'
+            '        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq \'.target_commitish\')"',
+            1,
+        )
+        self.assertNotEqual(draft_ref_lookup, workflow)
         self.assertIn(
             "stable draft verification must not require an unpublished Git tag",
-            MODULE.stable_release_workflow_issues(draft_tag_lookup),
+            MODULE.stable_release_workflow_issues(draft_ref_lookup),
         )
         without_rollback = workflow.replace(
             "        trap rollback_stable_promotion ERR\n", "", 1
@@ -846,6 +891,16 @@ jobs:
     def test_continuous_release_publish_requires_trusted_selection(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-continuous.yml").read_text()
         self.assertEqual(MODULE.continuous_release_workflow_issues(workflow), [])
+        misnamed = workflow.replace(
+            'name: "Publish Release (Continuous)"',
+            'name: "Publish Continuous Release"',
+            1,
+        )
+        self.assertNotEqual(misnamed, workflow)
+        self.assertIn(
+            'continuous release workflow must be named "Publish Release (Continuous)"',
+            MODULE.continuous_release_workflow_issues(misnamed),
+        )
         bypassed = workflow.replace(
             "    if: ${{ needs.select.outputs.should-publish == 'true' }}",
             "    if: always()",
@@ -855,6 +910,26 @@ jobs:
         self.assertIn(
             "continuous release publication must require the verified selection output",
             MODULE.continuous_release_workflow_issues(bypassed),
+        )
+        unreconciled_candidate = workflow.replace(
+            'gh_api_optional_scalar orphan_id "/repos/${repo}/releases/tags/${candidate_tag}" .id',
+            'gh_api_optional_scalar orphan_id "/repos/${repo}/releases/${candidate_id}" .id',
+            1,
+        )
+        self.assertNotEqual(unreconciled_candidate, workflow)
+        self.assertIn(
+            "continuous rollback must reconcile a candidate created without an emitted id",
+            MODULE.continuous_release_workflow_issues(unreconciled_candidate),
+        )
+        unguarded_draft_deletion = workflow.replace(
+            '--jq \'.draft\')" = true\n                gh api -X DELETE "/repos/${repo}/releases/${orphan_id}"',
+            'gh api -X DELETE "/repos/${repo}/releases/${orphan_id}"',
+            1,
+        )
+        self.assertNotEqual(unguarded_draft_deletion, workflow)
+        self.assertIn(
+            "continuous rollback must reconcile a candidate created without an emitted id",
+            MODULE.continuous_release_workflow_issues(unguarded_draft_deletion),
         )
 
     def test_publication_runs_outside_the_required_ci_workflow(self):

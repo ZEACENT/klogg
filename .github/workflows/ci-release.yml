@@ -1,4 +1,4 @@
-name: "Make CI Release"
+name: "Publish Release (Stable)"
 
 on:
   workflow_dispatch:
@@ -452,24 +452,27 @@ jobs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+        source scripts/github_api_helpers.sh
         repo="${GITHUB_REPOSITORY}"
         final_tag="v${KLOGG_VERSION}"
         candidate_tag="${final_tag}-candidate"
         for tag in "$candidate_tag" "$final_tag"; do
           release_id=""
-          lookup_error="$(mktemp)"
-          if release_id="$(gh api "/repos/${repo}/releases/tags/${tag}" --jq '.id' 2>"$lookup_error")"; then
-            draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
-            test "$draft" = true || {
-              echo "::error::refusing to replace existing published release ${tag}"
-              exit 1
-            }
-            gh api -X DELETE "/repos/${repo}/releases/${release_id}" >/dev/null
-          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
+          lookup_status=0
+          gh_api_optional_scalar release_id "/repos/${repo}/releases/tags/${tag}" .id \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0)
+              draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
+              test "$draft" = true || {
+                echo "::error::refusing to replace existing published release ${tag}"
+                exit 1
+              }
+              gh api -X DELETE "/repos/${repo}/releases/${release_id}" >/dev/null
+              ;;
+            1) ;;
+            *) exit 1 ;;
+          esac
 
           ref_error="$(mktemp)"
           if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$ref_error"; then

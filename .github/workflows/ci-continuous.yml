@@ -1,4 +1,4 @@
-name: "Publish Continuous Release"
+name: "Publish Release (Continuous)"
 
 on:
   workflow_run:
@@ -183,6 +183,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
 
           delete_ref_if_present() {
@@ -267,43 +268,44 @@ jobs:
           parked_sha="$(gh api "/repos/${repo}/git/ref/tags/${parked_tag}" --jq '.object.sha')"
           verify_release "$parked_id" "$parked_tag" true
 
-          lookup_error="$(mktemp)"
-          if live_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
-            if verify_release "$live_id" continuous false; then
-              echo "Remove stale parked continuous release ${parked_tag}; live continuous release is coherent"
-              gh api -X DELETE "/repos/${repo}/releases/${parked_id}" >/dev/null
-              delete_ref_if_present "$parked_tag"
-            else
-              restore_parked_release "$live_id"
-            fi
-          elif grep -Eq '404|Not Found' "$lookup_error"; then
-            restore_parked_release
-          else
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
+          lookup_status=0
+          gh_api_optional_scalar live_id "/repos/${repo}/releases/tags/continuous" .id \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0)
+              if verify_release "$live_id" continuous false; then
+                echo "Remove stale parked continuous release ${parked_tag}; live continuous release is coherent"
+                gh api -X DELETE "/repos/${repo}/releases/${parked_id}" >/dev/null
+                delete_ref_if_present "$parked_tag"
+              else
+                restore_parked_release "$live_id"
+              fi
+              ;;
+            1) restore_parked_release ;;
+            *) exit 1 ;;
+          esac
 
       - name: Clean stale continuous candidate draft
         shell: bash
         run: |
           set -euo pipefail
+          source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
           candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
           release_id=""
-          lookup_error="$(mktemp)"
-          if release_id="$(gh api "/repos/${repo}/releases/tags/${candidate_tag}" --jq '.id' 2>"$lookup_error")"; then
-            test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = true
-          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
+          lookup_status=0
+          gh_api_optional_scalar release_id "/repos/${repo}/releases/tags/${candidate_tag}" .id \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0) test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = true ;;
+            1) ;;
+            *) exit 1 ;;
+          esac
 
           lookup_error="$(mktemp)"
           if gh api "/repos/${repo}/git/ref/tags/${candidate_tag}" >/dev/null 2>"$lookup_error"; then
             gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null
-          elif [ -n "$release_id" ] || ! grep -Eq '404|Not Found' "$lookup_error"; then
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
             cat "$lookup_error"
             exit 1
           fi
@@ -375,20 +377,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
           backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"
-          lookup_error="$(mktemp)"
-          if release_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
-            :
-          elif grep -Eq '404|Not Found' "$lookup_error"; then
-            echo "No existing continuous release to park"
-            rm -f "$lookup_error"
-            exit 0
-          else
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
+          release_id=""
+          lookup_status=0
+          gh_api_optional_scalar release_id "/repos/${repo}/releases/tags/continuous" .id \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0) ;;
+            1)
+              echo "No existing continuous release to park"
+              exit 0
+              ;;
+            *) exit 1 ;;
+          esac
           test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = false
           test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.prerelease')" = true
           old_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')"
@@ -495,6 +498,7 @@ jobs:
           CANDIDATE_RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
         run: |
           set -euo pipefail
+          source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
           candidate_id="${CANDIDATE_RELEASE_ID:-}"
           candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
@@ -518,14 +522,28 @@ jobs:
 
           published_tag=""
           if [ -n "$candidate_id" ]; then
-            lookup_error="$(mktemp)"
-            if published_tag="$(gh api "/repos/${repo}/releases/${candidate_id}" --jq '.tag_name' 2>"$lookup_error")"; then
-              gh api -X DELETE "/repos/${repo}/releases/${candidate_id}" >/dev/null
-            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-              cat "$lookup_error"
-              exit 1
-            fi
-            rm -f "$lookup_error"
+            lookup_status=0
+            gh_api_optional_scalar published_tag "/repos/${repo}/releases/${candidate_id}" .tag_name \
+              || lookup_status=$?
+            case "$lookup_status" in
+              0) gh api -X DELETE "/repos/${repo}/releases/${candidate_id}" >/dev/null ;;
+              1) ;;
+              *) exit 1 ;;
+            esac
+          else
+            # A cancelled create step can leave a draft candidate without an
+            # emitted id; reconcile it by the deterministic tag, drafts only.
+            orphan_status=0
+            gh_api_optional_scalar orphan_id "/repos/${repo}/releases/tags/${candidate_tag}" .id \
+              || orphan_status=$?
+            case "$orphan_status" in
+              0)
+                test "$(gh api "/repos/${repo}/releases/${orphan_id}" --jq '.draft')" = true
+                gh api -X DELETE "/repos/${repo}/releases/${orphan_id}" >/dev/null
+                ;;
+              1) ;;
+              *) exit 1 ;;
+            esac
           fi
           delete_ref_if_present "$candidate_tag"
           if [ "$published_tag" = continuous ]; then
@@ -538,19 +556,21 @@ jobs:
           test -n "$previous_sha" && test -n "$backup_tag"
 
           live_id=""
-          lookup_error="$(mktemp)"
-          if live_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
-            if [ "$live_id" = "$previous_id" ]; then
-              test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$previous_sha"
-              delete_ref_if_present "$backup_tag"
-              exit 0
-            fi
-            gh api -X DELETE "/repos/${repo}/releases/${live_id}" >/dev/null
-          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
+          lookup_status=0
+          gh_api_optional_scalar live_id "/repos/${repo}/releases/tags/continuous" .id \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0)
+              if [ "$live_id" = "$previous_id" ]; then
+                test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$previous_sha"
+                delete_ref_if_present "$backup_tag"
+                exit 0
+              fi
+              gh api -X DELETE "/repos/${repo}/releases/${live_id}" >/dev/null
+              ;;
+            1) ;;
+            *) exit 1 ;;
+          esac
 
           delete_ref_if_present continuous
           test "$(gh api "/repos/${repo}/releases/${previous_id}" --jq '.tag_name')" = "$backup_tag"
