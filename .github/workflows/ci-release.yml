@@ -1,4 +1,4 @@
-name: "Make CI Release"
+name: "Publish Release (Stable)"
 
 on:
   workflow_dispatch:

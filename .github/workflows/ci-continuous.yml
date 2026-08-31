@@ -1,4 +1,4 @@
-name: "Publish Continuous Release"
+name: "Publish Release (Continuous)"
 
 on:
   workflow_run:

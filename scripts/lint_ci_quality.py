@@ -1910,8 +1910,20 @@ def cppcheck_suppression_issues(text: str) -> list[str]:
     return issues
 
 
+def workflow_display_name(text: str) -> str | None:
+    lines = text.splitlines()
+    for offset, line in enumerate(lines):
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or entry.group("indent") or entry.group("key") != "name":
+            continue
+        return yaml_value(lines, offset, entry.group("value"), 0)
+    return None
+
+
 def stable_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    if workflow_display_name(text) != "Publish Release (Stable)":
+        issues.append('stable release workflow must be named "Publish Release (Stable)"')
     commands = shell_commands(text)
     master_guard = 'test "${GITHUB_REF}" = "refs/heads/master" || {'
     if commands.count(master_guard) != 1:
@@ -1941,6 +1953,10 @@ def stable_release_workflow_issues(text: str) -> list[str]:
 
 def continuous_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    if workflow_display_name(text) != "Publish Release (Continuous)":
+        issues.append(
+            'continuous release workflow must be named "Publish Release (Continuous)"'
+        )
     blocks = workflow_job_blocks(text)
     select = blocks.get("select")
     publish = blocks.get("publish")

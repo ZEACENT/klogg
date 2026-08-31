@@ -809,6 +809,16 @@ jobs:
     def test_stable_release_master_guard_and_promotion_are_fail_closed(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-release.yml").read_text()
         self.assertEqual(MODULE.stable_release_workflow_issues(workflow), [])
+        misnamed = workflow.replace(
+            'name: "Publish Release (Stable)"',
+            'name: "Make CI Release"',
+            1,
+        )
+        self.assertNotEqual(misnamed, workflow)
+        self.assertIn(
+            'stable release workflow must be named "Publish Release (Stable)"',
+            MODULE.stable_release_workflow_issues(misnamed),
+        )
         bypassed = workflow.replace(
             '        test "${GITHUB_REF}" = "refs/heads/master" || {',
             '        true || test "${GITHUB_REF}" = "refs/heads/master" || {',
@@ -846,6 +856,16 @@ jobs:
     def test_continuous_release_publish_requires_trusted_selection(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-continuous.yml").read_text()
         self.assertEqual(MODULE.continuous_release_workflow_issues(workflow), [])
+        misnamed = workflow.replace(
+            'name: "Publish Release (Continuous)"',
+            'name: "Publish Continuous Release"',
+            1,
+        )
+        self.assertNotEqual(misnamed, workflow)
+        self.assertIn(
+            'continuous release workflow must be named "Publish Release (Continuous)"',
+            MODULE.continuous_release_workflow_issues(misnamed),
+        )
         bypassed = workflow.replace(
             "    if: ${{ needs.select.outputs.should-publish == 'true' }}",
             "    if: always()",
