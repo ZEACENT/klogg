@@ -530,6 +530,20 @@ jobs:
               1) ;;
               *) exit 1 ;;
             esac
+          else
+            # A cancelled create step can leave a draft candidate without an
+            # emitted id; reconcile it by the deterministic tag, drafts only.
+            orphan_status=0
+            gh_api_optional_scalar orphan_id "/repos/${repo}/releases/tags/${candidate_tag}" .id \
+              || orphan_status=$?
+            case "$orphan_status" in
+              0)
+                test "$(gh api "/repos/${repo}/releases/${orphan_id}" --jq '.draft')" = true
+                gh api -X DELETE "/repos/${repo}/releases/${orphan_id}" >/dev/null
+                ;;
+              1) ;;
+              *) exit 1 ;;
+            esac
           fi
           delete_ref_if_present "$candidate_tag"
           if [ "$published_tag" = continuous ]; then

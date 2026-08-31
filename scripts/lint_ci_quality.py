@@ -630,6 +630,8 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         for line in push_section.splitlines()
     ):
         issues.append("master pushes must not skip CI Build by path")
+    if re.search(r"(?m)^\s*push:\s*\{[^}]*paths-ignore", trigger_prefix):
+        issues.append("master pushes must not skip CI Build by path")
     needs = workflow_job_needs(text)
     missing_jobs = CI_BUILD_REQUIRED_JOBS - set(needs)
     unexpected_jobs = set(needs) - CI_BUILD_REQUIRED_JOBS
@@ -1933,16 +1935,23 @@ def stable_release_workflow_issues(text: str) -> list[str]:
         or "[[ \"$requested_run_id\" =~ ^[0-9]+$ ]]" not in text
     ):
         issues.append("stable release run ID must use validated environment input")
-    if '.inputs["qualification-mode"]' in text:
+    if any(
+        re.search(r"\.inputs\b", jq_filter)
+        for jq_filter in re.findall(r"--jq\s+(?:'[^']*'|\"[^\"]*\")", text)
+    ):
         issues.append("stable release evidence must come from downloaded receipts, not run API inputs")
     draft_verification = text.partition(
         "- name: Verify stable source publication after upload"
     )[2].partition("- name: Recheck master tip before stable promotion")[0]
-    if (
-        ".target_commitish" not in draft_verification
-        or "/git/ref/tags/" in draft_verification
-    ):
+    if "/git/ref/tags/" in draft_verification:
         issues.append("stable draft verification must not require an unpublished Git tag")
+    draft_target_jq = re.search(r"--jq\s+'[^']*\.target_commitish", draft_verification)
+    draft_target_test = re.search(
+        r'test\s+"\$\{[A-Za-z_][A-Za-z0-9_]*\}"\s*=\s*"\$\{KLOGG_SOURCE_COMMIT\}"',
+        draft_verification,
+    )
+    if draft_target_jq is None or draft_target_test is None:
+        issues.append("stable draft verification must compare the candidate target commit")
     if (
         "rollback_stable_promotion" not in text
         or "trap rollback_stable_promotion ERR" not in text
@@ -1978,6 +1987,14 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append("continuous release transaction must not be canceled in progress")
     if "${{ failure() || cancelled() }}" not in text:
         issues.append("continuous release rollback must cover failure and cancellation")
+    rollback = text.partition("- name: Roll back failed continuous promotion")[2]
+    if (
+        "releases/tags/${candidate_tag}" not in rollback
+        or "--jq '.draft'" not in rollback
+    ):
+        issues.append(
+            "continuous rollback must reconcile a candidate created without an emitted id"
+        )
     return issues
 
 
