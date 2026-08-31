@@ -620,8 +620,14 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
                     replayError = replay.error;
                     return replay.success;
                 } );
-            switch ( stagedResult ) {
+            std::optional<klogg::platform::FileIdentity> publishedIdentity;
+            switch ( stagedResult.result ) {
             case klogg::stagedoutput::Result::Published:
+                publishedIdentity = stagedResult.identity;
+                if ( !publishedIdentity.has_value() ) {
+                    return { false, CaptureOutputError::Open };
+                }
+                break;
             case klogg::stagedoutput::Result::DestinationExists:
                 break;
             case klogg::stagedoutput::Result::WriteFailure:
@@ -634,7 +640,7 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
             }
             candidateOutput = RollingFileManager(
                 outputPath, rollingMaxFileSize_, rollingBackupCount_ );
-            if ( !candidateOutput.openExisting() ) {
+            if ( !candidateOutput.openExisting( publishedIdentity ) ) {
                 return { false, CaptureOutputError::Open };
             }
         }
@@ -652,10 +658,15 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
             stagedOutput.cancelWriting();
             return { false, replay.error };
         }
+        const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
+        if ( !publishedIdentity.has_value() ) {
+            stagedOutput.cancelWriting();
+            return { false, CaptureOutputError::Open };
+        }
         if ( !stagedOutput.commit() ) {
             return { false, CaptureOutputError::Flush };
         }
-        if ( !candidateOutput.openExisting() ) {
+        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
             return { false, CaptureOutputError::Open };
         }
     }

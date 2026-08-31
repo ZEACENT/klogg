@@ -17,7 +17,12 @@ from source_publication_identity import (
     validate_asset_file_name,
     validate_version,
 )
-from verify_source_publication_manifest import PublicationError, verify_manifest
+from verify_source_publication_manifest import (
+    EVIDENCE_LEVELS,
+    PublicationError,
+    verify_manifest,
+    verify_package_receipt_evidence,
+)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -64,7 +69,8 @@ def publish_component(
     archive_record = receipt.get("archive")
     if not isinstance(archive_record, dict):
         raise PublicationError(f"source-set receipt lacks archive: {component}")
-    archive_source = root / str(archive_record.get("file_name", ""))
+    archive_name = validate_asset_file_name(archive_record.get("file_name"))
+    archive_source = root / archive_name
     archive_hash = sha256(archive_source)
     if archive_record.get("sha256") != archive_hash:
         raise PublicationError(f"source-set archive hash mismatch: {component}")
@@ -125,6 +131,7 @@ def publish_component(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", choices=("stable", "continuous"), required=True)
+    parser.add_argument("--evidence-level", choices=tuple(sorted(EVIDENCE_LEVELS)), required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
@@ -172,7 +179,12 @@ def main() -> int:
         receipt = read_json(receipt_path, "iOS package qualification receipt")
         if (
             receipt.get("receipt_kind") != "ios-native-package-verification"
-            or receipt.get("release_qualified") is not True
+            or receipt.get("qualification") != args.evidence_level
+            or not isinstance(receipt.get("release_qualified"), bool)
+            or (
+                args.evidence_level == "signed"
+                and receipt.get("release_qualified") is not True
+            )
             or receipt.get("source_set_receipt_sha256") != source_hashes["ios-native"]
             or re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -203,10 +215,11 @@ def main() -> int:
     packages = []
     for receipt_path in args.qualification_receipt:
         receipt = read_json(receipt_path, "package qualification receipt")
-        if receipt.get("receipt_kind") != "package-verification" or receipt.get(
-            "release_qualified"
-        ) is not True:
-            raise PublicationError(f"package is not release-qualified: {receipt_path}")
+        if receipt.get("receipt_kind") != "package-verification":
+            raise PublicationError(f"invalid package qualification receipt: {receipt_path}")
+        verify_package_receipt_evidence(
+            receipt, receipt_path.name, args.evidence_level
+        )
         if receipt.get("source_set_receipt_sha256") != source_hashes["adb-helper"]:
             raise PublicationError(
                 f"ADB package qualification source-set binding mismatch: {receipt_path}"
@@ -230,6 +243,7 @@ def main() -> int:
             )
             applicable = {"adb-helper": source_hashes["adb-helper"]}
             ios_qualification_record = None
+            ios_package_receipt_record = None
             if package.suffix.lower() == ".dmg":
                 applicable["ios-native"] = source_hashes["ios-native"]
                 ios_evidence = ios_qualifications.pop(package.name, None)
@@ -237,7 +251,7 @@ def main() -> int:
                     raise PublicationError(
                         f"missing external iOS qualification for DMG: {package.name}"
                     )
-                ios_path, _, ios_package = ios_evidence
+                ios_path, ios_receipt, ios_package = ios_evidence
                 if ios_package.get("sha256") != sha256(package):
                     raise PublicationError(
                         f"iOS qualification package hash mismatch: {package.name}"
@@ -252,6 +266,31 @@ def main() -> int:
                     "file_name": ios_copy.name,
                     "sha256": sha256(ios_copy),
                 }
+                ios_package_source = ios_path.parent / "ios-native-package-receipt.json"
+                ios_package_receipt = read_json(
+                    ios_package_source, f"iOS package receipt for {package.name}"
+                )
+                if (
+                    ios_package_receipt.get("receipt_kind") != "ios-native-package"
+                    or ios_package_receipt.get("status") != "passed"
+                    or ios_package_receipt.get("source_set_receipt_sha256")
+                    != source_hashes["ios-native"]
+                    or sha256(ios_package_source)
+                    != ios_receipt.get("ios_native_package_receipt_sha256")
+                ):
+                    raise PublicationError(
+                        f"iOS package receipt evidence mismatch: {package.name}"
+                    )
+                ios_package_name = f"{package.name}.ios-package.json"
+                ios_package_copy = copy_regular(
+                    ios_package_source,
+                    args.output / ios_package_name,
+                    f"iOS package receipt for {package.name}",
+                )
+                ios_package_receipt_record = {
+                    "file_name": ios_package_copy.name,
+                    "sha256": sha256(ios_package_copy),
+                }
             package_record = {
                 "file_name": package.name,
                 "sha256": sha256(package),
@@ -263,6 +302,20 @@ def main() -> int:
             }
             if ios_qualification_record is not None:
                 package_record["ios_qualification_receipt"] = ios_qualification_record
+                package_record["ios_package_receipt"] = ios_package_receipt_record
+            if args.evidence_level == "signed" and package.suffix.lower() == ".dmg":
+                for kind in ("signing", "notarization"):
+                    evidence_source = receipt_path.parent / f"adb-helper-{kind}-receipt.json"
+                    evidence_name = f"{package.name}.{kind}.json"
+                    evidence_copy = copy_regular(
+                        evidence_source,
+                        args.output / evidence_name,
+                        f"{kind} receipt for {package.name}",
+                    )
+                    package_record[f"{kind}_receipt"] = {
+                        "file_name": evidence_copy.name,
+                        "sha256": sha256(evidence_copy),
+                    }
             packages.append(package_record)
 
     if ios_qualifications:
@@ -275,6 +328,7 @@ def main() -> int:
         "schema_version": 1,
         "manifest_kind": "klogg-source-publication",
         "channel": args.channel,
+        "evidence_level": args.evidence_level,
         "release": {
             "tag": args.tag,
             "version": args.version,
@@ -292,12 +346,15 @@ def main() -> int:
         manifest_path,
         args.output,
         args.channel,
+        args.evidence_level,
         args.tag,
         args.version,
         args.commit,
         args.base_url,
     )
-    print(f"prepared coherent {args.channel} publication in {args.output}")
+    print(
+        f"prepared coherent {args.channel}/{args.evidence_level} publication in {args.output}"
+    )
     return 0
 
 

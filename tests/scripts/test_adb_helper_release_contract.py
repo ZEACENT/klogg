@@ -463,6 +463,53 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertNotRegex(adb_cmake, r"find_program\([^)]*\badb\b")
         self.assertNotRegex(adb_cmake, r"(?:find_package|pkg_check_modules|find_library)\([^)]*libusb")
 
+    def test_windows_installer_runs_makensis_directly_and_fail_closed(self):
+        action = self.required_text(WIN_PACKAGE)
+        installer = action.split("    - name: Win installer", 1)[1].split(
+            "    - name: Win package", 1
+        )[0]
+        self.assertNotIn("joncloud/makensis-action", installer)
+        for marker in (
+            "makensis.exe",
+            "/DVERSION=$env:KLOGG_VERSION",
+            "/DPLATFORM=$env:KLOGG_ARCH",
+            "/DQT_MAJOR=$env:KLOGG_QT",
+            "klogg.nsi",
+            "$LASTEXITCODE",
+        ):
+            self.assertIn(marker, installer)
+
+    def test_windows_runtime_staging_uses_package_architecture_and_fails_closed(self):
+        prepare = self.required_text(WIN_PREPARE)
+        runtime_section = prepare.split('echo "Copying vc runtime..."', 1)[1].split(
+            'echo "Copying ssl..."', 1
+        )[0]
+
+        self.assertIn(
+            r"%VCToolsRedistDir%%KLOGG_ARCH%\Microsoft.VC143.CRT",
+            runtime_section,
+        )
+        self.assertNotIn("%platform%", runtime_section)
+        for runtime in (
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+        ):
+            self.assertIn(runtime, runtime_section)
+        self.assertRegex(
+            runtime_section,
+            re.compile(
+                r"for\s+%%R\s+in\s*\([^)]*\)\s+do\s*\(.*?"
+                r'if\s+not\s+exist\s+"%KLOGG_VC_RUNTIME_DIR%\\%%R".*?'
+                r'xcopy\s+"%KLOGG_VC_RUNTIME_DIR%\\%%R".*?'
+                r"if\s+errorlevel\s+1.*?"
+                r'if\s+not\s+exist\s+"%KLOGG_WORKSPACE%\\release\\%%R"',
+                re.DOTALL | re.IGNORECASE,
+            ),
+        )
+
     def test_package_definitions_stage_exact_resolver_paths_and_verify_first(self):
         files = {
             "linux-cpack": self.required_text(ROOT_CMAKE),
@@ -549,7 +596,20 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             APPIMAGE_SCRIPT,
             WIN_PREPARE,
         )
-        combined = "\n".join(self.required_text(path) for path in paths)
+        normalized_sources = []
+        for path in paths:
+            lines = []
+            for line in self.required_text(path).splitlines():
+                if (
+                    "GITHUB_REF" in line
+                    or "github.ref == 'refs/heads/master'" in line
+                    or "Stable releases must be dispatched from refs/heads/master" in line
+                    or "Signed release qualification must run from master" in line
+                ):
+                    line = line.replace("refs/heads/master", "trusted-master-ref")
+                lines.append(line)
+            normalized_sources.append("\n".join(lines))
+        combined = "\n".join(normalized_sources)
         forbidden = {
             "Google platform-tools prebuilt": r"dl\.google\.com/[^\s'\"]*platform-tools|platform-tools-latest",
             "PATH adb lookup": r"(?:which|where|command\s+-v)\s+adb\b",

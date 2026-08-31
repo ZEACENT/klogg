@@ -408,9 +408,22 @@ def main() -> int:
     parser.add_argument("--sbom", type=pathlib.Path)
     parser.add_argument("--app-executable", type=pathlib.Path)
     parser.add_argument("--signed-package-stage", action="store_true")
+    parser.add_argument(
+        "--unsigned-package-stage",
+        action="store_true",
+        help="Verify a validation package receipt without requiring code signatures.",
+    )
     args = parser.parse_args()
 
     try:
+        if args.signed_package_stage and args.unsigned_package_stage:
+            raise VerificationError(
+                "signed and unsigned package-stage modes are mutually exclusive"
+            )
+        if args.unsigned_package_stage and args.verify_package_receipt is None:
+            raise VerificationError(
+                "unsigned package-stage mode requires --verify-package-receipt"
+            )
         lock = read_json(args.lock, "iOS native lock")
         receipt_path = args.receipt or args.stack_root / "ios-native-build-receipt.json"
         receipt = read_json(receipt_path, "iOS native build receipt")
@@ -420,8 +433,17 @@ def main() -> int:
             args.stack_root,
             args.architecture,
             receipt,
-            enforce_build_hashes=not args.signed_package_stage and args.verify_package_receipt is None,
-            require_code_signature=args.signed_package_stage or args.verify_package_receipt is not None,
+            enforce_build_hashes=(
+                not args.signed_package_stage
+                and (
+                    args.verify_package_receipt is None
+                    or args.unsigned_package_stage
+                )
+            ),
+            require_code_signature=args.signed_package_stage
+            or (
+                args.verify_package_receipt is not None and not args.unsigned_package_stage
+            ),
         )
         application = (
             verify_application_rpath(lock, args.app_executable)

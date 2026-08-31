@@ -1071,7 +1071,10 @@ class SanitizerConfigurationTest(unittest.TestCase):
             workflow,
         )
         self.assertIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
-        self.assertIn("cache-to: type=gha,mode=max,scope=klogg-qt5-tsan", workflow)
+        self.assertIn(
+            "cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}",
+            workflow,
+        )
 
     def test_linux_lsan_uses_complete_stacks_for_narrow_suppressions(self):
         workflow = CI_BUILD.read_text()

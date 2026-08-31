@@ -7,6 +7,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).parents[2]
 LINT_WORKFLOW = ROOT / ".github" / "workflows" / "lint.yml"
+CI_QUALITY_RUNNER = ROOT / "scripts" / "run_ci_quality.py"
 PYTHON_BASELINE = "3.8"
 PEP585_BUILTINS = {"dict", "list", "set", "tuple"}
 UNSUPPORTED_STRING_METHODS = {"removeprefix", "removesuffix"}
@@ -42,9 +43,10 @@ class PythonBaselineContractTest(unittest.TestCase):
         workflow = LINT_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("actions/setup-python@", workflow)
         self.assertIn(f"python-version: '{PYTHON_BASELINE}'", workflow)
-        self.assertIn(
-            "python3 -m unittest discover -s tests/scripts -p 'test_*.py'", workflow
-        )
+        self.assertIn("python3 scripts/run_ci_quality.py", workflow)
+        runner = CI_QUALITY_RUNNER.read_text(encoding="utf-8")
+        for token in ("unittest", "discover", "tests/scripts", "test_*.py"):
+            self.assertIn(token, runner)
 
     def test_pep585_annotations_are_postponed_for_python_38(self):
         findings = []

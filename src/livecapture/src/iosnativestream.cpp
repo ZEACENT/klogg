@@ -851,9 +851,10 @@ void IosNativeStreamWorker::stop( Generation generation ) noexcept
         state->retired = true;
         state->acceptingCallbacks = false;
     }
-    if ( !state->scheduleCleanup() ) {
-        state->publishStopped();
-    }
+    // scheduleCleanup() retains State when neither the configured executor nor
+    // the emergency thread can accept cleanup. Do not acknowledge stopped until
+    // runCleanup() has actually quiesced callbacks and released native clients.
+    static_cast<void>( state->scheduleCleanup() );
 }
 
 void IosNativeStreamWorker::shutdown() noexcept

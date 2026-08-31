@@ -30,6 +30,7 @@ PREFETCH_CMAKE = ROOT / "cmake" / "prefetch_cpm" / "CMakeLists.txt"
 MAC_PACKAGE_ACTION = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
 APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 IOS_LIVE_SERVICES = ROOT / "src" / "ui" / "src" / "iosliveservices.cpp"
+IOS_NATIVE_STREAM = ROOT / "src" / "livecapture" / "src" / "iosnativestream.cpp"
 CI_BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "ci-build.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build_ios_native_stack.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_ios_native_stack.py"
@@ -182,6 +183,18 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         self.assertIn("[ executor = catalogExecutor_ ]", source)
         self.assertNotIn("[ executor = catalogExecutor_.get() ]", source)
         self.assertIn("catalogExecutor_->shutdownAsync();", source)
+
+    def test_stop_acknowledgement_requires_cleanup_dispatch(self):
+        source = required_text(IOS_NATIVE_STREAM)
+        stop = re.search(
+            r"void IosNativeStreamWorker::stop\([^)]*\) noexcept\s*\{(.*?)\n\}",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(stop)
+        body = stop.group(1)
+        self.assertIn("state->scheduleCleanup()", body)
+        self.assertNotIn("publishStopped", body)
 
     def test_legal_source_archive_rejects_traversal_member_names(self):
         code = """
@@ -583,6 +596,44 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         self.assertIn("DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
         self.assertIn("DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
 
+    def test_ios_native_homebrew_bootstrap_cleans_aws_formula_and_tap_before_install(self):
+        workflow = required_text(CI_BUILD_WORKFLOW)
+        producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]
+        install_step = producer.split(
+            "      - name: Install iOS native source-build tools\n", 1
+        )[1].split("\n      - uses: actions/download-artifact@", 1)[0]
+        uninstall = "brew uninstall --ignore-dependencies aws-sam-cli"
+        untap = "brew untap aws/tap"
+        install = "brew install autoconf automake libtool pkg-config cmake ninja"
+        failures = []
+        for marker in (
+            "HOMEBREW_NO_AUTO_UPDATE=1",
+            "HOMEBREW_NO_INSTALL_CLEANUP=1",
+            uninstall,
+            untap,
+            install,
+        ):
+            if marker not in install_step:
+                failures.append(f"missing {marker}")
+        if not failures:
+            if not (
+                install_step.index(uninstall)
+                < install_step.index(untap)
+                < install_step.index(install)
+            ):
+                failures.append(
+                    "aws-sam-cli must be uninstalled before aws/tap is untapped "
+                    "and before project build tools are installed"
+                )
+            cleanup = install_step[
+                install_step.index(uninstall) : install_step.index(install)
+            ]
+            if "|| true" not in cleanup and "brew list --formula" not in cleanup:
+                failures.append(
+                    "shared AWS Homebrew cleanup must tolerate an absent formula and tap"
+                )
+        self.assertEqual(failures, [], "\n".join(failures))
+
     def test_ci_produces_both_thin_stacks_and_mac_consumes_the_bound_artifact(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
         for token in (
@@ -603,14 +654,24 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             "FETCHCONTENT_FULLY_DISCONNECTED=ON",
         ):
             self.assertIn(token, workflow)
-        self.assertRegex(workflow, r"Mac:\s+needs:\s*\[[^\]]*BuildIosNativeStacks")
+        self.assertRegex(
+            workflow,
+            r"MacPackages:\s+needs:\s*\[[^\]]*BuildIosNativeStacks",
+        )
         self.assertRegex(workflow, r"download-artifact@[^\r\n]+[\s\S]+name:\s+ios-native-\$\{\{")
         self.assertIn("${{ matrix.artifact }}.tar.gz", workflow)
         self.assertIn("tar -czf", workflow)
         self.assertIn("tar -xzf", workflow)
         self.assertIn("prefetch_artifacts/ios-native-archive", workflow)
-        producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  Mac:", 1)[0]
-        self.assertNotIn("continue-on-error: true", producer)
+        producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]
+        for marker in (
+            "id: upload_ios_stack",
+            "continue-on-error: true",
+            "steps.upload_ios_stack.outcome == 'failure'",
+            "overwrite: true",
+        ):
+            self.assertIn(marker, producer)
+        self.assertEqual(producer.count("continue-on-error: true"), 1)
 
     def test_commit_archives_receive_locked_autotools_tarball_versions(self):
         build = required_text(BUILD_SCRIPT)
@@ -686,14 +747,16 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             "--version",
             "--base-url",
             "not included in the installer",
-            'source_asset_url(base_url, "continuous"',
-            "rolling",
+            'f"{base_url}/releases"',
             "shasum -a 256",
             "validated_relative_path(",
             'patch.get("path"), "locked patch"',
             'f"3rdparty/libimobiledevice/{patch_path}"',
         ):
             self.assertIn(token, legal)
+        self.assertIn('f"{base_url}/releases/tag/continuous"', legal)
+        self.assertNotIn('source_asset_url(base_url, "continuous"', legal)
+        self.assertIn("rolling and mutable", legal)
         self.assertNotIn(
             "The accompanying ios-native-corresponding-source.tar.gz",
             legal,
@@ -747,6 +810,19 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         ):
             self.assertIn(token, verifier)
 
+    def test_unsigned_validation_receipts_do_not_require_code_signatures(self):
+        action = required_text(MAC_PACKAGE_ACTION)
+        validation = action.split("- name: Validate unsigned macOS disk image", 1)[1].split(
+            "- name: Sign and verify macOS disk image", 1
+        )[0]
+        self.assertIn("--unsigned-package-stage", validation)
+        verifier = required_text(VERIFY_SCRIPT)
+        self.assertIn("--unsigned-package-stage", verifier)
+        self.assertIn(
+            "args.verify_package_receipt is not None and not args.unsigned_package_stage",
+            verifier,
+        )
+
     def test_package_receipt_binds_legal_source_sbom_and_final_signed_closure(self):
         verifier = required_text(VERIFY_SCRIPT)
         for token in (
@@ -775,6 +851,21 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         self.assertIn("--legal-receipt", signed_verification)
         self.assertIn("--sbom", signed_verification)
         self.assertIn("--verify-package-receipt", signed_verification)
+
+    def test_release_secrets_are_transported_through_step_environment(self):
+        action = required_text(MAC_PACKAGE_ACTION)
+        for unsafe in (
+            'require_input "p12-password" "${{ inputs.p12-password }}"',
+            '--password "${{ inputs.notarization-password }}"',
+            'echo "KLOGG_CODESIGN=${{ inputs.codesign-identity }}"',
+        ):
+            self.assertNotIn(unsafe, action)
+        for marker in (
+            "KLOGG_P12_PASSWORD: ${{ inputs.p12-password }}",
+            "KLOGG_NOTARIZATION_PASSWORD: ${{ inputs.notarization-password }}",
+            'printf \'KLOGG_CODESIGN=%s\\n\'',
+        ):
+            self.assertIn(marker, action)
 
     def test_release_consumption_is_disconnected_and_fails_closed(self):
         action = required_text(MAC_PACKAGE_ACTION)

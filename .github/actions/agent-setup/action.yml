@@ -1,14 +1,17 @@
 name: "Setup agent"
-description: ""
+description: Install the pinned CMake, Ninja, Qt, Boost, and CPM build dependencies
 runs:
   using: "composite"
   steps:
-    - name: Install Ninja
-      uses: seanmiddleditch/gha-setup-ninja@master
+    - name: Install CMake and Ninja
+      uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+      with:
+        cmakeVersion: 3.31.6
+        ninjaVersion: 1.12.1
 
     - name: Install Qt
       if: ${{ matrix.config.qt_arch }}
-      uses: jurplel/install-qt-action@v4
+      uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
       with:
         version: ${{ matrix.config.qt_version }}
         arch: ${{ matrix.config.qt_arch }}
@@ -24,7 +27,7 @@ runs:
 
     - name: Restore Boost cache
       if: ${{ env.KLOGG_REQUIRE_PREFETCHED_BOOST != 'ON' }}
-      uses: actions/cache@v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: cache-boost
       with:
         path: ${{env.BOOST_ROOT}}
@@ -32,7 +35,7 @@ runs:
 
     - name: Restore CPM cache
       if: ${{ env.KLOGG_REQUIRE_PREFETCHED_CPM != 'ON' }}
-      uses: actions/cache@v4
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ github.workspace }}/cpm_cache
         key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}${{ env.KLOGG_CPM_CACHE_KEY_SUFFIX }}

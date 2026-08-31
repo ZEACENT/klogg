@@ -23,7 +23,9 @@ WIN_PREPARE = ROOT / "packaging" / "windows" / "prepare_release.cmd"
 WIN_NSIS = ROOT / "packaging" / "windows" / "klogg.nsi"
 WIN_PORTABLE = ROOT / "packaging" / "windows" / "7z_klogg_listfile.txt"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
+CI_CONTINUOUS = ROOT / ".github" / "workflows" / "ci-continuous.yml"
 CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yml"
+README = ROOT / "README.md"
 PUBLICATION_VERIFIER = ROOT / "scripts" / "verify_source_publication_manifest.py"
 PUBLICATION_PREPARER = ROOT / "scripts" / "prepare_source_publication.py"
 
@@ -107,6 +109,48 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         preparer = required_text(PUBLICATION_PREPARER)
         self.assertIn('validate_asset_file_name(record.get("name"))', preparer)
 
+    def test_publication_preparer_rejects_source_archive_path_escape(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            component_root = root / "component"
+            output = root / "output"
+            component_root.mkdir()
+            outside = root / "outside.tar.gz"
+            outside.write_bytes(b"outside source\n")
+            receipt = {
+                "receipt_kind": "component-source-set",
+                "component": "adb-helper",
+                "archive": {
+                    "file_name": "../outside.tar.gz",
+                    "sha256": sha256(outside),
+                },
+                "package_support_assets": [],
+            }
+            (component_root / "adb-helper-source-set-receipt.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            code = """
+import pathlib, sys
+from prepare_source_publication import publish_component
+publish_component(
+    "adb-helper", pathlib.Path(sys.argv[1]),
+    "adb-helper-source-set-receipt.json", "26.08.30", "v26.08.30",
+    "https://github.com/ZEACENT/klogg", pathlib.Path(sys.argv[2]),
+)
+"""
+            output.mkdir()
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(component_root), str(output)],
+                cwd=ROOT / "scripts",
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertRegex((result.stdout + result.stderr).lower(), r"unsafe|file name")
+            self.assertFalse(any(output.iterdir()))
+
     def test_publication_preparer_rejects_channel_tag_mismatches(self):
         for channel, tag in (("stable", "continuous"), ("continuous", "v26.08.28.1718")):
             with self.subTest(channel=channel, tag=tag):
@@ -116,6 +160,8 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
                         str(PUBLICATION_PREPARER),
                         "--channel",
                         channel,
+                        "--evidence-level",
+                        "validation",
                         "--tag",
                         tag,
                         "--version",
@@ -290,6 +336,10 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
             "mounted_app",
             "verify_ios_native_stack.py",
             "--verify-package-receipt",
+            "mounted_helper",
+            "smoke_adb_helper.py",
+            "verify_adb_helper_artifact.py",
+            '--package-root "$mount_dir"',
             "Contents/Frameworks/ios-native",
             "Contents/SharedSupport/ios-native",
         ):
@@ -322,41 +372,66 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         self.assertGreater(post_upload, upload, "stable publication must verify after upload")
         self.assertRegex(workflow[upload:], r"gh\s+(?:api|release\s+download)")
 
-    def test_continuous_release_publishes_one_mutable_coherent_package_and_source_set(self):
-        workflow = required_text(CI_BUILD)
-        preparer = required_text(PUBLICATION_PREPARER)
-        manifest = self.contract["publication_manifest"]["file_name"]
-        publication = workflow[workflow.index("  CreatePreRelease:") :]
-        for name in (
-            self.adb["receipt_file"],
-            self.ios["receipt_file"],
-            manifest,
-            "prepare_source_publication.py",
-            "verify_source_publication_manifest.py",
+    def test_stable_release_defaults_to_validation_and_keeps_signed_evidence_strict(self):
+        build = required_text(CI_BUILD)
+        release = required_text(CI_RELEASE)
+        self.assertIn("qualification-mode:", build)
+        self.assertIn("- release", build)
+        self.assertIn("evidence-level:", release)
+        evidence_input = release.split("evidence-level:", 1)[1].split("jobs:", 1)[0]
+        self.assertIn("default: validation", evidence_input)
+        self.assertIn("- validation", evidence_input)
+        self.assertIn("- signed", evidence_input)
+        self.assertIn("--evidence-level \"${KLOGG_EVIDENCE_LEVEL}\"", release)
+        self.assertRegex(
+            release,
+            r"KLOGG_EVIDENCE_LEVEL.*signed[\s\S]+adb-helper-signing-receipt\.json[\s\S]+adb-helper-notarization-receipt\.json",
+        )
+        for secret in (
+            "CODESIGN_BASE64",
+            "CODESIGN_PASSWORD",
+            "APPLE_DEVELOPER_ID_APPLICATION",
+            "NOTARIZATION_USERNAME",
+            "NOTARIZATION_TEAM",
+            "NOTARIZATION_PASSWORD",
         ):
-            self.assertIn(name, publication)
-        self.assertRegex(publication, r"(?i)channel[^\n]*continuous")
-        self.assertRegex(publication, r"(?i)mutable[^\n]*(?:true|True)")
-        self.assertRegex(publication, r"(?i)rolling")
-        self.assertIn(
-            "published_source_name(version, component, archive_hash)",
-            preparer,
+            self.assertNotIn(f"secrets.{secret}", release)
+
+    def test_required_ci_does_not_publish_and_workflow_run_publisher_is_trusted(self):
+        build = required_text(CI_BUILD)
+        for marker in (
+            "CreatePreRelease:",
+            "Create continuous candidate draft",
+            "tag_name=continuous",
+            "softprops/action-gh-release",
+        ):
+            self.assertNotIn(marker, build)
+
+        continuous = required_text(CI_CONTINUOUS)
+        self.assertIn("workflow_run:", continuous)
+        self.assertRegex(continuous, r"workflows:\s*\[\s*[\"']CI Build[\"']\s*\]")
+        self.assertIn("types: [completed]", continuous)
+        trusted = (
+            "github.event.workflow_run.conclusion == 'success'"
+            " && github.event.workflow_run.event == 'push'"
+            " && github.event.workflow_run.head_branch == 'master'"
+            " && github.event.workflow_run.head_repository.full_name == github.repository"
         )
-        for component in ("adb-helper", "ios-native"):
-            self.assertIn(f'"{component}"', preparer)
-        create_release = publication.index("- name: Create continuous candidate draft")
-        verification = publication.find("verify_source_publication_manifest.py", create_release)
-        self.assertGreater(
-            verification,
-            create_release,
-            "continuous publication must verify the uploaded rolling package/source set",
-        )
+        self.assertIn(trusted, " ".join(continuous.split()))
+        self.assertIn("actions: read", continuous)
+        self.assertIn("contents: write", continuous)
+        self.assertIn("cancel-in-progress: false", continuous)
+        self.assertIn("github.token", continuous)
+        self.assertNotRegex(continuous, r"secrets\.(?:CODESIGN|APPLE|NOTARIZATION)")
+        readme = required_text(README)
+        self.assertIn("continuous release", readme.lower())
+        self.assertRegex(readme, r"(?i)macOS[^\n]*unsigned")
 
     def test_source_asset_producers_bind_release_version_and_flat_checksums(self):
         build = required_text(CI_BUILD)
         stable = required_text(CI_RELEASE)
         adb_producer = section(build, "  PrefetchAdbHelperSources:", "  BuildAdbHelpers:")
-        ios_producer = section(build, "  BuildIosNativeStacks:", "  Mac:")
+        ios_producer = section(build, "  BuildIosNativeStacks:", "  MacPackages:")
         for producer in (adb_producer, ios_producer):
             self.assertRegex(producer, r"needs:\s*\[[^\]]*SaveVersion")
             self.assertIn("--version", producer)
@@ -379,20 +454,22 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         ):
             self.assertIn(marker, preparer)
         stable = required_text(CI_RELEASE)
-        continuous = required_text(CI_BUILD)
-        for workflow in (stable, continuous):
-            self.assertIn("ios-native-dmg-package-verification.json", workflow)
-            self.assertIn("--ios-qualification-receipt", workflow)
+        self.assertIn("ios-native-dmg-package-verification.json", stable)
+        self.assertIn("--ios-qualification-receipt", stable)
+        self.assertNotIn("--ios-qualification-receipt", required_text(CI_BUILD))
 
-    def test_stable_release_checks_out_selected_ci_commit_before_release_processing(self):
+    def test_stable_release_selects_exact_trusted_ci_artifacts_without_expression_injection(self):
         workflow = required_text(CI_RELEASE)
+        self.assertIn('test "${GITHUB_REF}" = "refs/heads/master"', workflow)
+        self.assertIn("KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}", workflow)
         selection = section(
             workflow,
             "- name: Select trusted CI run",
             "- name: Download artifacts for selected CI workflow",
         )
+        self.assertNotIn("${{ github.event.inputs.ci-run-id }}", selection)
+        self.assertRegex(selection, r"\^\[0-9\]\+\$")
         for marker in (
-            "actions/workflows/ci-build.yml/runs",
             'run_path="$(gh api',
             'run_repository="$(gh api',
             'run_branch="$(gh api',
@@ -404,9 +481,13 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
             '"${GITHUB_REPOSITORY}"',
             '"master"',
             '"success"',
+            "event=push",
+            'KLOGG_EVIDENCE_LEVEL" = validation',
+            "workflow-run API does not expose workflow_dispatch inputs",
+            "/branches/master",
         ):
             self.assertIn(marker, selection)
-        self.assertIn("push|workflow_dispatch", selection)
+        self.assertNotIn('.inputs["qualification-mode"]', selection)
         self.assertIn("run_id: ${{ env.KLOGG_CI_RUN_ID }}", workflow)
 
         metadata = workflow.index("klogg_commit.txt")
@@ -420,7 +501,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         changelog = section(workflow, "- name: Generate Changelog", "- name: Display structure")
         self.assertIn('--to-ref "${KLOGG_SOURCE_COMMIT}"', changelog)
 
-    def test_stable_and_continuous_retries_recreate_clean_draft_asset_sets(self):
+    def test_stable_retry_recreates_a_clean_draft_asset_set(self):
         stable = required_text(CI_RELEASE)
         stable_cleanup = stable.index("- name: Clean stale stable draft")
         stable_create = stable.index("- name: Create GitHub Release")
@@ -428,21 +509,14 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         cleanup = stable[stable_cleanup:stable_create]
         self.assertIn("draft", cleanup)
         self.assertIn("gh api -X DELETE", cleanup)
+        self.assertIn('candidate_tag="${final_tag}-candidate"', cleanup)
         self.assertIn("/git/ref/tags/${tag}", cleanup)
         self.assertNotIn(
             'git/refs/tags/${tag}" >/dev/null 2>&1 || true',
             cleanup,
             "stale stable tag deletion must fail closed",
         )
-
-        continuous = required_text(CI_BUILD)
-        publication = continuous[continuous.index("  CreatePreRelease:") :]
-        candidate_tag = "continuous-candidate-${{ github.run_id }}-${{ github.run_attempt }}"
-        self.assertIn(candidate_tag, publication)
-        candidate_cleanup = publication.index("- name: Clean stale continuous candidate draft")
-        candidate_create = publication.index("- name: Create continuous candidate draft")
-        self.assertLess(candidate_cleanup, candidate_create)
-        self.assertIn("gh api -X DELETE", publication[candidate_cleanup:candidate_create])
+        self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
 
     def test_stable_release_uses_selected_ci_commit_and_remains_draft_until_verified(self):
         workflow = required_text(CI_RELEASE)
@@ -457,58 +531,97 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim"):
         verify = publication.index("- name: Verify stable source publication after upload")
         self.assertLess(create, verify)
         self.assertIn("draft: true", publication[create:verify])
+        self.assertIn("tag_name: v${{ env.KLOGG_VERSION }}-candidate", publication[create:verify])
         verification = publication[verify:]
-        self.assertIn('/git/ref/tags/v${KLOGG_VERSION}', verification)
-        self.assertIn('test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}"', verification)
+        draft_verification = verification[: verification.index("- name: Recheck master tip")]
+        self.assertIn(".target_commitish", draft_verification)
+        self.assertIn(
+            'test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}"',
+            draft_verification,
+        )
+        self.assertNotIn("/git/ref/tags/", draft_verification)
         promotion = publication.find("draft=false", verify)
         self.assertGreater(promotion, verify, "stable release must publish only after verification")
 
-    def test_continuous_verifies_draft_candidate_before_replacing_public_release(self):
-        workflow = required_text(CI_BUILD)
-        publication = workflow[workflow.index("  CreatePreRelease:") :]
-        candidate = publication.index("- name: Create continuous candidate draft")
-        verification = publication.index("- name: Verify rolling source publication after upload")
-        parking = publication.index("- name: Park existing continuous release for rollback")
-        promotion = publication.index("- name: Promote verified continuous candidate")
-        self.assertLess(candidate, verification)
-        self.assertLess(verification, parking)
-        self.assertLess(parking, promotion)
-        self.assertIn("draft: true", publication[candidate:verification])
-        promoted = publication[promotion:]
-        self.assertIn("tag_name=continuous", promoted)
-        self.assertIn("draft=false", promoted)
-        self.assertIn("prerelease=true", promoted)
-        final_verification = publication.index("- name: Reverify promoted continuous release")
-        self.assertGreater(final_verification, promotion)
-        final_block = publication[final_verification:]
-        for marker in (
-            "tag_name",
-            "/git/ref/tags/continuous",
-            "KLOGG_SOURCE_COMMIT",
-            "continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
-            "verify_source_publication_manifest.py",
-            "--expected-tag continuous",
-            "- name: Roll back failed continuous promotion",
-            "KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID",
-            "KLOGG_PREVIOUS_CONTINUOUS_SHA",
-            "- name: Remove parked continuous release after promotion",
-        ):
-            self.assertIn(marker, final_block)
+    def test_release_publication_is_explicit_and_verifies_before_promotion(self):
+        self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
+        release = required_text(CI_RELEASE)
+        create = release.index("- name: Create GitHub Release")
+        verify = release.index("- name: Verify stable source publication after upload")
+        stale = release.index("- name: Recheck master tip before stable promotion")
+        promote = release.index("- name: Publish verified stable release")
+        self.assertLess(create, verify)
+        self.assertLess(verify, stale)
+        self.assertLess(stale, promote)
+        self.assertIn("draft: true", release[create:verify])
+        promotion = release[promote:]
+        self.assertIn("draft=false", promotion)
+        self.assertGreaterEqual(promotion.count("/branches/master"), 2)
+        self.assertIn("Roll back failed stable promotion", promotion)
+        self.assertIn('releases/${RELEASE_ID}', promotion)
+        self.assertIn('delete_ref_if_present "$final_tag"', promotion)
+        before_create = release.index("- name: Recheck master tip before stable draft creation")
+        self.assertLess(before_create, create)
+        for position in (before_create, stale):
+            check = release[position : release.find("\n    - name:", position + 1)]
+            self.assertIn("/branches/master", check)
+            self.assertIn("KLOGG_SOURCE_COMMIT", check)
 
-        rollback = section(
-            publication,
+    def test_continuous_publication_is_transactional_sha_bound_and_rollback_safe(self):
+        workflow = required_text(CI_CONTINUOUS)
+        ordered = [
+            "Create continuous candidate draft",
+            "Verify continuous candidate after upload",
+            "Recheck master tip before continuous promotion",
+            "Park existing continuous release for rollback",
+            "Promote verified continuous candidate",
+            "Reverify promoted continuous release",
+            "Roll back failed continuous promotion",
+        ]
+        positions = [workflow.index(marker) for marker in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("draft: true", workflow[positions[0] : positions[1]])
+        rollback = workflow[positions[-1] :]
+        self.assertIn("failure() || cancelled()", rollback)
+        recovery = workflow.index("Recover interrupted continuous transaction")
+        self.assertLess(recovery, positions[0])
+        reconciliation = workflow[recovery:positions[0]]
+        self.assertIn("continuous-rollback-", reconciliation)
+        self.assertIn("releases/tags/continuous", reconciliation)
+        self.assertIn("Restore parked continuous release", reconciliation)
+        self.assertIn("Remove stale parked continuous release", reconciliation)
+        self.assertIn("verify_source_publication_manifest.py", reconciliation)
+        self.assertIn("live continuous release is coherent", reconciliation)
+        self.assertIn('candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"', workflow)
+        self.assertIn('backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"', workflow)
+        self.assertNotIn("continuous-candidate-${GITHUB_RUN_ID}", workflow)
+        self.assertNotIn("continuous-rollback-${GITHUB_RUN_ID}", workflow)
+        self.assertIn("run-id: ${{ github.event.workflow_run.id }}", workflow)
+        self.assertIn("github-token: ${{ github.token }}", workflow)
+        self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertIn('test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}"', workflow)
+        reverify = section(
+            workflow,
+            "- name: Reverify promoted continuous release",
             "- name: Roll back failed continuous promotion",
-            "- name: Remove parked continuous release after promotion",
         )
-        no_previous_guard = rollback.index('if [ -z "$previous_id" ]')
-        live_tag_delete = rollback.index(
-            'git/refs/tags/continuous" >/dev/null 2>&1 || true'
+        self.assertIn("/branches/master", reverify)
+        self.assertIn("KLOGG_SOURCE_COMMIT", reverify)
+        promotion = section(
+            workflow,
+            "- name: Promote verified continuous candidate",
+            "- name: Reverify promoted continuous release",
         )
-        self.assertGreater(
-            live_tag_delete,
-            no_previous_guard,
-            "a failure before parking must leave the existing continuous tag untouched",
-        )
+        self.assertIn('candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"', promotion)
+        self.assertNotIn("2>&1 || true", promotion)
+        for marker in (
+            "continuous-candidate-",
+            "continuous-rollback-",
+            "tag_name=continuous",
+            "expected-channel continuous",
+            "expected-evidence-level validation",
+        ):
+            self.assertIn(marker, workflow)
 
 
 class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
@@ -524,7 +637,7 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
         path.write_bytes(content)
         return path
 
-    def make_manifest(self) -> tuple[pathlib.Path, dict]:
+    def make_manifest(self, evidence_level: str = "signed") -> tuple[pathlib.Path, dict]:
         version = "26.08.27"
         tag = f"v{version}"
         commit = "a" * 40
@@ -599,9 +712,42 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "receipt_kind": "package-verification",
-                        "release_qualified": True,
+                        "target": "macos-arm64",
+                        "release_qualified": evidence_level == "signed",
                         "source_set_receipt_sha256": source_set_hashes["adb-helper"],
+                        "source_helper_sha256": "6" * 64,
+                        "helper_sha256": "7" * 64,
+                        "required_receipts": [
+                            "binary-build",
+                            "binary-smoke",
+                            "package-verification",
+                            "signing",
+                            "notarization",
+                        ],
+                        "verified_receipts": [
+                            "binary-build",
+                            "binary-smoke",
+                            "package-verification",
+                            *(["signing", "notarization"] if evidence_level == "signed" else []),
+                        ],
                         "packages": [{"name": package.name, "sha256": package_hash}],
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode(),
+        )
+        ios_package_receipt = self.write_asset(
+            f"{package.name}.ios-package.json",
+            (
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "receipt_kind": "ios-native-package",
+                        "status": "passed",
+                        "source_set_receipt_sha256": source_set_hashes["ios-native"],
+                        "architecture": "arm64",
+                        "dylibs": [],
                     },
                     sort_keys=True,
                 )
@@ -614,9 +760,10 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                 json.dumps(
                     {
                         "receipt_kind": "ios-native-package-verification",
-                        "release_qualified": True,
+                        "qualification": evidence_level,
+                        "release_qualified": evidence_level == "signed",
                         "source_set_receipt_sha256": source_set_hashes["ios-native"],
-                        "ios_native_package_receipt_sha256": "5" * 64,
+                        "ios_native_package_receipt_sha256": sha256(ios_package_receipt),
                         "packages": [{"name": package.name, "sha256": package_hash}],
                     },
                     sort_keys=True,
@@ -624,6 +771,39 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                 + "\n"
             ).encode(),
         )
+        signed_evidence = {}
+        if evidence_level == "signed":
+            for kind in ("signing", "notarization"):
+                evidence = self.write_asset(
+                    f"adb-helper-{kind}-receipt.json",
+                    (
+                        json.dumps(
+                            {
+                                "receipt_kind": kind,
+                                "status": "passed",
+                                "target": "macos-arm64",
+                                **(
+                                    {"identity": "Developer ID Application: Klogg Test"}
+                                    if kind == "signing"
+                                    else {
+                                        "team_id": "TESTTEAM123",
+                                        "submission_id": "00000000-0000-0000-0000-000000000001",
+                                    }
+                                ),
+                                "package_sha256": package_hash,
+                                "source_helper_sha256": "6" * 64,
+                                "signed_helper_sha256": "7" * 64,
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    ).encode(),
+                )
+                signed_evidence[f"{kind}_receipt"] = {
+                    "file_name": evidence.name,
+                    "sha256": sha256(evidence),
+                }
+
         linux_package = self.write_asset("klogg-26.08.27-linux.deb", b"linux package\n")
         linux_hash = sha256(linux_package)
         linux_qualification = self.write_asset(
@@ -634,6 +814,16 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                         "receipt_kind": "package-verification",
                         "release_qualified": True,
                         "source_set_receipt_sha256": source_set_hashes["adb-helper"],
+                        "required_receipts": [
+                            "binary-build",
+                            "binary-smoke",
+                            "package-verification",
+                        ],
+                        "verified_receipts": [
+                            "binary-build",
+                            "binary-smoke",
+                            "package-verification",
+                        ],
                         "packages": [{"name": linux_package.name, "sha256": linux_hash}],
                     },
                     sort_keys=True,
@@ -645,6 +835,7 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
             "schema_version": 1,
             "manifest_kind": "klogg-source-publication",
             "channel": "stable",
+            "evidence_level": evidence_level,
             "release": {
                 "tag": tag,
                 "version": version,
@@ -664,6 +855,11 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                         "file_name": ios_qualification.name,
                         "sha256": sha256(ios_qualification),
                     },
+                    "ios_package_receipt": {
+                        "file_name": ios_package_receipt.name,
+                        "sha256": sha256(ios_package_receipt),
+                    },
+                    **signed_evidence,
                     "source_sets": source_set_hashes,
                 },
                 {
@@ -681,7 +877,7 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
         manifest.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return manifest, document
 
-    def run_verifier(self, manifest: pathlib.Path):
+    def run_verifier(self, manifest: pathlib.Path, evidence_level: str = "signed"):
         self.assertTrue(
             PUBLICATION_VERIFIER.is_file(),
             f"missing publication manifest verifier: {PUBLICATION_VERIFIER}",
@@ -696,6 +892,8 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                 str(self.root),
                 "--expected-channel",
                 "stable",
+                "--expected-evidence-level",
+                evidence_level,
                 "--expected-tag",
                 "v26.08.27",
                 "--expected-version",
@@ -715,6 +913,32 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
         manifest, _ = self.make_manifest()
         result = self.run_verifier(manifest)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_validation_evidence_accepts_unsigned_macos_receipts_with_complete_bindings(self):
+        manifest, document = self.make_manifest("validation")
+        self.assertEqual(document["channel"], "stable")
+        self.assertEqual(document["evidence_level"], "validation")
+        result = self.run_verifier(manifest, "validation")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_signed_evidence_rejects_missing_or_failed_signing_and_notarization(self):
+        for mismatch in ("missing-signing", "failed-notarization"):
+            with self.subTest(mismatch=mismatch):
+                manifest, document = self.make_manifest("signed")
+                if mismatch == "missing-signing":
+                    document["packages"][0].pop("signing_receipt")
+                else:
+                    path = self.root / "adb-helper-notarization-receipt.json"
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                    receipt["status"] = "failed"
+                    path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+                    document["packages"][0]["notarization_receipt"]["sha256"] = sha256(path)
+                manifest.write_text(
+                    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                result = self.run_verifier(manifest, "signed")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex((result.stdout + result.stderr).lower(), r"sign|notari")
 
     def test_manifest_verifier_rejects_hash_tag_package_and_source_mismatches(self):
         mutations = {
@@ -824,6 +1048,26 @@ class SourcePublicationManifestVerifierContractTest(unittest.TestCase):
                 self.assertRegex(
                     (result.stdout + result.stderr).lower(), r"qualification|package"
                 )
+
+    def test_manifest_verifier_rejects_unbound_ios_package_receipt_hash(self):
+        manifest, document = self.make_manifest("signed")
+        qualification = self.root / "ios-native-dmg-package-verification.json"
+        receipt = json.loads(qualification.read_text(encoding="utf-8"))
+        receipt["ios_native_package_receipt_sha256"] = "5" * 64
+        qualification.write_text(
+            json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        document["packages"][0]["ios_qualification_receipt"]["sha256"] = sha256(
+            qualification
+        )
+        manifest.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        result = self.run_verifier(manifest, "signed")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex((result.stdout + result.stderr).lower(), r"ios|package receipt")
 
     def test_manifest_verifier_requires_component_qualification_source_set_bindings(self):
         scenarios = ("adb-binding", "ios-missing", "ios-binding", "ios-package-receipt")

@@ -3,13 +3,6 @@ name: "CI Build"
 on:
   push:
     branches: [ master ]
-    paths-ignore:
-      - 'website/**'
-      - BUILD.md
-      - CODE_OF_CONDUCT.md
-      - CONTRIBUTING.md
-      - README.md
-      - .gitignore
   pull_request:
     branches: [ master ]
     paths-ignore:
@@ -20,30 +13,70 @@ on:
       - README.md
       - .gitignore
   workflow_dispatch:
+    inputs:
+      qualification-mode:
+        description: Secret-neutral validation, or explicit signed/notarized release qualification
+        required: true
+        default: validation
+        type: choice
+        options:
+          - validation
+          - release
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
 
 concurrency:
-  # Cancel superseded PR validation, but serialize master publication runs.
-  # A master run replaces the continuous tag/release; canceling it between
-  # deletion and recreation could leave the release missing indefinitely.
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Release qualification must not share a queue with ordinary master pushes.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'validation') }}
 
 env:
   KLOGG_CI_IMAGE_PREFIX: zeacent/klogg
 
 jobs:
+  ReleaseQualificationPreflight:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify release qualification inputs
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release' }}
+        shell: bash
+        env:
+          KLOGG_P12_FILE_BASE64: ${{ secrets.CODESIGN_BASE64 }}
+          KLOGG_P12_PASSWORD: ${{ secrets.CODESIGN_PASSWORD }}
+          KLOGG_CODESIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          KLOGG_NOTARIZATION_USERNAME: ${{ secrets.NOTARIZATION_USERNAME }}
+          KLOGG_NOTARIZATION_TEAM: ${{ secrets.NOTARIZATION_TEAM }}
+          KLOGG_NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/master" || {
+            echo "::error::Signed release qualification must run from master"
+            exit 1
+          }
+          missing=0
+          for name in \
+            KLOGG_P12_FILE_BASE64 \
+            KLOGG_P12_PASSWORD \
+            KLOGG_CODESIGN_IDENTITY \
+            KLOGG_NOTARIZATION_USERNAME \
+            KLOGG_NOTARIZATION_TEAM \
+            KLOGG_NOTARIZATION_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing release qualification secret: $name"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
   SaveVersion:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-22.04
     outputs:
       klogg_version: ${{ steps.save-version.outputs.klogg_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/klogg-version
@@ -56,7 +89,7 @@ jobs:
           echo "$KLOGG_VERSION" > klogg_version.txt
           echo "$GITHUB_SHA" > klogg_commit.txt
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: klogg_version
           path: |
@@ -71,12 +104,12 @@ jobs:
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Restore shared CPM cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ github.workspace }}/cpm_cache
           key: CPM-${{ hashFiles('3rdparty/CMakeLists.txt', 'cmake/CPM.cmake', '3rdparty/patches/**', 'cmake/prefetch_cpm/CMakeLists.txt') }}
@@ -89,7 +122,7 @@ jobs:
           tar -czf "$KLOGG_WORKSPACE/cpm-cache.tar.gz" \
             -C "$KLOGG_WORKSPACE" cpm_cache
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cpm-cache
           path: cpm-cache.tar.gz
@@ -106,7 +139,7 @@ jobs:
     steps:
       - name: Restore Boost prefetch cache
         id: cache-boost-prefetch
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ github.workspace }}/prefetch_artifacts/boost
           key: boost-prefetch-1-86-0
@@ -155,7 +188,7 @@ jobs:
           # reliably and tar is deterministic.
           tar -czf "$PREFETCH_ROOT/boost.tar.gz" -C "$PREFETCH_ROOT/boost" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: boost-root
           path: prefetch_artifacts/boost.tar.gz
@@ -171,7 +204,7 @@ jobs:
     steps:
       - name: Restore OpenSSL prefetch cache
         id: cache-openssl-prefetch
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ github.workspace }}/prefetch_artifacts/openssl.zip
           key: openssl-prefetch-1-1-1w
@@ -203,7 +236,7 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: openssl-archive
           path: prefetch_artifacts/openssl.zip
@@ -250,7 +283,7 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linuxdeployqt
           path: prefetch_artifacts/linuxdeployqt-continuous-x86_64.AppImage
@@ -300,7 +333,7 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cmake-installer
           path: prefetch_artifacts/cmake-3.20.2-linux-x86_64.sh
@@ -313,7 +346,7 @@ jobs:
     steps:
       - name: Restore MSYS2 tools cache
         id: cache-msys2-tools
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: prefetch_artifacts/msys2-tools.zip
           key: msys2-tools-mingw64-ragel-pkgconf-v1
@@ -422,7 +455,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: msys2-tools
           path: prefetch_artifacts/msys2-tools.zip
@@ -433,9 +466,16 @@ jobs:
     name: "Prefetch locked ADB helper source closure"
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Restore exact locked ADB source closure
+        id: cache-adb-sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: prefetch_artifacts/adb-helper-sources
+          key: adb-helper-sources-v1-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py') }}
 
       - name: Prefetch and hash immutable ADB sources
         shell: bash
@@ -445,7 +485,14 @@ jobs:
             --lock packaging/adb/adb-helper.lock.json \
             --download-root prefetch_artifacts/adb-helper-sources
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Save exact locked ADB source closure
+        if: ${{ github.event_name == 'push' && steps.cache-adb-sources.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: prefetch_artifacts/adb-helper-sources
+          key: adb-helper-sources-v1-${{ hashFiles('packaging/adb/adb-helper.lock.json', 'scripts/prefetch_adb_helper_sources.py') }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adb-helper-source-cache
           path: prefetch_artifacts/adb-helper-sources/*
@@ -460,11 +507,11 @@ jobs:
     env:
       KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: adb-helper-source-cache
           path: prefetch_artifacts/adb-helper-sources
@@ -485,7 +532,7 @@ jobs:
             --base-url "https://github.com/${GITHUB_REPOSITORY}" \
             --output prefetch_artifacts/adb-helper-release
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adb-helper-legal-assets
           path: prefetch_artifacts/adb-helper-release/*
@@ -493,7 +540,11 @@ jobs:
           compression-level: 0
 
   BuildAdbHelpers:
-    needs: [PrefetchAdbHelperSources, BuildAdbHelperLegalAssets]
+    needs: [BuildAdbHelperLegalAssets]
+    permissions: &artifact_attestation_permissions
+      contents: read
+      id-token: write
+      attestations: write
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Source-built ADB helper ${{ matrix.target }}"
     strategy:
@@ -503,19 +554,9 @@ jobs:
           - target: linux-x86_64
             runner: ubuntu-24.04
             container_image: quay.io/pypa/manylinux2014_x86_64@sha256:95440e0e72dd3a81dc8d2cf59a84d57af661456620f5bc821ff92048d0e54ff9
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-            container_image: quay.io/pypa/manylinux2014_aarch64@sha256:b63ff749fee6f3f2a6b67ed3101a073db3211df1791da19e9acf96f43c0dd6ff
-          - target: windows-x86_64
-            runner: windows-2022
-            container_image: ""
-          - target: macos-x86_64
-            runner: macos-15-intel
-          - target: macos-arm64
-            runner: macos-15
     runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    steps: &adb_helper_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -528,7 +569,7 @@ jobs:
 
       - name: Prepare MSVC for source-built AdbWinApi DLLs
         if: ${{ matrix.target == 'windows-x86_64' }}
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        uses: ./.github/actions/setup-msvc
         with:
           arch: x64
 
@@ -542,12 +583,12 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-pkgconf
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: adb-helper-source-cache
           path: ${{ runner.temp }}/adb-helper-prefetch
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: adb-helper-legal-assets
           path: ${{ runner.temp }}/adb-helper-release
@@ -607,7 +648,7 @@ jobs:
           fi
           tar -czf "$archive" -C "$artifact_root" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adb-helper-${{ matrix.target }}
           path: ${{ runner.temp }}/adb-helper-${{ matrix.target }}.tar.gz
@@ -615,12 +656,75 @@ jobs:
 
       - name: Attest target-bound ADB helper build provenance
         if: ${{ github.event_name != 'pull_request' }}
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/adb-helper-artifact/SHA256SUMS
 
-  Linux:
+  BuildAdbLinuxArm64:
+    needs: [BuildAdbHelperLegalAssets]
+    permissions: *artifact_attestation_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Source-built ADB helper ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            container_image: quay.io/pypa/manylinux2014_aarch64@sha256:b63ff749fee6f3f2a6b67ed3101a073db3211df1791da19e9acf96f43c0dd6ff
+    runs-on: ${{ matrix.runner }}
+    steps: *adb_helper_steps
+
+  BuildAdbWindowsX64:
+    needs: [BuildAdbHelperLegalAssets]
+    permissions: *artifact_attestation_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Source-built ADB helper ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            runner: windows-2022
+            container_image: ""
+    runs-on: ${{ matrix.runner }}
+    steps: *adb_helper_steps
+
+  BuildAdbMacX64:
+    needs: [BuildAdbHelperLegalAssets]
+    permissions: *artifact_attestation_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Source-built ADB helper ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-x86_64
+            runner: macos-15-intel
+            container_image: ""
+    runs-on: ${{ matrix.runner }}
+    steps: *adb_helper_steps
+
+  BuildAdbMacArm64:
+    needs: [BuildAdbHelperLegalAssets]
+    permissions: *artifact_attestation_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Source-built ADB helper ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+            container_image: ""
+    runs-on: ${{ matrix.runner }}
+    steps: *adb_helper_steps
+
+  LinuxPackages:
     needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbHelpers]
+    permissions: &artifact_verification_permissions
+      contents: read
+      attestations: read
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -634,6 +738,8 @@ jobs:
             os_version: 22.04
             arch: x64
             label: ubuntu-22.04-deb
+            cache_write: true
+            cache_scope: klogg-linux-ubuntu22.04
             package_tag: vs-gen
             cpack_gen: DEB
             artifacts_id: jammy
@@ -644,11 +750,14 @@ jobs:
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
             package: true
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
-
+            sanitizer: ""
+            timeout_minutes: 60
           - os: ubuntu_noble
             os_version: 24.04
             arch: x64
             label: ubuntu-24.04-deb
+            cache_write: true
+            cache_scope: klogg-linux-ubuntu24.04
             package_tag: vs-gen
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
             cpack_gen: DEB
@@ -659,11 +768,14 @@ jobs:
             container_suffix: _ubuntu24.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
             package: true
-
+            sanitizer: ""
+            timeout_minutes: 60
           - os: ubuntu_resolute
             os_version: 26.04
             arch: x64
             label: ubuntu-26.04-deb
+            cache_write: true
+            cache_scope: klogg-linux-ubuntu26.04
             package_tag: vs-gen
             check_command: for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 -o APT::Update::Error-Mode=any && break; if [ "$attempt" = 3 ]; then exit 1; fi; sleep $((attempt * 10)); done; DEBIAN_FRONTEND=noninteractive apt-get install -y /usr/local/klogg*.deb; QT_QPA_PLATFORM=offscreen klogg -v
             cpack_gen: DEB
@@ -678,11 +790,14 @@ jobs:
             container_suffix: _ubuntu26.04
             cmake_opts: -DENABLE_CPPCHECK=ON -DKLOGG_GENERIC_CPU=ON
             package: true
-
+            sanitizer: ""
+            timeout_minutes: 60
           - os: ubuntu_appimage
             os_version: 20.04
             arch: x64
             label: ubuntu-20.04-appimage
+            cache_write: true
+            cache_scope: klogg-linux-ubuntu20.04
             package_tag: vs-gen
             artifacts_id: appimage
             package_suffix: AppImage
@@ -690,62 +805,20 @@ jobs:
             container_suffix: _ubuntu20.04
             cmake_opts: -DKLOGG_GENERIC_CPU=ON
             package: true
-
-          # Sanitizer legs: build + test only (no packaging, no artifacts).
-          # Folded into the Linux matrix so ci-gate (needs: [Linux]) covers them.
-          # The former combined asan-ubsan-lsan leg was the matrix's critical
-          # path (~46 min); it is split into two parallel legs so the sanitizer
-          # compile runs on two runners. asan-lsan carries ASan + LeakSanitizer
-          # (detect_leaks=1 in ASAN_OPTIONS); ubsan carries the full UBSan
-          # suite (incl. -fno-sanitize=vptr handling). Union == combined leg.
-          - os: ubuntu_jammy
-            os_version: 22.04
-            arch: x64
-            label: ubuntu-22.04-asan-lsan
-            package_tag: asan
-            container_root: docker/ubuntu22.04
-            container_suffix: _ubuntu22.04
-            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DKLOGG_CI_LIGHT_DEBUG=ON
-            sanitizer: address
-            # ASan instrumentation + the full test suite is the longest pole in
-            # the matrix; leave headroom over the default 60 min for runner CPU
-            # contention (the deb legs hit the 60-min timeout on a slow runner).
-            timeout_minutes: 90
-            package: false
-
-          - os: ubuntu_jammy
-            os_version: 22.04
-            arch: x64
-            label: ubuntu-22.04-ubsan
-            package_tag: ubsan
-            container_root: docker/ubuntu22.04
-            container_suffix: _ubuntu22.04
-            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
-            sanitizer: undefined
+            cpack_gen:
+            check_container:
+            check_command:
+            sanitizer: ""
             timeout_minutes: 60
-            package: false
-
-          - os: ubuntu_jammy
-            os_version: 22.04
-            arch: x64
-            label: ubuntu-22.04-tsan
-            package_tag: tsan
-            container_root: docker/ubuntu22.04-tsan
-            container_suffix: _ubuntu22.04-tsan
-            cmake_opts: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
-            sanitizer: thread
-            timeout_minutes: 120
-            package: false
-
 
     runs-on: ubuntu-22.04
     timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    steps: &linux_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-linux-x86_64
@@ -761,10 +834,11 @@ jobs:
           archive="$archive_root/adb-helper-linux-x86_64.tar.gz"
           test -f "$archive"
           rm -rf "$artifact_root"
-          mkdir -p "$artifact_root"
-          tar -xzf "$archive" -C "$artifact_root"
+          python3 scripts/extract_verified_tar.py \
+            --archive "$archive" \
+            --destination "$artifact_root"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-legal-assets
@@ -787,19 +861,19 @@ jobs:
               --repo "$GITHUB_REPOSITORY"
           fi
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: cpm-cache
           path: ${{ github.workspace }}
       - uses: ./.github/actions/restore-cpm-cache
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.os == 'ubuntu_appimage' }}
         with:
           name: linuxdeployqt
           path: ${{ github.workspace }}/tools
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.sanitizer != 'thread' }}
         with:
           name: cmake-installer
@@ -813,10 +887,6 @@ jobs:
           printf '%s  %s\n' "$CMAKE_INSTALLER_SHA256" "$installer" \
             | sha256sum --check --strict
           cp "$installer" "${{ matrix.config.container_root }}/"
-
-      #- uses: satackey/action-docker-layer-caching@v0.0.11
-      #  # Ignore the failure of a step and avoid terminating the job.
-      #  continue-on-error: true
 
       - name: Set up Buildx for the TSan Qt image
         if: ${{ matrix.config.sanitizer == 'thread' }}
@@ -839,7 +909,7 @@ jobs:
           load: true
           tags: ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
           cache-from: type=gha,scope=klogg-qt5-tsan
-          cache-to: type=gha,mode=max,scope=klogg-qt5-tsan
+          cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}
 
       - name: Set up Buildx for the Linux build images
         if: ${{ matrix.config.sanitizer != 'thread' }}
@@ -861,25 +931,39 @@ jobs:
           # single-stage images, so no intermediate stages are lost, and the
           # smaller footprint keeps the shared 10GB repo cache budget from
           # evicting the per-leg ccache entries that the restore step relies on.
-          cache-from: type=gha,scope=klogg-linux-${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
-          cache-to: type=gha,mode=min,scope=klogg-linux-${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}
+          cache-from: type=gha,scope=${{ matrix.config.cache_scope }}
+          cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && format('type=gha,mode=min,scope={0}', matrix.config.cache_scope) || '' }}
+
+      - name: Compute bounded ccache generation
+        id: ccache-generation
+        if: ${{ matrix.config.sanitizer != 'thread' }}
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import datetime
+          today = datetime.datetime.now(datetime.timezone.utc).date()
+          previous = today - datetime.timedelta(days=1)
+          print(f"current={today.isoformat()}")
+          print(f"previous={previous.isoformat()}")
+          PY
 
       - name: Restore ccache for the Linux build
         id: restore-ccache
         if: ${{ matrix.config.sanitizer != 'thread' }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           # The container compiles with CCACHE_DIR=/usr/local/.ccache, which is
           # the workspace mounted at /usr/local, so restoring this host path
           # warms the in-container cache. The key is stable per config (no
           # per-commit SHA): per-sha entries exhausted the repo-wide 10GB cache
-          # budget, evicting every restore before the next run. restore-keys
-          # selects the most recent matching entry; the Save step below
-          # refreshes it on master pushes only, so PRs restore master's warm
-          # cache without writing throwaway entries of their own.
+          # budget, evicting every restore before the next run. The bounded v2
+          # generation tries the current UTC day, then only the previous day.
+          # The first successful master push each day seeds that immutable key;
+          # PRs restore it but never write throwaway cache entries of their own.
           path: ${{ github.workspace }}/.ccache
-          key: ${{ matrix.config.label }}-ccache-v1
-          restore-keys: ${{ matrix.config.label }}-ccache-v1-
+          key: ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+          restore-keys: |
+            ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.previous }}
 
       - uses: ./.github/actions/prepare-workspace-env
       - name: Require verified source-built ADB helper for Linux packages
@@ -942,18 +1026,6 @@ jobs:
           docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
             "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
             /bin/bash -c 'ccache -s 2>/dev/null || echo "ccache stats unavailable"'
-
-      - name: Save ccache for the Linux build
-        if: ${{ success() && matrix.config.sanitizer != 'thread' && github.event_name == 'push' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          # Cache keys are immutable; a constant key (e.g. ...-${{ github.ref }})
-          # would make save silently skip after the first push and every PR would
-          # restore that first, forever-stale cache. run_id keeps each master push
-          # refreshing, while the stable label-ccache-v1- restore-keys prefix still
-          # picks the most recent entry on PR restore.
-          key: ${{ matrix.config.label }}-ccache-v1-${{ github.run_id }}
 
       - name: Verify ASan-instrumented test binaries
         if: ${{ matrix.config.sanitizer == 'address' }}
@@ -1034,24 +1106,134 @@ jobs:
           tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
 
 # Final upload of all packages
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
+      - name: Bound Linux ccache before save
+        if: ${{ success() && matrix.config.sanitizer != 'thread' && github.event_name == 'push' }}
+        shell: bash
+        run: |
+          docker run --rm -v "$KLOGG_WORKSPACE":/usr/local \
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}" \
+            /bin/bash -c 'ccache --set-config=compression=true && ccache --set-config=compression_level=6 && ccache --max-size=250M && ccache --cleanup'
+
+      - name: Save ccache for the Linux build
+        if: ${{ success() && matrix.config.sanitizer != 'thread' && github.event_name == 'push' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # Cache keys are immutable. The daily v2 generation deliberately lets
+          # the first successful master push seed the day, bounds each entry to
+          # 250M above, and rolls forward without per-commit cache churn. PRs are
+          # restore-only and may fall back only to the previous daily generation.
+          key: ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
+  LinuxSanitizers:
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # Package-free sanitizer legs start without mobile artifact producers.
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-asan-lsan
+            cache_write: false
+            cache_scope: klogg-linux-ubuntu22.04
+            package_tag: asan
+            container_root: docker/ubuntu22.04
+            container_suffix: _ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: address
+            # ASan instrumentation + the full test suite is the longest pole in
+            # the matrix; leave headroom over the default 60 min for runner CPU
+            # contention (the deb legs hit the 60-min timeout on a slow runner).
+            timeout_minutes: 90
+            package: false
+            cpack_gen: NONE
+            artifacts_id: unused
+            package_suffix: unused
+            check_container: unused
+            check_command: "true"
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-ubsan
+            cache_write: false
+            cache_scope: klogg-linux-ubuntu22.04
+            package_tag: ubsan
+            container_root: docker/ubuntu22.04
+            container_suffix: _ubuntu22.04
+            cmake_opts: -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: undefined
+            timeout_minutes: 60
+            package: false
+            cpack_gen: NONE
+            artifacts_id: unused
+            package_suffix: unused
+            check_container: unused
+            check_command: "true"
+
+    runs-on: ubuntu-22.04
+    timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}
+    steps: *linux_steps
+
+  LinuxTsan:
+    needs: [SaveVersion, PrefetchCpmCache]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+      CMAKE_INSTALLER_SHA256: ea497b4658816010e5850a3ed53845e430654640aabbe10d93fe67def9503e4d
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # TSan uses its source-built Qt image and does not need the CMake installer.
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            label: ubuntu-22.04-tsan
+            cache_write: true
+            cache_scope: klogg-qt5-tsan
+            package_tag: tsan
+            container_root: docker/ubuntu22.04-tsan
+            container_suffix: _ubuntu22.04-tsan
+            cmake_opts: -DCMAKE_C_COMPILER=clang-14 -DCMAKE_CXX_COMPILER=clang++-14 -DCMAKE_PREFIX_PATH=/opt/qt5-tsan -DQt5_DIR=/opt/qt5-tsan/lib/cmake/Qt5 -DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan -DKLOGG_TSAN_QT_VERSION=5.15.19 -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON
+            sanitizer: thread
+            timeout_minutes: 120
+            package: false
+            cpack_gen: NONE
+            artifacts_id: unused
+            package_suffix: unused
+            check_container: unused
+            check_command: "true"
+
+    runs-on: ubuntu-22.04
+    timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}
+    steps: *linux_steps
+
   PrefetchIosNativeSources:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Prefetch locked iOS native sources"
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Restore checksum-locked iOS source archives
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ github.workspace }}/ios-native-sources
           key: ios-native-sources-${{ hashFiles('3rdparty/libimobiledevice/libimobiledevice.lock.json') }}
@@ -1064,7 +1246,7 @@ jobs:
             --lock 3rdparty/libimobiledevice/libimobiledevice.lock.json \
             --output "${{ github.workspace }}/ios-native-sources"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios-native-source-cache
           path: ${{ github.workspace }}/ios-native-sources/*
@@ -1073,6 +1255,7 @@ jobs:
 
   BuildIosNativeStacks:
     needs: [SaveVersion, PrefetchIosNativeSources]
+    permissions: *artifact_attestation_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "iOS native stack ${{ matrix.architecture }}"
     env:
@@ -1084,13 +1267,10 @@ jobs:
           - runner: macos-15-intel
             architecture: x86_64
             artifact: ios-native-x86_64
-          - runner: macos-15
-            architecture: arm64
-            artifact: ios-native-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    steps: &ios_native_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -1101,9 +1281,15 @@ jobs:
           export HOMEBREW_NO_ANALYTICS=1
           export HOMEBREW_NO_AUTO_UPDATE=1
           export HOMEBREW_NO_INSTALL_CLEANUP=1
+          if brew list --formula aws-sam-cli >/dev/null 2>&1; then
+            brew uninstall --ignore-dependencies aws-sam-cli || true
+          fi
+          if brew tap | grep -Fx aws/tap >/dev/null; then
+            brew untap aws/tap
+          fi
           brew install autoconf automake libtool pkg-config cmake ninja
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ios-native-source-cache
           path: ${{ github.workspace }}/ios-native-sources
@@ -1167,15 +1353,27 @@ jobs:
           tar -czf "${{ runner.temp }}/${{ matrix.artifact }}.tar.gz" \
             -C "${{ runner.temp }}/ios-native-stack" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload iOS native stack
+        id: upload_ios_stack
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
           if-no-files-found: error
 
+      - name: Retry iOS native stack upload after artifact-service failure
+        if: ${{ steps.upload_ios_stack.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          overwrite: true
+
       - name: Upload architecture-independent iOS source set
         if: ${{ matrix.architecture == 'arm64' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios-native-source-assets
           path: |
@@ -1189,12 +1387,31 @@ jobs:
 
       - name: Attest target-bound iOS native stack provenance
         if: ${{ github.event_name != 'pull_request' }}
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/ios-native-stack/SHA256SUMS
 
-  Mac:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbHelpers, BuildIosNativeStacks]
+  BuildIosNativeArm64:
+    needs: [SaveVersion, PrefetchIosNativeSources]
+    permissions: *artifact_attestation_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "iOS native stack ${{ matrix.architecture }}"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+            artifact: ios-native-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps: *ios_native_steps
+
+  MacPackages:
+    needs: [ReleaseQualificationPreflight, SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeStacks]
+    permissions: *artifact_verification_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -1217,62 +1434,16 @@ jobs:
             ios_native_architecture: x86_64
             cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0
             package: true
-          - os: macos-latest
-            qt_version: 6.9.3
-            qt_modules: qt5compat qtimageformats
-            qt_archives: qtbase icu qtsvg qttools qttranslations
-            qt_arch: clang_64
-            arch: arm64
-            label: arm64-qt6
-            package_tag: vs-arm64
-            artifacts_id: macos-arm-qt6
-            adb_target: macos-arm64
-            ios_native_artifact: ios-native-arm64
-            ios_native_architecture: arm64
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
-            package: true
-
-          # Sanitizer legs: build + test only (no packaging, no artifacts).
-          # Folded into the Mac matrix so ci-gate (needs: [Mac]) covers them.
-          # macOS TSan covers first-party and source-built dependencies; prebuilt Qt 6 is not TSan-instrumented.
-          # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
-          # Run on the Intel runner so TSan's 2x threading overhead is stable.
-          - os: macos-15-intel
-            qt_version: 6.9.3
-            qt_modules: qt5compat qtimageformats
-            qt_archives: qtbase icu qtsvg qttools qttranslations
-            qt_arch: clang_64
-            arch: x64
-            label: intel-qt6-asan-ubsan
-            package_tag: asan-ubsan
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
-            sanitizer: address-undefined
-            package: false
-
-          - os: macos-15-intel
-            qt_version: 6.9.3
-            qt_modules: qt5compat qtimageformats
-            qt_archives: qtbase icu qtsvg qttools qttranslations
-            qt_arch: clang_64
-            arch: x64
-            label: intel-qt6-first-party-tsan
-            package_tag: tsan
-            # KLOGG_CI_LIGHT_DEBUG=ON (-g1 instead of -g): same treatment as the
-            # asan-ubsan leg and the Linux tsan leg. Line tables suffice to
-            # symbolize TSan reports, and the smaller DWARF shrinks both compile
-            # time (vectorscan dominates) and the ccache entry footprint.
-            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON
-            sanitizer: thread
-            package: false
+            sanitizer: ""
 
     runs-on: ${{ matrix.config.os }}
     timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    steps: &mac_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-${{ matrix.config.adb_target }}
@@ -1286,18 +1457,18 @@ jobs:
           archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
           artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
           archive="$archive_root/adb-helper-${{ matrix.config.adb_target }}.tar.gz"
-          test -f "$archive"
           rm -rf "$artifact_root"
-          mkdir -p "$artifact_root"
-          tar -xzf "$archive" -C "$artifact_root"
+          python3 scripts/extract_verified_tar.py \
+            --archive "$archive" \
+            --destination "$artifact_root"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-legal-assets
           path: ${{ github.workspace }}/prefetch_artifacts/adb-helper/release
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: ios-native-${{ matrix.config.arch == 'x64' && 'x86_64' || 'arm64' }}
@@ -1313,8 +1484,9 @@ jobs:
           archive="$archive_root/ios-native-${{ matrix.config.arch == 'x64' && 'x86_64' || 'arm64' }}.tar.gz"
           test -f "$archive"
           rm -rf "$stack_root"
-          mkdir -p "$stack_root"
-          tar -xzf "$archive" -C "$stack_root"
+          python3 scripts/extract_verified_tar.py \
+            --archive "$archive" \
+            --destination "$stack_root"
 
       - name: Verify target-bound iOS native checksum envelope and Mach-O closure
         if: ${{ matrix.config.package != false }}
@@ -1392,20 +1564,39 @@ jobs:
           # the critical path (~11 min of a 27-30 min build). A warm ccache
           # collapses that to near zero. brew install is idempotent and fast
           # (~1s) when the formula is already present.
+          if brew list --formula aws-sam-cli >/dev/null 2>&1; then
+            brew uninstall --ignore-dependencies aws-sam-cli || true
+          fi
+          if brew tap | grep -Fx aws/tap >/dev/null; then
+            brew untap aws/tap
+          fi
           brew install ragel ccache
+
+      - name: Compute bounded ccache generation
+        id: ccache-generation
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import datetime
+          today = datetime.datetime.now(datetime.timezone.utc).date()
+          previous = today - datetime.timedelta(days=1)
+          print(f"current={today.isoformat()}")
+          print(f"previous={previous.isoformat()}")
+          PY
 
       - name: Restore ccache for the macOS build
         id: restore-ccache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          # Same keying strategy as the Linux legs: stable label key +
-          # restore-keys prefix so a PR restores master's warm cache, and the
-          # run_id-suffixed save key refreshes it on master pushes only.
+          # Same bounded daily v2 strategy as Linux: restore the current UTC
+          # day, then only the previous day. The first successful master push
+          # seeds the immutable daily key; pull requests remain restore-only.
           path: ${{ github.workspace }}/.ccache
-          key: ${{ matrix.config.label }}-ccache-v1
-          restore-keys: ${{ matrix.config.label }}-ccache-v1-
+          key: ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+          restore-keys: |
+            ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.previous }}
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: boost-root
           path: ${{ github.workspace }}
@@ -1425,7 +1616,7 @@ jobs:
           echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-setup
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: cpm-cache
           path: ${{ github.workspace }}
@@ -1472,16 +1663,6 @@ jobs:
         shell: sh
         run: ccache -s 2>/dev/null || echo "ccache stats unavailable"
 
-      - name: Save ccache for the macOS build
-        if: ${{ success() && github.event_name == 'push' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          # run_id-suffixed save key (same as Linux): refreshes the shared
-          # cache on each master push while the label-ccache-v1- restore-keys
-          # prefix keeps PR restores hitting the most recent master entry.
-          key: ${{ matrix.config.label }}-ccache-v1-${{ github.run_id }}
-
       - name: Verify ASan/UBSan-instrumented test binaries
         if: ${{ matrix.config.sanitizer == 'address-undefined' }}
         shell: bash
@@ -1505,10 +1686,10 @@ jobs:
       - uses: ./.github/actions/agent-package-mac
         if: ${{ matrix.config.package != false }}
         with:
+          qualification-mode: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release' && 'release' || 'validation' }}
           p12-file-base64: ${{ secrets.CODESIGN_BASE64 }}
           p12-password: ${{ secrets.CODESIGN_PASSWORD }}
           codesign-identity: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
-          installer-sign-identity: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
           notarization-username: ${{ secrets.NOTARIZATION_USERNAME }}
           notarization-team: ${{ secrets.NOTARIZATION_TEAM }}
           notarization-password: ${{ secrets.NOTARIZATION_PASSWORD }}
@@ -1526,15 +1707,121 @@ jobs:
           [ -n "$(find "$KLOGG_BUILD_ROOT/packages" -mindepth 1 2>/dev/null)" ] || { echo "::error::packages directory is empty"; exit 1; }
           tar -czf "$KLOGG_WORKSPACE/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz" -C "$KLOGG_BUILD_ROOT/packages" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: warn
 
-  Windows:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, BuildAdbHelpers]
+      - name: Bound macOS ccache before save
+        if: ${{ success() && github.event_name == 'push' }}
+        shell: sh
+        run: |
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache --max-size=250M
+          ccache --cleanup
+
+      - name: Save ccache for the macOS build
+        if: ${{ success() && github.event_name == 'push' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          # The first successful master push seeds this day's immutable key
+          # after the cache is compressed and bounded to 250M above. Later runs
+          # reuse it instead of creating per-commit entries; PRs never save it.
+          key: ${{ matrix.config.label }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
+
+  MacArmPackages:
+    needs: [ReleaseQualificationPreflight, SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64]
+    permissions: *artifact_verification_permissions
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - os: macos-latest
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: arm64
+            label: arm64-qt6
+            package_tag: vs-arm64
+            artifacts_id: macos-arm-qt6
+            adb_target: macos-arm64
+            ios_native_artifact: ios-native-arm64
+            ios_native_architecture: arm64
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=14.0
+            package: true
+            sanitizer: ""
+
+    runs-on: ${{ matrix.config.os }}
+    timeout-minutes: 60
+    steps: *mac_steps
+
+  MacSanitizers:
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # Package-free sanitizer legs start without ADB or iOS native producers.
+          # macOS TSan covers first-party and source-built dependencies;
+          # prebuilt Qt 6 is not TSan-instrumented.
+          # The Linux source-built Qt TSan leg is authoritative for Qt-internal races.
+          # Run on the Intel runner so TSan's
+          # threading overhead stays stable.
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-asan-ubsan
+            package_tag: asan-ubsan
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON -DENABLE_SANITIZER_UNDEFINED_BEHAVIOR=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: address-undefined
+            package: false
+            artifacts_id: unused
+            adb_target: unused
+            ios_native_artifact: unused
+            ios_native_architecture: unused
+          - os: macos-15-intel
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: clang_64
+            arch: x64
+            label: intel-qt6-first-party-tsan
+            package_tag: tsan
+            # KLOGG_CI_LIGHT_DEBUG=ON (-g1 instead of -g): same treatment as the
+            # asan-ubsan leg and the Linux tsan leg. Line tables suffice to
+            # symbolize TSan reports, and the smaller DWARF shrinks both compile
+            # time (vectorscan dominates) and the ccache entry footprint.
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=15.0 -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_THREAD=ON -DKLOGG_CI_LIGHT_DEBUG=ON
+            sanitizer: thread
+            package: false
+            artifacts_id: unused
+            adb_target: unused
+            ios_native_artifact: unused
+            ios_native_architecture: unused
+
+    runs-on: ${{ matrix.config.os }}
+    timeout-minutes: 60
+    steps: *mac_steps
+
+  WindowsPackages:
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64]
+    permissions: *artifact_verification_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -1557,72 +1844,42 @@ jobs:
             artifacts_id: windows-x64-qt6
             adb_target: windows-x86_64
             package: true
-
-          - os: windows
-            os_version: 2022
-            qt_version: 5.15.2
-            qt_modules:
-            qt_archives: qtbase qtimageformats qttools qttranslations icu qtsvg
-            qt_arch: win32_msvc2019
-            arch: x86
-            ssl_arch: ""
-            package_tag: QTRegex
-            cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
-            label: x86-qt5
-            artifacts_id: windows-x86-qt5
-            package: false
-
-          # Sanitizer leg: build + test only (no packaging, no artifacts).
-          # MSVC ASan is x64-only, so this rides on the x64-qt6 leg. x86-qt5
-          # cannot run ASan and is intentionally left without a sanitizer leg.
-          - os: windows
-            os_version: 2022
-            qt_version: 6.9.3
-            qt_modules: qt5compat qtimageformats
-            qt_archives: qtbase icu qtsvg qttools qttranslations
-            qt_arch: win64_msvc2022_64
-            arch: x64
-            ssl_arch: -x64
-            package_tag: asan
-            cmake_opts: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
-            label: x64-qt6-asan
-            sanitizer: address
-            package: false
+            sanitizer: ""
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
     timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+    steps: &windows_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-${{ matrix.config.adb_target }}
           path: ${{ github.workspace }}/prefetch_artifacts/adb-helper-archive
 
       - name: Extract mode-preserving ADB helper artifact
-        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+        if: ${{ matrix.config.package != false }}
         shell: bash
         run: |
           set -euo pipefail
           archive_root="${{ github.workspace }}/prefetch_artifacts/adb-helper-archive"
           artifact_root="${{ github.workspace }}/prefetch_artifacts/adb-helper"
           archive="$archive_root/adb-helper-${{ matrix.config.adb_target }}.tar.gz"
-          test -f "$archive"
           rm -rf "$artifact_root"
-          mkdir -p "$artifact_root"
-          tar -xzf "$archive" -C "$artifact_root"
+          python3 scripts/extract_verified_tar.py \
+            --archive "$archive" \
+            --destination "$artifact_root"
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: ${{ matrix.config.package != false }}
         with:
           name: adb-helper-legal-assets
           path: ${{ github.workspace }}/prefetch_artifacts/adb-helper/release
 
       - name: Verify target-bound ADB helper checksum envelope and provenance
-        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+        if: ${{ matrix.config.package != false }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1633,10 +1890,12 @@ jobs:
             --lock packaging/adb/adb-helper.lock.json \
             --artifact-root "$artifact_root" \
             --expected-target "${{ matrix.config.adb_target }}"
-          gh attestation verify "$artifact_root/SHA256SUMS" \
-            --repo "$GITHUB_REPOSITORY"
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            gh attestation verify "$artifact_root/SHA256SUMS" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: ${{ startsWith(matrix.config.qt_version, '5') }}
         with:
           name: openssl-archive
@@ -1652,7 +1911,7 @@ jobs:
           }
           7z x openssl.zip
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: msys2-tools
           path: ${{ github.workspace }}
@@ -1677,7 +1936,7 @@ jobs:
           echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ matrix.config.arch }}\bin" >> $GITHUB_ENV
           echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: boost-root
           path: ${{ github.workspace }}
@@ -1699,7 +1958,7 @@ jobs:
           echo "KLOGG_REQUIRE_PREFETCHED_CPM=ON" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-setup
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: cpm-cache
           path: ${{ github.workspace }}
@@ -1707,7 +1966,7 @@ jobs:
       - uses: ./.github/actions/prepare-workspace-env
 
       - name: Require verified source-built ADB helper for Windows packages
-        if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}
+        if: ${{ matrix.config.package != false }}
         shell: sh
         run: |
           echo "KLOGG_ADB_HELPER_TARGET=${{ matrix.config.adb_target }}" >> $GITHUB_ENV
@@ -1719,7 +1978,7 @@ jobs:
           echo "KLOGG_CMAKE_OPTS=$KLOGG_CMAKE_OPTS -DFETCHCONTENT_FULLY_DISCONNECTED=ON" >> $GITHUB_ENV
 
       - name: Prepare dev cmd
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        uses: ./.github/actions/setup-msvc
         with:
           arch: ${{ matrix.config.arch }}
 
@@ -1913,7 +2172,7 @@ jobs:
 
       - name: Upload Windows diagnostics artifact
         if: ${{ steps.run-tests.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           # Use label (defined on every config, including the asan leg which
           # has no artifacts_id) so the diagnostics artifact name is unique per
@@ -1945,7 +2204,7 @@ jobs:
 
       - name: Upload Windows ASan diagnostics artifact
         if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-x64-asan-diagnostics
           path: '${{ github.workspace }}\build_root\asan_diagnostics\**\*'
@@ -1957,14 +2216,10 @@ jobs:
         run: exit 1
 
       - uses: ./.github/actions/agent-package-win
-        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false && github.event_name != 'pull_request' }}
-        with:
-          s3-key-id: ${{ secrets.WIN_CS_KEY_ID }}
-          s3-secret: ${{ secrets.WIN_CS_SECRET }}
-          s3-bucket: ${{ secrets.WIN_CS_BUCKET }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
 
       - name: Verify SSL/TLS packaging
-        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false && github.event_name != 'pull_request' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         shell: pwsh
         run: |
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
@@ -1974,7 +2229,7 @@ jobs:
 # Upload packages as a single-file tarball to avoid GitHub's artifact backend
 # intermittently corrupting multi-file zip64 archives (same class as fe4859ca).
       - name: Package tarball for upload
-        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false && github.event_name != 'pull_request' }}
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         shell: pwsh
         run: |
           $tarName = "packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz"
@@ -1990,16 +2245,78 @@ jobs:
           tar -czf $tarPath -C $pkgDir .
 
 # Final upload of all packages
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false && github.event_name != 'pull_request' }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.run-tests.outcome == 'success' && matrix.config.package != false }}
         with:
           name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}
           path: '${{ env.KLOGG_WORKSPACE }}/packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.package_tag }}.tar.gz'
           if-no-files-found: error
 
+  WindowsX86:
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # The Qt 5 x86 portability leg is package-free and needs OpenSSL only.
+          - os: windows
+            os_version: 2022
+            qt_version: 5.15.2
+            qt_modules:
+            qt_archives: qtbase qtimageformats qttools qttranslations icu qtsvg
+            qt_arch: win32_msvc2019
+            arch: x86
+            ssl_arch: ""
+            package_tag: QTRegex
+            cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_VECTORSCAN=OFF
+            label: x86-qt5
+            artifacts_id: windows-x86-qt5
+            package: false
+            adb_target: unused
+            sanitizer: ""
+
+    runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
+    timeout-minutes: 60
+    steps: *windows_steps
+
+  WindowsAsan:
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools]
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    name: "Windows ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
+    env:
+      KLOGG_VERSION: ${{ needs.SaveVersion.outputs.klogg_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # The x64 ASan leg is package-free and does not wait for ADB or Qt 5 OpenSSL.
+          - os: windows
+            os_version: 2022
+            qt_version: 6.9.3
+            qt_modules: qt5compat qtimageformats
+            qt_archives: qtbase icu qtsvg qttools qttranslations
+            qt_arch: win64_msvc2022_64
+            arch: x64
+            ssl_arch: -x64
+            package_tag: asan
+            cmake_opts: -DKLOGG_USE_LTO=OFF -DKLOGG_USE_SENTRY=OFF -DENABLE_SANITIZER_ADDRESS=ON
+            label: x64-qt6-asan
+            sanitizer: address
+            package: false
+            artifacts_id: unused
+            adb_target: unused
+
+    runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
+    timeout-minutes: 60
+    steps: *windows_steps
+
   ci-gate:
     if: always()
-    needs: [Linux, Mac, Windows]
+    needs: [BuildAdbLinuxArm64, LinuxPackages, LinuxSanitizers, LinuxTsan, MacPackages, MacArmPackages, MacSanitizers, WindowsPackages, WindowsX86, WindowsAsan]
     runs-on: ubuntu-22.04
     steps:
       - name: Check CI results
@@ -2012,475 +2329,3 @@ jobs:
             fi
           done
           echo "CI passed: $results"
-
-  CreatePreRelease:
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && github.event_name == 'push'"
-    needs: [ci-gate]
-    runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - name: Generate Changelog
-        id: changelog
-        shell: bash
-        run: |
-          CHANGELOG="$(python3 scripts/gen_changelog.py --mode prerelease --to-ref HEAD --print-range)"
-          
-          # Escape newlines for GITHUB_ENV
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "CHANGELOG<<$EOF" >> $GITHUB_ENV
-          echo "$CHANGELOG" >> $GITHUB_ENV
-          echo "$EOF" >> $GITHUB_ENV
-      
-      - name: Download version artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: klogg_version
-          path: klogg_version
-
-      - name: Set version and source commit
-        shell: bash
-        run: |
-          echo "KLOGG_VERSION=$(cat klogg_version/klogg_version.txt)" >> "$GITHUB_ENV"
-          echo "KLOGG_SOURCE_COMMIT=$(cat klogg_version/klogg_commit.txt)" >> "$GITHUB_ENV"
-
-      - name: Download all package artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: packages-*
-          path: ./packages-all
-
-      - name: Download ADB helper source and legal assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: adb-helper-legal-assets
-          path: ./packages-all/adb-helper-legal-assets
-
-      - name: Download architecture-independent iOS source assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ios-native-source-assets
-          path: ./packages-all/ios-native-source-assets
-
-      - name: Verify ADB helper release assets before publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ./packages-all/adb-helper-legal-assets
-          sha256sum --check --strict ./*.sha256
-
-      # Package artifacts are uploaded as single-file tarballs; restore the
-      # per-artifact directory layout the cleanup below expects.
-      - name: Extract package tarballs
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r -d '' t; do
-            echo "Extracting: $t"
-            staging=$(mktemp -d)
-            python3 scripts/extract_verified_tar.py --archive "$t" --destination "$staging"
-            cp -a "$staging"/. "$(dirname "$t")"/
-            rm -rf "$staging" "$t"
-          done < <(find ./packages-all -name 'packages-*.tar.gz' -type f -print0)
-
-      - name: Require package qualification receipts before continuous publication
-        shell: sh
-        run: |
-          set -eu
-          required="
-            ./packages-all/packages-jammy-vs-gen/adb-helper-deb-package-verification.json
-            ./packages-all/packages-noble-vs-gen/adb-helper-deb-package-verification.json
-            ./packages-all/packages-resolute-vs-gen/adb-helper-deb-package-verification.json
-            ./packages-all/packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
-            ./packages-all/packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
-            ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
-            ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-signing-receipt.json
-            ./packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-notarization-receipt.json
-            ./packages-all/packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
-            ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
-            ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-signing-receipt.json
-            ./packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-notarization-receipt.json
-            ./packages-all/packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
-          "
-          for receipt in $required; do
-            test -f "$receipt" || { echo "Missing continuous qualification receipt: $receipt"; exit 1; }
-          done
-          python3 - <<'PY'
-          import hashlib, json, pathlib
-          package_receipts = [
-              pathlib.Path("packages-all/packages-jammy-vs-gen/adb-helper-deb-package-verification.json"),
-              pathlib.Path("packages-all/packages-noble-vs-gen/adb-helper-deb-package-verification.json"),
-              pathlib.Path("packages-all/packages-resolute-vs-gen/adb-helper-deb-package-verification.json"),
-              pathlib.Path("packages-all/packages-appimage-vs-gen/adb-helper-appimage-package-verification.json"),
-              pathlib.Path("packages-all/packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json"),
-              pathlib.Path("packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json"),
-              pathlib.Path("packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json"),
-          ]
-          for path in package_receipts:
-              receipt = json.loads(path.read_text(encoding="utf-8"))
-              if receipt.get("receipt_kind") != "package-verification":
-                  raise SystemExit(f"invalid package qualification receipt kind: {path}")
-              if receipt.get("release_qualified") is not True:
-                  raise SystemExit(f"package is not evidence-qualified for continuous publication: {path}")
-              required = set(receipt.get("required_receipts", []))
-              verified = set(receipt.get("verified_receipts", []))
-              if not required or not required.issubset(verified):
-                  raise SystemExit(f"package qualification receipt is incomplete: {path}")
-              packages = receipt.get("packages")
-              if not isinstance(packages, list) or not packages:
-                  raise SystemExit(f"package qualification receipt has no final package hashes: {path}")
-              for package in packages:
-                  name = package.get("name") if isinstance(package, dict) else None
-                  if not isinstance(name, str) or pathlib.PurePath(name).name != name:
-                      raise SystemExit(f"unsafe qualified package name in {path}: {name}")
-                  published = path.parent / name
-                  if not published.is_file():
-                      raise SystemExit(f"qualified package is missing: {published}")
-                  actual = hashlib.sha256(published.read_bytes()).hexdigest()
-                  if package.get("sha256") != actual:
-                      raise SystemExit(f"qualified package hash mismatch: {published}")
-          for package_dir in (
-              "packages-all/packages-macos-intel-qt6-vs-gen",
-              "packages-all/packages-macos-arm-qt6-vs-arm64",
-          ):
-              directory = pathlib.Path(package_dir)
-              dmgs = list(directory.glob("*.dmg"))
-              if len(dmgs) != 1:
-                  raise SystemExit(f"expected one qualified DMG in {directory}, got {len(dmgs)}")
-              dmg_hash = hashlib.sha256(dmgs[0].read_bytes()).hexdigest()
-              qualification_path = directory / "adb-helper-dmg-package-verification.json"
-              qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
-              if qualification.get("package_sha256") != dmg_hash:
-                  raise SystemExit(f"macOS qualification receipt is not bound to continuous DMG: {qualification_path}")
-              for name in ("signing", "notarization"):
-                  path = directory / f"adb-helper-{name}-receipt.json"
-                  receipt = json.loads(path.read_text(encoding="utf-8"))
-                  if receipt.get("receipt_kind") != name or receipt.get("status") != "passed":
-                      raise SystemExit(f"invalid macOS {name} receipt: {path}")
-                  if receipt.get("package_sha256", receipt.get("dmg_sha256")) != dmg_hash:
-                      raise SystemExit(f"macOS {name} receipt is not bound to continuous DMG: {path}")
-                  if receipt.get("signed_helper_sha256") != qualification.get("helper_sha256"):
-                      raise SystemExit(f"macOS {name} receipt is not bound to qualified helper: {path}")
-                  if receipt.get("source_helper_sha256") != qualification.get("source_helper_sha256"):
-                      raise SystemExit(f"macOS {name} receipt is not bound to source-built helper: {path}")
-          PY
-
-      - name: Prepare coherent rolling package and source publication
-        shell: bash
-        run: |
-          set -euo pipefail
-          qualification_args=(
-            --qualification-receipt packages-all/packages-jammy-vs-gen/adb-helper-deb-package-verification.json
-            --qualification-receipt packages-all/packages-noble-vs-gen/adb-helper-deb-package-verification.json
-            --qualification-receipt packages-all/packages-resolute-vs-gen/adb-helper-deb-package-verification.json
-            --qualification-receipt packages-all/packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
-            --qualification-receipt packages-all/packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
-            --qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
-            --qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
-            --ios-qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
-            --ios-qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
-          )
-          python3 scripts/prepare_source_publication.py \
-            --channel continuous \
-            --tag continuous \
-            --version "${KLOGG_VERSION}" \
-            --commit "${KLOGG_SOURCE_COMMIT}" \
-            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
-            --adb-source-root ./packages-all/adb-helper-legal-assets \
-            --ios-source-root ./packages-all/ios-native-source-assets \
-            "${qualification_args[@]}" \
-            --output ./packages-publication
-
-      - name: Clean up package artifacts
-        shell: sh
-        run: |
-          # Source assets are published from the coherent, content-addressed
-          # packages-publication set rather than their internal build-artifact names.
-          rm -rf ./packages-all/adb-helper-legal-assets ./packages-all/ios-native-source-assets
-          # Remove macOS app bundles and internal files that shouldn't be uploaded to GitHub Release
-          # These files are inside DMG packages and shouldn't be uploaded as separate assets
-          find ./packages-all -type d -name "*.app" -exec rm -rf {} + 2>/dev/null || true
-          find ./packages-all -type f \( -name "Info.plist" -o -name "libq*.dylib" -o -name "klogg.icns" -o -name "qt.conf" \) -delete 2>/dev/null || true
-          # Remove Qt framework files that are inside app bundles (not package files)
-          find ./packages-all -type f -name "Qt*" ! -name "*.dmg" ! -name "*.deb" ! -name "*.rpm" ! -name "*.AppImage" -delete 2>/dev/null || true
-          # Remove standalone klogg binary (should be inside packages, not standalone)
-          find ./packages-all -type f -name "klogg" ! -name "*.AppImage" ! -name "*.deb" ! -name "*.rpm" -delete 2>/dev/null || true
-          # Keep final packages plus the mandatory ADB corresponding-source,
-          # license, notice, SPDX SBOM, source-offer, manifest, and checksum assets.
-          find ./packages-all -type f ! \( -name "*.dmg" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.exe" -o -name "*.zip" -o -name "*.xz" -o -name "*.tar.xz" -o -name "*.tar.gz" -o -name "*.json" -o -name "*.txt" -o -name "*.sha256" \) -delete 2>/dev/null || true
-
-      - name: Clean stale continuous candidate draft
-        if: env.GITHUB_TOKEN != ''
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          candidate_tag="continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          lookup_error=$(mktemp)
-          if release_id=$(gh api "/repos/${repo}/releases/tags/${candidate_tag}" --jq '.id' 2>"$lookup_error"); then
-            draft=$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')
-            test "${draft}" = "true" || {
-              echo "::error::refusing to replace published candidate ${candidate_tag}"
-              exit 1
-            }
-            gh api -X DELETE "/repos/${repo}/releases/${release_id}"
-            gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null 2>&1 || true
-          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
-
-      - name: Create continuous candidate draft
-        id: candidate_release
-        if: env.GITHUB_TOKEN != ''
-        uses: softprops/action-gh-release@v1
-        with:
-          token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          tag_name: continuous-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
-          name: Continuous Candidate ${{ env.KLOGG_VERSION }}
-          body: |
-            Continuous Build ${{ env.KLOGG_VERSION }}
-
-            This is an automated rolling pre-release build. Its package/source publication set is mutable=true and is replaced as one verified coherent set by each successful master run. A parked prior release is restored if promotion verification fails. For the latest stable release, see [latest release](https://github.com/ZEACENT/klogg/releases/latest).
-
-            ## Changes
-            ${{ env.CHANGELOG }}
-
-            ## Downloads
-
-            ### Windows
-            - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
-            - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
-
-            ### Linux
-            - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
-            - Ubuntu 24.04 (Noble, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb)
-            - Ubuntu 26.04 (Resolute, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb)
-            - AppImage (Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage)
-
-            ### macOS
-            - Intel (x64, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg)
-            - Apple Silicon (ARM64, Vectorscan): [klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg](https://github.com/ZEACENT/klogg/releases/download/continuous/klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg)
-          prerelease: true
-          files: |
-            ./packages-all/**/*
-            ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz
-            ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz.sha256
-            ./packages-publication/klogg-v*-ios-native-source-*.tar.gz
-            ./packages-publication/klogg-v*-ios-native-source-*.tar.gz.sha256
-            ./packages-publication/adb-helper-source-set-receipt.json
-            ./packages-publication/ios-native-source-set-receipt.json
-            ./packages-publication/ios-native-*.sha256
-            ./packages-publication/NOTICE-ios-native.txt.sha256
-            ./packages-publication/klogg-source-publication-manifest.json
-            ./packages-publication/*.qualification.json
-            ./packages-publication/*.ios-qualification.json
-            ./packages-publication/adb-helper-licenses.tar.gz
-            ./packages-publication/adb-helper-notices.tar.gz
-            ./packages-publication/adb-helper-sbom.spdx.json
-            ./packages-publication/ADB-HELPER-SOURCE-OFFER.txt
-            ./packages-publication/adb-helper-source-manifest.json
-            ./packages-publication/adb-helper-*.sha256
-            ./packages-publication/ADB-HELPER-*.sha256
-            ./packages-publication/ios-native-source-offer.txt
-            ./packages-publication/ios-native-lgpl-replacement.txt
-            ./packages-publication/NOTICE-ios-native.txt
-          draft: true
-
-      - name: Verify rolling source publication after upload
-        if: env.GITHUB_TOKEN != ''
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
-        run: |
-          set -euo pipefail
-          test -n "${RELEASE_ID}" || { echo "::error::Missing candidate release ID"; exit 1; }
-          verification_root=$(mktemp -d)
-          while IFS=$'\t' read -r asset_id asset_name; do
-            gh api -H "Accept: application/octet-stream" \
-              "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
-          done < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
-            --jq '.[] | [.id, .name] | @tsv')
-          python3 scripts/verify_source_publication_manifest.py \
-            --manifest "$verification_root/klogg-source-publication-manifest.json" \
-            --assets-root "$verification_root" \
-            --expected-channel continuous \
-            --expected-tag continuous \
-            --expected-version "${KLOGG_VERSION}" \
-            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
-            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
-
-      - name: Park existing continuous release for rollback
-        if: env.GITHUB_TOKEN != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          tag="continuous"
-          backup_tag="continuous-rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          lookup_error=$(mktemp)
-          if ! release_id=$(gh api "/repos/${repo}/releases/tags/${tag}" --jq '.id' 2>"$lookup_error"); then
-            if grep -Eq '404|Not Found' "$lookup_error"; then
-              echo "No existing continuous release to park"
-              rm -f "$lookup_error"
-              exit 0
-            fi
-            cat "$lookup_error"
-            exit 1
-          fi
-          rm -f "$lookup_error"
-          old_sha=$(gh api "/repos/${repo}/git/ref/tags/${tag}" --jq '.object.sha')
-          {
-            echo "KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID=${release_id}"
-            echo "KLOGG_PREVIOUS_CONTINUOUS_SHA=${old_sha}"
-            echo "KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG=${backup_tag}"
-          } >> "$GITHUB_ENV"
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/${backup_tag}" >/dev/null 2>&1 || true
-          gh api -X POST "/repos/${repo}/git/refs" \
-            -f ref="refs/tags/${backup_tag}" \
-            -f sha="${old_sha}" >/dev/null
-          gh api -X PATCH "/repos/${repo}/releases/${release_id}" \
-            -f tag_name="${backup_tag}" \
-            -F draft=true \
-            -F prerelease=true >/dev/null
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null 2>&1 || true
-
-      - name: Promote verified continuous candidate
-        if: env.GITHUB_TOKEN != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          release_id="${RELEASE_ID}"
-          if [ -z "${release_id}" ]; then
-            echo "::error::No release ID from create_release step"
-            exit 1
-          fi
-          echo "Enforcing flags on release ${release_id}"
-          gh api -X PATCH "/repos/${repo}/releases/${release_id}" \
-            -f tag_name=continuous \
-            -f draft=false \
-            -f prerelease=true >/dev/null
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            >/dev/null 2>&1 || true
-
-      - name: Verify continuous release flags
-        if: env.GITHUB_TOKEN != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          release_id="${RELEASE_ID}"
-          if [ -z "${release_id}" ]; then
-            echo "::error::No release ID from create_release step"
-            exit 1
-          fi
-          tag_name="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.tag_name')"
-          draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
-          prerelease="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.prerelease')"
-
-          echo "continuous release flags: tag_name=${tag_name} draft=${draft} prerelease=${prerelease}"
-          if [ "${tag_name}" != "continuous" ] || [ "${draft}" != "false" ] || [ "${prerelease}" != "true" ]; then
-            gh api "/repos/${repo}/releases/${release_id}" --jq '{id,tag_name,html_url,draft,prerelease,target_commitish}'
-            exit 1
-          fi
-
-      - name: Reverify promoted continuous release
-        if: env.GITHUB_TOKEN != ''
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          tag_name="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.tag_name')"
-          test "${tag_name}" = "continuous" || { echo "::error::continuous release tag mismatch"; exit 1; }
-          ref_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')"
-          test "${ref_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
-            echo "::error::continuous ref ${ref_sha} != source commit ${KLOGG_SOURCE_COMMIT}"
-            exit 1
-          }
-          candidate_ref="continuous-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          candidate_error=$(mktemp)
-          if gh api "/repos/${repo}/git/ref/tags/${candidate_ref}" >/dev/null 2>"$candidate_error"; then
-            echo "::error::candidate tag was not cleaned up: ${candidate_ref}"
-            exit 1
-          elif ! grep -Eq '404|Not Found' "$candidate_error"; then
-            cat "$candidate_error"
-            exit 1
-          fi
-          rm -f "$candidate_error"
-          verification_root=$(mktemp -d)
-          gh release download continuous --repo "${repo}" --dir "$verification_root"
-          python3 scripts/verify_source_publication_manifest.py \
-            --manifest "$verification_root/klogg-source-publication-manifest.json" \
-            --assets-root "$verification_root" \
-            --expected-channel continuous \
-            --expected-tag continuous \
-            --expected-version "${KLOGG_VERSION}" \
-            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
-            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
-
-      - name: Roll back failed continuous promotion
-        if: failure() && env.GITHUB_TOKEN != ''
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-          CANDIDATE_RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY}"
-          candidate_id="${CANDIDATE_RELEASE_ID:-}"
-          previous_id="${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID:-}"
-          previous_sha="${KLOGG_PREVIOUS_CONTINUOUS_SHA:-}"
-          backup_tag="${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG:-}"
-          if [ -n "$candidate_id" ]; then
-            candidate_tag=$(gh api "/repos/${repo}/releases/${candidate_id}" --jq '.tag_name' 2>/dev/null || true)
-            gh api -X DELETE "/repos/${repo}/releases/${candidate_id}" >/dev/null 2>&1 || true
-            if [ -n "$candidate_tag" ]; then
-              gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null 2>&1 || true
-            fi
-          fi
-          if [ -z "$previous_id" ]; then
-            echo "No previous continuous release was parked; removed failed candidate without changing the live release"
-            exit 0
-          fi
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous" >/dev/null 2>&1 || true
-          test -n "$previous_sha" && test -n "$backup_tag"
-          gh api -X POST "/repos/${repo}/git/refs" \
-            -f ref="refs/tags/continuous" \
-            -f sha="$previous_sha" >/dev/null
-          gh api -X PATCH "/repos/${repo}/releases/${previous_id}" \
-            -f tag_name=continuous \
-            -F draft=false \
-            -F prerelease=true >/dev/null
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/${backup_tag}" >/dev/null 2>&1 || true
-          restored_id=$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')
-          test "$restored_id" = "$previous_id"
-
-      - name: Remove parked continuous release after promotion
-        if: success() && env.GITHUB_TOKEN != '' && env.KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID != ''
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-        run: |
-          repo="${GITHUB_REPOSITORY}"
-          gh api -X DELETE "/repos/${repo}/releases/${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID}" \
-            >/dev/null 2>&1 || echo "::warning::failed to delete parked continuous release"
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG}" \
-            >/dev/null 2>&1 || true

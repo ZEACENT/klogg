@@ -22,6 +22,7 @@ APP_MAIN = ROOT / "src" / "app" / "main.cpp"
 UNIT_TEST_MAIN = ROOT / "tests" / "unit" / "tests_main.cpp"
 UI_TEST_MAIN = ROOT / "tests" / "ui" / "qtests_main.cpp"
 ADB_TRACKER_MANAGER_TEST = ROOT / "tests" / "unit" / "adb_device_tracker_manager_test.cpp"
+PLATFORM_FILES_SOURCE = ROOT / "src" / "utils" / "src" / "platform_files.cpp"
 
 
 def function_body(source, signature):
@@ -52,6 +53,40 @@ def function_body(source, signature):
 
 
 class StaticAnalysisRegressionTest(unittest.TestCase):
+    def test_windows_file_identity_rejects_unrepresentable_qt_handles_before_narrowing(self):
+        source = PLATFORM_FILES_SOURCE.read_text()
+        file_identity = function_body(
+            source, "std::optional<FileIdentity> fileIdentity( const QFileDevice& file )"
+        )
+        windows_branch = file_identity.split("#if defined( Q_OS_WIN )", 1)[1].split(
+            "#else", 1
+        )[0]
+
+        handle_read = "const auto fileHandle = file.handle();"
+        invalid_guard = (
+            "if ( fileHandle < 0 || fileHandle > std::numeric_limits<int>::max() )"
+        )
+        descriptor_narrowing = "static_cast<int>( fileHandle )"
+        native_lookup = "_get_osfhandle( nativeDescriptor )"
+        for statement in (
+            handle_read,
+            invalid_guard,
+            descriptor_narrowing,
+            native_lookup,
+        ):
+            self.assertIn(statement, windows_branch)
+        self.assertLess(
+            windows_branch.index(handle_read), windows_branch.index(invalid_guard)
+        )
+        self.assertLess(
+            windows_branch.index(invalid_guard),
+            windows_branch.index(descriptor_narrowing),
+        )
+        self.assertLess(
+            windows_branch.index(descriptor_narrowing), windows_branch.index(native_lookup)
+        )
+        self.assertNotIn("static_cast<int>( file.handle() )", windows_branch)
+
     def test_reference_returning_adb_lookup_does_not_bind_a_temporary_string_key(self):
         source = ADB_TRACKER_MANAGER_TEST.read_text()
         lookup = function_body(source, "const DomainAdbDeviceInfo& deviceWithSerial(")

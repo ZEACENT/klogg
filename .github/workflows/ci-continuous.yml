@@ -1,0 +1,579 @@
+name: "Publish Continuous Release"
+
+on:
+  workflow_run:
+    workflows: ["CI Build"]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: continuous-release-publisher
+  cancel-in-progress: false
+
+jobs:
+  select:
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'master'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      KLOGG_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      KLOGG_CI_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+    outputs:
+      should-publish: ${{ steps.selection.outputs.should-publish }}
+    steps:
+      - name: Verify triggering CI run and current master tip
+        id: selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          run_api="/repos/${repo}/actions/runs/${KLOGG_CI_RUN_ID}"
+          test "$(gh api "$run_api" --jq '.path')" = ".github/workflows/ci-build.yml"
+          test "$(gh api "$run_api" --jq '.head_repository.full_name // empty')" = "$repo"
+          test "$(gh api "$run_api" --jq '.head_branch')" = "master"
+          test "$(gh api "$run_api" --jq '.event')" = "push"
+          test "$(gh api "$run_api" --jq '.conclusion')" = "success"
+          test "$(gh api "$run_api" --jq '.head_sha')" = "$KLOGG_CI_RUN_SHA"
+          master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
+          if [ "$master_sha" != "$KLOGG_CI_RUN_SHA" ]; then
+            echo "::notice::Skipping stale continuous run ${KLOGG_CI_RUN_ID}: ${KLOGG_CI_RUN_SHA} != ${master_sha}"
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should-publish=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: select
+    if: ${{ needs.select.outputs.should-publish == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      KLOGG_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      KLOGG_CI_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      KLOGG_EVIDENCE_LEVEL: validation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download package artifacts from exact CI run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: packages-*
+          path: packages-all
+
+      - name: Download version artifact from exact CI run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: klogg_version
+          path: klogg_version
+
+      - name: Download ADB legal assets from exact CI run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: adb-helper-legal-assets
+          path: adb-helper-legal-assets
+
+      - name: Download iOS source assets from exact CI run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ios-native-source-assets
+          path: ios-native-source-assets
+
+      - name: Bind downloaded artifacts to the triggering SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          KLOGG_VERSION="$(cat klogg_version/klogg_version.txt)"
+          KLOGG_SOURCE_COMMIT="$(cat klogg_version/klogg_commit.txt)"
+          test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}" || {
+            echo "::error::Artifact commit ${KLOGG_SOURCE_COMMIT} != triggering run ${KLOGG_CI_RUN_SHA}"
+            exit 1
+          }
+          git fetch --no-tags origin master
+          git checkout --detach "$KLOGG_SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$KLOGG_SOURCE_COMMIT"
+          {
+            echo "KLOGG_VERSION=$KLOGG_VERSION"
+            echo "KLOGG_SOURCE_COMMIT=$KLOGG_SOURCE_COMMIT"
+          } >> "$GITHUB_ENV"
+
+      - name: Extract package tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' archive; do
+            directory="$(dirname "$archive")"
+            staging="$(mktemp -d)"
+            python3 scripts/extract_verified_tar.py --archive "$archive" --destination "$staging"
+            cp -a "$staging"/. "$directory"/
+            rm -rf "$staging" "$archive"
+          done < <(find packages-all -name 'packages-*.tar.gz' -type f -print0)
+
+      - name: Generate continuous changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          changelog="$(python3 scripts/gen_changelog.py --mode prerelease --to-ref "$KLOGG_SOURCE_COMMIT" --print-range)"
+          delimiter="$(openssl rand -hex 16)"
+          {
+            echo "CHANGELOG<<$delimiter"
+            echo "$changelog"
+            echo "$delimiter"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare coherent rolling validation publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          qualification_args=(
+            --qualification-receipt packages-all/packages-jammy-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-noble-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-resolute-vs-gen/adb-helper-deb-package-verification.json
+            --qualification-receipt packages-all/packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
+            --qualification-receipt packages-all/packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
+            --qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
+            --qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
+            --ios-qualification-receipt packages-all/packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
+            --ios-qualification-receipt packages-all/packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
+          )
+          python3 scripts/prepare_source_publication.py \
+            --channel continuous \
+            --evidence-level "$KLOGG_EVIDENCE_LEVEL" \
+            --tag continuous \
+            --version "$KLOGG_VERSION" \
+            --commit "$KLOGG_SOURCE_COMMIT" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+            --adb-source-root adb-helper-legal-assets \
+            --ios-source-root ios-native-source-assets \
+            "${qualification_args[@]}" \
+            --output packages-publication
+
+      - name: Recheck master tip before continuous candidate creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
+          test "$master_sha" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Master advanced before candidate creation: ${master_sha}"
+            exit 1
+          }
+
+      - name: Recover interrupted continuous transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+
+          delete_ref_if_present() {
+            local tag="$1"
+            local lookup_error
+            lookup_error="$(mktemp)"
+            if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$lookup_error"; then
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+              cat "$lookup_error"
+              rm -f "$lookup_error"
+              return 1
+            fi
+            rm -f "$lookup_error"
+          }
+
+          verify_release() {
+            local release_id="$1"
+            local ref_tag="$2"
+            local expected_draft="$3"
+            local verification_root asset_list ref_sha manifest_commit manifest_version
+            test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = "$expected_draft" || return 1
+            test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.prerelease')" = true || return 1
+            ref_sha="$(gh api "/repos/${repo}/git/ref/tags/${ref_tag}" --jq '.object.sha')" || return 1
+            verification_root="$(mktemp -d)" || return 1
+            asset_list="$(mktemp)" || return 1
+            gh api --paginate "/repos/${repo}/releases/${release_id}/assets" \
+              --jq '.[] | [.id, .name] | @tsv' > "$asset_list" || return 1
+            while IFS=$'\t' read -r asset_id asset_name; do
+              gh api -H "Accept: application/octet-stream" \
+                "/repos/${repo}/releases/assets/${asset_id}" > "$verification_root/$asset_name" || return 1
+            done < "$asset_list"
+            read -r manifest_commit manifest_version < <(
+              python3 - "$verification_root/klogg-source-publication-manifest.json" <<'PY'
+          import json, pathlib, sys
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["release"]
+          print(release["commit"], release["version"])
+          PY
+            )
+            test "$ref_sha" = "$manifest_commit" || return 1
+            python3 scripts/verify_source_publication_manifest.py \
+              --manifest "$verification_root/klogg-source-publication-manifest.json" \
+              --assets-root "$verification_root" \
+              --expected-channel continuous \
+              --expected-evidence-level validation \
+              --expected-tag continuous \
+              --expected-version "$manifest_version" \
+              --expected-commit "$manifest_commit" \
+              --expected-base-url "https://github.com/${repo}" || return 1
+            rm -rf "$verification_root" "$asset_list"
+          }
+
+          restore_parked_release() {
+            local live_id="${1:-}"
+            echo "Restore parked continuous release ${parked_tag}"
+            if [ -n "$live_id" ]; then
+              gh api -X DELETE "/repos/${repo}/releases/${live_id}" >/dev/null
+            fi
+            delete_ref_if_present continuous
+            gh api -X POST "/repos/${repo}/git/refs" \
+              -f ref=refs/tags/continuous -f sha="$parked_sha" >/dev/null
+            gh api -X PATCH "/repos/${repo}/releases/${parked_id}" \
+              -f tag_name=continuous -F draft=false -F prerelease=true >/dev/null
+            delete_ref_if_present "$parked_tag"
+            test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$parked_id"
+            test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$parked_sha"
+          }
+
+          mapfile -t parked < <(
+            gh api --paginate "/repos/${repo}/releases?per_page=100" \
+              --jq '.[] | select(.tag_name | startswith("continuous-rollback-")) | [.id, .tag_name] | @tsv'
+          )
+          if [ "${#parked[@]}" -gt 1 ]; then
+            echo "::error::Multiple parked continuous releases require manual reconciliation"
+            printf '%s\n' "${parked[@]}"
+            exit 1
+          fi
+          if [ "${#parked[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          IFS=$'\t' read -r parked_id parked_tag <<< "${parked[0]}"
+          parked_sha="$(gh api "/repos/${repo}/git/ref/tags/${parked_tag}" --jq '.object.sha')"
+          verify_release "$parked_id" "$parked_tag" true
+
+          lookup_error="$(mktemp)"
+          if live_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
+            if verify_release "$live_id" continuous false; then
+              echo "Remove stale parked continuous release ${parked_tag}; live continuous release is coherent"
+              gh api -X DELETE "/repos/${repo}/releases/${parked_id}" >/dev/null
+              delete_ref_if_present "$parked_tag"
+            else
+              restore_parked_release "$live_id"
+            fi
+          elif grep -Eq '404|Not Found' "$lookup_error"; then
+            restore_parked_release
+          else
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+      - name: Clean stale continuous candidate draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
+          release_id=""
+          lookup_error="$(mktemp)"
+          if release_id="$(gh api "/repos/${repo}/releases/tags/${candidate_tag}" --jq '.id' 2>"$lookup_error")"; then
+            test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = true
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/${candidate_tag}" >/dev/null 2>"$lookup_error"; then
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null
+          elif [ -n "$release_id" ] || ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+          if [ -n "$release_id" ]; then
+            gh api -X DELETE "/repos/${repo}/releases/${release_id}" >/dev/null
+          fi
+
+      - name: Create continuous candidate draft
+        id: candidate_release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          token: ${{ github.token }}
+          tag_name: continuous-candidate-${{ env.KLOGG_CI_RUN_ID }}
+          target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
+          name: Continuous Candidate ${{ env.KLOGG_VERSION }}
+          body: |
+            Continuous Build ${{ env.KLOGG_VERSION }}
+
+            This rolling release is built from a successful trusted master push. Windows and Linux packages are CI-validated. The macOS disk images are unsigned validation artifacts, not signed or notarized releases.
+
+            ## Changes
+            ${{ env.CHANGELOG }}
+
+            ## Downloads
+            - Windows x64 installer and portable archive
+            - Ubuntu 22.04, 24.04, and 26.04 packages
+            - AppImage
+            - macOS Intel and Apple Silicon unsigned disk images
+            - Content-addressed ADB helper and iOS native corresponding source
+          prerelease: true
+          draft: true
+          files: |
+            ./packages-publication/*
+
+      - name: Verify continuous candidate after upload
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_ID"
+          verification_root="$(mktemp -d)"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api -H "Accept: application/octet-stream" \
+              "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
+          done < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" --jq '.[] | [.id, .name] | @tsv')
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest "$verification_root/klogg-source-publication-manifest.json" \
+            --assets-root "$verification_root" \
+            --expected-channel continuous \
+            --expected-evidence-level validation \
+            --expected-tag continuous \
+            --expected-version "$KLOGG_VERSION" \
+            --expected-commit "$KLOGG_SOURCE_COMMIT" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+
+      - name: Recheck master tip before continuous promotion
+        shell: bash
+        run: |
+          set -euo pipefail
+          master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
+          test "$master_sha" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Master advanced before continuous promotion: ${master_sha}"
+            exit 1
+          }
+
+      - name: Park existing continuous release for rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"
+          lookup_error="$(mktemp)"
+          if release_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
+            :
+          elif grep -Eq '404|Not Found' "$lookup_error"; then
+            echo "No existing continuous release to park"
+            rm -f "$lookup_error"
+            exit 0
+          else
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+          test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.prerelease')" = true
+          old_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')"
+          {
+            echo "KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID=$release_id"
+            echo "KLOGG_PREVIOUS_CONTINUOUS_SHA=$old_sha"
+            echo "KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG=$backup_tag"
+          } >> "$GITHUB_ENV"
+
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/${backup_tag}" >/dev/null 2>"$lookup_error"; then
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/${backup_tag}" >/dev/null
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+          gh api -X POST "/repos/${repo}/git/refs" \
+            -f ref="refs/tags/${backup_tag}" -f sha="$old_sha" >/dev/null
+          test "$(gh api "/repos/${repo}/git/ref/tags/${backup_tag}" --jq '.object.sha')" = "$old_sha"
+          gh api -X PATCH "/repos/${repo}/releases/${release_id}" \
+            -f tag_name="$backup_tag" -F draft=true -F prerelease=true >/dev/null
+          test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.tag_name')" = "$backup_tag"
+          test "$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')" = true
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous" >/dev/null
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/continuous" >/dev/null 2>"$lookup_error" \
+            || ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+      - name: Promote verified continuous candidate
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
+          test -n "$RELEASE_ID"
+          master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
+          test "$master_sha" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Master advanced inside continuous promotion: ${master_sha}"
+            exit 1
+          }
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/continuous" >/dev/null 2>"$lookup_error" \
+            || ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            echo "::error::Continuous ref must be absent before promotion"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" \
+            -f tag_name=continuous -F draft=false -F prerelease=true >/dev/null
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$RELEASE_ID"
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/${candidate_tag}" >/dev/null 2>"$lookup_error"; then
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+      - name: Reverify promoted continuous release
+        shell: bash
+        run: |
+          set -euo pipefail
+          master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
+          test "$master_sha" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Master advanced before continuous re-verification: ${master_sha}"
+            exit 1
+          }
+          test "$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/continuous" --jq '.prerelease')" = true
+          ref_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/continuous" --jq '.object.sha')"
+          test "$ref_sha" = "$KLOGG_SOURCE_COMMIT"
+          verification_root="$(mktemp -d)"
+          gh release download continuous --repo "$GITHUB_REPOSITORY" --dir "$verification_root"
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest "$verification_root/klogg-source-publication-manifest.json" \
+            --assets-root "$verification_root" \
+            --expected-channel continuous \
+            --expected-evidence-level validation \
+            --expected-tag continuous \
+            --expected-version "$KLOGG_VERSION" \
+            --expected-commit "$KLOGG_SOURCE_COMMIT" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+          master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
+          test "$master_sha" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Master advanced during continuous re-verification: ${master_sha}"
+            exit 1
+          }
+
+      - name: Roll back failed continuous promotion
+        if: ${{ failure() || cancelled() }}
+        shell: bash
+        env:
+          CANDIDATE_RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          candidate_id="${CANDIDATE_RELEASE_ID:-}"
+          candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
+          previous_id="${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID:-}"
+          previous_sha="${KLOGG_PREVIOUS_CONTINUOUS_SHA:-}"
+          backup_tag="${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG:-}"
+
+          delete_ref_if_present() {
+            local tag="$1"
+            local lookup_error
+            lookup_error="$(mktemp)"
+            if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$lookup_error"; then
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+              cat "$lookup_error"
+              rm -f "$lookup_error"
+              return 1
+            fi
+            rm -f "$lookup_error"
+          }
+
+          published_tag=""
+          if [ -n "$candidate_id" ]; then
+            lookup_error="$(mktemp)"
+            if published_tag="$(gh api "/repos/${repo}/releases/${candidate_id}" --jq '.tag_name' 2>"$lookup_error")"; then
+              gh api -X DELETE "/repos/${repo}/releases/${candidate_id}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+              cat "$lookup_error"
+              exit 1
+            fi
+            rm -f "$lookup_error"
+          fi
+          delete_ref_if_present "$candidate_tag"
+          if [ "$published_tag" = continuous ]; then
+            delete_ref_if_present continuous
+          fi
+
+          if [ -z "$previous_id" ]; then
+            exit 0
+          fi
+          test -n "$previous_sha" && test -n "$backup_tag"
+
+          live_id=""
+          lookup_error="$(mktemp)"
+          if live_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id' 2>"$lookup_error")"; then
+            if [ "$live_id" = "$previous_id" ]; then
+              test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$previous_sha"
+              delete_ref_if_present "$backup_tag"
+              exit 0
+            fi
+            gh api -X DELETE "/repos/${repo}/releases/${live_id}" >/dev/null
+          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            exit 1
+          fi
+          rm -f "$lookup_error"
+
+          delete_ref_if_present continuous
+          test "$(gh api "/repos/${repo}/releases/${previous_id}" --jq '.tag_name')" = "$backup_tag"
+          test "$(gh api "/repos/${repo}/git/ref/tags/${backup_tag}" --jq '.object.sha')" = "$previous_sha"
+          gh api -X POST "/repos/${repo}/git/refs" \
+            -f ref=refs/tags/continuous -f sha="$previous_sha" >/dev/null
+          gh api -X PATCH "/repos/${repo}/releases/${previous_id}" \
+            -f tag_name=continuous -F draft=false -F prerelease=true >/dev/null
+          delete_ref_if_present "$backup_tag"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$previous_id"
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$previous_sha"
+
+      - name: Remove parked continuous release after promotion
+        if: success() && env.KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG}" >/dev/null
+          if ! gh api -X DELETE "/repos/${repo}/releases/${KLOGG_PREVIOUS_CONTINUOUS_RELEASE_ID}" >/dev/null; then
+            gh api -X POST "/repos/${repo}/git/refs" \
+              -f ref="refs/tags/${KLOGG_PREVIOUS_CONTINUOUS_BACKUP_TAG}" \
+              -f sha="$KLOGG_PREVIOUS_CONTINUOUS_SHA" >/dev/null
+            echo "::error::Failed to remove parked continuous release; restored its rollback ref"
+            exit 1
+          fi

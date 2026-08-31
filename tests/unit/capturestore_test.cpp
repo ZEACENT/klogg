@@ -46,6 +46,7 @@
 #endif
 
 #include "capturestore.h"
+#include "platform/platform_files.h"
 #include "rollingfilemanager.h"
 
 class CaptureStoreTestAccess {
@@ -2463,6 +2464,33 @@ TEST_CASE( "CaptureStore removes a newly created Restore output after replay fai
     CHECK( QDir( rootPath )
                .entryList( { QStringLiteral( ".klogg-output-*" ) }, QDir::Files )
                .isEmpty() );
+}
+
+TEST_CASE( "RollingFileManager verifies a staged publication identity before binding",
+           "[rolling][identity]" )
+{
+    const auto rootPath = makeTestDir( "rolling_published_identity" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+    QSaveFile staged( filePath );
+    REQUIRE( staged.open( QIODevice::WriteOnly ) );
+    REQUIRE( staged.write( QByteArrayLiteral( "published" ) ) > 0 );
+    const auto publishedIdentity = klogg::platform::fileIdentity( staged );
+    REQUIRE( publishedIdentity.has_value() );
+    REQUIRE( staged.commit() );
+
+    RollingFileManager exact( filePath, 0, 0 );
+    REQUIRE( exact.openExisting( publishedIdentity ) );
+    exact.close();
+
+    const auto movedPath = filePath + QStringLiteral( ".owned" );
+    REQUIRE( QFile::rename( filePath, movedPath ) );
+    QFile replacement( filePath );
+    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
+    REQUIRE( replacement.write( QByteArrayLiteral( "replacement" ) ) > 0 );
+    replacement.close();
+
+    RollingFileManager replaced( filePath, 0, 0 );
+    CHECK_FALSE( replaced.openExisting( publishedIdentity ) );
 }
 
 TEST_CASE( "RollingFileManager resyncSize reads actual file size after direct writes" )

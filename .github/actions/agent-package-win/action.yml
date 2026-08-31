@@ -1,12 +1,5 @@
 name: "Prepare windows packages"
 description: Verify and package the target-matched Windows application and ADB helper
-inputs:
-  s3-key-id:
-    required: true
-  s3-secret:
-    required: true
-  s3-bucket:
-    required: true
 runs:
   using: "composite"
   steps:
@@ -48,10 +41,15 @@ runs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Win installer
-      uses: joncloud/makensis-action@v3.3
-      with:
-        script-file: klogg.nsi
-        arguments: "-DVERSION=%KLOGG_VERSION% -DPLATFORM=%KLOGG_ARCH% -DQT_MAJOR=%KLOGG_QT%" 
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $makensis = (Get-Command makensis.exe -ErrorAction Stop).Source
+        & $makensis "/V3" "/DVERSION=$env:KLOGG_VERSION" `
+          "/DPLATFORM=$env:KLOGG_ARCH" "/DQT_MAJOR=$env:KLOGG_QT" "klogg.nsi"
+        if ($LASTEXITCODE -ne 0) {
+          throw "makensis failed with exit code $LASTEXITCODE"
+        }
     
     - name: Win package
       shell: cmd
