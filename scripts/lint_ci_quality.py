@@ -1519,6 +1519,11 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if not has_application_build:
         issues.append("CodeQL manual build must trace the klogg application target")
 
+    if "config-file: ./.github/codeql-config.yml" not in text:
+        issues.append(
+            "codeql init must reference .github/codeql-config.yml so vendored"
+            " CPM sources under cpm_cache/ never produce repo alerts"
+        )
 
     return issues
 
@@ -2100,6 +2105,22 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in codeql_workflow_issues(codeql_text)
     )
+    codeql_config_path = root / ".github" / "codeql-config.yml"
+    if codeql_config_path.is_file():
+        codeql_config_text = codeql_config_path.read_text()
+        if (
+            "paths-ignore:" not in codeql_config_text
+            or re.search(r"^\s*-\s+cpm_cache\s*$", codeql_config_text, re.MULTILINE)
+            is None
+        ):
+            issues.append(
+                ".github/codeql-config.yml: paths-ignore must exclude the"
+                " vendored CPM source cache (cpm_cache)"
+            )
+    else:
+        issues.append(
+            ".github/codeql-config.yml: CodeQL config file is missing"
+        )
 
     agent_setup_path = (
         root / ".github" / "actions" / "agent-setup" / "action.yml"

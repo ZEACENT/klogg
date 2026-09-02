@@ -43,6 +43,7 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
+          config-file: ./.github/codeql-config.yml
       - uses: ./.github/actions/agent-setup
       - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - run: cmake --build build -t klogg
@@ -1127,6 +1128,16 @@ jobs:
 
     def test_secure_codeql_workflow_is_accepted(self):
         self.assertEqual(MODULE.codeql_workflow_issues(secure_codeql_workflow()), [])
+
+    def test_codeql_requires_config_excluding_vendored_sources(self):
+        text = secure_codeql_workflow().replace(
+            "          config-file: ./.github/codeql-config.yml\n",
+            "",
+            1,
+        )
+        issues = MODULE.codeql_workflow_issues(text)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("codeql-config.yml", issues[0])
 
     def test_release_mutation_requires_publishing_pat(self):
         message = "release mutation must bind GITHUB_TOKEN"

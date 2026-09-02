@@ -44,6 +44,9 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
+          # Exclude vendored third-party sources fetched into cpm_cache/ at
+          # configure time; only first-party code produces repo alerts.
+          config-file: ./.github/codeql-config.yml
 
       - uses: ./.github/actions/agent-setup
 
