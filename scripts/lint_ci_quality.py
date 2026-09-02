@@ -414,7 +414,11 @@ def workflow_step_blocks(job_block: list[str]) -> list[list[str]]:
         if not active:
             continue
         indent = len(line) - len(line.lstrip())
-        if indent <= steps_indent:
+        if indent < steps_indent:
+            region_end = index
+            break
+        if indent == steps_indent and LIST_ITEM_RE.match(line) is None:
+            # A sibling mapping key of steps: (e.g. outputs:) ends the region.
             region_end = index
             break
         item = LIST_ITEM_RE.match(line)
@@ -1515,6 +1519,7 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if not has_application_build:
         issues.append("CodeQL manual build must trace the klogg application target")
 
+
     return issues
 
 
@@ -1922,6 +1927,63 @@ def workflow_display_name(text: str) -> str | None:
     return None
 
 
+RELEASE_PATCH_ENDPOINT_RE = re.compile(r'gh\s+api\s+-X\s+PATCH\s+"[^"]*/releases/')
+RELEASE_PUBLISHER_TOKEN_DIRECTIVE = "${{ secrets.KLOGG_GITHUB_TOKEN }}"
+RELEASE_PUBLISHER_TOKEN_GUARD = (
+    'test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret'
+    ' is missing or empty"; exit 1; }'
+)
+
+
+def release_publisher_token_issues(text: str) -> list[str]:
+    """Reject release-API mutations executed with the Actions app token.
+
+    GitHub's workflow-persistence protection requires workflow-modification
+    authorization to create or update a release whose target commit adds or
+    changes .github/workflows/** files, and the Actions app token can never
+    hold that authorization, so such calls fail with 403 "Resource not
+    accessible by integration" (continuous publisher run 33428615996, fixed
+    by binding the mutating steps to the KLOGG_GITHUB_TOKEN PAT). Draft-only
+    softprops uploads keep github.token because tag creation is deferred to
+    the promotion PATCH, which must use the PAT.
+    """
+    issues: list[str] = []
+    for job_name, job_block in workflow_job_blocks(text).items():
+        for step in workflow_step_blocks(job_block):
+            step_text = "\n".join(step)
+            step_name = "unnamed"
+            for line in step:
+                match = KEY_VALUE_RE.match(line)
+                if match is not None and match.group("key") == "name":
+                    step_name = match.group("value").strip("'\"") or "unnamed"
+                    break
+            uses_pat = RELEASE_PUBLISHER_TOKEN_DIRECTIVE in step_text
+            has_run = any(line.lstrip().startswith("run:") for line in step)
+            if RELEASE_PATCH_ENDPOINT_RE.search(step_text) and not uses_pat:
+                issues.append(
+                    f"job {job_name} step {step_name!r}: release mutation must"
+                    f" bind GITHUB_TOKEN to {RELEASE_PUBLISHER_TOKEN_DIRECTIVE}"
+                    " because github.token can never modify releases whose"
+                    " target commit changes .github/workflows/** files"
+                )
+            softprops = "uses: softprops/action-gh-release@" in step_text
+            if softprops:
+                draft = re.search(r"^\s*draft:\s*(\S+)", step_text, re.MULTILINE)
+                if (draft is None or draft.group(1) != "true") and not uses_pat:
+                    issues.append(
+                        f"job {job_name} step {step_name!r}: published"
+                        " softprops release creation must use"
+                        f" {RELEASE_PUBLISHER_TOKEN_DIRECTIVE} (draft creation"
+                        " may defer tag creation to promotion)"
+                    )
+            if uses_pat and has_run and RELEASE_PUBLISHER_TOKEN_GUARD not in step_text:
+                issues.append(
+                    f"job {job_name} step {step_name!r}: KLOGG_GITHUB_TOKEN"
+                    " step must fail fast when the secret is empty"
+                )
+    return issues
+
+
 def stable_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     if workflow_display_name(text) != "Publish Release (Stable)":
@@ -1957,6 +2019,7 @@ def stable_release_workflow_issues(text: str) -> list[str]:
         or "trap rollback_stable_promotion ERR" not in text
     ):
         issues.append("stable release promotion must roll back every post-publish failure")
+    issues.extend(release_publisher_token_issues(text))
     return issues
 
 
@@ -1995,6 +2058,7 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append(
             "continuous rollback must reconcile a candidate created without an emitted id"
         )
+    issues.extend(release_publisher_token_issues(text))
     return issues
 
 

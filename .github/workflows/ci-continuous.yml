@@ -62,6 +62,15 @@ jobs:
       KLOGG_CI_RUN_ID: ${{ github.event.workflow_run.id }}
       KLOGG_CI_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
       KLOGG_EVIDENCE_LEVEL: validation
+    # GitHub's workflow-persistence protection refuses to let the Actions app
+    # token (github.token) create or update a release whose target commit adds
+    # or changes .github/workflows/** files; such calls fail with
+    # "Resource not accessible by integration" (HTTP 403, run 33428615996).
+    # Continuous publications routinely target workflow-modifying commits, so
+    # every step that PATCHes a release (recover/park/promote/rollback) binds
+    # GITHUB_TOKEN to the KLOGG_GITHUB_TOKEN PAT provisioned with repo +
+    # workflow scopes. Read-only and draft-creation steps keep github.token:
+    # draft creation defers tag creation to promotion, which uses the PAT.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,8 +190,12 @@ jobs:
 
       - name: Recover interrupted continuous transaction
         shell: bash
+        env:
+          # Restores a parked release via PATCH: requires the PAT (see above)
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
           source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
 
@@ -375,8 +388,12 @@ jobs:
 
       - name: Park existing continuous release for rollback
         shell: bash
+        env:
+          # Renames the live release onto the backup tag via PATCH: requires the PAT (see above)
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
           source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
           backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"
@@ -429,9 +446,12 @@ jobs:
       - name: Promote verified continuous candidate
         shell: bash
         env:
+          # Publishing the candidate creates the continuous tag via PATCH: requires the PAT (see above)
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
           RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
         run: |
           set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
           repo="$GITHUB_REPOSITORY"
           candidate_tag="continuous-candidate-${KLOGG_CI_RUN_ID}"
           test -n "$RELEASE_ID"
@@ -495,9 +515,12 @@ jobs:
         if: ${{ failure() || cancelled() }}
         shell: bash
         env:
+          # Restores the parked release via PATCH on the restore path: requires the PAT (see above)
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
           CANDIDATE_RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
         run: |
           set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
           source scripts/github_api_helpers.sh
           repo="$GITHUB_REPOSITORY"
           candidate_id="${CANDIDATE_RELEASE_ID:-}"

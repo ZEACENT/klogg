@@ -1128,6 +1128,78 @@ jobs:
     def test_secure_codeql_workflow_is_accepted(self):
         self.assertEqual(MODULE.codeql_workflow_issues(secure_codeql_workflow()), [])
 
+    def test_release_mutation_requires_publishing_pat(self):
+        message = "release mutation must bind GITHUB_TOKEN"
+        good = """\
+jobs:
+  publish:
+    steps:
+      - name: Promote verified candidate
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" \\
+            -f tag_name=continuous -F draft=false >/dev/null
+"""
+        self.assertNotIn(message, MODULE.release_publisher_token_issues(good))
+        bad = good.replace(
+            "GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}",
+            "GITHUB_TOKEN: ${{ github.token }}",
+        )
+        self.assertTrue(
+            any(message in issue for issue in MODULE.release_publisher_token_issues(bad))
+        )
+
+    def test_release_pat_step_must_fail_fast_on_empty_secret(self):
+        message = "KLOGG_GITHUB_TOKEN step must fail fast when the secret is empty"
+        guarded = """\
+jobs:
+  publish:
+    steps:
+      - name: Park existing continuous release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous" >/dev/null
+"""
+        self.assertNotIn(message, MODULE.release_publisher_token_issues(guarded))
+        unguarded = guarded.replace(
+            '          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN'
+            ' secret is missing or empty"; exit 1; }\n',
+            "",
+            1,
+        )
+        self.assertTrue(
+            any(
+                message in issue
+                for issue in MODULE.release_publisher_token_issues(unguarded)
+            )
+        )
+
+    def test_draft_softprops_upload_may_keep_actions_token(self):
+        draft = """\
+jobs:
+  publish:
+    steps:
+      - name: Create continuous candidate draft
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          token: ${{ github.token }}
+          tag_name: continuous-candidate-1
+          draft: true
+"""
+        self.assertEqual(MODULE.release_publisher_token_issues(draft), [])
+        published = draft.replace("          draft: true\n", "", 1)
+        issues = MODULE.release_publisher_token_issues(published)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("published softprops release creation", issues[0])
+
     def test_codeql_runs_on_master_pushes(self):
         message = "CodeQL workflow must run on pushes to master"
         good = secure_codeql_workflow()

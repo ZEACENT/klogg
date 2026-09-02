@@ -612,10 +612,19 @@ jobs:
       if: env.GITHUB_TOKEN != ''
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ github.token }}
+        # Publishing the candidate creates the final tag via PATCH. GitHub's
+        # workflow-persistence protection requires workflow-modification
+        # authorization for release mutations whose target commit changes
+        # .github/workflows/** files — an authorization the Actions app token
+        # can never hold (HTTP 403 "Resource not accessible by integration").
+        # The draft creation above is safe with github.token because a draft
+        # defers tag creation to this step. KLOGG_GITHUB_TOKEN must carry
+        # repo + workflow scopes.
+        GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         RELEASE_ID: ${{ steps.create_release.outputs.id }}
       run: |
         set -euo pipefail
+        test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
         repo="$GITHUB_REPOSITORY"
         final_tag="v${KLOGG_VERSION}"
         candidate_tag="${final_tag}-candidate"
