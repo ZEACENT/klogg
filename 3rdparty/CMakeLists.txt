@@ -822,3 +822,32 @@ foreach(target ${klogg_cpm_targets})
     set_property(TARGET ${target} PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${${target}_include_dirs})
   endif()
 endforeach()
+
+# CodeQL's paths-ignore does not exclude C/C++ translation units observed by a
+# manual traced build. This target lets the workflow compile every vendored
+# library before extractor initialization; the subsequent klogg build then
+# traces only first-party application and generated Qt translation units.
+add_custom_target(klogg_codeql_thirdparty)
+set(
+  klogg_codeql_thirdparty_targets
+  simdutf
+  roaring
+  libuchardet
+  streamvbyte
+  klogg_karchive
+  kdsingleapp
+  xxhash
+  whereami
+  kdtoolbox
+  efsw
+  tbb
+  tbbmalloc
+  mimalloc-static
+  maddy
+  FastPFor
+)
+foreach(target IN LISTS klogg_codeql_thirdparty_targets)
+  if(TARGET ${target})
+    add_dependencies(klogg_codeql_thirdparty ${target})
+  endif()
+endforeach()

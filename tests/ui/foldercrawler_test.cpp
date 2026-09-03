@@ -51,6 +51,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -194,6 +195,18 @@ struct FilterFavoritesGuard {
 // AbstractLogView::access_by MUST use a different tag in each translation unit
 // (two definitions of access_by<AbstractLogViewPrivate> would be an ODR clash).
 struct FolderViewTestAccess {
+    // FolderCrawlerWidget's pending-open state is intentionally private. These
+    // wrappers keep the regression coupled only to two narrow KLOGG_TESTS accessors
+    // instead of exposing the production members or using a private/public macro.
+    static std::weak_ptr<LogData> pendingMainData( const FolderCrawlerWidget* widget )
+    {
+        return widget->pendingMainDataForTest();
+    }
+
+    static LineNumber pendingJumpLine( const FolderCrawlerWidget* widget )
+    {
+        return widget->pendingJumpLineForTest();
+    }
 };
 
 template <>
@@ -248,6 +261,32 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
     {
         return view->logData_;
     }
+
+    static void selectNextMark( AbstractLogView* view )
+    {
+        view->selectNextMark();
+    }
+};
+
+class NoProviderFolderMarkProbeView final : public FolderFilteredView {
+  public:
+    NoProviderFolderMarkProbeView( FolderSearchResults* results,
+                                   const QuickFindPattern* quickFindPattern )
+        : FolderFilteredView( results, quickFindPattern )
+    {
+    }
+
+    const std::vector<LineNumber>& probedLines() const { return probedLines_; }
+
+  protected:
+    AbstractLogData::LineType lineType( LineNumber lineNumber ) const override
+    {
+        probedLines_.push_back( lineNumber );
+        return {};
+    }
+
+  private:
+    mutable std::vector<LineNumber> probedLines_;
 };
 
 TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selection highlight",
@@ -969,6 +1008,107 @@ TEST_CASE( "FolderCrawlerWidget exposes predefined filters and favorites in the 
     REQUIRE_FALSE( widget.searchToolbar()->keepSearchResultsButton()->isHidden() );
 }
 
+TEST_CASE( "FolderCrawlerWidget coalesces synchronous selections for one pending file",
+           "[folder][pending][regression]" )
+{
+    // A result click starts an asynchronous LogData index. A second click in the
+    // SAME uncached file can arrive synchronously before the event loop delivers
+    // loadingFinished. It must update only the pending jump -- not discard the
+    // in-flight LogData and start the same index again. A different file remains
+    // a true supersede and must replace the pending object.
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "a.log", 12, { 2, 8 } );
+    const QString b = makeFile( dir, "b.log", 12, { 5 } );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a, b } );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    const auto resultRowsForFile = [ & ]( const QString& path ) {
+        std::vector<LineNumber> rows;
+        const auto total = widget.folderResults()->getNbLine().get();
+        for ( uint64_t i = 0; i < total; ++i ) {
+            const LineNumber row{ i };
+            if ( widget.folderResults()->lineKind( row ) == LineKind::Data
+                 && widget.folderResults()->sourceForLine( row ).filePath == path ) {
+                rows.push_back( row );
+            }
+        }
+        return rows;
+    };
+
+    const auto aRows = resultRowsForFile( a );
+    const auto bRows = resultRowsForFile( b );
+    REQUIRE( aRows.size() == 2 );
+    REQUIRE( bRows.size() == 1 );
+    const auto firstALine = widget.folderResults()->sourceForLine( aRows[ 0 ] ).localLine;
+    const auto secondALine = widget.folderResults()->sourceForLine( aRows[ 1 ] ).localLine;
+    const auto bLine = widget.folderResults()->sourceForLine( bRows[ 0 ] ).localLine;
+    REQUIRE( firstALine == 2_lnum );
+    REQUIRE( secondALine == 8_lnum );
+    REQUIRE( bLine == 5_lnum );
+
+    using Access = FolderViewTestAccess;
+
+    SECTION( "same pending file keeps its LogData and completes once at the newest match" )
+    {
+        QSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+
+        // No event-loop turn between these calls: A is still uncached and pending
+        // for both selections.
+        widget.selectResultRow( aRows[ 0 ] );
+        const auto firstPending = Access::pendingMainData( &widget );
+        REQUIRE_FALSE( firstPending.expired() );
+        REQUIRE( Access::pendingJumpLine( &widget ) == firstALine );
+
+        widget.selectResultRow( aRows[ 1 ] );
+        const auto secondPending = Access::pendingMainData( &widget );
+        REQUIRE_FALSE( secondPending.expired() );
+        REQUIRE_FALSE( firstPending.owner_before( secondPending ) );
+        REQUIRE_FALSE( secondPending.owner_before( firstPending ) );
+        REQUIRE( Access::pendingJumpLine( &widget ) == secondALine );
+
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+        QTest::qWait( 200 ); // deterministic close-after-load settle
+
+        // One shared pending index completes once, and consumes the second jump.
+        REQUIRE( completionSpy.count() == 1 );
+        const auto selected
+            = AbstractLogView::access_by<FolderViewTestAccess>::selectedLines( widget.mainView() );
+        REQUIRE( selected.size() == 1 );
+        REQUIRE( selected.front() == secondALine );
+    }
+
+    SECTION( "a different pending file still replaces the in-flight LogData" )
+    {
+        QSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+
+        widget.selectResultRow( aRows[ 0 ] );
+        const auto pendingA = Access::pendingMainData( &widget );
+        REQUIRE_FALSE( pendingA.expired() );
+
+        // Still no event-loop turn: this is a genuine A-pending -> B-pending
+        // supersede, not a cache or current-file swap. Compare weak ownership so
+        // the assertion cannot be fooled by allocator address reuse and does not
+        // keep the abandoned A load alive.
+        widget.selectResultRow( bRows[ 0 ] );
+        const auto pendingB = Access::pendingMainData( &widget );
+        REQUIRE_FALSE( pendingB.expired() );
+        REQUIRE( ( pendingA.owner_before( pendingB ) || pendingB.owner_before( pendingA ) ) );
+        REQUIRE( Access::pendingJumpLine( &widget ) == bLine );
+
+        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+        QTest::qWait( 200 );
+        REQUIRE( completionSpy.count() == 1 );
+        const auto selected
+            = AbstractLogView::access_by<FolderViewTestAccess>::selectedLines( widget.mainView() );
+        REQUIRE( selected.size() == 1 );
+        REQUIRE( selected.front() == bLine );
+    }
+}
+
 TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without reload churn",
            "[folder]" )
 {
@@ -983,6 +1123,7 @@ TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without relo
 
     widget.selectResultRow( 1_lnum ); // first select -> async load + swap
     REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    QTest::qWait( 200 );
 
     // Selecting another row in the SAME file must keep the same file loaded.
     widget.selectResultRow( 2_lnum );
@@ -3591,6 +3732,121 @@ TEST_CASE( "Folder results view navigates marks with bracket shortcuts",
     pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewPrevMark );
     REQUIRE( selectionSpy.count() == spyCount + 1 );
     REQUIRE( selectionSpy.last().at( 0 ).value<LineNumber>() == 1_lnum );
+}
+
+TEST_CASE( "Folder results navigation is bounded by visible rows, not source line numbers",
+           "[folder][navigation][regression]" )
+{
+    // FolderFilteredView displays a compact row model (including its group header),
+    // while maxDisplayLineNumber() describes the largest SOURCE line number for
+    // gutter sizing. Navigation must never confuse those coordinate spaces.
+    constexpr int matchCount = 40;
+    constexpr int sourceStride = 100;
+    constexpr int totalSourceLines = matchCount * sourceStride;
+    std::vector<int> matchLines;
+    matchLines.reserve( matchCount );
+    for ( int i = 0; i < matchCount; ++i ) {
+        matchLines.push_back( i * sourceStride );
+    }
+
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const QString a = makeFile( dir, "sparse.log", totalSourceLines, matchLines );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), QStringList{ a } );
+    widget.show();
+    widget.resize( 800, 600 );
+    QTest::qWait( 100 );
+    widget.searchFor( "ERROR" );
+    REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
+
+    auto* const view = widget.filteredView();
+    REQUIRE( view != nullptr );
+    const auto visibleRows = widget.folderResults()->getNbLine();
+    REQUIRE( visibleRows == LinesCount( matchCount + 1 ) ); // one header + matches
+    const LineNumber lastVisibleRow{ visibleRows.get() - 1 };
+    REQUIRE( widget.folderResults()->lineKind( 0_lnum ) == LineKind::Header );
+    REQUIRE( widget.folderResults()->lineKind( lastVisibleRow ) == LineKind::Data );
+    REQUIRE( widget.folderResults()->sourceForLine( lastVisibleRow ).localLine
+             == LineNumber( ( matchCount - 1 ) * sourceStride ) );
+    // Keep the header in the normal row model; only the upper navigation bound is
+    // under test (no header skipping or special-casing).
+
+    view->viewport()->setFocus();
+    REQUIRE( waitFor( [ & ]() { return view->verticalScrollBar()->maximum() > 0; } ) );
+    using Access = AbstractLogView::access_by<FolderViewTestAccess>;
+
+    SECTION( "JumpToBottom selects the final visible result row" )
+    {
+        view->selectAndDisplayLine( 1_lnum );
+        view->verticalScrollBar()->setValue( 0 );
+        REQUIRE( view->verticalScrollBar()->value() < view->verticalScrollBar()->maximum() );
+
+        QSignalSpy selectionSpy( view, &AbstractLogView::newSelection );
+        pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewJumpToBottom );
+
+        REQUIRE( selectionSpy.count() == 1 );
+        REQUIRE( selectionSpy.last().at( 0 ).value<LineNumber>() == lastVisibleRow );
+        const auto selected = Access::selectedLines( view );
+        REQUIRE( selected.size() == 1 );
+        REQUIRE( selected.front() == lastVisibleRow );
+    }
+
+    SECTION( "JumpToTop is a no-op for an empty result model" )
+    {
+        // No rows are marked, so the Marks projection is a real empty compact
+        // model. JumpToTop must not manufacture row 0 and route it through the
+        // results view's newSelection -> source-file jump connection.
+        widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
+        REQUIRE( widget.folderResults()->getNbLine() == 0_lcount );
+        REQUIRE( Access::selectedLines( view ).empty() );
+
+        QSignalSpy sourceJumpSpy( view, &AbstractLogView::newSelection );
+        pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewJumpToTop );
+
+        REQUIRE( sourceJumpSpy.count() == 0 );
+        REQUIRE( Access::selectedLines( view ).empty() );
+        REQUIRE( widget.currentMainFilePath().isEmpty() );
+    }
+
+    SECTION( "Shift+Down reaches the final visible row but cannot pass it" )
+    {
+        const LineNumber penultimateRow = lastVisibleRow - 1_lcount;
+        view->selectAndDisplayLine( penultimateRow );
+
+        // LogViewSelectLinesDown is the configured Shift+Down action. The first
+        // press extends onto the last row.
+        pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewSelectLinesDown );
+        const auto atBottom = Access::selectedLines( view );
+        REQUIRE( atBottom.size() == 2 );
+        REQUIRE( atBottom.front() == penultimateRow );
+        REQUIRE( atBottom.back() == lastVisibleRow );
+
+        // A second press at the boundary is a no-op, not a phantom row after the
+        // compact FolderSearchResults data set.
+        pressConfiguredShortcut( view->viewport(), ShortcutAction::LogViewSelectLinesDown );
+        REQUIRE( Access::selectedLines( view ) == atBottom );
+    }
+
+    SECTION( "forward mark fallback probes only visible result rows" )
+    {
+        // A standalone FolderFilteredView has no MarkProvider, forcing the base
+        // linear fallback. Override lineType only to record every row it probes;
+        // no row is marked, so a correct traversal visits rows 1..last exactly.
+        QuickFindPattern quickFindPattern;
+        NoProviderFolderMarkProbeView probeView( widget.folderResults(), &quickFindPattern );
+        probeView.selectAndDisplayLine( 0_lnum );
+        Access::selectNextMark( &probeView );
+
+        const auto& probed = probeView.probedLines();
+        REQUIRE( probed.size() == static_cast<size_t>( visibleRows.get() - 1 ) );
+        REQUIRE( probed.front() == 1_lnum );
+        REQUIRE( probed.back() == lastVisibleRow );
+        REQUIRE( std::all_of( probed.cbegin(), probed.cend(), [ visibleRows ]( LineNumber line ) {
+            return line < visibleRows;
+        } ) );
+    }
 }
 
 TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every view",

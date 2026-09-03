@@ -401,32 +401,71 @@ std::string lowercaseHex( std::uint32_t value )
     return result;
 }
 
-std::string formatTimestamp( std::uint64_t seconds, std::uint32_t microseconds )
+std::int64_t floorDivide( std::int64_t value, std::int64_t divisor ) noexcept
 {
-    constexpr std::uint64_t SecondsPerDay = std::uint64_t{ 24u } * 60u * 60u;
-    const auto daysSinceEpoch = seconds / SecondsPerDay;
-    const auto secondsWithinDay = seconds % SecondsPerDay;
+    const auto quotient = value / divisor;
+    const auto remainder = value % divisor;
+    return remainder < 0 ? quotient - 1 : quotient;
+}
 
-    const auto shiftedDays = daysSinceEpoch + 719468u;
-    const auto era = shiftedDays / 146097u;
-    const auto dayOfEra = shiftedDays - era * 146097u;
+std::string formatLocalSecond( std::uint64_t seconds, std::int32_t utcOffsetSeconds )
+{
+    constexpr std::uint64_t UnsignedSecondsPerDay = std::uint64_t{ 24u } * 60u * 60u;
+    constexpr std::int64_t SecondsPerDay = std::int64_t{ 24 } * 60 * 60;
+
+    // Even UINT64_MAX seconds is only about 2.1e14 days, so the day count and
+    // all calendar intermediates fit comfortably in int64_t. Keeping the
+    // sub-day value signed lets historical negative offsets cross the epoch
+    // boundary without unsigned underflow.
+    auto daysSinceEpoch = static_cast<std::int64_t>( seconds / UnsignedSecondsPerDay );
+    const auto shiftedSeconds
+        = static_cast<std::int64_t>( seconds % UnsignedSecondsPerDay )
+          + static_cast<std::int64_t>( utcOffsetSeconds );
+    const auto dayAdjustment = floorDivide( shiftedSeconds, SecondsPerDay );
+    daysSinceEpoch += dayAdjustment;
+    const auto secondsWithinDay = shiftedSeconds - dayAdjustment * SecondsPerDay;
+
+    // Civil date conversion adapted from Howard Hinnant's public-domain
+    // days-from-civil inverse. It is purely arithmetic and works beyond the
+    // framework date-time ranges while preserving an exact signed UTC offset.
+    const auto shiftedDays = daysSinceEpoch + 719468;
+    const auto era = ( shiftedDays >= 0 ? shiftedDays : shiftedDays - 146096 ) / 146097;
+    const auto dayOfEra
+        = static_cast<std::uint64_t>( shiftedDays - era * 146097 );
     const auto yearOfEra
         = ( dayOfEra - dayOfEra / 1460u + dayOfEra / 36524u - dayOfEra / 146096u ) / 365u;
-    const auto year = yearOfEra + era * 400u;
+    const auto year = static_cast<std::int64_t>( yearOfEra ) + era * 400;
     const auto dayOfYear = dayOfEra - ( 365u * yearOfEra + yearOfEra / 4u - yearOfEra / 100u );
     const auto monthPrime = ( 5u * dayOfYear + 2u ) / 153u;
     const auto day = dayOfYear - ( 153u * monthPrime + 2u ) / 5u + 1u;
     const auto month = monthPrime < 10u ? monthPrime + 3u : monthPrime - 9u;
-    const auto calendarYear = year + ( month <= 2u ? 1u : 0u );
+    const auto calendarYear = year + ( month <= 2u ? 1 : 0 );
 
-    const auto hour = secondsWithinDay / 3600u;
-    const auto minute = ( secondsWithinDay % 3600u ) / 60u;
-    const auto second = secondsWithinDay % 60u;
+    const auto hour = static_cast<std::uint64_t>( secondsWithinDay / 3600 );
+    const auto minute = static_cast<std::uint64_t>( ( secondsWithinDay % 3600 ) / 60 );
+    const auto second = static_cast<std::uint64_t>( secondsWithinDay % 60 );
 
-    return paddedUnsigned( calendarYear, 4u ) + "-" + paddedUnsigned( month, 2u ) + "-"
-           + paddedUnsigned( day, 2u ) + " " + paddedUnsigned( hour, 2u ) + ":"
-           + paddedUnsigned( minute, 2u ) + ":" + paddedUnsigned( second, 2u ) + "."
-           + paddedUnsigned( microseconds, 6u );
+    return paddedUnsigned( static_cast<std::uint64_t>( calendarYear ), 4u ) + "-"
+           + paddedUnsigned( month, 2u ) + "-" + paddedUnsigned( day, 2u ) + " "
+           + paddedUnsigned( hour, 2u ) + ":" + paddedUnsigned( minute, 2u ) + ":"
+           + paddedUnsigned( second, 2u );
+}
+
+std::string normalizedUtcOffset( std::int32_t offsetSeconds )
+{
+    const auto signedOffset = static_cast<std::int64_t>( offsetSeconds );
+    const auto magnitude
+        = static_cast<std::uint64_t>( signedOffset < 0 ? -signedOffset : signedOffset );
+    const auto hours = magnitude / 3600u;
+    const auto minutes = ( magnitude % 3600u ) / 60u;
+    const auto seconds = magnitude % 60u;
+
+    auto result = std::string( 1u, signedOffset < 0 ? '-' : '+' )
+                  + paddedUnsigned( hours, 2u ) + ":" + paddedUnsigned( minutes, 2u );
+    if ( seconds != 0u ) {
+        result += ":" + paddedUnsigned( seconds, 2u );
+    }
+    return result;
 }
 
 class FormatBuilder {
@@ -711,20 +750,51 @@ void OsTraceRelayFrameDecoder::setError( OsTraceRelayErrorCode code ) noexcept
     payload_.clear();
 }
 
-FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
-                                            const OsTraceFormatOptions& options,
-                                            OsTraceFormatStatisticsHook statisticsHook )
+OsTraceFormatOptions::OsTraceFormatOptions( bool ansi, bool imageMetadata, bool labels,
+                                            OsTraceUtcOffsetResolver utcOffsetResolver )
+    : ansiColors( ansi )
+    , includeImageMetadata( imageMetadata )
+    , includeLabels( labels )
+    , utcOffsetSecondsAt( std::move( utcOffsetResolver ) )
+{
+}
+
+OsTraceRecordFormatter::OsTraceRecordFormatter( OsTraceFormatOptions options )
+    : options_( std::move( options ) )
+{
+}
+
+FormattedOsTraceRecord
+OsTraceRecordFormatter::format( const DecodedOsTraceRecord& record,
+                                OsTraceFormatStatisticsHook statisticsHook )
 {
     constexpr const char* Green = "\x1b[32m";
     constexpr const char* Magenta = "\x1b[35m";
     constexpr const char* Cyan = "\x1b[36m";
 
-    FormatBuilder builder( options.ansiColors );
-    builder.appendStyled( formatTimestamp( record.seconds, record.microseconds ), Green );
+    if ( !cachedEpochSecond_ || *cachedEpochSecond_ != record.seconds ) {
+        const auto utcOffsetSeconds
+            = options_.utcOffsetSecondsAt
+                  ? options_.utcOffsetSecondsAt( record.seconds )
+                  : std::optional<std::int32_t>{ 0 };
+        if ( !utcOffsetSeconds ) {
+            FormattedOsTraceRecord result;
+            result.utcOffsetResolved = false;
+            return result;
+        }
+        cachedLocalSecond_ = formatLocalSecond( record.seconds, *utcOffsetSeconds );
+        cachedUtcOffset_ = normalizedUtcOffset( *utcOffsetSeconds );
+        cachedEpochSecond_ = record.seconds;
+    }
+    const auto timestamp = cachedLocalSecond_ + "." + paddedUnsigned( record.microseconds, 6u )
+                           + cachedUtcOffset_;
+
+    FormatBuilder builder( options_.ansiColors );
+    builder.appendStyled( timestamp, Green );
     builder.append( " " );
     builder.appendStyled( escapeDisplayText( baseName( record.processPath ) ), Magenta );
     builder.append( "{" );
-    if ( options.includeImageMetadata && record.imagePath ) {
+    if ( options_.includeImageMetadata && record.imagePath ) {
         constexpr const char* Blue = "\x1b[34m";
         builder.appendStyled( escapeDisplayText( baseName( record.imagePath ) ), Magenta );
         builder.appendStyled( "+0x" + lowercaseHex( record.imageOffset ), Blue );
@@ -737,7 +807,7 @@ FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
     builder.appendStyled( escapeDisplayText( record.message.value_or( std::string{} ) ),
                           severityColor( record.level ) );
 
-    if ( options.includeLabels && ( record.subsystem || record.category ) ) {
+    if ( options_.includeLabels && ( record.subsystem || record.category ) ) {
         std::string labels;
         if ( record.subsystem ) {
             labels += "[" + escapeDisplayText( *record.subsystem ) + "]";
@@ -761,6 +831,14 @@ FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
         statisticsHook( result.statistics );
     }
     return result;
+}
+
+FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,
+                                            const OsTraceFormatOptions& options,
+                                            OsTraceFormatStatisticsHook statisticsHook )
+{
+    OsTraceRecordFormatter formatter( options );
+    return formatter.format( record, std::move( statisticsHook ) );
 }
 
 BorrowedActivityCallbackBridge::BorrowedActivityCallbackBridge( OwnedBytesCallback callback,

@@ -523,15 +523,15 @@ TEST_CASE( "ADB host and transport service builders produce exact smart-socket t
            "[livecapture][adb][protocol][command]" )
 {
     const auto version = buildHostService( HostService::Version );
-    const auto features = buildHostService( HostService::Features );
+    const auto serverFeatures = buildHostService( HostService::ServerFeatures );
     const auto devices = buildHostService( HostService::DevicesLong );
     const auto trackDevices = buildHostService( HostService::TrackDevicesLong );
     REQUIRE( version.value.has_value() );
-    REQUIRE( features.value.has_value() );
+    REQUIRE( serverFeatures.value.has_value() );
     REQUIRE( devices.value.has_value() );
     REQUIRE( trackDevices.value.has_value() );
     CHECK( *version.value == "host:version" );
-    CHECK( *features.value == "host:features" );
+    CHECK( *serverFeatures.value == "host:host-features" );
     CHECK( *devices.value == "host:devices-l" );
     CHECK( *trackDevices.value == "host:track-devices-l" );
 
@@ -540,20 +540,35 @@ TEST_CASE( "ADB host and transport service builders produce exact smart-socket t
     REQUIRE( invalidHost.error.has_value() );
     CHECK( invalidHost.error->code == ProtocolErrorCode::InvalidCommandOption );
 
+    const auto transportFeatures = buildTransportHostService( TransportHostService::Features );
+    REQUIRE( transportFeatures.value.has_value() );
+    REQUIRE_FALSE( transportFeatures.error.has_value() );
+    CHECK( *transportFeatures.value == "host:features" );
+
+    const auto invalidTransportService
+        = buildTransportHostService( static_cast<TransportHostService>( 0xffu ) );
+    REQUIRE_FALSE( invalidTransportService.value.has_value() );
+    REQUIRE( invalidTransportService.error.has_value() );
+    CHECK( invalidTransportService.error->code == ProtocolErrorCode::InvalidCommandOption );
+
     const auto any = buildTransportService( TransportSelection{ TransportKind::Any, {} } );
     const auto usb = buildTransportService( TransportSelection{ TransportKind::Usb, {} } );
     const auto local = buildTransportService( TransportSelection{ TransportKind::Local, {} } );
     const auto serial
         = buildTransportService( TransportSelection{ TransportKind::Serial, "emulator-5554" } );
+    const auto colonSerial
+        = buildTransportService( TransportSelection{ TransportKind::Serial, "foo:bar" } );
 
     REQUIRE( any.value.has_value() );
     REQUIRE( usb.value.has_value() );
     REQUIRE( local.value.has_value() );
     REQUIRE( serial.value.has_value() );
+    REQUIRE( colonSerial.value.has_value() );
     CHECK( *any.value == "host:transport-any" );
     CHECK( *usb.value == "host:transport-usb" );
     CHECK( *local.value == "host:transport-local" );
     CHECK( *serial.value == "host:transport:emulator-5554" );
+    CHECK( *colonSerial.value == "host:transport:foo:bar" );
 
     const auto missingSerial
         = buildTransportService( TransportSelection{ TransportKind::Serial, {} } );
@@ -588,13 +603,14 @@ TEST_CASE( "ADB host and transport service builders produce exact smart-socket t
     CHECK( oversized.error->code == ProtocolErrorCode::PayloadTooLarge );
 }
 
-TEST_CASE( "typed ADB logcat command builder emits exact streaming and clear services",
-           "[livecapture][adb][protocol][command]" )
+TEST_CASE( "typed ADB logcat command builder owns ordered source-device wall-time modifiers",
+           "[livecapture][adb][protocol][command][wall-time]" )
 {
     const auto defaults = buildLogcatService( LogcatCommandOptions{} );
     REQUIRE( defaults.value.has_value() );
     REQUIRE_FALSE( defaults.error.has_value() );
-    CHECK( *defaults.value == "shell,v2,raw:logcat" );
+    CHECK( *defaults.value
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec" );
 
     LogcatCommandOptions options;
     options.ansiOutputEnabled = true;
@@ -609,10 +625,25 @@ TEST_CASE( "typed ADB logcat command builder emits exact streaming and clear ser
     REQUIRE( structured.value.has_value() );
     REQUIRE_FALSE( structured.error.has_value() );
     CHECK( *structured.value
-           == "shell,v2,raw:logcat -v color -b main -b system -b crash -T 25 "
-              "--pid 4242 'ActivityManager:I' '*:S'" );
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec -v color -b main "
+              "-b system -b crash -T 25 --pid 4242 'ActivityManager:I' '*:S'" );
 
     CHECK( buildClearLogcatService() == "shell,v2,raw:logcat -c" );
+}
+
+TEST_CASE( "ADB logcat diagnostics classify only rejected owned format modifiers",
+           "[livecapture][adb][protocol][command][wall-time][diagnostic]" )
+{
+    const std::string unsupported{ "Invalid parameter year to -v\n" };
+    const auto normalized = normalizeLogcatStreamError( unsupported );
+    CHECK( normalized.find( "Android 7.0" ) != std::string::npos );
+    CHECK( normalized.find( "source-device wall time" ) != std::string::npos );
+    CHECK( normalized.find( unsupported ) != std::string::npos );
+
+    const std::string unrelated{
+        "Invalid parameter nope to -r\nusage: logcat [options]\n  -v <format>\n"
+    };
+    CHECK( normalizeLogcatStreamError( unrelated ) == unrelated );
 }
 
 TEST_CASE( "ADB logcat command builder shell-quotes filter values without interpolation",
@@ -629,8 +660,8 @@ TEST_CASE( "ADB logcat command builder shell-quotes filter values without interp
     REQUIRE( command.value.has_value() );
     REQUIRE_FALSE( command.error.has_value() );
     CHECK( *command.value
-           == "shell,v2,raw:logcat -v color --pid 4294967295 "
-              "'Activity Manager'\"'\"'$(reboot):I'" );
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec -v color "
+              "--pid 4294967295 'Activity Manager'\"'\"'$(reboot):I'" );
 }
 
 TEST_CASE( "ADB logcat command builder rejects options that cannot be represented safely",

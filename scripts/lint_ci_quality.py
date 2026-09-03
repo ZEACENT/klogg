@@ -414,7 +414,11 @@ def workflow_step_blocks(job_block: list[str]) -> list[list[str]]:
         if not active:
             continue
         indent = len(line) - len(line.lstrip())
-        if indent <= steps_indent:
+        if indent < steps_indent:
+            region_end = index
+            break
+        if indent == steps_indent and LIST_ITEM_RE.match(line) is None:
+            # A sibling mapping key of steps: (e.g. outputs:) ends the region.
             region_end = index
             break
         item = LIST_ITEM_RE.match(line)
@@ -430,6 +434,55 @@ def workflow_step_blocks(job_block: list[str]) -> list[list[str]]:
         end = step_starts[offset + 1] if offset + 1 < len(step_starts) else region_end
         result.append(job_block[start:end])
     return result
+
+
+def workflow_step_fields(
+    step: list[str],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Parse one workflow step's direct fields and simple child mappings."""
+    if not step:
+        return {}, {}
+    item = LIST_ITEM_RE.match(step[0])
+    if item is None:
+        return {}, {}
+    item_indent = len(item.group("indent"))
+    direct_indents = {item_indent, item_indent + 2}
+    fields: dict[str, str] = {}
+    field_offsets: dict[str, tuple[int, int]] = {}
+    for offset, line in enumerate(step):
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None:
+            continue
+        indent = len(entry.group("indent"))
+        if indent not in direct_indents:
+            continue
+        key = entry.group("key")
+        value_indent = item_indent + 2 if indent == item_indent else indent
+        fields[key] = yaml_value(step, offset, entry.group("value"), value_indent)
+        field_offsets[key] = (offset, value_indent)
+
+    children: dict[str, dict[str, str]] = {}
+    for parent in ("env", "with"):
+        position = field_offsets.get(parent)
+        if position is None:
+            continue
+        parent_offset, parent_indent = position
+        values: dict[str, str] = {}
+        for offset in range(parent_offset + 1, len(step)):
+            line = step[offset]
+            active = strip_yaml_comment(line)
+            if not active:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= parent_indent:
+                break
+            entry = KEY_VALUE_RE.match(line)
+            if entry is not None and indent == parent_indent + 2:
+                values[entry.group("key")] = yaml_value(
+                    step, offset, entry.group("value"), indent
+                )
+        children[parent] = values
+    return fields, children
 
 
 def workflow_job_matrix_values(block: list[str]) -> dict[str, set[str]]:
@@ -1257,6 +1310,50 @@ def check_checkout_blocks(path: Path, text: str) -> list[str]:
     return issues
 
 
+CODEQL_THIRDPARTY_TARGETS = {
+    "simdutf",
+    "roaring",
+    "libuchardet",
+    "streamvbyte",
+    "klogg_karchive",
+    "kdsingleapp",
+    "xxhash",
+    "whereami",
+    "kdtoolbox",
+    "efsw",
+    "tbb",
+    "tbbmalloc",
+    "mimalloc-static",
+    "maddy",
+    "FastPFor",
+}
+
+
+def codeql_thirdparty_target_issues(text: str) -> list[str]:
+    """Keep CodeQL's pre-init dependency target complete and non-spoofable."""
+    active_lines = [line.partition("#")[0].strip() for line in text.splitlines()]
+    active_text = "\n".join(line for line in active_lines if line)
+    issues: list[str] = []
+    if "add_custom_target(klogg_codeql_thirdparty)" not in active_text:
+        issues.append("3rdparty must define the klogg_codeql_thirdparty target")
+
+    match = re.search(
+        r"set\(\s*klogg_codeql_thirdparty_targets\s+(?P<targets>.*?)\s*\)",
+        active_text,
+        re.DOTALL,
+    )
+    configured = set(match.group("targets").split()) if match is not None else set()
+    for target in sorted(CODEQL_THIRDPARTY_TARGETS - configured):
+        issues.append(
+            f"klogg_codeql_thirdparty must prebuild vendored target {target}"
+        )
+    if "add_dependencies(klogg_codeql_thirdparty ${target})" not in active_text:
+        issues.append(
+            "klogg_codeql_thirdparty must depend on every configured vendored target"
+        )
+    return issues
+
+
 def codeql_workflow_issues(text: str) -> list[str]:
     """Validate the fail-closed CodeQL job and its remote action revisions."""
     lines = text.splitlines()
@@ -1464,6 +1561,72 @@ def codeql_workflow_issues(text: str) -> list[str]:
     if init_build_modes != ["manual"]:
         issues.append("CodeQL init must set build-mode: manual")
 
+    configure_positions: list[int] = []
+    init_positions: list[int] = []
+    thirdparty_prebuild_positions: list[int] = []
+    traced_plan_positions: list[int] = []
+    application_build_positions: list[int] = []
+    for step_index, step in enumerate(workflow_step_blocks(job_block)):
+        fields, _ = workflow_step_fields(step)
+        if fields.get("uses", "").startswith("github/codeql-action/init@"):
+            init_positions.append(step_index)
+        active_step = "\n".join(
+            active
+            for line in "\n".join(step).splitlines()
+            if (active := strip_yaml_comment(line))
+        )
+        if (
+            "cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt"
+            in active_step
+            and "grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles'"
+            in active_step
+        ):
+            traced_plan_positions.append(step_index)
+        for command in shell_commands("\n".join(step)):
+            tokens = shell_tokens(command)
+            if not tokens or tokens[0] != "cmake":
+                continue
+            if "--build" not in tokens and "-P" not in tokens:
+                configure_positions.append(step_index)
+                continue
+            if "--build" not in tokens:
+                continue
+            if "build" in tokens and "klogg_codeql_thirdparty" in tokens:
+                thirdparty_prebuild_positions.append(step_index)
+            if "build" in tokens and "klogg" in tokens and "-n" not in tokens:
+                application_build_positions.append(step_index)
+
+    prebuild_issue = "CodeQL must prebuild vendored targets before extractor initialization"
+    if (
+        len(configure_positions) != 1
+        or len(init_positions) != 1
+        or len(thirdparty_prebuild_positions) != 1
+        or not (
+            configure_positions[0]
+            < thirdparty_prebuild_positions[0]
+            < init_positions[0]
+        )
+    ):
+        issues.append(prebuild_issue)
+    traced_plan_issue = "CodeQL must verify that no vendored compile work remains"
+    if (
+        len(init_positions) != 1
+        or len(thirdparty_prebuild_positions) != 1
+        or len(traced_plan_positions) != 1
+        or not (
+            thirdparty_prebuild_positions[0]
+            < traced_plan_positions[0]
+            < init_positions[0]
+        )
+    ):
+        issues.append(traced_plan_issue)
+    if (
+        len(init_positions) == 1
+        and application_build_positions
+        and any(position <= init_positions[0] for position in application_build_positions)
+    ):
+        issues.append("CodeQL application build must run after extractor initialization")
+
     job_active = "\n".join(
         active for line in job_lines if (active := strip_yaml_comment(line))
     )
@@ -1487,7 +1650,7 @@ def codeql_workflow_issues(text: str) -> list[str]:
         if not tokens or tokens[0] != "cmake":
             continue
         if "--build" in tokens:
-            if "build" in tokens and "klogg" in tokens:
+            if "build" in tokens and "klogg" in tokens and "-n" not in tokens:
                 has_application_build = True
             continue
         if "-P" not in tokens:
@@ -1922,6 +2085,68 @@ def workflow_display_name(text: str) -> str | None:
     return None
 
 
+RELEASE_PATCH_ENDPOINT_RE = re.compile(r'gh\s+api\s+-X\s+PATCH\s+"[^"]*/releases/')
+RELEASE_PUBLISHER_TOKEN_DIRECTIVE = "${{ secrets.KLOGG_GITHUB_TOKEN }}"
+RELEASE_PUBLISHER_TOKEN_GUARD = (
+    'test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret'
+    ' is missing or empty"; exit 1; }'
+)
+
+
+def release_publisher_token_issues(text: str) -> list[str]:
+    """Reject release-API mutations executed with the Actions app token.
+
+    GitHub's workflow-persistence protection requires workflow-modification
+    authorization to create or update a release whose target commit adds or
+    changes .github/workflows/** files, and the Actions app token can never
+    hold that authorization, so such calls fail with 403 "Resource not
+    accessible by integration" (continuous publisher run 33428615996, fixed
+    by binding the mutating steps to the KLOGG_GITHUB_TOKEN PAT). Draft-only
+    softprops uploads keep github.token because tag creation is deferred to
+    the promotion PATCH, which must use the PAT.
+    """
+    issues: list[str] = []
+    for job_name, job_block in workflow_job_blocks(text).items():
+        for step in workflow_step_blocks(job_block):
+            fields, children = workflow_step_fields(step)
+            step_name = fields.get("name", "unnamed").strip("'\"") or "unnamed"
+            run_text = fields.get("run", "")
+            active_run = "\n".join(
+                active
+                for line in run_text.splitlines()
+                if (active := strip_yaml_comment(line))
+            )
+            env_token = children.get("env", {}).get("GITHUB_TOKEN")
+            action_token = children.get("with", {}).get("token")
+            uses_pat = RELEASE_PUBLISHER_TOKEN_DIRECTIVE in {
+                env_token,
+                action_token,
+            }
+            if RELEASE_PATCH_ENDPOINT_RE.search(active_run) and not uses_pat:
+                issues.append(
+                    f"job {job_name} step {step_name!r}: release mutation must"
+                    f" bind GITHUB_TOKEN to {RELEASE_PUBLISHER_TOKEN_DIRECTIVE}"
+                    " because github.token can never modify releases whose"
+                    " target commit changes .github/workflows/** files"
+                )
+            action = fields.get("uses", "")
+            if action.startswith("softprops/action-gh-release@"):
+                draft = children.get("with", {}).get("draft")
+                if draft != "true" and not uses_pat:
+                    issues.append(
+                        f"job {job_name} step {step_name!r}: published"
+                        " softprops release creation must use"
+                        f" {RELEASE_PUBLISHER_TOKEN_DIRECTIVE} (draft creation"
+                        " may defer tag creation to promotion)"
+                    )
+            if uses_pat and "run" in fields and RELEASE_PUBLISHER_TOKEN_GUARD not in active_run:
+                issues.append(
+                    f"job {job_name} step {step_name!r}: KLOGG_GITHUB_TOKEN"
+                    " step must fail fast when the secret is empty"
+                )
+    return issues
+
+
 def stable_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
     if workflow_display_name(text) != "Publish Release (Stable)":
@@ -1957,6 +2182,7 @@ def stable_release_workflow_issues(text: str) -> list[str]:
         or "trap rollback_stable_promotion ERR" not in text
     ):
         issues.append("stable release promotion must roll back every post-publish failure")
+    issues.extend(release_publisher_token_issues(text))
     return issues
 
 
@@ -1995,6 +2221,7 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append(
             "continuous rollback must reconcile a candidate created without an emitted id"
         )
+    issues.extend(release_publisher_token_issues(text))
     return issues
 
 
@@ -2036,7 +2263,11 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in codeql_workflow_issues(codeql_text)
     )
-
+    thirdparty_text = (root / "3rdparty" / "CMakeLists.txt").read_text()
+    issues.extend(
+        f"3rdparty/CMakeLists.txt: {issue}"
+        for issue in codeql_thirdparty_target_issues(thirdparty_text)
+    )
     agent_setup_path = (
         root / ".github" / "actions" / "agent-setup" / "action.yml"
     )

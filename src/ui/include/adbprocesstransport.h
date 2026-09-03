@@ -29,6 +29,7 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
   protected:
     Command streamingCommand() const override;
     Command clearCommand() const override;
+    QString normalizeStreamingError( const QString& error ) const override;
 
   private:
     QString normalizedAdbExecutable() const;

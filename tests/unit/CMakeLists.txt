@@ -10,7 +10,7 @@ add_executable(
   pure_catch_main.cpp
 )
 target_link_libraries(
-  klogg_ios_protocol_tests PRIVATE klogg_livecapture Catch2 project_options project_warnings
+  klogg_ios_protocol_tests PRIVATE klogg_ios_protocol Catch2 project_options project_warnings
 )
 klogg_configure_test_target(klogg_ios_protocol_tests)
 add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
@@ -38,9 +38,9 @@ set_tests_properties(klogg_configuration_preapplication_tests PROPERTIES TIMEOUT
 find_package(Threads REQUIRED)
 
 # Native iOS discovery and stream-worker lifecycle are specified against an
-# injected C-ABI table. This target intentionally has no Qt or libimobiledevice
-# linkage: catalog snapshots, passive pairing, callbacks, ownership, event
-# races, queueing, and shutdown remain source-neutral and device-free.
+# injected C-ABI table. Tests include no Qt or libimobiledevice APIs directly:
+# catalog snapshots, passive pairing, callbacks, ownership, event races,
+# queueing, and shutdown remain source-neutral and device-free.
 add_executable(
   klogg_ios_native_contract_tests
   ios_device_catalog_test.cpp

@@ -169,10 +169,18 @@ private:
     std::optional<OsTraceRelayError> error_;
 };
 
+using OsTraceUtcOffsetResolver
+    = std::function<std::optional<std::int32_t>( std::uint64_t )>;
+
 struct OsTraceFormatOptions {
+    OsTraceFormatOptions() = default;
+    OsTraceFormatOptions( bool ansi, bool imageMetadata, bool labels,
+                          OsTraceUtcOffsetResolver utcOffsetResolver = {} );
+
     bool ansiColors{ false };
     bool includeImageMetadata{ true };
     bool includeLabels{ true };
+    OsTraceUtcOffsetResolver utcOffsetSecondsAt;
 };
 
 struct OsTraceFormatStatistics {
@@ -201,6 +209,21 @@ using OsTraceFormatStatisticsHook = std::function<void( const OsTraceFormatStati
 struct FormattedOsTraceRecord {
     std::string bytes;
     OsTraceFormatStatistics statistics;
+    bool utcOffsetResolved{ true };
+};
+
+class OsTraceRecordFormatter {
+public:
+    explicit OsTraceRecordFormatter( OsTraceFormatOptions options = {} );
+
+    FormattedOsTraceRecord format( const DecodedOsTraceRecord& record,
+                                   OsTraceFormatStatisticsHook statisticsHook = {} );
+
+private:
+    OsTraceFormatOptions options_;
+    std::optional<std::uint64_t> cachedEpochSecond_;
+    std::string cachedLocalSecond_;
+    std::string cachedUtcOffset_;
 };
 
 FormattedOsTraceRecord formatOsTraceRecord( const DecodedOsTraceRecord& record,

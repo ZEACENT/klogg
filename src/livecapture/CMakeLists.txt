@@ -1,4 +1,15 @@
 add_library(
+  klogg_ios_protocol STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativeerrors.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosostraceprotocol.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativeerrors.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosostraceprotocol.cpp
+)
+
+target_include_directories(klogg_ios_protocol PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(klogg_ios_protocol PUBLIC project_options project_warnings)
+
+add_library(
   klogg_livecapture STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include/adbprotocol.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/boundedserialexecutor.h
@@ -6,9 +17,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosdevicecatalog.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativeadapter.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativeapi.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativeerrors.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/iosnativestream.h
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/iosostraceprotocol.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livedataqueue.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livedatastatistics.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livestate.h
@@ -16,16 +25,18 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosdevicecatalog.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativeadapter.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativeapi.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativeerrors.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/iosnativestream.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/iosostraceprotocol.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livedataqueue.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livedatastatistics.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livestate.cpp
 )
 
 target_include_directories(klogg_livecapture PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(klogg_livecapture PUBLIC project_options project_warnings)
+target_link_libraries(
+  klogg_livecapture
+  PUBLIC klogg_ios_protocol project_options project_warnings
+  PRIVATE Qt${QT_VERSION_MAJOR}::Core
+)
 # iosnativeadapter resolves the verified private closure exclusively with dlopen.
 # KLOGG_ENABLE_IOS_NATIVE_STACK remains a configure-time fail-closed artifact
 # check in 3rdparty/CMakeLists.txt; linking the dylibs here would make macdeployqt

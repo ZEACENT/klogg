@@ -42,6 +42,7 @@
 
 #include "adblogcatsource.h"
 #include "adbprotocol.h"
+#include "adbserversupervisor.h"
 #include "adbsmartsocketclient.h"
 #include "adbsmartsockettransport.h"
 #include "livedataqueue.h"
@@ -55,9 +56,12 @@ using namespace klogg::livecapture::adb;
 constexpr int EventPumpTimeoutMs = 1500;
 constexpr Generation StreamGeneration = 101u;
 constexpr auto StreamSerial = "SERIAL-42";
-constexpr auto FeaturesRequest = "host:features";
+constexpr auto VersionRequest = "host:version";
+constexpr auto HostFeaturesRequest = "host:host-features";
+constexpr auto UnscopedFeaturesRequest = "host:features";
 constexpr auto TransportRequest = "host:transport:SERIAL-42";
-constexpr auto LogcatRequest = "shell,v2,raw:logcat";
+constexpr auto LogcatRequest
+    = "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec";
 constexpr auto ClearRequest = "shell,v2,raw:logcat -c";
 
 static_assert( std::is_base_of<LiveSourceTransport, AdbSmartSocketTransport>::value,
@@ -443,26 +447,27 @@ public:
 void sendFeaturesOkay( QTcpSocket& socket,
                        const QByteArray& features = QByteArrayLiteral( "cmd,shell_v2,stat_v2" ) )
 {
-    FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( features ) );
+    FakeAdbServer::sendThenClose( socket,
+                                  QByteArrayLiteral( "OKAY" ) + hostReplyFrame( features ) );
 }
 
-void handleSuccessfulStartupRequest( QTcpSocket& socket, int, int requestIndex,
+void handleSuccessfulStartupRequest( QTcpSocket& socket, int connectionIndex, int requestIndex,
                                      const QByteArray& request, bool sendServiceOkay = true )
 {
-    if ( request == QByteArray( FeaturesRequest ) ) {
-        REQUIRE( requestIndex == 0 );
-        sendFeaturesOkay( socket );
-        return;
-    }
-
-    if ( request == QByteArray( TransportRequest ) ) {
-        REQUIRE( requestIndex == 0 );
+    if ( requestIndex == 0 ) {
+        REQUIRE( request == QByteArray( TransportRequest ) );
         FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
         return;
     }
 
-    REQUIRE( request == QByteArray( LogcatRequest ) );
     REQUIRE( requestIndex == 1 );
+    if ( connectionIndex % 2 == 0 ) {
+        REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
+        sendFeaturesOkay( socket );
+        return;
+    }
+
+    REQUIRE( request == QByteArray( LogcatRequest ) );
     if ( sendServiceOkay ) {
         FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
     }
@@ -483,6 +488,54 @@ void requireSingleTerminalError( const AdbSmartSocketTransport& transport,
 }
 
 } // namespace
+
+TEST_CASE( "ADB smart-socket server probe requests server-scoped features with multiple devices",
+           "[livecapture][adb][server][probe][features]" )
+{
+    FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                              const QByteArray& request ) {
+        REQUIRE( requestIndex == 0 );
+        if ( request == QByteArray( VersionRequest ) ) {
+            REQUIRE( connectionIndex == 0 );
+            FakeAdbServer::sendThenClose(
+                socket,
+                QByteArrayLiteral( "OKAY" ) + hostReplyFrame( QByteArrayLiteral( "0029" ) ) );
+            return;
+        }
+        if ( request == QByteArray( HostFeaturesRequest ) ) {
+            REQUIRE( connectionIndex == 1 );
+            sendFeaturesOkay( socket );
+            return;
+        }
+
+        REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
+        FakeAdbServer::send(
+            socket, QByteArrayLiteral( "FAIL" )
+                        + hostReplyFrame( QByteArrayLiteral( "more than one device/emulator" ) ) );
+    } );
+    AdbSmartSocketServerProbe probe;
+    std::optional<AdbServerProbeResult> result;
+    AdbServerEndpoint endpoint;
+    endpoint.port = server.port();
+
+    probe.probe( endpoint, [ &result ]( AdbServerProbeResult completed ) {
+        result = std::move( completed );
+    } );
+
+    REQUIRE( pumpEventsUntil( [ &result ] { return result.has_value(); } ) );
+    REQUIRE( result.has_value() );
+    CHECK( result->state == AdbServerProbeState::Ready );
+    CHECK( result->protocolVersion == 0x29u );
+    CHECK( result->features
+           == std::vector<std::string>{ "cmd", "shell_v2", "stat_v2" } );
+    CHECK( result->diagnostic.empty() );
+    REQUIRE( server.connectionCount() == 2 );
+    REQUIRE( server.requests().size() == 2 );
+    CHECK( server.requests().at( 0 ) == QByteArray( VersionRequest ) );
+    CHECK( server.requests().at( 1 ) == QByteArray( HostFeaturesRequest ) );
+    CHECK( server.requestConnections().at( 0 ) == 0 );
+    CHECK( server.requestConnections().at( 1 ) == 1 );
+}
 
 TEST_CASE( "ADB smart-socket transport starts nonblocking and reaches Connected only after shell "
            "service readiness",
@@ -506,15 +559,17 @@ TEST_CASE( "ADB smart-socket transport starts nonblocking and reaches Connected 
     CHECK( server.connectionCount() == 0 );
     CHECK( probe.received.empty() );
 
-    REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 3; } ) );
+    REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 4; } ) );
     REQUIRE( server.connectionCount() == 2 );
-    REQUIRE( server.requests().size() == 3 );
-    CHECK( server.requests().at( 0 ) == QByteArray( FeaturesRequest ) );
-    CHECK( server.requests().at( 1 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 2 ) == QByteArray( LogcatRequest ) );
+    REQUIRE( server.requests().size() == 4 );
+    CHECK( server.requests().at( 0 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 1 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 2 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 3 ) == QByteArray( LogcatRequest ) );
     CHECK( server.requestConnections().at( 0 ) == 0 );
-    CHECK( server.requestConnections().at( 1 ) == 1 );
+    CHECK( server.requestConnections().at( 1 ) == 0 );
     CHECK( server.requestConnections().at( 2 ) == 1 );
+    CHECK( server.requestConnections().at( 3 ) == 1 );
     CHECK( server.peerWasLoopbackAtAccept( 0 ) );
     CHECK( server.peerWasLoopbackAtAccept( 1 ) );
     CHECK( probe.stateCount( LiveSourceTransport::State::Connected ) == 0 );
@@ -584,46 +639,67 @@ TEST_CASE( "ADB smart-socket stdout crosses the bounded queue byte-for-byte with
 TEST_CASE( "ADB smart-socket stderr remains diagnostic while shell exit fails the stream once",
            "[livecapture][adb][transport][stderr][exit][error]" )
 {
-    FakeAdbServer server(
-        []( QTcpSocket& socket, int connectionIndex, int requestIndex, const QByteArray& request ) {
+    struct FailureCase {
+        QByteArray diagnostic;
+        QStringList expectedFragments;
+    };
+    const std::array cases{
+        FailureCase{ QByteArrayLiteral( "logcat: permission denied\n" ),
+                     { QStringLiteral( "permission denied" ), QStringLiteral( "17" ) } },
+        FailureCase{ QByteArrayLiteral( "Invalid parameter year to -v\n" ),
+                     { QStringLiteral( "Android 7.0" ),
+                       QStringLiteral( "source-device wall time" ),
+                       QStringLiteral( "Invalid parameter year to -v" ),
+                       QStringLiteral( "17" ) } },
+    };
+
+    for ( const auto& value : cases ) {
+        INFO( value.diagnostic.constData() );
+        FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                  const QByteArray& request ) {
             handleSuccessfulStartupRequest( socket, connectionIndex, requestIndex, request );
         } );
-    TrackingSocketFactory socketFactory;
-    ManualDeadlineScheduler deadlines;
-    AdbSmartSocketTransport transport( transportConfig( server.port() ), socketFactory, deadlines );
-    TransportProbe probe( transport );
+        TrackingSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketTransport transport( transportConfig( server.port() ), socketFactory,
+                                           deadlines );
+        TransportProbe probe( transport );
 
-    transport.start( StreamGeneration );
-    REQUIRE( pumpEventsUntil(
-        [ &probe ] { return probe.stateCount( LiveSourceTransport::State::Connected ) == 1; } ) );
+        transport.start( StreamGeneration );
+        REQUIRE( pumpEventsUntil(
+            [ &probe ] { return probe.stateCount( LiveSourceTransport::State::Connected ) == 1; } ) );
 
-    const auto diagnostic = QByteArrayLiteral( "logcat: permission denied\n" );
-    const auto stdoutBytes = QByteArrayLiteral( "captured stdout\n" );
-    FakeAdbServer::send( *server.socketAt( 1 ),
-                         shellV2Frame( 2u, diagnostic ) + shellV2Frame( 1u, stdoutBytes ) );
-    REQUIRE( pumpEventsUntil(
-        [ &probe, &stdoutBytes ] { return probe.receivedBytes() == stdoutBytes; } ) );
-    CHECK_FALSE( probe.receivedBytes().contains( diagnostic ) );
-    CHECK( transport.lastError().isEmpty() );
+        const auto stdoutBytes = QByteArrayLiteral( "captured stdout\n" );
+        FakeAdbServer::send( *server.socketAt( 1 ),
+                             shellV2Frame( 2u, value.diagnostic )
+                                 + shellV2Frame( 1u, stdoutBytes ) );
+        REQUIRE( pumpEventsUntil(
+            [ &probe, &stdoutBytes ] { return probe.receivedBytes() == stdoutBytes; } ) );
+        CHECK_FALSE( probe.receivedBytes().contains( value.diagnostic ) );
+        CHECK( transport.lastError().isEmpty() );
 
-    FakeAdbServer::send( *server.socketAt( 1 ),
-                         shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 17 ) ) ) );
-    REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
+        FakeAdbServer::send( *server.socketAt( 1 ),
+                             shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 17 ) ) ) );
+        REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
 
-    requireSingleTerminalError( transport, probe, StreamGeneration,
-                                { QStringLiteral( "permission denied" ), QStringLiteral( "17" ) } );
+        requireSingleTerminalError( transport, probe, StreamGeneration, value.expectedFragments );
+    }
 }
 
 TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal transport error",
            "[livecapture][adb][transport][error]" )
 {
-    SECTION( "host features FAIL" )
+    SECTION( "selected-device transport FAIL" )
     {
-        FakeAdbServer server( []( QTcpSocket& socket, int, int, const QByteArray& request ) {
-            REQUIRE( request == QByteArray( FeaturesRequest ) );
-            FakeAdbServer::send( socket, QByteArrayLiteral( "FAIL" )
-                                             + hostReplyFrame( QByteArrayLiteral(
-                                                 "ADB server rejected host:features" ) ) );
+        FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                  const QByteArray& request ) {
+            REQUIRE( connectionIndex == 0 );
+            REQUIRE( requestIndex == 0 );
+            REQUIRE( request == QByteArray( TransportRequest ) );
+            FakeAdbServer::send(
+                socket, QByteArrayLiteral( "FAIL" )
+                            + hostReplyFrame( QByteArrayLiteral(
+                                "ADB server rejected host:transport:SERIAL-42" ) ) );
         } );
         TrackingSocketFactory socketFactory;
         ManualDeadlineScheduler deadlines;
@@ -635,28 +711,67 @@ TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal t
         REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
         requireSingleTerminalError(
             transport, probe, StreamGeneration,
-            { QStringLiteral( "features" ), QStringLiteral( "rejected" ) } );
+            { QStringLiteral( "selected ADB device" ), QStringLiteral( "features" ),
+              QStringLiteral( "rejected" ) } );
+        CHECK( server.connectionCount() == 1 );
         CHECK( server.requestCount() == 1 );
+    }
+
+    SECTION( "selected-device features FAIL" )
+    {
+        FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                  const QByteArray& request ) {
+            REQUIRE( connectionIndex == 0 );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
+            FakeAdbServer::send(
+                socket, QByteArrayLiteral( "FAIL" )
+                            + hostReplyFrame( QByteArrayLiteral(
+                                "ADB server rejected host:features for selected transport" ) ) );
+        } );
+        TrackingSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketTransport transport( transportConfig( server.port() ), socketFactory,
+                                           deadlines );
+        TransportProbe probe( transport );
+
+        transport.start( StreamGeneration );
+        REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
+        requireSingleTerminalError(
+            transport, probe, StreamGeneration,
+            { QStringLiteral( "selected ADB device" ), QStringLiteral( "features" ),
+              QStringLiteral( "rejected" ) } );
+        CHECK( server.connectionCount() == 1 );
+        CHECK( server.requestCount() == 2 );
     }
 
     SECTION( "device logcat service FAIL" )
     {
         FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
                                   const QByteArray& request ) {
-            if ( request == QByteArray( FeaturesRequest ) ) {
-                sendFeaturesOkay( socket );
+            if ( connectionIndex == 0 ) {
+                handleSuccessfulStartupRequest( socket, connectionIndex, requestIndex, request );
+                return;
             }
-            else if ( request == QByteArray( TransportRequest ) ) {
+
+            REQUIRE( connectionIndex == 1 );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
                 FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
             }
-            else {
-                REQUIRE( connectionIndex == 1 );
-                REQUIRE( requestIndex == 1 );
-                REQUIRE( request == QByteArray( LogcatRequest ) );
-                FakeAdbServer::send( socket, QByteArrayLiteral( "FAIL" )
-                                                 + hostReplyFrame( QByteArrayLiteral(
-                                                     "device unauthorized for logcat" ) ) );
-            }
+
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( LogcatRequest ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "FAIL" )
+                                             + hostReplyFrame( QByteArrayLiteral(
+                                                 "device unauthorized for logcat" ) ) );
         } );
         TrackingSocketFactory socketFactory;
         ManualDeadlineScheduler deadlines;
@@ -696,8 +811,16 @@ TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal t
 
     SECTION( "features read timeout" )
     {
-        FakeAdbServer server( []( QTcpSocket&, int, int, const QByteArray& request ) {
-            REQUIRE( request == QByteArray( FeaturesRequest ) );
+        FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                  const QByteArray& request ) {
+            REQUIRE( connectionIndex == 0 );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
         } );
         TrackingSocketFactory socketFactory;
         ManualDeadlineScheduler deadlines;
@@ -707,7 +830,7 @@ TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal t
 
         transport.start( StreamGeneration );
         REQUIRE( pumpEventsUntil( [ & ] {
-            return server.requestCount() == 1
+            return server.requestCount() == 2
                    && deadlines.hasActive( AdbSmartSocketDeadlineKind::Read );
         } ) );
         deadlines.fire( AdbSmartSocketDeadlineKind::Read );
@@ -715,7 +838,8 @@ TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal t
         REQUIRE( probe.errors.size() == 1u );
         requireSingleTerminalError(
             transport, probe, StreamGeneration,
-            { QStringLiteral( "features" ), QStringLiteral( "timed out" ) } );
+            { QStringLiteral( "selected ADB device" ), QStringLiteral( "features" ),
+              QStringLiteral( "timed out" ) } );
     }
 }
 
@@ -725,8 +849,13 @@ TEST_CASE( "ADB smart-socket fails safely when the server is replaced after feat
     FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
                               const QByteArray& request ) {
         if ( connectionIndex == 0 ) {
-            REQUIRE( requestIndex == 0 );
-            REQUIRE( request == QByteArray( FeaturesRequest ) );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
             sendFeaturesOkay( socket );
             return;
         }
@@ -753,19 +882,27 @@ TEST_CASE( "ADB smart-socket fails safely when the server is replaced after feat
     CHECK( probe.stateCount( LiveSourceTransport::State::Connected ) == 0 );
     CHECK( probe.received.empty() );
     CHECK( server.connectionCount() == 2 );
-    CHECK( server.requestCount() == 2 );
+    CHECK( server.requestCount() == 3 );
     processDeferredDeletes();
     CHECK( socketFactory.allSocketsRetired() );
 }
 
-TEST_CASE( "ADB smart-socket transport rejects servers without shell_v2 actionably and without "
-           "modifying the environment",
+TEST_CASE( "ADB smart-socket transport rejects selected devices without shell_v2 actionably and "
+           "without modifying the environment",
            "[livecapture][adb][transport][features][compatibility]" )
 {
     const auto originalPath = qgetenv( "PATH" );
     const auto originalServerSocket = qgetenv( "ADB_SERVER_SOCKET" );
-    FakeAdbServer server( []( QTcpSocket& socket, int, int, const QByteArray& request ) {
-        REQUIRE( request == QByteArray( FeaturesRequest ) );
+    FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                              const QByteArray& request ) {
+        REQUIRE( connectionIndex == 0 );
+        if ( requestIndex == 0 ) {
+            REQUIRE( request == QByteArray( TransportRequest ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+            return;
+        }
+        REQUIRE( requestIndex == 1 );
+        REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
         sendFeaturesOkay( socket, QByteArrayLiteral( "cmd,shell_v2x,stat_v2,apex" ) );
     } );
     TrackingSocketFactory socketFactory;
@@ -776,10 +913,11 @@ TEST_CASE( "ADB smart-socket transport rejects servers without shell_v2 actionab
     transport.start( StreamGeneration );
     REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
 
-    requireSingleTerminalError( transport, probe, StreamGeneration,
-                                { QStringLiteral( "shell_v2" ), QStringLiteral( "ADB server" ) } );
+    requireSingleTerminalError(
+        transport, probe, StreamGeneration,
+        { QStringLiteral( "shell_v2" ), QStringLiteral( "selected ADB device" ) } );
     CHECK( server.connectionCount() == 1 );
-    CHECK( server.requestCount() == 1 );
+    CHECK( server.requestCount() == 2 );
     CHECK( transport.findChildren<QProcess*>().empty() );
     CHECK( qgetenv( "PATH" ) == originalPath );
     CHECK( qgetenv( "ADB_SERVER_SOCKET" ) == originalServerSocket );
@@ -880,20 +1018,24 @@ TEST_CASE( "ADB smart-socket clear negotiates independently without an active st
 {
     FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
                               const QByteArray& request ) {
-        if ( request == QByteArray( FeaturesRequest ) ) {
-            REQUIRE( connectionIndex == 0 );
-            REQUIRE( requestIndex == 0 );
+        if ( connectionIndex == 0 ) {
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
             sendFeaturesOkay( socket );
-            return;
-        }
-        if ( request == QByteArray( TransportRequest ) ) {
-            REQUIRE( connectionIndex == 1 );
-            REQUIRE( requestIndex == 0 );
-            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
             return;
         }
 
         REQUIRE( connectionIndex == 1 );
+        if ( requestIndex == 0 ) {
+            REQUIRE( request == QByteArray( TransportRequest ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+            return;
+        }
         REQUIRE( requestIndex == 1 );
         REQUIRE( request == QByteArray( ClearRequest ) );
         FakeAdbServer::send( socket,
@@ -919,10 +1061,15 @@ TEST_CASE( "ADB smart-socket clear negotiates independently without an active st
     CHECK( probe.states.empty() );
     CHECK( probe.errors.empty() );
     CHECK( transport.lastError().isEmpty() );
-    REQUIRE( server.requests().size() == 3 );
-    CHECK( server.requests().at( 0 ) == QByteArray( FeaturesRequest ) );
-    CHECK( server.requests().at( 1 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 2 ) == QByteArray( ClearRequest ) );
+    REQUIRE( server.requests().size() == 4 );
+    CHECK( server.requests().at( 0 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 1 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 2 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 3 ) == QByteArray( ClearRequest ) );
+    CHECK( server.requestConnections().at( 0 ) == 0 );
+    CHECK( server.requestConnections().at( 1 ) == 0 );
+    CHECK( server.requestConnections().at( 2 ) == 1 );
+    CHECK( server.requestConnections().at( 3 ) == 1 );
 }
 
 TEST_CASE( "ADB smart-socket clear uses an independent correlated operation without pausing stream",
@@ -930,20 +1077,23 @@ TEST_CASE( "ADB smart-socket clear uses an independent correlated operation with
 {
     FakeAdbServer server(
         []( QTcpSocket& socket, int connectionIndex, int requestIndex, const QByteArray& request ) {
-            if ( request == QByteArray( FeaturesRequest ) ) {
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+
+            REQUIRE( requestIndex == 1 );
+            if ( connectionIndex % 2 == 0 ) {
+                REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
                 sendFeaturesOkay( socket );
             }
-            else if ( request == QByteArray( TransportRequest ) ) {
-                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
-            }
-            else if ( request == QByteArray( LogcatRequest ) ) {
-                REQUIRE( connectionIndex == 1 );
-                REQUIRE( requestIndex == 1 );
+            else if ( connectionIndex == 1 ) {
+                REQUIRE( request == QByteArray( LogcatRequest ) );
                 FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
             }
             else {
                 REQUIRE( connectionIndex == 3 );
-                REQUIRE( requestIndex == 1 );
                 REQUIRE( request == QByteArray( ClearRequest ) );
                 FakeAdbServer::send(
                     socket, QByteArrayLiteral( "OKAY" )
@@ -974,13 +1124,17 @@ TEST_CASE( "ADB smart-socket clear uses an independent correlated operation with
     CHECK( probe.stateCount( LiveSourceTransport::State::Error ) == 0 );
     CHECK( probe.errors.empty() );
     CHECK( transport.lastError().isEmpty() );
-    REQUIRE( server.requests().size() == 6 );
-    CHECK( server.requests().at( 3 ) == QByteArray( FeaturesRequest ) );
+    REQUIRE( server.requests().size() == 8 );
+    CHECK( server.requests().at( 0 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 1 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 2 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 3 ) == QByteArray( LogcatRequest ) );
     CHECK( server.requests().at( 4 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 5 ) == QByteArray( ClearRequest ) );
-    CHECK( server.requestConnections().at( 3 ) == 2 );
-    CHECK( server.requestConnections().at( 4 ) == 3 );
-    CHECK( server.requestConnections().at( 5 ) == 3 );
+    CHECK( server.requests().at( 5 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 6 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 7 ) == QByteArray( ClearRequest ) );
+    CHECK( server.requestConnections()
+           == QVector<int>{ 0, 0, 1, 1, 2, 2, 3, 3 } );
 
     const auto afterClear = QByteArrayLiteral( "stream-still-running\n" );
     FakeAdbServer::send( *server.socketAt( 1 ), shellV2Frame( 1u, afterClear ) );
@@ -996,15 +1150,19 @@ TEST_CASE( "ADB smart-socket clear failure remains request-local and leaves stre
     const auto clearDiagnostic = QByteArrayLiteral( "logcat clear denied" );
     FakeAdbServer server( [ clearDiagnostic ]( QTcpSocket& socket, int connectionIndex,
                                                int requestIndex, const QByteArray& request ) {
-        if ( request == QByteArray( FeaturesRequest ) ) {
+        if ( requestIndex == 0 ) {
+            REQUIRE( request == QByteArray( TransportRequest ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+            return;
+        }
+
+        REQUIRE( requestIndex == 1 );
+        if ( connectionIndex % 2 == 0 ) {
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
             sendFeaturesOkay( socket );
         }
-        else if ( request == QByteArray( TransportRequest ) ) {
-            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
-        }
-        else if ( request == QByteArray( LogcatRequest ) ) {
-            REQUIRE( connectionIndex == 1 );
-            REQUIRE( requestIndex == 1 );
+        else if ( connectionIndex == 1 ) {
+            REQUIRE( request == QByteArray( LogcatRequest ) );
             FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
         }
         else {
@@ -1131,19 +1289,20 @@ TEST_CASE( "ADB smart-socket delivers queued stdout before a coalesced terminal 
 TEST_CASE( "AdbLogcatSource stop-then-clear workflow restarts through the smart-socket adapter",
            "[livecapture][adb][transport][source][clear][restart]" )
 {
-    FakeAdbServer server( []( QTcpSocket& socket, int, int requestIndex,
+    FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
                               const QByteArray& request ) {
-        if ( request == QByteArray( FeaturesRequest ) ) {
-            REQUIRE( requestIndex == 0 );
-            sendFeaturesOkay( socket );
-            return;
-        }
-        if ( request == QByteArray( TransportRequest ) ) {
-            REQUIRE( requestIndex == 0 );
+        if ( requestIndex == 0 ) {
+            REQUIRE( request == QByteArray( TransportRequest ) );
             FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
             return;
         }
+
         REQUIRE( requestIndex == 1 );
+        if ( connectionIndex % 2 == 0 ) {
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
+            sendFeaturesOkay( socket );
+            return;
+        }
         if ( request == QByteArray( LogcatRequest ) ) {
             FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
             return;
@@ -1167,19 +1326,24 @@ TEST_CASE( "AdbLogcatSource stop-then-clear workflow restarts through the smart-
         [ &source ] { return source.state() == AdbLogcatSource::State::Connected; } ) );
     REQUIRE( source.clearAndRestart() );
     REQUIRE( pumpEventsUntil( [ & ] {
-        return source.state() == AdbLogcatSource::State::Connected && server.requestCount() == 9;
+        return source.state() == AdbLogcatSource::State::Connected && server.requestCount() == 12;
     } ) );
 
-    REQUIRE( server.requests().size() == 9 );
-    CHECK( server.requests().at( 0 ) == QByteArray( FeaturesRequest ) );
-    CHECK( server.requests().at( 1 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 2 ) == QByteArray( LogcatRequest ) );
-    CHECK( server.requests().at( 3 ) == QByteArray( FeaturesRequest ) );
+    REQUIRE( server.requests().size() == 12 );
+    CHECK( server.requests().at( 0 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 1 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 2 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 3 ) == QByteArray( LogcatRequest ) );
     CHECK( server.requests().at( 4 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 5 ) == QByteArray( ClearRequest ) );
-    CHECK( server.requests().at( 6 ) == QByteArray( FeaturesRequest ) );
-    CHECK( server.requests().at( 7 ) == QByteArray( TransportRequest ) );
-    CHECK( server.requests().at( 8 ) == QByteArray( LogcatRequest ) );
+    CHECK( server.requests().at( 5 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 6 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 7 ) == QByteArray( ClearRequest ) );
+    CHECK( server.requests().at( 8 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 9 ) == QByteArray( UnscopedFeaturesRequest ) );
+    CHECK( server.requests().at( 10 ) == QByteArray( TransportRequest ) );
+    CHECK( server.requests().at( 11 ) == QByteArray( LogcatRequest ) );
+    CHECK( server.requestConnections()
+           == QVector<int>{ 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 } );
     CHECK( source.lastError().isEmpty() );
 
     source.disconnectSource();
@@ -1196,13 +1360,20 @@ TEST_CASE( "ADB smart-socket clear is independent from stream generation lifecyc
                 handleSuccessfulStartupRequest( socket, connectionIndex, requestIndex, request );
                 return;
             }
-            if ( request == QByteArray( FeaturesRequest ) ) {
-                REQUIRE( requestIndex == 0 );
+            if ( connectionIndex == 2 ) {
+                if ( requestIndex == 0 ) {
+                    REQUIRE( request == QByteArray( TransportRequest ) );
+                    FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                    return;
+                }
+                REQUIRE( requestIndex == 1 );
+                REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
                 sendFeaturesOkay( socket );
                 return;
             }
-            if ( request == QByteArray( TransportRequest ) ) {
-                REQUIRE( requestIndex == 0 );
+            REQUIRE( connectionIndex == 3 );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
                 FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
                 return;
             }
@@ -1233,7 +1404,7 @@ TEST_CASE( "ADB smart-socket clear is independent from stream generation lifecyc
         CHECK( probe.clears.front().generation == clearGeneration );
         CHECK( probe.clears.front().requestId == requestId );
         CHECK( probe.clears.front().succeeded );
-        CHECK( server.requestCount() == 6 );
+        CHECK( server.requestCount() == 8 );
         CHECK( probe.errors.empty() );
     }
 
@@ -1261,7 +1432,7 @@ TEST_CASE( "ADB smart-socket clear is independent from stream generation lifecyc
         } ) );
         constexpr LiveSourceTransport::ClearRequestId requestId = 7202u;
         transport.clearRemoteAsync( StreamGeneration, requestId );
-        REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 6; } ) );
+        REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 8; } ) );
 
         transport.stop( StreamGeneration );
         REQUIRE( socketFactory.connectedSocketCount() == 1 );
@@ -1282,7 +1453,13 @@ TEST_CASE( "ADB smart-socket preserves a failed generation diagnostic across ree
     FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
                               const QByteArray& request ) {
         if ( connectionIndex == 0 ) {
-            REQUIRE( request == QByteArray( FeaturesRequest ) );
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
             FakeAdbServer::send(
                 socket, QByteArrayLiteral( "FAIL" )
                             + hostReplyFrame( QByteArrayLiteral( "first generation rejected" ) ) );

@@ -11,11 +11,16 @@
 
 #include "iosnativestream.h"
 
+#include <QByteArray>
+#include <QDateTime>
+#include <QTimeZone>
+
 #include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -90,6 +95,31 @@ bool usesOsTrace( const IosNativeStreamConfig& config, const std::string& produc
     } catch ( ... ) {
         return true;
     }
+}
+
+std::optional<OsTraceUtcOffsetResolver>
+qtDeviceTimeZoneResolver( const std::string& deviceIanaId )
+{
+    QTimeZone sourceTimeZone( QByteArray::fromStdString( deviceIanaId ) );
+    if ( !sourceTimeZone.isValid() ) {
+        return std::nullopt;
+    }
+
+    return OsTraceUtcOffsetResolver{
+        [ sourceTimeZone = std::move( sourceTimeZone ) ]( std::uint64_t epochSeconds )
+            -> std::optional<std::int32_t> {
+            if ( epochSeconds
+                 > static_cast<std::uint64_t>( std::numeric_limits<qint64>::max() ) ) {
+                return std::nullopt;
+            }
+            const auto utc = QDateTime::fromSecsSinceEpoch(
+                static_cast<qint64>( epochSeconds ), QTimeZone::utc() );
+            if ( !utc.isValid() ) {
+                return std::nullopt;
+            }
+            return static_cast<std::int32_t>( sourceTimeZone.offsetFromUtc( utc ) );
+        }
+    };
 }
 
 } // namespace
@@ -369,9 +399,26 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                                 "The iOS trace relay returned a malformed packet.", detail ) );
                 return;
             }
-            auto formatted = formatOsTraceRecord(
-                *decoded.record,
-                OsTraceFormatOptions{ state->config.ansiOutputEnabled, true, true } );
+            if ( !state->osTraceFormatter ) {
+                state->publishFailure( localError(
+                    ErrorCategory::Backend, "ios-ostrace-time-zone-unavailable", ErrorScope::Stream,
+                    RetryPolicy::Backoff, "The iOS trace time zone is unavailable.",
+                    "The validated device TimeZone formatter was not retained before callbacks "
+                    "started." ) );
+                return;
+            }
+            // The pinned libimobiledevice os_trace client invokes activity callbacks
+            // serially from its single receive worker, so the stateful per-second cache
+            // needs no callback-path mutex.
+            auto formatted = state->osTraceFormatter->format( *decoded.record );
+            if ( !formatted.utcOffsetResolved ) {
+                state->publishFailure( localError(
+                    ErrorCategory::Stream, "ios-ostrace-malformed-packet", ErrorScope::Stream,
+                    RetryPolicy::Backoff, "The iOS trace relay returned a malformed packet.",
+                    "The packet timestamp is outside the source device time zone's supported "
+                    "range." ) );
+                return;
+            }
             formatted.bytes.push_back( '\n' );
             state->enqueue(
                 std::vector<std::uint8_t>( formatted.bytes.begin(), formatted.bytes.end() ) );
@@ -606,6 +653,57 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             return;
         }
 
+        if ( osTrace ) {
+            char* rawTimeZone = nullptr;
+            const auto timeZoneCode
+                = api.lockdownGetStringValue( rawLockdown, nullptr, "TimeZone", &rawTimeZone );
+            NativeStringOwner openedTimeZone( api, rawTimeZone );
+            if ( cancelled() ) {
+                return;
+            }
+            if ( timeZoneCode != 0 ) {
+                publishFailure( classifyIosNativeError( IosNativeError{
+                    IosNativeErrorDomain::Lockdown, timeZoneCode,
+                    nativeDetail( "read TimeZone", timeZoneCode ) } ) );
+                return;
+            }
+            if ( rawTimeZone == nullptr ) {
+                publishFailure( localError(
+                    ErrorCategory::Configuration, "ios-device-time-zone-invalid",
+                    ErrorScope::Device, RetryPolicy::Never,
+                    "The iOS device time zone is missing or unrecognized.",
+                    "The global lockdownd TimeZone value is missing. Set a valid time zone in "
+                    "Settings > General > Date & Time on the iOS device, then reconnect it." ) );
+                return;
+            }
+
+            const std::string timeZoneId( rawTimeZone );
+            const auto utcOffsetResolver
+                = config.timeZoneResolverFactory
+                      ? config.timeZoneResolverFactory( timeZoneId )
+                      : qtDeviceTimeZoneResolver( timeZoneId );
+            openedTimeZone.reset();
+            if ( cancelled() ) {
+                return;
+            }
+            if ( timeZoneId.empty() || !utcOffsetResolver || !( *utcOffsetResolver ) ) {
+                publishFailure( localError(
+                    ErrorCategory::Configuration, "ios-device-time-zone-invalid",
+                    ErrorScope::Device, RetryPolicy::Never,
+                    "The iOS device time zone is missing or unrecognized.",
+                    "The global lockdownd TimeZone value is empty or unrecognized. Set a valid "
+                    "time zone in Settings > General > Date & Time on the iOS device, then "
+                    "reconnect it." ) );
+                return;
+            }
+
+            osTraceFormatter.emplace( OsTraceFormatOptions{ config.ansiOutputEnabled, true, true,
+                                                             *utcOffsetResolver } );
+            if ( cancelled() ) {
+                return;
+            }
+        }
+
         NativeServiceDescriptor rawService = nullptr;
         const auto serviceCode = api.lockdownStartService(
             rawLockdown, osTrace ? OsTraceService : SyslogService, &rawService );
@@ -785,6 +883,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     std::condition_variable callbacksChanged;
     std::mutex syslogMutex;
     std::string syslogRecord;
+    std::optional<OsTraceRecordFormatter> osTraceFormatter;
     NativeDeviceOwner device;
     NativeLockdownOwner lockdown;
     NativeServiceOwner service;

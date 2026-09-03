@@ -129,7 +129,7 @@ private:
     std::optional<ProtocolError> error_;
 };
 
-enum class HostService : std::uint8_t { Version, Features, DevicesLong, TrackDevicesLong };
+enum class HostService : std::uint8_t { Version, ServerFeatures, DevicesLong, TrackDevicesLong };
 
 ProtocolResult<std::string> buildHostService( HostService service );
 
@@ -139,6 +139,10 @@ struct TransportSelection {
     TransportKind kind{ TransportKind::Any };
     std::string serial;
 };
+
+enum class TransportHostService : std::uint8_t { Features };
+
+ProtocolResult<std::string> buildTransportHostService( TransportHostService service );
 
 ProtocolResult<std::string> buildTransportService( const TransportSelection& selection );
 
@@ -158,6 +162,8 @@ struct LogcatCommandOptions {
     std::vector<LogcatFilter> filters;
 };
 
+std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled );
+std::string normalizeLogcatStreamError( const std::string& diagnostic );
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options );
 std::string buildClearLogcatService();
 

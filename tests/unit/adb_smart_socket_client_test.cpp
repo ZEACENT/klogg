@@ -416,12 +416,61 @@ public:
         } );
     }
 
+    std::size_t armCount( AdbSmartSocketDeadlineKind kind ) const
+    {
+        return static_cast<std::size_t>(
+            std::count_if( entries_.cbegin(), entries_.cend(), [ kind ]( const Entry& entry ) {
+                return entry.kind == kind;
+            } ) );
+    }
+
+    DeadlineToken activeToken( AdbSmartSocketDeadlineKind kind ) const
+    {
+        const auto found
+            = std::find_if( entries_.cbegin(), entries_.cend(), [ kind ]( const Entry& entry ) {
+                  return entry.active && entry.kind == kind && !entry.context.isNull();
+              } );
+        REQUIRE( found != entries_.cend() );
+        return found->token;
+    }
+
+    bool isActive( DeadlineToken token ) const
+    {
+        const auto found = std::find_if(
+            entries_.cbegin(), entries_.cend(),
+            [ token ]( const Entry& entry ) { return entry.token == token; } );
+        REQUIRE( found != entries_.cend() );
+        return found->active && !found->context.isNull();
+    }
+
+    int timeoutMs( DeadlineToken token ) const
+    {
+        const auto found = std::find_if(
+            entries_.cbegin(), entries_.cend(),
+            [ token ]( const Entry& entry ) { return entry.token == token; } );
+        REQUIRE( found != entries_.cend() );
+        return found->timeoutMs;
+    }
+
     void fire( AdbSmartSocketDeadlineKind kind )
     {
         auto found
             = std::find_if( entries_.begin(), entries_.end(), [ kind ]( const Entry& entry ) {
                   return entry.active && entry.kind == kind && !entry.context.isNull();
               } );
+        REQUIRE( found != entries_.end() );
+        found->active = false;
+        const auto callback = found->callback;
+        callback();
+    }
+
+    void fire( DeadlineToken token )
+    {
+        auto found = std::find_if( entries_.begin(), entries_.end(),
+                                  [ token ]( const Entry& entry ) {
+                                      return entry.token == token && entry.active
+                                             && !entry.context.isNull();
+                                  } );
         REQUIRE( found != entries_.end() );
         found->active = false;
         const auto callback = found->callback;
@@ -619,7 +668,7 @@ void requireHostUnexpectedEof( const QByteArray& responsePrefix )
 
     constexpr Generation generation = 501;
     constexpr AdbSmartSocketClient::OperationId operationId = 601;
-    client.requestHostService( generation, operationId, HostService::Features );
+    client.requestHostService( generation, operationId, HostService::ServerFeatures );
 
     REQUIRE(
         pumpEventsUntil( [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
@@ -684,8 +733,9 @@ TEST_CASE( "ADB smart-socket host requests are loopback-only nonblocking bounded
 {
     const QByteArray features = QByteArrayLiteral( "shell_v2,cmd,stat_v2,apex" );
     FakeAdbServer server( [ features ]( QTcpSocket& socket, int, int, const QByteArray& request ) {
-        REQUIRE( request == QByteArrayLiteral( "host:features" ) );
-        FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( features ) );
+        REQUIRE( request == QByteArrayLiteral( "host:host-features" ) );
+        FakeAdbServer::sendThenClose( socket,
+                                      QByteArrayLiteral( "OKAY" ) + hostReplyFrame( features ) );
     } );
     InspectableSocketFactory socketFactory( InspectableTcpSocket::WriteMode::Partial, 2 );
     ManualDeadlineScheduler deadlines;
@@ -697,7 +747,7 @@ TEST_CASE( "ADB smart-socket host requests are loopback-only nonblocking bounded
 
     constexpr Generation generation = 41;
     constexpr AdbSmartSocketClient::OperationId operationId = 7001;
-    client.requestHostService( generation, operationId, HostService::Features );
+    client.requestHostService( generation, operationId, HostService::ServerFeatures );
 
     // Starting the operation must only schedule connectToHost; it must not spin or block
     // until the local server accepts the connection.
@@ -708,7 +758,7 @@ TEST_CASE( "ADB smart-socket host requests are loopback-only nonblocking bounded
         [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 1; } ) );
     REQUIRE( server.connectionCount() == 1 );
     REQUIRE( server.requestCount() == 1 );
-    CHECK( server.requests().front() == QByteArrayLiteral( "host:features" ) );
+    CHECK( server.requests().front() == QByteArrayLiteral( "host:host-features" ) );
     CHECK( server.peerWasLoopbackAtAccept( 0 ) );
 
     REQUIRE( probe.count( ClientCallback::Kind::Connected ) == 1 );
@@ -749,7 +799,7 @@ TEST_CASE( "ADB smart-socket client sends exact features and devices-l host tran
         AdbSmartSocketClient::OperationId operationId;
     };
     const std::vector<Scenario> scenarios{
-        { HostService::Features, QByteArrayLiteral( "host:features" ),
+        { HostService::ServerFeatures, QByteArrayLiteral( "host:host-features" ),
           QByteArrayLiteral( "shell_v2,cmd" ), 1001 },
         { HostService::DevicesLong, QByteArrayLiteral( "host:devices-l" ),
           QByteArrayLiteral( "emulator-5554\tdevice transport_id:1\n" ), 1002 },
@@ -761,8 +811,8 @@ TEST_CASE( "ADB smart-socket client sends exact features and devices-l host tran
             FakeAdbServer server(
                 [ &scenario ]( QTcpSocket& socket, int, int, const QByteArray& request ) {
                     REQUIRE( request == scenario.request );
-                    FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" )
-                                                     + hostReplyFrame( scenario.reply ) );
+                    FakeAdbServer::sendThenClose(
+                        socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( scenario.reply ) );
                 } );
             InspectableSocketFactory socketFactory;
             ManualDeadlineScheduler deadlines;
@@ -779,6 +829,319 @@ TEST_CASE( "ADB smart-socket client sends exact features and devices-l host tran
             CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
         }
     }
+}
+
+TEST_CASE( "ADB smart-socket selected-device features use a transport-scoped host transaction",
+           "[livecapture][adb][network][client][host][transport]" )
+{
+    constexpr Generation generation = 82;
+    constexpr AdbSmartSocketClient::OperationId operationId = 1003;
+    const TransportSelection transport{ TransportKind::Serial, "foo:bar" };
+    const QByteArray features = QByteArrayLiteral( "shell_v2,cmd,stat_v2" );
+
+    FakeAdbServer server( [ features ]( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                        const QByteArray& request ) {
+        REQUIRE( connectionIndex == 0 );
+        if ( requestIndex == 0 ) {
+            REQUIRE( request == QByteArrayLiteral( "host:transport:foo:bar" ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+            return;
+        }
+
+        REQUIRE( requestIndex == 1 );
+        REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+        FakeAdbServer::sendThenClose( socket,
+                                      QByteArrayLiteral( "OKAY" ) + hostReplyFrame( features ) );
+    } );
+    InspectableSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.requestTransportHostService( generation, operationId, transport,
+                                        TransportHostService::Features );
+
+    REQUIRE( pumpEventsUntil(
+        [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 1; } ) );
+    REQUIRE( server.connectionCount() == 1 );
+    REQUIRE( socketFactory.socketCount() == 1 );
+    REQUIRE( server.requestCount() == 2 );
+    REQUIRE( server.requestConnections().size() == 2 );
+    CHECK( server.requests().at( 0 ) == QByteArrayLiteral( "host:transport:foo:bar" ) );
+    CHECK( server.requests().at( 1 ) == QByteArrayLiteral( "host:features" ) );
+    CHECK( server.requestConnections().at( 0 ) == 0 );
+    CHECK( server.requestConnections().at( 1 ) == 0 );
+    CHECK( probe.first( ClientCallback::Kind::HostReply ).bytes == features );
+    CHECK( probe.count( ClientCallback::Kind::HostReply ) == 1 );
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+    CHECK( probe.allCallbacksMatch( generation, operationId ) );
+}
+
+TEST_CASE( "ADB smart-socket selected-device feature query preserves transport and feature FAIL diagnostics",
+           "[livecapture][adb][network][client][host][transport][error]" )
+{
+    constexpr Generation generation = 83;
+    const TransportSelection transport{ TransportKind::Serial, "emulator-5554" };
+
+    SECTION( "transport FAIL" )
+    {
+        constexpr AdbSmartSocketClient::OperationId operationId = 1004;
+        const QByteArray diagnostic = QByteArrayLiteral( "device 'emulator-5554' not found" );
+        FakeAdbServer server(
+            [ diagnostic ]( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                            const QByteArray& request ) {
+                REQUIRE( connectionIndex == 0 );
+                REQUIRE( requestIndex == 0 );
+                REQUIRE( request == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                FakeAdbServer::send(
+                    socket, QByteArrayLiteral( "FAIL" ) + hostReplyFrame( diagnostic ) );
+            } );
+        InspectableSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+        ClientProbe probe( client );
+
+        client.requestTransportHostService( generation, operationId, transport,
+                                            TransportHostService::Features );
+
+        REQUIRE( pumpEventsUntil(
+            [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
+        REQUIRE( server.connectionCount() == 1 );
+        REQUIRE( server.requestCount() == 1 );
+        const auto& error = probe.first( ClientCallback::Kind::Error );
+        CHECK( error.errorCode == AdbSmartSocketErrorCode::RemoteFailure );
+        CHECK( error.diagnostic.contains( QString::fromUtf8( diagnostic ) ) );
+        CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+        CHECK( probe.allCallbacksMatch( generation, operationId ) );
+    }
+
+    SECTION( "features FAIL" )
+    {
+        constexpr AdbSmartSocketClient::OperationId operationId = 1005;
+        const QByteArray diagnostic = QByteArrayLiteral( "selected device rejected host:features" );
+        FakeAdbServer server(
+            [ diagnostic ]( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                            const QByteArray& request ) {
+                REQUIRE( connectionIndex == 0 );
+                if ( requestIndex == 0 ) {
+                    REQUIRE( request == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                    FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                    return;
+                }
+
+                REQUIRE( requestIndex == 1 );
+                REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+                FakeAdbServer::send(
+                    socket, QByteArrayLiteral( "FAIL" ) + hostReplyFrame( diagnostic ) );
+            } );
+        InspectableSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+        ClientProbe probe( client );
+
+        client.requestTransportHostService( generation, operationId, transport,
+                                            TransportHostService::Features );
+
+        REQUIRE( pumpEventsUntil(
+            [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
+        REQUIRE( server.connectionCount() == 1 );
+        REQUIRE( server.requestCount() == 2 );
+        const auto& error = probe.first( ClientCallback::Kind::Error );
+        CHECK( error.errorCode == AdbSmartSocketErrorCode::RemoteFailure );
+        CHECK( error.diagnostic.contains( QString::fromUtf8( diagnostic ) ) );
+        CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+        CHECK( probe.allCallbacksMatch( generation, operationId ) );
+    }
+}
+
+TEST_CASE( "ADB smart-socket selected-device feature replies reject malformed framing and trailing "
+           "bytes",
+           "[livecapture][adb][network][client][host][transport][protocol]" )
+{
+    struct Scenario {
+        QByteArray response;
+        AdbSmartSocketClient::OperationId operationId;
+    };
+    const std::vector<Scenario> scenarios{
+        { QByteArrayLiteral( "OKAY00Z1" ), 1005 },
+        { QByteArrayLiteral( "OKAY" ) + hostReplyFrame( QByteArrayLiteral( "one" ) )
+              + hostReplyFrame( QByteArrayLiteral( "two" ) ),
+          1006 },
+        { QByteArrayLiteral( "OKAY" ) + hostReplyFrame( QByteArrayLiteral( "one" ) )
+              + QByteArrayLiteral( "00" ),
+          1007 },
+    };
+
+    for ( const auto& scenario : scenarios ) {
+        DYNAMIC_SECTION( "response size " << scenario.response.size() )
+        {
+            FakeAdbServer server(
+                [ &scenario ]( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                               const QByteArray& request ) {
+                    REQUIRE( connectionIndex == 0 );
+                    if ( requestIndex == 0 ) {
+                        REQUIRE( request
+                                 == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                        FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                        return;
+                    }
+                    REQUIRE( requestIndex == 1 );
+                    REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+                    FakeAdbServer::send( socket, scenario.response );
+                } );
+            InspectableSocketFactory socketFactory;
+            ManualDeadlineScheduler deadlines;
+            AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+            ClientProbe probe( client );
+
+            constexpr Generation generation = 84;
+            client.requestTransportHostService(
+                generation, scenario.operationId,
+                TransportSelection{ TransportKind::Serial, "emulator-5554" },
+                TransportHostService::Features );
+
+            REQUIRE( pumpEventsUntil(
+                [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
+            CHECK( server.connectionCount() == 1 );
+            CHECK( server.requestCount() == 2 );
+            CHECK( probe.first( ClientCallback::Kind::Error ).errorCode
+                   == AdbSmartSocketErrorCode::Protocol );
+            CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+            CHECK( probe.allCallbacksMatch( generation, scenario.operationId ) );
+        }
+    }
+}
+
+TEST_CASE( "ADB smart-socket selected-device feature transaction preserves cancellation and "
+           "timeout correlation",
+           "[livecapture][adb][network][client][host][transport][cancel][deadline]" )
+{
+    const TransportSelection transport{ TransportKind::Serial, "emulator-5554" };
+
+    SECTION( "cancellation while awaiting the one-shot host reply is silent" )
+    {
+        FakeAdbServer server( []( QTcpSocket& socket, int, int requestIndex,
+                                  const QByteArray& request ) {
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+        } );
+        InspectableSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+        ClientProbe probe( client );
+
+        constexpr Generation generation = 85;
+        constexpr AdbSmartSocketClient::OperationId operationId = 1008;
+        client.requestTransportHostService( generation, operationId, transport,
+                                            TransportHostService::Features );
+        REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
+            return server.requestCount() == 2
+                   && deadlines.hasActive( AdbSmartSocketDeadlineKind::Read );
+        } ) );
+
+        client.cancelGeneration( generation );
+        deadlines.fireLastEvenIfCancelled();
+        QCoreApplication::processEvents( QEventLoop::AllEvents );
+
+        CHECK( server.connectionCount() == 1 );
+        CHECK( server.requestCount() == 2 );
+        CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+        CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+    }
+
+    SECTION( "one-shot host reply read timeout keeps operation correlation" )
+    {
+        FakeAdbServer server( []( QTcpSocket& socket, int, int requestIndex,
+                                  const QByteArray& request ) {
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+            REQUIRE( requestIndex == 1 );
+            REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+        } );
+        InspectableSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+        ClientProbe probe( client );
+
+        constexpr Generation generation = 86;
+        constexpr AdbSmartSocketClient::OperationId operationId = 1009;
+        client.requestTransportHostService( generation, operationId, transport,
+                                            TransportHostService::Features );
+        REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
+            return server.requestCount() == 2
+                   && deadlines.hasActive( AdbSmartSocketDeadlineKind::Read );
+        } ) );
+
+        deadlines.fire( AdbSmartSocketDeadlineKind::Read );
+
+        REQUIRE( probe.count( ClientCallback::Kind::Error ) == 1 );
+        CHECK( server.connectionCount() == 1 );
+        CHECK( server.requestCount() == 2 );
+        CHECK( probe.first( ClientCallback::Kind::Error ).errorCode
+               == AdbSmartSocketErrorCode::ReadTimeout );
+        CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+        CHECK( probe.allCallbacksMatch( generation, operationId ) );
+    }
+}
+
+TEST_CASE( "ADB one-shot host reply rearms a full EOF deadline while the socket stays open",
+           "[livecapture][adb][network][client][host][eof][deadline]" )
+{
+    FakeAdbServer server( []( QTcpSocket& socket, int, int, const QByteArray& request ) {
+        REQUIRE( request == QByteArrayLiteral( "host:host-features" ) );
+        FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+    } );
+    InspectableSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    const auto config = clientConfig( server.port() );
+    AdbSmartSocketClient client( config, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    constexpr Generation generation = 87;
+    constexpr AdbSmartSocketClient::OperationId operationId = 1010;
+    client.requestHostService( generation, operationId, HostService::ServerFeatures );
+    REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
+        return server.requestCount() == 1
+               && deadlines.armCount( AdbSmartSocketDeadlineKind::Read ) >= 2u
+               && deadlines.hasActive( AdbSmartSocketDeadlineKind::Read );
+    } ) );
+
+    const auto payloadReadDeadline
+        = deadlines.activeToken( AdbSmartSocketDeadlineKind::Read );
+    REQUIRE( deadlines.timeoutMs( payloadReadDeadline ) == config.readTimeoutMs );
+    const auto readsBeforeReply = socketFactory.requestedReadSizes().size();
+    FakeAdbServer::send( *server.socketAt( 0 ),
+                         hostReplyFrame( QByteArrayLiteral( "shell_v2,cmd" ) ) );
+    REQUIRE( pumpEventsUntil( [ &socketFactory, readsBeforeReply ] {
+        return socketFactory.requestedReadSizes().size() > readsBeforeReply;
+    } ) );
+
+    CHECK( server.socketAt( 0 )->state() == QAbstractSocket::ConnectedState );
+    CHECK_FALSE( deadlines.isActive( payloadReadDeadline ) );
+    CHECK( deadlines.armCount( AdbSmartSocketDeadlineKind::Read ) == 3u );
+    REQUIRE( deadlines.hasActive( AdbSmartSocketDeadlineKind::Read ) );
+    const auto eofDeadline = deadlines.activeToken( AdbSmartSocketDeadlineKind::Read );
+    CHECK( eofDeadline != payloadReadDeadline );
+    CHECK( deadlines.timeoutMs( eofDeadline ) == config.readTimeoutMs );
+    CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+
+    deadlines.fire( eofDeadline );
+
+    REQUIRE( probe.count( ClientCallback::Kind::Error ) == 1 );
+    const auto& error = probe.first( ClientCallback::Kind::Error );
+    CHECK( error.errorCode == AdbSmartSocketErrorCode::ReadTimeout );
+    CHECK( error.generation == generation );
+    CHECK( error.operationId == operationId );
+    CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
 }
 
 TEST_CASE( "ADB smart-socket shell operation sequences transport and service on one socket",
@@ -953,7 +1316,7 @@ TEST_CASE( "ADB smart-socket FAIL replies preserve remote diagnostics",
         AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
         ClientProbe probe( client );
 
-        client.requestHostService( 101, 3001, HostService::Features );
+        client.requestHostService( 101, 3001, HostService::ServerFeatures );
         REQUIRE( pumpEventsUntil(
             [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
         const auto& error = probe.first( ClientCallback::Kind::Error );
@@ -1044,7 +1407,7 @@ TEST_CASE( "ADB smart-socket deadlines are deterministic for connect write and r
                                      deadlines );
         ClientProbe probe( client );
 
-        client.requestHostService( 201, 4001, HostService::Features );
+        client.requestHostService( 201, 4001, HostService::ServerFeatures );
         REQUIRE( deadlines.hasActive( AdbSmartSocketDeadlineKind::Connect ) );
         deadlines.fire( AdbSmartSocketDeadlineKind::Connect );
 
@@ -1063,7 +1426,7 @@ TEST_CASE( "ADB smart-socket deadlines are deterministic for connect write and r
         AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
         ClientProbe probe( client );
 
-        client.requestHostService( 202, 4002, HostService::Features );
+        client.requestHostService( 202, 4002, HostService::ServerFeatures );
         REQUIRE( pumpEventsUntil(
             [ &deadlines ] { return deadlines.hasActive( AdbSmartSocketDeadlineKind::Write ); } ) );
         deadlines.fire( AdbSmartSocketDeadlineKind::Write );
@@ -1109,7 +1472,7 @@ TEST_CASE( "ADB smart-socket cancels a deadline token returned after a synchrono
     AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 251, 4501, HostService::Features );
+    client.requestHostService( 251, 4501, HostService::ServerFeatures );
 
     REQUIRE(
         pumpEventsUntil( [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
@@ -1133,7 +1496,7 @@ TEST_CASE( "ADB smart-socket cancel invalidates generation and closes without an
     ClientProbe probe( client );
 
     constexpr Generation generation = 301;
-    client.requestHostService( generation, 5001, HostService::Features );
+    client.requestHostService( generation, 5001, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
         return server.requestCount() == 1
                && deadlines.hasActive( AdbSmartSocketDeadlineKind::Read );
@@ -1164,18 +1527,19 @@ TEST_CASE( "ADB smart-socket reconnect reconstructs sockets and resets partial d
             FakeAdbServer::send( socket, QByteArrayLiteral( "OKA" ) );
             return;
         }
-        FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( secondReply ) );
+        FakeAdbServer::sendThenClose(
+            socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( secondReply ) );
     } );
     InspectableSocketFactory socketFactory;
     ManualDeadlineScheduler deadlines;
     AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 401, 6001, HostService::Features );
+    client.requestHostService( 401, 6001, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 1; } ) );
     client.cancelGeneration( 401 );
 
-    client.requestHostService( 402, 6002, HostService::Features );
+    client.requestHostService( 402, 6002, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil(
         [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 1; } ) );
 
@@ -1205,7 +1569,7 @@ TEST_CASE(
         AdbSmartSocketClient client( config, socketFactory, deadlines );
         ClientProbe probe( client );
 
-        client.requestHostService( 601, 7001, HostService::Features );
+        client.requestHostService( 601, 7001, HostService::ServerFeatures );
         REQUIRE( pumpEventsUntil(
             [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
         const auto& error = probe.first( ClientCallback::Kind::Error );
@@ -1288,7 +1652,8 @@ TEST_CASE( "ADB smart-socket terminal callbacks may synchronously start successo
                                   const QByteArray& ) {
             const auto reply = connectionIndex == 0 ? QByteArrayLiteral( "first" )
                                                     : QByteArrayLiteral( "second" );
-            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) + hostReplyFrame( reply ) );
+            FakeAdbServer::sendThenClose( socket,
+                                          QByteArrayLiteral( "OKAY" ) + hostReplyFrame( reply ) );
         } );
         InspectableSocketFactory socketFactory;
         ManualDeadlineScheduler deadlines;
@@ -1302,11 +1667,60 @@ TEST_CASE( "ADB smart-socket terminal callbacks may synchronously start successo
                               }
                           } );
 
-        client.requestHostService( 711, 8101, HostService::Features );
+        client.requestHostService( 711, 8101, HostService::ServerFeatures );
         REQUIRE( pumpEventsUntil(
             [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 2; } ) );
         CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
         CHECK( server.connectionCount() == 2 );
+    }
+
+    SECTION( "selected-device host reply starts another host request" )
+    {
+        FakeAdbServer server( []( QTcpSocket& socket, int connectionIndex, int requestIndex,
+                                  const QByteArray& request ) {
+            if ( connectionIndex == 0 ) {
+                if ( requestIndex == 0 ) {
+                    REQUIRE( request
+                             == QByteArrayLiteral( "host:transport:emulator-5554" ) );
+                    FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                    return;
+                }
+
+                REQUIRE( requestIndex == 1 );
+                REQUIRE( request == QByteArrayLiteral( "host:features" ) );
+                FakeAdbServer::sendThenClose(
+                    socket, QByteArrayLiteral( "OKAY" )
+                                + hostReplyFrame( QByteArrayLiteral( "selected" ) ) );
+                return;
+            }
+
+            REQUIRE( connectionIndex == 1 );
+            REQUIRE( requestIndex == 0 );
+            REQUIRE( request == QByteArrayLiteral( "host:version" ) );
+            FakeAdbServer::sendThenClose(
+                socket, QByteArrayLiteral( "OKAY" )
+                            + hostReplyFrame( QByteArrayLiteral( "0029" ) ) );
+        } );
+        InspectableSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
+        ClientProbe probe( client );
+        QObject::connect( &client, &AdbSmartSocketClient::hostReplyReceived, &client,
+                          [ &client ]( Generation, AdbSmartSocketClient::OperationId operationId,
+                                       const QByteArray& ) {
+                              if ( operationId == 8151 ) {
+                                  client.requestHostService( 711, 8152, HostService::Version );
+                              }
+                          } );
+
+        client.requestTransportHostService(
+            711, 8151, TransportSelection{ TransportKind::Serial, "emulator-5554" },
+            TransportHostService::Features );
+        REQUIRE( pumpEventsUntil(
+            [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 2; } ) );
+        CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+        CHECK( server.connectionCount() == 2 );
+        CHECK( server.requestCount() == 3 );
     }
 
     SECTION( "shell exit starts a host request" )
@@ -1321,9 +1735,9 @@ TEST_CASE( "ADB smart-socket terminal callbacks may synchronously start successo
                                                      + shellV2Frame( 3u, QByteArray( 1, '\0' ) ) );
                 }
                 else {
-                    FakeAdbServer::send( socket,
-                                         QByteArrayLiteral( "OKAY" )
-                                             + hostReplyFrame( QByteArrayLiteral( "features" ) ) );
+                    FakeAdbServer::sendThenClose(
+                        socket, QByteArrayLiteral( "OKAY" )
+                                    + hostReplyFrame( QByteArrayLiteral( "features" ) ) );
                 }
             } );
         InspectableSocketFactory socketFactory;
@@ -1333,7 +1747,7 @@ TEST_CASE( "ADB smart-socket terminal callbacks may synchronously start successo
         QObject::connect(
             &client, &AdbSmartSocketClient::shellExited, &client,
             [ &client ]( Generation, AdbSmartSocketClient::OperationId, std::uint8_t ) {
-                client.requestHostService( 712, 8202, HostService::Features );
+                client.requestHostService( 712, 8202, HostService::ServerFeatures );
             } );
 
         client.startShellService( 712, 8201, TransportSelection{ TransportKind::Any, {} },
@@ -1351,7 +1765,7 @@ TEST_CASE( "ADB smart-socket retires completed sockets without child accumulatio
            "[livecapture][adb][network][client][ownership]" )
 {
     FakeAdbServer server( []( QTcpSocket& socket, int, int, const QByteArray& ) {
-        FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY0000" ) );
+        FakeAdbServer::sendThenClose( socket, QByteArrayLiteral( "OKAY0000" ) );
     } );
     InspectableSocketFactory socketFactory;
     ManualDeadlineScheduler deadlines;
@@ -1360,7 +1774,7 @@ TEST_CASE( "ADB smart-socket retires completed sockets without child accumulatio
 
     for ( AdbSmartSocketClient::OperationId operationId = 8301; operationId < 8311;
           ++operationId ) {
-        client.requestHostService( 713, operationId, HostService::Features );
+        client.requestHostService( 713, operationId, HostService::ServerFeatures );
         REQUIRE( pumpEventsUntil( [ &probe, operationId ] {
             return probe.count( ClientCallback::Kind::HostReply )
                    == static_cast<int>( operationId - 8300 );
@@ -1380,7 +1794,7 @@ TEST_CASE( "ADB smart-socket write deadline covers accepted bytes until socket d
     AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 714, 8401, HostService::Features );
+    client.requestHostService( 714, 8401, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil(
         [ &deadlines ] { return deadlines.hasActive( AdbSmartSocketDeadlineKind::Write ); } ) );
     CHECK_FALSE( deadlines.hasActive( AdbSmartSocketDeadlineKind::Read ) );
@@ -1400,14 +1814,14 @@ TEST_CASE( "ADB smart-socket response after full write acceptance advances despi
     AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 715, 8501, HostService::Features );
+    client.requestHostService( 715, 8501, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
         return server.connectionCount() == 1
                && deadlines.hasActive( AdbSmartSocketDeadlineKind::Write );
     } ) );
-    FakeAdbServer::send( *server.socketAt( 0 ),
-                         QByteArrayLiteral( "OKAY" )
-                             + hostReplyFrame( QByteArrayLiteral( "shell_v2" ) ) );
+    FakeAdbServer::sendThenClose(
+        *server.socketAt( 0 ),
+        QByteArrayLiteral( "OKAY" ) + hostReplyFrame( QByteArrayLiteral( "shell_v2" ) ) );
 
     REQUIRE( pumpEventsUntil(
         [ &probe ] { return probe.count( ClientCallback::Kind::HostReply ) == 1; } ) );
@@ -1426,7 +1840,7 @@ TEST_CASE( "ADB smart-socket rejects unsolicited input before request acceptance
     AdbSmartSocketClient client( config, socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 716, 8601, HostService::Features );
+    client.requestHostService( 716, 8601, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil( [ &server, &deadlines ] {
         return server.connectionCount() == 1
                && deadlines.hasActive( AdbSmartSocketDeadlineKind::Write );
@@ -1471,9 +1885,50 @@ TEST_CASE( "ADB smart-socket rejects invalid configuration and non-v2 shell serv
         config.maxShellFrameBytes = 0;
         AdbSmartSocketClient client( config, socketFactory, deadlines );
         ClientProbe probe( client );
-        client.requestHostService( 718, 8801, HostService::Features );
+        client.requestHostService( 718, 8801, HostService::ServerFeatures );
         REQUIRE( probe.count( ClientCallback::Kind::Error ) == 1 );
         CHECK( socketFactory.socketCount() == 0 );
+    }
+
+    SECTION( "invalid selected-device feature inputs are rejected before connecting" )
+    {
+        struct Scenario {
+            const char* name;
+            TransportSelection transport;
+            TransportHostService service;
+            AdbSmartSocketClient::OperationId operationId;
+        };
+        const std::vector<Scenario> scenarios{
+            { "invalid service", { TransportKind::Serial, "emulator-5554" },
+              static_cast<TransportHostService>( 0xffu ), 8802 },
+            { "invalid transport kind",
+              { static_cast<TransportKind>( 0xffu ), "emulator-5554" },
+              TransportHostService::Features, 8803 },
+            { "missing serial", { TransportKind::Serial, {} },
+              TransportHostService::Features, 8804 },
+            { "NUL serial",
+              { TransportKind::Serial, std::string( "serial\0hidden", 13u ) },
+              TransportHostService::Features, 8805 },
+        };
+
+        for ( const auto& scenario : scenarios ) {
+            DYNAMIC_SECTION( scenario.name )
+            {
+                InspectableSocketFactory socketFactory;
+                ManualDeadlineScheduler deadlines;
+                AdbSmartSocketClient client( clientConfig( 5037 ), socketFactory, deadlines );
+                ClientProbe probe( client );
+
+                client.requestTransportHostService( 718, scenario.operationId,
+                                                            scenario.transport, scenario.service );
+
+                REQUIRE( probe.count( ClientCallback::Kind::Error ) == 1 );
+                CHECK( probe.first( ClientCallback::Kind::Error ).errorCode
+                       == AdbSmartSocketErrorCode::Protocol );
+                CHECK( probe.allCallbacksMatch( 718, scenario.operationId ) );
+                CHECK( socketFactory.socketCount() == 0 );
+            }
+        }
     }
 
     for ( const auto& service : std::vector<std::string>{
@@ -1517,7 +1972,7 @@ TEST_CASE( "ADB smart-socket queued callbacks preserve correlation and custom er
         },
         Qt::QueuedConnection );
 
-    client.requestHostService( 719, 8901, HostService::Features );
+    client.requestHostService( 719, 8901, HostService::ServerFeatures );
     REQUIRE( pumpEventsUntil( [ &queuedErrors ] { return queuedErrors == 1; } ) );
 }
 
@@ -1538,7 +1993,7 @@ TEST_CASE( "ADB smart-socket rejects extra or partial trailing one-shot host fra
             ManualDeadlineScheduler deadlines;
             AdbSmartSocketClient client( clientConfig( server.port() ), socketFactory, deadlines );
             ClientProbe probe( client );
-            client.requestHostService( 720, 9001, HostService::Features );
+            client.requestHostService( 720, 9001, HostService::ServerFeatures );
 
             REQUIRE( pumpEventsUntil(
                 [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
@@ -1549,6 +2004,32 @@ TEST_CASE( "ADB smart-socket rejects extra or partial trailing one-shot host fra
     }
 }
 
+TEST_CASE( "ADB smart-socket rejects a trailing one-shot host frame split at the read boundary",
+           "[livecapture][adb][network][client][host][protocol]" )
+{
+    const auto firstReply = hostReplyFrame( QByteArrayLiteral( "one" ) );
+    const auto trailingReply = hostReplyFrame( QByteArrayLiteral( "two" ) );
+    FakeAdbServer server(
+        [ firstReply, trailingReply ]( QTcpSocket& socket, int, int, const QByteArray& ) {
+            FakeAdbServer::sendThenClose( socket, QByteArrayLiteral( "OKAY" ) + firstReply
+                                                     + trailingReply );
+        } );
+    InspectableSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto config = clientConfig( server.port() );
+    config.maxReadChunkBytes = QByteArrayLiteral( "OKAY" ).size() + firstReply.size();
+    AdbSmartSocketClient client( config, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.requestHostService( 721, 9101, HostService::ServerFeatures );
+
+    REQUIRE(
+        pumpEventsUntil( [ &probe ] { return probe.count( ClientCallback::Kind::Error ) == 1; } ) );
+    CHECK( probe.first( ClientCallback::Kind::Error ).errorCode
+           == AdbSmartSocketErrorCode::Protocol );
+    CHECK( probe.count( ClientCallback::Kind::HostReply ) == 0 );
+}
+
 TEST_CASE( "ADB smart-socket survives synchronous connect deadline expiry",
            "[livecapture][adb][network][client][deadline][reentrant]" )
 {
@@ -1557,7 +2038,7 @@ TEST_CASE( "ADB smart-socket survives synchronous connect deadline expiry",
     AdbSmartSocketClient client( clientConfig( unusedLoopbackPort() ), socketFactory, deadlines );
     ClientProbe probe( client );
 
-    client.requestHostService( 721, 9101, HostService::Features );
+    client.requestHostService( 721, 9101, HostService::ServerFeatures );
 
     REQUIRE( probe.count( ClientCallback::Kind::Error ) == 1 );
     CHECK( probe.first( ClientCallback::Kind::Error ).errorCode

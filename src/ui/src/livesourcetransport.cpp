@@ -546,6 +546,7 @@ void ProcessLiveSourceTransport::failCurrentProcess( Generation generation,
     else if ( lastError_.isEmpty() ) {
         lastError_ = fallback;
     }
+    lastError_ = normalizeStreamingError( lastError_ );
 
     // Failure retires this run just as decisively as an intentional stop.
     // Invalidate before process teardown so any synchronous or queued callback
@@ -576,4 +577,9 @@ void ProcessLiveSourceTransport::prepareStreamingSession() {}
 void ProcessLiveSourceTransport::filterReceivedBytes( QByteArray& data )
 {
     Q_UNUSED( data );
+}
+
+QString ProcessLiveSourceTransport::normalizeStreamingError( const QString& error ) const
+{
+    return error;
 }

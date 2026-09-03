@@ -257,6 +257,32 @@ protected:
     }
 };
 
+class LegacyLogcatFormatFailureTransport
+    : public GenerationDrivenProcessTransport<AdbProcessTransport> {
+public:
+    LegacyLogcatFormatFailureTransport()
+        : GenerationDrivenProcessTransport<AdbProcessTransport>(
+              QString{}, QStringLiteral( "serial-123" ), {} )
+    {
+    }
+
+protected:
+    Command streamingCommand() const override
+    {
+#ifdef Q_OS_WIN
+        return Command{ QStringLiteral( "cmd" ),
+                        { QStringLiteral( "/c" ),
+                          QStringLiteral( "echo Invalid parameter year to -v 1>&2 & exit /b 1" ) } };
+#else
+        return Command{
+            QStringLiteral( "/bin/sh" ),
+            { QStringLiteral( "-c" ),
+              QStringLiteral( "echo 'Invalid parameter year to -v' >&2; exit 1" ) }
+        };
+#endif
+    }
+};
+
 class ReentrantReconnectAdbProcessTransport final : public ImmediateFailureAdbProcessTransport {
 public:
     QString stderrFilePathForTest() const
@@ -464,7 +490,7 @@ TEST_CASE( "Default live-source factory selects the explicit ADB backend" )
     CHECK( dynamic_cast<IosLogProcessTransport*>( iosTransport.get() ) != nullptr );
 }
 
-TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" )
+TEST_CASE( "AdbProcessTransport owns ordered wall-time modifiers and unchanged clear" )
 {
     TestAdbProcessTransport transport(
         QString{}, QStringLiteral( "emulator-5554" ),
@@ -489,18 +515,22 @@ TEST_CASE( "AdbProcessTransport builds normalized streaming and clear commands" 
                         && ( leaf == QStringLiteral( "adb" )
                              || leaf == QStringLiteral( "adb.exe" ) ) ) ) );
     }
-    REQUIRE( streaming.arguments
-             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
-                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
-                             QStringLiteral( "threadtime" ), QStringLiteral( "-T" ),
-                             QStringLiteral( "2026-03-15 12:34:56.000" ),
-                             QStringLiteral( "*:I" ) } );
 
     const auto clear = transport.clearCommandForTest();
     REQUIRE( clear.program == streaming.program );
     REQUIRE( clear.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-c" ) } );
+
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "usec" ), QStringLiteral( "-T" ),
+                             QStringLiteral( "2026-03-15 12:34:56.000" ),
+                             QStringLiteral( "*:I" ) } );
 }
 
 TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
@@ -512,7 +542,11 @@ TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
-                             QStringLiteral( "logcat" ), QStringLiteral( "--path" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "usec" ), QStringLiteral( "--path" ),
                              QStringLiteral( "C:\\temp\\log.txt" ), QStringLiteral( "--pattern" ),
                              QStringLiteral( "regex\\d+" ), QStringLiteral( "--title" ),
                              QStringLiteral( "hello world" ) } );
@@ -526,11 +560,15 @@ TEST_CASE( "AdbProcessTransport preserves empty quoted extra args" )
     const auto streaming = transport.streamingCommandForTest();
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
-                             QStringLiteral( "logcat" ), QStringLiteral( "--empty" ), QString{},
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "usec" ), QStringLiteral( "--empty" ), QString{},
                              QStringLiteral( "--quoted" ), QString{} } );
 }
 
-TEST_CASE( "AdbProcessTransport adds logcat color modifier when ANSI output is enabled" )
+TEST_CASE( "AdbProcessTransport appends a repeated color modifier for ANSI" )
 {
     TestAdbProcessTransport transport( QString{}, QStringLiteral( "serial-123" ),
                                        QStringLiteral( "-v threadtime *:I" ), true );
@@ -539,8 +577,94 @@ TEST_CASE( "AdbProcessTransport adds logcat color modifier when ANSI output is e
     REQUIRE( streaming.arguments
              == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
                              QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
-                             QStringLiteral( "color" ), QStringLiteral( "-v" ),
-                             QStringLiteral( "threadtime" ), QStringLiteral( "*:I" ) } );
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "usec" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "color" ), QStringLiteral( "*:I" ) } );
+}
+
+TEST_CASE( "AdbProcessTransport removes valid format args without reordering other tokens" )
+{
+    TestAdbProcessTransport transport(
+        QString{}, QStringLiteral( "serial-123" ),
+        QStringLiteral( "--pid 42 -v raw -b main -vraw -T 10 -v zone ActivityManager:I "
+                        "--format epoch *:D --format=epoch" ) );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "usec" ), QStringLiteral( "--pid" ),
+                             QStringLiteral( "42" ), QStringLiteral( "-b" ),
+                             QStringLiteral( "main" ), QStringLiteral( "-T" ),
+                             QStringLiteral( "10" ), QStringLiteral( "ActivityManager:I" ),
+                             QStringLiteral( "*:D" ) } );
+}
+
+TEST_CASE( "AdbProcessTransport format sanitizer preserves option boundaries and end-of-options" )
+{
+    SECTION( "bare format options do not consume a following option" )
+    {
+        TestAdbProcessTransport transport(
+            QString{}, QStringLiteral( "serial-123" ),
+            QStringLiteral( "-v --pid 42 --format -b main ActivityManager:I" ) );
+
+        const auto streaming = transport.streamingCommandForTest();
+        REQUIRE( streaming.arguments
+                 == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                                 QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "usec" ), QStringLiteral( "--pid" ),
+                                 QStringLiteral( "42" ), QStringLiteral( "-b" ),
+                                 QStringLiteral( "main" ),
+                                 QStringLiteral( "ActivityManager:I" ) } );
+    }
+
+    SECTION( "end-of-options preserves every following token" )
+    {
+        TestAdbProcessTransport transport(
+            QString{}, QStringLiteral( "serial-123" ),
+            QStringLiteral(
+                "--pid 42 -- -v raw --format epoch -v:I --format=epoch ActivityManager:D" ) );
+
+        const auto streaming = transport.streamingCommandForTest();
+        REQUIRE( streaming.arguments
+                 == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                                 QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "usec" ), QStringLiteral( "--pid" ),
+                                 QStringLiteral( "42" ), QStringLiteral( "--" ),
+                                 QStringLiteral( "-v" ), QStringLiteral( "raw" ),
+                                 QStringLiteral( "--format" ), QStringLiteral( "epoch" ),
+                                 QStringLiteral( "-v:I" ), QStringLiteral( "--format=epoch" ),
+                                 QStringLiteral( "ActivityManager:D" ) } );
+    }
+
+    SECTION( "empty assigned format is removed without consuming a following option" )
+    {
+        TestAdbProcessTransport transport(
+            QString{}, QStringLiteral( "serial-123" ),
+            QStringLiteral( "--format= --pid 42 ActivityManager:I" ) );
+
+        const auto streaming = transport.streamingCommandForTest();
+        REQUIRE( streaming.arguments
+                 == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "serial-123" ),
+                                 QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "threadtime" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "year" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "zone" ), QStringLiteral( "-v" ),
+                                 QStringLiteral( "usec" ), QStringLiteral( "--pid" ),
+                                 QStringLiteral( "42" ),
+                                 QStringLiteral( "ActivityManager:I" ) } );
+    }
 }
 
 TEST_CASE( "IosLogProcessTransport builds normalized streaming commands" )
@@ -1092,6 +1216,16 @@ TEST_CASE( "AdbProcessTransport surfaces immediate post-start failures as transp
     REQUIRE( errorSpy.safeWait() );
     REQUIRE( stateSpy.count() >= 1 );
     REQUIRE_FALSE( transport.lastError().isEmpty() );
+}
+
+TEST_CASE( "AdbProcessTransport explains legacy logcat wall-time format rejection" )
+{
+    LegacyLogcatFormatFailureTransport transport;
+
+    REQUIRE_FALSE( transport.startAndWait() );
+    CHECK( transport.lastError().contains( QStringLiteral( "Android 7.0" ) ) );
+    CHECK( transport.lastError().contains( QStringLiteral( "source-device wall time" ) ) );
+    CHECK( transport.lastError().contains( QStringLiteral( "Invalid parameter year to -v" ) ) );
 }
 
 TEST_CASE( "OptionsDialog exposes no legacy live-source executable or raw-argument controls" )

@@ -706,8 +706,8 @@ TEST_CASE( "Typed Android options reach transport config and command on every ge
     const auto service = adb::buildLogcatService( backend->logcatOptions );
     REQUIRE( service.value.has_value() );
     CHECK( *service.value
-           == "shell,v2,raw:logcat -v color -b main -b system -b crash --pid 4242 "
-              "'ActivityManager:I' '*:D'" );
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec -v color -b main "
+              "-b system -b crash --pid 4242 'ActivityManager:I' '*:D'" );
 
     clock.set( at( 100 ) );
     controller.reconnectRequested();
@@ -927,7 +927,8 @@ TEST_CASE( "A scheduler that completes inline cannot leave a stale retry token",
     CHECK_FALSE( controller.presentation().retryCountdownVisible );
 }
 
-TEST_CASE( "Android ANSI output controls the logcat formatter", "[livelog-controller][red][ansi]" )
+TEST_CASE( "Android streams own ordered wall-time modifiers with optional ANSI color",
+           "[livelog-controller][red][ansi][wall-time]" )
 {
     LiveSourceTransportConfig config;
     config.sourceType = LiveLogSourceType::AdbLogcat;
@@ -938,12 +939,14 @@ TEST_CASE( "Android ANSI output controls the logcat formatter", "[livelog-contro
     REQUIRE( plain.has_value() );
     const auto plainService = adb::buildLogcatService( plain->logcatOptions );
     REQUIRE( plainService.value.has_value() );
-    CHECK( *plainService.value == "shell,v2,raw:logcat" );
+    CHECK( *plainService.value
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec" );
 
     config.ansiOutputEnabled = true;
     const auto colored = livelog::makeAdbSmartSocketTransportConfig( config );
     REQUIRE( colored.has_value() );
     const auto coloredService = adb::buildLogcatService( colored->logcatOptions );
     REQUIRE( coloredService.value.has_value() );
-    CHECK( *coloredService.value == "shell,v2,raw:logcat -v color" );
+    CHECK( *coloredService.value
+           == "shell,v2,raw:logcat -v threadtime -v year -v zone -v usec -v color" );
 }

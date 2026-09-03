@@ -22,6 +22,7 @@
 #include "ioscatalogprovider.h"
 #include "iosnativeapi.h"
 #include "iosnativeerrors.h"
+#include "iosostraceprotocol.h"
 #include "livedataqueue.h"
 
 namespace klogg::livecapture::ios {
@@ -44,6 +45,9 @@ struct IosLogOptions {
 inline constexpr std::chrono::milliseconds DefaultIosNativeShutdownDeadline{ 750 };
 inline constexpr std::size_t DefaultIosNativeConcurrentSessionLimit{ 8u };
 
+using IosDeviceTimeZoneResolverFactory
+    = std::function<std::optional<OsTraceUtcOffsetResolver>( const std::string& )>;
+
 struct IosNativeStreamConfig {
     IosEndpointKey endpoint;
     Generation generation{ 0 };
@@ -52,6 +56,7 @@ struct IosNativeStreamConfig {
     std::size_t maximumSyslogRecordBytes{ std::size_t{ 1u } * 1024u * 1024u };
     IosNativeServicePolicy servicePolicy{ IosNativeServicePolicy::AutomaticByProductVersion };
     IosLogOptions logOptions;
+    IosDeviceTimeZoneResolverFactory timeZoneResolverFactory;
     std::chrono::milliseconds cleanupDeadline{ DefaultIosNativeShutdownDeadline };
 };
 

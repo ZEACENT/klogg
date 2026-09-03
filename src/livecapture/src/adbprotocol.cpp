@@ -20,6 +20,7 @@
 #include "adbprotocol.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -256,6 +257,25 @@ std::optional<char> logPriorityLetter( LogPriority priority )
     }
 
     return std::nullopt;
+}
+
+bool lineRejectsOwnedLogcatFormat( std::string_view line )
+{
+    std::string normalized( line );
+    std::transform( normalized.begin(), normalized.end(), normalized.begin(), []( char value ) {
+        return static_cast<char>( std::tolower( static_cast<unsigned char>( value ) ) );
+    } );
+
+    if ( normalized.find( "invalid parameter" ) == std::string::npos
+         || normalized.find( "to -v" ) == std::string::npos ) {
+        return false;
+    }
+
+    constexpr std::array<std::string_view, 4> OwnedModifiers{ "year", "zone", "usec", "color" };
+    return std::any_of( OwnedModifiers.cbegin(), OwnedModifiers.cend(),
+                        [ &normalized ]( std::string_view modifier ) {
+                            return normalized.find( modifier ) != std::string::npos;
+                        } );
 }
 
 ProtocolResult<std::string> commandError( ProtocolErrorCode code, std::string message )
@@ -524,8 +544,8 @@ ProtocolResult<std::string> buildHostService( HostService service )
     switch ( service ) {
     case HostService::Version:
         return ProtocolResult<std::string>{ "host:version", std::nullopt };
-    case HostService::Features:
-        return ProtocolResult<std::string>{ "host:features", std::nullopt };
+    case HostService::ServerFeatures:
+        return ProtocolResult<std::string>{ "host:host-features", std::nullopt };
     case HostService::DevicesLong:
         return ProtocolResult<std::string>{ "host:devices-l", std::nullopt };
     case HostService::TrackDevicesLong:
@@ -534,6 +554,17 @@ ProtocolResult<std::string> buildHostService( HostService service )
 
     return commandError( ProtocolErrorCode::InvalidCommandOption,
                          "ADB host service contains an unknown service kind." );
+}
+
+ProtocolResult<std::string> buildTransportHostService( TransportHostService service )
+{
+    switch ( service ) {
+    case TransportHostService::Features:
+        return ProtocolResult<std::string>{ "host:features", std::nullopt };
+    }
+
+    return commandError( ProtocolErrorCode::InvalidCommandOption,
+                         "ADB transport-scoped host service contains an unknown service kind." );
 }
 
 ProtocolResult<std::string> buildTransportService( const TransportSelection& selection )
@@ -566,12 +597,48 @@ ProtocolResult<std::string> buildTransportService( const TransportSelection& sel
     return ProtocolResult<std::string>{ std::move( service ), std::nullopt };
 }
 
+std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled )
+{
+    std::vector<std::string> arguments{
+        "-v", "threadtime", "-v", "year", "-v", "zone", "-v", "usec"
+    };
+    if ( ansiOutputEnabled ) {
+        arguments.emplace_back( "-v" );
+        arguments.emplace_back( "color" );
+    }
+    return arguments;
+}
+
+std::string normalizeLogcatStreamError( const std::string& diagnostic )
+{
+    std::string_view remaining( diagnostic );
+    while ( !remaining.empty() ) {
+        const auto end = remaining.find( '\n' );
+        const auto line = remaining.substr( 0u, end );
+        if ( lineRejectsOwnedLogcatFormat( line ) ) {
+            return "This ADB device cannot provide unambiguous source-device wall time because "
+                   "its logcat does not support the required year, zone, and microsecond format "
+                   "modifiers (Android 7.0 or compatible is required). Original error: "
+                   + diagnostic;
+        }
+        if ( end == std::string_view::npos ) {
+            break;
+        }
+        remaining.remove_prefix( end + 1u );
+    }
+    return diagnostic;
+}
+
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options )
 {
     std::string service{ "shell,v2,raw:logcat" };
-    if ( options.ansiOutputEnabled && !appendBounded( service, " -v color" ) ) {
-        return commandError( ProtocolErrorCode::PayloadTooLarge,
-                             "ADB logcat service exceeds the smart-socket payload limit." );
+    // appendBounded mutates the command and must stop at the first overflow.
+    for ( const auto& argument : buildLogcatFormatArguments( options.ansiOutputEnabled ) ) {
+        // cppcheck-suppress useStlAlgorithm
+        if ( !appendBounded( service, " " ) || !appendBounded( service, argument ) ) {
+            return commandError( ProtocolErrorCode::PayloadTooLarge,
+                                 "ADB logcat service exceeds the smart-socket payload limit." );
+        }
     }
 
     for ( const auto buffer : options.buffers ) {

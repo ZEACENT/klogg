@@ -23,17 +23,28 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "iosostraceprotocol.h"
 
+#ifdef QTIMEZONE_H
+#error "iosostraceprotocol.h must remain source-neutral and must not expose QTimeZone"
+#endif
+
 namespace {
 using namespace klogg::livecapture::ios;
+
+static_assert(
+    std::is_same<OsTraceUtcOffsetResolver,
+                 std::function<std::optional<std::int32_t>( std::uint64_t )>>::value,
+    "the protocol boundary accepts only an epoch-second to optional UTC-offset resolver" );
 
 constexpr std::size_t HeaderSize = 0x81u;
 constexpr std::size_t MarkerOffset = 0u;
@@ -778,18 +789,20 @@ TEST_CASE( "iOS formatter covers the supported unsigned timestamp range determin
     auto record = formattingRecord();
     record.seconds = 0u;
     record.microseconds = 0u;
-    CHECK( formatOsTraceRecord( record ).bytes.find( "1970-01-01 00:00:00.000000" ) == 0u );
+    CHECK( formatOsTraceRecord( record ).bytes.find( "1970-01-01 00:00:00.000000+00:00" )
+           == 0u );
 
     record.seconds = 253402300799ull;
     record.microseconds = 999999u;
-    CHECK( formatOsTraceRecord( record ).bytes.find( "9999-12-31 23:59:59.999999" ) == 0u );
+    CHECK( formatOsTraceRecord( record ).bytes.find( "9999-12-31 23:59:59.999999+00:00" )
+           == 0u );
 
     record.seconds = std::numeric_limits<std::uint64_t>::max();
     const auto first = formatOsTraceRecord( record );
     const auto second = formatOsTraceRecord( record );
     CHECK( first.bytes == second.bytes );
     CHECK( first.statistics == second.statistics );
-    CHECK( first.bytes.find( ".999999 " ) != std::string::npos );
+    CHECK( first.bytes.find( ".999999+00:00 " ) != std::string::npos );
 }
 
 TEST_CASE(
@@ -798,10 +811,10 @@ TEST_CASE(
 {
     const auto record = formattingRecord();
     const std::string expectedPlain
-        = "2023-11-14 22:13:20.123456 Runner{Framework+0x1234}[4242] <ERROR>: "
+        = "2023-11-14 22:13:20.123456+00:00 Runner{Framework+0x1234}[4242] <ERROR>: "
           "bad \xef\xbf\xbd payload [com.example][network]";
     const std::string expectedAnsi
-        = "\x1b[32m2023-11-14 22:13:20.123456\x1b[0m "
+        = "\x1b[32m2023-11-14 22:13:20.123456+00:00\x1b[0m "
           "\x1b[35mRunner\x1b[0m{\x1b[35mFramework\x1b[0m\x1b[34m+0x1234\x1b[0m}"
           "[\x1b[36m4242\x1b[0m] <\x1b[31mERROR\x1b[0m>: "
           "\x1b[31mbad \xef\xbf\xbd payload\x1b[0m "
@@ -830,6 +843,109 @@ TEST_CASE(
     CHECK( ansi.statistics.ansiExpansionByteCount == expectedAnsi.size() - expectedPlain.size() );
     REQUIRE( ansiHook.has_value() );
     CHECK( ansiHook.value() == ansi.statistics );
+}
+
+TEST_CASE( "iOS formatter applies source-neutral per-epoch UTC offsets exactly",
+           "[livecapture][ios][ostrace][format][timezone]" )
+{
+    struct WallTimeCase {
+        const char* name;
+        std::uint64_t seconds;
+        std::int32_t utcOffsetSeconds;
+        const char* timestamp;
+    };
+    const std::array cases{
+        WallTimeCase{ "New York winter", 1700000000ull, -5 * 60 * 60,
+                      "2023-11-14 17:13:20.123456-05:00" },
+        WallTimeCase{ "New York summer", 1689372800ull, -4 * 60 * 60,
+                      "2023-07-14 18:13:20.123456-04:00" },
+        WallTimeCase{ "New York immediately before spring DST", 1710053999ull, -5 * 60 * 60,
+                      "2024-03-10 01:59:59.123456-05:00" },
+        WallTimeCase{ "New York immediately after spring DST", 1710054000ull, -4 * 60 * 60,
+                      "2024-03-10 03:00:00.123456-04:00" },
+        WallTimeCase{ "Kolkata half-hour offset", 1700000000ull, 5 * 60 * 60 + 30 * 60,
+                      "2023-11-15 03:43:20.123456+05:30" },
+        WallTimeCase{ "historical Liberia seconds offset", 0ull, -( 44 * 60 + 30 ),
+                      "1969-12-31 23:15:30.123456-00:44:30" },
+    };
+    const std::string plainSuffix
+        = " Runner{Framework+0x1234}[4242] <ERROR>: bad \xef\xbf\xbd payload "
+          "[com.example][network]";
+    const std::string ansiSuffix
+        = "\x1b[0m \x1b[35mRunner\x1b[0m{\x1b[35mFramework\x1b[0m"
+          "\x1b[34m+0x1234\x1b[0m}[\x1b[36m4242\x1b[0m] "
+          "<\x1b[31mERROR\x1b[0m>: \x1b[31mbad \xef\xbf\xbd payload\x1b[0m "
+          "\x1b[36m[com.example][network]\x1b[0m";
+
+    for ( const auto& value : cases ) {
+        INFO( value.name );
+        auto record = formattingRecord();
+        record.seconds = value.seconds;
+        const OsTraceUtcOffsetResolver resolver
+            = [ expectedSeconds = value.seconds,
+                offset = value.utcOffsetSeconds ]( std::uint64_t epochSeconds ) {
+                  CHECK( epochSeconds == expectedSeconds );
+                  return offset;
+              };
+        const auto plain
+            = formatOsTraceRecord( record, OsTraceFormatOptions{ false, true, true, resolver } );
+        const auto ansi
+            = formatOsTraceRecord( record, OsTraceFormatOptions{ true, true, true, resolver } );
+        const auto expectedPlain = std::string{ value.timestamp } + plainSuffix;
+        const auto expectedAnsi = std::string{ "\x1b[32m" } + value.timestamp + ansiSuffix;
+
+        CHECK( plain.bytes == expectedPlain );
+        CHECK( ansi.bytes == expectedAnsi );
+        CHECK( plain.statistics.plainByteCount == expectedPlain.size() );
+        CHECK( plain.statistics.outputByteCount == expectedPlain.size() );
+        CHECK( ansi.statistics.plainByteCount == expectedPlain.size() );
+        CHECK( ansi.statistics.outputByteCount == expectedAnsi.size() );
+        CHECK( stripGeneratedAnsi( ansi.bytes ) == plain.bytes );
+    }
+}
+
+TEST_CASE( "iOS formatter reports an unavailable source time-zone offset without inventing UTC",
+           "[livecapture][ios][ostrace][format][timezone][range]" )
+{
+    OsTraceFormatOptions options;
+    options.utcOffsetSecondsAt = []( std::uint64_t ) -> std::optional<std::int32_t> {
+        return std::nullopt;
+    };
+
+    const auto formatted = formatOsTraceRecord( formattingRecord(), options );
+
+    CHECK_FALSE( formatted.utcOffsetResolved );
+    CHECK( formatted.bytes.empty() );
+    CHECK( formatted.statistics == OsTraceFormatStatistics{} );
+}
+
+TEST_CASE( "stateful iOS formatter resolves and formats each epoch second only once",
+           "[livecapture][ios][ostrace][format][timezone][cache]" )
+{
+    std::vector<std::uint64_t> resolvedSeconds;
+    OsTraceFormatOptions options;
+    options.utcOffsetSecondsAt = [ &resolvedSeconds ]( std::uint64_t seconds ) {
+        resolvedSeconds.push_back( seconds );
+        return std::int32_t{ 5 * 60 * 60 + 45 * 60 };
+    };
+    OsTraceRecordFormatter formatter( std::move( options ) );
+
+    auto firstRecord = formattingRecord();
+    firstRecord.microseconds = 1u;
+    auto secondRecord = firstRecord;
+    secondRecord.microseconds = 999999u;
+
+    const auto first = formatter.format( firstRecord );
+    const auto second = formatter.format( secondRecord );
+
+    CHECK( first.bytes.find( "2023-11-15 03:58:20.000001+05:45" ) == 0u );
+    CHECK( second.bytes.find( "2023-11-15 03:58:20.999999+05:45" ) == 0u );
+    CHECK( resolvedSeconds == std::vector<std::uint64_t>{ 1700000000ull } );
+
+    secondRecord.seconds += 1u;
+    CHECK( formatter.format( secondRecord ).bytes.find( "2023-11-15 03:58:21.999999+05:45" )
+           == 0u );
+    CHECK( resolvedSeconds == std::vector<std::uint64_t>{ 1700000000ull, 1700000001ull } );
 }
 
 TEST_CASE( "iOS formatter keeps plain and ANSI output semantically identical across a corpus",
@@ -929,12 +1045,12 @@ TEST_CASE( "iOS formatter keeps labels and image metadata optional without punct
 
     const auto formatted = formatOsTraceRecord( record, OsTraceFormatOptions{ false, true, true } );
     CHECK( formatted.bytes
-           == "2023-11-14 22:13:20.123456 Runner{}[4242] <ERROR>: bad \xef\xbf\xbd payload" );
+           == "2023-11-14 22:13:20.123456+00:00 Runner{}[4242] <ERROR>: bad \xef\xbf\xbd payload" );
 
     record.processPath.reset();
     record.message.reset();
     const auto missing = formatOsTraceRecord( record, OsTraceFormatOptions{ false, true, true } );
-    CHECK( missing.bytes == "2023-11-14 22:13:20.123456 {}[4242] <ERROR>: " );
+    CHECK( missing.bytes == "2023-11-14 22:13:20.123456+00:00 {}[4242] <ERROR>: " );
 }
 
 TEST_CASE(
