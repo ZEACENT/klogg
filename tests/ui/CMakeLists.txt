@@ -5,6 +5,7 @@ set(UI_TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/crawlerwidget_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/concatenatedlogdata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foldercrawler_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/foldercrawler_pending_failure_test.cpp
 )
 
 LIST(APPEND UI_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/mainwindow_test.cpp)

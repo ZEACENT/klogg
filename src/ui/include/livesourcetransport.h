@@ -133,6 +133,7 @@ protected:
     virtual Command clearCommand() const = 0;
     virtual void prepareStreamingSession();
     virtual void filterReceivedBytes( QByteArray& data );
+    virtual QString normalizeStreamingError( const QString& error ) const;
     virtual void startProcessAsync( QProcess& process );
     virtual AsyncStartupTiming asyncStartupTiming() const;
 

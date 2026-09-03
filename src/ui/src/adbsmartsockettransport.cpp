@@ -161,7 +161,8 @@ public:
         featureClient_ = createClient();
         auto* const client = featureClient_.data();
         connectFeatureClient( client, generation, operationId );
-        client->requestHostService( generation, operationId, HostService::Features );
+        client->requestTransportHostService( generation, operationId, transportSelection(),
+                                             TransportHostService::Features );
     }
 
     void stop( Generation generation )
@@ -190,7 +191,8 @@ public:
         operation.requestId = requestId;
         clearOperations_.emplace( operationId, std::move( operation ) );
         connectClearClient( client, generation, operationId );
-        client->requestHostService( generation, operationId, HostService::Features );
+        client->requestTransportHostService( generation, operationId, transportSelection(),
+                                             TransportHostService::Features );
     }
 
     QString lastError() const
@@ -264,8 +266,9 @@ private:
                 if ( !supportsShellV2( features ) ) {
                     failStream(
                         generation,
-                        QObject::tr( "ADB server does not advertise required shell_v2 support; "
-                                     "use a compatible ADB server." ) );
+                        QObject::tr(
+                            "Selected ADB device does not advertise required shell_v2 support; "
+                            "use a compatible ADB device." ) );
                     return;
                 }
                 startLogcat( generation );
@@ -279,9 +282,10 @@ private:
                      || featureClient_ != client || !isActive( generation ) ) {
                     return;
                 }
-                failStream( generation,
-                            contextualError( QObject::tr( "ADB server features negotiation" ), code,
-                                             diagnostic ) );
+                failStream(
+                    generation,
+                    contextualError( QObject::tr( "Selected ADB device features negotiation" ),
+                                     code, diagnostic ) );
             } );
     }
 
@@ -353,7 +357,8 @@ private:
                 auto error = QObject::tr( "ADB logcat exited with code %1." ).arg( exitCode );
                 if ( !diagnostic.isEmpty() ) {
                     error.append( QStringLiteral( " " ) );
-                    error.append( diagnostic );
+                    error.append( QString::fromStdString(
+                        normalizeLogcatStreamError( diagnostic.toStdString() ) ) );
                 }
                 failStream( generation, error );
             } );
@@ -396,8 +401,9 @@ private:
                 if ( !supportsShellV2( features ) ) {
                     completeClear(
                         operationId, false,
-                        QObject::tr( "ADB server does not advertise required shell_v2 support; "
-                                     "cannot clear logcat with this server." ) );
+                        QObject::tr(
+                            "Selected ADB device does not advertise required shell_v2 support; "
+                            "cannot clear logcat on this device." ) );
                     return;
                 }
 
@@ -450,9 +456,10 @@ private:
                     return;
                 }
 
-                const auto operation = found->second.phase == ClearPhase::Features
-                                           ? QObject::tr( "ADB logcat clear features negotiation" )
-                                           : QObject::tr( "ADB logcat clear" );
+                const auto operation
+                    = found->second.phase == ClearPhase::Features
+                          ? QObject::tr( "Selected ADB device logcat clear features negotiation" )
+                          : QObject::tr( "ADB logcat clear" );
                 auto error = contextualError( operation, code, diagnostic );
                 const auto stderrDiagnostic = trimmedDiagnostic( found->second.stderrBytes );
                 if ( !stderrDiagnostic.isEmpty() ) {

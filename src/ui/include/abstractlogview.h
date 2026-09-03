@@ -250,9 +250,13 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // route clicks to collapse/expand instead of selection.
     virtual LineKind lineKind( LineNumber lineNumber ) const;
 
-    // Line number to display for line at the given index
+    // Line number to display for line at the given index.
     virtual LineNumber displayLineNumber( LineNumber lineNumber ) const;
     virtual LineNumber lineIndex( LineNumber lineNumber ) const;
+    // Largest displayed label used only to size/render the line-number gutter.
+    // It is not the visible row count or a navigation bound; navigation must use
+    // logData_->getNbLine(), because filtered views can display source labels far
+    // larger than their compact row model.
     virtual LineNumber maxDisplayLineNumber() const;
 
     // Returns whether search range graying should be applied (true by default)

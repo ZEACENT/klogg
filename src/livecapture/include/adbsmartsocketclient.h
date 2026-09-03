@@ -98,9 +98,11 @@ public:
     AdbSmartSocketClient& operator=( const AdbSmartSocketClient& ) = delete;
 
     void requestHostService( Generation generation, OperationId operationId, HostService service );
+    void requestTransportHostService( Generation generation, OperationId operationId,
+                                      const TransportSelection& transport,
+                                      TransportHostService service );
     void startShellService( Generation generation, OperationId operationId,
-                            const TransportSelection& transport,
-                            const std::string& service );
+                            const TransportSelection& transport, const std::string& service );
     void cancelGeneration( Generation generation );
 
 Q_SIGNALS:

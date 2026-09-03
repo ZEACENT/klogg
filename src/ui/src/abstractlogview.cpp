@@ -892,12 +892,20 @@ void AbstractLogView::doRegisterShortcuts()
         horizontalScrollBar()->triggerAction( QScrollBar::SliderPageStepAdd );
     } );
 
-    registerShortcut( ShortcutAction::LogViewJumpToTop,
-                      [ this ]() { selectAndDisplayLine( 0_lnum ); } );
+    registerShortcut( ShortcutAction::LogViewJumpToTop, [ this ]() {
+        if ( logData_->getNbLine() == 0_lcount ) {
+            return;
+        }
+        selectAndDisplayLine( 0_lnum );
+    } );
     registerShortcut( ShortcutAction::LogViewJumpToBottom, [ this ]() {
+        const auto totalRows = logData_->getNbLine();
+        if ( totalRows == 0_lcount ) {
+            return;
+        }
         const bool wasAtBottom = verticalScrollBar()->value() == verticalScrollBar()->maximum();
         if ( !wasAtBottom ) {
-            selectAndDisplayLine( maxDisplayLineNumber() - 1_lcount );
+            selectAndDisplayLine( LineNumber( totalRows.get() ) - 1_lcount );
             jumpToBottom();
         }
         else {
@@ -960,8 +968,12 @@ void AbstractLogView::doRegisterShortcuts()
     } );
 
     registerShortcut( ShortcutAction::LogViewSelectLinesDown, [ this ]() {
+        const auto totalRows = logData_->getNbLine();
+        if ( totalRows == 0_lcount ) {
+            return;
+        }
         auto newPosition = selectionCurrentEndPos_;
-        if ( newPosition.line() >= maxDisplayLineNumber() - 1_lcount ) {
+        if ( newPosition.line() >= LineNumber( totalRows.get() ) - 1_lcount ) {
             // Reached the end
             return;
         }
@@ -993,8 +1005,11 @@ std::optional<LineNumber> AbstractLogView::findMarkedLine( LineNumber from, bool
 {
     using LineTypeFlags = AbstractLogData::LineTypeFlags;
     if ( forward ) {
-        const auto total = maxDisplayLineNumber();
-        for ( auto i = from + 1_lcount; i < total; ++i ) {
+        const auto totalRows = logData_->getNbLine();
+        if ( totalRows == 0_lcount ) {
+            return {};
+        }
+        for ( auto i = from + 1_lcount; i < totalRows; ++i ) {
             if ( lineType( i ).testFlag( LineTypeFlags::Mark ) ) {
                 return i;
             }

@@ -153,7 +153,8 @@ private:
             }
             version_ = static_cast<std::uint32_t>( value );
             phase_ = Phase::Features;
-            client_->requestHostService( activeToken_, featuresOperation, HostService::Features );
+            client_->requestHostService( activeToken_, featuresOperation,
+                                         HostService::ServerFeatures );
             return;
         }
 

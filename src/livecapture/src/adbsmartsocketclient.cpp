@@ -187,7 +187,110 @@ public:
 
     void requestHostService( Generation generation, OperationId operationId, HostService service )
     {
-        const auto builtService = buildHostService( service );
+        const auto kind = service == HostService::TrackDevicesLong ? OperationKind::StreamingHost
+                                                                   : OperationKind::OneShotHost;
+        startHostOperation( generation, operationId, buildHostService( service ), kind );
+    }
+
+    void requestTransportHostService( Generation generation, OperationId operationId,
+                                      const TransportSelection& transport,
+                                      TransportHostService service )
+    {
+        startTransportOperation( generation, operationId, transport,
+                                 buildTransportHostService( service ),
+                                 OperationKind::TransportHost );
+    }
+
+    void startShellService( Generation generation, OperationId operationId,
+                            const TransportSelection& transport, const std::string& service )
+    {
+        if ( service.rfind( "shell,v2,", 0u ) != 0u || service.find( '\0' ) != std::string::npos ) {
+            emitRequestError(
+                generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                QStringLiteral(
+                    "ADB shell operations require a shell-v2 service without NUL bytes." ) );
+            return;
+        }
+
+        startTransportOperation(
+            generation, operationId, transport,
+            ProtocolResult<std::string>{ service, std::nullopt }, OperationKind::Shell );
+    }
+
+    void cancelGeneration( Generation generation )
+    {
+        if ( phase_ == Phase::Idle || generation_ != generation ) {
+            return;
+        }
+        invalidateOperation();
+    }
+
+private:
+    enum class OperationKind : std::uint8_t { OneShotHost, StreamingHost, TransportHost, Shell };
+    enum class Phase : std::uint8_t {
+        Idle,
+        Connecting,
+        Writing,
+        HostStatus,
+        HostReply,
+        OneShotHostEof,
+        TransportStatus,
+        ShellStatus,
+        ShellFrames
+    };
+
+    void startTransportOperation( Generation generation, OperationId operationId,
+                                  const TransportSelection& transport,
+                                  ProtocolResult<std::string> builtService, OperationKind kind )
+    {
+        const auto transportService = buildTransportService( transport );
+        if ( transportService.error.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              protocolDiagnostic( *transportService.error ) );
+            return;
+        }
+        if ( builtService.error.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              protocolDiagnostic( *builtService.error ) );
+            return;
+        }
+        if ( !transportService.value.has_value() || !builtService.value.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              QStringLiteral( "ADB transport or service builder returned no request." ) );
+            return;
+        }
+
+        const auto encodedTransport
+            = encodeSmartSocketRequest( bytesFromString( *transportService.value ) );
+        const auto encodedService
+            = encodeSmartSocketRequest( bytesFromString( *builtService.value ) );
+        if ( encodedTransport.error.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              protocolDiagnostic( *encodedTransport.error ) );
+            return;
+        }
+        if ( encodedService.error.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              protocolDiagnostic( *encodedService.error ) );
+            return;
+        }
+        if ( !encodedTransport.value.has_value() || !encodedService.value.has_value() ) {
+            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
+                              QStringLiteral( "ADB request encoder returned no request." ) );
+            return;
+        }
+
+        if ( !beginOperation( generation, operationId, kind ) ) {
+            return;
+        }
+        firstRequest_ = byteArrayFromBytes( *encodedTransport.value );
+        serviceRequest_ = byteArrayFromBytes( *encodedService.value );
+        connectSocket();
+    }
+
+    void startHostOperation( Generation generation, OperationId operationId,
+                             ProtocolResult<std::string> builtService, OperationKind kind )
+    {
         if ( builtService.error.has_value() ) {
             emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
                               protocolDiagnostic( *builtService.error ) );
@@ -211,85 +314,12 @@ public:
             return;
         }
 
-        const auto kind = service == HostService::TrackDevicesLong ? OperationKind::StreamingHost
-                                                                   : OperationKind::OneShotHost;
         if ( !beginOperation( generation, operationId, kind ) ) {
             return;
         }
         firstRequest_ = byteArrayFromBytes( *encoded.value );
         connectSocket();
     }
-
-    void startShellService( Generation generation, OperationId operationId,
-                            const TransportSelection& transport, const std::string& service )
-    {
-        if ( service.rfind( "shell,v2,", 0u ) != 0u || service.find( '\0' ) != std::string::npos ) {
-            emitRequestError(
-                generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                QStringLiteral(
-                    "ADB shell operations require a shell-v2 service without NUL bytes." ) );
-            return;
-        }
-
-        const auto transportService = buildTransportService( transport );
-        if ( transportService.error.has_value() ) {
-            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                              protocolDiagnostic( *transportService.error ) );
-            return;
-        }
-        if ( !transportService.value.has_value() ) {
-            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                              QStringLiteral( "ADB transport builder returned no request." ) );
-            return;
-        }
-
-        const auto encodedTransport
-            = encodeSmartSocketRequest( bytesFromString( *transportService.value ) );
-        const auto encodedShell = encodeSmartSocketRequest( bytesFromString( service ) );
-        if ( encodedTransport.error.has_value() ) {
-            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                              protocolDiagnostic( *encodedTransport.error ) );
-            return;
-        }
-        if ( encodedShell.error.has_value() ) {
-            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                              protocolDiagnostic( *encodedShell.error ) );
-            return;
-        }
-        if ( !encodedTransport.value.has_value() || !encodedShell.value.has_value() ) {
-            emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
-                              QStringLiteral( "ADB request encoder returned no request." ) );
-            return;
-        }
-
-        if ( !beginOperation( generation, operationId, OperationKind::Shell ) ) {
-            return;
-        }
-        firstRequest_ = byteArrayFromBytes( *encodedTransport.value );
-        shellRequest_ = byteArrayFromBytes( *encodedShell.value );
-        connectSocket();
-    }
-
-    void cancelGeneration( Generation generation )
-    {
-        if ( phase_ == Phase::Idle || generation_ != generation ) {
-            return;
-        }
-        invalidateOperation();
-    }
-
-private:
-    enum class OperationKind : std::uint8_t { OneShotHost, StreamingHost, Shell };
-    enum class Phase : std::uint8_t {
-        Idle,
-        Connecting,
-        Writing,
-        HostStatus,
-        HostReply,
-        TransportStatus,
-        ShellStatus,
-        ShellFrames
-    };
 
     bool beginOperation( Generation generation, OperationId operationId, OperationKind kind )
     {
@@ -319,7 +349,8 @@ private:
         phase_ = Phase::Connecting;
         nextReadPhase_ = Phase::Idle;
         firstRequest_.clear();
-        shellRequest_.clear();
+        serviceRequest_.clear();
+        pendingHostReply_.clear();
         writeBuffer_.clear();
         writeOffset_ = 0;
         statusDecoder_ = SmartSocketStatusDecoder( config_.maxHostReplyBytes );
@@ -393,8 +424,9 @@ private:
             return;
         }
 
-        const auto readPhase
-            = operationKind_ == OperationKind::Shell ? Phase::TransportStatus : Phase::HostStatus;
+        const auto usesTransportSelection = operationKind_ == OperationKind::TransportHost
+                                            || operationKind_ == OperationKind::Shell;
+        const auto readPhase = usesTransportSelection ? Phase::TransportStatus : Phase::HostStatus;
         startWrite( firstRequest_, readPhase );
     }
 
@@ -450,6 +482,13 @@ private:
         }
     }
 
+    void armReadDeadline()
+    {
+        armDeadline( AdbSmartSocketDeadlineKind::Read, config_.readTimeoutMs,
+                     AdbSmartSocketErrorCode::ReadTimeout,
+                     QStringLiteral( "ADB smart-socket read timed out." ) );
+    }
+
     void enterReadPhase()
     {
         cancelDeadline();
@@ -458,9 +497,7 @@ private:
         phase_ = nextReadPhase_;
         nextReadPhase_ = Phase::Idle;
         statusDecoder_.reset();
-        armDeadline( AdbSmartSocketDeadlineKind::Read, config_.readTimeoutMs,
-                     AdbSmartSocketErrorCode::ReadTimeout,
-                     QStringLiteral( "ADB smart-socket read timed out." ) );
+        armReadDeadline();
     }
 
     void consumeAvailableBytes()
@@ -525,9 +562,7 @@ private:
                 if ( phase_ == Phase::HostStatus ) {
                     statusDecoder_.reset();
                     phase_ = Phase::HostReply;
-                    armDeadline( AdbSmartSocketDeadlineKind::Read, config_.readTimeoutMs,
-                                 AdbSmartSocketErrorCode::ReadTimeout,
-                                 QStringLiteral( "ADB smart-socket read timed out." ) );
+                    armReadDeadline();
                     continue;
                 }
                 if ( phase_ == Phase::TransportStatus ) {
@@ -538,7 +573,10 @@ private:
                         return;
                     }
                     statusDecoder_.reset();
-                    startWrite( shellRequest_, Phase::ShellStatus );
+                    const auto serviceStatus = operationKind_ == OperationKind::TransportHost
+                                                   ? Phase::HostStatus
+                                                   : Phase::ShellStatus;
+                    startWrite( serviceRequest_, serviceStatus );
                     return;
                 }
 
@@ -589,11 +627,15 @@ private:
                     return;
                 }
 
-                const auto reply = byteArrayFromBytes( result.frames.front() );
-                finishSuccess();
-                Q_EMIT client_.hostReplyReceived( generation, operationId, reply );
+                pendingHostReply_ = byteArrayFromBytes( result.frames.front() );
+                phase_ = Phase::OneShotHostEof;
+                armReadDeadline();
                 return;
             }
+            case Phase::OneShotHostEof:
+                fail( AdbSmartSocketErrorCode::Protocol,
+                      QStringLiteral( "ADB one-shot host service returned trailing data." ) );
+                return;
             case Phase::ShellFrames: {
                 auto result = shellDecoder_.feed( bytes );
                 const auto serial = operationSerial_;
@@ -681,6 +723,15 @@ private:
             return;
         }
 
+        if ( phase_ == Phase::OneShotHostEof ) {
+            const auto generation = generation_;
+            const auto operationId = operationId_;
+            const auto reply = std::move( pendingHostReply_ );
+            finishSuccess();
+            Q_EMIT client_.hostReplyReceived( generation, operationId, reply );
+            return;
+        }
+
         fail( AdbSmartSocketErrorCode::UnexpectedEof,
               QStringLiteral(
                   "ADB smart-socket closed before the current protocol frame completed." ) );
@@ -753,7 +804,8 @@ private:
         cancelDeadline();
         writeBuffer_.clear();
         firstRequest_.clear();
-        shellRequest_.clear();
+        serviceRequest_.clear();
+        pendingHostReply_.clear();
         statusDecoder_.reset();
         hostReplyDecoder_.reset();
         shellDecoder_.reset();
@@ -791,7 +843,8 @@ private:
     DeadlineToken deadlineToken_{ 0 };
 
     QByteArray firstRequest_;
-    QByteArray shellRequest_;
+    QByteArray serviceRequest_;
+    QByteArray pendingHostReply_;
     QByteArray writeBuffer_;
     qint64 writeOffset_{ 0 };
 
@@ -824,6 +877,14 @@ void AdbSmartSocketClient::requestHostService( Generation generation, OperationI
                                                HostService service )
 {
     impl_->requestHostService( generation, operationId, service );
+}
+
+void AdbSmartSocketClient::requestTransportHostService( Generation generation,
+                                                        OperationId operationId,
+                                                        const TransportSelection& transport,
+                                                        TransportHostService service )
+{
+    impl_->requestTransportHostService( generation, operationId, transport, service );
 }
 
 void AdbSmartSocketClient::startShellService( Generation generation, OperationId operationId,

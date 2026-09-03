@@ -155,6 +155,13 @@ class FolderCrawlerWidget : public QWidget,
     // top-view-size shortcuts resize.
     QComboBox* visibilityCombo() const { return visibilityBox_; }
     QSplitter* viewsSplitter() const { return splitter_; }
+#ifdef KLOGG_TESTS
+    // Read-only seams for pending-open coalescing regressions. Returning the
+    // shared_ptr by const reference must not extend or otherwise change the
+    // ownership of the in-flight LogData.
+    const std::shared_ptr<LogData>& pendingMainDataForTest() const { return pendingMainData_; }
+    LineNumber pendingJumpLineForTest() const { return pendingJump_.line; }
+#endif
 
     // Restores the status label to the pre-search "Ready (N file(s))" text.
     void updateReadyStatus();
@@ -287,6 +294,10 @@ class FolderCrawlerWidget : public QWidget,
                              LinesCount nLines = LinesCount( 1 ),
                              LineColumn startCol = LineColumn( 0 ),
                              LineLength nSymbols = LineLength( 0 ) );
+    // Assign the complete pending selection payload in one place. Same-file
+    // pending opens update this payload without restarting the in-flight index.
+    void setPendingJumpPayload( LineNumber line, LinesCount nLines, LineColumn startCol,
+                                LineLength nSymbols );
     // (Re)bind the follow/refresh data-flow of the CURRENT currentMainData_ to
     // the main view: the per-file LogData self-registers with FileWatcher and
     // re-indexes on growth, but nothing else forwards those notifications to
@@ -489,12 +500,20 @@ class FolderCrawlerWidget : public QWidget,
     // pending jump, so the real completion early-returns and the new file's
     // jump/overview/encoding are never applied with the final index state.
     QMetaObject::Connection pendingMainDataConn_;
-    LineNumber pendingJumpLine_ = 0_lnum;
+    struct PendingJumpPayload {
+        LineNumber line = 0_lnum;
+        LinesCount lineCount = LinesCount( 1 );
+        LineColumn column = LineColumn( 0 );
+        LineLength length = LineLength( 0 );
+    };
     // Portion to mirror into the main view once the pending file is open
     // (plain row clicks use the defaults -> whole-line selection).
-    LinesCount pendingJumpNLines_ = LinesCount( 1 );
-    LineColumn pendingJumpCol_ = LineColumn( 0 );
-    LineLength pendingJumpLen_ = LineLength( 0 );
+    PendingJumpPayload pendingJump_;
+    // Every valid open request advances this revision. A pending load records
+    // the revision it started for, so a newer same-file click queued behind a
+    // failed completion can be retried once instead of being discarded.
+    std::uint64_t mainViewOpenRequestRevision_ = 0u;
+    std::uint64_t pendingLoadStartRevision_ = 0u;
 
     // Current search generation: streaming fileGroupReady/searchFinished signals
     // whose generation differs are dropped (superseded by a newer search).

@@ -1790,12 +1790,23 @@ void FolderCrawlerWidget::expandAll()
     }
 }
 
+void FolderCrawlerWidget::setPendingJumpPayload( LineNumber line, LinesCount nLines,
+                                                  LineColumn startCol, LineLength nSymbols )
+{
+    pendingJump_ = PendingJumpPayload{ line, nLines, startCol, nSymbols };
+}
+
 void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumber localLine,
                                               LinesCount nLines, LineColumn startCol,
                                               LineLength nSymbols )
 {
     if ( filePath.isEmpty() ) {
         return;
+    }
+
+    ++mainViewOpenRequestRevision_;
+    if ( mainViewOpenRequestRevision_ == 0u ) {
+        ++mainViewOpenRequestRevision_;
     }
 
     // Already showing this file -> just jump.
@@ -1857,6 +1868,16 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
         return;
     }
 
+    // A second synchronous selection in the same uncached file arrives while
+    // its LogData is still indexing. Keep that one in-flight open intact and
+    // only replace the selection it will consume on completion. Different-file,
+    // current-file, and cache-hit requests remain true supersession paths above
+    // or below this branch.
+    if ( pendingMainData_ != nullptr && filePath == pendingMainFilePath_ ) {
+        setPendingJumpPayload( localLine, nLines, startCol, nSymbols );
+        return;
+    }
+
     // Not loaded yet -> index the file asynchronously, then swap + jump.
     // Supersede any in-flight async open FIRST: disconnect its one-shot
     // loadingFinished connection so the abandoned LogData can never run the
@@ -1867,11 +1888,9 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
     // stale completion either.
     disconnect( pendingMainDataConn_ );
     pendingMainFilePath_ = filePath;
-    pendingJumpLine_ = localLine;
-    pendingJumpNLines_ = nLines;
-    pendingJumpCol_ = startCol;
-    pendingJumpLen_ = nSymbols;
+    setPendingJumpPayload( localLine, nLines, startCol, nSymbols );
     pendingMainData_ = std::make_shared<LogData>();
+    pendingLoadStartRevision_ = mainViewOpenRequestRevision_;
 
     // Store the connection so its lifetime is tied to the open it serves: the
     // lambda self-disconnects on completion, and the supersede paths above
@@ -1896,36 +1915,42 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                        // installs below.
                        disconnect( pendingMainDataConn_ );
                        if ( status != LoadingStatus::Successful ) {
-                           // Defensive (no test: there is no deterministic way
-                           // to force an indexer exception). Unreadable or
-                           // deleted files still report Successful with 0 lines
-                           // -- the indexer treats them as empty
-                           // (logdataworker.cpp:616-637) -- so this guard only
-                           // covers the indexer-exception Interrupted path. Do
-                           // NOT promote the failed load: keep the previous
-                           // file displayed (a failed FIRST open leaves the
-                           // placeholder, a supported state), drop the pending
-                           // state, and skip caching/jumping/emitting.
                            LOG_WARNING << "FolderCrawlerWidget: open of "
                                        << pendingMainFilePath_ << " finished with status "
                                        << static_cast<int>( status ) << "; keeping the "
                                           "previously displayed file";
-                           // Defer the LogData destruction past the current
-                           // emission: this lambda runs inside
-                           // LogData::indexingFinished's Q_EMIT, and resetting
-                           // the last shared_ptr ref here would free the object
-                           // whose indexingFinished epilogue
-                           // (finishOperationAndStartNext, logdata.cpp:286) is
-                           // still on the stack.
+
+                           const auto retryLatestRequest
+                               = mainViewOpenRequestRevision_ != pendingLoadStartRevision_;
+                           const auto retryRevision = mainViewOpenRequestRevision_;
+                           const auto retryPath = pendingMainFilePath_;
+                           const auto retryJump = pendingJump_;
+
+                           // Defer destruction past LogData::indexingFinished's
+                           // signal stack. If a newer same-file click arrived
+                           // after this load became terminal, start one fresh
+                           // load for its latest jump. Any still-newer request
+                           // advances the revision and suppresses this retry.
                            auto abandonedData = std::move( pendingMainData_ );
                            pendingMainFilePath_.clear();
-                           QTimer::singleShot( 0, this,
-                                               [ abandonedData ]() mutable { abandonedData.reset(); } );
+                           QTimer::singleShot(
+                               0, this,
+                               [ this, abandonedData = std::move( abandonedData ),
+                                 retryLatestRequest, retryRevision, retryPath,
+                                 retryJump ]() mutable {
+                                   abandonedData.reset();
+                                   if ( retryLatestRequest && pendingMainData_ == nullptr
+                                        && mainViewOpenRequestRevision_ == retryRevision ) {
+                                       openFileInMainView( retryPath, retryJump.line,
+                                                           retryJump.lineCount, retryJump.column,
+                                                           retryJump.length );
+                                   }
+                               } );
                            return;
                        }
                        currentMainData_ = pendingMainData_;
                        currentMainFilePath_ = pendingMainFilePath_;
-                       lastMainViewLine_ = pendingJumpLine_;
+                       lastMainViewLine_ = pendingJump_.line;
                        cacheMainViewData( currentMainFilePath_, currentMainData_ );
 
                        // Sync the display codec to the indexer-detected encoding
@@ -1950,8 +1975,8 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
                        // thread (loadingFinished is a queued signal), so threading is
                        // correct.
                        mainView_->setSearchPattern( currentSearchPattern_ );
-                       selectInMainView( pendingJumpLine_, pendingJumpNLines_,
-                                         pendingJumpCol_, pendingJumpLen_ );
+                       selectInMainView( pendingJump_.line, pendingJump_.lineCount,
+                                         pendingJump_.column, pendingJump_.length );
                        // getNbLine() is only valid now that indexing finished: the
                        // overview repoint MUST happen here, not at attachFile time.
                        refreshFileOverview( pendingMainFilePath_ );

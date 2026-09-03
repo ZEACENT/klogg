@@ -4,8 +4,8 @@
  * This file is part of klogg.
  *
  * RED contract for the passive native iOS stream worker. Every native call is
- * injected; the tests use no vendor headers, daemon, framework, device, Qt,
- * timer, subprocess, Python, or real device content.
+ * injected; the tests use no vendor headers, daemon, framework, device, timer,
+ * subprocess, Python, or real device content.
  */
 
 #include <catch2/catch.hpp>
@@ -48,12 +48,14 @@ struct FakeNative {
     std::int32_t deviceResult{ 0 };
     std::int32_t handshakeResult{ 0 };
     std::int32_t productVersionResult{ 0 };
+    std::int32_t timeZoneResult{ 0 };
     std::int32_t startServiceResult{ 0 };
     std::int32_t osTraceNewResult{ 0 };
     std::int32_t osTraceStartResult{ 0 };
     std::int32_t syslogNewResult{ 0 };
     std::int32_t syslogStartResult{ 0 };
     std::string productVersion{ "17.6.1" };
+    std::string timeZone{ "America/New_York" };
     bool allocateDeviceOnError{ false };
     bool allocateLockdownOnError{ false };
     bool allocateServiceOnError{ false };
@@ -62,6 +64,7 @@ struct FakeNative {
     bool nullDeviceOnSuccess{ false };
     bool nullLockdownOnSuccess{ false };
     bool nullServiceOnSuccess{ false };
+    bool nullTimeZoneOnSuccess{ false };
     bool nullOsTraceOnSuccess{ false };
     bool nullSyslogOnSuccess{ false };
     bool emitOsTraceErrorDuringStart{ false };
@@ -98,10 +101,16 @@ struct FakeNative {
     bool handshakeReleased{ false };
     std::mutex handshakeMutex;
     std::condition_variable handshakeChanged;
+    bool blockTimeZone{ false };
+    bool timeZoneEntered{ false };
+    bool timeZoneReleased{ false };
+    std::mutex timeZoneMutex;
+    std::condition_variable timeZoneChanged;
 
     ~FakeNative()
     {
         releaseHandshake();
+        releaseTimeZone();
         interruptBlockedReceive();
     }
 
@@ -163,6 +172,32 @@ struct FakeNative {
         std::lock_guard<std::mutex> lock( handshakeMutex );
         handshakeReleased = true;
         handshakeChanged.notify_all();
+    }
+
+    void waitAtTimeZone()
+    {
+        if ( !blockTimeZone ) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock( timeZoneMutex );
+        timeZoneEntered = true;
+        timeZoneChanged.notify_all();
+        if ( !timeZoneChanged.wait_for( lock, 2s, [ this ] { return timeZoneReleased; } ) ) {
+            abiViolation = true;
+        }
+    }
+
+    bool waitUntilTimeZoneEntered()
+    {
+        std::unique_lock<std::mutex> lock( timeZoneMutex );
+        return timeZoneChanged.wait_for( lock, 2s, [ this ] { return timeZoneEntered; } );
+    }
+
+    void releaseTimeZone()
+    {
+        std::lock_guard<std::mutex> lock( timeZoneMutex );
+        timeZoneReleased = true;
+        timeZoneChanged.notify_all();
     }
 
     void beginCallback()
@@ -360,16 +395,37 @@ std::int32_t freeLockdown( NativeLockdownClient client )
 std::int32_t getString( NativeLockdownClient client, const char* domain, const char* key,
                         char** value )
 {
-    if ( client != LockdownHandle || domain != nullptr || key == nullptr
-         || std::string{ key } != "ProductVersion" ) {
+    if ( client != LockdownHandle || domain != nullptr || key == nullptr ) {
         fake->abiViolation = true;
+        return -1;
     }
-    fake->record( "get:ProductVersion" );
-    if ( fake->productVersionResult != 0 ) {
-        return fake->productVersionResult;
+
+    const std::string requestedKey{ key };
+    fake->record( "get:" + requestedKey );
+    const std::string* returnedValue = nullptr;
+    std::int32_t result = 0;
+    if ( requestedKey == "ProductVersion" ) {
+        returnedValue = &fake->productVersion;
+        result = fake->productVersionResult;
     }
-    auto bytes = std::make_unique<char[]>( fake->productVersion.size() + 1u );
-    std::memcpy( bytes.get(), fake->productVersion.c_str(), fake->productVersion.size() + 1u );
+    else if ( requestedKey == "TimeZone" ) {
+        fake->waitAtTimeZone();
+        returnedValue = &fake->timeZone;
+        result = fake->timeZoneResult;
+    }
+    else {
+        fake->abiViolation = true;
+        return -1;
+    }
+
+    if ( result != 0 ) {
+        return result;
+    }
+    if ( requestedKey == "TimeZone" && fake->nullTimeZoneOnSuccess ) {
+        return 0;
+    }
+    auto bytes = std::make_unique<char[]>( returnedValue->size() + 1u );
+    std::memcpy( bytes.get(), returnedValue->c_str(), returnedValue->size() + 1u );
     *value = bytes.release();
     return 0;
 }
@@ -675,6 +731,8 @@ TEST_CASE( "native iOS worker preflights an existing pair record before passive 
                                                    "lockdown-existing-pair",
                                                    "get:ProductVersion",
                                                    "string-free",
+                                                   "get:TimeZone",
+                                                   "string-free",
                                                    "service-start:com.apple.os_trace_relay",
                                                    "ostrace-new",
                                                    "ostrace-start" };
@@ -754,11 +812,12 @@ TEST_CASE( "native iOS worker selects os_trace for iOS 9 and newer and syslog on
         const char* version;
         const char* service;
         const char* client;
+        bool queriesTimeZone;
     };
     const std::vector<VersionCase> cases{
-        { "8.4.1", "service-start:com.apple.syslog_relay", "syslog-new" },
-        { "9.0", "service-start:com.apple.os_trace_relay", "ostrace-new" },
-        { "17.6.1", "service-start:com.apple.os_trace_relay", "ostrace-new" },
+        { "8.4.1", "service-start:com.apple.syslog_relay", "syslog-new", false },
+        { "9.0", "service-start:com.apple.os_trace_relay", "ostrace-new", true },
+        { "17.6.1", "service-start:com.apple.os_trace_relay", "ostrace-new", true },
     };
 
     for ( const auto& value : cases ) {
@@ -775,10 +834,165 @@ TEST_CASE( "native iOS worker selects os_trace for iOS 9 and newer and syslog on
                != state.calls.cend() );
         CHECK( std::find( state.calls.cbegin(), state.calls.cend(), value.client )
                != state.calls.cend() );
+        if ( value.queriesTimeZone ) {
+            CHECK( indexOf( state.calls, "get:ProductVersion" )
+                   < indexOf( state.calls, "get:TimeZone" ) );
+            CHECK( indexOf( state.calls, "get:TimeZone" ) < indexOf( state.calls, value.service ) );
+        }
+        else {
+            CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "get:TimeZone" )
+                   == state.calls.cend() );
+        }
         CHECK( observed.ready == std::vector<Generation>{ 20u } );
         worker.stop( 20u );
         executor.runAllOnWorker();
     }
+}
+
+TEST_CASE( "TimeZone native errors retain the existing Lockdown classification",
+           "[ios][native][stream][startup][timezone][error][mapping]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.timeZoneResult = -8;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 201u ),
+                                  observed.callbacks() );
+
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    CHECK( observed.ready.empty() );
+    REQUIRE( observed.errors.size() == 1u );
+    const auto& classified = observed.errors.front().second;
+    CHECK( classified.error.code == "ios-device-disconnected" );
+    CHECK( classified.error.category == ErrorCategory::Device );
+    CHECK( classified.error.scope == ErrorScope::Device );
+    CHECK( classified.error.retryPolicy == RetryPolicy::WaitForDevice );
+    CHECK( classified.error.code != "ios-device-time-zone-invalid" );
+    CHECK( classified.error.nativeDetail.find( "read TimeZone" ) != std::string::npos );
+    CHECK( classified.error.nativeDetail.find( "-8" ) != std::string::npos );
+    CHECK_FALSE( classified.awaitingUserReason.has_value() );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(),
+                      "service-start:com.apple.os_trace_relay" )
+           == state.calls.cend() );
+    CHECK_FALSE( state.abiViolation );
+}
+
+TEST_CASE( "os_trace startup rejects null empty or unrecognized device time zones before readiness",
+           "[ios][native][stream][startup][timezone][configuration]" )
+{
+    struct TimeZoneCase {
+        const char* name;
+        std::function<void( FakeNative& )> arrange;
+        const char* diagnostic;
+    };
+    const std::vector<TimeZoneCase> cases{
+        { "missing null TimeZone", []( FakeNative& value ) { value.nullTimeZoneOnSuccess = true; },
+          "missing" },
+        { "empty TimeZone", []( FakeNative& value ) { value.timeZone.clear(); }, "unrecognized" },
+        { "unrecognized TimeZone",
+          []( FakeNative& value ) { value.timeZone = "Mars/Olympus_Mons"; }, "unrecognized" },
+    };
+
+    Generation generation = 210u;
+    for ( const auto& value : cases ) {
+        INFO( value.name );
+        FakeNative state;
+        fake = &state;
+        value.arrange( state );
+        ManualExecutor executor;
+        ObservedCallbacks observed;
+        IosNativeStreamWorker worker( makeApi(), executor.executor(), config( ++generation ),
+                                      observed.callbacks() );
+
+        REQUIRE( worker.start() );
+        executor.runAllOnWorker();
+
+        CHECK( observed.ready.empty() );
+        REQUIRE( observed.errors.size() == 1u );
+        const auto& error = observed.errors.front().second.error;
+        CHECK( error.code == "ios-device-time-zone-invalid" );
+        CHECK( error.category == ErrorCategory::Configuration );
+        CHECK( error.scope == ErrorScope::Device );
+        CHECK( error.retryPolicy == RetryPolicy::Never );
+        CHECK( error.message.find( "time zone" ) != std::string::npos );
+        CHECK( error.nativeDetail.find( "TimeZone" ) != std::string::npos );
+        CHECK( error.nativeDetail.find( value.diagnostic ) != std::string::npos );
+        CHECK( indexOf( state.calls, "get:ProductVersion" )
+               < indexOf( state.calls, "get:TimeZone" ) );
+        CHECK( std::find( state.calls.cbegin(), state.calls.cend(),
+                          "service-start:com.apple.os_trace_relay" )
+               == state.calls.cend() );
+        CHECK_FALSE( state.abiViolation );
+    }
+}
+
+TEST_CASE( "stop during a blocked TimeZone query prevents all startup publication and service work",
+           "[ios][native][stream][startup][timezone][stop][barrier]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.blockTimeZone = true;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 220u ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    auto startup = executor.startNextOnWorker();
+    if ( !state.waitUntilTimeZoneEntered() ) {
+        state.releaseTimeZone();
+        startup.join();
+        FAIL( "native startup did not reach the TimeZone query barrier" );
+    }
+
+    worker.stop( 220u );
+    REQUIRE( executor.pending() == 1u );
+    state.releaseTimeZone();
+    startup.join();
+    executor.runAllOnWorker();
+
+    CHECK( observed.ready.empty() );
+    CHECK( observed.bytesAvailable.empty() );
+    CHECK( observed.errors.empty() );
+    CHECK( observed.stopped == std::vector<Generation>{ 220u } );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(),
+                      "service-start:com.apple.os_trace_relay" )
+           == state.calls.cend() );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "ostrace-new" )
+           == state.calls.cend() );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "ostrace-start" )
+           == state.calls.cend() );
+    CHECK( std::count( state.calls.cbegin(), state.calls.cend(), "lockdown-free" ) == 1 );
+    CHECK( std::count( state.calls.cbegin(), state.calls.cend(), "device-free" ) == 1 );
+    CHECK_FALSE( state.abiViolation );
+}
+
+TEST_CASE( "native iOS startup validates the selected stream ABI before device metadata I/O",
+           "[ios][native][stream][startup][abi][ordering]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto api = makeApi();
+    api.osTraceStart = nullptr;
+    IosNativeStreamWorker worker( std::move( api ), executor.executor(), config( 221u ),
+                                  observed.callbacks() );
+
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-native-abi-incomplete" );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "get:ProductVersion" )
+           != state.calls.cend() );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "get:TimeZone" )
+           == state.calls.cend() );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(),
+                      "service-start:com.apple.os_trace_relay" )
+           == state.calls.cend() );
 }
 
 TEST_CASE( "native iOS readiness requires service descriptor stream handle and armed read",
@@ -970,6 +1184,63 @@ TEST_CASE( "startup owns partial native handles and rejects success with null ha
     }
 }
 
+TEST_CASE( "os_trace packets are emitted in the fake source device time zone",
+           "[ios][native][stream][callback][format][timezone]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.timeZone = "Asia/Kolkata";
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 401u ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+    REQUIRE( observed.ready == std::vector<Generation>{ 401u } );
+
+    state.emitOsTrace( osTracePacket() );
+
+    REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 401u } );
+    const auto drained = worker.drain();
+    REQUIRE( drained.has_value() );
+    const std::string output( drained->bytes.begin(), drained->bytes.end() );
+    CHECK( output
+           == "2023-11-15 03:43:20.123456+05:30 Test{}[42] <ERROR>: native log\n" );
+    CHECK( output.find( "2023-11-14 22:13:20" ) == std::string::npos );
+    CHECK_FALSE( state.abiViolation );
+
+    worker.stop( 401u );
+    executor.runAllOnWorker();
+}
+
+TEST_CASE( "os_trace rejects epochs the device time zone cannot represent",
+           "[ios][native][stream][callback][format][timezone][malformed]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 402u ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+    REQUIRE( observed.ready == std::vector<Generation>{ 402u } );
+
+    auto packet = osTracePacket();
+    putLe64( packet, 55u, std::numeric_limits<std::uint64_t>::max() );
+    state.emitOsTrace( packet );
+
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-ostrace-malformed-packet" );
+    CHECK( observed.errors.front().second.error.nativeDetail.find( "timestamp" )
+           != std::string::npos );
+    CHECK_FALSE( worker.drain().has_value() );
+    CHECK_FALSE( state.abiViolation );
+
+    worker.stop( 402u );
+    executor.runAllOnWorker();
+}
+
 TEST_CASE( "os_trace callback copies decodes formats and queues bytes without unwinding into C",
            "[ios][native][stream][callback][ownership][format]" )
 {
@@ -1125,6 +1396,8 @@ TEST_CASE(
 {
     FakeNative state;
     fake = &state;
+    state.timeZoneResult = -8;
+    state.timeZone = "Not/A_TimeZone";
     ManualExecutor executor;
     ObservedCallbacks observed;
     auto options = config( 51u, "8.4" );
@@ -1132,6 +1405,9 @@ TEST_CASE(
     IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
     REQUIRE( worker.start() );
     executor.runAllOnWorker();
+    CHECK( observed.ready == std::vector<Generation>{ 51u } );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "get:TimeZone" )
+           == state.calls.cend() );
 
     CHECK_NOTHROW( state.emitSyslog( "alp" ) );
     CHECK( observed.bytesAvailable.empty() );
