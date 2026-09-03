@@ -653,6 +653,29 @@ IosNativeStreamConfig config( Generation generation, std::string version = "17.6
     result.ansiOutputEnabled = false;
     result.queueLimits = LiveDataQueueLimits{ 64u * 1024u, 32u };
     result.servicePolicy = IosNativeServicePolicy::AutomaticByProductVersion;
+    result.timeZoneResolverFactory
+        = []( const std::string& timeZoneId ) -> std::optional<OsTraceUtcOffsetResolver> {
+        std::optional<std::int32_t> fixedOffset;
+        if ( timeZoneId == "America/New_York" ) {
+            fixedOffset = -5 * 60 * 60;
+        }
+        else if ( timeZoneId == "Asia/Kolkata" ) {
+            fixedOffset = 5 * 60 * 60 + 30 * 60;
+        }
+        if ( !fixedOffset ) {
+            return std::nullopt;
+        }
+        return OsTraceUtcOffsetResolver{
+            [ offset = *fixedOffset ]( std::uint64_t epochSeconds )
+                -> std::optional<std::int32_t> {
+                if ( epochSeconds
+                     > static_cast<std::uint64_t>( std::numeric_limits<std::int64_t>::max() ) ) {
+                    return std::nullopt;
+                }
+                return offset;
+            }
+        };
+    };
     result.cleanupDeadline = 75ms;
     return result;
 }

@@ -97,6 +97,31 @@ bool usesOsTrace( const IosNativeStreamConfig& config, const std::string& produc
     }
 }
 
+std::optional<OsTraceUtcOffsetResolver>
+qtDeviceTimeZoneResolver( const std::string& deviceIanaId )
+{
+    QTimeZone sourceTimeZone( QByteArray::fromStdString( deviceIanaId ) );
+    if ( !sourceTimeZone.isValid() ) {
+        return std::nullopt;
+    }
+
+    return OsTraceUtcOffsetResolver{
+        [ sourceTimeZone = std::move( sourceTimeZone ) ]( std::uint64_t epochSeconds )
+            -> std::optional<std::int32_t> {
+            if ( epochSeconds
+                 > static_cast<std::uint64_t>( std::numeric_limits<qint64>::max() ) ) {
+                return std::nullopt;
+            }
+            const auto utc = QDateTime::fromSecsSinceEpoch(
+                static_cast<qint64>( epochSeconds ), QTimeZone::utc() );
+            if ( !utc.isValid() ) {
+                return std::nullopt;
+            }
+            return static_cast<std::int32_t>( sourceTimeZone.offsetFromUtc( utc ) );
+        }
+    };
+}
+
 } // namespace
 
 struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<State> {
@@ -652,13 +677,16 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 return;
             }
 
-            const bool timeZoneIdEmpty = rawTimeZone[ 0 ] == '\0';
-            const QTimeZone validatedTimeZone{ QByteArray( rawTimeZone ) };
+            const std::string timeZoneId( rawTimeZone );
+            const auto utcOffsetResolver
+                = config.timeZoneResolverFactory
+                      ? config.timeZoneResolverFactory( timeZoneId )
+                      : qtDeviceTimeZoneResolver( timeZoneId );
             openedTimeZone.reset();
             if ( cancelled() ) {
                 return;
             }
-            if ( timeZoneIdEmpty || !validatedTimeZone.isValid() ) {
+            if ( timeZoneId.empty() || !utcOffsetResolver ) {
                 publishFailure( localError(
                     ErrorCategory::Configuration, "ios-device-time-zone-invalid",
                     ErrorScope::Device, RetryPolicy::Never,
@@ -669,21 +697,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 return;
             }
 
-            osTraceFormatter.emplace( OsTraceFormatOptions{
-                config.ansiOutputEnabled, true, true,
-                [ sourceTimeZone = validatedTimeZone ]( std::uint64_t epochSeconds )
-                    -> std::optional<std::int32_t> {
-                    if ( epochSeconds
-                         > static_cast<std::uint64_t>( std::numeric_limits<qint64>::max() ) ) {
-                        return std::nullopt;
-                    }
-                    const auto utc = QDateTime::fromSecsSinceEpoch(
-                        static_cast<qint64>( epochSeconds ), QTimeZone::utc() );
-                    if ( !utc.isValid() ) {
-                        return std::nullopt;
-                    }
-                    return static_cast<std::int32_t>( sourceTimeZone.offsetFromUtc( utc ) );
-                } } );
+            osTraceFormatter.emplace( OsTraceFormatOptions{ config.ansiOutputEnabled, true, true,
+                                                             *utcOffsetResolver } );
             if ( cancelled() ) {
                 return;
             }

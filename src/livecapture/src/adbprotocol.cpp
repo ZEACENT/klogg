@@ -632,7 +632,9 @@ std::string normalizeLogcatStreamError( const std::string& diagnostic )
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options )
 {
     std::string service{ "shell,v2,raw:logcat" };
+    // appendBounded mutates the command and must stop at the first overflow.
     for ( const auto& argument : buildLogcatFormatArguments( options.ansiOutputEnabled ) ) {
+        // cppcheck-suppress useStlAlgorithm
         if ( !appendBounded( service, " " ) || !appendBounded( service, argument ) ) {
             return commandError( ProtocolErrorCode::PayloadTooLarge,
                                  "ADB logcat service exceeds the smart-socket payload limit." );
