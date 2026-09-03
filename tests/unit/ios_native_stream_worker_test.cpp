@@ -952,6 +952,32 @@ TEST_CASE( "os_trace startup rejects null empty or unrecognized device time zone
     }
 }
 
+TEST_CASE( "os_trace startup rejects an empty device time-zone resolver",
+           "[ios][native][stream][startup][timezone][configuration]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 219u );
+    options.timeZoneResolverFactory
+        = []( const std::string& ) -> std::optional<OsTraceUtcOffsetResolver> {
+        return OsTraceUtcOffsetResolver{};
+    };
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), std::move( options ),
+                                  observed.callbacks() );
+
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    CHECK( observed.ready.empty() );
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-device-time-zone-invalid" );
+    CHECK( std::find( state.calls.cbegin(), state.calls.cend(),
+                      "service-start:com.apple.os_trace_relay" )
+           == state.calls.cend() );
+}
+
 TEST_CASE( "stop during a blocked TimeZone query prevents all startup publication and service work",
            "[ios][native][stream][startup][timezone][stop][barrier]" )
 {

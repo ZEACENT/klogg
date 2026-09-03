@@ -686,7 +686,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             if ( cancelled() ) {
                 return;
             }
-            if ( timeZoneId.empty() || !utcOffsetResolver ) {
+            if ( timeZoneId.empty() || !utcOffsetResolver || !( *utcOffsetResolver ) ) {
                 publishFailure( localError(
                     ErrorCategory::Configuration, "ios-device-time-zone-invalid",
                     ErrorScope::Device, RetryPolicy::Never,
