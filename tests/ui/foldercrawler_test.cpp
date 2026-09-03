@@ -196,10 +196,8 @@ struct FilterFavoritesGuard {
 // (two definitions of access_by<AbstractLogViewPrivate> would be an ODR clash).
 struct FolderViewTestAccess {
     // FolderCrawlerWidget's pending-open state is intentionally private. These
-    // wrappers keep the RED test coupled only to two narrow KLOGG_TESTS accessors
+    // wrappers keep the regression coupled only to two narrow KLOGG_TESTS accessors
     // instead of exposing the production members or using a private/public macro.
-    // The accessors do not exist yet; that compile failure is an acceptable RED
-    // until the production fix supplies the seam.
     static std::weak_ptr<LogData> pendingMainData( const FolderCrawlerWidget* widget )
     {
         return widget->pendingMainDataForTest();

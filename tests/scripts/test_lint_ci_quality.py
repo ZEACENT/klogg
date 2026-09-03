@@ -39,13 +39,14 @@ jobs:
       CODEQL_ACTION_OVERLAY_ANALYSIS_CODE_SCANNING_CPP: "false"
     timeout-minutes: 30
     steps:
+      - uses: ./.github/actions/agent-setup
+      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+      - run: cmake --build build -t klogg_codeql_thirdparty
+      - run: cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt && ! grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt
       - uses: github/codeql-action/init@{CODEQL_PINNED}
         with:
           languages: c-cpp
           build-mode: manual
-          config-file: ./.github/codeql-config.yml
-      - uses: ./.github/actions/agent-setup
-      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON
       - run: cmake --build build -t klogg
       - uses: github/codeql-action/analyze@{CODEQL_PINNED} # v4.37.9
 """
@@ -1129,16 +1130,6 @@ jobs:
     def test_secure_codeql_workflow_is_accepted(self):
         self.assertEqual(MODULE.codeql_workflow_issues(secure_codeql_workflow()), [])
 
-    def test_codeql_requires_config_excluding_vendored_sources(self):
-        text = secure_codeql_workflow().replace(
-            "          config-file: ./.github/codeql-config.yml\n",
-            "",
-            1,
-        )
-        issues = MODULE.codeql_workflow_issues(text)
-        self.assertEqual(len(issues), 1)
-        self.assertIn("codeql-config.yml", issues[0])
-
     def test_release_mutation_requires_publishing_pat(self):
         message = "release mutation must bind GITHUB_TOKEN"
         good = """\
@@ -1162,6 +1153,71 @@ jobs:
         )
         self.assertTrue(
             any(message in issue for issue in MODULE.release_publisher_token_issues(bad))
+        )
+
+    def test_release_token_policy_rejects_comment_spoofs(self):
+        workflow = """\
+jobs:
+  publish:
+    steps:
+      - name: Spoofed release mutation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          # test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" -F draft=false
+"""
+        issues = MODULE.release_publisher_token_issues(workflow)
+        self.assertTrue(any("release mutation must bind" in issue for issue in issues))
+
+        pat_without_guard = workflow.replace(
+            "GITHUB_TOKEN: ${{ github.token }}",
+            "GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}",
+            1,
+        )
+        issues = MODULE.release_publisher_token_issues(pat_without_guard)
+        self.assertTrue(any("must fail fast" in issue for issue in issues))
+
+    def test_release_token_policy_parses_inline_run_steps(self):
+        inline = """\
+jobs:
+  publish:
+    steps:
+      - run: |
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" -F draft=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+"""
+        self.assertEqual(MODULE.release_publisher_token_issues(inline), [])
+        unguarded = inline.replace(
+            '          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }\n',
+            "",
+            1,
+        ).replace(
+            "        env:\n",
+            "        env:\n"
+            "          SPOOF: 'test -n \"${GITHUB_TOKEN:-}\" || { echo \"::error::KLOGG_GITHUB_TOKEN secret is missing or empty\"; exit 1; }'\n",
+            1,
+        )
+        self.assertTrue(
+            any(
+                "must fail fast" in issue
+                for issue in MODULE.release_publisher_token_issues(unguarded)
+            )
+        )
+
+        unsafe = inline.replace(
+            "GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}",
+            "GITHUB_TOKEN: ${{ github.token }}",
+            1,
+        )
+        self.assertTrue(
+            any(
+                "release mutation must bind" in issue
+                for issue in MODULE.release_publisher_token_issues(unsafe)
+            )
         )
 
     def test_release_pat_step_must_fail_fast_on_empty_secret(self):
@@ -1337,6 +1393,108 @@ jobs:
                 bad = good.replace(marker, "", 1)
                 self.assertNotEqual(bad, good)
                 self.assertIn(message, MODULE.codeql_workflow_issues(bad))
+
+    def test_codeql_prebuilds_vendored_targets_before_extractor_init(self):
+        message = "CodeQL must prebuild vendored targets before extractor initialization"
+        good = secure_codeql_workflow()
+        self.assertNotIn(message, MODULE.codeql_workflow_issues(good))
+
+        missing = good.replace(
+            "      - run: cmake --build build -t klogg_codeql_thirdparty\n", "", 1
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(missing))
+
+        marker = "      - run: cmake --build build -t klogg_codeql_thirdparty\n"
+        after_init = good.replace(marker, "", 1).replace(
+            f"      - uses: github/codeql-action/init@{CODEQL_PINNED}\n",
+            f"      - uses: github/codeql-action/init@{CODEQL_PINNED}\n"
+            + marker,
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(after_init))
+
+        configure = '      - run: cmake -S "$GITHUB_WORKSPACE" -B build -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" -DFETCHCONTENT_FULLY_DISCONNECTED=ON\n'
+        prebuild = "      - run: cmake --build build -t klogg_codeql_thirdparty\n"
+        before_configure = good.replace(configure + prebuild, prebuild + configure, 1)
+        self.assertIn(message, MODULE.codeql_workflow_issues(before_configure))
+
+        comment_spoof = missing.replace(
+            "      - run: cmake --build build -t klogg\n",
+            "      # run: cmake --build build -t klogg_codeql_thirdparty\n"
+            "      - run: cmake --build build -t klogg\n",
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(comment_spoof))
+
+    def test_codeql_verifies_no_vendored_work_remains_after_prebuild(self):
+        message = "CodeQL must verify that no vendored compile work remains"
+        good = secure_codeql_workflow()
+        self.assertNotIn(message, MODULE.codeql_workflow_issues(good))
+
+        guard = "      - run: cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt && ! grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt\n"
+        missing = good.replace(guard, "", 1)
+        self.assertIn(message, MODULE.codeql_workflow_issues(missing))
+
+        spoofed = missing.replace(
+            "      - uses: github/codeql-action/init@",
+            "      # " + guard.strip() + "\n      - uses: github/codeql-action/init@",
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(spoofed))
+
+        after_init = missing.replace(
+            "          build-mode: manual\n",
+            "          build-mode: manual\n" + guard,
+            1,
+        )
+        self.assertIn(message, MODULE.codeql_workflow_issues(after_init))
+
+    def test_codeql_thirdparty_target_covers_every_compiled_vendor(self):
+        good = """\
+add_custom_target(klogg_codeql_thirdparty)
+set(
+  klogg_codeql_thirdparty_targets
+  simdutf
+  roaring
+  libuchardet
+  streamvbyte
+  klogg_karchive
+  kdsingleapp
+  xxhash
+  whereami
+  kdtoolbox
+  efsw
+  tbb
+  tbbmalloc
+  mimalloc-static
+  maddy
+  FastPFor
+)
+foreach(target IN LISTS klogg_codeql_thirdparty_targets)
+  if(TARGET ${target})
+    add_dependencies(klogg_codeql_thirdparty ${target})
+  endif()
+endforeach()
+"""
+        self.assertEqual(MODULE.codeql_thirdparty_target_issues(good), [])
+
+        missing = good.replace("  maddy\n", "", 1)
+        self.assertTrue(
+            any(
+                "maddy" in issue
+                for issue in MODULE.codeql_thirdparty_target_issues(missing)
+            )
+        )
+
+        comment_spoof = missing.replace(
+            "  FastPFor\n", "  # maddy\n  FastPFor\n", 1
+        )
+        self.assertTrue(
+            any(
+                "maddy" in issue
+                for issue in MODULE.codeql_thirdparty_target_issues(comment_spoof)
+            )
+        )
 
     def test_codeql_build_cannot_be_spoofed_by_an_unrelated_job(self):
         good = secure_codeql_workflow()

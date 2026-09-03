@@ -39,15 +39,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          languages: c-cpp
-          build-mode: manual
-          # Exclude vendored third-party sources fetched into cpm_cache/ at
-          # configure time; only first-party code produces repo alerts.
-          config-file: ./.github/codeql-config.yml
-
       - uses: ./.github/actions/agent-setup
 
       - name: Install Linux deps
@@ -72,6 +63,23 @@ jobs:
             -DCPM_SOURCE_CACHE="$GITHUB_WORKSPACE/cpm_cache" \
             -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Prebuild vendored dependencies outside CodeQL tracing
+        run: cmake --build build -t klogg_codeql_thirdparty
+
+      - name: Verify traced build contains only first-party work
+        run: |
+          cmake --build build -t klogg -- -n > /tmp/codeql-traced-plan.txt
+          if grep -E 'cpm_cache|_deps|3rdparty/CMakeFiles' /tmp/codeql-traced-plan.txt; then
+            echo "::error::vendored compile work remains after CodeQL dependency prebuild"
+            exit 1
+          fi
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: c-cpp
+          build-mode: manual
 
       - name: Build traced application
         run: cmake --build build -t klogg

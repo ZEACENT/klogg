@@ -1,8 +1,0 @@
-# CodeQL analyzes first-party code only. `cpm_cache/` is the CPM source cache
-# (CPM_SOURCE_CACHE in CI) holding vendored third-party checkouts materialized
-# at configure time; findings there belong to the upstream projects, not this
-# repository's alert backlog. Keep this exclusion in sync with
-# scripts/lint_ci_quality.py, which enforces that the CodeQL workflow
-# references this file.
-paths-ignore:
-  - cpm_cache
