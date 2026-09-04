@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -185,6 +186,43 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         )
         return by_id
 
+    @contextlib.contextmanager
+    def patched_stack_inspection(self):
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "install_name",
+                    side_effect=lambda path: f"@rpath/{path.name}",
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(
+                    VERIFY_MODULE, "rpaths", return_value=["@loader_path"]
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(
+                    VERIFY_MODULE, "architectures", return_value=["arm64"]
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(
+                    VERIFY_MODULE, "deployment_target", return_value="14.0"
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(VERIFY_MODULE, "dependencies", return_value=[])
+            )
+            exported_symbols = patches.enter_context(
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "exported_symbols",
+                    return_value={"required_symbol"},
+                )
+            )
+            yield exported_symbols
+
     def test_catalog_dispatch_retains_its_executor_through_service_shutdown(self):
         source = required_text(IOS_LIVE_SERVICES)
         self.assertIn(
@@ -253,11 +291,14 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                 "--receipt",
                 str(receipt_path),
             ]
-            with (
-                mock.patch.object(sys, "argv", argv),
-                mock.patch.object(VERIFY_MODULE, "validate_build_receipt"),
-                mock.patch.object(VERIFY_MODULE, "verify_stack", return_value=[]),
-            ):
+            with contextlib.ExitStack() as patches:
+                patches.enter_context(mock.patch.object(sys, "argv", argv))
+                patches.enter_context(
+                    mock.patch.object(VERIFY_MODULE, "validate_build_receipt")
+                )
+                patches.enter_context(
+                    mock.patch.object(VERIFY_MODULE, "verify_stack", return_value=[])
+                )
                 self.assertNotEqual(VERIFY_MODULE.main(), 0)
 
         valid_build = {
@@ -712,28 +753,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                 },
                 "forbidden_dynamic_references": [],
             }
-            with (
-                mock.patch.object(
-                    VERIFY_MODULE,
-                    "install_name",
-                    side_effect=lambda path: f"@rpath/{path.name}",
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "rpaths", return_value=["@loader_path"]
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "architectures", return_value=["arm64"]
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "deployment_target", return_value="14.0"
-                ),
-                mock.patch.object(VERIFY_MODULE, "dependencies", return_value=[]),
-                mock.patch.object(
-                    VERIFY_MODULE,
-                    "exported_symbols",
-                    return_value={"required_symbol"},
-                ) as exported_symbols,
-            ):
+            with self.patched_stack_inspection() as exported_symbols:
                 evidence = VERIFY_MODULE.verify_stack(
                     {"artifact_contract": contract},
                     stack_root,
@@ -774,28 +794,7 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
                 },
                 "forbidden_dynamic_references": [],
             }
-            with (
-                mock.patch.object(
-                    VERIFY_MODULE,
-                    "install_name",
-                    side_effect=lambda path: f"@rpath/{path.name}",
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "rpaths", return_value=["@loader_path"]
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "architectures", return_value=["arm64"]
-                ),
-                mock.patch.object(
-                    VERIFY_MODULE, "deployment_target", return_value="14.0"
-                ),
-                mock.patch.object(VERIFY_MODULE, "dependencies", return_value=[]),
-                mock.patch.object(
-                    VERIFY_MODULE,
-                    "exported_symbols",
-                    return_value={"required_symbol"},
-                ),
-            ):
+            with self.patched_stack_inspection():
                 with self.assertRaisesRegex(
                     VERIFY_MODULE.VerificationError, r"unrequired|physical closure"
                 ):
