@@ -13,6 +13,7 @@ CI_QUALITY_RUNNER = ROOT / "scripts" / "run_ci_quality.py"
 PYTHON_BASELINE = "3.8"
 PEP585_BUILTINS = {"dict", "list", "set", "tuple"}
 UNSUPPORTED_STRING_METHODS = {"removeprefix", "removesuffix"}
+UNSUPPORTED_PATH_METHODS = {"readlink"}
 
 
 def python_sources():
@@ -40,11 +41,10 @@ def annotations(tree):
             yield node.annotation
 
 
-def parenthesized_with_lines(source):
-    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-    significant = (
+def unsupported_parenthesized_with_lines(source):
+    tokens = [
         token
-        for token in tokens
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
         if token.type
         not in {
             tokenize.COMMENT,
@@ -53,13 +53,22 @@ def parenthesized_with_lines(source):
             tokenize.NL,
             tokenize.NEWLINE,
         }
-    )
-    previous = None
+    ]
     findings = []
-    for token in significant:
-        if previous is not None and previous.string == "with" and token.string == "(":
-            findings.append(previous.start[0])
-        previous = token
+    for index, token in enumerate(tokens[:-1]):
+        if token.string != "with" or tokens[index + 1].string != "(":
+            continue
+        depth = 0
+        for context_token in tokens[index + 1 :]:
+            if context_token.string == "(":
+                depth += 1
+            elif context_token.string == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif depth == 1 and context_token.string in {",", "as"}:
+                findings.append(token.start[0])
+                break
     return findings
 
 
@@ -77,12 +86,16 @@ class PythonBaselineContractTest(unittest.TestCase):
         source = """\
 # with (
 message = "with ("
+with (single_manager):
+    consume_single()
+with (manager_factory(first, second)):
+    consume_factory()
 with first_manager, second_manager as value:
     consume(value)
 """
-        self.assertEqual(parenthesized_with_lines(source), [])
+        self.assertEqual(unsupported_parenthesized_with_lines(source), [])
         self.assertEqual(
-            parenthesized_with_lines(
+            unsupported_parenthesized_with_lines(
                 "with (\n    first_manager,\n    second_manager as value,\n):\n    consume(value)\n"
             ),
             [1],
@@ -94,7 +107,7 @@ with first_manager, second_manager as value:
             source = path.read_text(encoding="utf-8")
             findings.extend(
                 f"{path.relative_to(ROOT)}:{line}"
-                for line in parenthesized_with_lines(source)
+                for line in unsupported_parenthesized_with_lines(source)
             )
         self.assertEqual(findings, [])
 
@@ -123,6 +136,25 @@ with first_manager, second_manager as value:
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr in UNSUPPORTED_STRING_METHODS
+                ):
+                    findings.append(
+                        f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 0)}"
+                    )
+        self.assertEqual(findings, [])
+
+    def test_python_39_pathlib_helpers_are_not_used(self):
+        findings = []
+        for path in python_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in UNSUPPORTED_PATH_METHODS
+                    and not (
+                        isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "os"
+                    )
                 ):
                     findings.append(
                         f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 0)}"

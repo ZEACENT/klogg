@@ -1361,8 +1361,14 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             pattern.format(version=self.VERSION)
             for pattern in self.release_contract["packages"]
         ]
+        self.assertEqual(
+            len(package_names),
+            len(package_specs),
+            "release package fixture and display specifications must stay aligned",
+        )
         packages = []
-        for name, (group, label) in zip(package_names, package_specs):
+        for index, name in enumerate(package_names):
+            group, label = package_specs[index]
             package = self.write_asset(name, f"qualified package bytes for {name}\n".encode())
             packages.append(
                 {
@@ -1720,6 +1726,18 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             ]
         )
         return "\n".join(lines)
+
+    def test_package_fixture_and_display_specs_must_stay_aligned(self):
+        self.release_contract["packages"] = [
+            *self.release_contract["packages"],
+            "klogg-{version}-unexpected.pkg",
+        ]
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"package fixture and display specifications must stay aligned",
+        ):
+            self.make_publication()
 
     def test_target_publication_has_exact_23_uploaded_and_25_visible_assets(self):
         manifest, document = self.make_publication()

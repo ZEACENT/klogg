@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -131,7 +132,7 @@ def direct_dylib_target(path: pathlib.Path, libdir: pathlib.Path, label: str) ->
     target = path
     if path.is_symlink():
         try:
-            relative_target = path.readlink()
+            relative_target = pathlib.Path(os.readlink(path))
         except OSError as error:
             raise VerificationError(f"unreadable iOS native dylib alias {label}: {error}") from error
         if (

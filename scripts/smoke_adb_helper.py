@@ -30,6 +30,7 @@ PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT = [
     "ANDROID_ADB_SERVER_PORT",
     "ANDROID_ADB_SERVER_ADDRESS",
 ]
+SMART_SOCKET_POLL_TIMEOUT_SECONDS = 0.25
 SERVER_STABILITY_WINDOW_SECONDS = 0.25
 
 
@@ -99,7 +100,7 @@ def recv_exact(connection: socket.socket, size: int) -> bytes:
     return payload
 
 
-def query_smart_socket_version(port: int, timeout: float = 0.25) -> str:
+def query_smart_socket_version(port: int, timeout: float) -> str:
     request = b"host:version"
     frame = f"{len(request):04x}".encode("ascii") + request
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
@@ -117,7 +118,7 @@ def smart_socket_version(port: int, deadline: float) -> str:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            return query_smart_socket_version(port)
+            return query_smart_socket_version(port, SMART_SOCKET_POLL_TIMEOUT_SECONDS)
         except (ConnectionError, OSError, RuntimeError, ValueError) as error:
             last_error = error
             time.sleep(0.05)
@@ -197,7 +198,7 @@ def smoke_adb(
 
         report["host_version"] = smart_socket_version(port, time.monotonic() + timeout_seconds)
         try:
-            repeated_version = query_smart_socket_version(port)
+            repeated_version = query_smart_socket_version(port, timeout_seconds)
         except (ConnectionError, OSError, RuntimeError, ValueError) as error:
             raise RuntimeError(
                 f"private ADB server did not remain available after its first probe: {error}"
@@ -213,7 +214,7 @@ def smoke_adb(
                 "private ADB server did not remain stable after repeated probes"
             )
         try:
-            stable_version = query_smart_socket_version(port)
+            stable_version = query_smart_socket_version(port, timeout_seconds)
         except (ConnectionError, OSError, RuntimeError, ValueError) as error:
             raise RuntimeError(
                 f"private ADB server did not remain responsive throughout its stability window: {error}"

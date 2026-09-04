@@ -1134,6 +1134,7 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
         server_connection_limit: int | None = None,
         *,
         stall_after_connection_limit: bool = False,
+        response_delays: tuple[float, ...] = (),
     ) -> pathlib.Path:
         path = self.root / ("complete-adb" if complete_client else "server-only-adb")
         source = textwrap.dedent(
@@ -1150,6 +1151,7 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
             COMPLETE_CLIENT = {complete_client!r}
             SERVER_CONNECTION_LIMIT = {server_connection_limit!r}
             STALL_AFTER_CONNECTION_LIMIT = {stall_after_connection_limit!r}
+            RESPONSE_DELAYS = {response_delays!r}
             running = True
 
             def stop(*_args):
@@ -1230,6 +1232,8 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
                     header = recv_exact(connection, 4)
                     size = int(header.decode("ascii"), 16)
                     request = recv_exact(connection, size)
+                    if accepted_connections < len(RESPONSE_DELAYS):
+                        time.sleep(RESPONSE_DELAYS[accepted_connections])
                     if request == b"host:version":
                         connection.sendall(b"OKAY00040029")
                     else:
@@ -1312,6 +1316,34 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
         self.assertEqual(report.get("required_probe"), production_server_invocation_probe(port))
         self.assertIsInstance(report.get("server_pid"), int)
         self.assert_reported_endpoint_closed(report)
+
+    def test_smoke_gives_the_second_probe_the_configured_timeout_budget(self):
+        adb = self.make_fake_adb(
+            complete_client=True,
+            response_delays=(0.0, 0.35, 0.0),
+        )
+        report_path = self.root / "slow-second-probe.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report.get("host_version"), "0029")
+        self.assertEqual(report.get("stability_host_version"), "0029")
+
+    def test_smoke_gives_the_final_probe_the_configured_timeout_budget(self):
+        adb = self.make_fake_adb(
+            complete_client=True,
+            response_delays=(0.0, 0.0, 0.35),
+        )
+        report_path = self.root / "slow-final-probe.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report.get("host_version"), "0029")
+        self.assertEqual(report.get("stability_host_version"), "0029")
 
     def test_smoke_rejects_server_that_exits_after_one_successful_probe(self):
         adb = self.make_fake_adb(complete_client=True, server_connection_limit=1)
