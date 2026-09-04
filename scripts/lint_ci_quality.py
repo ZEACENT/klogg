@@ -2085,6 +2085,92 @@ def workflow_display_name(text: str) -> str | None:
     return None
 
 
+def workflow_mapping_block(
+    lines: list[str], parent_key: str, parent_indent: int
+) -> dict[str, tuple[str, list[str]]] | None:
+    """Parse one indentation-delimited mapping and reject ambiguous structure."""
+    parent_offsets = []
+    for offset, line in enumerate(lines):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == parent_key
+            and len(entry.group("indent")) == parent_indent
+        ):
+            parent_offsets.append(offset)
+    if len(parent_offsets) != 1:
+        return None
+    parent_offset = parent_offsets[0]
+    parent_entry = KEY_VALUE_RE.match(lines[parent_offset])
+    if parent_entry is None or scalar(parent_entry.group("value")):
+        return None
+
+    end = len(lines)
+    child_indent: int | None = None
+    starts: list[tuple[int, str]] = []
+    for offset in range(parent_offset + 1, len(lines)):
+        line = lines[offset]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        if "\t" in line[: len(line) - len(line.lstrip())]:
+            return None
+        indent = len(line) - len(line.lstrip())
+        if indent <= parent_indent:
+            end = offset
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if child_indent is None:
+            if entry is None:
+                return None
+            child_indent = indent
+        if indent == child_indent:
+            if entry is None:
+                return None
+            starts.append((offset, entry.group("key")))
+    if child_indent is None or len({key for _, key in starts}) != len(starts):
+        return None
+
+    result: dict[str, tuple[str, list[str]]] = {}
+    for index, (start, key) in enumerate(starts):
+        stop = starts[index + 1][0] if index + 1 < len(starts) else end
+        entry = KEY_VALUE_RE.match(lines[start])
+        if entry is None:
+            return None
+        result[key] = (
+            yaml_value(lines, start, entry.group("value"), child_indent),
+            lines[start:stop],
+        )
+    return result
+
+
+def workflow_trigger_mapping(text: str) -> dict[str, tuple[str, list[str]]] | None:
+    return workflow_mapping_block(text.splitlines(), "on", 0)
+
+
+def shell_case_labels(run_text: str, selector: str) -> set[str] | None:
+    lines = [
+        active
+        for line in run_text.splitlines()
+        if (active := strip_yaml_comment(line))
+    ]
+    start_lines = {f'case "${{{selector}}}" in', f'case "${selector}" in'}
+    starts = [index for index, line in enumerate(lines) if line in start_lines]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    try:
+        end = lines.index("esac", start + 1)
+    except ValueError:
+        return None
+    labels = []
+    for line in lines[start + 1 : end]:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*|\*)\)(?:\s|$)", line)
+        if match is not None:
+            labels.append(match.group(1))
+    return set(labels) if len(labels) == len(set(labels)) else None
+
+
 RELEASE_PATCH_ENDPOINT_RE = re.compile(r'gh\s+api\s+-X\s+PATCH\s+"[^"]*/releases/')
 RELEASE_PUBLISHER_TOKEN_DIRECTIVE = "${{ secrets.KLOGG_GITHUB_TOKEN }}"
 RELEASE_PUBLISHER_TOKEN_GUARD = (
@@ -2147,8 +2233,211 @@ def release_publisher_token_issues(text: str) -> list[str]:
     return issues
 
 
+RELEASE_BODY_MESSAGE = (
+    "release body must be rendered from the verified publication manifest"
+)
+RELEASE_INVENTORY_MESSAGE = (
+    "release publication must upload exactly 23 consolidated assets"
+)
+RELEASE_CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
+CONTINUOUS_CRITICAL_MESSAGE = (
+    "continuous public release mutations must share one rollback-protected PAT critical section"
+)
+RELEASE_MALFORMED_MESSAGE = (
+    "release publication workflow must fail closed when its structure is malformed"
+)
+STABLE_TRIGGER_MESSAGE = (
+    "stable release workflow must support only workflow_dispatch publication"
+)
+CONTINUOUS_TRIGGER_MESSAGE = (
+    "continuous release workflow must use only completed CI Build workflow_run events"
+)
+STABLE_RUN_PROJECTION_MESSAGE = (
+    "stable release selection must model push validation and workflow_dispatch receipt evidence"
+)
+
+
+def stable_release_trigger_issues(text: str) -> list[str]:
+    triggers = workflow_trigger_mapping(text)
+    if triggers is None or set(triggers) != {"workflow_dispatch"}:
+        return [STABLE_TRIGGER_MESSAGE]
+    value, _ = triggers["workflow_dispatch"]
+    return [] if value == "" else [STABLE_TRIGGER_MESSAGE]
+
+
+def continuous_release_trigger_issues(text: str) -> list[str]:
+    triggers = workflow_trigger_mapping(text)
+    if triggers is None or set(triggers) != {"workflow_run"}:
+        return [CONTINUOUS_TRIGGER_MESSAGE]
+    value, block = triggers["workflow_run"]
+    if value:
+        return [CONTINUOUS_TRIGGER_MESSAGE]
+    fields = workflow_mapping_block(block, "workflow_run", 2)
+    if fields is None or set(fields) != {"workflows", "types"}:
+        return [CONTINUOUS_TRIGGER_MESSAGE]
+    workflows = parse_inline_yaml_list(fields["workflows"][0])
+    event_types = parse_inline_yaml_list(fields["types"][0])
+    if workflows != {"CI Build"} or event_types != {"completed"}:
+        return [CONTINUOUS_TRIGGER_MESSAGE]
+    return []
+
+
+def stable_release_run_projection_issues(text: str) -> list[str]:
+    release = workflow_job_blocks(text).get("release")
+    if release is None:
+        return [STABLE_RUN_PROJECTION_MESSAGE]
+    matches = []
+    for step in workflow_step_blocks(release):
+        fields, _ = workflow_step_fields(step)
+        if fields.get("name") == "Select trusted CI run":
+            matches.append(fields.get("run", ""))
+    if len(matches) != 1:
+        return [STABLE_RUN_PROJECTION_MESSAGE]
+    run_text = matches[0]
+    if shell_case_labels(run_text, "run_event") != {
+        "push",
+        "workflow_dispatch",
+        "*",
+    }:
+        return [STABLE_RUN_PROJECTION_MESSAGE]
+    active_lines = {
+        active
+        for line in run_text.splitlines()
+        if (active := strip_yaml_comment(line))
+    }
+    if 'test "$KLOGG_EVIDENCE_LEVEL" = validation || {' not in active_lines:
+        return [STABLE_RUN_PROJECTION_MESSAGE]
+    return []
+
+
+def release_workflow_structure_is_malformed(text: str, job_name: str) -> bool:
+    blocks = workflow_job_blocks(text)
+    block = blocks.get(job_name)
+    if block is None or not workflow_step_blocks(block):
+        return True
+    for line in block:
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or entry.group("key") != "steps":
+            continue
+        if scalar(entry.group("value")):
+            return True
+        return False
+    return True
+
+
+def release_download_workflow_issues(
+    text: str, job_name: str, create_step_name: str, channel: str
+) -> list[str]:
+    issues: list[str] = []
+    blocks = workflow_job_blocks(text)
+    job = blocks.get(job_name)
+    if job is None:
+        return [RELEASE_MALFORMED_MESSAGE]
+    parsed_steps = [workflow_step_fields(step) for step in workflow_step_blocks(job)]
+    create_matches = [
+        (fields, children)
+        for fields, children in parsed_steps
+        if fields.get("name") == create_step_name
+    ]
+    renderer_matches = []
+    for fields, children in parsed_steps:
+        run_text = fields.get("run", "")
+        active_run = "\n".join(
+            active
+            for line in run_text.splitlines()
+            if (active := strip_yaml_comment(line))
+        )
+        if (
+            fields.get("name") == "Verify manifest and render release downloads"
+            and re.search(
+                r"(?:^|\n)python3 scripts/render_release_downloads\.py(?:\s|$)",
+                active_run,
+            )
+            and re.search(
+                r"(?:^|\n)python3 scripts/verify_source_publication_manifest\.py(?:\s|$)",
+                active_run,
+            )
+        ):
+            renderer_matches.append((fields, children, active_run))
+    if len(create_matches) != 1 or len(renderer_matches) != 1:
+        issues.append(RELEASE_BODY_MESSAGE)
+    else:
+        create_fields, create_children = create_matches[0]
+        if (
+            create_children.get("with", {}).get("body_path") != "release-body.md"
+            or "body" in create_children.get("with", {})
+        ):
+            issues.append(RELEASE_BODY_MESSAGE)
+        renderer_run = renderer_matches[0][2]
+        if (
+            "--manifest packages-publication/klogg-source-publication-manifest.json"
+            not in renderer_run
+            or "--assets-root packages-publication" not in renderer_run
+            or "--changelog-file release-changelog.txt" not in renderer_run
+            or "--output release-body.md" not in renderer_run
+        ):
+            issues.append(RELEASE_BODY_MESSAGE)
+        upload = create_children.get("with", {}).get("files")
+        if upload != "./packages-publication/*":
+            issues.append(RELEASE_INVENTORY_MESSAGE)
+        if channel == "continuous":
+            public_name = create_children.get("with", {}).get("name", "")
+            if (
+                "Candidate" in public_name
+                or public_name != "Continuous Build ${{ env.KLOGG_VERSION }}"
+            ):
+                issues.append(RELEASE_CANDIDATE_MESSAGE)
+    if len(renderer_matches) != 1 or 'test "$asset_count" -eq 23' not in (
+        renderer_matches[0][2] if renderer_matches else ""
+    ):
+        if RELEASE_INVENTORY_MESSAGE not in issues:
+            issues.append(RELEASE_INVENTORY_MESSAGE)
+    if re.search(r"packages-publication/[^\n]*\.sha256", text):
+        if RELEASE_INVENTORY_MESSAGE not in issues:
+            issues.append(RELEASE_INVENTORY_MESSAGE)
+    return issues
+
+
+def continuous_publication_critical_section_issues(text: str) -> list[str]:
+    publish = workflow_job_blocks(text).get("publish")
+    if publish is None:
+        return [CONTINUOUS_CRITICAL_MESSAGE]
+    matches = []
+    for step in workflow_step_blocks(publish):
+        fields, children = workflow_step_fields(step)
+        if fields.get("name") == "Publish verified continuous release transaction":
+            matches.append((fields, children))
+    if len(matches) != 1:
+        return [CONTINUOUS_CRITICAL_MESSAGE]
+    fields, children = matches[0]
+    active_run = "\n".join(
+        active
+        for line in fields.get("run", "").splitlines()
+        if (active := strip_yaml_comment(line))
+    )
+    active_lines = set(active_run.splitlines())
+    required_substrings = (
+        '-f tag_name="$backup_tag" -F draft=true',
+        'gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous"',
+        '-f tag_name=continuous -f name="Continuous Build ${KLOGG_VERSION}"',
+    )
+    if (
+        children.get("env", {}).get("GITHUB_TOKEN")
+        != RELEASE_PUBLISHER_TOKEN_DIRECTIVE
+        or "rollback_continuous_promotion() {" not in active_lines
+        or "trap rollback_continuous_promotion ERR" not in active_lines
+        or any(marker not in active_run for marker in required_substrings)
+    ):
+        return [CONTINUOUS_CRITICAL_MESSAGE]
+    return []
+
+
 def stable_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    issues.extend(stable_release_trigger_issues(text))
+    issues.extend(stable_release_run_projection_issues(text))
+    if release_workflow_structure_is_malformed(text, "release"):
+        issues.append(RELEASE_MALFORMED_MESSAGE)
     if workflow_display_name(text) != "Publish Release (Stable)":
         issues.append('stable release workflow must be named "Publish Release (Stable)"')
     commands = shell_commands(text)
@@ -2182,12 +2471,20 @@ def stable_release_workflow_issues(text: str) -> list[str]:
         or "trap rollback_stable_promotion ERR" not in text
     ):
         issues.append("stable release promotion must roll back every post-publish failure")
+    issues.extend(
+        release_download_workflow_issues(
+            text, "release", "Create GitHub Release", "stable"
+        )
+    )
     issues.extend(release_publisher_token_issues(text))
     return issues
 
 
 def continuous_release_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    issues.extend(continuous_release_trigger_issues(text))
+    if release_workflow_structure_is_malformed(text, "publish"):
+        issues.append(RELEASE_MALFORMED_MESSAGE)
     if workflow_display_name(text) != "Publish Release (Continuous)":
         issues.append(
             'continuous release workflow must be named "Publish Release (Continuous)"'
@@ -2221,6 +2518,15 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
         issues.append(
             "continuous rollback must reconcile a candidate created without an emitted id"
         )
+    issues.extend(
+        release_download_workflow_issues(
+            text,
+            "publish",
+            "Create continuous candidate draft",
+            "continuous",
+        )
+    )
+    issues.extend(continuous_publication_critical_section_issues(text))
     issues.extend(release_publisher_token_issues(text))
     return issues
 

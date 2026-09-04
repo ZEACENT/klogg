@@ -463,6 +463,24 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertNotRegex(adb_cmake, r"find_program\([^)]*\badb\b")
         self.assertNotRegex(adb_cmake, r"(?:find_package|pkg_check_modules|find_library)\([^)]*libusb")
 
+    def test_cmake_package_verification_requires_the_exact_binary_smoke_receipt(self):
+        adb_cmake = self.required_text(ADB_CMAKE)
+        verification_commands = re.findall(
+            r'COMMAND "\$\{Python3_EXECUTABLE\}" "\$\{_klogg_adb_verify\}"(?P<body>.*?)'
+            r'(?:RESULT_VARIABLE|DEPENDS klogg_adb_helper)',
+            adb_cmake,
+            re.DOTALL,
+        )
+        self.assertEqual(len(verification_commands), 2)
+        self.assertIn(
+            '--binary-smoke-receipt "${_klogg_adb_artifact_package_smoke}"',
+            verification_commands[0],
+        )
+        self.assertIn(
+            '--binary-smoke-receipt "${_klogg_adb_stage}/package-smoke.json"',
+            verification_commands[1],
+        )
+
     def test_windows_installer_runs_makensis_directly_and_fail_closed(self):
         action = self.required_text(WIN_PACKAGE)
         installer = action.split("    - name: Win installer", 1)[1].split(
@@ -579,10 +597,14 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertIn("--enable-new-dtags", superbuild)
         self.assertIn("CMAKE_BUILD_PARALLEL_LEVEL", build_script)
 
-        for kind in REQUIRED_RELEASE_ASSET_KINDS:
-            self.assertIn(kind, ci_release)
-        self.assertIn("adb-helper", ci_release)
-        self.assertRegex(ci_release, r"sha256sum[^\n]*adb")
+        for marker in (
+            "prepare_source_publication.py",
+            "--adb-source-root ./adb-helper-legal-assets",
+            "klogg-source-publication-manifest.json",
+            "packages-publication/SHA256SUMS",
+            "./packages-publication/*",
+        ):
+            self.assertIn(marker, ci_release)
 
     def test_release_paths_do_not_use_prebuilt_sdk_path_or_floating_adb(self):
         paths = (

@@ -23,6 +23,23 @@ PROBES = [
     "smart-socket-host-version",
     "no-lingering-process",
 ]
+PRODUCTION_SERVER_ARGUMENTS = ["server", "nodaemon"]
+PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT = [
+    "ADB_VENDOR_KEYS",
+    "ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_ADDRESS",
+]
+SERVER_STABILITY_WINDOW_SECONDS = 0.25
+
+
+def production_server_invocation_probe(port: int) -> dict:
+    return {
+        "name": "production-server-invocation",
+        "arguments": PRODUCTION_SERVER_ARGUMENTS,
+        "environment": {"ADB_SERVER_SOCKET": f"tcp:{port}"},
+        "scrubbed_environment": PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT,
+    }
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -82,21 +99,25 @@ def recv_exact(connection: socket.socket, size: int) -> bytes:
     return payload
 
 
-def smart_socket_version(port: int, deadline: float) -> str:
-    last_error: Exception | None = None
+def query_smart_socket_version(port: int, timeout: float = 0.25) -> str:
     request = b"host:version"
     frame = f"{len(request):04x}".encode("ascii") + request
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
+        connection.sendall(frame)
+        status = recv_exact(connection, 4)
+        if status != b"OKAY":
+            raise RuntimeError(f"host:version returned {status!r}")
+        size_text = recv_exact(connection, 4)
+        size = int(size_text.decode("ascii"), 16)
+        payload = recv_exact(connection, size)
+        return payload.decode("ascii")
+
+
+def smart_socket_version(port: int, deadline: float) -> str:
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.25) as connection:
-                connection.sendall(frame)
-                status = recv_exact(connection, 4)
-                if status != b"OKAY":
-                    raise RuntimeError(f"host:version returned {status!r}")
-                size_text = recv_exact(connection, 4)
-                size = int(size_text.decode("ascii"), 16)
-                payload = recv_exact(connection, size)
-                return payload.decode("ascii")
+            return query_smart_socket_version(port)
         except (ConnectionError, OSError, RuntimeError, ValueError) as error:
             last_error = error
             time.sleep(0.05)
@@ -153,12 +174,15 @@ def smoke_adb(
         # 127.0.0.1; tcp:<hostname>:<port> is rejected by the native server.
         server_socket_spec = f"tcp:{port}"
         server_environment = {
-            key: value for key, value in os.environ.items() if not key.startswith("ADB_")
+            key: value
+            for key, value in os.environ.items()
+            if key not in PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT
         }
+        server_environment["ADB_SERVER_SOCKET"] = server_socket_spec
         server_environment["HOME"] = isolated_home.name
         server_environment["USERPROFILE"] = isolated_home.name
         server = subprocess.Popen(
-            [*executable, "-L", server_socket_spec, "server", "nodaemon"],
+            [*executable, *PRODUCTION_SERVER_ARGUMENTS],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -168,9 +192,38 @@ def smoke_adb(
         )
         report["server_pid"] = server.pid
         report["server_endpoint"] = f"tcp:127.0.0.1:{port}"
+        report["required_probe"] = production_server_invocation_probe(port)
         report["passed_probes"].append("loopback-private-server")
 
         report["host_version"] = smart_socket_version(port, time.monotonic() + timeout_seconds)
+        try:
+            repeated_version = query_smart_socket_version(port)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"private ADB server did not remain available after its first probe: {error}"
+            ) from error
+        if repeated_version != report["host_version"] or server.poll() is not None:
+            raise RuntimeError("private ADB server did not remain stable after its first probe")
+        try:
+            server.wait(timeout=SERVER_STABILITY_WINDOW_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise RuntimeError(
+                "private ADB server did not remain stable after repeated probes"
+            )
+        try:
+            stable_version = query_smart_socket_version(port)
+        except (ConnectionError, OSError, RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"private ADB server did not remain responsive throughout its stability window: {error}"
+            ) from error
+        if stable_version != report["host_version"] or server.poll() is not None:
+            raise RuntimeError(
+                "private ADB server did not remain responsive throughout its stability window"
+            )
+        report["stability_host_version"] = stable_version
+        report["stability_window_seconds"] = SERVER_STABILITY_WINDOW_SECONDS
         report["passed_probes"].append("smart-socket-host-version")
     except Exception as error:
         report["error"] = str(error)

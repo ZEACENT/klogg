@@ -235,9 +235,11 @@ def main() -> int:
         "replaces its packages and source assets together and does not provide archival retention.\n"
         "Use the release page above to locate the content-addressed source asset included in the\n"
         "current rolling publication; a stable-only asset is not promised under the mutable tag.\n"
-        "Verify downloaded bytes with:\n"
+        "The release-level SHA256SUMS file covers every published asset, and the publication\n"
+        "manifest binds this source archive to its source-set receipt and release identity. Verify\n"
+        "downloaded bytes with:\n"
         f"  shasum -a 256 {published_archive}\n"
-        "and compare the result with the SHA-256 above. See ios-native-lgpl-replacement.txt for\n"
+        "and compare the result with both SHA256SUMS and the SHA-256 above. See ios-native-lgpl-replacement.txt for\n"
         "rebuild, replacement, and ad-hoc re-signing instructions.\n",
         encoding="utf-8",
     )

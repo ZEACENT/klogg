@@ -175,6 +175,26 @@
       "provenance": "klogg-local-terminal-error-reporting",
       "purpose": "report-syslog-worker-terminal-error",
       "terminal_callback": "natural-worker-errors-only"
+    },
+    {
+      "source_id": "libimobiledevice",
+      "path": "patches/0005-ostrace-record-type-callback.patch",
+      "required": true,
+      "source_archive_sha256": "7feac29cd037470b2dfaae07947bdc28248597605c62c2ff74547301dc238c17",
+      "clean_tree_sha256": "fac5e506389bffe486077ef6ce37c416a3230ef24a6bc8661eb96b9b6c747800",
+      "sha256": "3c43b50b10d8d9180b81e6385185ecd83e9953479af19f3dce9240a6f394fe15",
+      "patched_tree_sha256": "a5acf45cb73b96ded80d8944f8c2ee59e74a73181fe41caee2f81a30d9d8587d",
+      "provenance": "klogg-local-additive-ostrace-typed-record-abi",
+      "purpose": "preserve-ostrace-relay-record-type",
+      "typed_record_symbol": "ostrace_start_activity_with_record_type_and_error",
+      "typed_record_callback": "ostrace_record_cb_t",
+      "relay_record_type_abi": "uint8_t",
+      "relay_record_types": {"control": 1, "activity": 2},
+      "payload_length_abi": "size_t",
+      "callback_buffer_ownership": "borrowed-until-callback-returns",
+      "preserved_wrappers": ["ostrace_start_activity", "ostrace_start_activity_with_error"],
+      "terminal_callback": "natural-worker-errors-only",
+      "intentional_stop_terminal_callback": "suppressed"
     }
   ],
   "release_policy": {
@@ -211,6 +231,13 @@
       "libusbmuxd-2.0.dylib",
       "libimobiledevice-1.0.dylib"
     ],
+    "required_exported_symbols": {
+      "libimobiledevice-1.0.dylib": [
+        "lockdownd_client_new_with_existing_pair",
+        "ostrace_start_activity_with_record_type_and_error",
+        "syslog_relay_start_capture_raw_with_error"
+      ]
+    },
     "required_architectures": ["x86_64", "arm64"],
     "thin_artifacts": {
       "x86_64": {

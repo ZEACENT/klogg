@@ -304,6 +304,54 @@ TEST_CASE( "Fresh iOS session spec serializes typed fields without raw command d
     REQUIRE( parsed.diagnostics.empty() );
 }
 
+TEST_CASE( "Legacy and current running intent parse compatibly for restore normalization",
+           "[livelog-session-spec][inert-restore][compatibility]" )
+{
+    auto currentAndroid = makeAndroidSpec();
+    currentAndroid.runIntent = live::RunIntent::Running;
+    const auto currentAndroidParsed = parseSpec( serialized( currentAndroid ) );
+    REQUIRE( currentAndroidParsed.ok() );
+    CHECK( currentAndroidParsed.spec->runIntent == live::RunIntent::Running );
+
+    auto currentIos = makeSupportedIosSpec();
+    currentIos.runIntent = live::RunIntent::Running;
+    const auto currentIosParsed = parseSpec( serialized( currentIos ) );
+    REQUIRE( currentIosParsed.ok() );
+    CHECK( currentIosParsed.spec->runIntent == live::RunIntent::Running );
+
+    const auto legacyAndroid = parseSpec( QStringLiteral(
+        R"json({"schemaVersion":0,"sourceType":"adb_logcat","adbBackend":"smart_socket","captureId":"3f6b1d5e-9c24-4a17-8f2e-6d1a2b3c4d50","deviceSerial":"R58NC123ABC","runIntent":"running"})json" ) );
+    REQUIRE( legacyAndroid.ok() );
+    CHECK( legacyAndroid.spec->schemaVersion == klogg::livelog::kCurrentSpecVersion );
+    CHECK( legacyAndroid.spec->runIntent == live::RunIntent::Running );
+
+    const auto legacyIos = parseSpec( QStringLiteral(
+        R"json({"schemaVersion":0,"sourceType":"ios_log_stream","iosBackend":"native","captureId":"7a2c9e81-4b3d-4f60-9a15-2c7d8e9f0a12","deviceSerial":"00008101-001A2B3C4D5E","runIntent":"running"})json" ) );
+    REQUIRE( legacyIos.ok() );
+    CHECK( legacyIos.spec->schemaVersion == klogg::livelog::kCurrentSpecVersion );
+    CHECK( legacyIos.spec->runIntent == live::RunIntent::Running );
+}
+
+TEST_CASE( "Stopped session copies preserve every non-runtime field",
+           "[livelog-session-spec][inert-restore][policy]" )
+{
+    const auto assertStoppedCopy = []( const LiveLogSessionSpec& source ) {
+        auto expected = source;
+        expected.runIntent = live::RunIntent::Stopped;
+        const auto stopped = klogg::livelog::withStoppedRunIntent( source );
+        CHECK( source.runIntent == live::RunIntent::Running );
+        CHECK( stopped.runIntent == live::RunIntent::Stopped );
+        CHECK( serialized( stopped ) == serialized( expected ) );
+    };
+
+    assertStoppedCopy( makeAndroidSpec() );
+
+    auto parsedRestoreSpec = makeSupportedIosSpec();
+    parsedRestoreSpec.runIntent = live::RunIntent::Running;
+    parsedRestoreSpec.legacyMigrationMarker = true;
+    assertStoppedCopy( parsedRestoreSpec );
+}
+
 TEST_CASE( "Session spec keeps source-neutral identity helpers", "[livelog-session-spec]" )
 {
     // One type, both sources: the per-source URI schemes match the historical
@@ -336,6 +384,29 @@ TEST_CASE( "Transitional legacy_process discriminators persist and restore uncha
     REQUIRE( iosParsed.ok() );
     REQUIRE( iosParsed.spec->iosBackend == IosBackend::LegacyProcess );
     REQUIRE_FALSE( iosParsed.hasFatalDiagnostic() );
+}
+
+TEST_CASE( "Compatibility status depends only on the selected source backend",
+           "[livelog-session-spec][source-neutral]" )
+{
+    auto android = makeAndroidSpec();
+    android.iosBackend = IosBackend::LegacyProcess;
+    CHECK_FALSE( klogg::livelog::usesCompatibilityTransport( android ) );
+    CHECK( klogg::livelog::validateForAccept( android ).empty() );
+    CHECK_FALSE( klogg::livelog::sessionDataFromSpec( android ).readOnlyCompatibility );
+
+    auto ios = makeSupportedIosSpec();
+    ios.androidBackend = AndroidBackend::LegacyProcess;
+    CHECK_FALSE( klogg::livelog::usesCompatibilityTransport( ios ) );
+    CHECK( klogg::livelog::validateForAccept( ios ).empty() );
+    CHECK_FALSE( klogg::livelog::sessionDataFromSpec( ios ).readOnlyCompatibility );
+
+    android.androidBackend = AndroidBackend::LegacyProcess;
+    ios.iosBackend = IosBackend::LegacyProcess;
+    CHECK( klogg::livelog::usesCompatibilityTransport( android ) );
+    CHECK( klogg::livelog::usesCompatibilityTransport( ios ) );
+    CHECK( klogg::livelog::validateForRestore( android ).empty() );
+    CHECK( klogg::livelog::validateForRestore( ios ).empty() );
 }
 
 TEST_CASE( "Tampered Android discriminator fails closed to smart_socket, never legacy_process",
@@ -572,15 +643,15 @@ TEST_CASE( "Accept gate rejects transitional backends and undeviced running inte
                           } ) );
 }
 
-TEST_CASE( "Restored run intent drives the live state reducer StartRequested event",
-           "[livelog-session-spec]" )
+TEST_CASE( "Explicit running intent drives the live state reducer StartRequested event",
+           "[livelog-session-spec][runtime-start]" )
 {
-    const auto restoreEvents = []( const LiveLogSessionSpec& spec ) {
+    const auto runtimeStartEvents = []( const LiveLogSessionSpec& spec ) {
         return klogg::livelog::initialLiveStateEvents( spec, live::Timestamp{ 1500 } );
     };
 
     // Running intent maps onto the Task 2 reducer's StartRequested input.
-    const auto runningEvents = restoreEvents( makeAndroidSpec() );
+    const auto runningEvents = runtimeStartEvents( makeAndroidSpec() );
     REQUIRE_FALSE( runningEvents.empty() );
     for ( const auto& event : runningEvents ) {
         REQUIRE( std::holds_alternative<live::StartRequested>( event ) );
@@ -596,12 +667,12 @@ TEST_CASE( "Restored run intent drives the live state reducer StartRequested eve
     // Stopped tabs restore inert: no synthetic start is injected.
     auto stoppedSpec = makeAndroidSpec();
     stoppedSpec.runIntent = live::RunIntent::Stopped;
-    REQUIRE( restoreEvents( stoppedSpec ).empty() );
+    REQUIRE( runtimeStartEvents( stoppedSpec ).empty() );
 
     // Source-neutral: iOS sessions drive the same reducer entry point.
     auto runningIos = makeSupportedIosSpec();
     runningIos.runIntent = live::RunIntent::Running;
-    const auto iosEvents = restoreEvents( runningIos );
+    const auto iosEvents = runtimeStartEvents( runningIos );
     REQUIRE_FALSE( iosEvents.empty() );
     for ( const auto& event : iosEvents ) {
         REQUIRE( std::holds_alternative<live::StartRequested>( event ) );

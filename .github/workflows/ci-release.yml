@@ -255,16 +255,14 @@ jobs:
         PY
 
     - name: Generate Changelog
-      id: changelog
       shell: bash
       run: |
-        CHANGELOG="$(python3 scripts/gen_changelog.py --mode release --current-tag "v${KLOGG_VERSION}" --to-ref "${KLOGG_SOURCE_COMMIT}" --print-range)"
-
-        # Escape newlines for GITHUB_ENV
-        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-        echo "CHANGELOG<<$EOF" >> $GITHUB_ENV
-        echo "$CHANGELOG" >> $GITHUB_ENV
-        echo "$EOF" >> $GITHUB_ENV
+        set -euo pipefail
+        python3 scripts/gen_changelog.py \
+          --mode release \
+          --current-tag "v${KLOGG_VERSION}" \
+          --to-ref "${KLOGG_SOURCE_COMMIT}" \
+          --print-range > release-changelog.txt
 
     - name: Display structure of downloaded files
       run: ls -R ./packages-*
@@ -354,49 +352,6 @@ jobs:
       run: |
         sentry-cli upload-dif ./packages-windows-x64-qt6-vs-avx2/klogg-$KLOGG_VERSION-x64-Qt6-vs-avx2-pdb.zip
 
-    - name: Cleanup release artifacts
-      shell: sh
-      run: |
-        rm -rf ./packages-jammy-vs-gen/klogg_jammy_vs-gen
-        rm -rf ./packages-noble-vs-gen/klogg_noble_vs-gen
-        rm -rf ./packages-resolute-vs-gen/klogg_resolute_vs-gen
-        rm -rf ./packages-appimage-vs-gen/klogg_appimage_vs-gen
-        if [ -d ./packages-macos-intel-qt6-vs-gen/klogg-x64.app ]; then
-          rm -rf ./packages-macos-intel-qt6-vs-gen/klogg-x64.app
-        fi
-        if [ -d ./packages-macos-arm-qt6-vs-arm64/klogg-arm64.app ]; then
-          rm -rf ./packages-macos-arm-qt6-vs-arm64/klogg-arm64.app
-        fi
-        mkdir -p ./linux-debug
-        if [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug ]; then
-          mv ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug ./linux-debug
-        fi
-        if [ -f ./packages-noble-vs-gen/klogg_noble_vs-gen.debug ]; then
-          mv ./packages-noble-vs-gen/klogg_noble_vs-gen.debug ./linux-debug
-        fi
-        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ]; then
-          mv ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ./linux-debug
-        fi
-        if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ]; then
-          mv ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ./linux-debug
-        fi
-        if [ -n "$(ls -A ./linux-debug/*.debug 2>/dev/null)" ]; then
-          tar -cJf ./linux-debug/klogg-$KLOGG_VERSION-symbols.tar.xz ./linux-debug/*.debug
-          rm ./linux-debug/*.debug
-        else
-          echo "Warning: No debug files found, skipping symbols archive creation"
-        fi
-
-    - name: Prepare binary artifacts
-      shell: sh
-      run: |
-        mkdir ./packages-bin
-        mv ./packages-appimage-vs-gen/klogg_deps.tar.xz ./packages-bin/klogg-$KLOGG_VERSION-vs-gen-deps.tar.xz
-        mv ./klogg_version/klogg_version.txt ./packages-bin
-        test -d ./adb-helper-legal-assets || { echo "Required adb-helper legal/source assets are missing"; exit 1; }
-        test -d ./ios-native-source-assets || { echo "Required iOS native source assets are missing"; exit 1; }
-        (cd ./adb-helper-legal-assets && sha256sum --check --strict ./*.sha256)
-
     - name: Prepare coherent stable package and source publication
       shell: bash
       run: |
@@ -424,26 +379,40 @@ jobs:
           "${qualification_args[@]}" \
           --output ./packages-publication
 
-    # Required adb-helper release asset kinds: source-archive, licenses, notices,
-    # sbom, source-offer, and source-manifest.
-    - name: Prepare checksums
-      shell: sh
+    - name: Verify manifest and render release downloads
+      shell: bash
       run: |
-        (cd ./packages-publication && sha256sum --binary ./*adb-helper* ./ADB-HELPER-* > ../packages-bin/adb-helper-release-sha256.txt)
-        (cd ./packages-publication && sha256sum --binary ./* > ../packages-bin/source-publication-sha256.txt)
-        sha256sum --binary ./packages-bin/* > ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
-        if [ -d ./packages-jammy-vs-gen ] && [ -n "$(ls -A ./packages-jammy-vs-gen/* 2>/dev/null)" ]; then
-          sha256sum --binary ./packages-jammy-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
+        set -euo pipefail
+        python3 scripts/verify_source_publication_manifest.py \
+          --manifest packages-publication/klogg-source-publication-manifest.json \
+          --assets-root packages-publication \
+          --expected-channel stable \
+          --expected-evidence-level "${KLOGG_EVIDENCE_LEVEL}" \
+          --expected-tag "v${KLOGG_VERSION}" \
+          --expected-version "${KLOGG_VERSION}" \
+          --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+          --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+        asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
+        test "$asset_count" -eq 23
+        test -f packages-publication/klogg-release-evidence.tar
+        test -f packages-publication/SHA256SUMS
+        test -f packages-publication/adb-helper-source-set-receipt.json
+        test -f packages-publication/ios-native-source-set-receipt.json
+        if [ "${KLOGG_EVIDENCE_LEVEL}" = signed ]; then
+          evidence_description="Signed evidence includes signing and notarization receipts."
+        else
+          evidence_description="These disk images are unsigned validation artifacts, not signed or notarized releases."
         fi
-        if [ -d ./packages-noble-vs-gen ] && [ -n "$(ls -A ./packages-noble-vs-gen/* 2>/dev/null)" ]; then
-          sha256sum --binary ./packages-noble-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
-        fi
-        if [ -d ./packages-resolute-vs-gen ] && [ -n "$(ls -A ./packages-resolute-vs-gen/* 2>/dev/null)" ]; then
-          sha256sum --binary ./packages-resolute-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
-        fi
-        if [ -d ./packages-appimage-vs-gen ] && [ -n "$(ls -A ./packages-appimage-vs-gen/* 2>/dev/null)" ]; then
-          sha256sum --binary ./packages-appimage-vs-gen/* >> ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt 2>/dev/null || true
-        fi
+        python3 scripts/render_release_downloads.py \
+          --manifest packages-publication/klogg-source-publication-manifest.json \
+          --assets-root packages-publication \
+          --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+          --tag "v${KLOGG_VERSION}" \
+          --channel stable \
+          --version "${KLOGG_VERSION}" \
+          --evidence-description "$evidence_description" \
+          --changelog-file release-changelog.txt \
+          --output release-body.md
 
     - name: Clean stale stable draft
       if: env.GITHUB_TOKEN != ''
@@ -507,64 +476,11 @@ jobs:
         tag_name: v${{ env.KLOGG_VERSION }}-candidate
         target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
         name: Release v${{ env.KLOGG_VERSION }}
-        body: |
-          Release v${{ env.KLOGG_VERSION }}
-
-          ## Changes
-          ${{ env.CHANGELOG }}
-
-          ## Downloads
-
-          ### Windows
-          - Windows x64 (Qt 6, Vectorscan AVX2): [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-setup.exe)
-          - Windows x64 (Qt 6, Vectorscan AVX2) portable: [klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-x64-Qt6-vs-avx2-portable.zip)
-
-          ### Linux
-          - Ubuntu 22.04 (Jammy, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-jammy-vs-gen.deb)
-          - Ubuntu 24.04 (Noble, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-noble-vs-gen.deb)
-          - Ubuntu 26.04 (Resolute, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-resolute-vs-gen.deb)
-          - AppImage (Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-appimage-vs-gen.AppImage)
-
-          ### macOS (${{ env.KLOGG_EVIDENCE_LEVEL }} evidence)
-          Validation evidence publishes unsigned CI-validated disk images. Signed evidence is accepted only when signing and notarization receipts are complete.
-          - Intel (x64, Vectorscan generic): [klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-x64-vs-gen.dmg)
-          - Apple Silicon (ARM64, Vectorscan): [klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg](https://github.com/ZEACENT/klogg/releases/download/v${{ env.KLOGG_VERSION }}/klogg-${{ env.KLOGG_VERSION }}-mac-arm64-vs-arm64.dmg)
+        body_path: release-body.md
         prerelease: false
         draft: true
         files: |
-          ./packages-windows-x64-qt6-vs-avx2/*
-          ./packages-jammy-vs-gen/*
-          ./packages-noble-vs-gen/*
-          ./packages-resolute-vs-gen/*
-          ./packages-appimage-vs-gen/*
-          ./packages-bin/*
-          ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz
-          ./packages-publication/klogg-v*-adb-helper-source-*.tar.gz.sha256
-          ./packages-publication/klogg-v*-ios-native-source-*.tar.gz
-          ./packages-publication/klogg-v*-ios-native-source-*.tar.gz.sha256
-          ./packages-publication/adb-helper-source-set-receipt.json
-          ./packages-publication/ios-native-source-set-receipt.json
-          ./packages-publication/ios-native-*.sha256
-          ./packages-publication/NOTICE-ios-native.txt.sha256
-          ./packages-publication/klogg-source-publication-manifest.json
-          ./packages-publication/*.qualification.json
-          ./packages-publication/*.ios-qualification.json
-          ./packages-publication/*.ios-package.json
-          ./packages-publication/*.signing.json
-          ./packages-publication/*.notarization.json
-          ./packages-publication/adb-helper-licenses.tar.gz
-          ./packages-publication/adb-helper-notices.tar.gz
-          ./packages-publication/adb-helper-sbom.spdx.json
-          ./packages-publication/ADB-HELPER-SOURCE-OFFER.txt
-          ./packages-publication/adb-helper-source-manifest.json
-          ./packages-publication/adb-helper-*.sha256
-          ./packages-publication/ADB-HELPER-*.sha256
-          ./packages-publication/ios-native-source-offer.txt
-          ./packages-publication/ios-native-lgpl-replacement.txt
-          ./packages-publication/NOTICE-ios-native.txt
-          ./linux-debug/*
-          ./packages-macos-intel-qt6-vs-gen/*.dmg
-          ./packages-macos-arm-qt6-vs-arm64/*.dmg
+          ./packages-publication/*
 
     - name: Verify stable source publication after upload
       if: env.GITHUB_TOKEN != ''

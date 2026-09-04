@@ -2446,8 +2446,8 @@
         <translation>新工作階段不能使用相容性程序傳輸。請選擇內建服務偵測到的裝置。</translation>
     </message>
     <message>
-        <source>A detected device is required before the session can run or start on restore.</source>
-        <translation>工作階段需要選擇已偵測到的裝置，才能執行或在還原時啟動。</translation>
+        <source>A detected device is required before the live session can connect.</source>
+        <translation>即時日誌工作階段需要選擇已偵測到的裝置，才能連線。</translation>
     </message>
     <message>
         <source>The session has no usable capture identifier.</source>
@@ -2472,10 +2472,6 @@
     <message>
         <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
         <translation>已有另一個即時日誌工作階段使用此擷取識別碼；無法在不覆寫擷取儲存空間的情況下還原已儲存的工作階段。</translation>
-    </message>
-    <message>
-        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
-        <translation>已儲存的即時日誌傳輸無法使用；請透過內建服務重新開啟日誌來源。</translation>
     </message>
 </context>
 <context>

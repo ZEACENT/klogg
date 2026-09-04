@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -17,6 +18,21 @@ from verify_adb_helper_envelope import EnvelopeError, verify_checksum_file
 BINARY_BUILD_RECEIPT = "binary-build"
 BINARY_SMOKE_RECEIPT = "binary-smoke"
 PACKAGE_VERIFICATION_RECEIPT = "package-verification"
+REQUIRED_SMOKE_PROBES = [
+    "version",
+    "complete-client",
+    "loopback-private-server",
+    "smart-socket-host-version",
+    "no-lingering-process",
+]
+PRODUCTION_SERVER_ARGUMENTS = ["server", "nodaemon"]
+PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT = [
+    "ADB_VENDOR_KEYS",
+    "ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_ADDRESS",
+]
+REQUIRED_SERVER_STABILITY_WINDOW_SECONDS = 0.25
 # Stable normalized identifiers used by receipt-policy tooling.
 binary_build = BINARY_BUILD_RECEIPT
 binary_smoke = BINARY_SMOKE_RECEIPT
@@ -25,6 +41,14 @@ package_verification = PACKAGE_VERIFICATION_RECEIPT
 
 class VerificationError(RuntimeError):
     pass
+
+
+def has_exact_schema(document: object, expected: int) -> bool:
+    return (
+        isinstance(document, dict)
+        and type(document.get("schema_version")) is int
+        and document["schema_version"] == expected
+    )
 
 
 def read_json(path: pathlib.Path, label: str) -> dict:
@@ -99,6 +123,55 @@ def verify_hash_sidecar(path: pathlib.Path, expected_hash: str, expected_name: s
         )
 
 
+def validate_production_server_probe(smoke_receipt: dict) -> None:
+    if not has_exact_schema(smoke_receipt, 1):
+        raise VerificationError("ADB helper binary-smoke receipt has an unsupported schema")
+    if any(field in smoke_receipt for field in ("error", "cleanup_error")):
+        raise VerificationError("ADB helper binary-smoke receipt records a smoke or cleanup failure")
+    if smoke_receipt.get("passed_probes") != REQUIRED_SMOKE_PROBES:
+        raise VerificationError("ADB helper binary-smoke receipt lacks the complete ordered probe set")
+
+    endpoint = smoke_receipt.get("server_endpoint")
+    if not isinstance(endpoint, str):
+        raise VerificationError("ADB helper binary-smoke receipt lacks a server endpoint probe")
+    endpoint_match = re.fullmatch(r"tcp:127\.0\.0\.1:([1-9][0-9]{0,4})", endpoint)
+    if endpoint_match is None:
+        raise VerificationError("ADB helper binary-smoke server endpoint probe is malformed")
+    port = int(endpoint_match.group(1))
+    if port > 65535:
+        raise VerificationError("ADB helper binary-smoke server endpoint probe has an invalid port")
+
+    expected_probe = {
+        "name": "production-server-invocation",
+        "arguments": PRODUCTION_SERVER_ARGUMENTS,
+        "environment": {"ADB_SERVER_SOCKET": f"tcp:{port}"},
+        "scrubbed_environment": PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT,
+    }
+    if smoke_receipt.get("required_probe") != expected_probe:
+        raise VerificationError(
+            "ADB helper binary-smoke receipt lacks the exact production server invocation probe"
+        )
+
+    host_version = smoke_receipt.get("host_version")
+    if (
+        not isinstance(host_version, str)
+        or re.fullmatch(r"[0-9a-fA-F]+", host_version) is None
+        or smoke_receipt.get("stability_host_version") != host_version
+    ):
+        raise VerificationError(
+            "ADB helper binary-smoke receipt lacks a stable repeated host:version probe"
+        )
+    stability_window = smoke_receipt.get("stability_window_seconds")
+    if (
+        type(stability_window) not in (int, float)
+        or not math.isfinite(stability_window)
+        or stability_window < REQUIRED_SERVER_STABILITY_WINDOW_SECONDS
+    ):
+        raise VerificationError(
+            "ADB helper binary-smoke receipt lacks the required server stability probe window"
+        )
+
+
 def asset_required_for_scope(asset: dict, scope: str | None) -> bool:
     if asset.get("required") is not True:
         return False
@@ -136,7 +209,7 @@ def validate_source_set_receipt(
     )
     source_set = read_json(receipt_path, "ADB source-set receipt")
     if (
-        source_set.get("schema_version") != 1
+        not has_exact_schema(source_set, 1)
         or source_set.get("receipt_kind") != "component-source-set"
         or source_set.get("component") != "adb-helper"
         or source_set.get("lock_sha256") != sha256(lock_path)
@@ -248,8 +321,7 @@ def main() -> int:
     try:
         lock = read_json(args.lock, "ADB helper lock")
         receipt = read_json(args.receipt, "ADB helper receipt")
-        lock_schema = lock.get("schema_version")
-        if lock_schema != 2 or receipt.get("schema_version") != 1:
+        if not has_exact_schema(lock, 2) or not has_exact_schema(receipt, 1):
             raise VerificationError("unsupported ADB helper lock or receipt schema")
         source_assets_root = args.source_assets_root or args.release_root
         if source_assets_root is None:
@@ -267,20 +339,20 @@ def main() -> int:
             raise VerificationError("ADB helper receipt is not binary-build evidence")
 
         smoke_receipt = None
+        smoke_required = (
+            args.asset_scope is not None
+            or args.package_target is not None
+            or args.package_verification_receipt is not None
+        )
+        if smoke_required and args.binary_smoke_receipt is None:
+            raise VerificationError(
+                "ADB package/release verification requires binary-smoke evidence"
+            )
         if args.binary_smoke_receipt is not None:
             smoke_receipt = read_json(args.binary_smoke_receipt, "ADB helper binary-smoke receipt")
             if smoke_receipt.get("receipt_kind", BINARY_SMOKE_RECEIPT) != BINARY_SMOKE_RECEIPT:
                 raise VerificationError("ADB helper smoke receipt is not binary-smoke evidence")
-            passed_probes = set(smoke_receipt.get("passed_probes", []))
-            required_smoke_probes = {
-                "version",
-                "complete-client",
-                "loopback-private-server",
-                "smart-socket-host-version",
-                "no-lingering-process",
-            }
-            if passed_probes != required_smoke_probes:
-                raise VerificationError("ADB helper binary-smoke receipt lacks the complete probe set")
+            validate_production_server_probe(smoke_receipt)
 
         if args.require_lock_binding:
             actual_lock_hash = sha256(args.lock)
@@ -379,7 +451,7 @@ def main() -> int:
             )
 
         binary = receipt.get("binary_verification")
-        if not isinstance(binary, dict) or binary.get("schema_version") != 2:
+        if not has_exact_schema(binary, 2):
             raise VerificationError("receipt lacks supported binary verification")
         architectures = binary.get("architectures", [])
         expected_architectures = [target_plan.get("arch")]

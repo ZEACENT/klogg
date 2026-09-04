@@ -189,14 +189,6 @@ QString captureIdentifierAlreadyInUse()
         "restored without overwriting capture storage." );
 }
 
-QString transportUnavailableOnRestore()
-{
-    return QCoreApplication::translate(
-        "klogg::livelog::messages",
-        "The saved live-log transport is unavailable; reopen the source through the built-in "
-        "services." );
-}
-
 } // namespace messages
 
 QString serializeSpec( const LiveLogSessionSpec& spec )
@@ -560,14 +552,24 @@ ParseResult parsePersistedSpec( const QString& json )
     return result;
 }
 
-std::vector<Diagnostic> validateForAccept( const LiveLogSessionSpec& spec )
+bool usesCompatibilityTransport( const LiveLogSessionSpec& spec ) noexcept
+{
+    return spec.sourceKind == SourceKind::AndroidLogcat
+               ? spec.androidBackend == AndroidBackend::LegacyProcess
+               : spec.iosBackend == IosBackend::LegacyProcess;
+}
+
+namespace {
+
+std::vector<Diagnostic> validateSpec( const LiveLogSessionSpec& spec,
+                                      bool allowCompatibilityTransport )
 {
     std::vector<Diagnostic> diagnostics;
 
     // Transitional backends exist solely so previously-saved sessions survive
-    // the migration; freshly composed sessions may never select them.
-    if ( spec.androidBackend == AndroidBackend::LegacyProcess
-         || spec.iosBackend == IosBackend::LegacyProcess ) {
+    // the migration. Fresh composition may not select them; restore keeps them
+    // loadable and inert while applying every other validation rule unchanged.
+    if ( !allowCompatibilityTransport && usesCompatibilityTransport( spec ) ) {
         diagnostics.push_back( fatalDiagnostic(
             QStringLiteral( "transitional-backend-not-creatable" ),
             liveLogMessage( "New sessions cannot use compatibility process transports. Choose "
@@ -575,12 +577,12 @@ std::vector<Diagnostic> validateForAccept( const LiveLogSessionSpec& spec )
     }
 
     // A live session always targets a device; without one there is nothing to
-    // start on restore and nothing to stream later.
+    // reconnect to and nothing to stream later.
     if ( spec.device.deviceId.trimmed().isEmpty() ) {
         diagnostics.push_back( fatalDiagnostic(
             QStringLiteral( "running-intent-requires-device" ),
-            liveLogMessage( "A detected device is required before the session can run or "
-                            "start on restore." ) ) );
+            liveLogMessage(
+                "A detected device is required before the live session can connect." ) ) );
     }
 
     if ( !CaptureStore::isValidCaptureId( spec.captureId ) ) {
@@ -622,11 +624,29 @@ std::vector<Diagnostic> validateForAccept( const LiveLogSessionSpec& spec )
     return diagnostics;
 }
 
+} // namespace
+
+std::vector<Diagnostic> validateForAccept( const LiveLogSessionSpec& spec )
+{
+    return validateSpec( spec, false );
+}
+
+std::vector<Diagnostic> validateForRestore( const LiveLogSessionSpec& spec )
+{
+    return validateSpec( spec, true );
+}
+
+LiveLogSessionSpec withStoppedRunIntent( LiveLogSessionSpec spec )
+{
+    spec.runIntent = livecapture::RunIntent::Stopped;
+    return spec;
+}
+
 std::vector<livecapture::LiveStateEvent> initialLiveStateEvents( const LiveLogSessionSpec& spec,
                                                                  livecapture::Timestamp now )
 {
-    // Single source of truth: restore routes through the same accept gate as
-    // fresh composition, so EVERY fatally-rejected spec refuses to arm a run —
+    // Explicit runtime starts route through the same accept gate as fresh
+    // composition, so EVERY fatally-rejected spec refuses to arm a run —
     // including the transitional compatibility backends that exist only for
     // persistence compatibility and can never be re-created here. Timestamps
     // stay a pure pass-through; monotonic-now validation belongs to the
@@ -722,8 +742,7 @@ AdbLogcatSessionData sessionDataFromSpec( const LiveLogSessionSpec& spec )
     sessionData.iosCategories = spec.ios.categories;
     sessionData.iosSubsystem = spec.ios.subsystem;
     sessionData.iosJsonOutput = spec.ios.outputFormat == IosOptions::OutputFormat::Json;
-    sessionData.readOnlyCompatibility = spec.androidBackend == AndroidBackend::LegacyProcess
-                                        || spec.iosBackend == IosBackend::LegacyProcess;
+    sessionData.readOnlyCompatibility = usesCompatibilityTransport( spec );
     sessionData.ansiOutputEnabled = spec.capture.ansiOutputEnabled;
     sessionData.outputAnsiMode = spec.capture.preserveAnsiOnSave ? LiveLogSaveAnsiMode::Preserve
                                                                  : LiveLogSaveAnsiMode::Strip;

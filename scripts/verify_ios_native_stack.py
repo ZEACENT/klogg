@@ -16,6 +16,14 @@ class VerificationError(RuntimeError):
     pass
 
 
+def has_exact_schema(document: object, expected: int) -> bool:
+    return (
+        isinstance(document, dict)
+        and type(document.get("schema_version")) is int
+        and document["schema_version"] == expected
+    )
+
+
 def run(command: list[str]) -> str:
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode != 0:
@@ -83,6 +91,105 @@ def architectures(path: pathlib.Path) -> list[str]:
     return run(["lipo", "-archs", str(path)]).split()
 
 
+def exported_symbols(path: pathlib.Path) -> set[str]:
+    symbols: set[str] = set()
+    for line in run(["nm", "-gU", str(path)]).splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        symbol = fields[-1]
+        if symbol.startswith("_"):
+            symbol = symbol[1:]
+        symbols.add(symbol)
+    return symbols
+
+
+def locked_required_exported_symbols(
+    contract: dict, required_dylibs: list[str]
+) -> dict[str, list[str]]:
+    required = contract.get("required_exported_symbols")
+    if not isinstance(required, dict) or not required:
+        raise VerificationError("lock is missing required_exported_symbols")
+    for dylib_name, symbol_names in required.items():
+        if dylib_name not in required_dylibs or not isinstance(symbol_names, list) or not symbol_names:
+            raise VerificationError("lock has invalid required_exported_symbols")
+        if any(not isinstance(symbol, str) or not symbol for symbol in symbol_names):
+            raise VerificationError("lock has invalid required_exported_symbols")
+        if len(set(symbol_names)) != len(symbol_names):
+            raise VerificationError("lock has duplicate required_exported_symbols")
+    return required
+
+
+def verify_required_exported_symbols(path: pathlib.Path, required: list[str]) -> None:
+    missing = sorted(set(required) - exported_symbols(path))
+    if missing:
+        raise VerificationError(f"missing required exported symbols in {path.name}: {missing}")
+
+
+def direct_dylib_target(path: pathlib.Path, libdir: pathlib.Path, label: str) -> pathlib.Path:
+    resolved_libdir = libdir.resolve()
+    target = path
+    if path.is_symlink():
+        try:
+            relative_target = path.readlink()
+        except OSError as error:
+            raise VerificationError(f"unreadable iOS native dylib alias {label}: {error}") from error
+        if (
+            relative_target.is_absolute()
+            or len(relative_target.parts) != 1
+            or relative_target.name != str(relative_target)
+        ):
+            raise VerificationError(f"iOS native dylib alias escapes the closure: {label}")
+        target = libdir / relative_target
+        if target.is_symlink():
+            raise VerificationError(f"iOS native dylib alias chain is forbidden: {label}")
+        if not target.is_file():
+            raise VerificationError(
+                f"iOS native dylib alias has a dangling or non-regular target: {label}"
+            )
+        alias_identity = path.name[: -len(".dylib")]
+        if not (
+            target.name.endswith(".dylib")
+            and target.name.startswith(f"{alias_identity}.")
+        ):
+            raise VerificationError(
+                f"iOS native dylib alias target does not match its library identity: {label}"
+            )
+    elif not target.is_file():
+        raise VerificationError(f"missing required iOS native dylib: {label}")
+
+    resolved_target = target.resolve()
+    if not resolved_target.is_file() or resolved_target.parent != resolved_libdir:
+        raise VerificationError(f"iOS native dylib escapes the closure: {label}")
+    return resolved_target
+
+
+def required_dylib_targets(
+    libdir: pathlib.Path, required_dylibs: list[str]
+) -> dict[str, pathlib.Path]:
+    targets: dict[str, pathlib.Path] = {}
+    for name in required_dylibs:
+        if (
+            not isinstance(name, str)
+            or not name.endswith(".dylib")
+            or pathlib.PurePosixPath(name).name != name
+            or "\\" in name
+        ):
+            raise VerificationError(f"invalid required iOS native dylib name: {name}")
+        targets[name] = direct_dylib_target(libdir / name, libdir, name)
+
+    required_physical_targets = set(targets.values())
+    for alias in sorted(libdir.glob("*.dylib")):
+        if not alias.is_symlink():
+            continue
+        target = direct_dylib_target(alias, libdir, alias.name)
+        if target not in required_physical_targets:
+            raise VerificationError(
+                f"iOS native dylib alias targets an unrequired file: {alias.name}"
+            )
+    return targets
+
+
 def deployment_target(path: pathlib.Path) -> str:
     output = run(["vtool", "-show-build", str(path)])
     if "LC_BUILD_VERSION" not in output:
@@ -96,6 +203,8 @@ def deployment_target(path: pathlib.Path) -> str:
 def validate_build_receipt(
     lock: dict, lock_path: pathlib.Path, receipt: dict, architecture: str
 ) -> None:
+    if not has_exact_schema(receipt, 1):
+        raise VerificationError("unsupported iOS native build receipt schema")
     if receipt.get("receipt_kind") != "ios-native-build":
         raise VerificationError("invalid iOS native build receipt_kind")
     if receipt.get("lock_sha256") != sha256(lock_path):
@@ -138,15 +247,24 @@ def verify_stack(
     required_dylibs = contract.get("required_dylibs", [])
     if not isinstance(required_dylibs, list) or not required_dylibs:
         raise VerificationError("lock is missing the required iOS native dylib closure")
-    for name in required_dylibs:
-        path = libdir / str(name)
-        if not path.exists():
-            raise VerificationError(f"missing required iOS native dylib: {name}")
-        if path.resolve().parent != libdir.resolve():
-            raise VerificationError(f"iOS native dylib symlink escapes the closure: {name}")
-    dylibs = sorted(path for path in libdir.glob("*.dylib") if path.is_file() and not path.is_symlink())
+    required_exported_symbols = locked_required_exported_symbols(contract, required_dylibs)
+    required_targets = required_dylib_targets(libdir, required_dylibs)
+    dylibs = sorted(
+        path for path in libdir.glob("*.dylib") if path.is_file() and not path.is_symlink()
+    )
     if not dylibs:
         raise VerificationError("missing iOS native dylib closure; fail closed")
+    physical_dylibs = {path.resolve() for path in dylibs}
+    required_physical_dylibs = set(required_targets.values())
+    if physical_dylibs != required_physical_dylibs:
+        missing = sorted(path.name for path in required_physical_dylibs - physical_dylibs)
+        extra = sorted(path.name for path in physical_dylibs - required_physical_dylibs)
+        raise VerificationError(
+            f"iOS native physical closure mismatch; missing={missing}, unrequired={extra}"
+        )
+    required_symbols_by_target: dict[pathlib.Path, set[str]] = {}
+    for name, symbol_names in required_exported_symbols.items():
+        required_symbols_by_target.setdefault(required_targets[name], set()).update(symbol_names)
 
     forbidden = tuple(contract.get("forbidden_dynamic_references", ())) + (
         "/opt/homebrew",
@@ -178,6 +296,10 @@ def verify_stack(
             raise VerificationError(
                 f"deployment_target mismatch for {dylib.name}: {actual_target} != {expected_target}"
             )
+
+        required_symbols = sorted(required_symbols_by_target.get(dylib.resolve(), set()))
+        if required_symbols:
+            verify_required_exported_symbols(dylib, required_symbols)
 
         imports = dependencies(dylib)
         for imported in imports:
@@ -275,13 +397,16 @@ def verify_legal_assets(
     source = read_json(source_receipt_path, "iOS native source-set receipt")
     legal = read_json(legal_receipt_path, "iOS native legal receipt")
     sbom = read_json(sbom_path, "iOS native SPDX SBOM")
+    if not has_exact_schema(source, 1):
+        raise VerificationError("unsupported iOS native component source-set receipt schema")
     if (
-        source.get("schema_version") != 1
-        or source.get("receipt_kind") != "component-source-set"
+        source.get("receipt_kind") != "component-source-set"
         or source.get("component") != "ios-native"
         or source.get("lock_sha256") != lock_hash
     ):
         raise VerificationError("invalid or stale iOS native component source-set receipt")
+    if not has_exact_schema(legal, 1):
+        raise VerificationError("unsupported iOS native legal receipt schema")
     if legal.get("receipt_kind") != "legal" or legal.get("lock_sha256") != lock_hash:
         raise VerificationError("invalid or stale iOS native legal receipt")
     if legal.get("architecture") != architecture:
@@ -297,10 +422,13 @@ def verify_legal_assets(
         raise VerificationError("unsupported iOS native source tree hash algorithm")
     if re.fullmatch(r"[0-9a-f]{64}", str(source.get("patch_chain_sha256", ""))) is None:
         raise VerificationError("invalid iOS native source-set patch chain sha256")
-    if source.get("distribution") != {
-        "package_required": False,
-        "release_required": True,
-    }:
+    distribution = source.get("distribution")
+    if (
+        not isinstance(distribution, dict)
+        or set(distribution) != {"package_required", "release_required"}
+        or distribution["package_required"] is not False
+        or distribution["release_required"] is not True
+    ):
         raise VerificationError("invalid iOS native source archive distribution")
 
     assets_root = source_assets_root or source_receipt_path.parent
@@ -374,6 +502,8 @@ def verify_package_receipt(
     evidence: list[dict],
     legal_hashes: dict,
 ) -> None:
+    if not has_exact_schema(package, 2):
+        raise VerificationError("unsupported ios-native-package receipt schema")
     if package.get("receipt_kind") != "ios-native-package":
         raise VerificationError("invalid ios-native-package receipt_kind")
     if package.get("lock_sha256") != lock_hash or package.get("architecture") != architecture:
@@ -425,6 +555,8 @@ def main() -> int:
                 "unsigned package-stage mode requires --verify-package-receipt"
             )
         lock = read_json(args.lock, "iOS native lock")
+        if not has_exact_schema(lock, 2):
+            raise VerificationError("unsupported iOS native lock schema")
         receipt_path = args.receipt or args.stack_root / "ios-native-build-receipt.json"
         receipt = read_json(receipt_path, "iOS native build receipt")
         validate_build_receipt(lock, args.lock, receipt, args.architecture)

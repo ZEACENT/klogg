@@ -43,6 +43,13 @@ const auto ServiceHandle = reinterpret_cast<NativeServiceDescriptor>( 0x303 );
 const auto OsTraceHandle = reinterpret_cast<NativeOsTraceClient>( 0x404 );
 const auto SyslogHandle = reinterpret_cast<NativeSyslogRelayClient>( 0x505 );
 
+static_assert( static_cast<std::uint8_t>( NativeOsTraceRelayRecordType::Control )
+                   == static_cast<std::uint8_t>( OsTraceRelayRecordType::ControlPlist ),
+               "native and source-neutral control record types must share the wire value" );
+static_assert( static_cast<std::uint8_t>( NativeOsTraceRelayRecordType::Activity )
+                   == static_cast<std::uint8_t>( OsTraceRelayRecordType::Activity ),
+               "native and source-neutral activity record types must share the wire value" );
+
 struct FakeNative {
     NativePairRecordResult pairRecordResult{ NativePairRecordResult::Present };
     std::int32_t deviceResult{ 0 };
@@ -83,7 +90,7 @@ struct FakeNative {
     bool callbackReturnReleased{ false };
     bool stopEntered{ false };
     std::thread::id callbackThread;
-    NativeOsTraceActivityCallback osTraceActivityCallback{ nullptr };
+    NativeOsTraceRelayRecordCallback osTraceRecordCallback{ nullptr };
     NativeOsTraceErrorCallback osTraceErrorCallback{ nullptr };
     NativeSyslogRelayCallback syslogCallback{ nullptr };
     NativeSyslogRelayErrorCallback syslogErrorCallback{ nullptr };
@@ -278,15 +285,16 @@ struct FakeNative {
         nativeThreads.push_back( std::this_thread::get_id() );
     }
 
-    void emitOsTrace( const std::vector<std::uint8_t>& bytes )
+    void emitOsTrace( std::uint8_t recordType, const std::vector<std::uint8_t>& bytes )
     {
-        if ( osTraceActivityCallback == nullptr ) {
+        if ( osTraceRecordCallback == nullptr ) {
             abiViolation = true;
             return;
         }
         beginCallback();
-        osTraceActivityCallback( bytes.data(), static_cast<std::uint32_t>( bytes.size() ),
-                                 osTraceContext );
+        osTraceRecordCallback( static_cast<NativeOsTraceRelayRecordType>( recordType ),
+                               bytes.data(), static_cast<std::uint32_t>( bytes.size() ),
+                               osTraceContext );
         finishCallback();
     }
 
@@ -473,14 +481,15 @@ std::int32_t newOsTrace( NativeIdevice device, NativeServiceDescriptor service,
     return fake->osTraceNewResult;
 }
 
-std::int32_t startOsTrace( NativeOsTraceClient client, NativeOsTraceActivityCallback activity,
-                           NativeOsTraceErrorCallback error, void* context )
+std::int32_t startOsTraceWithRecordType( NativeOsTraceClient client,
+                                         NativeOsTraceRelayRecordCallback record,
+                                         NativeOsTraceErrorCallback error, void* context )
 {
-    if ( client != OsTraceHandle || activity == nullptr || error == nullptr ) {
+    if ( client != OsTraceHandle || record == nullptr || error == nullptr ) {
         fake->abiViolation = true;
     }
     fake->record( "ostrace-start" );
-    fake->osTraceActivityCallback = activity;
+    fake->osTraceRecordCallback = record;
     fake->osTraceErrorCallback = error;
     fake->osTraceContext = context;
     if ( fake->osTraceStartResult == 0 ) {
@@ -572,7 +581,7 @@ IosNativeApi makeApi()
     api.lockdownGetStringValue = &getString;
     api.nativeStringFree = &freeString;
     api.osTraceClientNew = &newOsTrace;
-    api.osTraceStart = &startOsTrace;
+    api.osTraceStartWithRecordType = &startOsTraceWithRecordType;
     api.osTraceStop = &stopOsTrace;
     api.osTraceClientFree = &freeOsTrace;
     api.syslogRelayClientNew = &newSyslog;
@@ -1026,7 +1035,7 @@ TEST_CASE( "native iOS startup validates the selected stream ABI before device m
     ManualExecutor executor;
     ObservedCallbacks observed;
     auto api = makeApi();
-    api.osTraceStart = nullptr;
+    api.osTraceStartWithRecordType = nullptr;
     IosNativeStreamWorker worker( std::move( api ), executor.executor(), config( 221u ),
                                   observed.callbacks() );
 
@@ -1233,6 +1242,122 @@ TEST_CASE( "startup owns partial native handles and rejects success with null ha
     }
 }
 
+TEST_CASE( "typed os_trace relay records route control activity malformed and unknown outer types",
+           "[ios][native][stream][callback][relay-type][table]" )
+{
+    struct RelayRecordCase {
+        const char* name;
+        std::uint8_t relayType;
+        std::vector<std::uint8_t> payload;
+        const char* outputFragment;
+        const char* errorCode;
+        std::vector<const char*> detailTokens;
+        const char* forbiddenDetail;
+    };
+
+    auto opaqueActivity = osTracePacket( "must-not-be-treated-as-log-text" );
+    putLe32( opaqueActivity, 1u, 2u );
+    opaqueActivity.resize( 0x81u + 12u );
+    putLe16( opaqueActivity, 37u, std::numeric_limits<std::uint16_t>::max() );
+    putLe32( opaqueActivity, 109u, std::numeric_limits<std::uint32_t>::max() );
+
+    auto malformedActivity = osTracePacket( "SENSITIVE-ACTIVITY-PAYLOAD" );
+    putLe32( malformedActivity, 109u, std::numeric_limits<std::uint32_t>::max() );
+
+    const std::vector<RelayRecordCase> cases{
+        { "empty control record", 1u, {}, nullptr, nullptr, {}, nullptr },
+        { "arbitrary control record",
+          1u,
+          { 0x00u, 0xffu, 0x7fu, 0x01u },
+          nullptr,
+          nullptr,
+          {},
+          nullptr },
+        { "decoded activity log packet",
+          2u,
+          osTracePacket( "typed activity" ),
+          "typed activity",
+          nullptr,
+          {},
+          nullptr },
+        { "opaque activity packet",
+          2u,
+          opaqueActivity,
+          "<ERROR>: ",
+          nullptr,
+          {},
+          "must-not-be-treated-as-log-text" },
+        { "malformed activity packet",
+          2u,
+          malformedActivity,
+          nullptr,
+          "ios-ostrace-malformed-packet",
+          { "relay_type=2", "payload_bytes=", "packet_bytes=", "packet_type=8",
+            "spans=", "declared_span_bytes=", "available_span_bytes=" },
+          "SENSITIVE-ACTIVITY-PAYLOAD" },
+        { "unknown relay record type",
+          77u,
+          { 'n', 'o', 't', '-', 'l', 'o', 'g' },
+          nullptr,
+          "ios-ostrace-malformed-packet",
+          { "relay_type=77", "payload_bytes=7" },
+          "not-log" },
+    };
+
+    Generation generation = 390u;
+    for ( const auto& value : cases ) {
+        INFO( value.name );
+        FakeNative state;
+        fake = &state;
+        ManualExecutor executor;
+        ObservedCallbacks observed;
+        IosNativeStreamWorker worker( makeApi(), executor.executor(), config( ++generation ),
+                                      observed.callbacks() );
+        REQUIRE( worker.start() );
+        executor.runAllOnWorker();
+        REQUIRE( observed.ready == std::vector<Generation>{ generation } );
+
+        CHECK_NOTHROW( state.emitOsTrace( value.relayType, value.payload ) );
+
+        if ( value.errorCode != nullptr ) {
+            REQUIRE( observed.errors.size() == 1u );
+            const auto& error = observed.errors.front().second.error;
+            CHECK( error.code == value.errorCode );
+            for ( const auto* token : value.detailTokens ) {
+                INFO( "detail token=" << token );
+                CHECK( error.nativeDetail.find( token ) != std::string::npos );
+            }
+            if ( value.forbiddenDetail != nullptr ) {
+                CHECK( error.nativeDetail.find( value.forbiddenDetail ) == std::string::npos );
+            }
+            CHECK_FALSE( worker.drain().has_value() );
+            executor.runAllOnWorker();
+            CHECK( observed.stopped == std::vector<Generation>{ generation } );
+        }
+        else if ( value.outputFragment != nullptr ) {
+            CHECK( observed.errors.empty() );
+            REQUIRE( observed.bytesAvailable == std::vector<Generation>{ generation } );
+            const auto drained = worker.drain();
+            REQUIRE( drained.has_value() );
+            const std::string output( drained->bytes.begin(), drained->bytes.end() );
+            CHECK( output.find( value.outputFragment ) != std::string::npos );
+            if ( value.forbiddenDetail != nullptr ) {
+                CHECK( output.find( value.forbiddenDetail ) == std::string::npos );
+            }
+            worker.stop( generation );
+            executor.runAllOnWorker();
+        }
+        else {
+            CHECK( observed.errors.empty() );
+            CHECK( observed.bytesAvailable.empty() );
+            CHECK_FALSE( worker.drain().has_value() );
+            worker.stop( generation );
+            executor.runAllOnWorker();
+        }
+        CHECK_FALSE( state.abiViolation );
+    }
+}
+
 TEST_CASE( "os_trace packets are emitted in the fake source device time zone",
            "[ios][native][stream][callback][format][timezone]" )
 {
@@ -1247,7 +1372,7 @@ TEST_CASE( "os_trace packets are emitted in the fake source device time zone",
     executor.runAllOnWorker();
     REQUIRE( observed.ready == std::vector<Generation>{ 401u } );
 
-    state.emitOsTrace( osTracePacket() );
+    state.emitOsTrace( 2u, osTracePacket() );
 
     REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 401u } );
     const auto drained = worker.drain();
@@ -1277,7 +1402,7 @@ TEST_CASE( "os_trace rejects epochs the device time zone cannot represent",
 
     auto packet = osTracePacket();
     putLe64( packet, 55u, std::numeric_limits<std::uint64_t>::max() );
-    state.emitOsTrace( packet );
+    state.emitOsTrace( 2u, packet );
 
     REQUIRE( observed.errors.size() == 1u );
     CHECK( observed.errors.front().second.error.code == "ios-ostrace-malformed-packet" );
@@ -1304,7 +1429,7 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
     executor.runAllOnWorker();
 
     auto borrowed = osTracePacket( "copy me" );
-    CHECK_NOTHROW( state.emitOsTrace( borrowed ) );
+    CHECK_NOTHROW( state.emitOsTrace( 2u, borrowed ) );
     std::fill( borrowed.begin(), borrowed.end(), std::uint8_t{ 0xa5 } );
 
     REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 41u } );
@@ -1321,7 +1446,7 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
     activity.resize( 0x81u + 12u );
     putLe16( activity, 37u, std::numeric_limits<std::uint16_t>::max() );
     putLe32( activity, 109u, std::numeric_limits<std::uint32_t>::max() );
-    CHECK_NOTHROW( state.emitOsTrace( activity ) );
+    CHECK_NOTHROW( state.emitOsTrace( 2u, activity ) );
     CHECK( observed.errors.empty() );
     const auto activityBatch = worker.drain();
     REQUIRE( activityBatch.has_value() );
@@ -1331,13 +1456,13 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
 
     const auto notificationsBeforeControl = observed.bytesAvailable.size();
     CHECK_NOTHROW( state.emitOsTrace(
-        std::vector<std::uint8_t>{ 'b', 'p', 'l', 'i', 's', 't', '0', '0', 0xd1u, 0x01u } ) );
+        1u, std::vector<std::uint8_t>{ 'b', 'p', 'l', 'i', 's', 't', '0', '0', 0xd1u, 0x01u } ) );
     CHECK( observed.errors.empty() );
     CHECK( observed.bytesAvailable.size() == notificationsBeforeControl );
     CHECK_FALSE( worker.drain().has_value() );
 
     observed.throwFromBytesAvailable = true;
-    CHECK_NOTHROW( state.emitOsTrace( osTracePacket( "observer throws" ) ) );
+    CHECK_NOTHROW( state.emitOsTrace( 2u, osTracePacket( "observer throws" ) ) );
     CHECK_FALSE( state.callbackTeardownViolation() );
     worker.stop( 41u );
     executor.runAllOnWorker();
@@ -1356,7 +1481,7 @@ TEST_CASE( "oversized os_trace callbacks are rejected before copying borrowed by
     executor.runAllOnWorker();
 
     std::vector<std::uint8_t> oversized( DefaultMaximumOsTraceRecordSize + 1u, 0u );
-    state.emitOsTrace( oversized );
+    state.emitOsTrace( 2u, oversized );
 
     REQUIRE( observed.errors.size() == 1u );
     CHECK( observed.errors.front().second.error.code == "ios-ostrace-malformed-packet" );
@@ -1381,7 +1506,7 @@ TEST_CASE( "malformed os_trace packets and native packet errors are terminal and
         REQUIRE( worker.start() );
         executor.runAllOnWorker();
 
-        CHECK_NOTHROW( state.emitOsTrace( std::vector<std::uint8_t>{ 2u, 8u, 0u } ) );
+        CHECK_NOTHROW( state.emitOsTrace( 2u, std::vector<std::uint8_t>{ 2u, 8u, 0u } ) );
         REQUIRE( observed.errors.size() == 1u );
         CHECK( observed.errors.front().second.error.code == "ios-ostrace-malformed-packet" );
         CHECK_FALSE( observed.errors.front().second.error.nativeDetail.empty() );
@@ -1405,7 +1530,7 @@ TEST_CASE( "malformed os_trace packets and native packet errors are terminal and
 
         auto packet = osTracePacket( "SENSITIVE-PACKET-TEXT" );
         putLe32( packet, 109u, std::numeric_limits<std::uint32_t>::max() );
-        state.emitOsTrace( packet );
+        state.emitOsTrace( 2u, packet );
 
         REQUIRE( observed.errors.size() == 1u );
         const auto& detail = observed.errors.front().second.error.nativeDetail;
@@ -1598,7 +1723,7 @@ TEST_CASE( "native stop is asynchronous ordered and recreates one-shot clients f
                                  firstObserved.callbacks() );
     REQUIRE( first.start() );
     executor.runAllOnWorker();
-    state.emitOsTrace( osTracePacket( "before stop" ) );
+    state.emitOsTrace( 2u, osTracePacket( "before stop" ) );
 
     first.stop( 61u );
     REQUIRE_FALSE( state.calls.empty() );
@@ -1654,7 +1779,7 @@ TEST_CASE( "cleanup waits for an in-flight native callback before stop and free"
     REQUIRE( worker.start() );
     executor.runAllOnWorker();
 
-    std::thread callbackThread( [ & ] { state.emitOsTrace( osTracePacket( "in flight" ) ); } );
+    std::thread callbackThread( [ & ] { state.emitOsTrace( 2u, osTracePacket( "in flight" ) ); } );
     {
         std::unique_lock<std::mutex> lock( callbackMutex );
         callbackChanged.wait( lock, [ & ] { return callbackEntered; } );
@@ -1712,7 +1837,7 @@ TEST_CASE( "cleanup rejection falls back asynchronously and waits for active cal
     startup.join();
 
     std::thread callbackThread(
-        [ & ] { state.emitOsTrace( osTracePacket( "in flight" ) ); } );
+        [ & ] { state.emitOsTrace( 2u, osTracePacket( "in flight" ) ); } );
     {
         std::unique_lock<std::mutex> lock( callbackMutex );
         REQUIRE( callbackChanged.wait_for( lock, 2s, [ & ] { return callbackEntered; } ) );
@@ -1757,7 +1882,7 @@ TEST_CASE( "worker ignores stale stop commands without retiring the current gene
     CHECK( std::find( state.calls.cbegin(), state.calls.cend(), "ostrace-stop" )
            == state.calls.cend() );
 
-    state.emitOsTrace( osTracePacket( "still current" ) );
+    state.emitOsTrace( 2u, osTracePacket( "still current" ) );
     REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 72u } );
     worker.stop( 72u );
     executor.runAllOnWorker();
@@ -1985,7 +2110,7 @@ TEST_CASE( "default worker session destruction never waits for a blocked native 
     }
 
     std::thread callbackThread(
-        [ & ] { state.emitOsTrace( osTracePacket( "blocked callback" ) ); } );
+        [ & ] { state.emitOsTrace( 2u, osTracePacket( "blocked callback" ) ); } );
     {
         std::unique_lock<std::mutex> lock( mutex );
         REQUIRE( changed.wait_for( lock, 2s, [ & ] { return callbackEntered; } ) );
@@ -2066,7 +2191,7 @@ TEST_CASE( "default worker session may be destroyed from a native data callback"
     }
 
     std::thread callbackThread(
-        [ & ] { state.emitOsTrace( osTracePacket( "destroy session" ) ); } );
+        [ & ] { state.emitOsTrace( 2u, osTracePacket( "destroy session" ) ); } );
     {
         std::unique_lock<std::mutex> lock( mutex );
         REQUIRE( changed.wait_for( lock, 1s, [ & ] { return destroyed; } ) );
@@ -2148,15 +2273,18 @@ TEST_CASE( "worker shutdown rejects late callbacks and completes cleanup on its 
                                   observed.callbacks() );
     REQUIRE( worker.start() );
     executor.runAllOnWorker();
-    const auto oldCallback = state.osTraceActivityCallback;
+    const auto oldCallback = state.osTraceRecordCallback;
     const auto oldContext = state.osTraceContext;
 
     worker.shutdown();
     executor.runAllOnWorker();
     const auto notificationsBeforeLateCallback = observed.bytesAvailable.size();
     const auto packet = osTracePacket( "late" );
-    CHECK_NOTHROW(
-        oldCallback( packet.data(), static_cast<std::uint32_t>( packet.size() ), oldContext ) );
+    CHECK_NOTHROW( oldCallback( NativeOsTraceRelayRecordType::Activity, packet.data(),
+                                static_cast<std::uint32_t>( packet.size() ), oldContext ) );
+    CHECK_NOTHROW( oldCallback( NativeOsTraceRelayRecordType::Control, nullptr, 0u, oldContext ) );
+    CHECK_NOTHROW( oldCallback( static_cast<NativeOsTraceRelayRecordType>( 99 ), packet.data(),
+                                static_cast<std::uint32_t>( packet.size() ), oldContext ) );
 
     CHECK( observed.bytesAvailable.size() == notificationsBeforeLateCallback );
     CHECK( observed.stopped == std::vector<Generation>{ 71u } );

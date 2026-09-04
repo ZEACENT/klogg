@@ -82,6 +82,16 @@ EXPECTED_SOURCES = {
     },
 }
 EXPECTED_BUILD_ORDER = list(EXPECTED_SOURCES)
+EXPECTED_LIBIMOBILEDEVICE_PATCH_CHAIN = [
+    "patches/0001-fix-ostrace-live-packet-leak.patch",
+    "patches/0002-interrupt-live-capture-receive.patch",
+    "patches/0003-passive-lockdown-handshake.patch",
+    "patches/0004-syslog-terminal-callback.patch",
+    "patches/0005-ostrace-record-type-callback.patch",
+]
+EXPECTED_LIBIMOBILEDEVICE_FINAL_TREE_SHA256 = (
+    "a5acf45cb73b96ded80d8944f8c2ee59e74a73181fe41caee2f81a30d9d8587d"
+)
 EXPECTED_THIN_ARTIFACTS = {
     "x86_64": "15.0",
     "arm64": "14.0",
@@ -222,7 +232,186 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_lock_schema_is_extended_for_release_and_artifact_evidence(self):
-        self.assertGreaterEqual(self.lock().get("schema_version", 0), 2)
+        self.assertEqual(type(self.lock().get("schema_version")), int)
+        self.assertEqual(self.lock().get("schema_version"), 2)
+
+    def test_verifier_rejects_boolean_lock_build_and_package_schema_versions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            lock_path = root / "lock.json"
+            receipt_path = root / "build.json"
+            lock_path.write_text('{"schema_version": true}\n', encoding="utf-8")
+            receipt_path.write_text("{}\n", encoding="utf-8")
+            argv = [
+                str(VERIFY_SCRIPT),
+                "--lock",
+                str(lock_path),
+                "--stack-root",
+                str(root),
+                "--architecture",
+                "arm64",
+                "--receipt",
+                str(receipt_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(VERIFY_MODULE, "validate_build_receipt"),
+                mock.patch.object(VERIFY_MODULE, "verify_stack", return_value=[]),
+            ):
+                self.assertNotEqual(VERIFY_MODULE.main(), 0)
+
+        valid_build = {
+            "schema_version": 1,
+            "receipt_kind": "ios-native-build",
+            "lock_sha256": VERIFY_MODULE.sha256(LOCK),
+            "architecture": "arm64",
+            "deployment_target": "14.0",
+            "native_qualified": True,
+            "qualification": "native",
+        }
+        invalid_build = dict(valid_build, schema_version=True)
+        with self.assertRaisesRegex(VERIFY_MODULE.VerificationError, "schema"):
+            VERIFY_MODULE.validate_build_receipt(
+                self.lock(), LOCK, invalid_build, "arm64"
+            )
+
+        invalid_package = {
+            "schema_version": True,
+            "receipt_kind": "ios-native-package",
+            "lock_sha256": "a" * 64,
+            "architecture": "arm64",
+            "build_receipt_sha256": "b" * 64,
+            "dylibs": [],
+        }
+        with self.assertRaisesRegex(VERIFY_MODULE.VerificationError, "schema"):
+            VERIFY_MODULE.verify_package_receipt(
+                invalid_package,
+                "a" * 64,
+                "arm64",
+                "b" * 64,
+                [],
+                {},
+            )
+
+    def test_verifier_rejects_boolean_source_and_legal_receipt_schema_versions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            lock_path = root / "lock.json"
+            lock_path.write_text('{"schema_version": 2}\n', encoding="utf-8")
+            lock_hash = VERIFY_MODULE.sha256(lock_path)
+
+            def write_asset(name: str, content: bytes) -> pathlib.Path:
+                path = root / name
+                path.write_bytes(content)
+                return path
+
+            source_offer = write_asset("source-offer.txt", b"source offer\n")
+            replacement = write_asset("replacement.txt", b"replacement\n")
+            notice = write_asset("NOTICE.txt", b"notice\n")
+            license_file = write_asset("COPYING", b"license\n")
+            sbom_path = root / "sbom.json"
+            sbom_path.write_text('{"spdxVersion": "SPDX-2.3"}\n', encoding="utf-8")
+
+            def bound(path: pathlib.Path) -> dict:
+                return {"path": path.name, "sha256": VERIFY_MODULE.sha256(path)}
+
+            source_document = {
+                "schema_version": 1,
+                "receipt_kind": "component-source-set",
+                "component": "ios-native",
+                "lock_sha256": lock_hash,
+                "source_identity": {
+                    "manifest_or_closure_sha256": "a" * 64,
+                    "tree_hash_algorithm": "sha256",
+                    "final_tree_sha256": "b" * 64,
+                },
+                "patch_chain_sha256": "c" * 64,
+                "package_support_assets": [
+                    {
+                        "kind": "source-offer",
+                        "file_name": source_offer.name,
+                        "sha256": VERIFY_MODULE.sha256(source_offer),
+                    },
+                    {
+                        "kind": "replacement-guide",
+                        "file_name": replacement.name,
+                        "sha256": VERIFY_MODULE.sha256(replacement),
+                    },
+                    {
+                        "kind": "notices",
+                        "file_name": notice.name,
+                        "sha256": VERIFY_MODULE.sha256(notice),
+                    },
+                    {
+                        "kind": "license:fixture",
+                        "file_name": license_file.name,
+                        "sha256": VERIFY_MODULE.sha256(license_file),
+                    },
+                ],
+                "distribution": {
+                    "package_required": False,
+                    "release_required": True,
+                },
+                "archive": {"file_name": "source.tar.gz", "sha256": "d" * 64},
+            }
+            legal_document = {
+                "schema_version": 1,
+                "receipt_kind": "legal",
+                "lock_sha256": lock_hash,
+                "architecture": "arm64",
+                "notice": bound(notice),
+                "replacement_guide": bound(replacement),
+                "license_files": [bound(license_file)],
+                "sbom": bound(sbom_path),
+            }
+            source_path = root / "source.json"
+            legal_path = root / "legal.json"
+
+            for label in ("source", "legal"):
+                with self.subTest(label=label):
+                    source_document["schema_version"] = (
+                        True if label == "source" else 1
+                    )
+                    legal_document["schema_version"] = (
+                        True if label == "legal" else 1
+                    )
+                    source_path.write_text(
+                        json.dumps(source_document), encoding="utf-8"
+                    )
+                    legal_path.write_text(
+                        json.dumps(legal_document), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        VERIFY_MODULE.VerificationError, "schema"
+                    ):
+                        VERIFY_MODULE.verify_legal_assets(
+                            lock_path,
+                            "arm64",
+                            source_path,
+                            legal_path,
+                            sbom_path,
+                            asset_scope="package",
+                            source_assets_root=root,
+                        )
+
+            source_document["schema_version"] = 1
+            legal_document["schema_version"] = 1
+            source_document["distribution"] = {
+                "package_required": 0,
+                "release_required": 1,
+            }
+            source_path.write_text(json.dumps(source_document), encoding="utf-8")
+            legal_path.write_text(json.dumps(legal_document), encoding="utf-8")
+            with self.assertRaisesRegex(VERIFY_MODULE.VerificationError, "distribution"):
+                VERIFY_MODULE.verify_legal_assets(
+                    lock_path,
+                    "arm64",
+                    source_path,
+                    legal_path,
+                    sbom_path,
+                    asset_scope="package",
+                    source_assets_root=root,
+                )
 
     def test_complete_native_stack_has_exact_versions_and_immutable_sources(self):
         sources = self.sources()
@@ -386,6 +575,297 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             build_verification,
             "build must verify the final tree produced by the complete patch series",
         )
+
+    def test_release_source_receipts_require_the_complete_ordered_libimobiledevice_patch_chain(self):
+        patches = self.lock().get("patches")
+        self.assertIsInstance(patches, list)
+        actual = [
+            patch.get("path")
+            for patch in patches
+            if isinstance(patch, dict) and patch.get("source_id") == "libimobiledevice"
+        ]
+        self.assertEqual(
+            actual,
+            EXPECTED_LIBIMOBILEDEVICE_PATCH_CHAIN,
+            "release/source receipts must bind the typed-record ABI patch after the existing runtime series",
+        )
+        self.assertEqual(
+            patches[-1].get("patched_tree_sha256"),
+            EXPECTED_LIBIMOBILEDEVICE_FINAL_TREE_SHA256,
+            "the lock must name the tree produced by applying the complete patch chain to the pinned archive",
+        )
+
+        build_inputs = "\n".join(
+            (required_text(THIRD_PARTY_CMAKE), required_text(BUILD_SCRIPT))
+        )
+        for patch_path in EXPECTED_LIBIMOBILEDEVICE_PATCH_CHAIN:
+            self.assertIn(pathlib.Path(patch_path).name, build_inputs)
+
+    def test_dynamic_ostrace_error_callback_restores_the_application_context(self):
+        adapter = required_text(ROOT / "src/livecapture/src/iosnativeadapter.cpp")
+        self.assertIn("void relayOsTraceError(", adapter)
+        self.assertIn(
+            "relay->errorCallback( error, relay->context )",
+            adapter,
+        )
+        self.assertRegex(
+            adapter,
+            r"symbols\.osTraceStartWithRecordType\(\s*client, nullptr, "
+            r"&relayOsTraceRecord, &relayOsTraceError, relayContext\s*\)",
+        )
+        self.assertNotRegex(
+            adapter,
+            r"symbols\.osTraceStartWithRecordType\(\s*client, nullptr, "
+            r"&relayOsTraceRecord, errorCallback, relayContext\s*\)",
+        )
+
+    def test_pinned_typed_ostrace_symbol_is_required_by_the_artifact_verifier(self):
+        symbol = "ostrace_start_activity_with_record_type_and_error"
+        contract = self.lock().get("artifact_contract")
+        self.assertIsInstance(contract, dict)
+        required = contract.get("required_exported_symbols")
+        self.assertIsInstance(required, dict)
+        self.assertEqual(
+            required.get("libimobiledevice-1.0.dylib"),
+            [
+                "lockdownd_client_new_with_existing_pair",
+                symbol,
+                "syslog_relay_start_capture_raw_with_error",
+            ],
+        )
+
+        verifier = required_text(VERIFY_SCRIPT)
+        for token in ("nm", "required_exported_symbols", "missing required exported symbols"):
+            self.assertIn(token, verifier)
+
+    def test_exported_symbol_verification_normalizes_macho_names_and_fails_closed(self):
+        dylib = pathlib.Path("libimobiledevice-1.0.dylib")
+        with mock.patch.object(
+            VERIFY_MODULE,
+            "run",
+            return_value=(
+                "0000000000001000 T _ostrace_start_activity_with_record_type_and_error\n"
+                "0000000000002000 T _lockdownd_client_new_with_existing_pair\n"
+            ),
+        ):
+            self.assertEqual(
+                VERIFY_MODULE.exported_symbols(dylib),
+                {
+                    "ostrace_start_activity_with_record_type_and_error",
+                    "lockdownd_client_new_with_existing_pair",
+                },
+            )
+            VERIFY_MODULE.verify_required_exported_symbols(
+                dylib, ["ostrace_start_activity_with_record_type_and_error"]
+            )
+            with self.assertRaisesRegex(
+                VERIFY_MODULE.VerificationError, "missing required exported symbols"
+            ):
+                VERIFY_MODULE.verify_required_exported_symbols(
+                    dylib, ["syslog_relay_start_capture_raw_with_error"]
+                )
+
+    def test_exported_symbol_lock_contract_rejects_duplicates_and_unknown_dylibs(self):
+        with self.assertRaises(VERIFY_MODULE.VerificationError):
+            VERIFY_MODULE.locked_required_exported_symbols(
+                {"required_exported_symbols": {"other.dylib": ["symbol"]}},
+                ["libimobiledevice-1.0.dylib"],
+            )
+        with self.assertRaises(VERIFY_MODULE.VerificationError):
+            VERIFY_MODULE.locked_required_exported_symbols(
+                {
+                    "required_exported_symbols": {
+                        "libimobiledevice-1.0.dylib": ["symbol", "symbol"]
+                    }
+                },
+                ["libimobiledevice-1.0.dylib"],
+            )
+
+    def test_builder_alias_layout_is_verified_and_alias_symbols_bind_to_the_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            prefix = root / "prefix"
+            (prefix / "include").mkdir(parents=True)
+            prefix_lib = prefix / "lib"
+            prefix_lib.mkdir()
+            physical = prefix_lib / "librequired.1.dylib"
+            physical.write_bytes(b"required dylib fixture")
+            try:
+                (prefix_lib / "librequired.dylib").symlink_to(physical.name)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"filesystem symlinks are unavailable: {error}")
+
+            stack_root = root / "artifact"
+            identities = BUILD_MODULE.stage_artifact(prefix, stack_root, [physical])
+            staged_physical = stack_root / "lib" / physical.name
+            staged_alias = stack_root / "lib" / "librequired.dylib"
+            self.assertTrue(staged_alias.is_symlink())
+            self.assertEqual(staged_alias.resolve(), staged_physical.resolve())
+
+            contract = {
+                "thin_artifacts": {"arm64": {"deployment_target": "14.0"}},
+                "allowed_dylib_rpaths": ["@loader_path"],
+                "allowed_system_dependencies": ["/usr/lib/libSystem.B.dylib"],
+                "required_dylibs": [staged_alias.name],
+                "required_exported_symbols": {
+                    staged_alias.name: ["required_symbol"]
+                },
+                "forbidden_dynamic_references": [],
+            }
+            with (
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "install_name",
+                    side_effect=lambda path: f"@rpath/{path.name}",
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "rpaths", return_value=["@loader_path"]
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "architectures", return_value=["arm64"]
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "deployment_target", return_value="14.0"
+                ),
+                mock.patch.object(VERIFY_MODULE, "dependencies", return_value=[]),
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "exported_symbols",
+                    return_value={"required_symbol"},
+                ) as exported_symbols,
+            ):
+                evidence = VERIFY_MODULE.verify_stack(
+                    {"artifact_contract": contract},
+                    stack_root,
+                    "arm64",
+                    {"dylibs": identities},
+                )
+
+            self.assertEqual([item["name"] for item in evidence], [physical.name])
+            exported_symbols.assert_called_once_with(staged_physical)
+
+    def test_verifier_rejects_regular_dylibs_outside_the_locked_physical_closure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            prefix = root / "prefix"
+            (prefix / "include").mkdir(parents=True)
+            prefix_lib = prefix / "lib"
+            prefix_lib.mkdir()
+            required = prefix_lib / "librequired.1.dylib"
+            extra = prefix_lib / "libextra.1.dylib"
+            required.write_bytes(b"required dylib fixture")
+            extra.write_bytes(b"extra dylib fixture")
+            try:
+                (prefix_lib / "librequired.dylib").symlink_to(required.name)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"filesystem symlinks are unavailable: {error}")
+
+            stack_root = root / "artifact"
+            identities = BUILD_MODULE.stage_artifact(
+                prefix, stack_root, [required, extra]
+            )
+            contract = {
+                "thin_artifacts": {"arm64": {"deployment_target": "14.0"}},
+                "allowed_dylib_rpaths": ["@loader_path"],
+                "allowed_system_dependencies": ["/usr/lib/libSystem.B.dylib"],
+                "required_dylibs": ["librequired.dylib"],
+                "required_exported_symbols": {
+                    "librequired.dylib": ["required_symbol"]
+                },
+                "forbidden_dynamic_references": [],
+            }
+            with (
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "install_name",
+                    side_effect=lambda path: f"@rpath/{path.name}",
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "rpaths", return_value=["@loader_path"]
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "architectures", return_value=["arm64"]
+                ),
+                mock.patch.object(
+                    VERIFY_MODULE, "deployment_target", return_value="14.0"
+                ),
+                mock.patch.object(VERIFY_MODULE, "dependencies", return_value=[]),
+                mock.patch.object(
+                    VERIFY_MODULE,
+                    "exported_symbols",
+                    return_value={"required_symbol"},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    VERIFY_MODULE.VerificationError, r"unrequired|physical closure"
+                ):
+                    VERIFY_MODULE.verify_stack(
+                        {"artifact_contract": contract},
+                        stack_root,
+                        "arm64",
+                        {"dylibs": identities},
+                    )
+
+    def test_verifier_rejects_dangling_chained_and_escaping_dylib_aliases(self):
+        for scenario in ("dangling", "chain", "escape"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                libdir = root / "lib"
+                libdir.mkdir()
+                physical = libdir / "librequired.1.dylib"
+                physical.write_bytes(b"required dylib fixture")
+                alias = libdir / "librequired.dylib"
+                outside = root / "outside.dylib"
+                outside.write_bytes(b"outside dylib fixture")
+                try:
+                    if scenario == "dangling":
+                        alias.symlink_to("missing.dylib")
+                    elif scenario == "chain":
+                        intermediate = libdir / "libintermediate.dylib"
+                        intermediate.symlink_to(physical.name)
+                        alias.symlink_to(intermediate.name)
+                    else:
+                        alias.symlink_to(pathlib.Path("..") / outside.name)
+                except (NotImplementedError, OSError) as error:
+                    self.skipTest(f"filesystem symlinks are unavailable: {error}")
+
+                contract = {
+                    "thin_artifacts": {"arm64": {"deployment_target": "14.0"}},
+                    "allowed_dylib_rpaths": ["@loader_path"],
+                    "allowed_system_dependencies": ["/usr/lib/libSystem.B.dylib"],
+                    "required_dylibs": [alias.name],
+                    "required_exported_symbols": {alias.name: ["required_symbol"]},
+                    "forbidden_dynamic_references": [],
+                }
+                receipt = {
+                    "dylibs": [
+                        {"name": physical.name, "sha256": VERIFY_MODULE.sha256(physical)}
+                    ]
+                }
+                with self.assertRaisesRegex(
+                    VERIFY_MODULE.VerificationError,
+                    r"alias|chain|dangling|escape|regular target",
+                ):
+                    VERIFY_MODULE.verify_stack(
+                        {"artifact_contract": contract}, root, "arm64", receipt
+                    )
+
+    def test_verifier_rejects_aliases_redirected_to_a_different_required_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            libdir = pathlib.Path(temporary) / "lib"
+            libdir.mkdir()
+            other_library = libdir / "libother.1.dylib"
+            other_library.write_bytes(b"other required dylib fixture")
+            alias = libdir / "librequired.dylib"
+            try:
+                alias.symlink_to(other_library.name)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"filesystem symlinks are unavailable: {error}")
+
+            with self.assertRaisesRegex(
+                VERIFY_MODULE.VerificationError, r"alias.*name|library identity"
+            ):
+                VERIFY_MODULE.direct_dylib_target(alias, libdir, alias.name)
 
     def test_verifier_enforces_macho_closure_install_names_architectures_and_targets(self):
         verifier = required_text(VERIFY_SCRIPT)

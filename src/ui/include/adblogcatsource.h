@@ -92,6 +92,7 @@ private:
     bool connecting_ = false;
     Generation generationCounter_{ 0 };
     std::optional<Generation> activeGeneration_;
+    std::optional<Generation> reportedErrorGeneration_;
     ClearRequestId clearRequestCounter_{ 0 };
     std::optional<Generation> pendingClearGeneration_;
     std::optional<ClearRequestId> pendingClearRequestId_;

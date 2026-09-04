@@ -1,0 +1,190 @@
+From: klogg maintainers <noreply@klogg.dev>
+Date: Sat, 5 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ostrace: expose outer relay record type
+
+Add a typed live-record callback that carries the exact one-byte outer relay
+message type alongside the borrowed payload. Keep both existing activity-start
+entry points as wrappers over one implementation, retain free-after-callback
+ownership, and preserve suppression of terminal callbacks during intentional
+stop.
+
+Type-1 control records may have an empty payload; type-2 activity records still
+require payload bytes. The new API is additive so existing consumers retain
+their ABI and behavior.
+
+---
+diff --git a/include/libimobiledevice/ostrace.h b/include/libimobiledevice/ostrace.h
+index ddfa573..263cbaa 100644
+--- a/include/libimobiledevice/ostrace.h
++++ b/include/libimobiledevice/ostrace.h
+@@ -81,20 +81,23 @@ struct ostrace_packet_header_t {
+ 	uint16_t unk14;
+ 	uint16_t category_len; // "category"
+ 	uint16_t unk15;
+ 	uint32_t unk16; // 0
+ };
+ #pragma pack(pop)
+ 
+ /** Receives unparsed ostrace data from the ostrace service */
+ typedef void (*ostrace_activity_cb_t)(const void* buf, size_t len, void *user_data);
+ 
++/** Receives an ostrace relay record with its authoritative outer message type. */
++typedef void (*ostrace_record_cb_t)(uint8_t record_type, const void* buf, size_t len, void *user_data);
++
+ /** Reports why the live activity worker terminated. */
+ typedef void (*ostrace_terminal_cb_t)(ostrace_error_t error, void *user_data);
+ 
+ /** Receives archive data from the ostrace service */
+ typedef int (*ostrace_archive_write_cb_t)(const void* buf, size_t len, void *user_data);
+ 
+ /* Interface */
+ 
+ /**
+  * Connects to the os_trace_relay service on the specified device.
+@@ -152,20 +155,23 @@ LIBIMOBILEDEVICE_API ostrace_error_t ostrace_client_free(ostrace_client_t client
+  * @return OSTRACE_E_SUCCESS on success,
+  *      OSTRACE_E_INVALID_ARG when one or more parameters are
+  *      invalid or OSTRACE_E_UNKNOWN_ERROR when an unspecified
+  *      error occurs or an ostrace activity has already been started.
+  */
+ LIBIMOBILEDEVICE_API ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data);
+ 
+ /** Starts activity capture and reports terminal worker errors. */
+ LIBIMOBILEDEVICE_API ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data);
+ 
++/** Starts typed activity capture and reports terminal worker errors. */
++LIBIMOBILEDEVICE_API ostrace_error_t ostrace_start_activity_with_record_type_and_error(ostrace_client_t client, plist_t options, ostrace_record_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data);
++
+ /**
+  * Stops the ostrace activity.
+  *
+  * Use ostrace_start_activity() to start receiving OS trace data.
+  *
+  * @param client The ostrace client to use
+  *
+  * @return OSTRACE_E_SUCCESS on success,
+  *      OSTRACE_E_INVALID_ARG when one or more parameters are
+  *      invalid or OSTRACE_E_UNKNOWN_ERROR when an unspecified
+diff --git a/src/ostrace.c b/src/ostrace.c
+index 9fd8ea9..433f76a 100644
+--- a/src/ostrace.c
++++ b/src/ostrace.c
+@@ -35,6 +35,7 @@
+ struct ostrace_worker_thread {
+ 	ostrace_client_t client;
+ 	ostrace_activity_cb_t cbfunc;
++	ostrace_record_cb_t record_cbfunc;
+ 	ostrace_terminal_cb_t terminal_callback;
+ 	void *user_data;
+ };
+@@ -273,29 +274,37 @@ void *ostrace_worker(void *arg)
+ 
+ 		debug_info("got length %d", rlen);
+ 
+-		if (rlen == 0 || rlen > OSTRACE_MAX_LIVE_PACKET_SIZE) {
++		if ((msgtype == 2 && rlen == 0) || rlen > OSTRACE_MAX_LIVE_PACKET_SIZE) {
+ 			debug_info("Invalid live packet length %d", rlen);
+ 			res = OSTRACE_E_REQUEST_FAILED;
+ 			break;
+ 		}
+-		void* buf = malloc(rlen);
+-		if (!buf) {
+-			res = OSTRACE_E_UNKNOWN_ERROR;
+-			break;
+-		}
+-		res = ostrace_receive_interruptible(oswt, (char*)buf, rlen, &received);
+-		if (res != OSTRACE_E_SUCCESS) {
+-			debug_info("Failed to receive %d bytes, error %d", rlen, res);
+-			free(buf);
+-			break;
++		void* buf = NULL;
++		received = 0;
++		if (rlen > 0) {
++			buf = malloc(rlen);
++			if (!buf) {
++				res = OSTRACE_E_UNKNOWN_ERROR;
++				break;
++			}
++			res = ostrace_receive_interruptible(oswt, (char*)buf, rlen, &received);
++			if (res != OSTRACE_E_SUCCESS) {
++				debug_info("Failed to receive %d bytes, error %d", rlen, res);
++				free(buf);
++				break;
++			}
++			if (received < rlen) {
++				debug_info("Failed to receive all data, got %d/%d", received, rlen);
++				free(buf);
++				res = OSTRACE_E_NOT_ENOUGH_DATA;
++				break;
++			}
+ 		}
+-		if (received < rlen) {
+-			debug_info("Failed to receive all data, got %d/%d", received, rlen);
+-			free(buf);
+-			res = OSTRACE_E_NOT_ENOUGH_DATA;
+-			break;
++		if (oswt->record_cbfunc) {
++			oswt->record_cbfunc(msgtype, buf, received, oswt->user_data);
++		} else {
++			oswt->cbfunc(buf, received, oswt->user_data);
+ 		}
+-		oswt->cbfunc(buf, received, oswt->user_data);
+ 		free(buf);
+ 	}
+ 
+@@ -311,14 +319,9 @@ void *ostrace_worker(void *arg)
+ 	return NULL;
+ }
+ 
+-ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data)
+-{
+-	return ostrace_start_activity_with_error(client, options, callback, NULL, user_data);
+-}
+-
+-ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
++static ostrace_error_t ostrace_start_activity_internal(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_record_cb_t record_callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
+ {
+-	if (!client || !callback)
++	if (!client || (!callback && !record_callback))
+ 		return OSTRACE_E_INVALID_ARG;
+ 
+ 	ostrace_error_t res = OSTRACE_E_UNKNOWN_ERROR;
+@@ -358,11 +361,14 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
+ 	if (oswt) {
+ 		oswt->client = client;
+ 		oswt->cbfunc = callback;
++		oswt->record_cbfunc = record_callback;
+ 		oswt->terminal_callback = terminal_callback;
+ 		oswt->user_data = user_data;
+ 
+ 		if (thread_new(&client->worker, ostrace_worker, oswt) == 0) {
+ 			res = OSTRACE_E_SUCCESS;
++		} else {
++			free(oswt);
+ 		}
+ 	}
+ 
+@@ -369,6 +375,21 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
+ 	return res;
+ }
+ 
++ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data)
++{
++	return ostrace_start_activity_with_error(client, options, callback, NULL, user_data);
++}
++
++ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
++{
++	return ostrace_start_activity_internal(client, options, callback, NULL, terminal_callback, user_data);
++}
++
++ostrace_error_t ostrace_start_activity_with_record_type_and_error(ostrace_client_t client, plist_t options, ostrace_record_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
++{
++	return ostrace_start_activity_internal(client, options, NULL, callback, terminal_callback, user_data);
++}
++
+ ostrace_error_t ostrace_stop_activity(ostrace_client_t client)
+ {
+ 	if (client->worker) {
+--
+2.50.1

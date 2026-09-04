@@ -16,7 +16,7 @@
 
 namespace klogg::livecapture::ios {
 
-// The pinned C ABI represents each of these enums as a 32-bit int.
+// The pinned vendor C ABI represents these C enums as a 32-bit int.
 enum class NativeConnectionType : std::int32_t { // NOLINT(performance-enum-size)
     Usb = 1,
     Network = 2
@@ -29,6 +29,11 @@ enum class NativeEventType : std::int32_t { // NOLINT(performance-enum-size)
     Add = 1,
     Remove = 2,
     Paired = 3
+};
+// The additive ostrace callback carries the outer relay type as uint8_t.
+enum class NativeOsTraceRelayRecordType : std::uint8_t {
+    Control = 1,
+    Activity = 2
 };
 
 struct NativeDeviceInfo {
@@ -50,7 +55,8 @@ using NativeOsTraceClient = void*;
 using NativeSyslogRelayClient = void*;
 using NativeEventContext = void*;
 using NativeEventCallback = void ( * )( const NativeDeviceEvent*, void* );
-using NativeOsTraceActivityCallback = void ( * )( const void*, std::size_t, void* );
+using NativeOsTraceRelayRecordCallback
+    = void ( * )( NativeOsTraceRelayRecordType, const void*, std::uint32_t, void* );
 using NativeOsTraceErrorCallback = void ( * )( std::int32_t, void* );
 using NativeSyslogRelayCallback = void ( * )( char, void* );
 using NativeSyslogRelayErrorCallback = void ( * )( std::int32_t, void* );
@@ -87,8 +93,9 @@ struct IosNativeApi {
                                                          const char* );
     std::int32_t ( *osTraceClientNew )( NativeIdevice, NativeServiceDescriptor,
                                         NativeOsTraceClient* );
-    std::int32_t ( *osTraceStart )( NativeOsTraceClient, NativeOsTraceActivityCallback,
-                                    NativeOsTraceErrorCallback, void* );
+    std::int32_t ( *osTraceStartWithRecordType )( NativeOsTraceClient,
+                                                  NativeOsTraceRelayRecordCallback,
+                                                  NativeOsTraceErrorCallback, void* );
     std::int32_t ( *osTraceStop )( NativeOsTraceClient );
     std::int32_t ( *osTraceClientFree )( NativeOsTraceClient );
     std::int32_t ( *syslogRelayClientNew )( NativeIdevice, NativeServiceDescriptor,

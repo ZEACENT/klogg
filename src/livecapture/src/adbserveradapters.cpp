@@ -36,6 +36,7 @@ namespace {
 
 constexpr auto versionOperation = AdbSmartSocketClient::OperationId{ 1 };
 constexpr auto featuresOperation = AdbSmartSocketClient::OperationId{ 2 };
+constexpr int adbServerStderrTailCapacityBytes = 16 * 1024;
 
 std::string stringFromQString( const QString& value )
 {
@@ -50,7 +51,46 @@ QString standardPrivateKeyPath()
 
 QString endpointSocket( const AdbServerEndpoint& endpoint )
 {
-    return QStringLiteral( "tcp:%1:%2" ).arg( endpoint.address.toString() ).arg( endpoint.port );
+    // launch() has already rejected every endpoint except the official loopback
+    // listener. ADB's server socket grammar represents that listener as
+    // tcp:<port>; tcp:<numeric-host>:<port> is not accepted by the native server.
+    return QStringLiteral( "tcp:%1" ).arg( endpoint.port );
+}
+
+void retainStderrTail( QByteArray& tail, const QByteArray& output )
+{
+    if ( output.isEmpty() ) {
+        return;
+    }
+    if ( output.size() >= adbServerStderrTailCapacityBytes ) {
+        tail = output.right( adbServerStderrTailCapacityBytes );
+        return;
+    }
+
+    tail.append( output );
+    const auto overflow = tail.size() - adbServerStderrTailCapacityBytes;
+    if ( overflow > 0 ) {
+        tail.remove( 0, overflow );
+    }
+}
+
+void drainStderr( QProcess& process, QByteArray& tail )
+{
+    retainStderrTail( tail, process.readAllStandardError() );
+}
+
+std::string appendStderrDiagnostic( std::string diagnostic, const QByteArray& tail )
+{
+    const auto stderrText = tail.trimmed();
+    if ( stderrText.isEmpty() ) {
+        return diagnostic;
+    }
+    if ( !diagnostic.empty() ) {
+        diagnostic.push_back( '\n' );
+    }
+    diagnostic += "Packaged ADB server stderr:\n";
+    diagnostic += stderrText.toStdString();
+    return diagnostic;
 }
 
 std::set<QProcess*>& publishedProcesses()
@@ -300,7 +340,9 @@ public:
         auto* const process = new QProcess( &owner_ );
         Launch launch;
         launch.process = process;
+        launch.stderrTail = std::make_shared<QByteArray>();
         launch.callback = std::move( callback );
+        const auto stderrTail = launch.stderrTail;
         launches_.emplace( token, std::move( launch ) );
 
         auto environment = QProcessEnvironment::systemEnvironment();
@@ -314,8 +356,13 @@ public:
         process->setProgram( resolvedExecutable );
         process->setArguments( officialArguments );
         process->setStandardOutputFile( QProcess::nullDevice() );
-        process->setStandardErrorFile( QProcess::nullDevice() );
+        process->setProcessChannelMode( QProcess::SeparateChannels );
 
+        // The process is the connection context so drainage survives release() and
+        // launcher destruction. Retaining only the bounded tail preserves fatal
+        // startup diagnostics while continuing to empty the pipe indefinitely.
+        QObject::connect( process, &QProcess::readyReadStandardError, process,
+                          [ process, stderrTail ] { drainStderr( *process, *stderrTail ); } );
         QObject::connect( process, &QProcess::started, &owner_, [ this, token ] {
             const auto found = launches_.find( token );
             if ( found == launches_.end() ) {
@@ -375,6 +422,7 @@ public:
             return;
         }
         auto* const process = found->second.process.data();
+        const auto stderrTail = found->second.stderrTail;
         launches_.erase( found );
         if ( process == nullptr ) {
             return;
@@ -384,7 +432,8 @@ public:
         process->setParent( nullptr );
         publishedProcesses().insert( process );
         QObject::connect( process, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
-                          process, [ process ]( int, QProcess::ExitStatus ) {
+                          process, [ process, stderrTail ]( int, QProcess::ExitStatus ) {
+                              drainStderr( *process, *stderrTail );
                               publishedProcesses().erase( process );
                               process->deleteLater();
                           } );
@@ -397,6 +446,7 @@ public:
 private:
     struct Launch {
         QPointer<QProcess> process;
+        std::shared_ptr<QByteArray> stderrTail;
         Callback callback;
         bool started{ false };
     };
@@ -410,6 +460,10 @@ private:
         }
         auto callback = std::move( found->second.callback );
         auto* const process = found->second.process.data();
+        if ( process != nullptr ) {
+            drainStderr( *process, *found->second.stderrTail );
+        }
+        diagnostic = appendStderrDiagnostic( std::move( diagnostic ), *found->second.stderrTail );
         launches_.erase( found );
         if ( process != nullptr ) {
             QObject::disconnect( process, nullptr, &owner_, nullptr );

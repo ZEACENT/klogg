@@ -98,6 +98,9 @@ if(KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES)
     COMMAND
       ${GIT_EXECUTABLE} apply --whitespace=nowarn
       ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0004-syslog-terminal-callback.patch
+    COMMAND
+      ${GIT_EXECUTABLE} apply --whitespace=nowarn
+      ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0005-ostrace-record-type-callback.patch
   )
   set(CPM_USE_LOCAL_PACKAGES ${_TMP_CPM_USE_LOCAL_PACKAGES})
 endif()
@@ -164,11 +167,12 @@ if(KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES)
     ${libimobiledevice_SOURCE_DIR}
     149f7623c672c1fa73122c7119a12bfc0012f2ac
     0a6c741d6361d9bb83c0b73e1a463969f2f98da39b518df72f3c24ca3213695e
-    fac5e506389bffe486077ef6ce37c416a3230ef24a6bc8661eb96b9b6c747800
+    a5acf45cb73b96ded80d8944f8c2ee59e74a73181fe41caee2f81a30d9d8587d
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0001-fix-ostrace-live-packet-leak.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0002-interrupt-live-capture-receive.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0003-passive-lockdown-handshake.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0004-syslog-terminal-callback.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0005-ostrace-record-type-callback.patch
   )
 endif()
 

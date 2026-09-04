@@ -151,19 +151,24 @@ namespace messages {
 // backend: they restore loadable but never arm, presented read-only.
 QString compatibilityTransportReadOnly();
 QString captureIdentifierAlreadyInUse();
-QString transportUnavailableOnRestore();
 } // namespace messages
 
 QString serializeSpec( const LiveLogSessionSpec& spec );
 ParseResult parsePersistedSpec( const QString& json );
+bool usesCompatibilityTransport( const LiveLogSessionSpec& spec ) noexcept;
 std::vector<Diagnostic> validateForAccept( const LiveLogSessionSpec& spec );
+std::vector<Diagnostic> validateForRestore( const LiveLogSessionSpec& spec );
 
-// Restored run intent expressed through the Task 2 reducer's inputs: Running
-// maps to a single StartRequested event, Stopped restores inert with no
-// events. Fail-closed like validateForAccept: sessions without a device
-// target or with an unusable capture id never arm a start, and the timestamp
-// is passed through verbatim (monotonic-now validation belongs to the
-// reducer).
+// Persistence snapshots an inactive copy without mutating the runtime session;
+// every non-runtime field remains unchanged.
+LiveLogSessionSpec withStoppedRunIntent( LiveLogSessionSpec spec );
+
+// Explicit runtime run intent expressed through the reducer's inputs: Running
+// maps to a single StartRequested event and Stopped maps to no events.
+// Fail-closed like validateForAccept: sessions without a device target or with
+// an unusable capture id never arm a start, and the timestamp is passed through
+// verbatim (monotonic-now validation belongs to the reducer). Persistence and
+// session restoration stay inert without using this mapping.
 std::vector<livecapture::LiveStateEvent> initialLiveStateEvents( const LiveLogSessionSpec& spec,
                                                                  livecapture::Timestamp now );
 

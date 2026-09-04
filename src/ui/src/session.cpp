@@ -28,10 +28,10 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <utility>
 
 #include <QDir>
 #include <QFile>
@@ -801,48 +801,48 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
                                        const std::function<ViewInterface*()>& view_factory,
                                        bool startConnected, const QString& viewContext )
 {
-    auto restoredSessionData = sessionData;
-    if ( !restoredSessionData.isValid() ) {
+    auto runtimeSessionData = sessionData;
+    runtimeSessionData.runIntent = startConnected ? klogg::livecapture::RunIntent::Running
+                                                  : klogg::livecapture::RunIntent::Stopped;
+    if ( !runtimeSessionData.isValid() ) {
         LOG_WARNING << "Refusing live source with invalid capture id "
-                    << restoredSessionData.captureId;
+                    << runtimeSessionData.captureId;
         return nullptr;
     }
-    if ( isLiveCaptureIdOpen( restoredSessionData.captureId ) ) {
+    if ( isLiveCaptureIdOpen( runtimeSessionData.captureId ) ) {
         LOG_WARNING << "Refusing duplicate live capture storage id "
-                    << restoredSessionData.captureId;
+                    << runtimeSessionData.captureId;
         return nullptr;
     }
 
     std::shared_ptr<StreamingLogData> logData;
     try {
-        logData = std::make_shared<StreamingLogData>( restoredSessionData.captureId );
+        logData = std::make_shared<StreamingLogData>( runtimeSessionData.captureId );
     } catch ( const std::exception& error ) {
-        LOG_WARNING << "Failed to initialize live capture " << restoredSessionData.captureId << ": "
+        LOG_WARNING << "Failed to initialize live capture " << runtimeSessionData.captureId << ": "
                     << error.what();
         return nullptr;
     }
 
     CaptureStore::Limits captureLimits;
-    captureLimits.rollingMaxFileSize = restoredSessionData.captureMaxFileSize;
-    captureLimits.rollingBackupCount = restoredSessionData.captureBackupCount;
+    captureLimits.rollingMaxFileSize = runtimeSessionData.captureMaxFileSize;
+    captureLimits.rollingBackupCount = runtimeSessionData.captureBackupCount;
     logData->setCaptureLimits( captureLimits );
 
-    if ( !restoredSessionData.boundOutputFile.isEmpty()
-         && !logData->bindOutputFile( restoredSessionData.boundOutputFile,
-                                      restoredSessionData.outputAnsiMode,
+    if ( !runtimeSessionData.boundOutputFile.isEmpty()
+         && !logData->bindOutputFile( runtimeSessionData.boundOutputFile,
+                                      runtimeSessionData.outputAnsiMode,
                                       OutputBindMode::Restore ) ) {
         LOG_WARNING << "Failed to restore ADB output file binding "
-                    << restoredSessionData.boundOutputFile;
+                    << runtimeSessionData.boundOutputFile;
     }
     auto logFilteredData = std::shared_ptr<LogFilteredData>( logData->getNewFilteredData() );
     auto adbSource = transportFactory_ != nullptr
-                         ? std::make_shared<AdbLogcatSource>( restoredSessionData, logData,
+                         ? std::make_shared<AdbLogcatSource>( runtimeSessionData, logData,
                                                               *transportFactory_ )
-                         : std::make_shared<AdbLogcatSource>( restoredSessionData, logData );
+                         : std::make_shared<AdbLogcatSource>( runtimeSessionData, logData );
 
-    auto liveSpec = klogg::livelog::sessionSpecFromSessionData( restoredSessionData );
-    liveSpec.runIntent = startConnected ? klogg::livecapture::RunIntent::Running
-                                        : klogg::livecapture::RunIntent::Stopped;
+    auto liveSpec = klogg::livelog::sessionSpecFromSessionData( runtimeSessionData );
     auto liveEffects = std::make_shared<SessionLiveLogEffects>(
         adbSource, liveSpec, adbInfrastructure_, iosCatalog_ );
     auto liveController = std::make_shared<klogg::livelog::LiveLogController>(
@@ -885,8 +885,8 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
     }
 
     openFiles_.insert( { view,
-                         { restoredSessionData.documentId(), restoredSessionData.documentId(),
-                           restoredSessionData.displayName(), restoredSessionData.associatedPath(),
+                         { runtimeSessionData.documentId(), runtimeSessionData.documentId(),
+                           runtimeSessionData.displayName(), runtimeSessionData.associatedPath(),
                            DocumentKind::AdbLogcat, logData, logFilteredData, adbSource, view,
                            liveEffects, liveController } } );
 
@@ -979,7 +979,8 @@ void WindowSession::save(
             spec.boundOutputFile = runtimeData.boundOutputFile;
             spec.capture.preserveAnsiOnSave
                 = runtimeData.outputAnsiMode == LiveLogSaveAnsiMode::Preserve;
-            sourceSpec = klogg::livelog::serializeSpec( spec );
+            sourceSpec = klogg::livelog::serializeSpec(
+                klogg::livelog::withStoppedRunIntent( std::move( spec ) ) );
         }
 
         // Defensive null-guard: a future buggy view returning a null context must
@@ -1042,28 +1043,17 @@ OpenedDocumentsList WindowSession::restore( const std::function<ViewInterface*()
             }
             const auto& restoredSpec = parsed.spec.value();
 
-            // Gate routing: restored tabs pass the same typed accept gate as
-            // fresh composition before anything can arm. The transitional
-            // compatibility backends are the one soft case — they stay
-            // loadable read-only (never armed, never an error); every other
-            // fatality refuses the tab with a structured rejection.
-            bool compatibilityTransport = false;
-            QStringList gateRejections;
-            for ( const auto& diagnostic : klogg::livelog::validateForAccept( restoredSpec ) ) {
-                if ( diagnostic.severity != klogg::livelog::Diagnostic::Severity::Fatal ) {
-                    continue;
-                }
-                if ( diagnostic.code == QLatin1String( "transitional-backend-not-creatable" ) ) {
-                    compatibilityTransport = true;
-                    continue;
-                }
-                gateRejections << diagnostic.message;
-            }
-
+            // Restore has one typed gate: compatibility transports remain
+            // loadable read-only, while every other fatal validation refuses the
+            // tab. The gate owns that policy instead of routing on diagnostic text.
+            const auto gateRejections
+                = fatalMessagesOf( klogg::livelog::validateForRestore( restoredSpec ) );
             if ( !gateRejections.isEmpty() ) {
                 refuseRestoredLiveSource( file, gateRejections );
                 continue;
             }
+            const auto compatibilityTransport
+                = klogg::livelog::usesCompatibilityTransport( restoredSpec );
             // Info-level parse diagnostics and compatibility-transport
             // presentation surface as non-error notices, once per source document.
             for ( const auto& diagnostic : parsed.diagnostics ) {
@@ -1083,21 +1073,13 @@ OpenedDocumentsList WindowSession::restore( const std::function<ViewInterface*()
                 continue;
             }
 
-            // Arming decision comes from the gated mapping itself: Running
-            // intents on accepted specs yield exactly one StartRequested.
-            const auto armEvents = klogg::livelog::initialLiveStateEvents(
-                restoredSpec, std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  std::chrono::steady_clock::now().time_since_epoch() ) );
-
+            // Validation precedes composition so an inert restore cannot
+            // launder an otherwise rejected payload. openAdbAlways owns the
+            // runtime activation invariant and canonicalizes this tab to Stopped.
             const auto sessionData = klogg::livelog::sessionDataFromSpec( restoredSpec );
             if ( sessionData.isValid() ) {
-                view = appSession_->openAdbAlways( sessionData, view_factory, !armEvents.empty(),
+                view = appSession_->openAdbAlways( sessionData, view_factory, false,
                                                    file.viewContext );
-            }
-            if ( view == nullptr && !armEvents.empty() ) {
-                refuseRestoredLiveSource(
-                    file, { klogg::livelog::messages::transportUnavailableOnRestore() } );
-                continue;
             }
         }
         else if ( file.sourceType == QStringLiteral( "folder" ) ) {

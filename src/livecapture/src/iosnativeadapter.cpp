@@ -8,7 +8,10 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -20,6 +23,16 @@ namespace klogg::livecapture::ios {
 namespace {
 
 #ifdef __APPLE__
+using VendorOsTraceRecordCallback
+    = void ( * )( std::uint8_t, const void*, std::size_t, void* );
+constexpr std::int32_t OsTraceRequestFailed = -7;
+
+struct OsTraceCallbackRelay {
+    NativeOsTraceRelayRecordCallback recordCallback{ nullptr };
+    NativeOsTraceErrorCallback errorCallback{ nullptr };
+    void* context{ nullptr };
+};
+
 struct NativeSymbols {
     std::int32_t ( *deviceListExtendedFree )( NativeDeviceInfo** ){ nullptr };
     std::int32_t ( *deviceNewWithOptions )( NativeIdevice*, const char*, std::int32_t ){ nullptr };
@@ -29,8 +42,11 @@ struct NativeSymbols {
     void ( *plistFree )( void* ){ nullptr };
     void ( *plistMemFree )( void* ){ nullptr };
     std::int32_t ( *readPairRecord )( const char*, char**, std::uint32_t* ){ nullptr };
-    std::int32_t ( *osTraceStart )( NativeOsTraceClient, void*, NativeOsTraceActivityCallback,
-                                    NativeOsTraceErrorCallback, void* ){ nullptr };
+    std::int32_t ( *osTraceStartWithRecordType )( NativeOsTraceClient, void*,
+                                                  VendorOsTraceRecordCallback,
+                                                  NativeOsTraceErrorCallback, void* ){ nullptr };
+    std::int32_t ( *osTraceStop )( NativeOsTraceClient ){ nullptr };
+    std::int32_t ( *osTraceClientFree )( NativeOsTraceClient ){ nullptr };
     std::int32_t ( *syslogRelayStart )( NativeSyslogRelayClient, NativeSyslogRelayCallback,
                                         NativeSyslogRelayErrorCallback, void* ){ nullptr };
 };
@@ -39,6 +55,8 @@ NativeSymbols symbols;
 std::vector<void*> moduleHandles;
 std::string loadedRoot;
 std::mutex loadMutex;
+std::mutex osTraceRelayMutex;
+std::unordered_map<NativeOsTraceClient, std::unique_ptr<OsTraceCallbackRelay>> osTraceRelays;
 
 std::int32_t deviceListExtendedFree( NativeDeviceInfo** devices )
 {
@@ -107,10 +125,82 @@ void freePairRecord( char* record )
     std::free( record ); // NOLINT(cppcoreguidelines-no-malloc, cppcoreguidelines-owning-memory)
 }
 
-std::int32_t osTraceStart( NativeOsTraceClient client, NativeOsTraceActivityCallback callback,
-                           NativeOsTraceErrorCallback errorCallback, void* context )
+void relayOsTraceError( std::int32_t error, void* context ) noexcept
 {
-    return symbols.osTraceStart( client, nullptr, callback, errorCallback, context );
+    auto* const relay = static_cast<OsTraceCallbackRelay*>( context );
+    if ( relay == nullptr || relay->errorCallback == nullptr ) {
+        return;
+    }
+    try {
+        relay->errorCallback( error, relay->context );
+    } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+        // Never unwind through the vendor C callback boundary.
+    }
+}
+
+void relayOsTraceRecord( std::uint8_t recordType, const void* bytes, std::size_t byteCount,
+                         void* context ) noexcept
+{
+    auto* const relay = static_cast<OsTraceCallbackRelay*>( context );
+    if ( relay == nullptr || relay->recordCallback == nullptr ) {
+        return;
+    }
+    try {
+        if ( byteCount > std::numeric_limits<std::uint32_t>::max() ) {
+            relayOsTraceError( OsTraceRequestFailed, relay );
+            return;
+        }
+        relay->recordCallback( static_cast<NativeOsTraceRelayRecordType>( recordType ), bytes,
+                               static_cast<std::uint32_t>( byteCount ), relay->context );
+    } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+        // Never unwind through the vendor C callback boundary.
+    }
+}
+
+std::int32_t osTraceStartWithRecordType( NativeOsTraceClient client,
+                                         NativeOsTraceRelayRecordCallback callback,
+                                         NativeOsTraceErrorCallback errorCallback, void* context )
+{
+    auto relay = std::make_unique<OsTraceCallbackRelay>();
+    relay->recordCallback = callback;
+    relay->errorCallback = errorCallback;
+    relay->context = context;
+    auto* const relayContext = relay.get();
+    {
+        std::lock_guard<std::mutex> lock( osTraceRelayMutex );
+        if ( osTraceRelays.find( client ) != osTraceRelays.end() ) {
+            return -1;
+        }
+        osTraceRelays.emplace( client, std::move( relay ) );
+    }
+
+    const auto result = symbols.osTraceStartWithRecordType(
+        client, nullptr, &relayOsTraceRecord, &relayOsTraceError, relayContext );
+    if ( result != 0 ) {
+        std::lock_guard<std::mutex> lock( osTraceRelayMutex );
+        osTraceRelays.erase( client );
+    }
+    return result;
+}
+
+std::int32_t osTraceStop( NativeOsTraceClient client )
+{
+    const auto result = symbols.osTraceStop( client );
+    if ( result == 0 ) {
+        std::lock_guard<std::mutex> lock( osTraceRelayMutex );
+        osTraceRelays.erase( client );
+    }
+    return result;
+}
+
+std::int32_t osTraceClientFree( NativeOsTraceClient client )
+{
+    const auto result = symbols.osTraceClientFree( client );
+    if ( result == 0 ) {
+        std::lock_guard<std::mutex> lock( osTraceRelayMutex );
+        osTraceRelays.erase( client );
+    }
+    return result;
 }
 
 std::int32_t syslogRelayStart( NativeSyslogRelayClient client, NativeSyslogRelayCallback callback,
@@ -156,11 +246,9 @@ IosNativeApi resolvedApi( void* mobile )
             mobile, "lockdownd_client_new_with_existing_pair" );
     api.osTraceClientNew
         = requiredSymbol<decltype( api.osTraceClientNew )>( mobile, "ostrace_client_new" );
-    api.osTraceStart = &osTraceStart;
-    api.osTraceStop
-        = requiredSymbol<decltype( api.osTraceStop )>( mobile, "ostrace_stop_activity" );
-    api.osTraceClientFree
-        = requiredSymbol<decltype( api.osTraceClientFree )>( mobile, "ostrace_client_free" );
+    api.osTraceStartWithRecordType = &osTraceStartWithRecordType;
+    api.osTraceStop = &osTraceStop;
+    api.osTraceClientFree = &osTraceClientFree;
     api.syslogRelayClientNew
         = requiredSymbol<decltype( api.syslogRelayClientNew )>( mobile, "syslog_relay_client_new" );
     api.syslogRelayStart = &syslogRelayStart;
@@ -300,8 +388,14 @@ IosNativeApi loadIosNativeApiFromBundle( const std::string& stackRoot, std::stri
         candidateSymbols.readPairRecord
             = requiredSymbol<decltype( candidateSymbols.readPairRecord )>(
                 usbmux, "usbmuxd_read_pair_record" );
-        candidateSymbols.osTraceStart = requiredSymbol<decltype( candidateSymbols.osTraceStart )>(
-            mobile, "ostrace_start_activity_with_error" );
+        candidateSymbols.osTraceStartWithRecordType
+            = requiredSymbol<decltype( candidateSymbols.osTraceStartWithRecordType )>(
+                mobile, "ostrace_start_activity_with_record_type_and_error" );
+        candidateSymbols.osTraceStop = requiredSymbol<decltype( candidateSymbols.osTraceStop )>(
+            mobile, "ostrace_stop_activity" );
+        candidateSymbols.osTraceClientFree
+            = requiredSymbol<decltype( candidateSymbols.osTraceClientFree )>( mobile,
+                                                                              "ostrace_client_free" );
         candidateSymbols.syslogRelayStart
             = requiredSymbol<decltype( candidateSymbols.syslogRelayStart )>(
                 mobile, "syslog_relay_start_capture_raw_with_error" );
@@ -323,8 +417,9 @@ IosNativeApi loadIosNativeApiFromBundle( const std::string& stackRoot, std::stri
               && candidateSymbols.readPairRecord != nullptr
               && candidateApi.lockdownClientNewWithExistingPair != nullptr
               && candidateApi.osTraceClientNew != nullptr
-              && candidateSymbols.osTraceStart != nullptr && candidateApi.osTraceStop != nullptr
-              && candidateApi.osTraceClientFree != nullptr
+              && candidateSymbols.osTraceStartWithRecordType != nullptr
+              && candidateSymbols.osTraceStop != nullptr
+              && candidateSymbols.osTraceClientFree != nullptr
               && candidateApi.syslogRelayClientNew != nullptr
               && candidateSymbols.syslogRelayStart != nullptr
               && candidateApi.syslogRelayStop != nullptr

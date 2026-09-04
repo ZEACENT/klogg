@@ -77,6 +77,7 @@ if(KLOGG_ADB_HELPER_ARTIFACT_ROOT)
     COMMAND "${Python3_EXECUTABLE}" "${_klogg_adb_verify}"
       --lock "${KLOGG_ADB_HELPER_LOCK}"
       --receipt "${_klogg_adb_artifact_receipt}"
+      --binary-smoke-receipt "${_klogg_adb_artifact_package_smoke}"
       --package-root "${KLOGG_ADB_HELPER_ARTIFACT_ROOT}"
       --asset-scope package
       --source-assets-root "${_klogg_adb_package_stage}"
@@ -136,6 +137,7 @@ if(KLOGG_ADB_HELPER_AVAILABLE)
     COMMAND "${Python3_EXECUTABLE}" "${_klogg_adb_verify}"
       --lock "${KLOGG_ADB_HELPER_LOCK}"
       --receipt "${_klogg_adb_stage}/receipt.json"
+      --binary-smoke-receipt "${_klogg_adb_stage}/package-smoke.json"
       --package-root "${_klogg_adb_stage}"
       --asset-scope package
       --source-assets-root "${_klogg_adb_package_stage}"
