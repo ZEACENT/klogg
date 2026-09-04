@@ -692,6 +692,12 @@ waitForTerminalLaunchResult( const std::vector<AdbServerLaunchResult>& results )
     return *terminal;
 }
 
+QByteArray normalizeTextLineEndings( QByteArray content )
+{
+    content.replace( "\r\n", "\n" );
+    return content;
+}
+
 QByteArray readFile( const QString& path )
 {
     QFile file( path );
@@ -1164,6 +1170,15 @@ TEST_CASE( "Qt launcher refuses PATH resolution even when an adb-named executabl
     CHECK( result->diagnostic.find( "explicit executable" ) != std::string::npos );
 }
 
+TEST_CASE( "ADB launch observations normalize native text line endings",
+           "[livecapture][adb][supervisor][startup][environment][adapter]" )
+{
+    CHECK( normalizeTextLineEndings( QByteArrayLiteral( "first\nsecond\n" ) )
+           == QByteArrayLiteral( "first\nsecond\n" ) );
+    CHECK( normalizeTextLineEndings( QByteArrayLiteral( "first\r\nsecond\r\n" ) )
+           == QByteArrayLiteral( "first\nsecond\n" ) );
+}
+
 TEST_CASE( "Qt launcher uses the exact production server invocation and scrubs endpoint overrides",
            "[livecapture][adb][supervisor][startup][environment][adapter]" )
 {
@@ -1195,7 +1210,7 @@ TEST_CASE( "Qt launcher uses the exact production server invocation and scrubs e
     } );
 
     const auto terminal = waitForTerminalLaunchResult( results );
-    const auto observation = readFile( observationPath );
+    const auto observation = normalizeTextLineEndings( readFile( observationPath ) );
     CHECK( observation.contains( "argc=2\nargv0=server\nargv1=nodaemon\n" ) );
     CHECK( observation.contains( "ADB_SERVER_SOCKET=tcp:5037\n" ) );
     CHECK_FALSE( observation.contains( "ADB_SERVER_SOCKET=tcp:127.0.0.1:5037\n" ) );
