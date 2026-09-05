@@ -71,6 +71,11 @@ public:
     virtual void start( Generation generation ) = 0;
     virtual void stop( Generation generation ) = 0;
     virtual void clearRemoteAsync( Generation generation, ClearRequestId requestId ) = 0;
+
+    // Before publishing State::Error, every transport must populate lastError()
+    // for that generation and any structured snapshot it supports. State observers
+    // may synchronously retire the transport, so errorOccurred is compatibility
+    // notification rather than the authoritative diagnostic handoff.
     virtual QString lastError() const = 0;
     virtual std::optional<klogg::livecapture::LiveSourceError> lastStructuredError() const;
     virtual klogg::livecapture::LiveDataStatistics statistics() const;

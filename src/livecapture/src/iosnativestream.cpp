@@ -349,7 +349,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         }
     }
 
-    static void osTraceActivity( const void* bytes, std::size_t byteCount, void* context ) noexcept
+    static void osTraceRecord( NativeOsTraceRelayRecordType recordType, const void* bytes,
+                               std::uint32_t byteCount, void* context ) noexcept
     {
         auto* const state = static_cast<State*>( context );
         CallbackGuard guard( state );
@@ -357,18 +358,36 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             return;
         }
         try {
+            if ( recordType == NativeOsTraceRelayRecordType::Control ) {
+                return;
+            }
+            const auto wireRecordType = static_cast<std::int32_t>( recordType );
+            if ( recordType != NativeOsTraceRelayRecordType::Activity ) {
+                state->publishFailure( localError(
+                    ErrorCategory::Stream, "ios-ostrace-malformed-packet", ErrorScope::Stream,
+                    RetryPolicy::Backoff, "The iOS trace relay returned a malformed packet.",
+                    "os_trace relay record type unknown relay_type="
+                        + std::to_string( wireRecordType )
+                        + " payload_bytes=" + std::to_string( byteCount ) ) );
+                return;
+            }
             if ( bytes == nullptr && byteCount != 0u ) {
                 state->publishFailure( localError(
                     ErrorCategory::Stream, "ios-ostrace-malformed-packet", ErrorScope::Stream,
                     RetryPolicy::Backoff, "The iOS trace relay returned a malformed packet.",
-                    "The activity callback returned a null borrowed buffer." ) );
+                    "os_trace activity record has a null borrowed buffer relay_type="
+                        + std::to_string( wireRecordType )
+                        + " payload_bytes=" + std::to_string( byteCount ) ) );
                 return;
             }
             if ( byteCount > DefaultMaximumOsTraceRecordSize ) {
                 state->publishFailure( localError(
                     ErrorCategory::Stream, "ios-ostrace-malformed-packet", ErrorScope::Stream,
                     RetryPolicy::Backoff, "The iOS trace relay returned a malformed packet.",
-                    "The borrowed os_trace packet exceeded the 16 MiB limit before copying." ) );
+                    "The borrowed os_trace packet exceeded the 16 MiB limit before copying "
+                    "relay_type="
+                        + std::to_string( wireRecordType )
+                        + " payload_bytes=" + std::to_string( byteCount ) ) );
                 return;
             }
             const auto* first = static_cast<const std::uint8_t*>( bytes );
@@ -376,23 +395,14 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             if ( byteCount != 0u ) {
                 owned.assign( first, first + byteCount );
             }
-            const auto payloadKind = classifyOsTraceCallbackPayload( owned );
-            if ( payloadKind == OsTraceCallbackPayloadKind::ControlPlist ) {
-                return;
-            }
-            if ( payloadKind == OsTraceCallbackPayloadKind::Unknown ) {
-                state->publishFailure( localError(
-                    ErrorCategory::Stream, "ios-ostrace-malformed-packet", ErrorScope::Stream,
-                    RetryPolicy::Backoff, "The iOS trace relay returned a malformed packet.",
-                    "os_trace callback payload kind unknown packet_bytes="
-                        + std::to_string( byteCount ) ) );
-                return;
-            }
             const auto decoded = decodeOsTracePacket( owned );
             if ( !decoded.record ) {
-                const auto detail = decoded.error
-                                        ? sanitizedDecodeDetail( *decoded.error )
-                                        : std::string{ "os_trace packet decode error unknown" };
+                const auto decodeDetail = decoded.error
+                                              ? sanitizedDecodeDetail( *decoded.error )
+                                              : std::string{ "os_trace packet decode error unknown" };
+                const auto detail = "relay_type=" + std::to_string( wireRecordType )
+                                    + " payload_bytes=" + std::to_string( byteCount ) + " "
+                                    + decodeDetail;
                 state->publishFailure(
                     localError( ErrorCategory::Stream, "ios-ostrace-malformed-packet",
                                 ErrorScope::Stream, RetryPolicy::Backoff,
@@ -635,7 +645,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
         const bool osTrace = usesOsTrace( config, productVersion );
         if ( osTrace
-             && ( api.osTraceClientNew == nullptr || api.osTraceStart == nullptr
+             && ( api.osTraceClientNew == nullptr || api.osTraceStartWithRecordType == nullptr
                   || api.osTraceStop == nullptr || api.osTraceClientFree == nullptr ) ) {
             publishFailure( localError( ErrorCategory::Configuration, "ios-native-abi-incomplete",
                                         ErrorScope::Infrastructure, RetryPolicy::Never,
@@ -740,8 +750,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             if ( cancelled() ) {
                 return;
             }
-            startCode = api.osTraceStart( rawClient, &State::osTraceActivity, &State::osTraceError,
-                                          this );
+            startCode = api.osTraceStartWithRecordType( rawClient, &State::osTraceRecord,
+                                                        &State::osTraceError, this );
         }
         else {
             NativeSyslogRelayClient rawClient = nullptr;

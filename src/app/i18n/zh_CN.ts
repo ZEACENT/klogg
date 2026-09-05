@@ -2446,8 +2446,8 @@
         <translation>新会话不能使用兼容进程传输。请选择内置服务检测到的设备。</translation>
     </message>
     <message>
-        <source>A detected device is required before the session can run or start on restore.</source>
-        <translation>会话需要选择已检测到的设备，才能运行或在还原时启动。</translation>
+        <source>A detected device is required before the live session can connect.</source>
+        <translation>实时日志会话需要选择已检测到的设备，才能连接。</translation>
     </message>
     <message>
         <source>The session has no usable capture identifier.</source>
@@ -2472,10 +2472,6 @@
     <message>
         <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
         <translation>已有另一个实时日志会话使用此捕获标识符；无法在不覆盖捕获存储的情况下还原保存的会话。</translation>
-    </message>
-    <message>
-        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
-        <translation>保存的实时日志传输不可用；请通过内置服务重新打开日志源。</translation>
     </message>
 </context>
 <context>

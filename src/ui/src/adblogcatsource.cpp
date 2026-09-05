@@ -3,6 +3,7 @@
 #include <limits>
 #include <utility>
 
+#include <QPointer>
 #include <QTimer>
 
 #include "adbprocesstransport.h"
@@ -146,9 +147,11 @@ void AdbLogcatSource::wireTransport()
              } );
     connect( transport_.get(), &LiveSourceTransport::errorOccurred, this,
              [ this ]( Generation generation, const QString& error ) {
-                 if ( activeGeneration_ != generation || error.isEmpty() ) {
+                 if ( activeGeneration_ != generation || error.isEmpty()
+                      || reportedErrorGeneration_ == generation ) {
                      return;
                  }
+                 reportedErrorGeneration_ = generation;
                  lastError_ = error;
                  LOG_WARNING << "live log transport error " << error;
                  Q_EMIT errorOccurred( lastError_ );
@@ -159,6 +162,7 @@ void AdbLogcatSource::wireTransport()
 
 void AdbLogcatSource::retireTransport()
 {
+    reportedErrorGeneration_.reset();
     if ( !transport_ ) {
         return;
     }
@@ -177,6 +181,7 @@ void AdbLogcatSource::retireTransport()
 void AdbLogcatSource::startTransport()
 {
     const auto generation = nextGeneration();
+    reportedErrorGeneration_.reset();
     activeGeneration_ = generation;
     connecting_ = true;
     transport_->start( generation );
@@ -220,6 +225,7 @@ void AdbLogcatSource::disconnectSource()
     }
     connecting_ = false;
     restartAfterClear_ = false;
+    reportedErrorGeneration_.reset();
     const auto generation = activeGeneration_;
     activeGeneration_.reset();
     if ( transport_ && generation.has_value() ) {
@@ -378,6 +384,7 @@ void AdbLogcatSource::cancelTransport( Generation generation )
         return;
     }
     activeGeneration_.reset();
+    reportedErrorGeneration_.reset();
     connecting_ = false;
     if ( transport_ ) {
         transport_->stop( generation );
@@ -406,6 +413,7 @@ void AdbLogcatSource::openTransport( Generation generation,
     }
 
     activeGeneration_.reset();
+    reportedErrorGeneration_.reset();
     connecting_ = false;
     retireTransport();
     transport_ = transportFactory_->create( config );
@@ -446,27 +454,51 @@ void AdbLogcatSource::setState( State state )
 void AdbLogcatSource::setStateFromTransport( Generation generation,
                                              LiveSourceTransport::State state )
 {
+    if ( state == LiveSourceTransport::State::Error ) {
+        const auto structured = transport_ ? transport_->lastStructuredError() : std::nullopt;
+        const auto diagnostic = transport_ ? transport_->lastError() : QString{};
+        const auto failure = structured.value_or( klogg::livecapture::LiveSourceError{
+            klogg::livecapture::ErrorCategory::Stream, "live-stream-failed",
+            klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
+            diagnostic.isEmpty() ? "The live stream failed." : diagnostic.toStdString(),
+            diagnostic.toStdString() } );
+        const auto terminalText
+            = diagnostic.isEmpty() ? QString::fromStdString( failure.message ) : diagnostic;
+        const auto logData = logData_;
+        QPointer<AdbLogcatSource> guard( this );
+
+        connecting_ = false;
+        if ( logData ) { logData->finishInput(); }
+        if ( !guard ) { return; }
+
+        guard->lastError_ = terminalText;
+        guard->setState( State::Error );
+        if ( !guard ) { return; }
+
+        if ( guard->reportedErrorGeneration_ != generation && !terminalText.isEmpty() ) {
+            guard->reportedErrorGeneration_ = generation;
+            LOG_WARNING << "live log transport error " << terminalText;
+            Q_EMIT guard->errorOccurred( terminalText );
+        }
+        if ( !guard || guard->activeGeneration_ != generation ) { return; }
+
+        const auto stateCallback = guard->controllerState_;
+        if ( stateCallback ) { stateCallback( generation, state ); }
+        if ( !guard || guard->activeGeneration_ != generation ) { return; }
+
+        const auto failureCallback = guard->controllerFailure_;
+        if ( failureCallback ) { failureCallback( generation, failure ); }
+        return;
+    }
+
     if ( controllerState_ ) { controllerState_( generation, state ); }
     switch ( state ) {
     case LiveSourceTransport::State::Connected:
         connecting_ = false;
         setState( State::Connected );
         break;
-    case LiveSourceTransport::State::Error: {
-        connecting_ = false;
-        if ( logData_ ) { logData_->finishInput(); }
-        auto structured = transport_ ? transport_->lastStructuredError() : std::nullopt;
-        if ( transport_ ) { lastError_ = transport_->lastError(); }
-        setState( State::Error );
-        if ( controllerFailure_ ) {
-            controllerFailure_( generation, structured.value_or( klogg::livecapture::LiveSourceError{
-                klogg::livecapture::ErrorCategory::Stream, "live-stream-failed",
-                klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
-                lastError_.isEmpty() ? "The live stream failed." : lastError_.toStdString(),
-                lastError_.toStdString() } ) );
-        }
+    case LiveSourceTransport::State::Error:
         break;
-    }
     case LiveSourceTransport::State::Connecting:
         connecting_ = true;
         setState( State::Disconnected );

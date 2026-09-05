@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
+import io
 import pathlib
+import tokenize
 import unittest
 
 
@@ -11,6 +13,7 @@ CI_QUALITY_RUNNER = ROOT / "scripts" / "run_ci_quality.py"
 PYTHON_BASELINE = "3.8"
 PEP585_BUILTINS = {"dict", "list", "set", "tuple"}
 UNSUPPORTED_STRING_METHODS = {"removeprefix", "removesuffix"}
+UNSUPPORTED_PATH_METHODS = {"readlink"}
 
 
 def python_sources():
@@ -38,6 +41,37 @@ def annotations(tree):
             yield node.annotation
 
 
+def unsupported_parenthesized_with_lines(source):
+    tokens = [
+        token
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type
+        not in {
+            tokenize.COMMENT,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.NL,
+            tokenize.NEWLINE,
+        }
+    ]
+    findings = []
+    for index, token in enumerate(tokens[:-1]):
+        if token.string != "with" or tokens[index + 1].string != "(":
+            continue
+        depth = 0
+        for context_token in tokens[index + 1 :]:
+            if context_token.string == "(":
+                depth += 1
+            elif context_token.string == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif depth == 1 and context_token.string in {",", "as"}:
+                findings.append(token.start[0])
+                break
+    return findings
+
+
 class PythonBaselineContractTest(unittest.TestCase):
     def test_fast_lint_runs_the_full_contract_suite_on_python_38(self):
         workflow = LINT_WORKFLOW.read_text(encoding="utf-8")
@@ -47,6 +81,35 @@ class PythonBaselineContractTest(unittest.TestCase):
         runner = CI_QUALITY_RUNNER.read_text(encoding="utf-8")
         for token in ("unittest", "discover", "tests/scripts", "test_*.py"):
             self.assertIn(token, runner)
+
+    def test_parenthesized_with_detection_ignores_spoofs_and_plain_with(self):
+        source = """\
+# with (
+message = "with ("
+with (single_manager):
+    consume_single()
+with (manager_factory(first, second)):
+    consume_factory()
+with first_manager, second_manager as value:
+    consume(value)
+"""
+        self.assertEqual(unsupported_parenthesized_with_lines(source), [])
+        self.assertEqual(
+            unsupported_parenthesized_with_lines(
+                "with (\n    first_manager,\n    second_manager as value,\n):\n    consume(value)\n"
+            ),
+            [1],
+        )
+
+    def test_python_310_parenthesized_with_syntax_is_not_used(self):
+        findings = []
+        for path in python_sources():
+            source = path.read_text(encoding="utf-8")
+            findings.extend(
+                f"{path.relative_to(ROOT)}:{line}"
+                for line in unsupported_parenthesized_with_lines(source)
+            )
+        self.assertEqual(findings, [])
 
     def test_pep585_annotations_are_postponed_for_python_38(self):
         findings = []
@@ -73,6 +136,25 @@ class PythonBaselineContractTest(unittest.TestCase):
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
                     and node.func.attr in UNSUPPORTED_STRING_METHODS
+                ):
+                    findings.append(
+                        f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 0)}"
+                    )
+        self.assertEqual(findings, [])
+
+    def test_python_39_pathlib_helpers_are_not_used(self):
+        findings = []
+        for path in python_sources():
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in UNSUPPORTED_PATH_METHODS
+                    and not (
+                        isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "os"
+                    )
                 ):
                     findings.append(
                         f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 0)}"

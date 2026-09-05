@@ -65,7 +65,7 @@ REQUIRED_LIVELOG_MESSAGE_PREFIXES = (
     # transitional-backend-not-creatable
     "New sessions cannot use compatibility process transports.",
     # running-intent-requires-device
-    "A detected device is required before the session can run",
+    "A detected device is required before the live session can connect.",
     # invalid-capture-id
     "The session has no usable capture identifier.",
     # unknown-source-kind
@@ -84,8 +84,6 @@ REQUIRED_LIVELOG_MESSAGE_PREFIXES = (
     "Saved iOS transport",
     # active capture storage collision
     "Another live session already uses this capture identifier",
-    # unavailable native/application-owned factory during restore
-    "The saved live-log transport is unavailable",
     # typed Android option validation
     "The saved Android process filter must be a non-negative PID.",
     "The saved Android buffers, priority, or filter expression is invalid.",

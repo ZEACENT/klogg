@@ -367,6 +367,71 @@ TEST_CASE( "iOS native transport drains queued bytes before publishing terminal 
     CHECK( states.back() == LiveSourceTransport::State::Error );
 }
 
+TEST_CASE( "iOS native transport preserves the terminal diagnostic through reentrant stop",
+           "[ios][native][transport][drain][ordering][error][reentrant][generation]" )
+{
+    ScriptedWorkerFactory factory;
+    IosNativeTransport transport( factory, nativeConfig() );
+    constexpr Generation generation = 107u;
+    const auto expectedText
+        = QStringLiteral( "The iOS device disconnected.\nUSB endpoint vanished" );
+    std::vector<std::string> events;
+    std::vector<LiveSourceError> structuredAtError;
+    std::vector<std::pair<Generation, QString>> diagnostics;
+
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [ &events ]( Generation observedGeneration, const QByteArray& bytes ) {
+                          events.push_back( "bytes:" + std::to_string( observedGeneration ) + ":"
+                                            + bytes.toStdString() );
+                      } );
+    QObject::connect(
+        &transport, &LiveSourceTransport::stateChanged, &transport,
+        [ & ]( Generation observedGeneration, LiveSourceTransport::State state ) {
+            if ( observedGeneration == generation && state == LiveSourceTransport::State::Error ) {
+                events.push_back( "state:error" );
+                REQUIRE( transport.lastStructuredError().has_value() );
+                structuredAtError.push_back( *transport.lastStructuredError() );
+                CHECK( transport.lastError() == expectedText );
+                transport.stop( observedGeneration );
+            }
+        } );
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred,
+                      [ & ]( Generation observedGeneration, const QString& diagnostic ) {
+                          events.push_back( "diagnostic" );
+                          diagnostics.emplace_back( observedGeneration, diagnostic );
+                      } );
+
+    transport.start( generation );
+    REQUIRE( factory.sessions.size() == 1u );
+    factory.publishBytes( 0u, "before-terminal\n", false );
+    factory.publishFailure( 0u, disconnectError( "USB endpoint vanished" ) );
+    drainQtEvents();
+
+    REQUIRE_FALSE( events.empty() );
+    CHECK( events.front() == "bytes:107:before-terminal\n" );
+    REQUIRE( structuredAtError.size() == 1u );
+    CHECK( structuredAtError.front().code == "ios-device-disconnected" );
+    CHECK( structuredAtError.front().retryPolicy == RetryPolicy::WaitForDevice );
+    CHECK( structuredAtError.front().nativeDetail == "USB endpoint vanished" );
+    CHECK( diagnostics
+           == std::vector<std::pair<Generation, QString>>{ { generation, expectedText } } );
+    CHECK( factory.sessions.front()->stopCalls == 1 );
+
+    const auto eventCount = events.size();
+    const auto diagnosticCount = diagnostics.size();
+    const auto callbacks = factory.sessions.front()->callbacks;
+    factory.publishBytes( 0u, "stale-after-stop\n", false );
+    callbacks.ready( generation );
+    callbacks.bytesAvailable( generation );
+    callbacks.failed( generation, disconnectError( "late stale failure" ) );
+    callbacks.stopped( generation );
+    drainQtEvents();
+
+    CHECK( events.size() == eventCount );
+    CHECK( diagnostics.size() == diagnosticCount );
+    CHECK( structuredAtError.size() == 1u );
+}
+
 TEST_CASE( "iOS native transport retires a terminal session without erasing Error state",
            "[ios][native][transport][terminal][cleanup][state]" )
 {

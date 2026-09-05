@@ -186,8 +186,9 @@ using ExpectedHandshakeNew
     = std::int32_t ( * )( NativeIdevice, NativeLockdownClient*, const char* );
 using ExpectedOsTraceNew
     = std::int32_t ( * )( NativeIdevice, NativeServiceDescriptor, NativeOsTraceClient* );
-using ExpectedOsTraceStart = std::int32_t ( * )( NativeOsTraceClient, NativeOsTraceActivityCallback,
-                                                 NativeOsTraceErrorCallback, void* );
+using ExpectedOsTraceStartWithRecordType
+    = std::int32_t ( * )( NativeOsTraceClient, NativeOsTraceRelayRecordCallback,
+                          NativeOsTraceErrorCallback, void* );
 using ExpectedOsTraceStop = std::int32_t ( * )( NativeOsTraceClient );
 using ExpectedSyslogNew
     = std::int32_t ( * )( NativeIdevice, NativeServiceDescriptor, NativeSyslogRelayClient* );
@@ -230,7 +231,8 @@ TEST_CASE( "native iOS ABI is injectable and contains every owned C resource",
     static_assert( std::is_same_v<decltype( IosNativeApi::lockdownClientNewWithExistingPair ),
                                   ExpectedHandshakeNew> );
     static_assert( std::is_same_v<decltype( IosNativeApi::osTraceClientNew ), ExpectedOsTraceNew> );
-    static_assert( std::is_same_v<decltype( IosNativeApi::osTraceStart ), ExpectedOsTraceStart> );
+    static_assert( std::is_same_v<decltype( IosNativeApi::osTraceStartWithRecordType ),
+                                  ExpectedOsTraceStartWithRecordType> );
     static_assert( std::is_same_v<decltype( IosNativeApi::osTraceStop ), ExpectedOsTraceStop> );
     static_assert(
         std::is_same_v<decltype( IosNativeApi::osTraceClientFree ), ExpectedOsTraceStop> );
@@ -244,6 +246,8 @@ TEST_CASE( "native iOS ABI is injectable and contains every owned C resource",
     static_assert( std::is_same_v<std::underlying_type_t<NativeConnectionType>, std::int32_t> );
     static_assert( std::is_same_v<std::underlying_type_t<NativeConnectionOption>, std::int32_t> );
     static_assert( std::is_same_v<std::underlying_type_t<NativeEventType>, std::int32_t> );
+    static_assert(
+        std::is_same_v<std::underlying_type_t<NativeOsTraceRelayRecordType>, std::uint8_t> );
     static_assert( std::is_same_v<std::underlying_type_t<NativePairRecordResult>, std::int32_t> );
     static_assert( static_cast<std::int32_t>( NativeConnectionType::Usb ) == 1 );
     static_assert( static_cast<std::int32_t>( NativeConnectionType::Network ) == 2 );
@@ -252,6 +256,8 @@ TEST_CASE( "native iOS ABI is injectable and contains every owned C resource",
     static_assert( static_cast<std::int32_t>( NativeEventType::Add ) == 1 );
     static_assert( static_cast<std::int32_t>( NativeEventType::Remove ) == 2 );
     static_assert( static_cast<std::int32_t>( NativeEventType::Paired ) == 3 );
+    static_assert( static_cast<std::int32_t>( NativeOsTraceRelayRecordType::Control ) == 1 );
+    static_assert( static_cast<std::int32_t>( NativeOsTraceRelayRecordType::Activity ) == 2 );
 
     const auto api = makeApi();
     CHECK( api.getDeviceListExtended != nullptr );

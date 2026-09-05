@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QPointer>
 #include <QProcess>
 #include <QString>
 #include <QTemporaryDir>
@@ -106,6 +107,18 @@ public:
     {
         lastError_ = error;
         Q_EMIT errorOccurred( generation, error );
+    }
+
+    void publishTerminalError( Generation generation,
+                               klogg::livecapture::LiveSourceError error )
+    {
+        structuredError = std::move( error );
+        lastError_ = QString::fromStdString( structuredError->message );
+        QPointer<DeterministicLiveSourceTransport> guard( this );
+        Q_EMIT stateChanged( generation, State::Error );
+        if ( guard ) {
+            Q_EMIT guard->errorOccurred( generation, lastError_ );
+        }
     }
 
     void completeClear( Generation generation, ClearRequestId requestId, bool succeeded,
@@ -504,6 +517,112 @@ TEST_CASE( "AdbLogcatSource coalesces connect requests while startup is pending"
     REQUIRE( source.connectSource() );
     REQUIRE( factory.lastTransport != nullptr );
     REQUIRE( factory.lastTransport->startGenerations.size() == 1u );
+}
+
+TEST_CASE( "AdbLogcatSource stops terminal delivery after synchronous source destruction",
+           "[livecapture][transport][factory][source][error][reentrant][destroy][ios]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSessionData sessionData;
+    sessionData.sourceType = LiveLogSourceType::IosLogStream;
+    auto source = std::make_unique<AdbLogcatSource>( sessionData, nullptr, factory );
+    QPointer<AdbLogcatSource> sourceGuard( source.get() );
+    int sourceDiagnostics = 0;
+    int controllerErrorStates = 0;
+    int controllerFailures = 0;
+
+    source->setControllerCallbacks(
+        {},
+        [ &controllerErrorStates ]( Generation, LiveSourceTransport::State state ) {
+            if ( state == LiveSourceTransport::State::Error ) {
+                ++controllerErrorStates;
+            }
+        },
+        [ &controllerFailures ]( Generation, klogg::livecapture::LiveSourceError ) {
+            ++controllerFailures;
+        } );
+    QObject::connect( source.get(), &AdbLogcatSource::errorOccurred,
+                      [ &sourceDiagnostics ]( const QString& ) { ++sourceDiagnostics; } );
+    QObject::connect( source.get(), &AdbLogcatSource::stateChanged, source.get(),
+                      [ &source ]( AdbLogcatSource::State state ) {
+                          if ( state == AdbLogcatSource::State::Error ) {
+                              source.reset();
+                          }
+                      } );
+
+    REQUIRE( source->connectSource() );
+    REQUIRE( factory.lastTransport != nullptr );
+    const auto generation = factory.lastTransport->startGenerations.back();
+    const klogg::livecapture::LiveSourceError terminalError{
+        klogg::livecapture::ErrorCategory::Backend,
+        "ios-terminal-destruction-test",
+        klogg::livecapture::ErrorScope::Stream,
+        klogg::livecapture::RetryPolicy::Never,
+        "The native iOS stream terminated.",
+        "source deleted by state observer"
+    };
+
+    factory.lastTransport->publishTerminalError( generation, terminalError );
+
+    CHECK( sourceGuard.isNull() );
+    CHECK( sourceDiagnostics == 0 );
+    CHECK( controllerErrorStates == 0 );
+    CHECK( controllerFailures == 0 );
+}
+
+TEST_CASE( "AdbLogcatSource finalizes input before a reentrant terminal disconnect",
+           "[livecapture][transport][factory][source][error][ordering][reentrant][ios]" )
+{
+    QTemporaryDir captureRoot;
+    REQUIRE( captureRoot.isValid() );
+    auto logData = std::make_shared<StreamingLogData>( makeCaptureId(), captureRoot.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSessionData sessionData;
+    sessionData.sourceType = LiveLogSourceType::IosLogStream;
+    AdbLogcatSource source( sessionData, logData, factory );
+    int sourceDiagnostics = 0;
+    int controllerErrorStates = 0;
+    int controllerFailures = 0;
+
+    source.setControllerCallbacks(
+        {},
+        [ &controllerErrorStates ]( Generation, LiveSourceTransport::State state ) {
+            if ( state == LiveSourceTransport::State::Error ) {
+                ++controllerErrorStates;
+            }
+        },
+        [ &controllerFailures ]( Generation, klogg::livecapture::LiveSourceError ) {
+            ++controllerFailures;
+        } );
+    QObject::connect( &source, &AdbLogcatSource::errorOccurred, &source,
+                      [ & ]( const QString& ) {
+                          ++sourceDiagnostics;
+                          CHECK( logData->getNbLine().get() == 1u );
+                          source.disconnectSource();
+                      } );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( factory.lastTransport != nullptr );
+    const auto generation = factory.lastTransport->startGenerations.back();
+    factory.lastTransport->publishBytes( generation, QByteArrayLiteral( "partial terminal line" ) );
+    REQUIRE( logData->getNbLine().get() == 0u );
+    const klogg::livecapture::LiveSourceError terminalError{
+        klogg::livecapture::ErrorCategory::Backend,
+        "ios-terminal-reentrant-stop-test",
+        klogg::livecapture::ErrorScope::Stream,
+        klogg::livecapture::RetryPolicy::Never,
+        "The native iOS stream terminated.",
+        "source disconnected by diagnostic observer"
+    };
+
+    factory.lastTransport->publishTerminalError( generation, terminalError );
+
+    CHECK( sourceDiagnostics == 1 );
+    CHECK( controllerErrorStates == 0 );
+    CHECK( controllerFailures == 0 );
+    CHECK( source.state() == AdbLogcatSource::State::Disconnected );
+    CHECK( factory.lastTransport->stopGenerations
+           == std::vector<Generation>{ generation } );
 }
 
 TEST_CASE( "AdbLogcatSource serializes restart behind an in-flight remote clear",

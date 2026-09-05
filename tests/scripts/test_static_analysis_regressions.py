@@ -431,7 +431,8 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         self.assertIn("CaptureStore::isValidCaptureId", validity)
 
         opener = function_body(session_source, "ViewInterface* Session::openAdbAlways")
-        self.assertIn("if ( !restoredSessionData.isValid() )", opener)
+        self.assertIn("runtimeSessionData.runIntent = startConnected", opener)
+        self.assertIn("if ( !runtimeSessionData.isValid() )", opener)
         self.assertIn("catch ( const std::exception& error )", opener)
         self.assertGreaterEqual(opener.count("return nullptr;"), 2)
 

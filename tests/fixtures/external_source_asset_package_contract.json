@@ -34,9 +34,45 @@
   ],
   "publication_manifest": {
     "file_name": "klogg-source-publication-manifest.json",
-    "schema_version": 1,
-    "manifest_kind": "klogg-source-publication",
+    "schema_version": 2,
+    "manifest_kind": "klogg-release-publication",
     "stable_channel": "stable",
     "continuous_channel": "continuous"
+  },
+  "release_publication": {
+    "uploaded_asset_count": 23,
+    "github_generated_asset_count": 2,
+    "visible_asset_count": 25,
+    "packages": [
+      "klogg-{version}-x64-Qt6-vs-avx2-setup.exe",
+      "klogg-{version}-x64-Qt6-vs-avx2-portable.zip",
+      "klogg-{version}-jammy-vs-gen.deb",
+      "klogg-{version}-noble-vs-gen.deb",
+      "klogg-{version}-resolute-vs-gen.deb",
+      "klogg-{version}-appimage-vs-gen.AppImage",
+      "klogg-{version}-mac-x64-vs-gen.dmg",
+      "klogg-{version}-mac-arm64-vs-arm64.dmg"
+    ],
+    "top_level_support_assets": [
+      "adb-helper-licenses.tar.gz",
+      "adb-helper-notices.tar.gz",
+      "adb-helper-sbom.spdx.json",
+      "ADB-HELPER-SOURCE-OFFER.txt",
+      "adb-helper-source-manifest.json",
+      "ios-native-source-offer.txt",
+      "ios-native-lgpl-replacement.txt",
+      "NOTICE-ios-native.txt"
+    ],
+    "evidence_archive": {
+      "file_name": "klogg-release-evidence.tar",
+      "index_member": "index.json",
+      "schema_version": 1,
+      "index_kind": "klogg-release-evidence"
+    },
+    "checksums": {
+      "file_name": "SHA256SUMS",
+      "covered_asset_count": 22,
+      "format": "sha256sum-binary-v1"
+    }
   }
 }

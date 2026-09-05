@@ -55,6 +55,11 @@ constexpr auto FirstIdentity = "adb-server:first";
 constexpr auto ReplacementIdentity = "adb-server:replacement";
 constexpr int AsyncWaitTimeoutMs = 5000;
 constexpr int AsyncPollIntervalMs = 10;
+constexpr std::size_t MaximumLaunchDiagnosticBytes = 32u * 1024u;
+constexpr auto FatalSocketDiagnostic = "ADB_SERVER_SOCKET must use tcp:<port>";
+constexpr auto FatalCrashDiagnostic = "packaged ADB crashed while installing listener";
+constexpr auto FatalLargeOutputDiagnostic
+    = "packaged ADB listener failed after verbose startup output";
 
 template <typename Predicate>
 bool waitForQtCondition( Predicate predicate )
@@ -662,6 +667,44 @@ std::uint64_t readHeartbeat( const QString& path )
     return parsed ? heartbeat : 0u;
 }
 
+AdbServerLaunchRequest testHelperLaunchRequest()
+{
+    return AdbServerLaunchRequest{
+        QString::fromUtf8( KLOGG_ADB_SERVER_TEST_HELPER_PATH ),
+        { QStringLiteral( "server" ), QStringLiteral( "nodaemon" ) },
+        false,
+        AdbServerEndpoint{ QHostAddress::LocalHost, 5037 },
+    };
+}
+
+AdbServerLaunchResult
+waitForTerminalLaunchResult( const std::vector<AdbServerLaunchResult>& results )
+{
+    REQUIRE( waitForQtCondition( [ &results ] {
+        return std::any_of( results.begin(), results.end(), []( const auto& result ) {
+            return result.state != AdbServerLaunchState::Started;
+        } );
+    } ) );
+    const auto terminal = std::find_if( results.begin(), results.end(), []( const auto& result ) {
+        return result.state != AdbServerLaunchState::Started;
+    } );
+    REQUIRE( terminal != results.end() );
+    return *terminal;
+}
+
+QByteArray normalizeTextLineEndings( QByteArray content )
+{
+    content.replace( "\r\n", "\n" );
+    return content;
+}
+
+QByteArray readFile( const QString& path )
+{
+    QFile file( path );
+    REQUIRE( file.open( QIODevice::ReadOnly ) );
+    return file.readAll();
+}
+
 } // namespace
 
 TEST_CASE(
@@ -1127,6 +1170,106 @@ TEST_CASE( "Qt launcher refuses PATH resolution even when an adb-named executabl
     CHECK( result->diagnostic.find( "explicit executable" ) != std::string::npos );
 }
 
+TEST_CASE( "ADB launch observations normalize native text line endings",
+           "[livecapture][adb][supervisor][startup][environment][adapter]" )
+{
+    CHECK( normalizeTextLineEndings( QByteArrayLiteral( "first\nsecond\n" ) )
+           == QByteArrayLiteral( "first\nsecond\n" ) );
+    CHECK( normalizeTextLineEndings( QByteArrayLiteral( "first\r\nsecond\r\n" ) )
+           == QByteArrayLiteral( "first\nsecond\n" ) );
+}
+
+TEST_CASE( "Qt launcher uses the exact production server invocation and scrubs endpoint overrides",
+           "[livecapture][adb][supervisor][startup][environment][adapter]" )
+{
+    QTemporaryDir temporaryDirectory;
+    REQUIRE( temporaryDirectory.isValid() );
+    const auto observationPath
+        = temporaryDirectory.filePath( QStringLiteral( "adb-launch-observation" ) );
+    ScopedEnvironmentVariable modeEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_MODE" ),
+                                               QByteArrayLiteral( "inspect-launch" ) );
+    ScopedEnvironmentVariable observationEnvironment(
+        QByteArrayLiteral( "KLOGG_ADB_HELPER_OBSERVATION" ), observationPath.toUtf8() );
+    ScopedEnvironmentVariable socketEnvironment( QByteArrayLiteral( "ADB_SERVER_SOCKET" ),
+                                                 QByteArrayLiteral( "tcp:198.51.100.7:7000" ) );
+    ScopedEnvironmentVariable portEnvironment( QByteArrayLiteral( "ADB_SERVER_PORT" ),
+                                               QByteArrayLiteral( "7001" ) );
+    ScopedEnvironmentVariable androidPortEnvironment(
+        QByteArrayLiteral( "ANDROID_ADB_SERVER_PORT" ), QByteArrayLiteral( "7002" ) );
+    ScopedEnvironmentVariable addressEnvironment( QByteArrayLiteral( "ANDROID_ADB_SERVER_ADDRESS" ),
+                                                  QByteArrayLiteral( "198.51.100.8" ) );
+    ScopedEnvironmentVariable vendorKeysEnvironment( QByteArrayLiteral( "ADB_VENDOR_KEYS" ),
+                                                     QByteArrayLiteral( "/untrusted/adbkey" ) );
+    ScopedEnvironmentVariable traceEnvironment( QByteArrayLiteral( "ADB_TRACE" ),
+                                                QByteArrayLiteral( "sockets" ) );
+    QtAdbServerLauncher launcher;
+    std::vector<AdbServerLaunchResult> results;
+
+    launcher.launch( testHelperLaunchRequest(), [ &results ]( AdbServerLaunchResult result ) {
+        results.push_back( std::move( result ) );
+    } );
+
+    const auto terminal = waitForTerminalLaunchResult( results );
+    const auto observation = normalizeTextLineEndings( readFile( observationPath ) );
+    CHECK( observation.contains( "argc=2\nargv0=server\nargv1=nodaemon\n" ) );
+    CHECK( observation.contains( "ADB_SERVER_SOCKET=tcp:5037\n" ) );
+    CHECK_FALSE( observation.contains( "ADB_SERVER_SOCKET=tcp:127.0.0.1:5037\n" ) );
+    CHECK( observation.contains( "ADB_SERVER_PORT=<unset>\n" ) );
+    CHECK( observation.contains( "ANDROID_ADB_SERVER_PORT=<unset>\n" ) );
+    CHECK( observation.contains( "ANDROID_ADB_SERVER_ADDRESS=<unset>\n" ) );
+    CHECK( observation.contains( "ADB_VENDOR_KEYS=<unset>\n" ) );
+    CHECK( observation.contains( "ADB_TRACE=sockets\n" ) );
+    CHECK( terminal.state == AdbServerLaunchState::Exited );
+    CHECK( terminal.diagnostic.find( "code 0" ) != std::string::npos );
+}
+
+TEST_CASE( "Qt launcher preserves recognizable fatal stderr from early server termination",
+           "[livecapture][adb][supervisor][startup][stderr][adapter]" )
+{
+    const std::vector<std::pair<QByteArray, std::string>> scenarios{
+        { QByteArrayLiteral( "fatal-exit" ), FatalSocketDiagnostic },
+        { QByteArrayLiteral( "fatal-crash" ), FatalCrashDiagnostic },
+    };
+
+    for ( const auto& scenario : scenarios ) {
+        DYNAMIC_SECTION( scenario.first.constData() )
+        {
+            ScopedEnvironmentVariable modeEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_MODE" ),
+                                                       scenario.first );
+            QtAdbServerLauncher launcher;
+            std::vector<AdbServerLaunchResult> results;
+
+            launcher.launch( testHelperLaunchRequest(),
+                             [ &results ]( AdbServerLaunchResult result ) {
+                                 results.push_back( std::move( result ) );
+                             } );
+
+            const auto terminal = waitForTerminalLaunchResult( results );
+            CHECK( terminal.state != AdbServerLaunchState::Started );
+            CHECK( terminal.diagnostic.find( scenario.second ) != std::string::npos );
+            CHECK( terminal.diagnostic.size() <= MaximumLaunchDiagnosticBytes );
+        }
+    }
+}
+
+TEST_CASE( "Qt launcher continuously drains verbose stderr and retains a bounded fatal tail",
+           "[livecapture][adb][supervisor][startup][stderr][bounded][adapter]" )
+{
+    ScopedEnvironmentVariable modeEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_MODE" ),
+                                               QByteArrayLiteral( "large-stderr" ) );
+    QtAdbServerLauncher launcher;
+    std::vector<AdbServerLaunchResult> results;
+
+    launcher.launch( testHelperLaunchRequest(), [ &results ]( AdbServerLaunchResult result ) {
+        results.push_back( std::move( result ) );
+    } );
+
+    const auto terminal = waitForTerminalLaunchResult( results );
+    CHECK( terminal.state != AdbServerLaunchState::Started );
+    CHECK( terminal.diagnostic.find( FatalLargeOutputDiagnostic ) != std::string::npos );
+    CHECK( terminal.diagnostic.size() <= MaximumLaunchDiagnosticBytes );
+}
+
 TEST_CASE( "published Qt launcher process survives launcher destruction and drains output",
            "[livecapture][adb][supervisor][ownership][shutdown][adapter]" )
 {
@@ -1135,10 +1278,14 @@ TEST_CASE( "published Qt launcher process survives launcher destruction and drai
     const auto heartbeatPath
         = temporaryDirectory.filePath( QStringLiteral( "adb-helper-heartbeat" ) );
     const auto stopPath = temporaryDirectory.filePath( QStringLiteral( "adb-helper-stop" ) );
+    const auto stoppedPath
+        = temporaryDirectory.filePath( QStringLiteral( "adb-helper-stopped" ) );
     ScopedEnvironmentVariable heartbeatEnvironment(
         QByteArrayLiteral( "KLOGG_ADB_HELPER_HEARTBEAT" ), heartbeatPath.toUtf8() );
     ScopedEnvironmentVariable stopEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOP" ),
                                                stopPath.toUtf8() );
+    ScopedEnvironmentVariable stoppedEnvironment( QByteArrayLiteral( "KLOGG_ADB_HELPER_STOPPED" ),
+                                                  stoppedPath.toUtf8() );
     AdbHelperStopGuard stopGuard( stopPath );
     std::optional<AdbServerLaunchResult> result;
 
@@ -1164,7 +1311,7 @@ TEST_CASE( "published Qt launcher process survives launcher destruction and drai
         return readHeartbeat( heartbeatPath ) > heartbeatAfterLauncherDestruction;
     } ) );
     stopGuard.requestStop();
-    QTest::qWait( 100 );
+    REQUIRE( waitForQtCondition( [ &stoppedPath ] { return QFileInfo::exists( stoppedPath ); } ) );
 }
 
 TEST_CASE( "server disappearance and replacement advance epoch and use bounded injected backoff",

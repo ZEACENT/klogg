@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib.util
 import pathlib
 import tempfile
@@ -19,7 +21,6 @@ UPLOAD_ARTIFACT_PINNED = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 DOWNLOAD_ARTIFACT_PINNED = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 CODEQL_PINNED = "cdf488f595d80d6e07e03d4674febd5ab45fa938"
 NODE20_CODEQL_PINNED = "4187e74d05793876e9989daffde9c3e66b4acd07"
-
 
 def secure_codeql_workflow() -> str:
     return f"""\
@@ -2227,6 +2228,449 @@ steps:
             ),
             [],
         )
+
+
+class ReleaseDownloadPublicationLintTest(unittest.TestCase):
+    BODY_MESSAGE = (
+        "release body must be rendered from the verified publication manifest"
+    )
+    INVENTORY_MESSAGE = (
+        "release publication must upload exactly 23 consolidated assets"
+    )
+    CANDIDATE_MESSAGE = "public promoted release name must not contain Candidate"
+    CRITICAL_MESSAGE = (
+        "continuous public release mutations must share one rollback-protected "
+        "PAT critical section"
+    )
+    MALFORMED_MESSAGE = (
+        "release publication workflow must fail closed when its structure is malformed"
+    )
+    EXACT_BAD_CONTINUOUS_BODY = """\
+Continuous Build ${{ env.KLOGG_VERSION }}
+
+This rolling release is built from a successful trusted master push. Windows and Linux packages are CI-validated. The macOS disk images are unsigned validation artifacts, not signed or notarized releases.
+
+## Changes
+${{ env.CHANGELOG }}
+
+## Downloads
+- Windows x64 installer and portable archive
+- Ubuntu 22.04, 24.04, and 26.04 packages
+- AppImage
+- macOS Intel and Apple Silicon unsigned disk images
+- Content-addressed ADB helper and iOS native corresponding source"""
+
+    @staticmethod
+    def projected_workflow(channel: str) -> str:
+        path = ROOT / ".github" / "workflows" / (
+            "ci-release.yml" if channel == "stable" else "ci-continuous.yml"
+        )
+        workflow = path.read_text()
+        create_marker = (
+            "    - name: Create GitHub Release"
+            if channel == "stable"
+            else "      - name: Create continuous candidate draft"
+        )
+        create = workflow.index(create_marker)
+        if "render_release_downloads.py" not in workflow:
+            indent = "    " if channel == "stable" else "      "
+            render = (
+                f"{indent}- name: Verify manifest and render release downloads\n"
+                f"{indent}  shell: bash\n"
+                f"{indent}  run: |\n"
+                f"{indent}    set -euo pipefail\n"
+                f"{indent}    python3 scripts/verify_source_publication_manifest.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication\n"
+                f"{indent}    asset_count=\"$(find packages-publication -maxdepth 1 -type f | wc -l)\"\n"
+                f"{indent}    test \"$asset_count\" -eq 23\n"
+                f"{indent}    python3 scripts/render_release_downloads.py --manifest packages-publication/klogg-source-publication-manifest.json --assets-root packages-publication --changelog-file release-changelog.txt --output release-body.md\n\n"
+            )
+            workflow = workflow[:create] + render + workflow[create:]
+            create += len(render)
+
+        field_indent = "        " if channel == "stable" else "          "
+        item_indent = field_indent + "  "
+        inline_body = f"{field_indent}body: |"
+        if inline_body in workflow[create:]:
+            body_start = workflow.index(inline_body, create)
+            body_end = workflow.index(f"{field_indent}prerelease:", body_start)
+            workflow = (
+                workflow[:body_start]
+                + f"{field_indent}body_path: release-body.md\n"
+                + workflow[body_end:]
+            )
+        else:
+            body_start = workflow.index(
+                f"{field_indent}body_path: release-body.md", create
+            )
+
+        block_files = f"{field_indent}files: |"
+        scalar_files = f"{field_indent}files: ./packages-publication/*"
+        if block_files in workflow[create:]:
+            files_start = workflow.index(block_files, create)
+            files_end = workflow.index("\n\n", files_start)
+            workflow = (
+                workflow[:files_start]
+                + f"{field_indent}files: |\n"
+                + f"{item_indent}./packages-publication/*"
+                + workflow[files_end:]
+            )
+        elif scalar_files not in workflow[create:]:
+            raise AssertionError("projected workflow lacks a release asset upload field")
+        if channel == "continuous":
+            workflow = workflow.replace(
+                "          name: Continuous Candidate ${{ env.KLOGG_VERSION }}",
+                "          name: Continuous Build ${{ env.KLOGG_VERSION }}",
+                1,
+            )
+            critical_marker = (
+                "      - name: Publish verified continuous release transaction"
+            )
+            if critical_marker not in workflow:
+                park_start = workflow.index(
+                    "      - name: Park existing continuous release for rollback"
+                )
+                reverify_start = workflow.index(
+                    "      - name: Reverify promoted continuous release", park_start
+                )
+                critical_step = """\
+      - name: Publish verified continuous release transaction
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.candidate_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          repo="$GITHUB_REPOSITORY"
+          backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"
+          rollback_continuous_promotion() {
+            original_status=$?
+            trap - ERR
+            set +e
+            if [ -n "${old_release_id:-}" ]; then
+              gh api -X PATCH "/repos/${repo}/releases/${old_release_id}" -f tag_name=continuous -F draft=false -F prerelease=true >/dev/null
+            fi
+            exit "$original_status"
+          }
+          trap rollback_continuous_promotion ERR
+          old_release_id="$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id // empty')"
+          old_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha // empty')"
+          if [ -n "$old_release_id" ]; then
+            gh api -X POST "/repos/${repo}/git/refs" -f ref="refs/tags/${backup_tag}" -f sha="$old_sha" >/dev/null
+            gh api -X PATCH "/repos/${repo}/releases/${old_release_id}" -f tag_name="$backup_tag" -F draft=true -F prerelease=true >/dev/null
+            gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous" >/dev/null
+          fi
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" -f tag_name=continuous -f name="Continuous Build ${KLOGG_VERSION}" -F draft=false -F prerelease=true >/dev/null
+          trap - ERR
+
+"""
+                workflow = (
+                    workflow[:park_start]
+                    + critical_step
+                    + workflow[reverify_start:]
+                )
+        return workflow
+
+    @staticmethod
+    def issues(channel: str, workflow: str) -> list[str]:
+        if channel == "stable":
+            return MODULE.stable_release_workflow_issues(workflow)
+        return MODULE.continuous_release_workflow_issues(workflow)
+
+    def test_exact_old_inline_body_and_sidecar_upload_are_rejected(self):
+        current_bad = """\
+name: "Publish Release (Continuous)"
+jobs:
+  publish:
+    steps:
+      - name: Create continuous candidate draft
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          token: ${{ github.token }}
+          tag_name: continuous-candidate-${{ env.KLOGG_CI_RUN_ID }}
+          name: Continuous Candidate ${{ env.KLOGG_VERSION }}
+          body: |
+            Continuous Build ${{ env.KLOGG_VERSION }}
+
+            This rolling release is built from a successful trusted master push. Windows and Linux packages are CI-validated. The macOS disk images are unsigned validation artifacts, not signed or notarized releases.
+
+            ## Changes
+            ${{ env.CHANGELOG }}
+
+            ## Downloads
+            - Windows x64 installer and portable archive
+            - Ubuntu 22.04, 24.04, and 26.04 packages
+            - AppImage
+            - macOS Intel and Apple Silicon unsigned disk images
+            - Content-addressed ADB helper and iOS native corresponding source
+          prerelease: true
+          draft: true
+          files: |
+            ./packages-publication/*
+            ./packages-publication/*.sha256
+"""
+        publish = MODULE.workflow_job_blocks(current_bad)["publish"]
+        create = MODULE.workflow_step_blocks(publish)[0]
+        _, children = MODULE.workflow_step_fields(create)
+        self.assertEqual(children["with"]["body"], self.EXACT_BAD_CONTINUOUS_BODY)
+        self.assertIn(self.BODY_MESSAGE, self.issues("continuous", current_bad))
+        self.assertIn(self.INVENTORY_MESSAGE, self.issues("continuous", current_bad))
+
+    def test_exact_projected_stable_and_continuous_workflows_are_accepted(self):
+        for channel in ("stable", "continuous"):
+            with self.subTest(channel=channel):
+                projected = self.projected_workflow(channel)
+                self.assertEqual(self.issues(channel, projected), [])
+
+    def test_release_workflow_triggers_match_their_only_supported_projection(self):
+        stable_message = (
+            "stable release workflow must support only workflow_dispatch publication"
+        )
+        continuous_message = (
+            "continuous release workflow must use only completed CI Build workflow_run events"
+        )
+        stable = self.projected_workflow("stable")
+        continuous = self.projected_workflow("continuous")
+        self.assertNotIn(stable_message, self.issues("stable", stable))
+        self.assertNotIn(continuous_message, self.issues("continuous", continuous))
+
+        direct_stable_push = stable.replace(
+            "  workflow_dispatch:\n", "  push:\n    branches: [master]\n", 1
+        )
+        self.assertIn(stable_message, self.issues("stable", direct_stable_push))
+        stable_spoof = direct_stable_push.replace(
+            "jobs:\n",
+            "# workflow_dispatch:\n"
+            "env:\n"
+            "  TRIGGER_DESCRIPTION: 'workflow_dispatch publication'\n"
+            "jobs:\n",
+            1,
+        )
+        self.assertIn(stable_message, self.issues("stable", stable_spoof))
+
+        direct_continuous_push = continuous.replace(
+            '  workflow_run:\n    workflows: ["CI Build"]\n    types: [completed]\n',
+            "  push:\n    branches: [master]\n",
+            1,
+        )
+        self.assertIn(
+            continuous_message,
+            self.issues("continuous", direct_continuous_push),
+        )
+        malformed_workflow_run = continuous.replace(
+            "    types: [completed]", "    types: [completed", 1
+        )
+        self.assertIn(
+            continuous_message,
+            self.issues("continuous", malformed_workflow_run),
+        )
+
+    def test_stable_selected_ci_run_projects_only_push_validation_and_dispatch_receipts(self):
+        message = (
+            "stable release selection must model push validation and workflow_dispatch receipt evidence"
+        )
+        workflow = self.projected_workflow("stable")
+        self.assertNotIn(message, self.issues("stable", workflow))
+
+        near_miss = workflow.replace("          workflow_dispatch)", "          pull_request)", 1)
+        self.assertNotEqual(near_miss, workflow)
+        self.assertIn(message, self.issues("stable", near_miss))
+        spoofed = near_miss.replace(
+            "          pull_request)",
+            "          # workflow_dispatch)\n"
+            "          SPOOF='workflow_dispatch)'\n"
+            "          pull_request)",
+            1,
+        )
+        self.assertIn(message, self.issues("stable", spoofed))
+
+        weakened_push = workflow.replace(
+            '            test "$KLOGG_EVIDENCE_LEVEL" = validation || {',
+            '            test "$KLOGG_EVIDENCE_LEVEL" != invalid || {',
+            1,
+        )
+        self.assertNotEqual(weakened_push, workflow)
+        self.assertIn(message, self.issues("stable", weakened_push))
+
+    def test_body_path_near_miss_is_rejected(self):
+        for channel in ("stable", "continuous"):
+            with self.subTest(channel=channel):
+                workflow = self.projected_workflow(channel).replace(
+                    "body_path: release-body.md",
+                    "          body_path: release-body.md.bak",
+                    1,
+                )
+                self.assertIn(self.BODY_MESSAGE, self.issues(channel, workflow))
+
+    def test_comments_and_strings_cannot_spoof_renderer_or_body_path(self):
+        good = self.projected_workflow("continuous")
+        render_start = good.index(
+            "      - name: Verify manifest and render release downloads"
+        )
+        create = good.index("      - name: Create continuous candidate draft")
+        without_renderer = good[:render_start] + good[create:]
+        scenarios = {
+            "renderer-comment": without_renderer.replace(
+                "      - name: Create continuous candidate draft",
+                "      # python3 scripts/render_release_downloads.py --output release-body.md\n"
+                "      - name: Create continuous candidate draft",
+                1,
+            ),
+            "renderer-string": without_renderer.replace(
+                "      - name: Create continuous candidate draft",
+                "      - name: Describe renderer\n"
+                "        run: RELEASE_RENDERER='python3 scripts/render_release_downloads.py --output release-body.md'\n\n"
+                "      - name: Create continuous candidate draft",
+                1,
+            ),
+            "body-comment": good.replace(
+                "          body_path: release-body.md",
+                "          # body_path: release-body.md\n"
+                "          body: plain release body",
+                1,
+            ),
+            "body-string": good.replace(
+                "          body_path: release-body.md",
+                "          body: 'body_path: release-body.md'",
+                1,
+            ),
+        }
+        for label, workflow in scenarios.items():
+            with self.subTest(label=label):
+                self.assertIn(self.BODY_MESSAGE, self.issues("continuous", workflow))
+
+    def test_malformed_release_workflow_fails_closed(self):
+        malformed = """\
+name: "Publish Release (Continuous)"
+jobs:
+  publish:
+    steps: [unterminated
+    # body_path: release-body.md
+    # render_release_downloads.py
+"""
+        self.assertIn(
+            self.MALFORMED_MESSAGE,
+            self.issues("continuous", malformed),
+        )
+
+    def test_real_workflows_are_mutation_guarded_for_rendered_body_and_inventory(self):
+        for channel in ("stable", "continuous"):
+            with self.subTest(channel=channel):
+                projected = self.projected_workflow(channel)
+                without_renderer = projected.replace(
+                    "    python3 scripts/render_release_downloads.py",
+                    "    python3 scripts/not-the-release-renderer.py",
+                    1,
+                )
+                self.assertIn(
+                    self.BODY_MESSAGE, self.issues(channel, without_renderer)
+                )
+                without_exact_count = projected.replace(
+                    '    test "$asset_count" -eq 23',
+                    '    test "$asset_count" -ge 23',
+                    1,
+                )
+                self.assertIn(
+                    self.INVENTORY_MESSAGE,
+                    self.issues(channel, without_exact_count),
+                )
+
+    def test_public_candidate_name_is_rejected_even_when_promotion_renames_the_tag(self):
+        workflow = self.projected_workflow("continuous").replace(
+            "          name: Continuous Build ${{ env.KLOGG_VERSION }}",
+            "          name: Continuous Candidate ${{ env.KLOGG_VERSION }}",
+            1,
+        )
+        self.assertIn(self.CANDIDATE_MESSAGE, self.issues("continuous", workflow))
+
+        string_spoof = workflow.replace(
+            "          name: Continuous Candidate ${{ env.KLOGG_VERSION }}",
+            "          name: Continuous Candidate ${{ env.KLOGG_VERSION }} # public name: Continuous Build",
+            1,
+        )
+        self.assertIn(self.CANDIDATE_MESSAGE, self.issues("continuous", string_spoof))
+
+    def test_continuous_public_mutations_share_one_structural_pat_rollback_section(self):
+        good = self.projected_workflow("continuous")
+        self.assertNotIn(self.CRITICAL_MESSAGE, self.issues("continuous", good))
+
+        publish = MODULE.workflow_job_blocks(good)["publish"]
+        parsed_steps = [
+            MODULE.workflow_step_fields(step)
+            for step in MODULE.workflow_step_blocks(publish)
+        ]
+        matching = [
+            (fields, children)
+            for fields, children in parsed_steps
+            if fields.get("name") == "Publish verified continuous release transaction"
+        ]
+        self.assertEqual(len(matching), 1)
+        fields, children = matching[0]
+        self.assertEqual(
+            children["env"]["GITHUB_TOKEN"],
+            "${{ secrets.KLOGG_GITHUB_TOKEN }}",
+        )
+        active_run = "\n".join(
+            active
+            for line in fields["run"].splitlines()
+            if (active := MODULE.strip_yaml_comment(line))
+        )
+        mutation_markers = (
+            '-f tag_name="$backup_tag" -F draft=true',
+            'gh api -X DELETE "/repos/${repo}/git/refs/tags/continuous"',
+            '-f tag_name=continuous -f name="Continuous Build ${KLOGG_VERSION}"',
+        )
+        for marker in mutation_markers:
+            self.assertIn(marker, active_run)
+        self.assertIn("rollback_continuous_promotion()", active_run)
+        self.assertIn("trap rollback_continuous_promotion ERR", active_run)
+
+        critical_start = good.index(
+            "      - name: Publish verified continuous release transaction"
+        )
+        critical_end = good.index("\n      - name:", critical_start + 8)
+
+        def mutate_critical(old: str, new: str) -> str:
+            critical = good[critical_start:critical_end]
+            mutated = critical.replace(old, new, 1)
+            self.assertNotEqual(mutated, critical)
+            return good[:critical_start] + mutated + good[critical_end:]
+
+        promote = (
+            '          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" '
+            '-f tag_name=continuous -f name="Continuous Build ${KLOGG_VERSION}" '
+            '-F draft=false -F prerelease=true >/dev/null'
+        )
+        split_step = mutate_critical(
+            promote,
+            "      - name: Split candidate promotion\n"
+            "        shell: bash\n"
+            "        env:\n"
+            "          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}\n"
+            "        run: |\n"
+            "          test -n \"${GITHUB_TOKEN:-}\" || { echo \"::error::KLOGG_GITHUB_TOKEN secret is missing or empty\"; exit 1; }\n"
+            + promote,
+        )
+        self.assertIn(self.CRITICAL_MESSAGE, self.issues("continuous", split_step))
+
+        without_pat = mutate_critical(
+            "GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}",
+            "GITHUB_TOKEN: ${{ github.token }}",
+        )
+        pat_issues = self.issues("continuous", without_pat)
+        self.assertTrue(any("release mutation must bind" in issue for issue in pat_issues))
+
+        comment_spoof = mutate_critical(
+            "          trap rollback_continuous_promotion ERR",
+            "          # trap rollback_continuous_promotion ERR",
+        )
+        self.assertIn(self.CRITICAL_MESSAGE, self.issues("continuous", comment_spoof))
+
+        string_spoof = mutate_critical(
+            "          trap rollback_continuous_promotion ERR",
+            "          SPOOF='trap rollback_continuous_promotion ERR'",
+        )
+        self.assertIn(self.CRITICAL_MESSAGE, self.issues("continuous", string_spoof))
 
 
 if __name__ == "__main__":

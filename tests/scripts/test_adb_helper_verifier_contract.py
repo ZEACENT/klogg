@@ -14,12 +14,29 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_adb_helper_artifact.py"
 ENVELOPE_SCRIPT = ROOT / "scripts" / "verify_adb_helper_envelope.py"
 SMOKE_SCRIPT = ROOT / "scripts" / "smoke_adb_helper.py"
+
+PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT = [
+    "ADB_VENDOR_KEYS",
+    "ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_PORT",
+    "ANDROID_ADB_SERVER_ADDRESS",
+]
+
+
+def production_server_invocation_probe(port: int) -> dict:
+    return {
+        "name": "production-server-invocation",
+        "arguments": ["server", "nodaemon"],
+        "environment": {"ADB_SERVER_SOCKET": f"tcp:{port}"},
+        "scrubbed_environment": PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT,
+    }
 
 
 class AdbHelperVerifierContractTest(unittest.TestCase):
@@ -294,10 +311,16 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         return lock_path, receipt_path, package_root, self.root / "release", receipt
 
     def write_smoke_receipt(self, helper: pathlib.Path, name: str = "binary-smoke.json") -> pathlib.Path:
+        port = 5037
         receipt = {
             "schema_version": 1,
             "receipt_kind": "binary-smoke",
             "helper_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+            "server_endpoint": f"tcp:127.0.0.1:{port}",
+            "required_probe": production_server_invocation_probe(port),
+            "host_version": "0029",
+            "stability_host_version": "0029",
+            "stability_window_seconds": 0.25,
             "passed_probes": [
                 "version",
                 "complete-client",
@@ -342,25 +365,38 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         )
 
     def run_scoped_verifier(
-        self, lock, receipt, package_root, source_assets_root, asset_scope, *extra_args
+        self,
+        lock,
+        receipt,
+        package_root,
+        source_assets_root,
+        asset_scope,
+        *extra_args,
+        include_smoke: bool = True,
     ):
         self.assertTrue(VERIFY_SCRIPT.is_file(), f"missing verifier script: {VERIFY_SCRIPT}")
+        command = [
+            sys.executable,
+            str(VERIFY_SCRIPT),
+            "--lock",
+            str(lock),
+            "--receipt",
+            str(receipt),
+            "--package-root",
+            str(package_root),
+            "--asset-scope",
+            asset_scope,
+            "--source-assets-root",
+            str(source_assets_root),
+        ]
+        if include_smoke:
+            receipt_document = json.loads(pathlib.Path(receipt).read_text(encoding="utf-8"))
+            helper = pathlib.Path(package_root) / receipt_document["helper"]["path"]
+            smoke = self.write_smoke_receipt(helper, f"{asset_scope}-scope-smoke.json")
+            command.extend(("--binary-smoke-receipt", str(smoke)))
+        command.extend(extra_args)
         return subprocess.run(
-            [
-                sys.executable,
-                str(VERIFY_SCRIPT),
-                "--lock",
-                str(lock),
-                "--receipt",
-                str(receipt),
-                "--package-root",
-                str(package_root),
-                "--asset-scope",
-                asset_scope,
-                "--source-assets-root",
-                str(source_assets_root),
-                *extra_args,
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=10,
@@ -371,6 +407,136 @@ class AdbHelperVerifierContractTest(unittest.TestCase):
         lock, receipt, package_root, release_root, _ = self.make_release_fixture()
         result = self.run_verifier(lock, receipt, package_root, release_root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_verifier_accepts_exact_structured_production_server_invocation_probe(self):
+        lock, receipt, package_root, release_root, document = self.make_release_fixture()
+        helper = package_root / document["helper"]["path"]
+        smoke = self.write_smoke_receipt(helper)
+
+        result = self.run_verifier(
+            lock,
+            receipt,
+            package_root,
+            release_root,
+            "--binary-smoke-receipt",
+            str(smoke),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_verifier_rejects_boolean_smoke_schema_version(self):
+        lock, receipt, package_root, release_root, document = self.make_release_fixture()
+        helper = package_root / document["helper"]["path"]
+        smoke = self.write_smoke_receipt(helper)
+        smoke_document = json.loads(smoke.read_text(encoding="utf-8"))
+        smoke_document["schema_version"] = True
+        smoke.write_text(json.dumps(smoke_document), encoding="utf-8")
+
+        result = self.run_verifier(
+            lock,
+            receipt,
+            package_root,
+            release_root,
+            "--binary-smoke-receipt",
+            str(smoke),
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("schema", (result.stdout + result.stderr).lower())
+
+    def test_verifier_rejects_smoke_receipts_with_failure_diagnostics(self):
+        for field in ("error", "cleanup_error"):
+            with self.subTest(field=field):
+                lock, receipt, package_root, release_root, document = self.make_release_fixture()
+                helper = package_root / document["helper"]["path"]
+                smoke = self.write_smoke_receipt(helper, f"{field}-smoke.json")
+                smoke_document = json.loads(smoke.read_text(encoding="utf-8"))
+                smoke_document[field] = "fixture failure"
+                smoke.write_text(json.dumps(smoke_document), encoding="utf-8")
+
+                result = self.run_verifier(
+                    lock,
+                    receipt,
+                    package_root,
+                    release_root,
+                    "--binary-smoke-receipt",
+                    str(smoke),
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("failure", (result.stdout + result.stderr).lower())
+
+    def test_verifier_fails_closed_on_invalid_or_spoofed_server_invocation_probe(self):
+        scenarios = (
+            "bad",
+            "near-miss",
+            "malformed",
+            "spoof",
+            "unstable",
+            "no-stability-window",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                lock, receipt, package_root, release_root, document = self.make_release_fixture()
+                helper = package_root / document["helper"]["path"]
+                smoke = self.write_smoke_receipt(helper, f"{scenario}-smoke.json")
+                smoke_document = json.loads(smoke.read_text(encoding="utf-8"))
+                if scenario == "bad":
+                    smoke_document["required_probe"]["arguments"] = [
+                        "-L",
+                        "tcp:5037",
+                        "server",
+                        "nodaemon",
+                    ]
+                elif scenario == "near-miss":
+                    smoke_document["required_probe"]["environment"] = {
+                        "ADB_SERVER_SOCKET": "tcp:127.0.0.1:5037"
+                    }
+                elif scenario == "malformed":
+                    smoke_document["required_probe"] = "production-server-invocation"
+                elif scenario == "spoof":
+                    exact_probe = smoke_document.pop("required_probe")
+                    smoke_document["diagnostic"] = (
+                        "claimed required probe: " + json.dumps(exact_probe, sort_keys=True)
+                    )
+                elif scenario == "unstable":
+                    smoke_document.pop("stability_host_version")
+                else:
+                    smoke_document.pop("stability_window_seconds")
+                smoke.write_text(json.dumps(smoke_document), encoding="utf-8")
+
+                result = self.run_verifier(
+                    lock,
+                    receipt,
+                    package_root,
+                    release_root,
+                    "--binary-smoke-receipt",
+                    str(smoke),
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("probe", (result.stdout + result.stderr).lower())
+
+    def test_scoped_verification_requires_binary_smoke_evidence(self):
+        lock, receipt, package_root, source_assets_root, document = self.make_release_fixture()
+        archive = next(
+            asset for asset in document["release_assets"] if asset["kind"] == "source-archive"
+        )
+        archive_path = source_assets_root / archive["path"]
+        archive_path.unlink()
+        archive_path.with_name(archive_path.name + ".sha256").unlink()
+
+        result = self.run_scoped_verifier(
+            lock,
+            receipt,
+            package_root,
+            source_assets_root,
+            "package",
+            include_smoke=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("binary-smoke", (result.stdout + result.stderr).lower())
 
     def test_package_scope_omits_source_archive_but_requires_and_hash_checks_source_set_receipt(self):
         lock, receipt, package_root, source_assets_root, document = self.make_release_fixture()
@@ -962,16 +1128,30 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def make_fake_adb(self, complete_client: bool) -> pathlib.Path:
+    def make_fake_adb(
+        self,
+        complete_client: bool,
+        server_connection_limit: int | None = None,
+        *,
+        stall_after_connection_limit: bool = False,
+        response_delays: tuple[float, ...] = (),
+    ) -> pathlib.Path:
         path = self.root / ("complete-adb" if complete_client else "server-only-adb")
         source = textwrap.dedent(
             f"""\
             #!{sys.executable}
+            import json
+            import os
+            import pathlib
             import signal
             import socket
             import sys
+            import time
 
             COMPLETE_CLIENT = {complete_client!r}
+            SERVER_CONNECTION_LIMIT = {server_connection_limit!r}
+            STALL_AFTER_CONNECTION_LIMIT = {stall_after_connection_limit!r}
+            RESPONSE_DELAYS = {response_delays!r}
             running = True
 
             def stop(*_args):
@@ -980,6 +1160,16 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
 
             signal.signal(signal.SIGTERM, stop)
             signal.signal(signal.SIGINT, stop)
+
+            def recv_exact(connection, size):
+                payload = b""
+                while len(payload) < size:
+                    chunk = connection.recv(size - len(payload))
+                    if not chunk:
+                        raise RuntimeError("short smart-socket request")
+                    payload += chunk
+                return payload
+
             args = sys.argv[1:]
             if args == ["version"]:
                 print("Android Debug Bridge version 1.0.41")
@@ -990,36 +1180,75 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
                     raise SystemExit(9)
                 print("adb help: devices, shell, logcat")
                 raise SystemExit(0)
-            if "server" not in args:
-                raise SystemExit(8)
+            conflicting = [
+                name
+                for name in {PRODUCTION_SERVER_SCRUBBED_ENVIRONMENT!r}
+                if name in os.environ
+            ]
+            server_socket = os.environ.get("ADB_SERVER_SOCKET", "")
+            observation_path = os.environ.get("KLOGG_ADB_SMOKE_OBSERVATION")
+            if observation_path:
+                pathlib.Path(observation_path).write_text(
+                    json.dumps(
+                        dict(
+                            arguments=args,
+                            server_socket=server_socket,
+                            conflicting_environment=conflicting,
+                            adb_trace=os.environ.get("ADB_TRACE"),
+                        ),
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+            if args != ["server", "nodaemon"]:
+                print("fatal: expected exact production server arguments", file=sys.stderr)
+                raise SystemExit(6)
 
-            port = None
-            if "-P" in args:
-                port = int(args[args.index("-P") + 1])
-            if "-L" in args:
-                endpoint = args[args.index("-L") + 1]
-                port = int(endpoint.rsplit(":", 1)[1])
-            if port is None:
-                raise SystemExit(7)
+            socket_parts = server_socket.split(":")
+            if (
+                len(socket_parts) != 2
+                or socket_parts[0] != "tcp"
+                or not socket_parts[1].isdigit()
+            ):
+                print("fatal: expected ADB_SERVER_SOCKET=tcp:<port>", file=sys.stderr)
+                raise SystemExit(6)
+            if conflicting:
+                print(f"fatal: conflicting endpoint environment: {{conflicting}}", file=sys.stderr)
+                raise SystemExit(6)
+            port = int(socket_parts[1])
 
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", port))
             listener.listen(1)
             listener.settimeout(0.1)
+            accepted_connections = 0
             while running:
                 try:
                     connection, _ = listener.accept()
                 except socket.timeout:
                     continue
                 with connection:
-                    header = connection.recv(4)
+                    header = recv_exact(connection, 4)
                     size = int(header.decode("ascii"), 16)
-                    request = connection.recv(size)
+                    request = recv_exact(connection, size)
+                    if accepted_connections < len(RESPONSE_DELAYS):
+                        time.sleep(RESPONSE_DELAYS[accepted_connections])
                     if request == b"host:version":
                         connection.sendall(b"OKAY00040029")
                     else:
                         connection.sendall(b"FAIL000bunsupported")
+                accepted_connections += 1
+                if (
+                    SERVER_CONNECTION_LIMIT is not None
+                    and accepted_connections >= SERVER_CONNECTION_LIMIT
+                ):
+                    if STALL_AFTER_CONNECTION_LIMIT:
+                        listener.close()
+                        while running:
+                            time.sleep(0.05)
+                        raise SystemExit(0)
+                    break
             listener.close()
             """
         )
@@ -1047,10 +1276,30 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
         with self.assertRaises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=0.25)
 
-    def test_smoke_probes_complete_client_private_server_smart_socket_and_cleanup(self):
+    def test_smoke_probes_exact_production_server_invocation_and_cleanup(self):
         adb = self.make_fake_adb(complete_client=True)
         report_path = self.root / "smoke.json"
-        result = self.run_smoke(adb, report_path)
+        observation_path = self.root / "server-invocation.json"
+        hostile_environment = {
+            "KLOGG_ADB_SMOKE_OBSERVATION": str(observation_path),
+            "ADB_SERVER_SOCKET": "tcp:198.51.100.7:7000",
+            "ADB_VENDOR_KEYS": "/untrusted/adbkey",
+            "ADB_SERVER_PORT": "7001",
+            "ANDROID_ADB_SERVER_PORT": "7002",
+            "ANDROID_ADB_SERVER_ADDRESS": "198.51.100.8",
+            "ADB_TRACE": "sockets",
+        }
+        with mock.patch.dict(os.environ, hostile_environment, clear=False):
+            result = self.run_smoke(adb, report_path)
+        observation = json.loads(observation_path.read_text(encoding="utf-8"))
+        with self.subTest(contract="arguments"):
+            self.assertEqual(observation.get("arguments"), ["server", "nodaemon"])
+        with self.subTest(contract="socket"):
+            self.assertRegex(observation.get("server_socket", ""), r"^tcp:[0-9]+$")
+        with self.subTest(contract="scrubbed-environment"):
+            self.assertEqual(observation.get("conflicting_environment"), [])
+        with self.subTest(contract="unrelated-adb-environment"):
+            self.assertEqual(observation.get("adb_trace"), "sockets")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -1063,7 +1312,74 @@ class AdbHelperSmokeContractTest(unittest.TestCase):
                 "no-lingering-process",
             ],
         )
+        port = int(report["server_endpoint"].rsplit(":", 1)[1])
+        self.assertEqual(report.get("required_probe"), production_server_invocation_probe(port))
         self.assertIsInstance(report.get("server_pid"), int)
+        self.assert_reported_endpoint_closed(report)
+
+    def test_smoke_gives_the_second_probe_the_configured_timeout_budget(self):
+        adb = self.make_fake_adb(
+            complete_client=True,
+            response_delays=(0.0, 0.35, 0.0),
+        )
+        report_path = self.root / "slow-second-probe.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report.get("host_version"), "0029")
+        self.assertEqual(report.get("stability_host_version"), "0029")
+
+    def test_smoke_gives_the_final_probe_the_configured_timeout_budget(self):
+        adb = self.make_fake_adb(
+            complete_client=True,
+            response_delays=(0.0, 0.0, 0.35),
+        )
+        report_path = self.root / "slow-final-probe.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report.get("host_version"), "0029")
+        self.assertEqual(report.get("stability_host_version"), "0029")
+
+    def test_smoke_rejects_server_that_exits_after_one_successful_probe(self):
+        adb = self.make_fake_adb(complete_client=True, server_connection_limit=1)
+        report_path = self.root / "one-shot-smoke.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("remain available", (result.stdout + result.stderr).lower())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assert_reported_endpoint_closed(report)
+
+    def test_smoke_rejects_server_that_exits_after_two_successful_probes(self):
+        adb = self.make_fake_adb(complete_client=True, server_connection_limit=2)
+        report_path = self.root / "two-shot-smoke.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("remain stable", (result.stdout + result.stderr).lower())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assert_reported_endpoint_closed(report)
+
+    def test_smoke_rejects_server_that_stalls_during_the_stability_window(self):
+        adb = self.make_fake_adb(
+            complete_client=True,
+            server_connection_limit=2,
+            stall_after_connection_limit=True,
+        )
+        report_path = self.root / "stalled-smoke.json"
+
+        result = self.run_smoke(adb, report_path)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("remain responsive", (result.stdout + result.stderr).lower())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
         self.assert_reported_endpoint_closed(report)
 
     def test_smoke_rejects_server_only_fork_and_still_leaves_no_process(self):

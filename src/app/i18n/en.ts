@@ -2446,8 +2446,8 @@
         <translation>New sessions cannot use compatibility process transports. Choose a device detected by the built-in services.</translation>
     </message>
     <message>
-        <source>A detected device is required before the session can run or start on restore.</source>
-        <translation>A detected device is required before the session can run or start on restore.</translation>
+        <source>A detected device is required before the live session can connect.</source>
+        <translation>A detected device is required before the live session can connect.</translation>
     </message>
     <message>
         <source>The session has no usable capture identifier.</source>
@@ -2472,10 +2472,6 @@
     <message>
         <source>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</source>
         <translation>Another live session already uses this capture identifier; the saved session cannot be restored without overwriting capture storage.</translation>
-    </message>
-    <message>
-        <source>The saved live-log transport is unavailable; reopen the source through the built-in services.</source>
-        <translation>The saved live-log transport is unavailable; reopen the source through the built-in services.</translation>
     </message>
 </context>
 <context>

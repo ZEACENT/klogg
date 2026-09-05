@@ -99,7 +99,7 @@ bool streamApiComplete( const IosNativeApi& api ) noexcept
            && api.lockdownClientNewWithExistingPair != nullptr && api.lockdownClientFree != nullptr
            && api.lockdownStartService != nullptr && api.serviceDescriptorFree != nullptr
            && api.lockdownGetStringValue != nullptr && api.nativeStringFree != nullptr
-           && api.osTraceClientNew != nullptr && api.osTraceStart != nullptr
+           && api.osTraceClientNew != nullptr && api.osTraceStartWithRecordType != nullptr
            && api.osTraceStop != nullptr && api.osTraceClientFree != nullptr
            && api.syslogRelayClientNew != nullptr && api.syslogRelayStart != nullptr
            && api.syslogRelayStop != nullptr && api.syslogRelayClientFree != nullptr;

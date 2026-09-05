@@ -649,6 +649,16 @@ TEST_CASE( "iOS os_trace callback boundary distinguishes control plist from trac
     CHECK( classifyOsTraceCallbackPayload( unknown ) == OsTraceCallbackPayloadKind::Unknown );
 }
 
+TEST_CASE( "iOS relay record enum preserves the outer wire type mapping",
+           "[livecapture][ios][ostrace][relay][type-mapping]" )
+{
+    static_assert(
+        std::is_same<std::underlying_type_t<OsTraceRelayRecordType>, std::uint8_t>::value,
+        "the source-neutral relay type mirrors the one-byte native ABI" );
+    CHECK( static_cast<std::uint8_t>( OsTraceRelayRecordType::ControlPlist ) == 1u );
+    CHECK( static_cast<std::uint8_t>( OsTraceRelayRecordType::Activity ) == 2u );
+}
+
 TEST_CASE( "iOS relay framing decodes type 1 big-endian and type 2 little-endian lengths",
            "[livecapture][ios][ostrace][relay]" )
 {
@@ -663,6 +673,24 @@ TEST_CASE( "iOS relay framing decodes type 1 big-endian and type 2 little-endian
     CHECK( byteString( result.records.at( 0 ).payload ) == "plist" );
     CHECK( result.records.at( 1 ).type == OsTraceRelayRecordType::Activity );
     CHECK( result.records.at( 1 ).payload == ByteBuffer{ 0u, 1u, 2u } );
+    CHECK( result.bufferedByteCount == 0u );
+}
+
+TEST_CASE( "iOS relay framing preserves zero-length control and activity records",
+           "[livecapture][ios][ostrace][relay][zero-length]" )
+{
+    OsTraceRelayFrameDecoder decoder;
+    const auto result = decoder.feed( concatenate(
+        { relayFrame( 1u, {} ), relayFrame( 2u, {} ), relayFrame( 2u, ByteBuffer{ 'a' } ) } ) );
+
+    REQUIRE_FALSE( result.error.has_value() );
+    REQUIRE( result.records.size() == 3u );
+    CHECK( result.records.at( 0 ).type == OsTraceRelayRecordType::ControlPlist );
+    CHECK( result.records.at( 0 ).payload.empty() );
+    CHECK( result.records.at( 1 ).type == OsTraceRelayRecordType::Activity );
+    CHECK( result.records.at( 1 ).payload.empty() );
+    CHECK( result.records.at( 2 ).type == OsTraceRelayRecordType::Activity );
+    CHECK( result.records.at( 2 ).payload == ByteBuffer{ 'a' } );
     CHECK( result.bufferedByteCount == 0u );
 }
 
@@ -742,16 +770,25 @@ TEST_CASE( "iOS relay framing preserves a deterministic corpus across arbitrary 
     CHECK( decoder.feed( {} ).bufferedByteCount == 0u );
 }
 
-TEST_CASE( "iOS relay framing enforces a maximum record before allocation",
-           "[livecapture][ios][ostrace][relay][bounds]" )
+TEST_CASE(
+    "iOS relay framing accepts the exact maximum and rejects larger records before allocation",
+    "[livecapture][ios][ostrace][relay][bounds]" )
 {
-    OsTraceRelayFrameDecoder decoder( 4u );
-    const auto result = decoder.feed( relayFrame( 2u, ByteBuffer( 5u, 0x5au ) ) );
+    for ( const auto type : { std::uint8_t{ 1u }, std::uint8_t{ 2u } } ) {
+        INFO( "relay type=" << static_cast<unsigned>( type ) );
+        OsTraceRelayFrameDecoder exactDecoder( 4u );
+        const auto exact = exactDecoder.feed( relayFrame( type, ByteBuffer( 4u, 0x5au ) ) );
+        REQUIRE_FALSE( exact.error.has_value() );
+        REQUIRE( exact.records.size() == 1u ); // NOLINT(readability-container-size-empty)
+        CHECK( exact.records.front().payload == ByteBuffer( 4u, 0x5au ) );
 
-    REQUIRE( result.records.empty() );
-    REQUIRE( result.error.has_value() );
-    CHECK( result.error.value().code == OsTraceRelayErrorCode::RecordTooLarge );
-    CHECK( result.bufferedByteCount == 0u );
+        OsTraceRelayFrameDecoder oversizedDecoder( 4u );
+        const auto oversized = oversizedDecoder.feed( relayFrame( type, ByteBuffer( 5u, 0x5au ) ) );
+        REQUIRE( oversized.records.empty() );
+        REQUIRE( oversized.error.has_value() );
+        CHECK( oversized.error.value().code == OsTraceRelayErrorCode::RecordTooLarge );
+        CHECK( oversized.bufferedByteCount == 0u );
+    }
 
     OsTraceRelayFrameDecoder overflowDecoder( 1024u );
     const auto overflow = overflowDecoder.feed( ByteBuffer{ 2u, 0xffu, 0xffu, 0xffu, 0xffu } );

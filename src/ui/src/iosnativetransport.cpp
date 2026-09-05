@@ -294,8 +294,7 @@ void IosNativeTransport::postFailure( Generation generation, ClassifiedIosNative
     const auto terminalText = lastError_;
     QPointer<IosNativeTransport> guard( this );
     publishState( generation, State::Error );
-    if ( guard != nullptr && guard->activeGeneration_ == generation
-         && guard->stateGeneration_ == generation && guard->state_ == State::Error ) {
+    if ( guard != nullptr ) {
         Q_EMIT guard->errorOccurred( generation, terminalText );
     }
 }

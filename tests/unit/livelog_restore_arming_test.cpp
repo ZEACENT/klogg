@@ -18,38 +18,27 @@
  */
 
 /*
- * Task 6 cycle 2 RED contracts: restore ARMING.
+ * RED contracts for inert persisted live-session restoration.
  *
- * Cycle 1 pinned what a persisted live-log session IS (typed spec, parse
- * diagnostics, accept gate). This file pins what restore DOES with it:
+ * Parsing remains backward compatible with saved Running intent, but restore
+ * must always recreate Android and iOS tabs in Stopped state. No transport,
+ * ADB infrastructure observation, or iOS catalog subscription may begin until
+ * an explicit reconnect. Saving snapshots a stopped persistence copy without
+ * mutating the live controller, regardless of its runtime state.
  *
- *   1. Restored tabs route through validateForAccept before anything arms:
- *      every spec the gate rejects fatally must also refuse to arm a run,
- *      and Session-level restore must surface structured rejections through
- *      the existing lastRestoreRejections() path with actionable text
- *      (including reopen guidance for raw-CLI sessions).
- *   2. Valid Running-intent specs drive initialLiveStateEvents through the
- *      Task 2 state reducer so the tab starts WaitingForInfrastructure /
- *      WaitingForDevice instead of Stopped — observable at session level as
- *      an armed transport on the recording factory.
- *   3. Transitional legacy_process sessions stay loadable (options intact)
- *      but never arm, and never surface as errors.
- *
- * Everything here is deterministic: fixed capture ids, a recording transport
- * factory instead of real processes/devices, no waits, no wall-clock reads.
- * (The once-per-capture-id migration notice lives in
- * livelog_migration_notice_test.cpp: its surfacing channel does not exist
- * yet, so that file intentionally does not compile until the production side
- * lands.)
+ * Everything here is deterministic: fixed capture ids, recording service
+ * doubles, no waits, no wall-clock assertions, and no real devices/processes.
  */
 
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <QCoreApplication>
@@ -57,12 +46,17 @@
 #include <QEvent>
 #include <QFile>
 #include <QJsonDocument>
+#include <QHostAddress>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 
+#include "adbinfrastructuremanager.h"
 #include "adblogcatsource.h"
+#include "adbserversupervisor.h"
+#include "adbsmartsocketclient.h"
 #include "livelogcontroller.h"
 #include "livelogsession.h"
 #include "livesourcetransport.h"
@@ -162,7 +156,12 @@ public:
 
     QString lastError() const override
     {
-        return {};
+        return lastError_;
+    }
+
+    std::optional<live::LiveSourceError> lastStructuredError() const override
+    {
+        return structuredError_;
     }
 
     void publishState( Generation generation, State state )
@@ -175,8 +174,33 @@ public:
         Q_EMIT bytesReceived( generation, bytes );
     }
 
+    void publishTerminalError( Generation generation, live::LiveSourceError error )
+    {
+        structuredError_ = std::move( error );
+        lastError_ = QString::fromStdString( structuredError_->message ) + QLatin1Char( '\n' )
+                     + QString::fromStdString( structuredError_->nativeDetail );
+        Q_EMIT stateChanged( generation, State::Error );
+        stopObservedBeforeTerminalText = std::find( stopGenerations.cbegin(), stopGenerations.cend(),
+                                                    generation )
+                                         != stopGenerations.cend();
+        ++terminalTextEmissions;
+        Q_EMIT errorOccurred( generation, lastError_ );
+    }
+
+    void publishTextError( Generation generation )
+    {
+        ++terminalTextEmissions;
+        Q_EMIT errorOccurred( generation, lastError_ );
+    }
+
     std::vector<Generation> startGenerations;
     std::vector<Generation> stopGenerations;
+    bool stopObservedBeforeTerminalText{ false };
+    int terminalTextEmissions{ 0 };
+
+private:
+    QString lastError_;
+    std::optional<live::LiveSourceError> structuredError_;
 };
 
 class UnavailableLiveSourceTransportFactory final : public LiveSourceTransportFactory {
@@ -188,6 +212,108 @@ public:
     }
 
     mutable int createCalls = 0;
+};
+
+class PassiveAdbSocketFactory final : public live::adb::AdbSmartSocketFactory {
+public:
+    QTcpSocket* createSocket( QObject* parent ) override
+    {
+        // Ownership transfers to the Qt parent.
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+        return new QTcpSocket( parent );
+    }
+};
+
+class PassiveAdbDeadlineScheduler final : public live::adb::AdbSmartSocketDeadlineScheduler {
+public:
+    live::adb::DeadlineToken armDeadline( live::adb::AdbSmartSocketDeadlineKind, int, QObject*,
+                                          std::function<void()> ) override
+    {
+        return ++nextToken_;
+    }
+
+    void cancelDeadline( live::adb::DeadlineToken ) override {}
+
+private:
+    live::adb::DeadlineToken nextToken_{ 0 };
+};
+
+class RecordingAdbProbe final : public live::adb::AdbServerProbe {
+public:
+    live::adb::AdbServerToken probe( const live::adb::AdbServerEndpoint&, Callback ) override
+    {
+        ++calls;
+        return static_cast<live::adb::AdbServerToken>( calls );
+    }
+    void cancel( live::adb::AdbServerToken ) override {}
+    int calls{ 0 };
+};
+
+class PassiveAdbLauncher final : public live::adb::AdbServerLauncher {
+public:
+    live::adb::AdbServerToken launch( const live::adb::AdbServerLaunchRequest&, Callback ) override
+    {
+        return 1u;
+    }
+    void cleanup( live::adb::AdbServerToken ) override {}
+    void release( live::adb::AdbServerToken ) override {}
+};
+
+class PassiveAdbStartupLock final : public live::adb::AdbServerStartupLock {
+public:
+    live::adb::AdbServerToken acquire( const QString&, Callback ) override
+    {
+        return 1u;
+    }
+    void cancel( live::adb::AdbServerToken ) override {}
+    void release( live::adb::AdbServerToken ) override {}
+};
+
+class PassiveAdbKeyStore final : public live::adb::AdbKeyStore {
+public:
+    live::adb::AdbServerKeyInspection inspectStandardKey() override
+    {
+        return { live::adb::AdbServerStandardKeyState::Present, {} };
+    }
+    live::adb::AdbServerKeyGenerationResult generateStandardKey() override
+    {
+        return { true, {} };
+    }
+};
+
+class PassiveAdbServerScheduler final : public live::adb::AdbServerScheduler {
+public:
+    live::adb::AdbServerToken schedule( live::adb::AdbServerScheduleKind,
+                                        std::chrono::milliseconds, Callback ) override
+    {
+        return ++nextToken_;
+    }
+    void cancel( live::adb::AdbServerToken ) override {}
+
+private:
+    live::adb::AdbServerToken nextToken_{ 0 };
+};
+
+struct RecordingAdbInfrastructure {
+    PassiveAdbSocketFactory socketFactory;
+    PassiveAdbDeadlineScheduler deadlines;
+    live::adb::AdbSmartSocketClient client;
+    RecordingAdbProbe probe;
+    PassiveAdbLauncher launcher;
+    PassiveAdbStartupLock startupLock;
+    PassiveAdbKeyStore keyStore;
+    PassiveAdbServerScheduler supervisorScheduler;
+    PassiveAdbServerScheduler trackerScheduler;
+    live::adb::AdbInfrastructureManager manager;
+
+    RecordingAdbInfrastructure()
+        : client( live::adb::AdbSmartSocketClientConfig{}, socketFactory, deadlines )
+        , manager( live::adb::AdbInfrastructureManagerConfig{},
+                   live::adb::AdbInfrastructureManagerDependencies{
+                       probe, launcher, startupLock, keyStore, supervisorScheduler, client,
+                       trackerScheduler } )
+    {
+    }
 };
 
 class RecordingLiveSourceTransportFactory final : public LiveSourceTransportFactory {
@@ -225,12 +351,14 @@ public:
 
     SubscriptionId subscribe( SnapshotCallback callback ) override
     {
+        ++subscribeCalls;
         callback_ = std::move( callback );
         return 1u;
     }
 
     void unsubscribe( SubscriptionId subscription ) override
     {
+        ++unsubscribeCalls;
         if ( subscription == 1u ) {
             callback_ = {};
         }
@@ -270,6 +398,8 @@ public:
     }
 
     std::vector<klogg::livecapture::ios::IosEndpointKey> metadataRequests;
+    int subscribeCalls{ 0 };
+    int unsubscribeCalls{ 0 };
 
 private:
     klogg::livecapture::ios::IosCatalogSnapshot snapshot_;
@@ -375,6 +505,22 @@ OpenedDocumentsList restoreSession( Session& appSession, const QString& windowId
     return restored;
 }
 
+LiveLogSessionSpec saveAndParseLiveTab( Session& appSession, const QString& windowId,
+                                        const ViewInterface* view )
+{
+    WindowSession windowSession{ std::shared_ptr<Session>( &appSession, []( Session* ) {} ),
+                                 windowId, 0 };
+    const std::vector<SaveFileInfo> files{ { view, 0u, nullptr } };
+    windowSession.save( files, {}, 0 );
+
+    const auto savedFiles = SessionInfo::getSynced().openFiles( windowId );
+    REQUIRE( savedFiles.size() == 1 );
+    const auto parsed = klogg::livelog::parsePersistedSpec( savedFiles.front().sourceSpec );
+    REQUIRE( parsed.ok() );
+    REQUIRE( parsed.spec.has_value() );
+    return *parsed.spec;
+}
+
 void closeAndDeleteViews( Session& appSession, OpenedDocumentsList& opened )
 {
     for ( auto& entry : opened ) {
@@ -389,10 +535,8 @@ void closeAndDeleteViews( Session& appSession, OpenedDocumentsList& opened )
 TEST_CASE( "Restore arming refuses every spec that validateForAccept rejects",
            "[livelog-restore-arming]" )
 {
-    // The arming mapping is the last defense before a restored tab starts
-    // talking to hardware: it must be fail-closed in EXACTLY the same cases
-    // as the accept gate, including the transitional backends that cycle 1
-    // allowed into the schema for persistence compatibility only.
+    // Explicit runtime start mapping must remain fail-closed in exactly the
+    // same cases as the accept gate, including compatibility-only backends.
     const auto armEvents = []( const LiveLogSessionSpec& spec ) {
         return klogg::livelog::initialLiveStateEvents( spec, live::Timestamp{ 1500 } );
     };
@@ -428,102 +572,349 @@ TEST_CASE( "Restore arming refuses every spec that validateForAccept rejects",
     REQUIRE( std::get<live::StartRequested>( validEvents.front() ).at == live::Timestamp{ 1500 } );
 }
 
-TEST_CASE( "Restored Running intent drives the reducer into a waiting state, never Stopped",
-           "[livelog-restore-arming]" )
+TEST_CASE( "Explicit runtime start intent still drives the reducer",
+           "[livelog-restore-arming][runtime-start]" )
 {
     const live::LiveStateConfig config{ 5u, std::chrono::seconds{ 10 } };
-
-    // Infrastructure unknown at restore time (the common case): the restored
-    // tab must present WaitingForInfrastructure, not a silent Stopped state.
     auto snapshot = live::initialLiveState();
-    REQUIRE( snapshot.source.status == live::SourceStatus::Stopped );
-    for ( const auto& event :
-          klogg::livelog::initialLiveStateEvents( makeAndroidSpec(), live::Timestamp{ 1500 } ) ) {
-        snapshot = live::reduce( snapshot, event, config ).snapshot;
-    }
-    REQUIRE( snapshot.runIntent == live::RunIntent::Running );
-    REQUIRE( snapshot.source.status == live::SourceStatus::WaitingForInfrastructure );
-
-    // Infrastructure already ready when the session comes back: straight to
-    // waiting for the device, still never Stopped.
-    auto readySnapshot = live::initialLiveState();
-    live::InfrastructureChanged infrastructureReady;
-    infrastructureReady.status = live::InfrastructureStatus::Ready;
-    infrastructureReady.ownership = live::InfrastructureOwnership::AppShared;
-    infrastructureReady.at = live::Timestamp{ 1000 };
-    readySnapshot = live::reduce( readySnapshot, infrastructureReady, config ).snapshot;
-    for ( const auto& event :
-          klogg::livelog::initialLiveStateEvents( makeAndroidSpec(), live::Timestamp{ 1500 } ) ) {
-        readySnapshot = live::reduce( readySnapshot, event, config ).snapshot;
-    }
-    REQUIRE( readySnapshot.runIntent == live::RunIntent::Running );
-    REQUIRE( readySnapshot.source.status == live::SourceStatus::WaitingForDevice );
-
-    // Source neutrality: iOS sessions drive the same waiting states.
-    auto iosSnapshot = live::initialLiveState();
-    for ( const auto& event :
-          klogg::livelog::initialLiveStateEvents( makeSupportedIosSpec(), live::Timestamp{ 2500 } ) ) {
-        iosSnapshot = live::reduce( iosSnapshot, event, config ).snapshot;
-    }
-    REQUIRE( iosSnapshot.runIntent == live::RunIntent::Running );
-    REQUIRE( iosSnapshot.source.status != live::SourceStatus::Stopped );
-    REQUIRE( iosSnapshot.source.status == live::SourceStatus::WaitingForInfrastructure );
-
-    // Stopped tabs restore inert: no synthetic start exists and the state
-    // machine stays Stopped.
-    auto stoppedSpec = makeAndroidSpec();
-    stoppedSpec.runIntent = live::RunIntent::Stopped;
-    REQUIRE(
-        klogg::livelog::initialLiveStateEvents( stoppedSpec, live::Timestamp{ 1500 } ).empty() );
-    REQUIRE( live::initialLiveState().source.status == live::SourceStatus::Stopped );
-    REQUIRE( live::initialLiveState().runIntent == live::RunIntent::Stopped );
+    const auto events
+        = klogg::livelog::initialLiveStateEvents( makeAndroidSpec(), live::Timestamp{ 1500 } );
+    REQUIRE( events.size() == 1 );
+    REQUIRE( std::holds_alternative<live::StartRequested>( events.front() ) );
+    snapshot = live::reduce( snapshot, events.front(), config ).snapshot;
+    CHECK( snapshot.runIntent == live::RunIntent::Running );
+    CHECK( snapshot.source.status == live::SourceStatus::WaitingForInfrastructure );
 }
 
-SCENARIO( "Restore arms valid running sessions through the transport factory",
-          "[livelog-restore-arming][session]" )
+TEST_CASE( "Persisted Android running intent restores inert and reconnects once",
+           "[livelog-restore-arming][session][inert-restore]" )
 {
     ScopedSessionWindows windowsGuard;
-
+    QTemporaryDir outputDir;
+    REQUIRE( outputDir.isValid() );
     RecordingLiveSourceTransportFactory factory;
     auto appSession = std::make_shared<Session>( factory );
-
-    const auto windowId = QStringLiteral( "livelog-arm-running-window" );
+    const auto windowId = QStringLiteral( "livelog-inert-android-window" );
     auto spec = makeAndroidSpec();
+    spec.boundOutputFile = outputDir.filePath( QStringLiteral( "android-restored.log" ) );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
 
-    GIVEN( "A saved window with one valid running-intent live session" )
-    {
-        seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
-                                       klogg::livelog::serializeSpec( spec ) } } );
+    auto opened = restoreSession( *appSession, windowId );
 
-        WHEN( "The window session is restored" )
+    REQUIRE( opened.size() == 1 );
+    REQUIRE( appSession->getDocumentKind( opened.front().second ) == DocumentKind::AdbLogcat );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    CHECK( factory.createdTransports.empty() );
+    CHECK( factory.totalStarts() == 0 );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Stopped );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    CHECK( controller->spec().runIntent == live::RunIntent::Stopped );
+    CHECK( source->sessionData().runIntent == live::RunIntent::Stopped );
+    CHECK( source->sessionData().deviceSerial == spec.device.deviceId );
+    CHECK( source->sessionData().captureId == spec.captureId );
+    CHECK( source->sessionData().androidBuffers == spec.android.buffers );
+    CHECK( source->sessionData().androidFilterSpec == spec.android.filterSpec );
+    CHECK( source->sessionData().androidPriority == spec.android.priority );
+    CHECK( source->sessionData().androidPid == spec.android.pid );
+    CHECK( source->sessionData().boundOutputFile == spec.boundOutputFile );
+    CHECK( QFile::exists( spec.boundOutputFile ) );
+    CHECK( appSession->lastRestoreRejections().isEmpty() );
+
+    REQUIRE( source->reconnectSource() );
+    REQUIRE( factory.requestedConfigs.size() == 1 );
+    REQUIRE( factory.createdTransports.size() == 1 );
+    CHECK( factory.totalStarts() == 1 );
+    const auto& config = factory.requestedConfigs.front();
+    CHECK( config.deviceId == spec.device.deviceId );
+    CHECK( config.androidBuffers == spec.android.buffers );
+    CHECK( config.androidFilterSpec == spec.android.filterSpec );
+    CHECK( config.androidPriority == spec.android.priority );
+    CHECK( config.androidPid == spec.android.pid );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "Persisted Android running intent does not acquire ADB infrastructure",
+           "[livelog-restore-arming][session][inert-restore][adb-infrastructure]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingAdbInfrastructure infrastructure;
+    auto appSession = std::make_shared<Session>( factory, &infrastructure.manager, nullptr );
+    const auto windowId = QStringLiteral( "livelog-inert-adb-infrastructure-window" );
+    const auto spec = makeAndroidSpec();
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+
+    REQUIRE( opened.size() == 1 );
+    CHECK( infrastructure.manager.activeLeaseCount() == 0u );
+    CHECK( infrastructure.probe.calls == 0 );
+    CHECK( factory.createdTransports.empty() );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Stopped );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "Inactive live-session composition canonicalizes runtime run intent",
+           "[livelog-restore-arming][session][inert]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto sessionData = klogg::livelog::sessionDataFromSpec( makeAndroidSpec() );
+    REQUIRE( sessionData.runIntent == live::RunIntent::Running );
+
+    auto* view = appSession->openAdbLogcat(
+        sessionData,
+        []() -> ViewInterface* {
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            return new NullView();
+        },
+        false );
+
+    REQUIRE( view != nullptr );
+    auto* controller = appSession->getLiveLogController( view );
+    auto* source = appSession->getAdbLogcatSource( view );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    CHECK( controller->spec().runIntent == live::RunIntent::Stopped );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Stopped );
+    CHECK( source->sessionData().runIntent == live::RunIntent::Stopped );
+    CHECK( factory.createdTransports.empty() );
+
+    appSession->close( view );
+    delete view;
+}
+
+TEST_CASE( "Fresh explicitly-started live sessions still start immediately",
+           "[livelog-restore-arming][session][fresh-start]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto sessionData = klogg::livelog::sessionDataFromSpec( makeAndroidSpec() );
+
+    auto* view = appSession->openAdbLogcat(
+        sessionData,
+        []() -> ViewInterface* {
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            return new NullView();
+        },
+        true );
+
+    REQUIRE( view != nullptr );
+    REQUIRE( factory.createdTransports.size() == 1 );
+    CHECK( factory.totalStarts() == 1 );
+    auto* controller = appSession->getLiveLogController( view );
+    REQUIRE( controller != nullptr );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+    appSession->close( view );
+    delete view;
+}
+
+TEST_CASE( "Clean and unclean restore both normalize old running JSON on the next save",
+           "[livelog-restore-arming][session][inert-restore][persistence]" )
+{
+    for ( const bool uncleanShutdown : { false, true } ) {
+        DYNAMIC_SECTION( "uncleanShutdown=" << uncleanShutdown )
         {
+            ScopedSessionWindows windowsGuard;
+            RecordingLiveSourceTransportFactory factory;
+            auto appSession = std::make_shared<Session>( factory );
+            const auto windowId
+                = uncleanShutdown ? QStringLiteral( "livelog-unclean-running-window" )
+                                  : QStringLiteral( "livelog-clean-running-window" );
+            const auto spec = makeAndroidSpec();
+            seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                           klogg::livelog::serializeSpec( spec ) } } );
+            auto& sessionInfo = SessionInfo::getSynced();
+            sessionInfo.setDirtyShutdown( uncleanShutdown );
+            sessionInfo.save();
+
             auto opened = restoreSession( *appSession, windowId );
+            REQUIRE( opened.size() == 1 );
+            auto* controller = appSession->getLiveLogController( opened.front().second );
+            REQUIRE( controller != nullptr );
+            CHECK( controller->snapshot().runIntent == live::RunIntent::Stopped );
+            CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+            CHECK( factory.totalStarts() == 0 );
 
-            THEN( "The live tab comes back and its run is already armed" )
-            {
-                REQUIRE( opened.size() == 1 );
-                REQUIRE( appSession->getDocumentKind( opened.front().second )
-                         == DocumentKind::AdbLogcat );
-                REQUIRE( appSession->getDisplayName( opened.front().second )
-                         == spec.displayName() );
-
-                // Exactly one transport was created for the exact device the
-                // spec recorded, and restore started it: the tab resumes its
-                // running intent without user interaction.
-                REQUIRE( factory.createdTransports.size() == 1 );
-                REQUIRE( factory.requestedConfigs.front().deviceId == spec.device.deviceId );
-                REQUIRE( factory.totalStarts() == 1 );
-                auto* source = appSession->getAdbLogcatSource( opened.front().second );
-                REQUIRE( source != nullptr );
-                CHECK( source->sessionData().runIntent == live::RunIntent::Running );
-                source->disconnectSource();
-                CHECK( source->sessionData().runIntent == live::RunIntent::Stopped );
-                REQUIRE( appSession->lastRestoreRejections().isEmpty() );
-            }
-
+            const auto saved = saveAndParseLiveTab( *appSession, windowId, opened.front().second );
+            CHECK( saved.schemaVersion == klogg::livelog::kCurrentSpecVersion );
+            CHECK( saved.runIntent == live::RunIntent::Stopped );
+            CHECK( saved.captureId == spec.captureId );
+            CHECK( saved.device.deviceId == spec.device.deviceId );
             closeAndDeleteViews( *appSession, opened );
         }
     }
+}
+
+TEST_CASE( "Persistence stops only the saved copy of every active runtime state",
+           "[livelog-restore-arming][session][persistence-normalization]" )
+{
+    const auto openFresh = []( Session& appSession, LiveLogSessionSpec spec ) {
+        spec.boundOutputFile.clear();
+        auto data = klogg::livelog::sessionDataFromSpec( spec );
+        return appSession.openAdbLogcat(
+            data,
+            []() -> ViewInterface* {
+                // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+                return new NullView();
+            },
+            true );
+    };
+
+    SECTION( "failed but still running" )
+    {
+        ScopedSessionWindows windowsGuard;
+        RecordingLiveSourceTransportFactory factory;
+        auto appSession = std::make_shared<Session>( factory );
+        const auto windowId = QStringLiteral( "livelog-save-failed-window" );
+        seedWindowFiles( windowId, {} );
+        auto spec = makeAndroidSpec();
+        spec.capture.autoReconnectEnabled = false;
+        auto* view = openFresh( *appSession, spec );
+        REQUIRE( view != nullptr );
+        auto* controller = appSession->getLiveLogController( view );
+        REQUIRE( controller != nullptr );
+        controller->streamFailed(
+            controller->snapshot().generation,
+            live::LiveSourceError{ live::ErrorCategory::Stream, "terminal", live::ErrorScope::Stream,
+                                   live::RetryPolicy::Never, "terminal", "test" } );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::Failed );
+        const auto saved = saveAndParseLiveTab( *appSession, windowId, view );
+        CHECK( saved.runIntent == live::RunIntent::Stopped );
+        CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+        CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
+        appSession->close( view );
+        delete view;
+    }
+
+    SECTION( "retry wait" )
+    {
+        ScopedSessionWindows windowsGuard;
+        RecordingLiveSourceTransportFactory factory;
+        auto appSession = std::make_shared<Session>( factory );
+        const auto windowId = QStringLiteral( "livelog-save-retrying-window" );
+        seedWindowFiles( windowId, {} );
+        auto* view = openFresh( *appSession, makeAndroidSpec() );
+        REQUIRE( view != nullptr );
+        auto* controller = appSession->getLiveLogController( view );
+        REQUIRE( controller != nullptr );
+        controller->streamFailed(
+            controller->snapshot().generation,
+            live::LiveSourceError{ live::ErrorCategory::Stream, "retry", live::ErrorScope::Stream,
+                                   live::RetryPolicy::Backoff, "retry", "test" } );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::RetryWait );
+        const auto saved = saveAndParseLiveTab( *appSession, windowId, view );
+        CHECK( saved.runIntent == live::RunIntent::Stopped );
+        CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+        CHECK( controller->snapshot().source.status == live::SourceStatus::RetryWait );
+        appSession->close( view );
+        delete view;
+    }
+
+    SECTION( "waiting for device" )
+    {
+        ScopedSessionWindows windowsGuard;
+        RecordingLiveSourceTransportFactory factory;
+        RecordingIosCatalog catalog;
+        auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+        const auto windowId = QStringLiteral( "livelog-save-waiting-window" );
+        seedWindowFiles( windowId, {} );
+        auto* view = openFresh( *appSession, makeSupportedIosSpec() );
+        REQUIRE( view != nullptr );
+        auto* controller = appSession->getLiveLogController( view );
+        REQUIRE( controller != nullptr );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+        const auto saved = saveAndParseLiveTab( *appSession, windowId, view );
+        CHECK( saved.runIntent == live::RunIntent::Stopped );
+        CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+        CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+        appSession->close( view );
+        delete view;
+    }
+
+    SECTION( "streaming" )
+    {
+        ScopedSessionWindows windowsGuard;
+        RecordingLiveSourceTransportFactory factory;
+        auto appSession = std::make_shared<Session>( factory );
+        const auto windowId = QStringLiteral( "livelog-save-streaming-window" );
+        seedWindowFiles( windowId, {} );
+        auto* view = openFresh( *appSession, makeAndroidSpec() );
+        REQUIRE( view != nullptr );
+        auto* controller = appSession->getLiveLogController( view );
+        REQUIRE( controller != nullptr );
+        REQUIRE( factory.createdTransports.size() == 1 );
+        factory.createdTransports.front()->publishState( controller->snapshot().generation,
+                                                         LiveSourceTransport::State::Connected );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+        const auto saved = saveAndParseLiveTab( *appSession, windowId, view );
+        CHECK( saved.runIntent == live::RunIntent::Stopped );
+        CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+        CHECK( controller->snapshot().source.status == live::SourceStatus::Streaming );
+        appSession->close( view );
+        delete view;
+    }
+}
+
+TEST_CASE( "Persisted iOS running intent restores without catalog activation and reconnects once",
+           "[livelog-restore-arming][session][inert-restore][ios-catalog]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto windowId = QStringLiteral( "livelog-inert-ios-window" );
+    const auto spec = makeSupportedIosSpec();
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    CHECK( catalog.subscribeCalls == 0 );
+    CHECK( catalog.metadataRequests.empty() );
+    CHECK( factory.createdTransports.empty() );
+    CHECK( factory.totalStarts() == 0 );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Stopped );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    CHECK( source->sessionData().runIntent == live::RunIntent::Stopped );
+    CHECK( source->sessionData().deviceSerial == spec.device.deviceId );
+    CHECK( source->sessionData().captureId == spec.captureId );
+    CHECK( source->sessionData().iosEndpoint.udid == spec.device.deviceId.toStdString() );
+    CHECK( source->sessionData().iosEndpoint.connectionType
+           == klogg::livecapture::ios::NativeConnectionType::Network );
+
+    REQUIRE( source->reconnectSource() );
+    CHECK( catalog.subscribeCalls == 1 );
+    CHECK( factory.totalStarts() == 0 );
+
+    klogg::livecapture::ios::IosCatalogEntry entry;
+    entry.endpoint.udid = spec.device.deviceId.toStdString();
+    entry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    catalog.publish( { 1u, { entry } } );
+
+    REQUIRE( factory.requestedConfigs.size() == 1 );
+    CHECK( factory.totalStarts() == 1 );
+    const auto& config = factory.requestedConfigs.front();
+    CHECK( config.deviceId == spec.device.deviceId );
+    CHECK( config.iosEndpoint == entry.endpoint );
+    CHECK( controller->snapshot().runIntent == live::RunIntent::Running );
+
+    closeAndDeleteViews( *appSession, opened );
 }
 
 SCENARIO( "Rejected restored specs never arm and surface structured rejections",
@@ -790,8 +1181,8 @@ TEST_CASE( "Restore rejects duplicate active capture storage ids across source k
     closeAndDeleteViews( *appSession, opened );
 }
 
-TEST_CASE( "Running restore with unavailable transport factory is rejected transactionally",
-           "[livelog-restore-arming][session]" )
+TEST_CASE( "Unavailable transport does not prevent inert restoration",
+           "[livelog-restore-arming][session][inert-restore]" )
 {
     ScopedSessionWindows windowsGuard;
     UnavailableLiveSourceTransportFactory factory;
@@ -802,11 +1193,13 @@ TEST_CASE( "Running restore with unavailable transport factory is rejected trans
                                    klogg::livelog::serializeSpec( spec ) } } );
 
     auto opened = restoreSession( *appSession, windowId );
-    CHECK( opened.empty() );
-    CHECK( factory.createCalls == 1 );
-    REQUIRE( appSession->lastRestoreRejections().size() == 1 );
-    CHECK( appSession->lastRestoreRejections().front().contains( QStringLiteral( "unavailable" ),
-                                                                 Qt::CaseInsensitive ) );
+    REQUIRE( opened.size() == 1 );
+    CHECK( factory.createCalls == 0 );
+    CHECK( appSession->lastRestoreRejections().isEmpty() );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    REQUIRE( controller != nullptr );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    closeAndDeleteViews( *appSession, opened );
 }
 
 TEST_CASE( "Each restore pass replaces stale notices and rejections",
@@ -883,7 +1276,10 @@ TEST_CASE( "One configured reconnect attempt permits one retry after the initial
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
     CHECK( controller->snapshot().infrastructure.ownership
            == live::InfrastructureOwnership::AppShared );
 
@@ -898,8 +1294,8 @@ TEST_CASE( "One configured reconnect attempt permits one retry after the initial
     closeAndDeleteViews( *appSession, opened );
 }
 
-TEST_CASE( "iOS catalog startup failure surfaces as a failed restored tab",
-           "[livelog-restore-arming][session][ios-catalog][error]" )
+TEST_CASE( "iOS catalog startup failure stays dormant until manual reconnect",
+           "[livelog-restore-arming][session][ios-catalog][error][inert-restore]" )
 {
     ScopedSessionWindows windowsGuard;
     RecordingLiveSourceTransportFactory factory;
@@ -919,7 +1315,12 @@ TEST_CASE( "iOS catalog startup failure surfaces as a failed restored tab",
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    CHECK( catalog.subscribeCalls == 0 );
+    REQUIRE( source->reconnectSource() );
     CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
     REQUIRE( controller->snapshot().source.failure.has_value() );
     CHECK( controller->snapshot().source.failure->code == "ios-catalog-api-incomplete" );
@@ -942,7 +1343,10 @@ TEST_CASE( "manual reconnect retries recoverable iOS metadata for the selected e
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
 
     klogg::livecapture::ios::IosCatalogEntry entry;
     entry.endpoint.udid = spec.device.deviceId.toStdString();
@@ -985,6 +1389,7 @@ TEST_CASE( "transient iOS metadata failure remains actionable and retries on rec
     auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
     REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
 
     klogg::livecapture::ios::IosCatalogEntry entry;
     entry.endpoint.udid = spec.device.deviceId.toStdString();
@@ -1019,8 +1424,8 @@ TEST_CASE( "transient iOS metadata failure remains actionable and retries on rec
     closeAndDeleteViews( *appSession, opened );
 }
 
-TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
-           "[livelog-restore-arming][session][ios-catalog]" )
+TEST_CASE( "iOS catalog snapshots arm only after reconnect and retire the matching live tab",
+           "[livelog-restore-arming][session][ios-catalog][inert-restore]" )
 {
     ScopedSessionWindows windowsGuard;
     RecordingLiveSourceTransportFactory factory;
@@ -1034,7 +1439,11 @@ TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Stopped );
+    REQUIRE( source->reconnectSource() );
     CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
     CHECK( factory.totalStarts() == 0u );
 
@@ -1045,13 +1454,86 @@ TEST_CASE( "iOS catalog snapshots arm and retire only the matching live tab",
 
     REQUIRE( factory.totalStarts() == 1u );
     const auto generation = controller->snapshot().generation;
-    factory.createdTransports.front()->publishState(
+    factory.createdTransports.back()->publishState(
         generation, LiveSourceTransport::State::Connected );
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
 
     catalog.publish( { 2u, {} } );
     CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
     CHECK_FALSE( factory.createdTransports.front()->stopGenerations.empty() );
+    closeAndDeleteViews( *appSession, opened );
+}
+
+TEST_CASE( "iOS terminal diagnostics survive controller cancellation exactly once",
+           "[livelog-restore-arming][session][ios][error][ordering][reentrant]" )
+{
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    RecordingIosCatalog catalog;
+    auto appSession = std::make_shared<Session>( factory, nullptr, &catalog );
+    const auto spec = makeSupportedIosSpec();
+    const auto windowId = QStringLiteral( "livelog-ios-terminal-diagnostic-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "ios_log_stream" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
+
+    klogg::livecapture::ios::IosCatalogEntry entry;
+    entry.endpoint.udid = spec.device.deviceId.toStdString();
+    entry.endpoint.connectionType = klogg::livecapture::ios::NativeConnectionType::Network;
+    catalog.publish( { 1u, { entry } } );
+    REQUIRE( factory.createdTransports.size() == 1u );
+    auto* transport = factory.createdTransports.front();
+    REQUIRE( transport != nullptr );
+    const auto generation = controller->snapshot().generation;
+    transport->publishState( generation, LiveSourceTransport::State::Connected );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+
+    const live::LiveSourceError terminalError{
+        live::ErrorCategory::Backend,
+        "ios-native-terminal-test",
+        live::ErrorScope::Stream,
+        live::RetryPolicy::Never,
+        "The native iOS stream terminated.",
+        "lockdown receive failed: connection reset"
+    };
+    const auto expectedText = QStringLiteral(
+        "The native iOS stream terminated.\nlockdown receive failed: connection reset" );
+    std::vector<QString> sourceDiagnostics;
+    bool diagnosticObservedBeforeStop = false;
+    QObject::connect( source, &AdbLogcatSource::errorOccurred, source,
+                      [ & ]( const QString& diagnostic ) {
+                          sourceDiagnostics.push_back( diagnostic );
+                          diagnosticObservedBeforeStop = transport->stopGenerations.empty();
+                      } );
+
+    transport->publishTerminalError( generation, terminalError );
+
+    CHECK( transport->stopObservedBeforeTerminalText );
+    CHECK( transport->stopGenerations == std::vector<live::Generation>{ generation } );
+    CHECK( sourceDiagnostics == std::vector<QString>{ expectedText } );
+    CHECK( diagnosticObservedBeforeStop );
+    CHECK( source->lastError() == expectedText );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
+    REQUIRE( controller->snapshot().source.failure.has_value() );
+    CHECK( controller->snapshot().source.failure->code == "ios-native-terminal-test" );
+    CHECK( controller->snapshot().source.failure->retryPolicy == live::RetryPolicy::Never );
+    CHECK( controller->snapshot().source.failure->nativeDetail
+           == "lockdown receive failed: connection reset" );
+    CHECK( controller->snapshot().source.failure->code != "live-stream-failed" );
+
+    transport->publishTextError( generation );
+    QCoreApplication::sendPostedEvents( source, QEvent::MetaCall );
+    CHECK( transport->terminalTextEmissions == 2 );
+    CHECK( sourceDiagnostics == std::vector<QString>{ expectedText } );
+    CHECK( source->lastError() == expectedText );
+
     closeAndDeleteViews( *appSession, opened );
 }
 
@@ -1070,7 +1552,10 @@ TEST_CASE( "queued iOS snapshot from a retired observation cannot arm a restarte
     auto opened = restoreSession( *appSession, windowId );
     REQUIRE( opened.size() == 1 );
     auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
+    REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
     const auto staleCallback = catalog.callbackCopy();
     REQUIRE( static_cast<bool>( staleCallback ) );
 
@@ -1107,6 +1592,7 @@ TEST_CASE( "queued iOS catalog invalidation observes the latest same-generation 
     auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
     REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
 
     klogg::livecapture::ios::IosCatalogEntry entry;
     entry.endpoint.udid = spec.device.deviceId.toStdString();
@@ -1152,8 +1638,9 @@ TEST_CASE( "Failed output rebind keeps the rolled-back per-tab binding healthy",
     auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
     REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
     const auto generation = controller->snapshot().generation;
-    factory.createdTransports.front()->publishState(
+    factory.createdTransports.back()->publishState(
         generation, LiveSourceTransport::State::Connected );
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
 
@@ -1194,9 +1681,10 @@ TEST_CASE( "Capture output degradation survives stop and fresh start until rebin
     auto* source = appSession->getAdbLogcatSource( opened.front().second );
     REQUIRE( controller != nullptr );
     REQUIRE( source != nullptr );
+    REQUIRE( source->reconnectSource() );
     const auto generation = controller->snapshot().generation;
-    factory.createdTransports.front()->publishState( generation,
-                                                     LiveSourceTransport::State::Connected );
+    factory.createdTransports.back()->publishState( generation,
+                                                    LiveSourceTransport::State::Connected );
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
 
     QTemporaryDir outputRoot;
@@ -1206,7 +1694,7 @@ TEST_CASE( "Capture output degradation survives stop and fresh start until rebin
     const auto rotationPath = outputPath + QStringLiteral( ".tmp_rotate" );
     REQUIRE( QDir().mkpath( rotationPath ) );
 
-    factory.createdTransports.front()->publishBytes( generation, QByteArrayLiteral( "line\n" ) );
+    factory.createdTransports.back()->publishBytes( generation, QByteArrayLiteral( "line\n" ) );
     REQUIRE( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
 
     controller->stopRequested();
