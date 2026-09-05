@@ -2329,3 +2329,38 @@ jobs:
             fi
           done
           echo "CI passed: $results"
+
+  DispatchContinuous:
+    needs: [ci-gate]
+    if: >-
+      ${{
+        success()
+        && needs.ci-gate.result == 'success'
+        && github.event_name == 'push'
+        && github.ref == 'refs/heads/master'
+        && github.event.repository.full_name == github.repository
+      }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch Continuous publisher for current master
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KLOGG_CI_RUN_ID: ${{ github.run_id }}
+          KLOGG_CI_RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
+          if [ "$master_sha" != "$KLOGG_CI_RUN_SHA" ]; then
+            echo "::notice::Skipping stale Continuous dispatch: ${KLOGG_CI_RUN_SHA} != ${master_sha}"
+            exit 0
+          fi
+          gh workflow run ci-continuous.yml \
+            --repo "$repo" \
+            --ref master \
+            -f ci-run-id="$KLOGG_CI_RUN_ID" \
+            -f ci-run-sha="$KLOGG_CI_RUN_SHA"

@@ -2,627 +2,524 @@ name: "Publish Release (Stable)"
 
 on:
   workflow_dispatch:
-    inputs:
-      ci-run-id:
-        description: "Optional successful trusted master CI Build run ID; defaults to latest successful master push"
-        required: false
-        type: string
-      evidence-level:
-        description: "Publish secret-neutral validation artifacts, or require signed/notarized macOS evidence"
-        required: true
-        default: validation
-        type: choice
-        options:
-          - validation
-          - signed
 
 permissions: {}
 
 concurrency:
-  group: stable-release-publisher
+  group: release-publisher
+  queue: max
   cancel-in-progress: false
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
-      actions: read
       contents: write
     env:
-      KLOGG_HAS_SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN != '' && 'true' || 'false' }}
       KLOGG_HAS_DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK != '' && 'true' || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
-      KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}
-      KLOGG_EVIDENCE_LEVEL: ${{ github.event.inputs.evidence-level }}
     steps:
-    - name: Reject non-master stable dispatch
-      shell: bash
-      run: |
-        set -euo pipefail
-        test "${GITHUB_REF}" = "refs/heads/master" || {
-          echo "::error::Stable releases must be dispatched from refs/heads/master"
-          exit 1
-        }
-
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      with:
-        persist-credentials: false
-        fetch-depth: 0
-
-    - name: Select trusted CI run
-      shell: bash
-      run: |
-        set -euo pipefail
-        repo="${GITHUB_REPOSITORY}"
-        requested_run_id="${KLOGG_REQUESTED_CI_RUN_ID}"
-        if [ -n "$requested_run_id" ]; then
-          [[ "$requested_run_id" =~ ^[0-9]+$ ]] || {
-            echo "::error::ci-run-id must contain digits only"
+      - name: Reject non-master stable dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/master" || {
+            echo "::error::Stable releases must be dispatched from refs/heads/master"
             exit 1
           }
-          run_id="$requested_run_id"
-        else
-          run_id="$(gh api "/repos/${repo}/actions/workflows/ci-build.yml/runs?branch=master&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')"
-        fi
-        test -n "$run_id" || { echo "::error::No successful trusted master CI Build run found"; exit 1; }
-        run_api="/repos/${repo}/actions/runs/${run_id}"
-        run_path="$(gh api "$run_api" --jq '.path')"
-        run_repository="$(gh api "$run_api" --jq '.head_repository.full_name // empty')"
-        run_branch="$(gh api "$run_api" --jq '.head_branch // empty')"
-        run_event="$(gh api "$run_api" --jq '.event')"
-        run_conclusion="$(gh api "$run_api" --jq '.conclusion')"
-        run_sha="$(gh api "$run_api" --jq '.head_sha')"
-        test "$run_path" = ".github/workflows/ci-build.yml" || { echo "::error::Selected run uses ${run_path}"; exit 1; }
-        test "$run_repository" = "${GITHUB_REPOSITORY}" || { echo "::error::Selected run is from ${run_repository}"; exit 1; }
-        test "$run_branch" = "master" || { echo "::error::Selected run branch is ${run_branch}"; exit 1; }
-        case "$run_event" in
-          push)
-            test "$KLOGG_EVIDENCE_LEVEL" = validation || {
-              echo "::error::Push CI runs contain validation evidence, not signed evidence"
-              exit 1
-            }
-            ;;
-          workflow_dispatch)
-            # The workflow-run API does not expose workflow_dispatch inputs.
-            # Bind the requested evidence level after download from the SHA-bound
-            # package, iOS, signing, and notarization receipts instead.
-            ;;
-          *) echo "::error::Selected run event is ${run_event}"; exit 1 ;;
-        esac
-        test "$run_conclusion" = "success" || { echo "::error::Selected run conclusion is ${run_conclusion}"; exit 1; }
-        test "$run_sha" != "null" && test -n "$run_sha"
-        master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
-        test "$run_sha" = "$master_sha" || {
-          echo "::error::Selected CI run is stale: ${run_sha} != current master ${master_sha}"
-          exit 1
-        }
-        {
-          echo "KLOGG_CI_RUN_ID=${run_id}"
-          echo "KLOGG_CI_RUN_SHA=${run_sha}"
-        } >> "$GITHUB_ENV"
 
-    - name: Download artifacts for selected CI workflow
-      uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
-      with:
-        workflow: ci-build.yml
-        run_id: ${{ env.KLOGG_CI_RUN_ID }}
-        github_token: ${{ github.token }}
-        # Download only the artifacts the release consumes. Without a filter,
-        # dawidd6 downloads ALL run artifacts, including the
-        # "<owner>~<repo>~<id>.dockerbuild" build records that
-        # docker/build-push-action uploads alongside the docker `type=gha`
-        # cache (added in 1ddee61d). Those are gzipped OCI tarballs, not
-        # zips, so dawidd6's unzip step fails the release with "Invalid or
-        # unsupported zip format. No END header found" (run 31241902650).
-        name: '^(packages-.*|klogg_version|adb-helper-legal-assets|ios-native-source-assets)$'
-        name_is_regexp: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
-    - name: Initialize selected CI metadata and checkout
-      shell: bash
-      run: |
-        set -euo pipefail
-        KLOGG_VERSION=$(cat klogg_version/klogg_version.txt)
-        KLOGG_SOURCE_COMMIT=$(cat klogg_version/klogg_commit.txt)
-        test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}" || {
-          echo "::error::Artifact commit ${KLOGG_SOURCE_COMMIT} does not match selected run ${KLOGG_CI_RUN_SHA}"
-          exit 1
-        }
-        git fetch --no-tags origin master
-        git merge-base --is-ancestor "${KLOGG_SOURCE_COMMIT}" origin/master || {
-          echo "::error::Selected CI commit is not in trusted master history"
-          exit 1
-        }
-        echo "KLOGG_VERSION=${KLOGG_VERSION}" >> "$GITHUB_ENV"
-        echo "KLOGG_SOURCE_COMMIT=${KLOGG_SOURCE_COMMIT}" >> "$GITHUB_ENV"
-        git checkout --detach "${KLOGG_SOURCE_COMMIT}"
-        test "$(git rev-parse HEAD)" = "${KLOGG_SOURCE_COMMIT}"
+      - name: Select live Continuous release snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          release_api="/repos/${repo}/releases/tags/continuous"
+          release_id="$(gh api "$release_api" --jq '.id')"
+          release_tag="$(gh api "$release_api" --jq '.tag_name')"
+          release_draft="$(gh api "$release_api" --jq '.draft')"
+          release_prerelease="$(gh api "$release_api" --jq '.prerelease')"
+          [[ "$release_id" =~ ^[0-9]+$ ]] && [ "$release_id" -gt 0 ] || {
+            echo "::error::Live Continuous release ID is invalid"
+            exit 1
+          }
+          test "$release_tag" = continuous || { echo "::error::Live Continuous release tag is ${release_tag}"; exit 1; }
+          test "$release_draft" = false || { echo "::error::Live Continuous release is still a draft"; exit 1; }
+          test "$release_prerelease" = true || { echo "::error::Live Continuous release is not a pre-release"; exit 1; }
+          source_tag_sha="$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')"
+          [[ "$source_tag_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Continuous tag SHA is invalid"; exit 1; }
+          master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
+          test "$source_tag_sha" = "$master_sha" || {
+            echo "::error::Continuous release is not the latest master revision: ${source_tag_sha} != ${master_sha}"
+            exit 1
+          }
+          {
+            echo "KLOGG_SOURCE_RELEASE_ID=${release_id}"
+            echo "KLOGG_SOURCE_COMMIT=${source_tag_sha}"
+          } >> "$GITHUB_ENV"
 
-    # Package artifacts are uploaded as single-file tarballs (not raw
-    # multi-file directories) to avoid GitHub's artifact backend intermittently
-    # corrupting multi-file zip64 archives ("No END header found" on extract).
-    # Restore the ./packages-*/ directory layout the steps below expect.
-    - name: Extract package tarballs
-      shell: bash
-      run: |
-        set -euo pipefail
-        while IFS= read -r -d '' t; do
-          echo "Extracting: $t"
-          staging=$(mktemp -d)
-          python3 scripts/extract_verified_tar.py --archive "$t" --destination "$staging"
-          cp -a "$staging"/. "$(dirname "$t")"/
-          rm -rf "$staging" "$t"
-        done < <(find . -maxdepth 2 -name 'packages-*.tar.gz' -type f -print0)
+      - name: Download immutable Continuous release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          source_root="continuous-publication"
+          assets_json="continuous-release-assets.json"
+          mkdir -p "$source_root"
+          gh api "/repos/${repo}/releases/${KLOGG_SOURCE_RELEASE_ID}/assets?per_page=100" > "$assets_json"
+          python3 - "$assets_json" <<'PY' > continuous-release-download-plan.jsonl
+          import json
+          import pathlib
+          import sys
 
-    - name: Validate package evidence before publication
-      shell: bash
-      run: |
-        set -eu
-        required="
-          packages-jammy-vs-gen/adb-helper-deb-package-verification.json
-          packages-noble-vs-gen/adb-helper-deb-package-verification.json
-          packages-resolute-vs-gen/adb-helper-deb-package-verification.json
-          packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
-          packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
-          packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
-          packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
-          packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
-          packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
-        "
-        if [ "$KLOGG_EVIDENCE_LEVEL" = signed ]; then
-          required="$required
-            packages-macos-intel-qt6-vs-gen/adb-helper-signing-receipt.json
-            packages-macos-intel-qt6-vs-gen/adb-helper-notarization-receipt.json
-            packages-macos-arm-qt6-vs-arm64/adb-helper-signing-receipt.json
-            packages-macos-arm-qt6-vs-arm64/adb-helper-notarization-receipt.json
-          "
-        fi
-        for receipt in $required; do
-          test -f "$receipt" || { echo "Missing release qualification receipt: $receipt"; exit 1; }
-        done
-        python3 - <<'PY'
-        import hashlib, json, os, pathlib
-        evidence_level = os.environ["KLOGG_EVIDENCE_LEVEL"]
-        package_receipts = [
-            pathlib.Path("packages-jammy-vs-gen/adb-helper-deb-package-verification.json"),
-            pathlib.Path("packages-noble-vs-gen/adb-helper-deb-package-verification.json"),
-            pathlib.Path("packages-resolute-vs-gen/adb-helper-deb-package-verification.json"),
-            pathlib.Path("packages-appimage-vs-gen/adb-helper-appimage-package-verification.json"),
-            pathlib.Path("packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json"),
-            pathlib.Path("packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json"),
-            pathlib.Path("packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json"),
-        ]
-        for path in package_receipts:
-            receipt = json.loads(path.read_text(encoding="utf-8"))
-            if receipt.get("receipt_kind") != "package-verification":
-                raise SystemExit(f"invalid package qualification receipt kind: {path}")
-            if not isinstance(receipt.get("release_qualified"), bool):
-                raise SystemExit(f"package has an invalid release claim: {path}")
-            required = set(receipt.get("required_receipts", []))
-            verified = set(receipt.get("verified_receipts", []))
-            mandatory = {"binary-build", "binary-smoke", "package-verification"}
-            if not mandatory.issubset(required) or not mandatory.issubset(verified):
-                raise SystemExit(f"package validation receipt is incomplete: {path}")
-            if not verified.issubset(required):
-                raise SystemExit(f"package receipt verifies evidence outside policy: {path}")
-            if evidence_level == "signed" and (
-                receipt.get("release_qualified") is not True
-                or not required.issubset(verified)
-            ):
-                raise SystemExit(f"package is not signed/release-qualified: {path}")
-            packages = receipt.get("packages")
-            if not isinstance(packages, list) or not packages:
-                raise SystemExit(f"package qualification receipt has no final package hashes: {path}")
-            for package in packages:
-                name = package.get("name") if isinstance(package, dict) else None
-                if not isinstance(name, str) or pathlib.PurePath(name).name != name:
-                    raise SystemExit(f"unsafe qualified package name in {path}: {name}")
-                published = path.parent / name
-                if not published.is_file():
-                    raise SystemExit(f"qualified package is missing: {published}")
-                actual = hashlib.sha256(published.read_bytes()).hexdigest()
-                if package.get("sha256") != actual:
-                    raise SystemExit(f"qualified package hash mismatch: {published}")
-        for package_dir in ("packages-macos-intel-qt6-vs-gen", "packages-macos-arm-qt6-vs-arm64"):
-            directory = pathlib.Path(package_dir)
-            dmgs = list(directory.glob("*.dmg"))
-            if len(dmgs) != 1:
-                raise SystemExit(f"expected one qualified DMG in {directory}, got {len(dmgs)}")
-            dmg_hash = hashlib.sha256(dmgs[0].read_bytes()).hexdigest()
-            qualification_path = directory / "adb-helper-dmg-package-verification.json"
-            qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
-            if qualification.get("package_sha256") != dmg_hash:
-                raise SystemExit(f"macOS qualification receipt is not bound to published DMG: {qualification_path}")
-            ios_path = directory / "ios-native-dmg-package-verification.json"
-            ios_qualification = json.loads(ios_path.read_text(encoding="utf-8"))
-            if (
-                ios_qualification.get("qualification") != evidence_level
-                or ios_qualification.get("release_qualified") != (evidence_level == "signed")
-            ):
-                raise SystemExit(f"iOS qualification evidence level mismatch: {ios_path}")
-            if evidence_level != "signed":
-                continue
-            for name in ("signing", "notarization"):
-                path = directory / f"adb-helper-{name}-receipt.json"
-                receipt = json.loads(path.read_text(encoding="utf-8"))
-                if receipt.get("receipt_kind") != name or receipt.get("status") != "passed":
-                    raise SystemExit(f"invalid macOS {name} receipt: {path}")
-                if receipt.get("package_sha256", receipt.get("dmg_sha256")) != dmg_hash:
-                    raise SystemExit(f"macOS {name} receipt is not bound to published DMG: {path}")
-                if receipt.get("signed_helper_sha256") != qualification.get("helper_sha256"):
-                    raise SystemExit(f"macOS {name} receipt is not bound to qualified helper: {path}")
-                if receipt.get("source_helper_sha256") != qualification.get("source_helper_sha256"):
-                    raise SystemExit(f"macOS {name} receipt is not bound to source-built helper: {path}")
-        PY
+          records = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if not isinstance(records, list) or len(records) != 23:
+              raise SystemExit("live Continuous release must contain exactly 23 assets")
+          ids = set()
+          names = set()
+          normalized = []
+          for record in records:
+              if not isinstance(record, dict):
+                  raise SystemExit("malformed Continuous release asset record")
+              asset_id = record.get("id")
+              name = record.get("name")
+              if type(asset_id) is not int or asset_id <= 0 or asset_id in ids:
+                  raise SystemExit("invalid or duplicate Continuous release asset ID")
+              if (
+                  not isinstance(name, str)
+                  or not name
+                  or pathlib.PurePosixPath(name).name != name
+                  or "\\" in name
+                  or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                  or name in names
+              ):
+                  raise SystemExit("invalid or duplicate Continuous release asset name")
+              ids.add(asset_id)
+              names.add(name)
+              normalized.append([asset_id, name])
+          for record in sorted(normalized, key=lambda item: item[1]):
+              print(json.dumps(record, separators=(",", ":")))
+          PY
+          while IFS= read -r record; do
+            asset_id="$(jq -r '.[0]' <<< "$record")"
+            asset_name="$(jq -r '.[1]' <<< "$record")"
+            gh api -H "Accept: application/octet-stream" \
+              "/repos/${repo}/releases/assets/${asset_id}" > "$source_root/$asset_name"
+          done < continuous-release-download-plan.jsonl
+          python3 - "$assets_json" "$source_root" "$KLOGG_SOURCE_RELEASE_ID" "$KLOGG_SOURCE_COMMIT" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
 
-    - name: Generate Changelog
-      shell: bash
-      run: |
-        set -euo pipefail
-        python3 scripts/gen_changelog.py \
-          --mode release \
-          --current-tag "v${KLOGG_VERSION}" \
-          --to-ref "${KLOGG_SOURCE_COMMIT}" \
-          --print-range > release-changelog.txt
+          assets_path = pathlib.Path(sys.argv[1])
+          assets_root = pathlib.Path(sys.argv[2])
+          release_id = int(sys.argv[3])
+          tag_sha = sys.argv[4]
+          records = json.loads(assets_path.read_text(encoding="utf-8"))
+          source_assets = []
+          for record in records:
+              path = assets_root / record["name"]
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f"missing regular Continuous asset: {record['name']}")
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              source_assets.append(
+                  {
+                      "id": record["id"],
+                      "name": record["name"],
+                      "sha256": digest.hexdigest(),
+                  }
+              )
+          metadata = {
+              "schema_version": 1,
+              "metadata_kind": "klogg-continuous-publication-source",
+              "source_release_id": release_id,
+              "source_tag_sha": tag_sha,
+              "source_assets": sorted(source_assets, key=lambda item: item["name"]),
+          }
+          pathlib.Path("continuous-source-metadata.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
 
-    - name: Display structure of downloaded files
-      run: ls -R ./packages-*
+      - name: Verify Continuous source publication and checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          readarray -t identity < <(python3 - <<'PY'
+          import json
+          import pathlib
+          import re
 
-    - name: Decompress debug symbols
-      shell: sh
-      run: |
-        if [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug.xz ]; then
-          xz -d ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug.xz
-        else
-          echo "Warning: ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug.xz not found, skipping"
-        fi
-        if [ -f ./packages-noble-vs-gen/klogg_noble_vs-gen.debug.xz ]; then
-          xz -d ./packages-noble-vs-gen/klogg_noble_vs-gen.debug.xz
-        else
-          echo "Warning: ./packages-noble-vs-gen/klogg_noble_vs-gen.debug.xz not found, skipping"
-        fi
-        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz ]; then
-          xz -d ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz
-        else
-          echo "Warning: ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug.xz not found, skipping"
-        fi
-        if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug.xz ]; then
-          xz -d ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug.xz
-        else
-          echo "Warning: ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug.xz not found, skipping"
-        fi
+          manifest = json.loads(
+              pathlib.Path("continuous-publication/klogg-source-publication-manifest.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          release = manifest.get("release")
+          if not isinstance(release, dict):
+              raise SystemExit("Continuous publication release identity is malformed")
+          version = release.get("version")
+          commit = release.get("commit")
+          if not isinstance(version, str) or re.fullmatch(r"[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]+", version) is None:
+              raise SystemExit("Continuous publication version is malformed")
+          if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+              raise SystemExit("Continuous publication commit is malformed")
+          print(version)
+          print(commit)
+          PY
+          )
+          KLOGG_VERSION="${identity[0]}"
+          manifest_commit="${identity[1]}"
+          test "$manifest_commit" = "$KLOGG_SOURCE_COMMIT" || {
+            echo "::error::Continuous manifest commit ${manifest_commit} != tag ${KLOGG_SOURCE_COMMIT}"
+            exit 1
+          }
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest continuous-publication/klogg-source-publication-manifest.json \
+            --assets-root continuous-publication \
+            --expected-channel continuous \
+            --expected-evidence-level validation \
+            --expected-tag continuous \
+            --expected-version "$KLOGG_VERSION" \
+            --expected-commit "$KLOGG_SOURCE_COMMIT" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor "$KLOGG_SOURCE_COMMIT" origin/master || {
+            echo "::error::Continuous commit is not in trusted master history"
+            exit 1
+          }
+          git checkout --detach "$KLOGG_SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$KLOGG_SOURCE_COMMIT"
+          echo "KLOGG_VERSION=${KLOGG_VERSION}" >> "$GITHUB_ENV"
 
-    - name: Setup Sentry CLI
-      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
-      uses: mathrix-education/setup-sentry-cli@ff4fff773f5e628fa214ebd19e46fb7289454ee2 # v3.0.0
-      with:
-        token: ${{ secrets.SENTRY_TOKEN }}
-        organization: anton-filimonov
-        project: klogg
+      - name: Recheck Continuous snapshot after download
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$KLOGG_SOURCE_RELEASE_ID"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')" = true
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          test "$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" = "$KLOGG_SOURCE_COMMIT"
 
-    - name: Create Sentry release
-      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
-      shell: sh
-      run: |
-        sentry-cli releases new $KLOGG_VERSION
-        sentry-cli releases set-commits --auto $KLOGG_VERSION
+      - name: Generate Changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gen_changelog.py \
+            --mode release \
+            --current-tag "v${KLOGG_VERSION}" \
+            --to-ref "${KLOGG_SOURCE_COMMIT}" \
+            --print-range > release-changelog.txt
 
-    - name: Upload symbols linux
-      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
-      shell: sh
-      run: |
-        if [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug ] && [ -f ./packages-jammy-vs-gen/klogg_jammy_vs-gen ]; then
-          sentry-cli upload-dif ./packages-jammy-vs-gen/klogg_jammy_vs-gen.debug ./packages-jammy-vs-gen/klogg_jammy_vs-gen
-        else
-          echo "Warning: ./packages-jammy-vs-gen debug files not found, skipping"
-        fi
-        if [ -f ./packages-noble-vs-gen/klogg_noble_vs-gen.debug ] && [ -f ./packages-noble-vs-gen/klogg_noble_vs-gen ]; then
-          sentry-cli upload-dif ./packages-noble-vs-gen/klogg_noble_vs-gen.debug  ./packages-noble-vs-gen/klogg_noble_vs-gen
-        else
-          echo "Warning: ./packages-noble-vs-gen debug files not found, skipping"
-        fi
-        if [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug ] && [ -f ./packages-resolute-vs-gen/klogg_resolute_vs-gen ]; then
-          sentry-cli upload-dif ./packages-resolute-vs-gen/klogg_resolute_vs-gen.debug  ./packages-resolute-vs-gen/klogg_resolute_vs-gen
-        else
-          echo "Warning: ./packages-resolute-vs-gen debug files not found, skipping"
-        fi
-        if [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug ] && [ -f ./packages-appimage-vs-gen/klogg_appimage_vs-gen ]; then
-          sentry-cli upload-dif ./packages-appimage-vs-gen/klogg_appimage_vs-gen.debug  ./packages-appimage-vs-gen/klogg_appimage_vs-gen
-        else
-          echo "Warning: ./packages-appimage-vs-gen debug files not found, skipping"
-        fi
+      - name: Promote verified Continuous publication to Stable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/promote_release_publication.py \
+            --source-manifest continuous-publication/klogg-source-publication-manifest.json \
+            --source-assets-root continuous-publication \
+            --source-metadata continuous-source-metadata.json \
+            --output packages-publication
 
-    - name: Upload symbols mac
-      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
-      shell: sh
-      run: |
-        if [ -d ./packages-macos-intel-qt6-vs-gen ] && [ -f ./packages-macos-intel-qt6-vs-gen/klogg-x64.app/Contents/MacOS/klogg ]; then
-          sentry-cli upload-dif ./packages-macos-intel-qt6-vs-gen/klogg-x64.app/Contents/MacOS/klogg ./packages-macos-intel-qt6-vs-gen/klogg-x64.dSym
-        else
-          echo "Skipping macOS Intel symbols upload - artifacts not found"
-        fi
-        if [ -d ./packages-macos-arm-qt6-vs-arm64 ] && [ -f ./packages-macos-arm-qt6-vs-arm64/klogg-arm64.app/Contents/MacOS/klogg ]; then
-          sentry-cli upload-dif ./packages-macos-arm-qt6-vs-arm64/klogg-arm64.app/Contents/MacOS/klogg ./packages-macos-arm-qt6-vs-arm64/klogg-arm64.dSym
-        else
-          echo "Skipping macOS ARM symbols upload - artifacts not found"
-        fi
+      - name: Verify manifest and render release downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r '.schema_version' packages-publication/klogg-source-publication-manifest.json)" = 3
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest packages-publication/klogg-source-publication-manifest.json \
+            --assets-root packages-publication \
+            --expected-channel stable \
+            --expected-evidence-level validation \
+            --expected-tag "v${KLOGG_VERSION}" \
+            --expected-version "${KLOGG_VERSION}" \
+            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
+          asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
+          test "$asset_count" -eq 23
+          python3 scripts/render_release_downloads.py \
+            --manifest packages-publication/klogg-source-publication-manifest.json \
+            --assets-root packages-publication \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "v${KLOGG_VERSION}" \
+            --channel stable \
+            --version "${KLOGG_VERSION}" \
+            --evidence-description "These disk images are unsigned validation artifacts promoted byte-for-byte from the verified Continuous release." \
+            --changelog-file release-changelog.txt \
+            --output release-body.md
 
-    - name: Upload symbols win
-      if: env.KLOGG_HAS_SENTRY_TOKEN == 'true'
-      shell: sh
-      run: |
-        sentry-cli upload-dif ./packages-windows-x64-qt6-vs-avx2/klogg-$KLOGG_VERSION-x64-Qt6-vs-avx2-pdb.zip
-
-    - name: Prepare coherent stable package and source publication
-      shell: bash
-      run: |
-        set -euo pipefail
-        qualification_args=(
-          --qualification-receipt packages-jammy-vs-gen/adb-helper-deb-package-verification.json
-          --qualification-receipt packages-noble-vs-gen/adb-helper-deb-package-verification.json
-          --qualification-receipt packages-resolute-vs-gen/adb-helper-deb-package-verification.json
-          --qualification-receipt packages-appimage-vs-gen/adb-helper-appimage-package-verification.json
-          --qualification-receipt packages-windows-x64-qt6-vs-avx2/adb-helper-windows-package-verification.json
-          --qualification-receipt packages-macos-intel-qt6-vs-gen/adb-helper-dmg-package-verification.json
-          --qualification-receipt packages-macos-arm-qt6-vs-arm64/adb-helper-dmg-package-verification.json
-          --ios-qualification-receipt packages-macos-intel-qt6-vs-gen/ios-native-dmg-package-verification.json
-          --ios-qualification-receipt packages-macos-arm-qt6-vs-arm64/ios-native-dmg-package-verification.json
-        )
-        python3 scripts/prepare_source_publication.py \
-          --channel stable \
-          --evidence-level "${KLOGG_EVIDENCE_LEVEL}" \
-          --tag "v${KLOGG_VERSION}" \
-          --version "${KLOGG_VERSION}" \
-          --commit "${KLOGG_SOURCE_COMMIT}" \
-          --base-url "https://github.com/${GITHUB_REPOSITORY}" \
-          --adb-source-root ./adb-helper-legal-assets \
-          --ios-source-root ./ios-native-source-assets \
-          "${qualification_args[@]}" \
-          --output ./packages-publication
-
-    - name: Verify manifest and render release downloads
-      shell: bash
-      run: |
-        set -euo pipefail
-        python3 scripts/verify_source_publication_manifest.py \
-          --manifest packages-publication/klogg-source-publication-manifest.json \
-          --assets-root packages-publication \
-          --expected-channel stable \
-          --expected-evidence-level "${KLOGG_EVIDENCE_LEVEL}" \
-          --expected-tag "v${KLOGG_VERSION}" \
-          --expected-version "${KLOGG_VERSION}" \
-          --expected-commit "${KLOGG_SOURCE_COMMIT}" \
-          --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
-        asset_count="$(find packages-publication -maxdepth 1 -type f | wc -l)"
-        test "$asset_count" -eq 23
-        test -f packages-publication/klogg-release-evidence.tar
-        test -f packages-publication/SHA256SUMS
-        test -f packages-publication/adb-helper-source-set-receipt.json
-        test -f packages-publication/ios-native-source-set-receipt.json
-        if [ "${KLOGG_EVIDENCE_LEVEL}" = signed ]; then
-          evidence_description="Signed evidence includes signing and notarization receipts."
-        else
-          evidence_description="These disk images are unsigned validation artifacts, not signed or notarized releases."
-        fi
-        python3 scripts/render_release_downloads.py \
-          --manifest packages-publication/klogg-source-publication-manifest.json \
-          --assets-root packages-publication \
-          --base-url "https://github.com/${GITHUB_REPOSITORY}" \
-          --tag "v${KLOGG_VERSION}" \
-          --channel stable \
-          --version "${KLOGG_VERSION}" \
-          --evidence-description "$evidence_description" \
-          --changelog-file release-changelog.txt \
-          --output release-body.md
-
-    - name: Clean stale stable draft
-      if: env.GITHUB_TOKEN != ''
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        source scripts/github_api_helpers.sh
-        repo="${GITHUB_REPOSITORY}"
-        final_tag="v${KLOGG_VERSION}"
-        candidate_tag="${final_tag}-candidate"
-        for tag in "$candidate_tag" "$final_tag"; do
-          release_id=""
-          lookup_status=0
-          gh_api_optional_scalar release_id "/repos/${repo}/releases/tags/${tag}" .id \
-            || lookup_status=$?
-          case "$lookup_status" in
-            0)
-              draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
-              test "$draft" = true || {
-                echo "::error::refusing to replace existing published release ${tag}"
+      - name: Clean stale stable draft
+        if: env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/github_api_helpers.sh
+          repo="${GITHUB_REPOSITORY}"
+          final_tag="v${KLOGG_VERSION}"
+          candidate_tag="${final_tag}-candidate"
+          for tag in "$candidate_tag" "$final_tag"; do
+            release_id=""
+            lookup_status=0
+            gh_api_optional_scalar release_id "/repos/${repo}/releases/tags/${tag}" .id \
+              || lookup_status=$?
+            case "$lookup_status" in
+              0)
+                draft="$(gh api "/repos/${repo}/releases/${release_id}" --jq '.draft')"
+                test "$draft" = true || {
+                  echo "::error::refusing to replace existing published release ${tag}"
+                  exit 1
+                }
+                gh api -X DELETE "/repos/${repo}/releases/${release_id}" >/dev/null
+                ;;
+              1) ;;
+              *) exit 1 ;;
+            esac
+            ref_error="$(mktemp)"
+            if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$ref_error"; then
+              if [ "$tag" = "$final_tag" ] && [ -z "$release_id" ]; then
+                echo "::error::refusing to remove orphan stable tag ${tag}"
                 exit 1
-              }
-              gh api -X DELETE "/repos/${repo}/releases/${release_id}" >/dev/null
-              ;;
-            1) ;;
-            *) exit 1 ;;
-          esac
-
-          ref_error="$(mktemp)"
-          if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$ref_error"; then
-            if [ "$tag" = "$final_tag" ] && [ -z "$release_id" ]; then
-              echo "::error::refusing to remove orphan stable tag ${tag}"
+              fi
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$ref_error"; then
+              cat "$ref_error"
               exit 1
             fi
-            gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
-          elif ! grep -Eq '404|Not Found' "$ref_error"; then
-            cat "$ref_error"
+            rm -f "$ref_error"
+          done
+
+      - name: Recheck Continuous snapshot before stable draft creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$KLOGG_SOURCE_RELEASE_ID"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')" = true
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          test "$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" = "$KLOGG_SOURCE_COMMIT"
+
+      - name: Create GitHub Release
+        id: create_release
+        if: env.GITHUB_TOKEN != ''
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          token: ${{ github.token }}
+          tag_name: v${{ env.KLOGG_VERSION }}-candidate
+          target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
+          name: Release v${{ env.KLOGG_VERSION }}
+          body_path: release-body.md
+          prerelease: false
+          draft: true
+          files: |
+            ./packages-publication/*
+
+      - name: Verify stable source publication after upload
+        if: env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
+          release_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.tag_name')"
+          test "${release_tag}" = "v${KLOGG_VERSION}-candidate" || { echo "::error::Stable candidate tag mismatch"; exit 1; }
+          candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.target_commitish')"
+          test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}" || {
+            echo "::error::Stable candidate target ${candidate_target} != source commit ${KLOGG_SOURCE_COMMIT}"
             exit 1
-          fi
-          rm -f "$ref_error"
-        done
+          }
+          verification_root="$(mktemp -d)"
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api -H "Accept: application/octet-stream" \
+              "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
+          done < <(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
+          test "$(jq -r '.schema_version' "$verification_root/klogg-source-publication-manifest.json")" = 3
+          python3 scripts/verify_source_publication_manifest.py \
+            --manifest "$verification_root/klogg-source-publication-manifest.json" \
+            --assets-root "$verification_root" \
+            --expected-channel stable \
+            --expected-evidence-level validation \
+            --expected-tag "v${KLOGG_VERSION}" \
+            --expected-version "${KLOGG_VERSION}" \
+            --expected-commit "${KLOGG_SOURCE_COMMIT}" \
+            --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
 
-    - name: Recheck master tip before stable draft creation
-      shell: bash
-      run: |
-        set -euo pipefail
-        master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
-        test "${master_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
-          echo "::error::Master advanced before stable draft creation: ${master_sha}"
-          exit 1
-        }
+      - name: Recheck Continuous snapshot before stable promotion
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$KLOGG_SOURCE_RELEASE_ID"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')" = true
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          test "$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" = "$KLOGG_SOURCE_COMMIT"
 
-    - name: Create GitHub Release
-      id: create_release
-      if: env.GITHUB_TOKEN != ''
-      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-      with:
-        token: ${{ github.token }}
-        tag_name: v${{ env.KLOGG_VERSION }}-candidate
-        target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}
-        name: Release v${{ env.KLOGG_VERSION }}
-        body_path: release-body.md
-        prerelease: false
-        draft: true
-        files: |
-          ./packages-publication/*
-
-    - name: Verify stable source publication after upload
-      if: env.GITHUB_TOKEN != ''
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-        RELEASE_ID: ${{ steps.create_release.outputs.id }}
-      run: |
-        set -euo pipefail
-        test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
-        release_tag="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.tag_name')"
-        test "${release_tag}" = "v${KLOGG_VERSION}-candidate" || { echo "::error::Stable candidate tag mismatch"; exit 1; }
-        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.target_commitish')"
-        test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}" || {
-          echo "::error::Stable candidate target ${candidate_target} != source commit ${KLOGG_SOURCE_COMMIT}"
-          exit 1
-        }
-        verification_root=$(mktemp -d)
-        while IFS=$'\t' read -r asset_id asset_name; do
-          gh api -H "Accept: application/octet-stream" \
-            "/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "$verification_root/$asset_name"
-        done < <(gh api --paginate "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
-          --jq '.[] | [.id, .name] | @tsv')
-        python3 scripts/verify_source_publication_manifest.py \
-          --manifest "$verification_root/klogg-source-publication-manifest.json" \
-          --assets-root "$verification_root" \
-          --expected-channel stable \
-          --expected-evidence-level "${KLOGG_EVIDENCE_LEVEL}" \
-          --expected-tag "v${KLOGG_VERSION}" \
-          --expected-version "${KLOGG_VERSION}" \
-          --expected-commit "${KLOGG_SOURCE_COMMIT}" \
-          --expected-base-url "https://github.com/${GITHUB_REPOSITORY}"
-
-    - name: Recheck master tip before stable promotion
-      shell: bash
-      run: |
-        set -euo pipefail
-        master_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/branches/master" --jq '.commit.sha')"
-        test "${master_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
-          echo "::error::Master advanced before stable promotion: ${master_sha}"
-          exit 1
-        }
-
-    - name: Publish verified stable release
-      if: env.GITHUB_TOKEN != ''
-      shell: bash
-      env:
-        # Publishing the candidate creates the final tag via PATCH. GitHub's
-        # workflow-persistence protection requires workflow-modification
-        # authorization for release mutations whose target commit changes
-        # .github/workflows/** files — an authorization the Actions app token
-        # can never hold (HTTP 403 "Resource not accessible by integration").
-        # The draft creation above is safe with github.token because a draft
-        # defers tag creation to this step. KLOGG_GITHUB_TOKEN must carry
-        # repo + workflow scopes.
-        GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
-        RELEASE_ID: ${{ steps.create_release.outputs.id }}
-      run: |
-        set -euo pipefail
-        test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
-        repo="$GITHUB_REPOSITORY"
-        final_tag="v${KLOGG_VERSION}"
-        candidate_tag="${final_tag}-candidate"
-        promoted=false
-        delete_ref_if_present() {
-          local tag="$1"
-          local lookup_error
-          lookup_error="$(mktemp)"
-          if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$lookup_error"; then
-            gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
-          elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-            cat "$lookup_error"
+      - name: Publish verified stable release
+        if: env.GITHUB_TOKEN != ''
+        shell: bash
+        env:
+          # The final PATCH creates a tag at a commit that can modify workflow
+          # files, so GitHub requires a PAT carrying repo + workflow scopes.
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          repo="$GITHUB_REPOSITORY"
+          source scripts/github_api_helpers.sh
+          final_tag="v${KLOGG_VERSION}"
+          candidate_tag="${final_tag}-candidate"
+          final_ref_owned=false
+          delete_ref_if_present() {
+            local tag="$1"
+            local lookup_error
+            lookup_error="$(mktemp)"
+            if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$lookup_error"; then
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+              cat "$lookup_error"
+              rm -f "$lookup_error"
+              return 1
+            fi
             rm -f "$lookup_error"
-            return 1
-          fi
-          rm -f "$lookup_error"
-        }
-        rollback_stable_promotion() {
-          local original_status=$?
-          trap - ERR
-          if [ "$promoted" = true ]; then
-            echo "Roll back failed stable promotion ${final_tag}"
+          }
+          rollback_stable_promotion() {
+            local original_status=$?
+            local cleanup_status=0
+            local owned_tag=""
+            local lookup_status=0
+            trap - ERR
             set +e
-            cleanup_status=0
-            gh api -X DELETE "/repos/${repo}/releases/${RELEASE_ID}" >/dev/null \
-              || cleanup_status=1
-            delete_ref_if_present "$final_tag" || cleanup_status=1
+            echo "Roll back failed stable promotion ${final_tag}"
+            gh_api_optional_scalar owned_tag "/repos/${repo}/releases/${RELEASE_ID}" .tag_name \
+              || lookup_status=$?
+            case "$lookup_status" in
+              0)
+                if [ "$owned_tag" != "$candidate_tag" ] && [ "$owned_tag" != "$final_tag" ]; then
+                  echo "::error::Stable candidate changed to unexpected tag ${owned_tag}"
+                  cleanup_status=1
+                else
+                  gh api -X DELETE "/repos/${repo}/releases/${RELEASE_ID}" >/dev/null || cleanup_status=1
+                fi
+                ;;
+              1) ;;
+              *) cleanup_status=1 ;;
+            esac
+            if [ "$final_ref_owned" = true ]; then
+              delete_ref_if_present "$final_tag" || cleanup_status=1
+            fi
             delete_ref_if_present "$candidate_tag" || cleanup_status=1
             if [ "$cleanup_status" -ne 0 ]; then
               echo "::error::Stable promotion rollback was incomplete"
             fi
+            exit "$original_status"
+          }
+          trap rollback_stable_promotion ERR
+
+          test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$KLOGG_SOURCE_RELEASE_ID"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')" = true
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          test "$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" = "$KLOGG_SOURCE_COMMIT"
+          lookup_error="$(mktemp)"
+          if gh api "/repos/${repo}/git/ref/tags/${final_tag}" >/dev/null 2>"$lookup_error" \
+            || ! grep -Eq '404|Not Found' "$lookup_error"; then
+            cat "$lookup_error"
+            echo "::error::Stable tag already exists: ${final_tag}"
             exit 1
           fi
-          exit "$original_status"
-        }
-        trap rollback_stable_promotion ERR
+          rm -f "$lookup_error"
+          gh api -X POST "/repos/${repo}/git/refs" \
+            -f ref="refs/tags/${final_tag}" -f sha="$KLOGG_SOURCE_COMMIT" >/dev/null
+          final_ref_owned=true
+          echo "KLOGG_STABLE_FINAL_REF_OWNED=true" >> "$GITHUB_ENV"
+          test "$(gh api "/repos/${repo}/git/ref/tags/${final_tag}" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" \
+            -f tag_name="$final_tag" -F draft=false -F prerelease=false >/dev/null
+          test "$(gh api "/repos/${repo}/releases/tags/${final_tag}" --jq '.id')" = "$RELEASE_ID"
+          test "$(gh api "/repos/${repo}/git/ref/tags/${final_tag}" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          delete_ref_if_present "$candidate_tag"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.id')" = "$KLOGG_SOURCE_RELEASE_ID"
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.draft')" = false
+          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq '.prerelease')" = true
+          test "$(gh api "/repos/${repo}/git/ref/tags/continuous" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
+          test "$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" = "$KLOGG_SOURCE_COMMIT"
+          trap - ERR
 
-        test -n "${RELEASE_ID}" || { echo "::error::Missing draft release ID"; exit 1; }
-        master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
-        test "${master_sha}" = "${KLOGG_SOURCE_COMMIT}" || {
-          echo "::error::Master advanced inside stable promotion: ${master_sha}"
-          exit 1
-        }
-        lookup_error="$(mktemp)"
-        if gh api "/repos/${repo}/git/ref/tags/${final_tag}" >/dev/null 2>"$lookup_error" \
-          || ! grep -Eq '404|Not Found' "$lookup_error"; then
-          cat "$lookup_error"
-          echo "::error::Stable tag already exists: ${final_tag}"
-          exit 1
-        fi
-        rm -f "$lookup_error"
-        gh api -X PATCH "/repos/${repo}/releases/${RELEASE_ID}" \
-          -f tag_name="$final_tag" -F draft=false -F prerelease=false >/dev/null
-        promoted=true
-        test "$(gh api "/repos/${repo}/releases/tags/${final_tag}" --jq '.id')" = "$RELEASE_ID"
-        test "$(gh api "/repos/${repo}/git/ref/tags/${final_tag}" --jq '.object.sha')" = "$KLOGG_SOURCE_COMMIT"
-        lookup_error="$(mktemp)"
-        if gh api "/repos/${repo}/git/ref/tags/${candidate_tag}" >/dev/null 2>"$lookup_error"; then
-          gh api -X DELETE "/repos/${repo}/git/refs/tags/${candidate_tag}" >/dev/null
-        elif ! grep -Eq '404|Not Found' "$lookup_error"; then
-          cat "$lookup_error"
-          exit 1
-        fi
-        rm -f "$lookup_error"
-        if ! master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')" \
-          || [ "${master_sha}" != "${KLOGG_SOURCE_COMMIT}" ]; then
-          echo "::error::Master advanced while stable release was being published: ${master_sha:-unknown}"
-          false
-        fi
-        promoted=false
-        trap - ERR
+      - name: Roll back failed or cancelled stable promotion
+        if: ${{ failure() || cancelled() }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.create_release.outputs.id }}
+          FINAL_REF_OWNED: ${{ env.KLOGG_STABLE_FINAL_REF_OWNED }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_ID:-}" ]; then
+            echo "No Stable candidate was created; no release rollback is required"
+            exit 0
+          fi
+          test -n "${GITHUB_TOKEN:-}" || { echo "::error::KLOGG_GITHUB_TOKEN secret is missing or empty"; exit 1; }
+          source scripts/github_api_helpers.sh
+          repo="$GITHUB_REPOSITORY"
+          final_tag="v${KLOGG_VERSION}"
+          candidate_tag="${final_tag}-candidate"
+          delete_ref_if_present() {
+            local tag="$1"
+            local lookup_error
+            lookup_error="$(mktemp)"
+            if gh api "/repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>"$lookup_error"; then
+              gh api -X DELETE "/repos/${repo}/git/refs/tags/${tag}" >/dev/null
+            elif ! grep -Eq '404|Not Found' "$lookup_error"; then
+              cat "$lookup_error"
+              rm -f "$lookup_error"
+              return 1
+            fi
+            rm -f "$lookup_error"
+          }
+          owned_tag=""
+          lookup_status=0
+          gh_api_optional_scalar owned_tag "/repos/${repo}/releases/${RELEASE_ID}" .tag_name \
+            || lookup_status=$?
+          case "$lookup_status" in
+            0)
+              test "$owned_tag" = "$candidate_tag" || test "$owned_tag" = "$final_tag" || {
+                echo "::error::Stable candidate changed to unexpected tag ${owned_tag}"
+                exit 1
+              }
+              gh api -X DELETE "/repos/${repo}/releases/${RELEASE_ID}" >/dev/null
+              ;;
+            1) ;;
+            *) exit 1 ;;
+          esac
+          if [ "${FINAL_REF_OWNED:-false}" = true ]; then
+            delete_ref_if_present "$final_tag"
+          fi
+          delete_ref_if_present "$candidate_tag"
 
-    - name: Discord notification
-      if: env.KLOGG_HAS_DISCORD_WEBHOOK == 'true'
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
-        DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
-      uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
-      with:
-        args: 'New release v${{ env.KLOGG_VERSION }} has been published!'
-
-
-
-
-   
+      - name: Discord notification
+        if: success() && env.KLOGG_HAS_DISCORD_WEBHOOK == 'true'
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
+          DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
+        uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
+        with:
+          args: 'New release v${{ env.KLOGG_VERSION }} has been published!'

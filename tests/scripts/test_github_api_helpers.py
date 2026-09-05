@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 
@@ -92,6 +93,169 @@ esac
         self.assertEqual(result.stdout, "status=2\nvalue=<>\n")
         self.assertIn("gh: Server Error (HTTP 500)", result.stderr)
 
+    def run_continuous_selection(self, mode: str) -> tuple[subprocess.CompletedProcess, str]:
+        workflow = CONTINUOUS_WORKFLOW.read_text(encoding="utf-8")
+        step = workflow.split(
+            "      - name: Verify dispatched CI run and current master tip", 1
+        )[1].split("\n\n  publish:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_gh = root / "gh"
+            state = root / "state"
+            output = root / "github-output"
+            fake_gh.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+if [ "$FAKE_GH_MODE" = api-error ]; then
+  printf 'gh: simulated API failure\\n' >&2
+  exit 1
+fi
+if [ "$FAKE_GH_MODE" = transient ] && [ ! -e "$FAKE_GH_TRANSIENT_STATE" ]; then
+  : > "$FAKE_GH_TRANSIENT_STATE"
+  printf 'gh: simulated transient API failure\\n' >&2
+  exit 1
+fi
+shift
+endpoint=""
+jq_filter=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jq) jq_filter="$2"; shift 2 ;;
+    --paginate|--slurp) shift ;;
+    -*) shift ;;
+    *)
+      if [ -z "$endpoint" ]; then endpoint="$1"; fi
+      shift
+      ;;
+  esac
+done
+case "$endpoint" in
+  */branches/master)
+    printf '%s\\n' "$EXPECTED_SHA"
+    ;;
+  */jobs?*)
+    if [ "$FAKE_GH_MODE" = gate-failure ]; then
+      printf 'completed\\tfailure\\n'
+    elif [ "$FAKE_GH_MODE" = retry-gate ] && [[ "$endpoint" == */attempts/2/* ]]; then
+      printf '\\n'
+    else
+      printf 'completed\\tsuccess\\n'
+    fi
+    ;;
+  */actions/runs/*)
+    case "$jq_filter" in
+      *'.head_repository.full_name'*'@tsv'*)
+        if [ "$FAKE_GH_MODE" = identity-failure ]; then
+          printf '.github/workflows/other.yml\\tZEACENT/klogg\\tmaster\\tpush\\t%s\\n' "$EXPECTED_SHA"
+        else
+          printf '.github/workflows/ci-build.yml\\tZEACENT/klogg\\tmaster\\tpush\\t%s\\n' "$EXPECTED_SHA"
+        fi
+        ;;
+      .path)
+        if [ "$FAKE_GH_MODE" = identity-failure ]; then
+          printf '.github/workflows/other.yml\\n'
+        else
+          printf '.github/workflows/ci-build.yml\\n'
+        fi
+        ;;
+      '.head_repository.full_name // empty') printf 'ZEACENT/klogg\\n' ;;
+      '.head_branch // empty') printf 'master\\n' ;;
+      .event) printf 'push\\n' ;;
+      .head_sha) printf '%s\\n' "$EXPECTED_SHA" ;;
+      .run_attempt)
+        if [ "$FAKE_GH_MODE" = retry-gate ]; then printf '2\\n'; else printf '1\\n'; fi
+        ;;
+      '[.status, (.conclusion // "")] | @tsv')
+        count="$(cat "$FAKE_GH_STATE" 2>/dev/null || printf 0)"
+        case "$FAKE_GH_MODE" in
+          failure) printf 'completed\\tfailure\\n' ;;
+          transition)
+            count=$((count + 1))
+            printf '%s\\n' "$count" > "$FAKE_GH_STATE"
+            if [ "$count" -eq 1 ]; then printf 'in_progress\\t\\n'; else printf 'completed\\tsuccess\\n'; fi
+            ;;
+          timeout) printf 'in_progress\\t\\n' ;;
+          *) printf 'completed\\tsuccess\\n' ;;
+        esac
+        ;;
+      .status)
+        count="$(cat "$FAKE_GH_STATE" 2>/dev/null || printf 0)"
+        case "$FAKE_GH_MODE" in
+          transition)
+            count=$((count + 1))
+            printf '%s\\n' "$count" > "$FAKE_GH_STATE"
+            if [ "$count" -eq 1 ]; then printf 'in_progress\\n'; else printf 'completed\\n'; fi
+            ;;
+          timeout) printf 'in_progress\\n' ;;
+          *) printf 'completed\\n' ;;
+        esac
+        ;;
+      '.conclusion // ""')
+        case "$FAKE_GH_MODE" in
+          failure) printf 'failure\\n' ;;
+          transition)
+            count="$(cat "$FAKE_GH_STATE" 2>/dev/null || printf 0)"
+            if [ "$count" -le 1 ]; then printf '\\n'; else printf 'success\\n'; fi
+            ;;
+          timeout) printf '\\n' ;;
+          *) printf 'success\\n' ;;
+        esac
+        ;;
+      *) printf 'unexpected jq filter: %s\\n' "$jq_filter" >&2; exit 2 ;;
+    esac
+    ;;
+  *) printf 'unexpected endpoint: %s\\n' "$endpoint" >&2; exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{root}{os.pathsep}{env['PATH']}",
+                    "FAKE_GH_MODE": mode,
+                    "FAKE_GH_STATE": str(state),
+                    "FAKE_GH_TRANSIENT_STATE": str(root / "transient-state"),
+                    "EXPECTED_SHA": "a" * 40,
+                    "GITHUB_REPOSITORY": "ZEACENT/klogg",
+                    "GITHUB_OUTPUT": str(output),
+                    "KLOGG_REQUESTED_CI_RUN_ID": "12345",
+                    "KLOGG_REQUESTED_CI_RUN_SHA": "a" * 40,
+                    "KLOGG_DISPATCH_SHA": "a" * 40,
+                    "KLOGG_CI_POLL_ATTEMPTS": "2",
+                    "KLOGG_CI_POLL_INTERVAL_SECONDS": "0",
+                    "KLOGG_GH_API_RETRY_ATTEMPTS": "2",
+                    "KLOGG_GH_API_RETRY_DELAY_SECONDS": "0",
+                }
+            )
+            result = subprocess.run(
+                ["bash", "-c", script],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            emitted = output.read_text(encoding="utf-8") if output.exists() else ""
+            return result, emitted
+
+    def test_continuous_selection_waits_for_success_and_fails_closed(self):
+        for mode in ("success", "transition", "retry-gate", "transient"):
+            with self.subTest(mode=mode):
+                result, emitted = self.run_continuous_selection(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("ci-run-id=12345", emitted)
+                self.assertIn(f"ci-run-sha={'a' * 40}", emitted)
+                self.assertIn("should-publish=true", emitted)
+        for mode in ("failure", "timeout", "gate-failure", "identity-failure", "api-error"):
+            with self.subTest(mode=mode):
+                result, emitted = self.run_continuous_selection(mode)
+                self.assertNotEqual(result.returncode, 0, mode)
+                self.assertNotIn("should-publish=true", emitted)
+
     def test_release_cleanup_uses_the_optional_scalar_lookup(self):
         continuous = workflow_section(
             CONTINUOUS_WORKFLOW,
@@ -100,8 +264,8 @@ esac
         )
         stable = workflow_section(
             STABLE_WORKFLOW,
-            "    - name: Clean stale stable draft",
-            "    - name: Recheck master tip before stable draft creation",
+            "      - name: Clean stale stable draft",
+            "      - name: Recheck Continuous snapshot before stable draft creation",
         )
         for name, cleanup in (("continuous", continuous), ("stable", stable)):
             with self.subTest(workflow=name):
