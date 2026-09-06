@@ -1726,8 +1726,9 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
     auto suggestedPath = adbSource->sessionData().boundOutputFile;
     if ( suggestedPath.isEmpty() ) {
-        suggestedPath = QDir::home().filePath( session_.getDisplayName( crawler )
-                                               + QStringLiteral( ".log" ) );
+        const auto stem = klogg::suggestedFileNameStem( session_.getDisplayName( crawler ),
+                                                        QStringLiteral( "live-log" ) );
+        suggestedPath = QDir::home().filePath( stem + QStringLiteral( ".log" ) );
     }
 
     QString outputPath;

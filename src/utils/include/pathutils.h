@@ -43,6 +43,10 @@ inline QString displayNameForPath( const QString& path )
     return base.isEmpty() ? path : base;
 }
 
+// Normalize characters in an automatically suggested filename stem, not an existing
+// path or a user-selected destination. The caller owns the directory and extension.
+QString suggestedFileNameStem( const QString& label, const QString& fallback );
+
 } // namespace klogg
 
 #endif

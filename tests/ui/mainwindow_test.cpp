@@ -1176,6 +1176,38 @@ SCENARIO( "Closing one of several windows deletes its discarded live capture",
 }
 
 namespace {
+void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
+                             const QString& chosenPath = {} )
+{
+    REQUIRE( action.isEnabled() );
+    const auto nativeDialogsDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
+    QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
+    QStringList suggestions;
+    bool closed = false;
+    QObject dialogDriver;
+    QTimer::singleShot( 0, Qt::PreciseTimer, &dialogDriver, [ & ] {
+        if ( auto* dialog = qobject_cast<QFileDialog*>( QApplication::activeModalWidget() ) ) {
+            suggestions = dialog->selectedFiles();
+            if ( chosenPath.isEmpty() ) {
+                dialog->reject();
+                closed = true;
+            }
+            else {
+                dialog->selectFile( chosenPath );
+                closed = QMetaObject::invokeMethod( dialog, "accept", Qt::DirectConnection );
+            }
+        }
+        else if ( auto* modal = qobject_cast<QDialog*>( QApplication::activeModalWidget() ) ) {
+            modal->reject();
+        }
+    } );
+    action.trigger();
+    QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
+    REQUIRE( closed );
+    REQUIRE( suggestions.size() == 1 );
+    CHECK( suggestions.front().toStdString() == expectedSuggestion.toStdString() );
+}
+
 void exerciseLiveCountdownRouting( MainWindow& window, Session& session,
                                    TabbedCrawlerWidget& tabs, CrawlerWidget* crawler,
                                    QMenu& menu, MenuActionChanges& changes )
@@ -1294,6 +1326,10 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             QString{},
             useIos ? LiveLogSourceType::IosLogStream : LiveLogSourceType::AdbLogcat,
         };
+        if ( preservationScenario == 4 ) {
+            data.deviceDescription = useIos ? QStringLiteral( "iPhone 15 Pro (USB)" )
+                                            : QStringLiteral( "Pixel 8 (ABC123)" );
+        }
         data.autoReconnectEnabled = true;
         data.adbBackend = AdbTransportBackend::SmartSocket;
         files.emplace_back( data.documentId(), 0, QString{}, data.persistedSourceType(),
@@ -1464,21 +1500,21 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         CHECK_FALSE( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Output error:" ) ) );
 
         if ( preservationScenario == 4 ) {
-            const auto savedPath = documents.filePath( "bound-live.log" );
-            const auto nativeDialogsDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
-            QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
-            bool accepted = false;
-            QTimer::singleShot( 0, Qt::PreciseTimer, mainWindow.get(), [ & ] {
-                if ( auto* dialog = qobject_cast<QFileDialog*>( QApplication::activeModalWidget() ) ) {
-                    dialog->selectFile( savedPath );
-                    accepted = QMetaObject::invokeMethod( dialog, "accept", Qt::DirectConnection );
-                }
-            } );
+            const auto savedPath = documents.filePath( "chosen log (keep).log" );
+            const auto expectedSuggestion = QDir::home().filePath(
+                useIos ? QStringLiteral( "iPhone-15-Pro-USB.log" )
+                       : QStringLiteral( "Pixel-8-ABC123.log" ) );
+            const auto displayName = appSession->getDisplayName( crawler );
             auto* save = mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) );
+            auto* saveStripped = mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) );
             REQUIRE( save != nullptr );
-            save->trigger();
-            QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
-            REQUIRE( accepted );
+            REQUIRE( saveStripped != nullptr );
+            exerciseLiveSaveDialog( *saveStripped, expectedSuggestion );
+            exerciseLiveSaveDialog( *save, expectedSuggestion );
+            CHECK( source->sessionData().boundOutputFile.isEmpty() );
+            CHECK_FALSE( QFile::exists( savedPath ) );
+            CHECK( appSession->getDisplayName( crawler ) == displayName );
+            exerciseLiveSaveDialog( *save, expectedSuggestion, savedPath );
             REQUIRE( source->sessionData().boundOutputFile == savedPath );
             CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
             CHECK( info->text() == QDir::toNativeSeparators( savedPath ) );
@@ -1489,6 +1525,9 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             CHECK( std::any_of( savedEntries.begin(), savedEntries.end(), [ & ]( const auto* action ) {
                 return action->toolTip() == savedPath;
             } ) );
+            exerciseLiveSaveDialog( *saveStripped, savedPath );
+            exerciseLiveSaveDialog( *save, savedPath );
+            CHECK( source->sessionData().boundOutputFile == savedPath );
             transport->publishBytes( QByteArrayLiteral( "saved tail\n" ) );
             source->disconnectSource();
             QFile saved{ savedPath };
@@ -1585,9 +1624,16 @@ TEST_CASE( "Live control routes preserve current file folder live and saved meta
            "[ui][session][live-presentation-preservation]" )
 {
     const auto useIos = GENERATE( false, true );
-    // Current live, other live, file, folder, Save Live binding, rolling search/follow.
-    const auto scenario = GENERATE( 0, 1, 2, 3, 4, 5 );
+    // Current live, other live, file, folder, rolling search/follow.
+    const auto scenario = GENERATE( 0, 1, 2, 3, 5 );
     exerciseLivePresentation( useIos, scenario >= 1 && scenario <= 3, scenario );
+}
+
+TEST_CASE( "Live save suggests clean filenames and preserves chosen paths",
+           "[ui][session][live-save-filename]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 4 );
 }
 
 SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )
