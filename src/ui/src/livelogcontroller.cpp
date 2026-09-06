@@ -261,9 +261,48 @@ live::LiveStatePresentation LiveLogController::presentation() const
     return live::projectLiveState( snapshot_ );
 }
 
-void LiveLogController::setChangedCallback( std::function<void()> callback )
+bool LiveLogControlPresentation::OutputError::operator==( const OutputError& other ) const
 {
-    changedCallback_ = std::move( callback );
+    return code == other.code && message == other.message;
+}
+
+bool LiveLogControlPresentation::sameControlState( const LiveLogControlPresentation& other ) const
+{
+    return status == other.status && disconnectEnabled == other.disconnectEnabled
+           && reconnectEnabled == other.reconnectEnabled && retryAttempt == other.retryAttempt
+           && awaitingUserReason == other.awaitingUserReason && failureMessage == other.failureMessage
+           && outputBinding == other.outputBinding && outputBindingError == other.outputBindingError;
+}
+
+LiveLogControlPresentation LiveLogController::controlPresentation() const
+{
+    const auto projection = presentation();
+    LiveLogControlPresentation result;
+    result.status = projection.status;
+    result.disconnectEnabled = projection.disconnectEnabled;
+    result.reconnectEnabled = projection.reconnectEnabled;
+    result.retryAttempt = projection.retryAttempt;
+    result.awaitingUserReason = projection.awaitingUserReason;
+    result.failureMessage = projection.failureMessage;
+    result.outputBinding = projection.outputBinding;
+    if ( snapshot_.outputBindingError.has_value() ) {
+        result.outputBindingError = LiveLogControlPresentation::OutputError{
+            snapshot_.outputBindingError->code, snapshot_.outputBindingError->message };
+    }
+    if ( projection.retryCountdownVisible ) {
+        const auto remaining = std::max<std::int64_t>( 0, projection.retryRemaining.count() );
+        constexpr std::int64_t MillisecondsPerSecond = 1000;
+        // Divide before rounding so even the largest duration cannot overflow.
+        result.retryCountdownSeconds
+            = remaining / MillisecondsPerSecond + ( remaining % MillisecondsPerSecond != 0 ? 1 : 0 );
+    }
+    return result;
+}
+
+void LiveLogController::setPresentationChangedCallback( PresentationChangedCallback callback )
+{
+    lastControlPresentation_ = controlPresentation();
+    presentationChangedCallback_ = std::move( callback );
 }
 
 void LiveLogController::armRunIntent()
@@ -443,7 +482,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             for ( const auto& effect : transition.effects ) {
                 execute( effect, pendingBytes );
             }
-            notifyChanged();
+            notifyPresentationChanged();
         }
     } catch ( ... ) {
         pendingDispatches_.clear();
@@ -572,10 +611,23 @@ void LiveLogController::cancelScheduledRetry()
     }
 }
 
-void LiveLogController::notifyChanged()
+void LiveLogController::notifyPresentationChanged()
 {
-    if ( changedCallback_ ) {
-        changedCallback_();
+    auto current = controlPresentation();
+    const auto controlChanged = !current.sameControlState( lastControlPresentation_ );
+    if ( !controlChanged
+         && current.retryCountdownSeconds == lastControlPresentation_.retryCountdownSeconds ) {
+        return;
+    }
+
+    const auto change = controlChanged ? LiveLogPresentationChange::Control
+                                       : LiveLogPresentationChange::CountdownOnly;
+    // Commit before observers run; nested events are still serialized by dispatch.
+    // A local callable and a value argument also permit self replacement/removal.
+    lastControlPresentation_ = current;
+    const auto callback = presentationChangedCallback_;
+    if ( callback ) {
+        callback( std::move( current ), change );
     }
 }
 

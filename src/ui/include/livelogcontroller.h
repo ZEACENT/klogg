@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include <QByteArray>
 
@@ -55,6 +56,31 @@ struct LiveLogControllerConfig {
     livecapture::Timestamp maximumRetryDelay{ std::chrono::seconds{ 30 } };
 };
 
+// Only visible control state belongs here. Content and metrics are refreshed
+// by StreamingLogData's existing coalescer, independently of this value.
+struct LiveLogControlPresentation {
+    struct OutputError {
+        std::string code;
+        std::string message;
+
+        bool operator==( const OutputError& other ) const;
+    };
+
+    livecapture::PresentationStatus status{ livecapture::PresentationStatus::Stopped };
+    bool disconnectEnabled{ false };
+    bool reconnectEnabled{ false };
+    std::optional<unsigned> retryAttempt;
+    std::optional<livecapture::AwaitingUserReason> awaitingUserReason;
+    std::string failureMessage;
+    livecapture::OutputBindingState outputBinding{ livecapture::OutputBindingState::Healthy };
+    std::optional<OutputError> outputBindingError;
+    std::optional<std::int64_t> retryCountdownSeconds;
+
+    bool sameControlState( const LiveLogControlPresentation& other ) const;
+};
+
+enum class LiveLogPresentationChange : std::uint8_t { Control, CountdownOnly };
+
 class LiveLogController {
 public:
     LiveLogController( LiveLogSessionSpec spec, LiveLogControllerConfig config,
@@ -71,7 +97,12 @@ public:
     const livecapture::LiveStateSnapshot& snapshot() const noexcept;
     livecapture::LiveStatePresentation presentation() const;
 
-    void setChangedCallback( std::function<void()> callback );
+    LiveLogControlPresentation controlPresentation() const;
+
+    using PresentationChangedCallback
+        = std::function<void( LiveLogControlPresentation, LiveLogPresentationChange )>;
+    // Registration establishes a fresh comparison baseline, without replay.
+    void setPresentationChangedCallback( PresentationChangedCallback callback );
 
     void armRunIntent();
     void startRequested();
@@ -101,6 +132,7 @@ public:
                                std::optional<livecapture::LiveSourceError> error = std::nullopt );
 
 private:
+    friend struct LiveLogControllerTimeTestAccess;
     class ProductionRuntime;
 
     struct PendingDispatch {
@@ -113,7 +145,7 @@ private:
     livecapture::Timestamp retryDelay( unsigned attempt ) const;
     LiveSourceTransportConfig transportConfig() const;
     void cancelScheduledRetry();
-    void notifyChanged();
+    void notifyPresentationChanged();
 
     LiveLogSessionSpec spec_;
     LiveLogControllerConfig config_;
@@ -126,7 +158,8 @@ private:
     LiveLogControllerEffects& effects_;
     std::optional<LiveLogScheduler::Token> retryToken_;
     std::deque<PendingDispatch> pendingDispatches_;
-    std::function<void()> changedCallback_;
+    LiveLogControlPresentation lastControlPresentation_;
+    PresentationChangedCallback presentationChangedCallback_;
     bool dispatching_{ false };
 };
 

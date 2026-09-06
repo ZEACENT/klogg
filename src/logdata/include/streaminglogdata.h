@@ -92,6 +92,9 @@ class StreamingLogData : public SearchableLogData {
     void doDetachReader() const override;
 
   private:
+    // Tests deliver the existing single-shot timer, never a synthetic completion signal.
+    friend struct StreamingLogDataTimerTestAccess;
+
       struct OutputBindResult {
           bool success = false;
           CaptureOutputError error = CaptureOutputError::Open;

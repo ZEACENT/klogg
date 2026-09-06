@@ -22,7 +22,10 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#include <QEvent>
 #include <QMenu>
+#include <QProxyStyle>
+#include <QStyleFactory>
 #include <QTabBar>
 #include <QTimer>
 #include <QTranslator>
@@ -585,6 +588,22 @@ TEST_CASE( "generateColoredDotIcon creates non-null icons for all live status an
 }
 
 namespace {
+class TabSizingStyle final : public QProxyStyle {
+  public:
+    TabSizingStyle() : QProxyStyle( QStyleFactory::create( QStringLiteral( "Fusion" ) ) ) {}
+
+    QSize sizeFromContents( ContentsType type, const QStyleOption* option, const QSize& size,
+                            const QWidget* widget = nullptr ) const override
+    {
+        if ( type == CT_TabBarTab ) {
+            ++tabSizingCalls;
+        }
+        return QProxyStyle::sizeFromContents( type, option, size, widget );
+    }
+
+    mutable int tabSizingCalls = 0;
+};
+
 // Runs just enough of the event loop to process any queued metacalls
 // (e.g. the deferred loadIcons() dispatched via Qt::QueuedConnection).
 void runPendingMainThreadEvents()
@@ -595,6 +614,99 @@ void runPendingMainThreadEvents()
     }
 }
 } // namespace
+
+TEST_CASE( "Unchanged live tab presentation does not repeat tab layout",
+           "[live-tab][icon-layout]" )
+{
+    const auto path = QString::fromLatin1( GENERATE( "adb://icon-layout", "ios-log://icon-layout" ) );
+    ScopedStyleSetting styleSetting( StyleManager::ModernKey );
+    TabSizingStyle sizingStyle;
+    TabbedCrawlerWidget tabWidget;
+    auto* const tabBar = tabWidget.findChild<CrawlerTabBar*>();
+    REQUIRE( tabBar != nullptr );
+    tabBar->setStyle( &sizingStyle );
+    auto* crawler = new DummyCrawlerWidget();
+    auto index = tabWidget.addCrawler( crawler, path, QStringLiteral( "Live tab" ) );
+    tabWidget.addCrawler( new DummyCrawlerWidget(), QStringLiteral( "other.log" ),
+                         QStringLiteral( "Other tab" ) );
+    tabWidget.resize( 600, 300 );
+    tabWidget.show();
+    runPendingMainThreadEvents();
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Connected );
+    runPendingMainThreadEvents();
+    REQUIRE_FALSE( tabWidget.tabIcon( index ).isNull() );
+
+    // Calibrate the layout observer using an actual size change, not a timer.
+    // Qt versions may legitimately optimize layout for equal-sized icon changes.
+    sizingStyle.tabSizingCalls = 0;
+    tabBar->setIconSize( tabBar->iconSize() + QSize( 1, 1 ) );
+    static_cast<void>( tabBar->tabRect( index ) );
+    REQUIRE( sizingStyle.tabSizingCalls > 0 );
+    runPendingMainThreadEvents();
+
+    SECTION( "existing tab" ) {}
+    SECTION( "moved tab" )
+    {
+        tabBar->moveTab( index, 1 );
+        index = tabWidget.indexOf( crawler );
+    }
+    SECTION( "replacement tab" )
+    {
+        tabWidget.removeCrawler( index );
+        delete crawler;
+        crawler = new DummyCrawlerWidget();
+        index = tabWidget.addCrawler( crawler, path, QStringLiteral( "Replacement" ) );
+        tabWidget.setLiveTabStatus( index, LiveTabStatus::Connected );
+    }
+    SECTION( "palette reload" )
+    {
+        const auto oldKey = tabWidget.tabIcon( index ).cacheKey();
+        QEvent paletteChange( QEvent::PaletteChange );
+        QCoreApplication::sendEvent( &tabWidget, &paletteChange );
+        runPendingMainThreadEvents();
+        REQUIRE_FALSE( tabWidget.tabIcon( index ).isNull() );
+        CHECK( tabWidget.tabIcon( index ).cacheKey() != oldKey );
+    }
+    runPendingMainThreadEvents();
+
+    const auto requireNoRepeatedLayout = [ & ]( LiveTabStatus liveStatus, DataStatus dataStatus ) {
+        const auto key = tabWidget.tabIcon( index ).cacheKey();
+        const auto title = tabWidget.tabText( index );
+        const auto toolTip = tabWidget.tabToolTip( index );
+        sizingStyle.tabSizingCalls = 0;
+        for ( int repeat = 0; repeat < 64; ++repeat ) {
+            tabWidget.setLiveTabStatus( index, liveStatus );
+            tabWidget.setTabDataStatus( index, dataStatus );
+            tabWidget.updateCrawler( index, title, toolTip );
+        }
+        CHECK( tabWidget.tabIcon( index ).cacheKey() == key );
+        CHECK( sizingStyle.tabSizingCalls == 0 );
+    };
+    requireNoRepeatedLayout( LiveTabStatus::Connected, DataStatus::OLD_DATA );
+
+    auto previousKey = tabWidget.tabIcon( index ).cacheKey();
+    tabWidget.setLiveTabStatus( index, LiveTabStatus::Error );
+    CHECK( tabWidget.tabIcon( index ).cacheKey() != previousKey );
+    requireNoRepeatedLayout( LiveTabStatus::Error, DataStatus::OLD_DATA );
+
+    for ( const auto dataStatus : { DataStatus::NEW_DATA, DataStatus::NEW_FILTERED_DATA } ) {
+        previousKey = tabWidget.tabIcon( index ).cacheKey();
+        tabWidget.setTabDataStatus( index, dataStatus );
+        CHECK( tabWidget.tabIcon( index ).cacheKey() != previousKey );
+        requireNoRepeatedLayout( LiveTabStatus::Error, dataStatus );
+    }
+
+    sizingStyle.tabSizingCalls = 0;
+    tabWidget.updateCrawler( index, QStringLiteral( "Renamed live tab" ),
+                             QStringLiteral( "Updated tooltip" ) );
+    CHECK( tabWidget.tabText( index ) == QStringLiteral( "Renamed live tab" ) );
+    CHECK( tabWidget.tabToolTip( index ) == QStringLiteral( "Updated tooltip" ) );
+    CHECK( sizingStyle.tabSizingCalls > 0 );
+    runPendingMainThreadEvents();
+    requireNoRepeatedLayout( LiveTabStatus::Error, DataStatus::NEW_FILTERED_DATA );
+    tabWidget.hide();
+    runPendingMainThreadEvents();
+}
 
 TEST_CASE( "setLiveTabStatus updates the tab icon with colored dots" )
 {
