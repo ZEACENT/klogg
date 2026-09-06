@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "iosnativestream.h"
 #include "live_capture_benchmark_core.h"
 
 namespace {
@@ -170,6 +171,69 @@ void requireCanonicalObservation( const benchmark::ArmObservation& observation,
 }
 
 } // namespace
+
+TEST_CASE( "Synthetic native session drains its whole pending batch after one notification",
+           "[benchmark][live-capture][synthetic-drain][contract]" )
+{
+    constexpr klogg::livecapture::Generation generation = 17u;
+    std::vector<std::string> notifications;
+    klogg::livecapture::ios::IosNativeStreamCallbacks callbacks;
+    callbacks.ready = [ & ]( auto observedGeneration ) {
+        CHECK( observedGeneration == generation );
+        notifications.push_back( "ready" );
+    };
+    callbacks.bytesAvailable = [ & ]( auto observedGeneration ) {
+        CHECK( observedGeneration == generation );
+        notifications.push_back( "bytes" );
+    };
+    callbacks.stopped = [ & ]( auto observedGeneration ) {
+        CHECK( observedGeneration == generation );
+        notifications.push_back( "stopped" );
+    };
+
+    auto session = benchmark::SyntheticNativeSessionTestAccess::create(
+        generation, { ascii( "a" ), ascii( "bc" ) }, std::move( callbacks ) );
+    REQUIRE( session != nullptr );
+    REQUIRE( notifications.empty() );
+    const auto queued = session->statistics();
+    REQUIRE( queued.generation == generation );
+    REQUIRE( queued.receivedBytes == 3u );
+    REQUIRE( queued.receivedChunks == 2u );
+    REQUIRE( queued.queuedBytes == 3u );
+    REQUIRE( queued.queuedChunks == 2u );
+    REQUIRE( queued.highWaterQueuedBytes == 3u );
+    REQUIRE( queued.highWaterQueuedChunks == 2u );
+    REQUIRE( queued.deliveredBytes == 0u );
+    REQUIRE( queued.deliveredChunks == 0u );
+
+    REQUIRE( session->start() );
+    const std::vector<std::string> startedNotifications{ "ready", "bytes" };
+    REQUIRE( notifications == startedNotifications );
+
+    // The production transport consumes one pending batch per notification;
+    // preloaded source fragments must not depend on a drain-until-empty loop.
+    const auto batch = session->drain();
+    REQUIRE( batch.has_value() );
+    CHECK( batch->generation == generation );
+    CHECK( batch->bytes == ascii( "abc" ) );
+    CHECK( batch->sourceChunks == 2u );
+    const auto drained = session->statistics();
+    CHECK( drained.generation == generation );
+    CHECK( drained.queuedBytes == 0u );
+    CHECK( drained.queuedChunks == 0u );
+    CHECK( drained.deliveredBytes == 3u );
+    CHECK( drained.deliveredChunks == 2u );
+    CHECK( drained.receivedBytes == queued.receivedBytes );
+    CHECK( drained.receivedChunks == queued.receivedChunks );
+    CHECK( drained.highWaterQueuedBytes == queued.highWaterQueuedBytes );
+    CHECK( drained.highWaterQueuedChunks == queued.highWaterQueuedChunks );
+    CHECK_FALSE( session->drain().has_value() );
+    CHECK( notifications == startedNotifications );
+
+    session->stop( generation );
+    const std::vector<std::string> stoppedNotifications{ "ready", "bytes", "stopped" };
+    CHECK( notifications == stoppedNotifications );
+}
 
 TEST_CASE( "Synthetic live-capture records have a deterministic versioned binary frame",
            "[benchmark][live-capture][framing][contract]" )

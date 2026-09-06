@@ -12,6 +12,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QMetaObject>
 #include <QPointer>
 #include <QString>
 
@@ -284,6 +285,72 @@ TEST_CASE( "iOS native transport tolerates synchronous stop from readiness state
         drainQtEvents();
         CHECK( factory.sessions.front()->stopCalls == 1 );
     }
+}
+
+TEST_CASE( "iOS native transport drains records while native startup is still pending",
+           "[ios][native][transport][backpressure][readiness]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits = klogg::livecapture::LiveDataQueueLimits{ 2u, 1u };
+    IosNativeTransport transport( factory, config );
+    QByteArray received;
+    std::vector<LiveSourceTransport::State> states;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [ &received ]( Generation, const QByteArray& bytes ) { received += bytes; } );
+    QObject::connect( &transport, &LiveSourceTransport::stateChanged,
+                      [ &states ]( Generation, LiveSourceTransport::State state ) {
+                          states.push_back( state );
+                      } );
+
+    transport.start( 105u );
+    for ( const auto* record : { "a\n", "b\n", "c\n" } ) {
+        factory.publishBytes( 0u, record );
+        drainQtEvents();
+        CHECK( factory.latest()->queue.statistics().queuedBytes == 0u );
+    }
+    CHECK( received == "a\nb\nc\n" );
+    REQUIRE( states.size() == 1u );
+    CHECK( states.back() == LiveSourceTransport::State::Connecting );
+
+    factory.publishReady( 0u );
+    drainQtEvents();
+    CHECK( states.back() == LiveSourceTransport::State::Connected );
+}
+
+TEST_CASE( "iOS native transport yields between replenished batches so stop is not starved",
+           "[ios][native][transport][backpressure][fairness][stop]" )
+{
+    ScriptedWorkerFactory factory;
+    IosNativeTransport transport( factory, nativeConfig() );
+    QByteArray received;
+    int deliveredBatches = 0;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived, &transport,
+                      [ & ]( Generation generation, const QByteArray& bytes ) {
+                          received += bytes;
+                          ++deliveredBatches;
+                          if ( deliveredBatches == 1 ) {
+                              QMetaObject::invokeMethod(
+                                  &transport, [ &transport, generation ] { transport.stop( generation ); },
+                                  Qt::QueuedConnection );
+                          }
+                          // Model the native producer resuming as soon as drain frees capacity.
+                          // Bound the old busy-loop behavior so RED fails rather than hangs.
+                          if ( deliveredBatches < 4 ) {
+                              factory.publishBytes( 0u, "next\n" );
+                          }
+                      } );
+
+    transport.start( 106u );
+    factory.publishReady( 0u );
+    drainQtEvents();
+    factory.publishBytes( 0u, "first\n" );
+    drainQtEvents();
+
+    CHECK( deliveredBatches == 1 );
+    CHECK( received == "first\n" );
+    CHECK( factory.latest()->stopCalls == 1 );
+    CHECK( transport.lastError().isEmpty() );
 }
 
 TEST_CASE( "iOS native transport marshals worker callbacks back to its Qt thread",

@@ -19,9 +19,22 @@
 #include <string>
 #include <vector>
 
+namespace klogg::livecapture::ios {
+class IosNativeStreamSession;
+struct IosNativeStreamCallbacks;
+} // namespace klogg::livecapture::ios
+
 namespace klogg::benchmarks::livecapture {
 
 using Bytes = std::vector<std::uint8_t>;
+
+// Benchmark-only access to the actual integrated fixture session. Forward
+// declarations keep native/Qt dependencies out of the pure fixture protocol.
+struct SyntheticNativeSessionTestAccess {
+    static std::unique_ptr<::klogg::livecapture::ios::IosNativeStreamSession>
+    create( std::uint64_t generation, std::vector<Bytes> fragments,
+            ::klogg::livecapture::ios::IosNativeStreamCallbacks callbacks );
+};
 
 constexpr std::uint16_t FramedRecordVersion = 1u;
 constexpr std::size_t FramedRecordHeaderBytes = 44u;

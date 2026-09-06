@@ -326,24 +326,18 @@ void IosNativeTransport::drainCurrent( Generation generation )
     if ( session_ == nullptr || activeGeneration_ != generation ) {
         return;
     }
-    while ( activeGeneration_ == generation ) {
-        const auto batch = session_->drain();
-        if ( !batch.has_value() || batch->generation != generation ) {
-            return;
-        }
-        if ( batch->bytes.empty() ) {
-            continue;
-        }
-        const auto maximum = static_cast<std::size_t>( std::numeric_limits<int>::max() );
-        const auto byteCount = std::min( batch->bytes.size(), maximum );
-        const QByteArray bytes( reinterpret_cast<const char*>( batch->bytes.data() ),
-                                static_cast<int>( byteCount ) );
-        QPointer<IosNativeTransport> guard( this );
-        Q_EMIT bytesReceived( generation, bytes );
-        if ( guard == nullptr || guard->activeGeneration_ != generation ) {
-            return;
-        }
+    // drain() removes the entire pending batch and wakes the native producer.
+    // A refill schedules its own empty-to-nonempty notification; do not chase it
+    // here or a busy stream can starve queued stop requests on the Qt thread.
+    const auto batch = session_->drain();
+    if ( !batch.has_value() || batch->generation != generation || batch->bytes.empty() ) {
+        return;
     }
+    const auto maximum = static_cast<std::size_t>( std::numeric_limits<int>::max() );
+    const auto byteCount = std::min( batch->bytes.size(), maximum );
+    const QByteArray bytes( reinterpret_cast<const char*>( batch->bytes.data() ),
+                            static_cast<int>( byteCount ) );
+    Q_EMIT bytesReceived( generation, bytes );
 }
 
 void IosNativeTransport::publishState( Generation generation, State state )

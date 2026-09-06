@@ -249,6 +249,10 @@ public:
     {
         statistics_.generation = generation_;
         for ( const auto& fragment : fragments_ ) {
+            if ( fragment.size()
+                 > std::numeric_limits<std::size_t>::max() - statistics_.receivedBytes ) {
+                throw std::length_error( "synthetic native fixture byte count exceeds size limits" );
+            }
             statistics_.receivedBytes += fragment.size();
             ++statistics_.receivedChunks;
             statistics_.queuedBytes += fragment.size();
@@ -283,16 +287,25 @@ public:
 
     std::optional<::klogg::livecapture::LiveDataBatch> drain() override
     {
-        if ( nextFragment_ == fragments_.size() ) {
+        if ( fragments_.empty() ) {
             return std::nullopt;
         }
-        auto bytes = std::move( fragments_.at( nextFragment_ ) );
-        ++nextFragment_;
-        statistics_.queuedBytes -= bytes.size();
-        --statistics_.queuedChunks;
+
+        // Match the production queue's whole-pending-batch contract. Build the
+        // aggregate before consuming fragments so allocation failure preserves
+        // both the pending data and its accounting.
+        Bytes bytes;
+        bytes.reserve( statistics_.queuedBytes );
+        for ( const auto& fragment : fragments_ ) {
+            bytes.insert( bytes.end(), fragment.cbegin(), fragment.cend() );
+        }
+        const auto sourceChunks = fragments_.size();
+        fragments_.clear();
+        statistics_.queuedBytes = 0u;
+        statistics_.queuedChunks = 0u;
         statistics_.deliveredBytes += bytes.size();
-        ++statistics_.deliveredChunks;
-        return ::klogg::livecapture::LiveDataBatch{ generation_, std::move( bytes ), 1u };
+        statistics_.deliveredChunks += sourceChunks;
+        return ::klogg::livecapture::LiveDataBatch{ generation_, std::move( bytes ), sourceChunks };
     }
 
     ::klogg::livecapture::LiveDataStatistics statistics() const override
@@ -316,7 +329,6 @@ private:
     ::klogg::livecapture::ios::IosNativeStreamCallbacks callbacks_;
     std::shared_ptr<SyntheticQueueTotals> totals_;
     ::klogg::livecapture::LiveDataStatistics statistics_;
-    std::size_t nextFragment_{ 0u };
     bool published_{ false };
 };
 
@@ -762,6 +774,16 @@ std::vector<std::size_t> cumulativeSegmentRecordCounts( const FramedFixture& fix
 }
 
 } // namespace
+
+std::unique_ptr<::klogg::livecapture::ios::IosNativeStreamSession>
+SyntheticNativeSessionTestAccess::create(
+    std::uint64_t generation, std::vector<Bytes> fragments,
+    ::klogg::livecapture::ios::IosNativeStreamCallbacks callbacks )
+{
+    return std::make_unique<FixtureNativeSession>(
+        generation, std::move( fragments ), std::move( callbacks ),
+        std::make_shared<SyntheticQueueTotals>() );
+}
 
 ArmObservation runSyntheticArm( const SyntheticArmPlan& plan )
 {
