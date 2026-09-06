@@ -387,15 +387,20 @@ def _check_unguarded_platform_helper(text: str, path: Path) -> list[tuple[int, s
     return findings
 
 
-def _extract_call_args(code: str, open_paren_pos: int) -> str:
+def _extract_call_args(
+    code: str, open_paren_pos: int, masked: str | None = None
+) -> str:
     """Return the substring inside the parentheses starting at
     ``open_paren_pos``, balancing nested ``()``. Returns '' if unbalanced.
 
-    Used by the qsizetype check so that ``.indexOf( QLatin1Char( '\\n' ), start )``
-    is recognised as passing ``start`` (the nested QLatin1Char call would defeat
-    a naive ``[^)]*`` capture).
+    ``masked`` may be supplied when a caller already has a same-length
+    comment/literal-stripped copy of ``code``. Used by the qsizetype check so
+    that ``.indexOf( QLatin1Char( '\\n' ), start )`` is recognised as passing
+    ``start`` (the nested QLatin1Char call would defeat a naive ``[^)]*``
+    capture).
     """
-    masked = _strip_cpp_literals(_strip_cpp_comments(code))
+    if masked is None:
+        masked = _strip_cpp_literals(_strip_cpp_comments(code))
     depth = 0
     start = open_paren_pos + 1
     for i in range(start, len(masked)):
@@ -1444,6 +1449,227 @@ def _check_qfileinfo_direct_include(text: str, path: Path) -> list[tuple[int, st
     ]
 
 
+# Catch2 assertions must account for native boundary formatting. Tab captions
+# vary by platform, and copied text retains Windows CRLF (PR #69). Keep this
+# deliberately limited to the two UI presentation APIs
+# that have caused those failures; this is not intended to parse C++ generally.
+_ASSERTION_RE = re.compile(r"\b(?:CHECK|REQUIRE)\s*\(")
+_NATIVE_ASSERTION_RE = re.compile(
+    r"\btabToolTip\s*\(|\bgetSelectedText\s*\(|\bAccess\s*::\s*mainText\s*\("
+)
+_PATH_IDENTIFIER_RE = re.compile(r"(?:[A-Za-z_]\w*)?[Pp]ath\w*")
+_STRING_LITERAL_RE = re.compile(r'"(?P<value>(?:\\.|[^"\\\n])*)"')
+_LF_ESCAPE_RE = re.compile(r"(?<!\\)(?:\\\\)*\\n")
+_TAB_TOOLTIP_CALL_RE = r"\btabToolTip\s*\("
+_MAIN_TEXT_CALL_RE = r"\bAccess\s*::\s*mainText\s*\("
+_MEMBER_CALL_RECEIVER_RE = (
+    r"\s*[A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*\s*(?:->|\.)\s*"
+)
+
+
+def _balanced_close(masked: str, open_pos: int) -> int | None:
+    """Find an opening bracket's matching close, rejecting mismatched brackets."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    if open_pos >= len(masked) or masked[open_pos] not in pairs:
+        return None
+    stack = [masked[open_pos]]
+    for index in range(open_pos + 1, len(masked)):
+        ch = masked[index]
+        if ch in pairs:
+            stack.append(ch)
+        elif ch in ")]}":
+            if not stack or pairs[stack[-1]] != ch:
+                return None
+            stack.pop()
+            if not stack:
+                return index
+    return None
+
+
+def _strip_assertion_parentheses(expression: str) -> tuple[str, bool]:
+    """Remove enclosing parentheses and report unmatched brackets."""
+    expression = expression.strip()
+    while expression.startswith("("):
+        masked = _strip_cpp_literals(expression)
+        close = _balanced_close(masked, 0)
+        if close is None:
+            return expression, True
+        if close != len(masked.rstrip()) - 1:
+            break
+        expression = expression[1:close].strip()
+
+    masked = _strip_cpp_literals(expression)
+    return expression, bool(masked) and _balanced_close("(" + masked + ")", 0) is None
+
+
+def _split_assertion_equality(expression: str) -> tuple[tuple[str, str] | None, bool]:
+    """Return one top-level ``==`` pair, after peeling outer parentheses."""
+    expression, malformed = _strip_assertion_parentheses(expression)
+    if malformed:
+        return None, True
+    masked = _strip_cpp_literals(expression)
+    stack: list[str] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    equalities: list[int] = []
+    index = 0
+    while index < len(masked):
+        ch = masked[index]
+        if ch in pairs:
+            stack.append(ch)
+        elif ch in ")]}":
+            if not stack or pairs[stack[-1]] != ch:
+                return None, True
+            stack.pop()
+        elif (
+            ch == "="
+            and index + 1 < len(masked)
+            and masked[index + 1] == "="
+            and not stack
+        ):
+            equalities.append(index)
+            index += 1
+        index += 1
+    if stack:
+        return None, True
+    if len(equalities) != 1:
+        return None, False
+
+    equality = equalities[0]
+    left, left_malformed = _strip_assertion_parentheses(expression[:equality])
+    right, right_malformed = _strip_assertion_parentheses(expression[equality + 2 :])
+    if left_malformed or right_malformed:
+        return None, True
+    return (left, right), False
+
+
+def _is_bare_call(expression: str, call_re: str, receiver_re: str) -> bool:
+    """Match a specified call only when it is the whole operand."""
+    masked = _strip_cpp_literals(expression)
+    match = re.search(call_re, masked)
+    if match is None or not re.fullmatch(receiver_re, masked[: match.start()]):
+        return False
+    close = _balanced_close(masked, match.end() - 1)
+    return close is not None and not masked[close + 1 :].strip()
+
+
+def _simple_literal_value(expression: str) -> str | None:
+    """Return a plain/Qt literal's source spelling, excluding transformed text."""
+    expression, malformed = _strip_assertion_parentheses(expression)
+    if malformed:
+        return None
+    match = _STRING_LITERAL_RE.fullmatch(expression)
+    if match is None:
+        match = re.fullmatch(
+            r"(?:QStringLiteral|QByteArrayLiteral|QLatin1String)\s*\(\s*"
+            + _STRING_LITERAL_RE.pattern
+            + r"\s*\)",
+            expression,
+        )
+    return None if match is None else match.group("value")
+
+
+def _native_assertion_allow_lines(text: str) -> set[int]:
+    """Find allow markers in actual comments, never in string/raw-string spoof."""
+    literal_free = _strip_cpp_literals(text)
+    marker_re = re.compile(
+        r"//[^\n]*" + re.escape(ALLOW_MARKER) + r"|/\*.*?" + re.escape(ALLOW_MARKER) + r".*?\*/",
+        re.DOTALL,
+    )
+    return {
+        literal_free.count("\n", 0, match.start()) + 1
+        for match in marker_re.finditer(literal_free)
+    }
+
+
+def _check_native_presentation_test_assertion(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Reject direct native-caption and CRLF-sensitive Catch2 comparisons."""
+    if "tests" not in path.parts:
+        return []
+
+    comment_free = _strip_cpp_comments(text)
+    code = _strip_cpp_literals(comment_free)
+    allow_lines = _native_assertion_allow_lines(text)
+    findings: list[tuple[int, str]] = []
+    for assertion in _ASSERTION_RE.finditer(code):
+        open_pos = assertion.end() - 1
+        line_num = code.count("\n", 0, assertion.start()) + 1
+        close = _balanced_close(code, open_pos)
+        end_pos = close if close is not None else code.find(";", open_pos)
+        if end_pos < 0:
+            end_pos = len(code)
+        end_line = code.count("\n", 0, end_pos) + 1
+        if any(line in allow_lines for line in range(line_num, end_line + 1)):
+            continue
+
+        candidate = code[open_pos + 1 : end_pos]
+        comparison, malformed = (
+            (None, True)
+            if close is None
+            else _split_assertion_equality(
+                _extract_call_args(comment_free, open_pos, code)
+            )
+        )
+        if malformed:
+            if _NATIVE_ASSERTION_RE.search(candidate):
+                findings.append(
+                    (
+                        line_num,
+                        "Malformed native-presentation assertion: unbalanced "
+                        "brackets prevent verifying portable output.",
+                    )
+                )
+            continue
+        if comparison is None:
+            continue
+        left, right = comparison
+
+        tooltip, other = (
+            (left, right)
+            if _is_bare_call(left, _TAB_TOOLTIP_CALL_RE, _MEMBER_CALL_RECEIVER_RE)
+            else (right, left)
+            if _is_bare_call(right, _TAB_TOOLTIP_CALL_RE, _MEMBER_CALL_RECEIVER_RE)
+            else ("", "")
+        )
+        literal = _simple_literal_value(other)
+        if tooltip and (
+            _PATH_IDENTIFIER_RE.fullmatch(other.strip())
+            or (literal is not None and bool(re.match(r"(?:/|[A-Za-z]:[\\/])", literal)))
+        ):
+            findings.append(
+                (
+                    line_num,
+                    "tabToolTip() is native presentation; compare it with "
+                    "QDir::toNativeSeparators(path), not a raw portable path.",
+                )
+            )
+            continue
+
+        text_call, expected = (
+            (left, right)
+            if _is_bare_call(left, r"\bgetSelectedText\s*\(", _MEMBER_CALL_RECEIVER_RE)
+            or _is_bare_call(left, _MAIN_TEXT_CALL_RE, r"\s*")
+            else (right, left)
+            if _is_bare_call(right, r"\bgetSelectedText\s*\(", _MEMBER_CALL_RECEIVER_RE)
+            or _is_bare_call(right, _MAIN_TEXT_CALL_RE, r"\s*")
+            else ("", "")
+        )
+        if (
+            text_call
+            and (literal := _simple_literal_value(expected)) is not None
+            and _LF_ESCAPE_RE.search(literal)
+        ):
+            findings.append(
+                (
+                    line_num,
+                    "Copied text may retain native CRLF; normalize the result "
+                    "before comparing it with a multi-line literal.",
+                )
+            )
+    return findings
+
+
 MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "writable-reopen-of-live-qlockfile",
@@ -1460,6 +1686,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "qfileinfo-direct-include",
         "check": _check_qfileinfo_direct_include,
+    },
+    {
+        "name": "native-presentation-test-assertion",
+        "check": _check_native_presentation_test_assertion,
     },
     {
         "name": "unguarded-platform-helper",

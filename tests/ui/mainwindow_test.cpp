@@ -1447,7 +1447,10 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             CHECK( completed.count() == 1 );
             CHECK( crawler->isFollowEnabled() );
             CHECK( follow->isChecked() );
-            CHECK( Access::mainText( crawler ) == QStringLiteral( "old-001\nnew-002" ) );
+            INFO( "Copied main-view text: " << Access::mainText( crawler ).toStdString() );
+            CHECK( Access::mainText( crawler )
+                       .replace( QStringLiteral( "\r\n" ), QStringLiteral( "\n" ) )
+                   == QStringLiteral( "old-001\nnew-002" ) );
             QTest::qWait( 200 ); // Retire the actual search/load completion before teardown.
             menu->removeEventFilter( &changes );
             controller->stopRequested();
@@ -1518,7 +1521,8 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             REQUIRE( source->sessionData().boundOutputFile == savedPath );
             CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
             CHECK( info->text() == QDir::toNativeSeparators( savedPath ) );
-            CHECK( tabs->tabToolTip( 0 ) == savedPath );
+            INFO( "Saved tab tooltip: " << tabs->tabToolTip( 0 ).toStdString() );
+            CHECK( tabs->tabToolTip( 0 ) == QDir::toNativeSeparators( savedPath ) );
             REQUIRE( changes.added > 0 );
             REQUIRE( changes.removed > 0 );
             const auto savedEntries = menu->actions();
