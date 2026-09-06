@@ -611,6 +611,7 @@ struct CaptureStore::CapturePathState
     bool hasActiveProcessMarker() const
     {
         const QFileInfo coordinationInfo( coordinationStem_ );
+        markerScansForTesting_.fetch_add( 1, std::memory_order_relaxed );
         const auto markerFiles = coordinationInfo.dir().entryList(
             QStringList{ coordinationInfo.fileName() + QStringLiteral( ".active.*" ) },
             QDir::Files | QDir::Hidden, QDir::Name );
@@ -724,6 +725,27 @@ struct CaptureStore::CapturePathState
             std::move( callback ) );
     }
 
+    MaintenanceOperationsForTesting maintenanceOperationsForTesting() const
+    {
+        // Independent observations, not a transactional snapshot. Relaxed atomics
+        // also count background maintenance without adding state/gate lock ordering.
+        return { markerScansForTesting_.load( std::memory_order_relaxed ),
+                 retryGateAttemptsForTesting_.load( std::memory_order_relaxed ) };
+    }
+
+    MaintenanceRetryForTesting maintenanceRetryForTesting() const
+    {
+        return { gateRetryRequestEpoch_.load( std::memory_order_acquire ),
+                 gateRetryCompletedEpoch_.load( std::memory_order_acquire ),
+                 retryScheduled_.load( std::memory_order_acquire ) };
+    }
+
+    void setBeforeRetryHandoffCallbackForTesting( std::function<void()> callback )
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        beforeRetryHandoffCallbackForTesting_ = std::move( callback );
+    }
+
     bool hasLocalCoordinationOwnershipForTesting() const
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
@@ -829,6 +851,15 @@ struct CaptureStore::CapturePathState
                 ++lease;
             }
         }
+    }
+
+    bool needsCoordinatedMaintenanceLocked() const
+    {
+        // This is owner-level work, not the background scheduler's narrower
+        // retry policy: a sole active requester may promote retirements or
+        // finish directory deletion synchronously.
+        return !retiredFiles_.isEmpty() || !pendingRetirementRequesters_.isEmpty()
+               || directoryDeletionRequested_ || hasPendingGateRetry();
     }
 
     qint64 promotePendingRetirementsLocked()
@@ -988,11 +1019,14 @@ struct CaptureStore::CapturePathState
     std::atomic<bool> retryScheduled_{ false };
     std::atomic<std::uint64_t> gateRetryRequestEpoch_{ 0 };
     std::atomic<std::uint64_t> gateRetryCompletedEpoch_{ 0 };
+    mutable std::atomic<std::uint64_t> markerScansForTesting_{ 0 };
+    std::atomic<std::uint64_t> retryGateAttemptsForTesting_{ 0 };
     qint64 tombstoneEpoch_ = 0;
     qint64 pendingTombstoneRegistryReleaseEpoch_ = 0;
     bool failNextRetiredFileRemovalForTesting_ = false;
     bool failNextCaptureDirectoryRemovalForTesting_ = false;
     std::function<void()> beforeActivationCallbackForTesting_;
+    std::function<void()> beforeRetryHandoffCallbackForTesting_;
     std::unique_ptr<QLockFile> processMarker_;
     std::shared_ptr<CaptureSegmentIdState> segmentIds_;
     QHash<QString, std::weak_ptr<SpilledSegmentFile>> fileLeases_;
@@ -1427,7 +1461,30 @@ void CaptureStore::CapturePathState::releaseRetiredFile(
 
 void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistry()
 {
+    bool needsCoordination = false;
+    qint64 releaseEpoch = 0;
+    {
+        const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        pruneExpiredLeases();
+        needsCoordination = needsCoordinatedMaintenanceLocked();
+        if ( !needsCoordination ) {
+            releaseEpoch = takeTombstoneRegistryReleaseEpochLocked();
+        }
+    }
+    // Registry updates must stay outside the state mutex. A historical
+    // tombstone epoch still qualifies release, but is not filesystem work.
+    if ( !needsCoordination ) {
+        if ( releaseEpoch > 0 ) {
+            releaseTombstones( registryKey_, registrySlotEpoch_, shared_from_this(),
+                               releaseEpoch );
+        }
+        return;
+    }
+
+    // Never wait for the cross-process gate while holding the state mutex.
+    // The gate-held entry re-evaluates leases and pending work after acquisition.
     CapturePathGate gate( gatePath() );
+    retryGateAttemptsForTesting_.fetch_add( 1, std::memory_order_relaxed );
     if ( !gate.lock() ) {
         scheduleRetry( true );
         return;
@@ -1440,33 +1497,40 @@ void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistry()
 
 void CaptureStore::CapturePathState::retryRetiredFilesAndReleaseRegistryGateHeld()
 {
-    const auto foreignProcessActive = hasActiveProcessMarker();
     qint64 retainEpoch = 0;
     qint64 releaseEpoch = 0;
     {
         const std::lock_guard<std::recursive_mutex> lock( mutex_ );
         pruneExpiredLeases();
         retainEpoch = promotePendingRetirementsLocked();
-        if ( !foreignProcessActive ) {
-            for ( auto retired = retiredFiles_.begin();
-                  retired != retiredFiles_.end(); ) {
-                if ( !fileLeases_.value( retired.key() ).expired() ) {
-                    ++retired;
-                    continue;
+        // A pinned tombstone needs local bookkeeping, not a foreign-owner
+        // scan. Check markers lazily at the first physical deletion candidate;
+        // the gate keeps that observation valid for this deletion pass only.
+        bool markersChecked = false;
+        for ( auto retired = retiredFiles_.begin();
+              retired != retiredFiles_.end(); ) {
+            if ( !fileLeases_.value( retired.key() ).expired() ) {
+                ++retired;
+                continue;
+            }
+            if ( !markersChecked ) {
+                if ( hasActiveProcessMarker() ) {
+                    break;
                 }
-                if ( removeRetiredFile( retired.value() ) ) {
-                    const auto& retiredFile = retired.value();
-                    if ( processFileOwnership_->ownedFiles.value(
-                             retiredFile.name )
-                         == retiredFile.identity ) {
-                        processFileOwnership_->ownedFiles.remove(
-                            retiredFile.name );
-                    }
-                    retired = retiredFiles_.erase( retired );
-                    ++tombstoneEpoch_;
-                } else {
-                    ++retired;
+                markersChecked = true;
+            }
+            if ( removeRetiredFile( retired.value() ) ) {
+                const auto& retiredFile = retired.value();
+                if ( processFileOwnership_->ownedFiles.value(
+                         retiredFile.name )
+                     == retiredFile.identity ) {
+                    processFileOwnership_->ownedFiles.remove(
+                        retiredFile.name );
                 }
+                retired = retiredFiles_.erase( retired );
+                ++tombstoneEpoch_;
+            } else {
+                ++retired;
             }
         }
         if ( retiredFiles_.isEmpty() ) {
@@ -1551,6 +1615,17 @@ void CaptureStore::CapturePathState::scheduleRetry( bool force )
                     }
                     if ( !state->hasPendingGateRetry()
                          && !state->hasRetryableMaintenance() ) {
+                        std::function<void()> beforeHandoff;
+                        {
+                            const std::lock_guard<std::recursive_mutex> lock(
+                                state->mutex_ );
+                            beforeHandoff = std::move(
+                                state->beforeRetryHandoffCallbackForTesting_ );
+                            state->beforeRetryHandoffCallbackForTesting_ = {};
+                        }
+                        if ( beforeHandoff ) {
+                            beforeHandoff();
+                        }
                         state->retryScheduled_.store(
                             false, std::memory_order_release );
                         if ( state->hasPendingGateRetry()
@@ -1957,6 +2032,27 @@ int CaptureStore::setCapturePathGateTimeoutForTesting( int timeoutMs )
 {
     return capturePathGateTimeoutMs.exchange( timeoutMs,
                                               std::memory_order_acq_rel );
+}
+
+CaptureStore::MaintenanceOperationsForTesting
+CaptureStore::maintenanceOperationsForTesting() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return capturePathState_->maintenanceOperationsForTesting();
+}
+
+CaptureStore::MaintenanceRetryForTesting
+CaptureStore::maintenanceRetryForTesting() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return capturePathState_->maintenanceRetryForTesting();
+}
+
+void CaptureStore::setBeforeRetryHandoffCallbackForTesting(
+    std::function<void()> callback )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    capturePathState_->setBeforeRetryHandoffCallbackForTesting( std::move( callback ) );
 }
 
 bool CaptureStore::hasCapturePathCoordinationOwnershipForTesting() const
