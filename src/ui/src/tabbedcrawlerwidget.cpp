@@ -483,11 +483,10 @@ void TabbedCrawlerWidget::updateCrawler( int index, const QString& displayName,
     // Strip any old-format live status suffix from both the display name and custom name
     const auto cleanDisplayName = tabLabelWithoutLiveStatus( displayName );
     const auto customName = tabLabelWithoutLiveStatus( rawCustomName );
-    if ( customName.isEmpty() ) {
-        myTabBar_.setTabText( index, cleanDisplayName );
-    }
-    else {
-        myTabBar_.setTabText( index, customName );
+    const auto& label = customName.isEmpty() ? cleanDisplayName : customName;
+    // Qt refreshes tab layout even when setTabText receives unchanged text.
+    if ( myTabBar_.tabText( index ) != label ) {
+        myTabBar_.setTabText( index, label );
     }
 }
 
@@ -1018,7 +1017,8 @@ void TabbedCrawlerWidget::updateIcon( int index )
         icon = &live_icons_[ static_cast<int>( liveStatus ) ][ static_cast<int>( dataStatus ) ];
     }
 
-    if ( icon && !icon->isNull() ) {
+    if ( icon && !icon->isNull()
+         && myTabBar_.tabIcon( index ).cacheKey() != icon->cacheKey() ) {
         myTabBar_.setTabIcon( index, *icon );
     }
 }

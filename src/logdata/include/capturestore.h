@@ -170,6 +170,19 @@ class CaptureStore {
     bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
                                         std::function<void()> waitForRelease );
     static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    // Operation counts stay outside business Stats and are scoped to one path state.
+    struct MaintenanceOperationsForTesting {
+        std::uint64_t markerScans = 0;
+        std::uint64_t retryGateAttempts = 0;
+    };
+    MaintenanceOperationsForTesting maintenanceOperationsForTesting() const;
+    struct MaintenanceRetryForTesting {
+        std::uint64_t requested = 0;
+        std::uint64_t completed = 0;
+        bool scheduled = false;
+    };
+    MaintenanceRetryForTesting maintenanceRetryForTesting() const;
+    void setBeforeRetryHandoffCallbackForTesting( std::function<void()> callback );
     bool hasCapturePathCoordinationOwnershipForTesting() const;
     QString capturePathActiveMarkerPathForTesting() const;
     QString capturePathIdentity() const;

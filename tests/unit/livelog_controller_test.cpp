@@ -328,6 +328,256 @@ void checkProjectionMatches( const livelog::LiveLogController& controller )
 
 } // namespace
 
+TEST_CASE( "Live byte batches advance data without control presentation notifications",
+           "[livelog-controller][live-presentation-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    effects.records.clear();
+    int notifications = 0;
+    controller.setPresentationChangedCallback( [ & ]( auto, auto ) { ++notifications; } );
+    REQUIRE( notifications == 0 ); // Registration is not a replay.
+
+    constexpr int BatchCount = 64;
+    for ( int batch = 0; batch < BatchCount; ++batch ) {
+        clock.set( at( 100 + batch ) );
+        controller.streamBytesReceived(
+            generation, QByteArray::number( batch ).rightJustified( 63, '0' ) + '\n' );
+    }
+    REQUIRE( effects.records.size() == static_cast<std::size_t>( BatchCount ) );
+    for ( int batch = 0; batch < BatchCount; ++batch ) {
+        const auto& record = effects.records.at( static_cast<std::size_t>( batch ) );
+        REQUIRE( record.kind == RecordingEffects::Kind::AppendBytes );
+        REQUIRE( record.generation == generation );
+        REQUIRE( record.bytes
+                 == QByteArray::number( batch ).rightJustified( 63, '0' ) + '\n' );
+    }
+    REQUIRE( controller.snapshot().now == at( 163 ) );
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    checkProjectionMatches( controller );
+    CHECK( notifications == 0 );
+}
+
+TEST_CASE( "Live time ticks notify only when a visible retry second changes",
+           "[livelog-controller][live-presentation-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    auto config = controllerConfig();
+    config.initialRetryDelay = 3s;
+    livelog::LiveLogController controller{ androidSpec(), config, clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    int notifications = 0;
+    controller.setPresentationChangedCallback( [ & ]( auto, auto ) { ++notifications; } );
+
+    clock.set( at( 100 ) );
+    controller.refreshPresentationTime();
+    REQUIRE( controller.snapshot().now == at( 100 ) );
+    REQUIRE_FALSE( controller.presentation().retryCountdownVisible );
+    CHECK( notifications == 0 );
+
+    controller.streamFailed( controller.snapshot().generation, retryableStreamError() );
+    REQUIRE( controller.presentation().retryCountdownVisible );
+    REQUIRE( controller.presentation().retryRemaining == 3s );
+    REQUIRE( scheduler.activeCount() == 1u );
+    const auto retryToken = scheduler.latestToken();
+    REQUIRE( scheduler.deadline( retryToken ) == at( 3100 ) );
+    notifications = 0;
+    for ( const auto tick : { 101, 500, 1099 } ) {
+        clock.set( at( tick ) );
+        controller.refreshPresentationTime();
+        REQUIRE( controller.snapshot().now == at( tick ) );
+    }
+    REQUIRE( controller.presentation().retryRemaining == live::Timestamp{ 2001 } );
+    CHECK( notifications == 0 ); // Every tick still displays ceil(remaining) == 3 seconds.
+
+    notifications = 0;
+    clock.set( at( 1100 ) );
+    controller.refreshPresentationTime();
+    REQUIRE( controller.presentation().retryRemaining == 2s );
+    CHECK( notifications == 1 );
+    CHECK( scheduler.activeCount() == 1u );
+    CHECK( scheduler.latestToken() == retryToken );
+    checkProjectionMatches( controller );
+}
+
+TEST_CASE( "Control presentation preserves diagnostics gates and recovery",
+           "[livelog-controller][live-presentation-preservation]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ iosSpec(), controllerConfig(), clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    std::vector<livelog::LiveLogControlPresentation> observed;
+    std::vector<livelog::LiveLogPresentationChange> changes;
+    controller.setPresentationChangedCallback( [ & ]( auto value, auto change ) {
+        observed.push_back( value );
+        changes.push_back( change );
+    } );
+    REQUIRE( observed.empty() );
+
+    auto error = outputBindingError();
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, error );
+    REQUIRE( observed.size() == 1u );
+    CHECK( observed.back().status == live::PresentationStatus::Connected );
+    REQUIRE( observed.back().outputBindingError.has_value() );
+    CHECK( observed.back().outputBindingError->code == error.code );
+    CHECK( observed.back().outputBindingError->message == error.message );
+    error.code = "unknown-output-code";
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, error );
+    REQUIRE( observed.size() == 2u );
+    CHECK( observed.back().outputBindingError->code == error.code );
+    error.message = "A different visible diagnostic";
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, error );
+    REQUIRE( observed.size() == 3u );
+    CHECK( observed.back().outputBindingError->message == error.message );
+    error.nativeDetail = "Not part of the control presentation";
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, error );
+    CHECK( observed.size() == 3u );
+    controller.outputBindingChanged( live::OutputBindingState::Healthy );
+    REQUIRE( observed.size() == 4u );
+    CHECK_FALSE( observed.back().outputBindingError.has_value() );
+    CHECK( observed.back().outputBinding == live::OutputBindingState::Healthy );
+
+    for ( const auto reason : { live::AwaitingUserReason::Trust, live::AwaitingUserReason::Unlock,
+                               live::AwaitingUserReason::Pair, live::AwaitingUserReason::Authorize } ) {
+        const auto count = observed.size();
+        controller.userActionRequired( controller.snapshot().generation, reason );
+        REQUIRE( observed.size() == count + 1u );
+        CHECK( observed.back().status == live::PresentationStatus::AwaitingUser );
+        CHECK( observed.back().awaitingUserReason == reason );
+    }
+    for ( const auto* message : { "Infrastructure failed", "Changed infrastructure diagnostic" } ) {
+        auto failure = retryableStreamError();
+        failure.message = message;
+        failure.retryPolicy = live::RetryPolicy::Never;
+        controller.deviceAbsent( controller.snapshot().generation );
+        const auto count = observed.size();
+        controller.availabilityFailed( controller.snapshot().generation, failure );
+        REQUIRE( observed.size() == count + 1u );
+        CHECK( observed.back().status == live::PresentationStatus::Failed );
+        CHECK( observed.back().failureMessage == message );
+        auto changedDiagnostic = observed.back();
+        changedDiagnostic.failureMessage += " updated";
+        CHECK_FALSE( changedDiagnostic.sameControlState( observed.back() ) );
+    }
+    CHECK( std::all_of( changes.begin(), changes.end(), []( auto change ) {
+        return change == livelog::LiveLogPresentationChange::Control;
+    } ) );
+}
+
+TEST_CASE( "Nested append failure notifies after the byte effect and observers own stable values",
+           "[livelog-controller][live-presentation-preservation]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ androidSpec(), controllerConfig(), clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    effects.records.clear();
+    effects.beforeRecord = [ & ]( auto kind, auto ) {
+        if ( kind == RecordingEffects::Kind::AppendBytes ) {
+            controller.outputBindingChanged( live::OutputBindingState::Degraded, outputBindingError() );
+        }
+    };
+    int firstCalls = 0;
+    int replacementCalls = 0;
+    int depth = 0;
+    auto lifetime = std::make_shared<int>( 42 );
+    const std::weak_ptr<int> weakLifetime = lifetime;
+    controller.setPresentationChangedCallback(
+        [ &, lifetime ]( const livelog::LiveLogControlPresentation& value, auto change ) {
+            ++depth;
+            ++firstCalls;
+            CHECK( depth == 1 );
+            CHECK( change == livelog::LiveLogPresentationChange::Control );
+            REQUIRE( effects.count( RecordingEffects::Kind::AppendBytes ) == 1u );
+            CHECK( value.outputBinding == live::OutputBindingState::Degraded );
+            controller.setPresentationChangedCallback( [ & ]( auto replacement, auto replacementChange ) {
+                ++depth;
+                ++replacementCalls;
+                CHECK( depth == 1 );
+                CHECK( replacementChange == livelog::LiveLogPresentationChange::Control );
+                CHECK( replacement.outputBinding == live::OutputBindingState::Healthy );
+                controller.setPresentationChangedCallback( {} );
+                controller.refreshPresentationTime();
+                --depth;
+            } );
+            CHECK_FALSE( weakLifetime.expired() ); // The executing callable owns its captures.
+            controller.outputBindingChanged( live::OutputBindingState::Healthy );
+            CHECK( replacementCalls == 0 ); // Nested dispatch is queued, not recursive.
+            CHECK( value.outputBinding == live::OutputBindingState::Degraded );
+            --depth;
+        } );
+    lifetime.reset();
+    controller.streamBytesReceived( controller.snapshot().generation, QByteArrayLiteral( "kept\n" ) );
+    CHECK( firstCalls == 1 );
+    CHECK( replacementCalls == 1 );
+    CHECK( weakLifetime.expired() );
+    CHECK( effects.latest( RecordingEffects::Kind::AppendBytes ).bytes == QByteArrayLiteral( "kept\n" ) );
+    CHECK( controller.controlPresentation().outputBinding == live::OutputBindingState::Healthy );
+    controller.outputBindingChanged( live::OutputBindingState::Degraded, outputBindingError() );
+    CHECK( replacementCalls == 1 );
+}
+
+TEST_CASE( "Presentation countdown uses nonnegative ceil seconds without changing retry deadlines",
+           "[livelog-controller][live-presentation-preservation]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    auto config = controllerConfig();
+    config.initialRetryDelay = 3s;
+    livelog::LiveLogController controller{ androidSpec(), config, clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    std::vector<livelog::LiveLogPresentationChange> changes;
+    controller.setPresentationChangedCallback( [ & ]( auto, auto change ) { changes.push_back( change ); } );
+    controller.streamFailed( controller.snapshot().generation, retryableStreamError() );
+    REQUIRE( changes.size() == 1u );
+    CHECK( changes.back() == livelog::LiveLogPresentationChange::Control );
+    CHECK( controller.controlPresentation().retryAttempt == 1u );
+    CHECK( controller.controlPresentation().retryCountdownSeconds == 3 );
+    const auto token = scheduler.latestToken();
+    CHECK( scheduler.deadline( token ) == at( 3050 ) );
+    for ( const auto tick : { 51, 999, 1049 } ) {
+        clock.set( at( tick ) );
+        controller.refreshPresentationTime();
+        CHECK( controller.controlPresentation().retryCountdownSeconds == 3 );
+        CHECK( changes.size() == 1u );
+    }
+    for ( const auto tick : { 1050, 2050, 3050 } ) {
+        clock.set( at( tick ) );
+        controller.refreshPresentationTime();
+        CHECK( changes.back() == livelog::LiveLogPresentationChange::CountdownOnly );
+        CHECK( controller.controlPresentation().retryCountdownSeconds == ( 3050 - tick ) / 1000 );
+    }
+    REQUIRE( changes.size() == 4u );
+    clock.set( at( 3100 ) );
+    controller.refreshPresentationTime();
+    CHECK( controller.controlPresentation().retryCountdownSeconds == 0 );
+    CHECK( changes.size() == 4u );
+    CHECK( scheduler.latestToken() == token );
+    scheduler.fire( token );
+    REQUIRE( changes.size() == 5u );
+    CHECK( changes.back() == livelog::LiveLogPresentationChange::Control );
+    CHECK_FALSE( controller.controlPresentation().retryCountdownSeconds.has_value() );
+    controller.stopRequested();
+    const auto count = changes.size();
+    controller.streamBytesReceived( controller.snapshot().generation - 1u, QByteArrayLiteral( "stale\n" ) );
+    controller.streamFailed( controller.snapshot().generation - 1u, retryableStreamError() );
+    CHECK( changes.size() == count );
+    CHECK( effects.count( RecordingEffects::Kind::AppendBytes ) == 0u );
+}
+
 TEST_CASE( "Running session intent is reduced before any startup effect executes",
            "[livelog-controller][red][ordering]" )
 {

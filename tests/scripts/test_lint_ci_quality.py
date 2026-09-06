@@ -833,8 +833,8 @@ jobs:
             MODULE.stable_release_workflow_issues(misnamed),
         )
         bypassed = workflow.replace(
-            '        test "${GITHUB_REF}" = "refs/heads/master" || {',
-            '        true || test "${GITHUB_REF}" = "refs/heads/master" || {',
+            '          test "${GITHUB_REF}" = "refs/heads/master" || {',
+            '          true || test "${GITHUB_REF}" = "refs/heads/master" || {',
             1,
         )
         self.assertNotEqual(bypassed, workflow)
@@ -842,27 +842,30 @@ jobs:
             "stable release dispatch must fail closed outside master",
             MODULE.stable_release_workflow_issues(bypassed),
         )
-        run_api_inputs = workflow.replace(
-            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n',
-            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n'
-            '        run_qualification="$(gh api "$run_api" --jq \'.inputs["qualification-mode"] // empty\')"\n',
+        prerelease_bypassed = workflow.replace(
+            '          test "$release_prerelease" = true || {',
+            '          true || test "$release_prerelease" = true || {',
             1,
         )
-        self.assertNotEqual(run_api_inputs, workflow)
+        self.assertNotEqual(prerelease_bypassed, workflow)
         self.assertIn(
-            "stable release evidence must come from downloaded receipts, not run API inputs",
-            MODULE.stable_release_workflow_issues(run_api_inputs),
+            "stable release must promote only the immutable live Continuous publication",
+            MODULE.stable_release_workflow_issues(prerelease_bypassed),
         )
-        run_api_inputs_alias = workflow.replace(
-            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n',
-            '        run_event="$(gh api "$run_api" --jq \'.event\')"\n'
-            '        run_qualification="$(gh api "$run_api" --jq \'.inputs | .["qualification-mode"] // empty\')"\n',
+        v2_candidate = workflow.replace(')" = 3', ')" = 2', 1)
+        self.assertIn(
+            "stable release verification must require promotion manifest schema v3",
+            MODULE.stable_release_workflow_issues(v2_candidate),
+        )
+        without_snapshot_recheck = workflow.replace(
+            '          test "$(gh api "/repos/${repo}/releases/tags/continuous" --jq \'.id\')" = "$KLOGG_SOURCE_RELEASE_ID"\n',
+            "",
             1,
         )
-        self.assertNotEqual(run_api_inputs_alias, workflow)
+        self.assertNotEqual(without_snapshot_recheck, workflow)
         self.assertIn(
-            "stable release evidence must come from downloaded receipts, not run API inputs",
-            MODULE.stable_release_workflow_issues(run_api_inputs_alias),
+            "stable release must revalidate the selected Continuous snapshot",
+            MODULE.stable_release_workflow_issues(without_snapshot_recheck),
         )
         draft_target_swap = workflow.replace(
             "--jq '.target_commitish'", "--jq '.tag_name'", 1
@@ -872,23 +875,30 @@ jobs:
             "stable draft verification must compare the candidate target commit",
             MODULE.stable_release_workflow_issues(draft_target_swap),
         )
-        draft_ref_lookup = workflow.replace(
-            '        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq \'.target_commitish\')"',
-            '        ref_sha="$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/v${KLOGG_VERSION}-candidate" --jq \'.object.sha\')"\n'
-            '        candidate_target="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq \'.target_commitish\')"',
+        without_rollback = workflow.replace(
+            "          trap rollback_stable_promotion ERR\n", "", 1
+        )
+        self.assertIn(
+            "stable release promotion must roll back failure and cancellation",
+            MODULE.stable_release_workflow_issues(without_rollback),
+        )
+        without_ref_ownership = workflow.replace(
+            "          final_ref_owned=true",
+            "          final_ref_owned=false",
             1,
         )
-        self.assertNotEqual(draft_ref_lookup, workflow)
         self.assertIn(
-            "stable draft verification must not require an unpublished Git tag",
-            MODULE.stable_release_workflow_issues(draft_ref_lookup),
+            "stable release promotion must own the final ref before rollback",
+            MODULE.stable_release_workflow_issues(without_ref_ownership),
         )
-        without_rollback = workflow.replace(
-            "        trap rollback_stable_promotion ERR\n", "", 1
+        without_cancel_rollback = workflow.replace(
+            "        if: ${{ failure() || cancelled() }}",
+            "        if: ${{ failure() }}",
+            1,
         )
         self.assertIn(
-            "stable release promotion must roll back every post-publish failure",
-            MODULE.stable_release_workflow_issues(without_rollback),
+            "stable release promotion must roll back failure and cancellation",
+            MODULE.stable_release_workflow_issues(without_cancel_rollback),
         )
 
     def test_continuous_release_publish_requires_trusted_selection(self):
@@ -914,6 +924,39 @@ jobs:
             "continuous release publication must require the verified selection output",
             MODULE.continuous_release_workflow_issues(bypassed),
         )
+        selection_message = (
+            "continuous release selection must validate the dispatched successful master CI receipt"
+        )
+        unretried_api = workflow.replace("          gh_api_retry() {", "          gh_api_once() {", 1)
+        self.assertIn(
+            selection_message,
+            MODULE.continuous_release_workflow_issues(unretried_api),
+        )
+        unvalidated_sha = workflow.replace(
+            '          [[ "$run_sha" =~ ^[0-9a-f]{40}$ ]] || {',
+            '          test -n "$run_sha" || {',
+            1,
+        )
+        self.assertIn(
+            selection_message,
+            MODULE.continuous_release_workflow_issues(unvalidated_sha),
+        )
+        wrong_gate = workflow.replace(
+            'select(.name == "ci-gate")', 'select(.name == "LinuxPackages")', 1
+        )
+        self.assertIn(
+            selection_message,
+            MODULE.continuous_release_workflow_issues(wrong_gate),
+        )
+        raw_event = workflow.replace(
+            "      KLOGG_DISPATCH_SHA: ${{ github.sha }}",
+            "      KLOGG_DISPATCH_SHA: ${{ github.event.workflow_run.head_sha }}",
+            1,
+        )
+        self.assertIn(
+            selection_message,
+            MODULE.continuous_release_workflow_issues(raw_event),
+        )
         unreconciled_candidate = workflow.replace(
             'gh_api_optional_scalar orphan_id "/repos/${repo}/releases/tags/${candidate_tag}" .id',
             'gh_api_optional_scalar orphan_id "/repos/${repo}/releases/${candidate_id}" .id',
@@ -934,6 +977,98 @@ jobs:
             "continuous rollback must reconcile a candidate created without an emitted id",
             MODULE.continuous_release_workflow_issues(unguarded_draft_deletion),
         )
+
+    def test_ci_dispatches_continuous_only_after_successful_master_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        needs = MODULE.workflow_job_needs(workflow)
+        self.assertEqual(needs.get("DispatchContinuous"), {"ci-gate"})
+        dispatch = MODULE.workflow_job_blocks(workflow)["DispatchContinuous"]
+        condition = MODULE.workflow_job_direct_value(dispatch, "if")
+        for marker in (
+            "success()",
+            "needs.ci-gate.result == 'success'",
+            "github.event_name == 'push'",
+            "github.ref == 'refs/heads/master'",
+            "github.event.repository.full_name == github.repository",
+        ):
+            self.assertIn(marker, condition)
+        dispatch_text = "\n".join(dispatch)
+        self.assertIn("actions: write", dispatch_text)
+        self.assertIn("ci-continuous.yml", dispatch_text)
+        self.assertIn("github.run_id", dispatch_text)
+        self.assertIn("github.sha", dispatch_text)
+        self.assertNotIn("softprops/action-gh-release", dispatch_text)
+        self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
+        post_gate_message = "CI post-gate job DispatchContinuous must directly need only ci-gate"
+        wrong_need = workflow.replace(
+            "  DispatchContinuous:\n    needs: [ci-gate]",
+            "  DispatchContinuous:\n    needs: [LinuxPackages]",
+            1,
+        )
+        self.assertIn(post_gate_message, MODULE.ci_build_workflow_issues(wrong_need))
+        dispatch_message = (
+            "CI Continuous dispatch must be an exact successful trusted master post-gate job"
+        )
+        weakened = workflow.replace(
+            "        && github.event_name == 'push'",
+            "        && github.event_name != 'pull_request'",
+            1,
+        )
+        self.assertIn(dispatch_message, MODULE.ci_build_workflow_issues(weakened))
+        wrong_token = workflow.replace(
+            "          GH_TOKEN: ${{ github.token }}\n"
+            "          KLOGG_CI_RUN_ID: ${{ github.run_id }}",
+            "          GH_TOKEN: ${{ secrets.KLOGG_GITHUB_TOKEN }}\n"
+            "          KLOGG_CI_RUN_ID: ${{ github.run_id }}",
+            1,
+        )
+        self.assertIn(dispatch_message, MODULE.ci_build_workflow_issues(wrong_token))
+        missing_sha = workflow.replace(
+            '            -f ci-run-sha="$KLOGG_CI_RUN_SHA"',
+            '            # -f ci-run-sha="$KLOGG_CI_RUN_SHA"',
+            1,
+        )
+        self.assertIn(dispatch_message, MODULE.ci_build_workflow_issues(missing_sha))
+
+    def test_release_workflow_triggers_form_explicit_promotion_chain(self):
+        continuous = (
+            ROOT / ".github" / "workflows" / "ci-continuous.yml"
+        ).read_text()
+        stable = (ROOT / ".github" / "workflows" / "ci-release.yml").read_text()
+        self.assertIn("workflow_dispatch:", continuous)
+        self.assertNotIn("workflow_run:", continuous)
+        self.assertIn("ci-run-id:", continuous)
+        self.assertIn("ci-run-sha:", continuous)
+        self.assertNotIn("github.event.workflow_run", continuous)
+        self.assertIn("workflow_dispatch:", stable)
+        self.assertNotIn("ci-run-id:", stable)
+        self.assertNotIn("evidence-level:", stable)
+
+    def test_stable_selects_live_continuous_release_not_ci_artifacts(self):
+        continuous = (
+            ROOT / ".github" / "workflows" / "ci-continuous.yml"
+        ).read_text()
+        stable = (ROOT / ".github" / "workflows" / "ci-release.yml").read_text()
+        self.assertIn("/releases/tags/continuous", stable)
+        self.assertIn("/releases/assets/${asset_id}", stable)
+        self.assertNotIn("actions/workflows/ci-build.yml/runs", stable)
+        self.assertNotIn("action-download-artifact", stable)
+        self.assertNotIn("KLOGG_REQUESTED_CI_RUN_ID", stable)
+        self.assertNotIn("KLOGG_EVIDENCE_LEVEL", stable)
+        self.assertNotIn("sentry-cli", stable)
+        continuous_concurrency = MODULE.workflow_mapping_block(
+            continuous.splitlines(), "concurrency", 0
+        )
+        stable_concurrency = MODULE.workflow_mapping_block(
+            stable.splitlines(), "concurrency", 0
+        )
+        self.assertIsNotNone(continuous_concurrency)
+        self.assertIsNotNone(stable_concurrency)
+        self.assertEqual(
+            continuous_concurrency["group"][0], stable_concurrency["group"][0]
+        )
+        self.assertEqual(continuous_concurrency["queue"][0], "max")
+        self.assertEqual(stable_concurrency["queue"][0], "max")
 
     def test_publication_runs_outside_the_required_ci_workflow(self):
         message = "release publication must run outside the required CI workflow"
@@ -2266,6 +2401,11 @@ ${{ env.CHANGELOG }}
             "ci-release.yml" if channel == "stable" else "ci-continuous.yml"
         )
         workflow = path.read_text()
+        if "render_release_downloads.py" in workflow and (
+            channel == "stable"
+            or "Publish verified continuous release transaction" in workflow
+        ):
+            return workflow
         create_marker = (
             "    - name: Create GitHub Release"
             if channel == "stable"
@@ -2427,7 +2567,7 @@ jobs:
             "stable release workflow must support only workflow_dispatch publication"
         )
         continuous_message = (
-            "continuous release workflow must use only completed CI Build workflow_run events"
+            "continuous release workflow must use only reviewed CI dispatch receipts"
         )
         stable = self.projected_workflow("stable")
         continuous = self.projected_workflow("continuous")
@@ -2438,59 +2578,53 @@ jobs:
             "  workflow_dispatch:\n", "  push:\n    branches: [master]\n", 1
         )
         self.assertIn(stable_message, self.issues("stable", direct_stable_push))
-        stable_spoof = direct_stable_push.replace(
-            "jobs:\n",
-            "# workflow_dispatch:\n"
-            "env:\n"
-            "  TRIGGER_DESCRIPTION: 'workflow_dispatch publication'\n"
-            "jobs:\n",
+        stable_with_input = stable.replace(
+            "  workflow_dispatch:\n",
+            "  workflow_dispatch:\n    inputs:\n      ci-run-id:\n        required: false\n        type: string\n",
             1,
         )
-        self.assertIn(stable_message, self.issues("stable", stable_spoof))
+        self.assertIn(stable_message, self.issues("stable", stable_with_input))
 
         direct_continuous_push = continuous.replace(
-            '  workflow_run:\n    workflows: ["CI Build"]\n    types: [completed]\n',
-            "  push:\n    branches: [master]\n",
-            1,
+            "  workflow_dispatch:\n", "  push:\n    branches: [master]\n", 1
         )
         self.assertIn(
             continuous_message,
             self.issues("continuous", direct_continuous_push),
         )
-        malformed_workflow_run = continuous.replace(
-            "    types: [completed]", "    types: [completed", 1
-        )
-        self.assertIn(
-            continuous_message,
-            self.issues("continuous", malformed_workflow_run),
-        )
+        optional_input = continuous.replace("        required: true", "        required: false", 1)
+        self.assertIn(continuous_message, self.issues("continuous", optional_input))
+        malformed_input = continuous.replace("        type: string", "        type: [string", 1)
+        self.assertIn(continuous_message, self.issues("continuous", malformed_input))
 
-    def test_stable_selected_ci_run_projects_only_push_validation_and_dispatch_receipts(self):
+    def test_stable_projects_only_the_live_continuous_release(self):
         message = (
-            "stable release selection must model push validation and workflow_dispatch receipt evidence"
+            "stable release must promote only the immutable live Continuous publication"
         )
         workflow = self.projected_workflow("stable")
         self.assertNotIn(message, self.issues("stable", workflow))
 
-        near_miss = workflow.replace("          workflow_dispatch)", "          pull_request)", 1)
-        self.assertNotEqual(near_miss, workflow)
-        self.assertIn(message, self.issues("stable", near_miss))
-        spoofed = near_miss.replace(
-            "          pull_request)",
-            "          # workflow_dispatch)\n"
-            "          SPOOF='workflow_dispatch)'\n"
-            "          pull_request)",
+        not_prerelease = workflow.replace(
+            '          test "$release_prerelease" = true || {',
+            '          test "$release_prerelease" = false || {',
+            1,
+        )
+        self.assertNotEqual(not_prerelease, workflow)
+        self.assertIn(message, self.issues("stable", not_prerelease))
+        ci_fallback = workflow.replace(
+            '          release_api="/repos/${repo}/releases/tags/continuous"',
+            '          release_api="/repos/${repo}/actions/workflows/ci-build.yml/runs"',
+            1,
+        )
+        self.assertIn(message, self.issues("stable", ci_fallback))
+        spoofed = ci_fallback.replace(
+            '          release_api="/repos/${repo}/actions/workflows/ci-build.yml/runs"',
+            "          # /releases/tags/continuous\n"
+            "          SPOOF='/releases/tags/continuous'\n"
+            '          release_api="/repos/${repo}/actions/workflows/ci-build.yml/runs"',
             1,
         )
         self.assertIn(message, self.issues("stable", spoofed))
-
-        weakened_push = workflow.replace(
-            '            test "$KLOGG_EVIDENCE_LEVEL" = validation || {',
-            '            test "$KLOGG_EVIDENCE_LEVEL" != invalid || {',
-            1,
-        )
-        self.assertNotEqual(weakened_push, workflow)
-        self.assertIn(message, self.issues("stable", weakened_push))
 
     def test_body_path_near_miss_is_rejected(self):
         for channel in ("stable", "continuous"):

@@ -143,7 +143,7 @@ if(KLOGG_BUILD_BENCHMARKS)
   )
   target_link_libraries(
     klogg_live_capture_benchmark_contract_tests
-    PRIVATE klogg_live_capture_benchmark_core klogg_logdata Catch2
+    PRIVATE klogg_live_capture_benchmark_core klogg_livecapture klogg_logdata Catch2
             Qt${QT_VERSION_MAJOR}::Core project_options project_warnings
   )
   add_dependencies(klogg_live_capture_benchmark_contract_tests live_capture_fixture_producer)
@@ -192,6 +192,7 @@ add_executable(klogg_tests
     mergefileorder_test.cpp
     overview_test.cpp
     optionsdialog_test.cpp
+    pathutils_test.cpp
     patternmatcher_test.cpp
     quicklabelpattern_test.cpp
     qt_event_queue_test.cpp

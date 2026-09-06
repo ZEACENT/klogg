@@ -96,7 +96,7 @@ Binaries for all platforms are available from [GitHub Releases](https://github.c
 
 Automated rolling builds are available from the [continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous). Windows and Linux packages are CI-validated; macOS disk images are unsigned CI validation artifacts and may require local Gatekeeper approval.
 
-Stable releases default to the same secret-neutral validation evidence. A stable release explicitly published with signed evidence requires both macOS signing and notarization receipts; unsigned macOS artifacts are never described as signed or notarized.
+Stable releases are created manually by promoting the current manifest-verified Continuous release. The package, source, support, and evidence payloads are reused byte-for-byte; only immutable Stable release metadata and checksums are regenerated. Stable macOS disk images therefore remain unsigned validation artifacts and are never described as signed or notarized.
 
 ## Building
 

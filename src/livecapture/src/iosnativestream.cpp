@@ -285,6 +285,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         if ( !shouldPublish ) {
             return;
         }
+        // A callback may be waiting for queue capacity, including inside native
+        // start. Release it before observers or the serial cleanup dispatcher can
+        // wait for startup/callback completion. Never hold controlMutex here.
+        queue.close();
         const auto state = weak_from_this().lock();
         if ( state == nullptr ) {
             return;
@@ -333,7 +337,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     {
         LiveDataEnqueueResult result = LiveDataEnqueueResult::Closed;
         try {
-            result = queue.tryEnqueue( LiveDataChunk{ config.generation, std::move( bytes ) } );
+            // Native readers deliver callbacks serially off the GUI thread.
+            // Retain the complete pending record while the bounded queue waits
+            // for the consumer; stop/failure closes the queue to cancel the wait.
+            result = queue.enqueueWait( LiveDataChunk{ config.generation, std::move( bytes ) } );
         } catch ( ... ) {
             publishBoundaryFailure( ErrorCategory::Backend, "ios-live-queue-failed",
                                     ErrorScope::Stream, RetryPolicy::Backoff,
@@ -342,10 +349,13 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             return;
         }
         if ( result == LiveDataEnqueueResult::Backpressure ) {
-            publishBoundaryFailure( ErrorCategory::Stream, "ios-live-queue-saturated",
-                                    ErrorScope::Stream, RetryPolicy::Backoff,
-                                    "The iOS live-data queue is saturated.",
-                                    "The bounded queue rejected a complete log record." );
+            // enqueueWait only rejects records that can never fit, not transient
+            // pressure. Retrying this same record cannot restore progress.
+            publishBoundaryFailure( ErrorCategory::Stream, "ios-live-record-too-large",
+                                    ErrorScope::Stream, RetryPolicy::Never,
+                                    "The iOS log record exceeds the live-data queue byte limit.",
+                                    "A complete formatted log record cannot fit in the bounded "
+                                    "queue, even when empty." );
         }
     }
 
@@ -542,6 +552,14 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     void runStartupImpl()
     {
         if ( cancelled() ) {
+            return;
+        }
+
+        if ( config.queueLimits.maxQueuedBytes == 0u || config.queueLimits.maxQueuedChunks == 0u ) {
+            publishFailure( localError(
+                ErrorCategory::Configuration, "ios-live-queue-invalid-capacity", ErrorScope::Stream,
+                RetryPolicy::Never, "The iOS live-data queue capacity must be positive.",
+                "Both byte and chunk limits must allow at least one complete log record." ) );
             return;
         }
 
@@ -785,14 +803,13 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 startCode,
                 nativeDetail( osTrace ? "ostrace_start_activity" : "syslog_relay_start_capture",
                               startCode ) } ) );
-            return;
         }
         const auto startedOsTrace = openedOsTrace.get();
         const auto startedSyslog = openedSyslog.get();
         bool committed = false;
         {
             std::lock_guard<std::mutex> lock( controlMutex );
-            if ( !retired && !terminal ) {
+            if ( startCode == 0 && !retired && !terminal ) {
                 device = std::move( openedDevice );
                 lockdown = std::move( openedLockdown );
                 service = std::move( openedService );
@@ -807,6 +824,10 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             }
         }
         if ( !committed ) {
+            // Failed start may still have entered a native callback. Cancellation
+            // and start failure share the same close/quiesce/stop/join boundary
+            // before these locally owned clients can be freed.
+            queue.close();
             {
                 std::unique_lock<std::mutex> lock( controlMutex );
                 callbacksChanged.wait( lock, [ this ] { return callbacksInFlight == 0u; } );
@@ -824,6 +845,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
     void runCleanup() noexcept
     {
+        queue.close();
         {
             std::lock_guard<std::mutex> lock( controlMutex );
             cleanupRunning = true;
@@ -872,7 +894,6 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         closingService.reset();
         closingLockdown.reset();
         closingDevice.reset();
-        queue.close();
         admissionLease.reset();
         publishStopped();
         {
@@ -960,6 +981,9 @@ void IosNativeStreamWorker::stop( Generation generation ) noexcept
         state->retired = true;
         state->acceptingCallbacks = false;
     }
+    // Startup can itself be inside a blocked native callback. Close before
+    // dispatch, not just inside cleanup queued behind that startup task.
+    state->queue.close();
     // scheduleCleanup() retains State when neither the configured executor nor
     // the emergency thread can accept cleanup. Do not acknowledge stopped until
     // runCleanup() has actually quiesced callbacks and released native clients.
@@ -977,6 +1001,11 @@ void IosNativeStreamWorker::shutdown() noexcept
 std::optional<LiveDataBatch> IosNativeStreamWorker::drain()
 {
     return state_ != nullptr ? state_->queue.drain() : std::nullopt;
+}
+
+std::size_t IosNativeStreamWorker::waitingProducerCount() const
+{
+    return state_ != nullptr ? state_->queue.waitingProducerCount() : 0u;
 }
 
 LiveDataStatistics IosNativeStreamWorker::statistics() const

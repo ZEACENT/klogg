@@ -898,5 +898,139 @@ class QtVersionMacroInTestsTest(unittest.TestCase):
         self.assertEqual(self.check(text), [])
 
 
+class NativePresentationAssertionTest(unittest.TestCase):
+    """PR #69: native paths and copied CRLF text are not internal Qt values."""
+
+    def check(self, text, name="tests/ui/example_test.cpp"):
+        # Exercise the registered lint entry point even before the rule exists:
+        # RED must mean a bad assertion escaped, not a missing function error.
+        return [
+            finding
+            for rule in lint.MULTI_LINE_CHECKS
+            if rule["name"] == "native-presentation-test-assertion"
+            for finding in rule["check"](text, Path(name))
+        ]
+
+    def test_exact_windows_failures_are_flagged(self):
+        cases = [
+            "CHECK( tabs->tabToolTip( 0 ) == savedPath );",
+            r'CHECK( Access::mainText( crawler ) == QStringLiteral( "old-001\nnew-002" ) );',
+            r'REQUIRE( view->getSelectedText() == QStringLiteral( "first\nsecond" ) );',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0][0], 1)
+
+    def test_plain_path_identifier_is_not_a_loophole(self):
+        for name in ("path", "Path", "saved_path"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    len(self.check(f"CHECK( tabs->tabToolTip( 0 ) == {name} );")), 1
+                )
+
+    def test_truncated_native_assertion_without_semicolon_fails_closed(self):
+        cases = [
+            "CHECK( tabs->tabToolTip( 0 ) == savedPath",
+            r'CHECK( Access::mainText( crawler ) == QStringLiteral( "first\nsecond" )',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertIn("malformed", findings[0][1].lower())
+
+    def test_multiline_reversed_and_parenthesized_comparisons(self):
+        cases = [
+            "\nCHECK(\n    (savedPath) == tabs.tabToolTip( currentIndex() )\n);",
+            'CHECK( QStringLiteral( "C:/logs/device.log" ) == tabs->tabToolTip( 0 ) );',
+            'CHECK( tabs->tabToolTip( 0 ) == QStringLiteral( "/tmp/device.log" ) );',
+            r'REQUIRE( QStringLiteral( "first\nsecond" ) == view->getSelectedText() );',
+            r'CHECK( (Access::mainText( crawler ) == QStringLiteral( "first\nsecond" )) );',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(len(self.check(text)), 1)
+
+    def test_native_or_normalized_operands_are_accepted(self):
+        cases = [
+            "CHECK( tabs->tabToolTip( 0 ) == QDir::toNativeSeparators( savedPath ) );",
+            "CHECK( QDir::toNativeSeparators( savedPath ) == tabs->tabToolTip( 0 ) );",
+            "CHECK( QDir::fromNativeSeparators( tabs->tabToolTip( 0 ) ) == savedPath );",
+            r'CHECK( view->getSelectedText().replace( "\r\n", "\n" ) == QStringLiteral( "first\nsecond" ) );',
+            r'CHECK( QStringLiteral( "first\nsecond" ) == Access::mainText( crawler ).replace( "\r\n", "\n" ) );',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.check(text), [])
+
+    def test_near_misses_and_other_output_contracts_are_accepted(self):
+        cases = [
+            "CHECK( tabs->tabToolTip( 0 ) == sentinel );",
+            'CHECK( tabs->tabToolTip( 0 ) == QStringLiteral( "Updated tooltip" ) );',
+            'REQUIRE( view->getSelectedText() == QStringLiteral( "ERROR alpha" ) );',
+            r'CHECK( file.readAll() == QByteArrayLiteral( "first\nsecond" ) );',
+            r'CHECK( view->getSelectedText() == QStringLiteral( "literal\\ntext" ) );',
+            r'CHECK( snapshot.text() == QStringLiteral( "first\nsecond" ) );',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.check(text), [])
+
+    def test_comments_and_string_spoofs_are_not_code(self):
+        bad = "CHECK( tabs->tabToolTip( 0 ) == savedPath );"
+        text = (
+            "// " + bad + "\n/* " + bad + " */\n"
+            'const auto quoted = "' + bad + '";\n'
+            'const auto raw = R"example(' + bad + ')example";\n'
+        )
+        self.assertEqual(self.check(text), [])
+        # Mentioning a normalization function in a comment/string cannot waive
+        # an actually unnormalized comparison.
+        text += 'const auto hint = "QDir::toNativeSeparators(savedPath)";\n'
+        text += bad + " // QDir::toNativeSeparators(savedPath)\n"
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_malformed_native_assertions_fail_closed(self):
+        cases = [
+            "CHECK( tabs->tabToolTip( 0 ) == savedPath;",
+            r'CHECK( Access::mainText( crawler ) == QStringLiteral( "first\nsecond" );',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertIn("malformed", findings[0][1].lower())
+        self.assertEqual(self.check("CHECK( unrelated("), [])
+
+    def test_rule_is_test_only_and_allow_marker_is_local(self):
+        bad = "CHECK( tabs->tabToolTip( 0 ) == savedPath );"
+        self.assertEqual(self.check(bad, name="src/ui/src/example.cpp"), [])
+        self.assertEqual(self.check(bad + " // lint-allow: platform-fragile"), [])
+        text = bad + " // lint-allow: platform-fragile\n" + bad
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 2)
+        self.assertEqual(
+            len(self.check('const auto hint = "lint-allow: platform-fragile"; ' + bad)),
+            1,
+        )
+
+    def test_real_tree_mutations_restore_the_escaped_assertions(self):
+        path = REPO_ROOT / "tests" / "ui" / "mainwindow_test.cpp"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(self.check(text, name=str(path)), [])
+        mutations = [
+            ("QDir::toNativeSeparators( savedPath )", "savedPath"),
+            (r'.replace( QStringLiteral( "\r\n" ), QStringLiteral( "\n" ) )', ""),
+        ]
+        for before, after in mutations:
+            with self.subTest(before=before):
+                mutated = text.replace(before, after)
+                self.assertNotEqual(mutated, text)
+                self.assertGreaterEqual(len(self.check(mutated, name=str(path))), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

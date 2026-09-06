@@ -75,6 +75,7 @@ struct FakeNative {
     bool nullOsTraceOnSuccess{ false };
     bool nullSyslogOnSuccess{ false };
     bool emitOsTraceErrorDuringStart{ false };
+    std::function<void()> duringStreamStart;
     bool throwDuringDeviceNew{ false };
     std::atomic_bool stopOnCallbackThread{ false };
     std::atomic_bool freeInsideCallback{ false };
@@ -88,6 +89,7 @@ struct FakeNative {
     bool blockCallbackReturn{ false };
     bool callbackBodyReturned{ false };
     bool callbackReturnReleased{ false };
+    bool callbackReturnWaitCancelled{ false };
     bool stopEntered{ false };
     std::thread::id callbackThread;
     NativeOsTraceRelayRecordCallback osTraceRecordCallback{ nullptr };
@@ -222,7 +224,7 @@ struct FakeNative {
         callbackBodyReturned = true;
         callbackChanged.notify_all();
         callbackChanged.wait( lock, [ this ] {
-            return !blockCallbackReturn || callbackReturnReleased;
+            return !blockCallbackReturn || callbackReturnReleased || callbackReturnWaitCancelled;
         } );
         callbackActive = false;
         callbackThread = {};
@@ -247,6 +249,15 @@ struct FakeNative {
     {
         std::lock_guard<std::mutex> lock( callbackMutex );
         callbackReturnReleased = true;
+        callbackChanged.notify_all();
+    }
+
+    void cancelCallbackReturnWaits()
+    {
+        std::lock_guard<std::mutex> lock( callbackMutex );
+        // Unlike releaseCallbackReturn(), watchdog cleanup must also release
+        // callbacks that have not entered yet and will reset the per-call gate.
+        callbackReturnWaitCancelled = true;
         callbackChanged.notify_all();
     }
 
@@ -498,6 +509,9 @@ std::int32_t startOsTraceWithRecordType( NativeOsTraceClient client,
             error( -2, context );
         }
     }
+    if ( fake->duringStreamStart ) {
+        fake->duringStreamStart();
+    }
     return fake->osTraceStartResult;
 }
 
@@ -545,6 +559,9 @@ std::int32_t startSyslog( NativeSyslogRelayClient client, NativeSyslogRelayCallb
     fake->syslogCallback = callback;
     fake->syslogErrorCallback = error;
     fake->syslogContext = context;
+    if ( fake->duringStreamStart ) {
+        fake->duringStreamStart();
+    }
     return fake->syslogStartResult;
 }
 
@@ -595,16 +612,21 @@ class ManualExecutor {
 public:
     IosNativeStreamExecutor executor()
     {
-        return [ this ]( IosNativeStreamTask task ) { tasks_.push_back( std::move( task ) ); };
+        return [ this ]( IosNativeStreamTask task ) {
+            std::lock_guard<std::mutex> lock( mutex_ );
+            tasks_.push_back( std::move( task ) );
+        };
     }
 
     std::size_t pending() const
     {
+        std::lock_guard<std::mutex> lock( mutex_ );
         return tasks_.size();
     }
 
     std::thread startNextOnWorker()
     {
+        std::lock_guard<std::mutex> lock( mutex_ );
         REQUIRE_FALSE( tasks_.empty() );
         auto task = std::move( tasks_.front() );
         tasks_.erase( tasks_.begin() );
@@ -619,12 +641,13 @@ public:
 
     void runAllOnWorker()
     {
-        while ( !tasks_.empty() ) {
+        while ( pending() != 0u ) {
             runNextOnWorker();
         }
     }
 
 private:
+    mutable std::mutex mutex_;
     std::vector<IosNativeStreamTask> tasks_;
 };
 
@@ -634,21 +657,30 @@ struct ObservedCallbacks {
     std::vector<std::pair<Generation, ClassifiedIosNativeError>> errors;
     std::vector<Generation> stopped;
     bool throwFromBytesAvailable{ false };
+    std::mutex mutex;
 
     IosNativeStreamCallbacks callbacks()
     {
         IosNativeStreamCallbacks result;
-        result.ready = [ this ]( Generation generation ) { ready.push_back( generation ); };
+        result.ready = [ this ]( Generation generation ) {
+            std::lock_guard<std::mutex> lock( mutex );
+            ready.push_back( generation );
+        };
         result.bytesAvailable = [ this ]( Generation generation ) {
+            std::lock_guard<std::mutex> lock( mutex );
             bytesAvailable.push_back( generation );
             if ( throwFromBytesAvailable ) {
                 throw std::runtime_error( "observer failure" );
             }
         };
         result.failed = [ this ]( Generation generation, const ClassifiedIosNativeError& error ) {
+            std::lock_guard<std::mutex> lock( mutex );
             errors.emplace_back( generation, error );
         };
-        result.stopped = [ this ]( Generation generation ) { stopped.push_back( generation ); };
+        result.stopped = [ this ]( Generation generation ) {
+            std::lock_guard<std::mutex> lock( mutex );
+            stopped.push_back( generation );
+        };
         return result;
     }
 };
@@ -730,6 +762,21 @@ std::vector<std::uint8_t> osTracePacket( const std::string& message = "native lo
     packet.insert( packet.end(), message.begin(), message.end() );
     packet.push_back( 0u );
     return packet;
+}
+
+// The deadline is only a failure watchdog; success requires the queue's locked
+// waiter count or an explicit producer completion signal, never elapsed time.
+template <typename Predicate>
+bool waitForNativeCondition( Predicate predicate )
+{
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while ( !predicate() ) {
+        if ( std::chrono::steady_clock::now() >= deadline ) {
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    return true;
 }
 
 std::size_t indexOf( const std::vector<std::string>& calls, const std::string& value )
@@ -1657,34 +1704,311 @@ TEST_CASE( "legacy syslog terminal errors use syslog relay ABI codes",
     }
 }
 
-TEST_CASE( "bounded native queue reports backpressure and statistics without silent drops",
+TEST_CASE( "bounded native queue waits for capacity and resumes complete records losslessly",
            "[ios][native][stream][queue][backpressure][statistics]" )
 {
+    const auto limits = GENERATE( LiveDataQueueLimits{ 2u, 8u },
+                                  LiveDataQueueLimits{ 1024u, 1u } );
     FakeNative state;
     fake = &state;
     ManualExecutor executor;
     ObservedCallbacks observed;
     auto options = config( 52u, "8.4" );
-    options.queueLimits = LiveDataQueueLimits{ 2u, 1u };
+    options.queueLimits = limits;
     IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
     REQUIRE( worker.start() );
     executor.runAllOnWorker();
 
     state.emitSyslog( "a\0"s );
-    state.emitSyslog( "b\0"s );
+    std::atomic_bool returned{ false };
+    std::thread producer( [ & ] {
+        state.emitSyslog( "b\0"s );
+        returned = true;
+    } );
+    const bool reachedBarrier = waitForNativeCondition( [ & ] {
+        return worker.waitingProducerCount() == 1u || returned.load();
+    } );
+    const bool waited = reachedBarrier && worker.waitingProducerCount() == 1u;
+    const auto first = worker.drain();
+    producer.join();
+    const auto second = worker.drain();
+    worker.stop( 52u );
+    executor.runAllOnWorker();
 
-    REQUIRE( observed.errors.size() == 1u );
-    CHECK( observed.errors.front().second.error.code == "ios-live-queue-saturated" );
+    CHECK( waited );
+    CHECK( observed.errors.empty() );
+    REQUIRE( first.has_value() );
+    REQUIRE( second.has_value() );
+    CHECK( first->bytes == std::vector<std::uint8_t>{ 'a', '\n' } );
+    CHECK( second->bytes == std::vector<std::uint8_t>{ 'b', '\n' } );
+    CHECK( first->sourceChunks == 1u );
+    CHECK( second->sourceChunks == 1u );
     const auto statistics = worker.statistics();
     CHECK( statistics.receivedBytes == 4u );
     CHECK( statistics.receivedChunks == 2u );
-    CHECK( statistics.queuedBytes == 2u );
-    CHECK( statistics.queuedChunks == 1u );
-    CHECK( statistics.backpressuredBytes == 2u );
-    CHECK( statistics.backpressuredChunks == 1u );
+    CHECK( statistics.deliveredBytes == 4u );
+    CHECK( statistics.deliveredChunks == 2u );
+    CHECK( statistics.queuedBytes == 0u );
+    CHECK( statistics.queuedChunks == 0u );
+    CHECK( statistics.backpressuredBytes == 0u );
+    CHECK( statistics.backpressuredChunks == 0u );
     CHECK( statistics.highWaterQueuedBytes == 2u );
+    CHECK( statistics.highWaterQueuedChunks == 1u );
     CHECK_FALSE( state.callbackTeardownViolation() );
+}
+
+TEST_CASE( "native synchronous startup bursts drain before ready without losing records",
+           "[ios][native][stream][queue][backpressure][startup]" )
+{
+    const auto limits = GENERATE( LiveDataQueueLimits{ 8u, 2u },
+                                  IosNativeStreamConfig{}.queueLimits );
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 53u, "8.4" );
+    options.queueLimits = limits;
+    constexpr std::size_t recordCount = 300u;
+    std::string expected;
+    for ( std::size_t index = 0u; index < recordCount; ++index ) {
+        expected += std::to_string( index ) + '\n';
+    }
+    std::atomic_bool startReturned{ false };
+    std::atomic_bool readyBeforeStartReturned{ false };
+    auto callbacks = observed.callbacks();
+    const auto observeReady = callbacks.ready;
+    callbacks.ready = [ & ]( Generation generation ) {
+        readyBeforeStartReturned = !startReturned.load();
+        observeReady( generation );
+    };
+    state.duringStreamStart = [ & ] {
+        for ( std::size_t index = 0u; index < recordCount; ++index ) {
+            state.emitSyslog( std::to_string( index ) + '\0' );
+        }
+        startReturned = true;
+    };
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), options, callbacks );
+    REQUIRE( worker.start() );
+    auto startup = executor.startNextOnWorker();
+    // This waiter proves a callback inside native start is blocked before ready.
+    const bool reachedBarrier = waitForNativeCondition( [ & ] {
+        return worker.waitingProducerCount() == 1u || startReturned.load();
+    } );
+    const bool waitedBeforeReady = worker.waitingProducerCount() == 1u && !startReturned.load();
+    std::string actual;
+    std::size_t chunks = 0u;
+    const bool completed = waitForNativeCondition( [ & ] {
+        if ( const auto batch = worker.drain() ) {
+            actual.append( batch->bytes.begin(), batch->bytes.end() );
+            chunks += batch->sourceChunks;
+        }
+        return startReturned.load();
+    } );
+    if ( !completed ) {
+        worker.shutdown();
+    }
+    startup.join();
+    if ( const auto batch = worker.drain() ) {
+        actual.append( batch->bytes.begin(), batch->bytes.end() );
+        chunks += batch->sourceChunks;
+    }
+    worker.shutdown();
     executor.runAllOnWorker();
+    CHECK( reachedBarrier );
+    CHECK( waitedBeforeReady );
+    CHECK( completed );
+    CHECK_FALSE( readyBeforeStartReturned );
+    CHECK( observed.ready == std::vector<Generation>{ 53u } );
+    CHECK( observed.errors.empty() );
+    CHECK( actual == expected );
+    CHECK( chunks == recordCount );
+    const auto statistics = worker.statistics();
+    CHECK( statistics.receivedChunks == recordCount );
+    CHECK( statistics.deliveredChunks == recordCount );
+    CHECK( statistics.receivedBytes == expected.size() );
+    CHECK( statistics.deliveredBytes == expected.size() );
+    CHECK( statistics.highWaterQueuedBytes <= limits.maxQueuedBytes );
+    CHECK( statistics.highWaterQueuedChunks <= limits.maxQueuedChunks );
+    CHECK( statistics.backpressuredChunks == 0u );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+}
+
+TEST_CASE( "native terminal paths unblock full queues before cleanup or consumer drain",
+           "[ios][native][stream][queue][backpressure][cancellation]" )
+{
+    const bool duringStartup = GENERATE( false, true );
+    const auto terminalPath = GENERATE( 0, 1, 2 ); // stop, shutdown, native failure
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 54u, "8.4" );
+    options.queueLimits = LiveDataQueueLimits{ 2u, 1u };
+    std::atomic_bool producerReturned{ false };
+    auto produce = [ & ] {
+        state.emitSyslog( "a\0"s );
+        state.emitSyslog( "b\0"s );
+        producerReturned = true;
+    };
+    if ( duringStartup ) {
+        state.duringStreamStart = produce;
+    }
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
+    REQUIRE( worker.start() );
+    std::thread producer;
+    if ( duringStartup ) {
+        producer = executor.startNextOnWorker();
+    }
+    else {
+        executor.runAllOnWorker();
+        producer = std::thread( produce );
+    }
+    const bool reachedBarrier = waitForNativeCondition( [ & ] {
+        return worker.waitingProducerCount() == 1u || producerReturned.load();
+    } );
+    const bool waited = worker.waitingProducerCount() == 1u;
+    if ( !reachedBarrier ) {
+        // Startup may not have installed the native callbacks before the watchdog.
+        worker.shutdown();
+    }
+    else if ( terminalPath == 0 ) {
+        worker.stop( 54u );
+    }
+    else if ( terminalPath == 1 ) {
+        worker.shutdown();
+    }
+    else {
+        // Inject the terminal notification without nesting FakeNative's single
+        // reader ownership tracker inside the blocked data callback.
+        state.syslogErrorCallback( -2, state.syslogContext );
+    }
+    const bool unblockedWithoutDrain = waitForNativeCondition( [ & ] {
+        return producerReturned.load();
+    } );
+    if ( !unblockedWithoutDrain ) {
+        // Failure recovery only: release the test thread before any assertions.
+        static_cast<void>( worker.drain() );
+    }
+    producer.join();
+    executor.runAllOnWorker();
+    const auto retained = worker.drain();
+    CHECK( reachedBarrier );
+    CHECK( waited );
+    CHECK( unblockedWithoutDrain );
+    CHECK( worker.waitingProducerCount() == 0u );
+    REQUIRE( retained.has_value() );
+    CHECK( retained->bytes == std::vector<std::uint8_t>{ 'a', '\n' } );
+    CHECK( retained->sourceChunks == 1u );
+    CHECK( worker.statistics().receivedChunks == 1u );
+    CHECK( worker.statistics().backpressuredChunks == 0u );
+    CHECK( observed.stopped == std::vector<Generation>{ 54u } );
+    CHECK( observed.errors.size() == ( terminalPath == 2 ? 1u : 0u ) );
+    CHECK( observed.ready.size() == ( duringStartup ? 0u : 1u ) );
+    CHECK( std::count( state.calls.begin(), state.calls.end(), "syslog-stop" ) == 1 );
+    CHECK( std::count( state.calls.begin(), state.calls.end(), "syslog-free" ) == 1 );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+}
+
+TEST_CASE( "native startup failure closes a full queue and joins callback return before freeing",
+           "[ios][native][stream][queue][backpressure][startup][ownership]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.syslogStartResult = -2;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 57u, "8.4" );
+    options.queueLimits = LiveDataQueueLimits{ 2u, 1u };
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
+    std::thread producer;
+    std::atomic_bool reachedWait{ false };
+    state.duringStreamStart = [ & ] {
+        state.emitSyslog( "a\0"s );
+        state.blockCallbackReturn = true;
+        producer = std::thread( [ & ] { state.emitSyslog( "b\0"s ); } );
+        reachedWait = waitForNativeCondition( [ & ] {
+            return worker.waitingProducerCount() == 1u;
+        } );
+    };
+    REQUIRE( worker.start() );
+    auto startup = executor.startNextOnWorker();
+    const bool startupReachedWait = waitForNativeCondition( [ & ] { return reachedWait.load(); } );
+    const bool bodyReturned = state.waitUntilCallbackBodyReturned();
+    const bool stopEntered = state.waitUntilStopEntered();
+    if ( !bodyReturned ) {
+        static_cast<void>( worker.drain() );
+    }
+    // Keep the native callback beyond its C++ guard until stop/join is reached.
+    // Cancellation also releases a producer that enters after the watchdog fired.
+    state.cancelCallbackReturnWaits();
+    startup.join();
+    producer.join();
+    executor.runAllOnWorker();
+    CHECK( startupReachedWait );
+    CHECK( reachedWait );
+    CHECK( bodyReturned );
+    CHECK( stopEntered );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-device-disconnected" );
+    CHECK( observed.ready.empty() );
+    CHECK( observed.stopped == std::vector<Generation>{ 57u } );
+    CHECK( std::find( state.calls.begin(), state.calls.end(), "syslog-stop" )
+           < std::find( state.calls.begin(), state.calls.end(), "syslog-free" ) );
+    const auto retained = worker.drain();
+    REQUIRE( retained.has_value() );
+    CHECK( retained->bytes == std::vector<std::uint8_t>{ 'a', '\n' } );
+}
+
+TEST_CASE( "native records that cannot fit are explicit nonretryable failures",
+           "[ios][native][stream][queue][backpressure][oversize]" )
+{
+    const bool osTrace = GENERATE( false, true );
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 55u, osTrace ? "17.6.1" : "8.4" );
+    options.queueLimits = LiveDataQueueLimits{ 2u, 1u };
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+    if ( osTrace ) {
+        state.emitOsTrace( 2u, osTracePacket() );
+    }
+    else {
+        state.emitSyslog( "ab\0"s ); // The appended newline counts toward the limit.
+    }
+    executor.runAllOnWorker();
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-live-record-too-large" );
+    CHECK( observed.errors.front().second.error.retryPolicy == RetryPolicy::Never );
+    CHECK( worker.waitingProducerCount() == 0u );
+    CHECK_FALSE( worker.drain().has_value() );
+    CHECK( observed.stopped == std::vector<Generation>{ 55u } );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+}
+
+TEST_CASE( "native zero capacity is rejected before starting a reader",
+           "[ios][native][stream][queue][backpressure][configuration]" )
+{
+    const auto limits = GENERATE( LiveDataQueueLimits{ 2u, 0u }, LiveDataQueueLimits{ 0u, 1u } );
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    auto options = config( 56u, "8.4" );
+    options.queueLimits = limits;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), options, observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+    worker.shutdown();
+    executor.runAllOnWorker();
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-live-queue-invalid-capacity" );
+    CHECK( observed.errors.front().second.error.retryPolicy == RetryPolicy::Never );
+    CHECK( observed.ready.empty() );
+    CHECK( state.calls.empty() );
 }
 
 TEST_CASE( "native stop interrupts a blocked partial-frame receive before cleanup acknowledgement",

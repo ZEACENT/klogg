@@ -349,59 +349,46 @@ publish_component(
         ):
             self.assertIn(marker, qualification)
 
-    def test_stable_release_publishes_content_addressed_adb_and_ios_sources_with_manifest(self):
+    def test_stable_release_promotes_verified_continuous_sources_and_manifest(self):
         workflow = required_text(CI_RELEASE)
-        preparer = required_text(PUBLICATION_PREPARER)
+        promoter = required_text(ROOT / "scripts" / "promote_release_publication.py")
         manifest = self.contract["publication_manifest"]["file_name"]
-        for name in (
-            self.adb["receipt_file"],
-            self.ios["receipt_file"],
+        for marker in (
+            "/releases/tags/continuous",
+            "/releases/assets/${asset_id}",
+            "continuous-source-metadata.json",
+            "promote_release_publication.py",
+            "verify_source_publication_manifest.py",
             manifest,
-            "adb-helper",
-            "ios-native",
         ):
-            self.assertIn(name, workflow)
-        self.assertIn(
-            "published_source_name(version, component, archive_hash)",
-            preparer,
-        )
-        for component in ("adb-helper", "ios-native"):
-            self.assertIn(f'"{component}"', preparer)
-        self.assertIn("prepare_source_publication.py", workflow)
-        self.assertIn("verify_source_publication_manifest.py", workflow)
-        self.assertRegex(workflow, r"(?i)channel[^\n]*stable")
-        self.assertIn('"mutable": args.channel == "continuous"', preparer)
+            self.assertIn(marker, workflow)
+        self.assertNotIn("prepare_source_publication.py", workflow)
+        self.assertIn('document["schema_version"] = 3', promoter)
+        self.assertIn('document["channel"] = "stable"', promoter)
+        self.assertIn('document["promotion"]', promoter)
         upload = workflow.index("- name: Create GitHub Release")
         post_upload = workflow.find("verify_source_publication_manifest.py", upload)
         self.assertGreater(post_upload, upload, "stable publication must verify after upload")
-        self.assertRegex(workflow[upload:], r"gh\s+(?:api|release\s+download)")
 
-    def test_stable_release_defaults_to_validation_and_keeps_signed_evidence_strict(self):
+    def test_stable_release_is_strict_validation_only_continuous_promotion(self):
         build = required_text(CI_BUILD)
         release = required_text(CI_RELEASE)
         self.assertIn("qualification-mode:", build)
         self.assertIn("- release", build)
-        self.assertIn("evidence-level:", release)
-        evidence_input = release.split("evidence-level:", 1)[1].split("jobs:", 1)[0]
-        self.assertIn("default: validation", evidence_input)
-        self.assertIn("- validation", evidence_input)
-        self.assertIn("- signed", evidence_input)
-        self.assertIn("--evidence-level \"${KLOGG_EVIDENCE_LEVEL}\"", release)
-        self.assertRegex(
-            release,
-            r"KLOGG_EVIDENCE_LEVEL.*signed[\s\S]+adb-helper-signing-receipt\.json[\s\S]+adb-helper-notarization-receipt\.json",
-        )
-        for secret in (
-            "CODESIGN_BASE64",
-            "CODESIGN_PASSWORD",
-            "APPLE_DEVELOPER_ID_APPLICATION",
-            "NOTARIZATION_USERNAME",
-            "NOTARIZATION_TEAM",
-            "NOTARIZATION_PASSWORD",
+        for obsolete in (
+            "evidence-level:",
+            "KLOGG_EVIDENCE_LEVEL",
+            "- signed",
+            "sentry-cli",
+            "SENTRY_TOKEN",
+            "adb-helper-signing-receipt.json",
+            "adb-helper-notarization-receipt.json",
         ):
-            self.assertNotIn(f"secrets.{secret}", release)
+            self.assertNotIn(obsolete, release)
+        self.assertIn("--expected-evidence-level validation", release)
+        self.assertIn("promoted byte-for-byte", release)
 
-    def test_required_ci_does_not_publish_and_workflow_run_publisher_is_trusted(self):
+    def test_required_ci_dispatches_only_a_trusted_continuous_publisher(self):
         build = required_text(CI_BUILD)
         for marker in (
             "CreatePreRelease:",
@@ -410,22 +397,29 @@ publish_component(
             "softprops/action-gh-release",
         ):
             self.assertNotIn(marker, build)
+        dispatch = build.split("  DispatchContinuous:", 1)[1]
+        self.assertIn("needs: [ci-gate]", dispatch)
+        for marker in (
+            "success()",
+            "needs.ci-gate.result == 'success'",
+            "github.event_name == 'push'",
+            "github.ref == 'refs/heads/master'",
+            "gh workflow run ci-continuous.yml",
+            "ci-run-id=\"$KLOGG_CI_RUN_ID\"",
+            "ci-run-sha=\"$KLOGG_CI_RUN_SHA\"",
+        ):
+            self.assertIn(marker, dispatch)
 
         continuous = required_text(CI_CONTINUOUS)
-        self.assertIn("workflow_run:", continuous)
-        self.assertRegex(continuous, r"workflows:\s*\[\s*[\"']CI Build[\"']\s*\]")
-        self.assertIn("types: [completed]", continuous)
-        trusted = (
-            "github.event.workflow_run.conclusion == 'success'"
-            " && github.event.workflow_run.event == 'push'"
-            " && github.event.workflow_run.head_branch == 'master'"
-            " && github.event.workflow_run.head_repository.full_name == github.repository"
-        )
-        self.assertIn(trusted, " ".join(continuous.split()))
-        self.assertIn("actions: read", continuous)
-        self.assertIn("contents: write", continuous)
+        self.assertIn("workflow_dispatch:", continuous)
+        self.assertNotIn("workflow_run:", continuous)
+        self.assertIn("ci-run-id:", continuous)
+        self.assertIn("ci-run-sha:", continuous)
+        self.assertIn("select(.name == \"ci-gate\")", continuous)
+        self.assertIn("Timed out waiting for source CI run", continuous)
+        self.assertIn("run-id: ${{ env.KLOGG_CI_RUN_ID }}", continuous)
+        self.assertNotIn("github.event.workflow_run", continuous)
         self.assertIn("cancel-in-progress: false", continuous)
-        self.assertIn("github.token", continuous)
         self.assertNotRegex(continuous, r"secrets\.(?:CODESIGN|APPLE|NOTARIZATION)")
         readme = required_text(README)
         self.assertIn("continuous release", readme.lower())
@@ -434,6 +428,7 @@ publish_component(
     def test_source_asset_producers_bind_release_version_and_flat_checksums(self):
         build = required_text(CI_BUILD)
         stable = required_text(CI_RELEASE)
+        promoter = required_text(ROOT / "scripts" / "promote_release_publication.py")
         adb_producer = section(build, "  PrefetchAdbHelperSources:", "  BuildAdbHelpers:")
         ios_producer = section(build, "  BuildIosNativeStacks:", "  MacPackages:")
         for producer in (adb_producer, ios_producer):
@@ -442,9 +437,10 @@ publish_component(
             self.assertIn("--base-url", producer)
         self.assertNotIn("packages-bin", stable)
         self.assertNotIn("source-publication-sha256.txt", stable)
-        self.assertIn("packages-publication/SHA256SUMS", stable)
+        self.assertIn("write_checksums(staging)", promoter)
+        self.assertIn("packages-publication", stable)
 
-    def test_publication_preparer_requires_adb_and_explicit_ios_source_qualifications(self):
+    def test_continuous_preparer_owns_source_qualification_before_stable_promotion(self):
         preparer = required_text(PUBLICATION_PREPARER)
         for marker in (
             "source_set_receipt_sha256",
@@ -453,52 +449,56 @@ publish_component(
             "missing external iOS qualification for DMG",
         ):
             self.assertIn(marker, preparer)
+        continuous = required_text(CI_CONTINUOUS)
         stable = required_text(CI_RELEASE)
-        self.assertIn("ios-native-dmg-package-verification.json", stable)
-        self.assertIn("--ios-qualification-receipt", stable)
-        self.assertNotIn("--ios-qualification-receipt", required_text(CI_BUILD))
+        self.assertIn("ios-native-dmg-package-verification.json", continuous)
+        self.assertIn("--ios-qualification-receipt", continuous)
+        self.assertNotIn("--ios-qualification-receipt", stable)
+        self.assertIn("promote_release_publication.py", stable)
 
-    def test_stable_release_selects_exact_trusted_ci_artifacts_without_expression_injection(self):
+    def test_stable_release_selects_exact_live_continuous_assets_without_override(self):
         workflow = required_text(CI_RELEASE)
         self.assertIn('test "${GITHUB_REF}" = "refs/heads/master"', workflow)
-        self.assertIn("KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}", workflow)
+        self.assertNotIn("ci-run-id:", workflow)
+        self.assertNotIn("KLOGG_REQUESTED_CI_RUN_ID", workflow)
         selection = section(
             workflow,
-            "- name: Select trusted CI run",
-            "- name: Download artifacts for selected CI workflow",
+            "- name: Select live Continuous release snapshot",
+            "- name: Download immutable Continuous release assets",
         )
-        self.assertNotIn("${{ github.event.inputs.ci-run-id }}", selection)
-        self.assertRegex(selection, r"\^\[0-9\]\+\$")
         for marker in (
-            'run_path="$(gh api',
-            'run_repository="$(gh api',
-            'run_branch="$(gh api',
-            'run_event="$(gh api',
-            'run_conclusion="$(gh api',
-            'KLOGG_CI_RUN_ID=',
-            'KLOGG_CI_RUN_SHA=',
-            '".github/workflows/ci-build.yml"',
-            '"${GITHUB_REPOSITORY}"',
-            '"master"',
-            '"success"',
-            "event=push",
-            'KLOGG_EVIDENCE_LEVEL" = validation',
-            "workflow-run API does not expose workflow_dispatch inputs",
+            "/releases/tags/continuous",
+            'release_id="$(gh api',
+            'release_draft="$(gh api',
+            'release_prerelease="$(gh api',
+            'test "$release_draft" = false',
+            'test "$release_prerelease" = true',
+            "/git/ref/tags/continuous",
             "/branches/master",
+            "KLOGG_SOURCE_RELEASE_ID=",
+            "KLOGG_SOURCE_COMMIT=",
         ):
             self.assertIn(marker, selection)
-        self.assertNotIn('.inputs["qualification-mode"]', selection)
-        self.assertIn("run_id: ${{ env.KLOGG_CI_RUN_ID }}", workflow)
-
-        metadata = workflow.index("klogg_commit.txt")
-        checkout = workflow.find('git checkout --detach "${KLOGG_SOURCE_COMMIT}"', metadata)
-        extract = workflow.index("- name: Extract package tarballs")
-        self.assertGreater(checkout, metadata)
-        self.assertLess(checkout, extract)
-        initialization = workflow[metadata:extract]
-        self.assertIn('test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}"', initialization)
-        self.assertIn("git merge-base --is-ancestor", initialization)
-        changelog = section(workflow, "- name: Generate Changelog", "- name: Display structure")
+        download = section(
+            workflow,
+            "- name: Download immutable Continuous release assets",
+            "- name: Verify Continuous source publication and checkout",
+        )
+        self.assertIn("len(records) != 23", download)
+        self.assertIn("invalid or duplicate Continuous release asset ID", download)
+        self.assertIn("invalid or duplicate Continuous release asset name", download)
+        self.assertIn("/releases/assets/${asset_id}", download)
+        self.assertIn("continuous-source-metadata.json", download)
+        self.assertNotIn("action-download-artifact", workflow)
+        self.assertNotIn("actions/workflows/ci-build.yml/runs", workflow)
+        checkout = workflow.index('git checkout --detach "$KLOGG_SOURCE_COMMIT"')
+        promote = workflow.index("- name: Promote verified Continuous publication to Stable")
+        self.assertLess(checkout, promote)
+        changelog = section(
+            workflow,
+            "- name: Generate Changelog",
+            "- name: Promote verified Continuous publication to Stable",
+        )
         self.assertIn('--to-ref "${KLOGG_SOURCE_COMMIT}"', changelog)
 
     def test_stable_retry_recreates_a_clean_draft_asset_set(self):
@@ -518,12 +518,14 @@ publish_component(
         )
         self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
 
-    def test_stable_release_uses_selected_ci_commit_and_remains_draft_until_verified(self):
+    def test_stable_release_uses_continuous_commit_and_remains_draft_until_verified(self):
         workflow = required_text(CI_RELEASE)
-        self.assertIn("klogg_commit.txt", workflow)
+        self.assertIn("continuous-publication/klogg-source-publication-manifest.json", workflow)
         self.assertIn("KLOGG_SOURCE_COMMIT", workflow)
         publication = section(
-            workflow, "- name: Prepare coherent stable package and source publication", "- name: Discord notification"
+            workflow,
+            "- name: Promote verified Continuous publication to Stable",
+            "- name: Discord notification",
         )
         self.assertNotIn('--commit "${GITHUB_SHA}"', publication)
         self.assertIn("target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}", publication)
@@ -532,14 +534,17 @@ publish_component(
         self.assertLess(create, verify)
         self.assertIn("draft: true", publication[create:verify])
         self.assertIn("tag_name: v${{ env.KLOGG_VERSION }}-candidate", publication[create:verify])
-        verification = publication[verify:]
-        draft_verification = verification[: verification.index("- name: Recheck master tip")]
+        draft_verification = section(
+            publication,
+            "- name: Verify stable source publication after upload",
+            "- name: Recheck Continuous snapshot before stable promotion",
+        )
         self.assertIn(".target_commitish", draft_verification)
         self.assertIn(
             'test "${candidate_target}" = "${KLOGG_SOURCE_COMMIT}"',
             draft_verification,
         )
-        self.assertNotIn("/git/ref/tags/", draft_verification)
+        self.assertNotIn("/git/ref/tags/v${KLOGG_VERSION}-candidate", draft_verification)
         promotion = publication.find("draft=false", verify)
         self.assertGreater(promotion, verify, "stable release must publish only after verification")
 
@@ -548,7 +553,7 @@ publish_component(
         release = required_text(CI_RELEASE)
         create = release.index("- name: Create GitHub Release")
         verify = release.index("- name: Verify stable source publication after upload")
-        stale = release.index("- name: Recheck master tip before stable promotion")
+        stale = release.index("- name: Recheck Continuous snapshot before stable promotion")
         promote = release.index("- name: Publish verified stable release")
         self.assertLess(create, verify)
         self.assertLess(verify, stale)
@@ -557,14 +562,39 @@ publish_component(
         promotion = release[promote:]
         self.assertIn("draft=false", promotion)
         self.assertGreaterEqual(promotion.count("/branches/master"), 2)
+        self.assertGreaterEqual(promotion.count("/releases/tags/continuous"), 2)
         self.assertIn("Roll back failed stable promotion", promotion)
         self.assertIn('releases/${RELEASE_ID}', promotion)
         self.assertIn('delete_ref_if_present "$final_tag"', promotion)
-        before_create = release.index("- name: Recheck master tip before stable draft creation")
+        self.assertNotIn("promoted=", promotion)
+        self.assertIn('-f ref="refs/tags/${final_tag}"', promotion)
+        self.assertIn("final_ref_owned=true", promotion)
+        rollback = section(
+            release,
+            "rollback_stable_promotion() {",
+            "trap rollback_stable_promotion ERR",
+        )
+        self.assertIn('gh api -X DELETE "/repos/${repo}/releases/${RELEASE_ID}"', rollback)
+        self.assertIn('if [ "$final_ref_owned" = true ]', rollback)
+        self.assertIn('delete_ref_if_present "$final_tag"', rollback)
+        cancellation = section(
+            release,
+            "- name: Roll back failed or cancelled stable promotion",
+            "- name: Discord notification",
+        )
+        self.assertIn("failure() || cancelled()", cancellation)
+        self.assertIn('releases/${RELEASE_ID}', cancellation)
+        notification = release.split("- name: Discord notification", 1)[1]
+        self.assertIn("continue-on-error: true", notification)
+        before_create = release.index(
+            "- name: Recheck Continuous snapshot before stable draft creation"
+        )
         self.assertLess(before_create, create)
         for position in (before_create, stale):
-            check = release[position : release.find("\n    - name:", position + 1)]
+            end = release.find("\n      - name:", position + 1)
+            check = release[position : end if end != -1 else len(release)]
             self.assertIn("/branches/master", check)
+            self.assertIn("/releases/tags/continuous", check)
             self.assertIn("KLOGG_SOURCE_COMMIT", check)
 
     def test_continuous_publication_is_transactional_sha_bound_and_rollback_safe(self):
@@ -600,9 +630,10 @@ publish_component(
         self.assertIn('backup_tag="continuous-rollback-${KLOGG_CI_RUN_ID}"', workflow)
         self.assertNotIn("continuous-candidate-${GITHUB_RUN_ID}", workflow)
         self.assertNotIn("continuous-rollback-${GITHUB_RUN_ID}", workflow)
-        self.assertIn("run-id: ${{ github.event.workflow_run.id }}", workflow)
+        self.assertIn("run-id: ${{ env.KLOGG_CI_RUN_ID }}", workflow)
         self.assertIn("github-token: ${{ github.token }}", workflow)
-        self.assertIn("github.event.workflow_run.head_sha", workflow)
+        self.assertIn("KLOGG_REQUESTED_CI_RUN_SHA: ${{ inputs.ci-run-sha }}", workflow)
+        self.assertNotIn("github.event.workflow_run", workflow)
         self.assertIn('test "${KLOGG_SOURCE_COMMIT}" = "${KLOGG_CI_RUN_SHA}"', workflow)
         critical = section(
             workflow,
@@ -2178,16 +2209,19 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
     def test_workflows_stage_only_consolidated_assets_and_use_rendered_body(self):
         stable = required_text(CI_RELEASE)
         continuous = required_text(CI_CONTINUOUS)
+        promoter = required_text(ROOT / "scripts" / "promote_release_publication.py")
         for workflow in (stable, continuous):
             self.assertIn("render_release_downloads.py", workflow)
             self.assertIn("body_path:", workflow)
-            self.assertIn(self.release_contract["evidence_archive"]["file_name"], workflow)
-            self.assertIn(self.release_contract["checksums"]["file_name"], workflow)
             self.assertNotRegex(workflow, r"packages-publication/[^\n]*\.sha256")
             self.assertNotRegex(
                 workflow,
                 r"packages-publication/[^\n]*(?:qualification|signing|notarization)\.json",
             )
+        self.assertIn(self.release_contract["evidence_archive"]["file_name"], continuous)
+        self.assertIn(self.release_contract["checksums"]["file_name"], continuous)
+        self.assertIn("write_checksums(staging)", promoter)
+        self.assertIn('test "$asset_count" -eq 23', stable)
         self.assertNotIn("Candidate", section(continuous, "- name: Create continuous candidate draft", "- name: Verify continuous candidate after upload").split("name:", 2)[-1])
         self.assertIn('-f name="Continuous Build ${KLOGG_VERSION}"', continuous)
         self.assertEqual(
@@ -2213,7 +2247,7 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
         changelog = section(
             stable,
             "- name: Generate Changelog",
-            "- name: Display structure of downloaded files",
+            "- name: Promote verified Continuous publication to Stable",
         )
         self.assertIn("release-changelog.txt", changelog)
         self.assertNotIn("GITHUB_ENV", changelog)

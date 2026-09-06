@@ -95,7 +95,10 @@ CI_BUILD_REQUIRED_JOBS = {
     "WindowsX86",
     "WindowsAsan",
     "ci-gate",
+    "DispatchContinuous",
 }
+
+CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
 
 CI_BUILD_ROOT_JOBS = {
     "SaveVersion",
@@ -741,24 +744,30 @@ def ci_build_workflow_issues(text: str) -> list[str]:
                 )
 
     gate = "ci-gate"
+    validation_jobs = set(needs) - {gate} - CI_BUILD_POST_GATE_JOBS
     if gate in needs:
         consumed_before_gate = {
             dependency
             for job, dependencies in needs.items()
-            if job != gate
+            if job in validation_jobs
             for dependency in dependencies
         }
-        terminal_jobs = (set(needs) - {gate}) - consumed_before_gate
+        terminal_jobs = validation_jobs - consumed_before_gate
         if needs[gate] != terminal_jobs:
             issues.append(
                 "CI gate must directly need exactly terminal validation jobs, got "
                 f"{sorted(needs[gate])}, expected {sorted(terminal_jobs)}"
             )
-        missing_from_gate = (set(needs) - {gate}) - ancestors[gate]
+        missing_from_gate = validation_jobs - ancestors[gate]
         if missing_from_gate:
             issues.append(
                 "CI gate does not cover jobs: " + ", ".join(sorted(missing_from_gate))
             )
+    for job in CI_BUILD_POST_GATE_JOBS & set(needs):
+        if needs[job] != {gate}:
+            issues.append(f"CI post-gate job {job} must directly need only {gate}")
+        if validation_jobs - ancestors[job]:
+            issues.append(f"CI post-gate job {job} must run after the complete CI gate")
 
     try:
         artifact_records = workflow_artifact_records(text)
@@ -981,6 +990,53 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         or shell_commands(text).count(release_master_guard) != 1
     ):
         issues.append("signed release qualification must reject non-master dispatches")
+
+    dispatch = job_blocks.get("DispatchContinuous")
+    dispatch_message = (
+        "CI Continuous dispatch must be an exact successful trusted master post-gate job"
+    )
+    if dispatch is not None:
+        expected_condition = (
+            "${{ success() && needs.ci-gate.result == 'success' "
+            "&& github.event_name == 'push' && github.ref == 'refs/heads/master' "
+            "&& github.event.repository.full_name == github.repository }}"
+        )
+        permissions = workflow_mapping_block(dispatch, "permissions", 4)
+        parsed_steps = [
+            workflow_step_fields(step) for step in workflow_step_blocks(dispatch)
+        ]
+        valid_step = len(parsed_steps) == 1
+        if valid_step:
+            fields, children = parsed_steps[0]
+            run_text = fields.get("run", "")
+            active_run = "\n".join(
+                active
+                for line in run_text.splitlines()
+                if (active := strip_yaml_comment(line))
+            )
+            env = children.get("env", {})
+            valid_step = (
+                fields.get("name") == "Dispatch Continuous publisher for current master"
+                and fields.get("shell") == "bash"
+                and env.get("GH_TOKEN") == "${{ github.token }}"
+                and env.get("KLOGG_CI_RUN_ID") == "${{ github.run_id }}"
+                and env.get("KLOGG_CI_RUN_SHA") == "${{ github.sha }}"
+                and 'master_sha="$(gh api "/repos/${repo}/branches/master" --jq ".commit.sha")"'
+                in active_run.replace("'", '"')
+                and "gh workflow run ci-continuous.yml" in active_run
+                and '--repo "$repo"' in active_run
+                and "--ref master" in active_run
+                and '-f ci-run-id="$KLOGG_CI_RUN_ID"' in active_run
+                and '-f ci-run-sha="$KLOGG_CI_RUN_SHA"' in active_run
+            )
+        if (
+            workflow_job_direct_value(dispatch, "if") != expected_condition
+            or permissions is None
+            or {key: value for key, (value, _) in permissions.items()}
+            != {"actions": "write", "contents": "read"}
+            or not valid_step
+        ):
+            issues.append(dispatch_message)
 
     if "CreatePreRelease" in job_blocks or "softprops/action-gh-release@" in active_text:
         issues.append("release publication must run outside the required CI workflow")
@@ -2250,10 +2306,10 @@ STABLE_TRIGGER_MESSAGE = (
     "stable release workflow must support only workflow_dispatch publication"
 )
 CONTINUOUS_TRIGGER_MESSAGE = (
-    "continuous release workflow must use only completed CI Build workflow_run events"
+    "continuous release workflow must use only reviewed CI dispatch receipts"
 )
 STABLE_RUN_PROJECTION_MESSAGE = (
-    "stable release selection must model push validation and workflow_dispatch receipt evidence"
+    "stable release must promote only the immutable live Continuous publication"
 )
 
 
@@ -2261,24 +2317,32 @@ def stable_release_trigger_issues(text: str) -> list[str]:
     triggers = workflow_trigger_mapping(text)
     if triggers is None or set(triggers) != {"workflow_dispatch"}:
         return [STABLE_TRIGGER_MESSAGE]
-    value, _ = triggers["workflow_dispatch"]
-    return [] if value == "" else [STABLE_TRIGGER_MESSAGE]
+    value, block = triggers["workflow_dispatch"]
+    active = [line for line in block if strip_yaml_comment(line)]
+    return [] if value == "" and len(active) == 1 else [STABLE_TRIGGER_MESSAGE]
 
 
 def continuous_release_trigger_issues(text: str) -> list[str]:
     triggers = workflow_trigger_mapping(text)
-    if triggers is None or set(triggers) != {"workflow_run"}:
+    if triggers is None or set(triggers) != {"workflow_dispatch"}:
         return [CONTINUOUS_TRIGGER_MESSAGE]
-    value, block = triggers["workflow_run"]
+    value, block = triggers["workflow_dispatch"]
     if value:
         return [CONTINUOUS_TRIGGER_MESSAGE]
-    fields = workflow_mapping_block(block, "workflow_run", 2)
-    if fields is None or set(fields) != {"workflows", "types"}:
+    dispatch_fields = workflow_mapping_block(block, "workflow_dispatch", 2)
+    if dispatch_fields is None or set(dispatch_fields) != {"inputs"}:
         return [CONTINUOUS_TRIGGER_MESSAGE]
-    workflows = parse_inline_yaml_list(fields["workflows"][0])
-    event_types = parse_inline_yaml_list(fields["types"][0])
-    if workflows != {"CI Build"} or event_types != {"completed"}:
+    input_block = dispatch_fields["inputs"][1]
+    inputs = workflow_mapping_block(input_block, "inputs", 4)
+    if inputs is None or set(inputs) != {"ci-run-id", "ci-run-sha"}:
         return [CONTINUOUS_TRIGGER_MESSAGE]
+    for input_name in ("ci-run-id", "ci-run-sha"):
+        fields = workflow_mapping_block(input_block, input_name, 6)
+        if fields is None or set(fields) != {"description", "required", "type"}:
+            return [CONTINUOUS_TRIGGER_MESSAGE]
+        values = {key: field[0] for key, field in fields.items()}
+        if not values["description"] or values["required"] != "true" or values["type"] != "string":
+            return [CONTINUOUS_TRIGGER_MESSAGE]
     return []
 
 
@@ -2286,26 +2350,81 @@ def stable_release_run_projection_issues(text: str) -> list[str]:
     release = workflow_job_blocks(text).get("release")
     if release is None:
         return [STABLE_RUN_PROJECTION_MESSAGE]
-    matches = []
-    for step in workflow_step_blocks(release):
-        fields, _ = workflow_step_fields(step)
-        if fields.get("name") == "Select trusted CI run":
-            matches.append(fields.get("run", ""))
-    if len(matches) != 1:
+    steps = [workflow_step_fields(step) for step in workflow_step_blocks(release)]
+    by_name: dict[str, list[tuple[dict[str, str], dict[str, dict[str, str]]]]] = {}
+    for parsed in steps:
+        by_name.setdefault(parsed[0].get("name", ""), []).append(parsed)
+    required_names = (
+        "Select live Continuous release snapshot",
+        "Download immutable Continuous release assets",
+        "Verify Continuous source publication and checkout",
+        "Promote verified Continuous publication to Stable",
+    )
+    if any(len(by_name.get(name, [])) != 1 for name in required_names):
         return [STABLE_RUN_PROJECTION_MESSAGE]
-    run_text = matches[0]
-    if shell_case_labels(run_text, "run_event") != {
-        "push",
-        "workflow_dispatch",
-        "*",
-    }:
-        return [STABLE_RUN_PROJECTION_MESSAGE]
-    active_lines = {
+    selection = by_name[required_names[0]][0][0].get("run", "")
+    download = by_name[required_names[1]][0][0].get("run", "")
+    verification = by_name[required_names[2]][0][0].get("run", "")
+    promotion = by_name[required_names[3]][0][0].get("run", "")
+    required_selection = (
+        "/releases/tags/continuous",
+        'release_draft="$(gh api',
+        'release_prerelease="$(gh api',
+        'test "$release_draft" = false',
+        'test "$release_prerelease" = true',
+        "/git/ref/tags/continuous",
+        "/branches/master",
+        "KLOGG_SOURCE_RELEASE_ID=",
+        "KLOGG_SOURCE_COMMIT=",
+    )
+    selection_lines = {
         active
-        for line in run_text.splitlines()
+        for line in selection.splitlines()
         if (active := strip_yaml_comment(line))
     }
-    if 'test "$KLOGG_EVIDENCE_LEVEL" = validation || {' not in active_lines:
+    required_selection_lines = {
+        'test "$release_draft" = false || { echo "::error::Live Continuous release is still a draft"; exit 1; }',
+        'test "$release_prerelease" = true || { echo "::error::Live Continuous release is not a pre-release"; exit 1; }',
+    }
+    required_download = (
+        '/releases/${KLOGG_SOURCE_RELEASE_ID}/assets?per_page=100',
+        "/releases/assets/${asset_id}",
+        "len(records) != 23",
+        '"metadata_kind": "klogg-continuous-publication-source"',
+        '"source_release_id": release_id',
+        '"source_tag_sha": tag_sha',
+    )
+    required_verification = (
+        "verify_source_publication_manifest.py",
+        "--expected-channel continuous",
+        "--expected-evidence-level validation",
+        "--expected-tag continuous",
+        'test "$manifest_commit" = "$KLOGG_SOURCE_COMMIT"',
+    )
+    required_promotion = (
+        "promote_release_publication.py",
+        "--source-manifest continuous-publication/klogg-source-publication-manifest.json",
+        "--source-assets-root continuous-publication",
+        "--source-metadata continuous-source-metadata.json",
+        "--output packages-publication",
+    )
+    if (
+        any(marker not in selection for marker in required_selection)
+        or not required_selection_lines.issubset(selection_lines)
+        or any(marker not in download for marker in required_download)
+        or any(marker not in verification for marker in required_verification)
+        or any(marker not in promotion for marker in required_promotion)
+    ):
+        return [STABLE_RUN_PROJECTION_MESSAGE]
+    forbidden = (
+        "KLOGG_REQUESTED_CI_RUN_ID",
+        "KLOGG_EVIDENCE_LEVEL",
+        "action-download-artifact",
+        "actions/workflows/ci-build.yml/runs",
+        "sentry-cli",
+        "--evidence-level signed",
+    )
+    if any(marker in text for marker in forbidden):
         return [STABLE_RUN_PROJECTION_MESSAGE]
     return []
 
@@ -2444,19 +2563,16 @@ def stable_release_workflow_issues(text: str) -> list[str]:
     master_guard = 'test "${GITHUB_REF}" = "refs/heads/master" || {'
     if commands.count(master_guard) != 1:
         issues.append("stable release dispatch must fail closed outside master")
-    if (
-        "KLOGG_REQUESTED_CI_RUN_ID: ${{ github.event.inputs.ci-run-id }}" not in text
-        or "[[ \"$requested_run_id\" =~ ^[0-9]+$ ]]" not in text
-    ):
-        issues.append("stable release run ID must use validated environment input")
-    if any(
-        re.search(r"\.inputs\b", jq_filter)
-        for jq_filter in re.findall(r"--jq\s+(?:'[^']*'|\"[^\"]*\")", text)
-    ):
-        issues.append("stable release evidence must come from downloaded receipts, not run API inputs")
+    if "group: release-publisher" not in text or "queue: max" not in text:
+        issues.append("release publishers must share one lossless serialized concurrency group")
+    if text.count(".schema_version'") < 2 or text.count(')\" = 3') < 2:
+        issues.append("stable release verification must require promotion manifest schema v3")
+    snapshot_checks = text.count('/releases/tags/continuous" --jq \'.id\'')
+    if snapshot_checks < 5 or text.count("/git/ref/tags/continuous") < 5:
+        issues.append("stable release must revalidate the selected Continuous snapshot")
     draft_verification = text.partition(
         "- name: Verify stable source publication after upload"
-    )[2].partition("- name: Recheck master tip before stable promotion")[0]
+    )[2].partition("- name: Recheck Continuous snapshot before stable promotion")[0]
     if "/git/ref/tags/" in draft_verification:
         issues.append("stable draft verification must not require an unpublished Git tag")
     draft_target_jq = re.search(r"--jq\s+'[^']*\.target_commitish", draft_verification)
@@ -2469,8 +2585,17 @@ def stable_release_workflow_issues(text: str) -> list[str]:
     if (
         "rollback_stable_promotion" not in text
         or "trap rollback_stable_promotion ERR" not in text
+        or "- name: Roll back failed or cancelled stable promotion" not in text
+        or "if: ${{ failure() || cancelled() }}" not in text
     ):
-        issues.append("stable release promotion must roll back every post-publish failure")
+        issues.append("stable release promotion must roll back failure and cancellation")
+    if (
+        '-f ref="refs/tags/${final_tag}" -f sha="$KLOGG_SOURCE_COMMIT"' not in text
+        or "final_ref_owned=true" not in text
+        or 'if [ "$final_ref_owned" = true ]' not in text
+        or "KLOGG_STABLE_FINAL_REF_OWNED=true" not in text
+    ):
+        issues.append("stable release promotion must own the final ref before rollback")
     issues.extend(
         release_download_workflow_issues(
             text, "release", "Create GitHub Release", "stable"
@@ -2492,20 +2617,68 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
     blocks = workflow_job_blocks(text)
     select = blocks.get("select")
     publish = blocks.get("publish")
-    expected_select = (
-        "github.event.workflow_run.conclusion == 'success' "
-        "&& github.event.workflow_run.event == 'push' "
-        "&& github.event.workflow_run.head_branch == 'master' "
-        "&& github.event.workflow_run.head_repository.full_name == github.repository"
+    selection_message = (
+        "continuous release selection must validate the dispatched successful master CI receipt"
     )
-    if select is None or workflow_job_direct_value(select, "if") != expected_select:
-        issues.append("continuous release selection must require a trusted successful master push")
+    selection_valid = select is not None and workflow_job_direct_value(select, "if") is None
+    if selection_valid:
+        env_fields = workflow_mapping_block(select, "env", 4)
+        selection_steps = []
+        for step in workflow_step_blocks(select):
+            fields, children = workflow_step_fields(step)
+            if fields.get("name") == "Verify dispatched CI run and current master tip":
+                selection_steps.append((fields, children))
+        selection_valid = env_fields is not None and len(selection_steps) == 1
+    if selection_valid:
+        env = {key: value for key, (value, _) in env_fields.items()}
+        fields, _ = selection_steps[0]
+        active_run = "\n".join(
+            active
+            for line in fields.get("run", "").splitlines()
+            if (active := strip_yaml_comment(line))
+        )
+        required_markers = (
+            "gh_api_retry() {",
+            "GitHub API request failed after ${attempt} attempts",
+            '[[ "$run_id" =~ ^[0-9]+$ ]]',
+            '[[ "$run_sha" =~ ^[0-9a-f]{40}$ ]]',
+            'test "$run_sha" = "$KLOGG_DISPATCH_SHA"',
+            '".github/workflows/ci-build.yml"',
+            '"master"',
+            '"push"',
+            'select(.name == "ci-gate")',
+            'test "$gate_status" = "completed"',
+            'test "$gate_conclusion" = "success"',
+            'test "$run_conclusion" = "success"',
+            'Timed out waiting for source CI run',
+            '/branches/master',
+            'echo "ci-run-id=${run_id}"',
+            'echo "ci-run-sha=${run_sha}"',
+            'echo "should-publish=true"',
+        )
+        selection_valid = (
+            env.get("GITHUB_TOKEN") == "${{ github.token }}"
+            and env.get("KLOGG_REQUESTED_CI_RUN_ID") == "${{ inputs.ci-run-id }}"
+            and env.get("KLOGG_REQUESTED_CI_RUN_SHA") == "${{ inputs.ci-run-sha }}"
+            and env.get("KLOGG_DISPATCH_SHA") == "${{ github.sha }}"
+            and env.get("KLOGG_GH_API_RETRY_ATTEMPTS") == "4"
+            and env.get("KLOGG_GH_API_RETRY_DELAY_SECONDS") == "2"
+            and fields.get("shell") == "bash"
+            and all(marker in active_run for marker in required_markers)
+        )
+    if not selection_valid or "github.event.workflow_run" in text:
+        issues.append(selection_message)
     if (
         publish is None
         or workflow_job_direct_value(publish, "if")
         != "${{ needs.select.outputs.should-publish == 'true' }}"
+        or "KLOGG_CI_RUN_ID: ${{ needs.select.outputs.ci-run-id }}" not in text
+        or "KLOGG_CI_RUN_SHA: ${{ needs.select.outputs.ci-run-sha }}" not in text
+        or "run-id: ${{ env.KLOGG_CI_RUN_ID }}" not in text
     ):
         issues.append("continuous release publication must require the verified selection output")
+    if "group: release-publisher" not in text or "queue: max" not in text:
+        issues.append("release publishers must share one lossless serialized concurrency group")
     if "cancel-in-progress: false" not in text:
         issues.append("continuous release transaction must not be canceled in progress")
     if "${{ failure() || cancelled() }}" not in text:

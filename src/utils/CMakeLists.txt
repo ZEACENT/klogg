@@ -25,6 +25,7 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/cpu_info.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/runnable_lambda.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu_info.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/pathutils.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/platform_files.cpp
 )
 

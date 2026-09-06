@@ -119,6 +119,8 @@ public:
     void shutdown() noexcept override;
     std::optional<LiveDataBatch> drain() override;
     LiveDataStatistics statistics() const override;
+    // Observe native producer backpressure without changing the session ABI.
+    std::size_t waitingProducerCount() const;
 
 private:
     struct State;

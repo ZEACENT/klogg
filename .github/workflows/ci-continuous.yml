@@ -1,54 +1,156 @@
 name: "Publish Release (Continuous)"
 
 on:
-  workflow_run:
-    workflows: ["CI Build"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ci-run-id:
+        description: "Successful trusted master CI Build run ID"
+        required: true
+        type: string
+      ci-run-sha:
+        description: "Commit SHA produced by the trusted master CI Build"
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: continuous-release-publisher
+  group: release-publisher
+  queue: max
   cancel-in-progress: false
 
 jobs:
   select:
-    if: >-
-      github.event.workflow_run.conclusion == 'success'
-      && github.event.workflow_run.event == 'push'
-      && github.event.workflow_run.head_branch == 'master'
-      && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      KLOGG_CI_RUN_ID: ${{ github.event.workflow_run.id }}
-      KLOGG_CI_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      KLOGG_REQUESTED_CI_RUN_ID: ${{ inputs.ci-run-id }}
+      KLOGG_REQUESTED_CI_RUN_SHA: ${{ inputs.ci-run-sha }}
+      KLOGG_DISPATCH_SHA: ${{ github.sha }}
+      KLOGG_CI_POLL_ATTEMPTS: 24
+      KLOGG_CI_POLL_INTERVAL_SECONDS: 5
+      KLOGG_GH_API_RETRY_ATTEMPTS: 4
+      KLOGG_GH_API_RETRY_DELAY_SECONDS: 2
     outputs:
       should-publish: ${{ steps.selection.outputs.should-publish }}
+      ci-run-id: ${{ steps.selection.outputs.ci-run-id }}
+      ci-run-sha: ${{ steps.selection.outputs.ci-run-sha }}
     steps:
-      - name: Verify triggering CI run and current master tip
+      - name: Verify dispatched CI run and current master tip
         id: selection
         shell: bash
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
-          run_api="/repos/${repo}/actions/runs/${KLOGG_CI_RUN_ID}"
-          test "$(gh api "$run_api" --jq '.path')" = ".github/workflows/ci-build.yml"
-          test "$(gh api "$run_api" --jq '.head_repository.full_name // empty')" = "$repo"
-          test "$(gh api "$run_api" --jq '.head_branch')" = "master"
-          test "$(gh api "$run_api" --jq '.event')" = "push"
-          test "$(gh api "$run_api" --jq '.conclusion')" = "success"
-          test "$(gh api "$run_api" --jq '.head_sha')" = "$KLOGG_CI_RUN_SHA"
-          master_sha="$(gh api "/repos/${repo}/branches/master" --jq '.commit.sha')"
-          if [ "$master_sha" != "$KLOGG_CI_RUN_SHA" ]; then
-            echo "::notice::Skipping stale continuous run ${KLOGG_CI_RUN_ID}: ${KLOGG_CI_RUN_SHA} != ${master_sha}"
+          run_id="${KLOGG_REQUESTED_CI_RUN_ID}"
+          run_sha="${KLOGG_REQUESTED_CI_RUN_SHA}"
+          [[ "$run_id" =~ ^[0-9]+$ ]] || {
+            echo "::error::ci-run-id must contain digits only"
+            exit 1
+          }
+          [[ "$run_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::ci-run-sha must be a lowercase 40-character commit SHA"
+            exit 1
+          }
+          test "$run_sha" = "$KLOGG_DISPATCH_SHA" || {
+            echo "::error::Dispatched CI SHA ${run_sha} does not match workflow revision ${KLOGG_DISPATCH_SHA}"
+            exit 1
+          }
+
+          gh_api_retry() {
+            local attempt=1
+            while true; do
+              if gh api "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$KLOGG_GH_API_RETRY_ATTEMPTS" ]; then
+                echo "::error::GitHub API request failed after ${attempt} attempts" >&2
+                return 1
+              fi
+              if [ "$KLOGG_GH_API_RETRY_DELAY_SECONDS" != 0 ]; then
+                sleep "$KLOGG_GH_API_RETRY_DELAY_SECONDS"
+              fi
+              attempt=$((attempt + 1))
+            done
+          }
+
+          run_api="/repos/${repo}/actions/runs/${run_id}"
+          verify_run_identity() {
+            identity="$(gh_api_retry "$run_api" --jq '
+              [.path, (.head_repository.full_name // ""), (.head_branch // ""), .event, .head_sha]
+              | @tsv
+            ')"
+            IFS=$'\t' read -r run_path run_repository run_branch run_event api_run_sha <<< "$identity"
+            test "$run_path" = ".github/workflows/ci-build.yml"
+            test "$run_repository" = "$repo"
+            test "$run_branch" = "master"
+            test "$run_event" = "push"
+            test "$api_run_sha" = "$run_sha"
+          }
+          verify_run_identity
+
+          run_attempt="$(gh_api_retry "$run_api" --jq '.run_attempt')"
+          [[ "$run_attempt" =~ ^[0-9]+$ ]]
+          gate_record=""
+          for gate_attempt in $(seq "$run_attempt" -1 1); do
+            gate_record="$(gh_api_retry --paginate --slurp \
+              "${run_api}/attempts/${gate_attempt}/jobs?per_page=100" --jq '
+                [.[].jobs[] | select(.name == "ci-gate")]
+                | if length == 0 then empty
+                  elif length == 1 then .[0] | [.status, .conclusion] | @tsv
+                  else error("expected at most one ci-gate job per attempt") end
+              ')"
+            if [ -n "$gate_record" ]; then
+              break
+            fi
+          done
+          test -n "$gate_record" || { echo "::error::Source CI has no ci-gate job"; exit 1; }
+          IFS=$'\t' read -r gate_status gate_conclusion <<< "$gate_record"
+          test "$gate_status" = "completed" && test "$gate_conclusion" = "success" || {
+            echo "::error::Source CI gate is ${gate_status}/${gate_conclusion}"
+            exit 1
+          }
+
+          completed=false
+          for _ in $(seq 1 "$KLOGG_CI_POLL_ATTEMPTS"); do
+            run_state="$(gh_api_retry "$run_api" --jq '[.status, (.conclusion // "")] | @tsv')"
+            IFS=$'\t' read -r run_status run_conclusion <<< "$run_state"
+            if [ "$run_status" = "completed" ]; then
+              test "$run_conclusion" = "success" || {
+                echo "::error::Source CI completed with ${run_conclusion:-no conclusion}"
+                exit 1
+              }
+              completed=true
+              break
+            fi
+            case "$run_status" in
+              queued|in_progress|pending|waiting|requested) ;;
+              *) echo "::error::Unexpected source CI status ${run_status}"; exit 1 ;;
+            esac
+            if [ "$KLOGG_CI_POLL_INTERVAL_SECONDS" != 0 ]; then
+              sleep "$KLOGG_CI_POLL_INTERVAL_SECONDS"
+            fi
+          done
+          test "$completed" = true || {
+            echo "::error::Timed out waiting for source CI run ${run_id} to complete"
+            exit 1
+          }
+          verify_run_identity
+
+          master_sha="$(gh_api_retry "/repos/${repo}/branches/master" --jq '.commit.sha')"
+          if [ "$master_sha" != "$run_sha" ]; then
+            echo "::notice::Skipping stale continuous run ${run_id}: ${run_sha} != ${master_sha}"
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "ci-run-id=${run_id}"
+            echo "ci-run-sha=${run_sha}"
+            echo "should-publish=true"
+          } >> "$GITHUB_OUTPUT"
 
   publish:
     needs: select
@@ -59,8 +161,8 @@ jobs:
       contents: write
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      KLOGG_CI_RUN_ID: ${{ github.event.workflow_run.id }}
-      KLOGG_CI_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      KLOGG_CI_RUN_ID: ${{ needs.select.outputs.ci-run-id }}
+      KLOGG_CI_RUN_SHA: ${{ needs.select.outputs.ci-run-sha }}
       KLOGG_EVIDENCE_LEVEL: validation
     # GitHub's workflow-persistence protection refuses to let the Actions app
     # token (github.token) create or update a release whose target commit adds
@@ -81,7 +183,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.KLOGG_CI_RUN_ID }}
           pattern: packages-*
           path: packages-all
 
@@ -89,7 +191,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.KLOGG_CI_RUN_ID }}
           name: klogg_version
           path: klogg_version
 
@@ -97,7 +199,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.KLOGG_CI_RUN_ID }}
           name: adb-helper-legal-assets
           path: adb-helper-legal-assets
 
@@ -105,7 +207,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.KLOGG_CI_RUN_ID }}
           name: ios-native-source-assets
           path: ios-native-source-assets
 

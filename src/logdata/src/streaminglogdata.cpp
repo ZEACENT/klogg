@@ -102,6 +102,9 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     }
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
+    }
+    // A rolling replacement is dirty even when its retained count is unchanged.
+    if ( appendResult.lineCount > 0_lcount || wasTrimmed ) {
         scheduleLoadingFinished( LiveAppendRefreshIntervalMs );
     }
 
@@ -146,6 +149,8 @@ void StreamingLogData::finishInput()
     const auto currentLineCount = captureStore_.lineCount();
     if ( currentLineCount != previousLineCount ) {
         Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
+    }
+    if ( appendResult.lineCount > 0_lcount || wasTrimmed ) {
         scheduleLoadingFinished();
     }
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip

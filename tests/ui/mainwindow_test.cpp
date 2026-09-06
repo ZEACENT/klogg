@@ -19,7 +19,12 @@
 
 #include <catch2/catch.hpp>
 
+#include <cstdio>
+#include <ctime>
+
 #include <QAction>
+#include <QElapsedTimer>
+#include <QPointer>
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -28,6 +33,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileDialog>
 
 #include <QClipboard>
 #include <QLineEdit>
@@ -41,6 +47,7 @@
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimerEvent>
 #include <QToolButton>
 #include <QUuid>
 #include <QVariant>
@@ -58,15 +65,136 @@
 #include "folderfilteredview.h"
 #include "livelogcontroller.h"
 #include "livelogsession.h"
+#include "livesourcetransport.h"
 #include "log.h"
+#include "logfiltereddata.h"
+#include "logmainview.h"
+#include "searchtoolbar.h"
+#include "streaminglogdata.h"
 #include "mainwindow.h"
 #include "persistentinfo.h"
+#include "pathline.h"
 #include "predefinedfilters.h"
 #include "predefinedfilterscombobox.h"
 #include "session.h"
 #include "sessioninfo.h"
 #include "tabgroup.h"
 #include "uimessage.h"
+
+struct StreamingLogDataTimerTestAccess {
+    static bool pending( const StreamingLogData& data )
+    {
+        return data.loadingFinishedQueued_ && data.loadingFinishedTimer_.isActive();
+    }
+
+    static void deliver( StreamingLogData& data )
+    {
+        REQUIRE( pending( data ) );
+        const auto timerId = data.loadingFinishedTimer_.timerId();
+        REQUIRE( timerId >= 0 );
+        QTimerEvent event{ timerId };
+        QCoreApplication::sendEvent( &data.loadingFinishedTimer_, &event );
+        REQUIRE_FALSE( data.loadingFinishedTimer_.isActive() );
+        REQUIRE_FALSE( data.loadingFinishedQueued_ );
+    }
+};
+
+namespace klogg::livelog {
+
+// Keep the production-owned runtime and MainWindow callback intact. Substitute
+// time before any retry is registered, so no real retry timer can race the UI
+// assertions or tab switch. All scheduled callbacks remain owned by this scope.
+struct LiveLogControllerTimeTestAccess {
+    class ManualClock final : public LiveLogClock {
+    public:
+        livecapture::Timestamp now() const noexcept override { return value; }
+        livecapture::Timestamp value{ 0 };
+    } clock;
+
+    class ManualScheduler final : public LiveLogScheduler {
+    public:
+        Token schedule( livecapture::Timestamp deadline, std::function<void()> callback ) override
+        {
+            REQUIRE_FALSE( callback_ );
+            deadline_ = deadline;
+            callback_ = std::move( callback );
+            return ++token_;
+        }
+
+        void cancel( Token token ) override
+        {
+            CHECK( token == token_ );
+            callback_ = {};
+        }
+
+        void fire( ManualClock& manualClock )
+        {
+            REQUIRE( callback_ );
+            manualClock.value = deadline_;
+            auto callback = std::move( callback_ );
+            callback_ = {};
+            callback();
+        }
+
+        bool pending() const { return static_cast<bool>( callback_ ); }
+        livecapture::Timestamp deadline() const { return deadline_; }
+
+    private:
+        Token token_{ 0 };
+        livecapture::Timestamp deadline_{ 0 };
+        std::function<void()> callback_;
+    } scheduler;
+
+    explicit LiveLogControllerTimeTestAccess( LiveLogController& controller )
+        : controller_{ controller }
+        , previousClock_{ controller.clock_ }
+        , previousScheduler_{ controller.scheduler_ }
+    {
+        REQUIRE_FALSE( controller.retryToken_.has_value() );
+        clock.value = previousClock_->now();
+        controller_.clock_ = &clock;
+        controller_.scheduler_ = &scheduler;
+    }
+
+    ~LiveLogControllerTimeTestAccess()
+    {
+        // Cancel substituted scheduler tokens before either dependency expires.
+        controller_.stopRequested();
+        CHECK_FALSE( scheduler.pending() );
+        controller_.clock_ = previousClock_;
+        controller_.scheduler_ = previousScheduler_;
+    }
+
+    LiveLogControllerTimeTestAccess( const LiveLogControllerTimeTestAccess& ) = delete;
+    LiveLogControllerTimeTestAccess& operator=( const LiveLogControllerTimeTestAccess& ) = delete;
+
+private:
+    LiveLogController& controller_;
+    LiveLogClock* previousClock_;
+    LiveLogScheduler* previousScheduler_;
+};
+
+} // namespace klogg::livelog
+
+struct LivePresentationCrawlerAccess;
+template <>
+struct CrawlerWidget::access_by<LivePresentationCrawlerAccess> {
+    static StreamingLogData* data( CrawlerWidget* crawler )
+    {
+        return dynamic_cast<StreamingLogData*>( crawler->logData_.get() );
+    }
+
+    static LinesCount matches( CrawlerWidget* crawler )
+    {
+        return crawler->logFilteredData_->getNbMatches();
+    }
+
+    static QString mainText( CrawlerWidget* crawler )
+    {
+        crawler->logMainView_->selectAll();
+        return crawler->logMainView_->getSelectedText();
+    }
+};
 
 namespace {
 QString makeTestDir( const QString& prefix )
@@ -182,6 +310,55 @@ public:
 private:
     SessionInfo& sessionInfo_;
     std::vector<SessionInfoWindowSnapshot> snapshots_;
+};
+
+// Same direct transport/factory pattern as livelog_restore_arming_test.cpp: no
+// device service, native backend, network, or process is activated by this fixture.
+class MenuLiveSourceTransport final : public LiveSourceTransport {
+public:
+    void start( Generation generation ) override { startedGeneration = generation; }
+    void stop( Generation ) override {}
+    void clearRemoteAsync( Generation, ClearRequestId ) override {}
+    QString lastError() const override { return {}; }
+
+    void publishConnected()
+    {
+        Q_EMIT stateChanged( startedGeneration, State::Connected );
+    }
+    void publishBytes( const QByteArray& bytes )
+    {
+        Q_EMIT bytesReceived( startedGeneration, bytes );
+    }
+    Generation startedGeneration{ 0 };
+};
+
+class MenuLiveSourceTransportFactory final : public LiveSourceTransportFactory {
+public:
+    std::unique_ptr<LiveSourceTransport> create( const LiveSourceTransportConfig& ) const override
+    {
+        auto transport = std::make_unique<MenuLiveSourceTransport>();
+        created.push_back( transport.get() );
+        return transport;
+    }
+    mutable std::vector<MenuLiveSourceTransport*> created;
+};
+
+class MenuActionChanges final : public QObject {
+public:
+    int added = 0;
+    int removed = 0;
+
+protected:
+    bool eventFilter( QObject*, QEvent* event ) override
+    {
+        if ( event->type() == QEvent::ActionAdded ) {
+            ++added;
+        }
+        else if ( event->type() == QEvent::ActionRemoved ) {
+            ++removed;
+        }
+        return false;
+    }
 };
 
 QToolButton* findGroupChipButton( QTabBar* tabBar, int tabIndex )
@@ -996,6 +1173,471 @@ SCENARIO( "Closing one of several windows deletes its discarded live capture",
 
     config.setMinimizeToTray( previousMinimizeToTray );
     config.save();
+}
+
+namespace {
+void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
+                             const QString& chosenPath = {} )
+{
+    REQUIRE( action.isEnabled() );
+    const auto nativeDialogsDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
+    QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
+    QStringList suggestions;
+    bool closed = false;
+    QObject dialogDriver;
+    QTimer::singleShot( 0, Qt::PreciseTimer, &dialogDriver, [ & ] {
+        if ( auto* dialog = qobject_cast<QFileDialog*>( QApplication::activeModalWidget() ) ) {
+            suggestions = dialog->selectedFiles();
+            if ( chosenPath.isEmpty() ) {
+                dialog->reject();
+                closed = true;
+            }
+            else {
+                dialog->selectFile( chosenPath );
+                closed = QMetaObject::invokeMethod( dialog, "accept", Qt::DirectConnection );
+            }
+        }
+        else if ( auto* modal = qobject_cast<QDialog*>( QApplication::activeModalWidget() ) ) {
+            modal->reject();
+        }
+    } );
+    action.trigger();
+    QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
+    REQUIRE( closed );
+    REQUIRE( suggestions.size() == 1 );
+    CHECK( suggestions.front().toStdString() == expectedSuggestion.toStdString() );
+}
+
+void exerciseLiveCountdownRouting( MainWindow& window, Session& session,
+                                   TabbedCrawlerWidget& tabs, CrawlerWidget* crawler,
+                                   QMenu& menu, MenuActionChanges& changes )
+{
+    namespace live = klogg::livecapture;
+    auto* controller = session.getLiveLogController( crawler );
+    REQUIRE( controller != nullptr );
+    auto* info = window.findChild<PathLine*>();
+    auto* disconnect = window.findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
+    REQUIRE( info != nullptr );
+    REQUIRE( disconnect != nullptr );
+    const auto current = tabs.currentWidget() == crawler;
+    const auto tabIndex = tabs.indexOf( crawler );
+    REQUIRE( tabIndex >= 0 );
+    klogg::livelog::LiveLogControllerTimeTestAccess time{ *controller };
+    const auto failStream = [ & ] {
+        controller->streamFailed(
+            controller->snapshot().generation,
+            live::LiveSourceError{ live::ErrorCategory::Stream, "countdown-route-retry",
+                                   live::ErrorScope::Stream, live::RetryPolicy::Backoff,
+                                   "Deterministic countdown interruption", {} } );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::RetryWait );
+        REQUIRE( time.scheduler.pending() );
+    };
+    // Real retry transitions establish a four-second backoff, leaving room for
+    // multiple delivered second boundaries before switching into the countdown.
+    for ( int attempt = 0; attempt < 2; ++attempt ) {
+        failStream();
+        time.scheduler.fire( time.clock );
+        REQUIRE( controller->snapshot().source.status == live::SourceStatus::OpeningStream );
+    }
+    failStream();
+    REQUIRE( controller->controlPresentation().retryCountdownSeconds == 4 );
+    const auto before = controller->controlPresentation();
+    const auto deadline = time.scheduler.deadline();
+    const auto entries = menu.actions();
+    const auto sentinel = QStringLiteral( "countdown-route-sentinel" );
+    const auto seedRouteProbes = [ & ] {
+        info->setText( sentinel );
+        disconnect->setEnabled( !before.disconnectEnabled );
+        tabs.setTabToolTip( tabIndex, sentinel );
+        changes.added = 0;
+        changes.removed = 0;
+    };
+    const auto checkNoControlWrites = [ & ] {
+        CHECK( disconnect->isEnabled() == !before.disconnectEnabled );
+        CHECK( tabs.tabToolTip( tabIndex ) == sentinel );
+        CHECK( changes.added == 0 );
+        CHECK( changes.removed == 0 );
+        CHECK( menu.actions() == entries );
+        CHECK( time.scheduler.pending() );
+        CHECK( time.scheduler.deadline() == deadline );
+    };
+    const auto countdownText = [ & ]( int seconds ) {
+        return QDir::toNativeSeparators( session.getDisplayName( crawler ) )
+               + QCoreApplication::translate( "MainWindow", " - Reconnect in %1 seconds..." )
+                     .arg( seconds );
+    };
+    seedRouteProbes();
+    time.clock.value = deadline - std::chrono::milliseconds{ 3001 };
+    controller->refreshPresentationTime();
+    REQUIRE( controller->controlPresentation().retryCountdownSeconds == 4 );
+    CHECK( info->text() == sentinel );
+    checkNoControlWrites();
+
+    time.clock.value += std::chrono::milliseconds{ 1 };
+    controller->refreshPresentationTime(); // Genuine CountdownOnly through the registered route.
+    const auto after = controller->controlPresentation();
+    REQUIRE( after.sameControlState( before ) );
+    REQUIRE( after.retryCountdownSeconds == 3 );
+    CHECK( info->text() == ( current ? countdownText( 3 ) : sentinel ) );
+    checkNoControlWrites();
+
+    if ( !current ) {
+        // Another background tick advances controller state without touching
+        // the UI. Switching in must render that current two-second projection.
+        time.clock.value += std::chrono::seconds{ 1 };
+        controller->refreshPresentationTime();
+        REQUIRE( controller->controlPresentation().retryCountdownSeconds == 2 );
+        CHECK( info->text() == sentinel );
+        checkNoControlWrites();
+        tabs.setCurrentWidget( crawler );
+        CHECK( info->text() == countdownText( 2 ) );
+        CHECK( disconnect->isEnabled() == before.disconnectEnabled );
+        CHECK( controller->snapshot().source.status == live::SourceStatus::RetryWait );
+        CHECK( time.scheduler.pending() );
+        CHECK( time.scheduler.deadline() == deadline );
+    }
+}
+
+void exerciseLivePresentation( bool useIos, bool background, int preservationScenario = -1,
+                               bool countdown = false )
+{
+    namespace live = klogg::livecapture;
+    CAPTURE( useIos, background, preservationScenario );
+    MenuLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restoreGuard{ sessionInfo };
+    const auto windowIds = sessionInfo.windows();
+    const auto windowId = QStringLiteral( "menu-live-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    sessionInfo.add( windowId );
+    for ( const auto& id : windowIds ) {
+        sessionInfo.remove( id );
+    }
+
+    std::vector<SessionInfo::OpenFile> files;
+    for ( int index = 0; index < 2; ++index ) {
+        AdbLogcatSessionData data{
+            QStringLiteral( "unused-test-backend" ),
+            QStringLiteral( "menu-device-%1" ).arg( index ),
+            QStringLiteral( "Menu device %1" ).arg( index ),
+            QString{},
+            QUuid::createUuid().toString( QUuid::WithoutBraces ),
+            QString{},
+            useIos ? LiveLogSourceType::IosLogStream : LiveLogSourceType::AdbLogcat,
+        };
+        if ( preservationScenario == 4 ) {
+            data.deviceDescription = useIos ? QStringLiteral( "iPhone 15 Pro (USB)" )
+                                            : QStringLiteral( "Pixel 8 (ABC123)" );
+        }
+        data.autoReconnectEnabled = true;
+        data.adbBackend = AdbTransportBackend::SmartSocket;
+        files.emplace_back( data.documentId(), 0, QString{}, data.persistedSourceType(),
+                            data.displayName(), klogg::livelog::serializeSpec(
+                                                    klogg::livelog::sessionSpecFromSessionData( data ) ) );
+    }
+    sessionInfo.setOpenFiles( windowId, files );
+    sessionInfo.setCurrentFileIndex( windowId, background ? 1 : 0 );
+    sessionInfo.save();
+
+    WindowSession windowSession{ appSession, windowId, 0 };
+    auto mainWindow = std::make_unique<MainWindow>( windowSession );
+    mainWindow->resize( 900, 600 );
+    mainWindow->show();
+    mainWindow->reloadSession();
+    auto* tabs = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( tabs->count() == 2 );
+    auto* crawler = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    auto* otherCrawler = qobject_cast<CrawlerWidget*>( tabs->widget( 1 ) );
+    REQUIRE( crawler != nullptr );
+    REQUIRE( otherCrawler != nullptr );
+    REQUIRE( waitUiState( [ & ] {
+        return crawler->isFirstLoadDone() && otherCrawler->isFirstLoadDone();
+    } ) );
+    QTest::qWait( 200 ); // Retire initial load callbacks before observing the menu.
+    tabs->setCurrentIndex( background ? 1 : 0 );
+    REQUIRE( tabs->currentWidget() == ( background ? otherCrawler : crawler ) );
+    REQUIRE( factory.created.empty() ); // Restore is inert.
+    auto* source = appSession->getAdbLogcatSource( crawler );
+    auto* controller = appSession->getLiveLogController( crawler );
+    REQUIRE( source != nullptr );
+    REQUIRE( controller != nullptr );
+    REQUIRE( source->reconnectSource() );
+    REQUIRE( factory.created.size() == 1u );
+    auto* transport = factory.created.front();
+    transport->publishConnected();
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+    REQUIRE( transport->startedGeneration == controller->snapshot().generation );
+    auto* menu = mainWindow->findChild<QMenu*>( QStringLiteral( "openedFilesMenu" ) );
+    REQUIRE( menu != nullptr );
+    REQUIRE( menu->actions().size() == 4 ); // Selector, separator, two live documents.
+    MenuActionChanges changes;
+    menu->installEventFilter( &changes );
+    QPointer<QAction> firstEntry{ menu->actions().at( 2 ) };
+    QPointer<QAction> secondEntry{ menu->actions().at( 3 ) };
+    REQUIRE( firstEntry != nullptr );
+    REQUIRE( secondEntry != nullptr );
+
+    if ( preservationScenario >= 0 ) {
+        QTemporaryDir documents;
+        REQUIRE( documents.isValid() );
+        const auto filePath = documents.filePath( "visible.log" );
+        QFile file{ filePath };
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "current file\n" ) == 13 );
+        file.close();
+        if ( preservationScenario == 2 ) {
+            mainWindow->loadFileNonInteractive( filePath );
+            auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabs->currentWidget() );
+            REQUIRE( fileCrawler != nullptr );
+            REQUIRE( waitUiState( [ & ] { return fileCrawler->isFirstLoadDone(); } ) );
+            QTest::qWait( 200 );
+        }
+        else if ( preservationScenario == 3 ) {
+            mainWindow->openFolderByPath( documents.path() );
+            REQUIRE( qobject_cast<FolderCrawlerWidget*>( tabs->currentWidget() ) != nullptr );
+            QTest::qWait( 200 );
+        }
+        else {
+            tabs->setCurrentIndex( preservationScenario == 1 ? 1 : 0 );
+        }
+        if ( countdown ) {
+            exerciseLiveCountdownRouting( *mainWindow, *appSession, *tabs, crawler, *menu, changes );
+            menu->removeEventFilter( &changes );
+            mainWindow->close();
+            return;
+        }
+        if ( preservationScenario == 5 ) {
+            using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+            auto* data = Access::data( crawler );
+            REQUIRE( data != nullptr );
+            if ( StreamingLogDataTimerTestAccess::pending( *data ) ) {
+                StreamingLogDataTimerTestAccess::deliver( *data );
+            }
+            CaptureStore::Limits limits;
+            limits.segmentTargetBytes = 8;
+            limits.memoryBudgetBytes = 4096;
+            limits.rollingMaxFileSize = 8;
+            limits.rollingBackupCount = 2;
+            data->setCaptureLimits( limits );
+            REQUIRE( source->bindOutputFile( documents.filePath( "rolling-follow.log" ),
+                                             LiveLogSaveAnsiMode::Preserve ) );
+            transport->publishBytes( QByteArrayLiteral( "old-000\nold-001\n" ) );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            REQUIRE( data->getNbLine() == 2_lcount );
+            auto* search = crawler->findChild<SearchToolbar*>();
+            REQUIRE( search != nullptr );
+            search->setAutoRefresh( true );
+            search->searchLineEdit()->setEditText( QStringLiteral( "new" ) );
+            search->searchButton()->click();
+            REQUIRE( waitUiState( [ & ] { return search->stopButton()->isHidden(); } ) );
+            REQUIRE( Access::matches( crawler ) == 0_lcount );
+            auto* follow = mainWindow->findChild<QAction*>( QStringLiteral( "followAction" ) );
+            REQUIRE( follow != nullptr );
+            follow->setChecked( true );
+            REQUIRE( crawler->isFollowEnabled() );
+            SafeQSignalSpy completed{ crawler, &CrawlerWidget::loadingFinished };
+            transport->publishBytes( QByteArrayLiteral( "new-002\n" ) );
+            REQUIRE( data->getNbLine() == 2_lcount );
+            REQUIRE( StreamingLogDataTimerTestAccess::pending( *data ) );
+            REQUIRE( completed.count() == 0 );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            REQUIRE( waitUiState( [ & ] { return Access::matches( crawler ) == 1_lcount; } ) );
+            CHECK( completed.count() == 1 );
+            CHECK( crawler->isFollowEnabled() );
+            CHECK( follow->isChecked() );
+            INFO( "Copied main-view text: " << Access::mainText( crawler ).toStdString() );
+            CHECK( Access::mainText( crawler )
+                       .replace( QStringLiteral( "\r\n" ), QStringLiteral( "\n" ) )
+                   == QStringLiteral( "old-001\nnew-002" ) );
+            QTest::qWait( 200 ); // Retire the actual search/load completion before teardown.
+            menu->removeEventFilter( &changes );
+            controller->stopRequested();
+            mainWindow->close();
+            return;
+        }
+
+        auto* info = mainWindow->findChild<PathLine*>();
+        auto* disconnect = mainWindow->findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
+        REQUIRE( info != nullptr );
+        REQUIRE( disconnect != nullptr );
+        const auto current = tabs->currentWidget() == crawler;
+        const auto sentinel = QStringLiteral( "presentation-route-sentinel" );
+        const auto seedRouteProbes = [ & ] {
+            // Deliberately diverge the actual widgets from their model. A redundant
+            // route would now perform an observable write; idempotent guards cannot
+            // hide it behind an unchanged final text/icon/action value.
+            info->setText( sentinel );
+            disconnect->setEnabled( false ); // The emitting source is streaming (enabled).
+            tabs->setTabToolTip( 0, sentinel );
+            changes.added = 0;
+            changes.removed = 0;
+        };
+        seedRouteProbes();
+        transport->publishBytes( QByteArrayLiteral( "preserved\n" ) );
+        CHECK( info->text() == sentinel );
+        CHECK_FALSE( disconnect->isEnabled() );
+        CHECK( tabs->tabToolTip( 0 ) == sentinel );
+        CHECK( changes.added == 0 );
+        CHECK( changes.removed == 0 );
+
+        auto error = live::LiveSourceError{ live::ErrorCategory::Capture, "unknown-output",
+                                            live::ErrorScope::Capture, live::RetryPolicy::Never,
+                                            "first output diagnostic", {} };
+        controller->outputBindingChanged( live::OutputBindingState::Degraded, error );
+        CHECK( info->text() == ( current ? appSession->getDisplayName( crawler ) : sentinel ) );
+        CHECK( disconnect->isEnabled() == current );
+        CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "first output diagnostic" ) ) );
+        CHECK( changes.added == 0 );
+        CHECK( changes.removed == 0 );
+        seedRouteProbes();
+        error.message = "replacement diagnostic";
+        controller->outputBindingChanged( live::OutputBindingState::Degraded, error );
+        CHECK( info->text() == ( current ? appSession->getDisplayName( crawler ) : sentinel ) );
+        CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "replacement diagnostic" ) ) );
+        CHECK( disconnect->isEnabled() == current );
+        CHECK( changes.added == 0 );
+        CHECK( changes.removed == 0 );
+        controller->outputBindingChanged( live::OutputBindingState::Healthy );
+        CHECK_FALSE( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Output error:" ) ) );
+
+        if ( preservationScenario == 4 ) {
+            const auto savedPath = documents.filePath( "chosen log (keep).log" );
+            const auto expectedSuggestion = QDir::home().filePath(
+                useIos ? QStringLiteral( "iPhone-15-Pro-USB.log" )
+                       : QStringLiteral( "Pixel-8-ABC123.log" ) );
+            const auto displayName = appSession->getDisplayName( crawler );
+            auto* save = mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogPreserveAnsiAction" ) );
+            auto* saveStripped = mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) );
+            REQUIRE( save != nullptr );
+            REQUIRE( saveStripped != nullptr );
+            exerciseLiveSaveDialog( *saveStripped, expectedSuggestion );
+            exerciseLiveSaveDialog( *save, expectedSuggestion );
+            CHECK( source->sessionData().boundOutputFile.isEmpty() );
+            CHECK_FALSE( QFile::exists( savedPath ) );
+            CHECK( appSession->getDisplayName( crawler ) == displayName );
+            exerciseLiveSaveDialog( *save, expectedSuggestion, savedPath );
+            REQUIRE( source->sessionData().boundOutputFile == savedPath );
+            CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
+            CHECK( info->text() == QDir::toNativeSeparators( savedPath ) );
+            INFO( "Saved tab tooltip: " << tabs->tabToolTip( 0 ).toStdString() );
+            CHECK( tabs->tabToolTip( 0 ) == QDir::toNativeSeparators( savedPath ) );
+            REQUIRE( changes.added > 0 );
+            REQUIRE( changes.removed > 0 );
+            const auto savedEntries = menu->actions();
+            CHECK( std::any_of( savedEntries.begin(), savedEntries.end(), [ & ]( const auto* action ) {
+                return action->toolTip() == savedPath;
+            } ) );
+            exerciseLiveSaveDialog( *saveStripped, savedPath );
+            exerciseLiveSaveDialog( *save, savedPath );
+            CHECK( source->sessionData().boundOutputFile == savedPath );
+            transport->publishBytes( QByteArrayLiteral( "saved tail\n" ) );
+            source->disconnectSource();
+            QFile saved{ savedPath };
+            REQUIRE( saved.open( QIODevice::ReadOnly ) );
+            CHECK( saved.readAll() == QByteArrayLiteral( "preserved\nsaved tail\n" ) );
+        }
+        menu->removeEventFilter( &changes );
+        controller->stopRequested();
+        mainWindow->close();
+        return;
+    }
+
+    uint64_t initialBytes = 0;
+    uint64_t initialLines = 0;
+    QDateTime modified;
+    appSession->getFileInfo( crawler, &initialBytes, &initialLines, &modified );
+    REQUIRE_FALSE( logging::needLogging( QtInfoMsg ) );
+    REQUIRE_FALSE( logging::needLogging( QtDebugMsg ) );
+    constexpr int BatchCount = 64;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const auto cpuStart = std::clock();
+    for ( int batch = 0; batch < BatchCount; ++batch ) {
+        transport->publishBytes( QByteArray::number( batch ).rightJustified( 63, '0' ) + '\n' );
+    }
+    const auto cpuTicks = std::clock() - cpuStart;
+    const auto elapsedNs = elapsed.nsecsElapsed();
+    uint64_t bytes = 0;
+    uint64_t lines = 0;
+    appSession->getFileInfo( crawler, &bytes, &lines, &modified );
+    REQUIRE( bytes == initialBytes + 4096u );
+    REQUIRE( lines == initialLines + 64u );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+    if ( qEnvironmentVariableIsSet( "KLOGG_MEASURE_LIVE_PRESENTATION" ) ) {
+        std::fprintf( stderr,
+                      "LIVE_REPLAY ios=%d background=%d batches=64 bytes=4096 lines=64 "
+                      "window=900x600 shown=1 output=unbound info_logging=0 debug_logging=0 "
+                      "follow=%d added=%d removed=%d cpu_ticks=%lld clocks_per_sec=%lld elapsed_ns=%lld\n",
+                      static_cast<int>( useIos ), static_cast<int>( background ),
+                      static_cast<int>( crawler->isFollowEnabled() ), changes.added, changes.removed,
+                      static_cast<long long>( cpuTicks ), static_cast<long long>( CLOCKS_PER_SEC ),
+                      static_cast<long long>( elapsedNs ) );
+    }
+    CHECK( changes.added == 0 );
+    CHECK( changes.removed == 0 );
+    CHECK( firstEntry != nullptr );
+    CHECK( secondEntry != nullptr );
+    CHECK( menu->actions().at( 2 ) == firstEntry.data() );
+    CHECK( menu->actions().at( 3 ) == secondEntry.data() );
+
+    controller->streamFailed( controller->snapshot().generation,
+                             live::LiveSourceError{ live::ErrorCategory::Stream, "menu-retry",
+                                                    live::ErrorScope::Stream, live::RetryPolicy::Backoff,
+                                                    "Deterministic stream interruption", {} } );
+    REQUIRE( controller->presentation().retryCountdownVisible );
+    changes.added = 0;
+    changes.removed = 0;
+    firstEntry = menu->actions().at( 2 );
+    secondEntry = menu->actions().at( 3 );
+    controller->refreshPresentationTime();
+    REQUIRE( controller->presentation().retryCountdownVisible );
+    CHECK( changes.added == 0 );
+    CHECK( changes.removed == 0 );
+    CHECK( firstEntry != nullptr );
+    CHECK( secondEntry != nullptr );
+    CHECK( menu->actions().at( 2 ) == firstEntry.data() );
+    CHECK( menu->actions().at( 3 ) == secondEntry.data() );
+
+    menu->removeEventFilter( &changes );
+    controller->stopRequested();
+    mainWindow->close();
+}
+
+} // namespace
+
+TEST_CASE( "Live bytes and retry countdown preserve opened-files menu actions",
+           "[ui][session][live-presentation-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    const auto background = GENERATE( false, true );
+    exerciseLivePresentation( useIos, background );
+}
+
+TEST_CASE( "Live countdown boundaries route only current info and tab switches read current time",
+           "[ui][session][live-presentation-preservation][live-countdown-routing]" )
+{
+    const auto useIos = GENERATE( false, true );
+    // Current live, other live, file, folder: all use the real controller callback.
+    const auto scenario = GENERATE( 0, 1, 2, 3 );
+    exerciseLivePresentation( useIos, scenario != 0, scenario, true );
+}
+
+TEST_CASE( "Live control routes preserve current file folder live and saved metadata ownership",
+           "[ui][session][live-presentation-preservation]" )
+{
+    const auto useIos = GENERATE( false, true );
+    // Current live, other live, file, folder, rolling search/follow.
+    const auto scenario = GENERATE( 0, 1, 2, 3, 5 );
+    exerciseLivePresentation( useIos, scenario >= 1 && scenario <= 3, scenario );
+}
+
+TEST_CASE( "Live save suggests clean filenames and preserves chosen paths",
+           "[ui][session][live-save-filename]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 4 );
 }
 
 SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )

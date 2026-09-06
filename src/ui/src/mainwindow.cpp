@@ -1726,8 +1726,9 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
     auto suggestedPath = adbSource->sessionData().boundOutputFile;
     if ( suggestedPath.isEmpty() ) {
-        suggestedPath = QDir::home().filePath( session_.getDisplayName( crawler )
-                                               + QStringLiteral( ".log" ) );
+        const auto stem = klogg::suggestedFileNameStem( session_.getDisplayName( crawler ),
+                                                        QStringLiteral( "live-log" ) );
+        suggestedPath = QDir::home().filePath( stem + QStringLiteral( ".log" ) );
     }
 
     QString outputPath;
@@ -3143,8 +3144,7 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
     QString toolTip = baseTip;
     LiveTabStatus liveStatus = LiveTabStatus::Disconnected;
     if ( controller != nullptr ) {
-        const auto& snapshot = controller->snapshot();
-        const auto projection = klogg::livecapture::projectLiveState( snapshot );
+        const auto projection = controller->controlPresentation();
         switch ( projection.status ) {
         case klogg::livecapture::PresentationStatus::Connected:
             liveStatus = LiveTabStatus::Connected;
@@ -3197,9 +3197,9 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
 
         if ( projection.outputBinding == klogg::livecapture::OutputBindingState::Degraded ) {
             liveStatus = LiveTabStatus::Error;
-            if ( snapshot.outputBindingError.has_value() ) {
+            if ( projection.outputBindingError.has_value() ) {
                 QString outputError;
-                const auto& error = *snapshot.outputBindingError;
+                const auto& error = *projection.outputBindingError;
                 if ( error.code == "output-open-failed" ) {
                     outputError = tr( "The bound capture output could not be opened." );
                 }
@@ -3240,17 +3240,23 @@ void MainWindow::registerAdbLogcatSource( CrawlerWidget* crawler )
 
     const QPointer<MainWindow> windowGuard( this );
     const QPointer<CrawlerWidget> crawlerGuard( crawler );
-    controller->setChangedCallback( [ windowGuard, crawlerGuard ] {
-        if ( windowGuard == nullptr || crawlerGuard == nullptr ) {
-            return;
-        }
-        if ( windowGuard->currentCrawlerWidget() == crawlerGuard ) {
-            windowGuard->updateMenuBarFromDocument( crawlerGuard );
-            windowGuard->updateInfoLine();
-        }
-        windowGuard->updateOpenedFilesMenu();
-        windowGuard->updateLiveTabAppearance( crawlerGuard );
-    } );
+    controller->setPresentationChangedCallback(
+        [ windowGuard, crawlerGuard ]( const klogg::livelog::LiveLogControlPresentation&,
+                                      klogg::livelog::LiveLogPresentationChange change ) {
+            if ( windowGuard == nullptr || crawlerGuard == nullptr ) {
+                return;
+            }
+            const auto controlChanged = change == klogg::livelog::LiveLogPresentationChange::Control;
+            if ( windowGuard->currentCrawlerWidget() == crawlerGuard ) {
+                if ( controlChanged ) {
+                    windowGuard->updateMenuBarFromDocument( crawlerGuard );
+                }
+                windowGuard->updateInfoLine();
+            }
+            if ( controlChanged ) {
+                windowGuard->updateLiveTabAppearance( crawlerGuard );
+            }
+        } );
 
     connect( adbSource, &AdbLogcatSource::clearFailed, this,
              [ windowGuard, crawlerGuard ]( const QString& error ) {
@@ -3399,8 +3405,8 @@ void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
     const auto isReadOnlyCompatibility
         = adbSource != nullptr && adbSource->isReadOnlyCompatibility();
     const auto projection = controller != nullptr
-                                ? klogg::livecapture::projectLiveState( controller->snapshot() )
-                                : klogg::livecapture::LiveStatePresentation{};
+                                ? controller->controlPresentation()
+                                : klogg::livelog::LiveLogControlPresentation{};
     disconnectSourceAction->setEnabled( isLiveDocument && !isReadOnlyCompatibility
                                         && projection.disconnectEnabled );
     reconnectSourceAction->setEnabled( isLiveDocument && !isReadOnlyCompatibility
@@ -3503,13 +3509,11 @@ void MainWindow::updateInfoLine()
     }
 
     if ( const auto* controller = session_.getLiveLogController( crawler ) ) {
-        const auto projection
-            = klogg::livecapture::projectLiveState( controller->snapshot() );
-        if ( projection.retryCountdownVisible ) {
-            const auto remainingMs = projection.retryRemaining.count();
-            const auto remainingSec = ( remainingMs + 999 ) / 1000;
+        const auto projection = controller->controlPresentation();
+        if ( projection.retryCountdownSeconds.has_value() ) {
             infoLine->setText( QDir::toNativeSeparators( session_.getDisplayName( crawler ) )
-                               + tr( " - Reconnect in %1 seconds..." ).arg( remainingSec ) );
+                               + tr( " - Reconnect in %1 seconds..." )
+                                     .arg( *projection.retryCountdownSeconds ) );
             infoLine->displayGauge( 0 );
             return;
         }

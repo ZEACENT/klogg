@@ -27,11 +27,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTime>
+#include <QTimerEvent>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUuid>
 
 #include <filesystem>
+#include <optional>
 #include <string_view>
 
 #include "capturestore.h"
@@ -39,6 +41,24 @@
 #include "logfiltereddata.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
+
+struct StreamingLogDataTimerTestAccess {
+    static bool pending( const StreamingLogData& data )
+    {
+        return data.loadingFinishedQueued_ && data.loadingFinishedTimer_.isActive();
+    }
+
+    static void deliver( StreamingLogData& data )
+    {
+        REQUIRE( pending( data ) );
+        const auto timerId = data.loadingFinishedTimer_.timerId();
+        REQUIRE( timerId >= 0 );
+        QTimerEvent event{ timerId };
+        QCoreApplication::sendEvent( &data.loadingFinishedTimer_, &event );
+        REQUIRE_FALSE( data.loadingFinishedTimer_.isActive() );
+        REQUIRE_FALSE( data.loadingFinishedQueued_ );
+    }
+};
 
 namespace {
 QString makeCaptureId()
@@ -120,6 +140,33 @@ bool waitForTerminalMatchCount( LogFilteredData& filteredData, LinesCount expect
     return false;
 }
 
+// The caller arms the spy before starting the search, including synchronous cache hits.
+// Return any terminal result for this generation so an incorrect count fails explicitly.
+std::optional<LinesCount>
+waitForTerminalResult( SafeQSignalSpy& searchProgressSpy,
+                       LogFilteredData::SearchGeneration expectedGeneration,
+                       int timeoutMs = 10000 )
+{
+    QElapsedTimer timer;
+    timer.start();
+    int consumedSignals = 0;
+    while ( true ) {
+        while ( consumedSignals < searchProgressSpy.count() ) {
+            const auto args = searchProgressSpy.at( consumedSignals++ );
+            if ( args.size() >= 4 && args.at( 1 ).toInt() == 100
+                 && args.at( 3 ).toULongLong() == expectedGeneration ) {
+                return args.at( 0 ).value<LinesCount>();
+            }
+        }
+
+        const auto remaining = timeoutMs - static_cast<int>( timer.elapsed() );
+        if ( remaining <= 0 ) {
+            return std::nullopt;
+        }
+        searchProgressSpy.wait( qMin( 100, remaining ) );
+    }
+}
+
 QByteArray makeStreamingSearchLines( int firstLine, int count, bool matchFinalLine = false )
 {
     QByteArray data;
@@ -137,12 +184,14 @@ QByteArray makeStreamingSearchLines( int firstLine, int count, bool matchFinalLi
 struct SearchConfigGuard {
     Configuration& cfg;
     bool prevParallel;
+    bool prevResultsCache;
     int prevBufferLines;
     int prevThreadPoolSize;
 
     explicit SearchConfigGuard( Configuration& c )
         : cfg( c )
         , prevParallel( c.useParallelSearch() )
+        , prevResultsCache( c.useSearchResultsCache() )
         , prevBufferLines( c.searchReadBufferSizeLines() )
         , prevThreadPoolSize( c.searchThreadPoolSize() )
     {
@@ -151,6 +200,7 @@ struct SearchConfigGuard {
     ~SearchConfigGuard()
     {
         cfg.setUseParallelSearch( prevParallel );
+        cfg.setUseSearchResultsCache( prevResultsCache );
         cfg.setSearchReadBufferSizeLines( prevBufferLines );
         cfg.setSearchThreadPoolSize( prevThreadPoolSize );
     }
@@ -159,6 +209,203 @@ struct SearchConfigGuard {
     SearchConfigGuard& operator=( const SearchConfigGuard& ) = delete;
 };
 } // namespace
+
+TEST_CASE( "Rolling replacements refresh even when the retained line count is unchanged",
+           "[streaming][live-presentation-red]" )
+{
+    const auto finishPartial = GENERATE( false, true );
+    CAPTURE( finishPartial );
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    StreamingLogData logData{ makeCaptureId(), tempDir.path() };
+    SafeQSignalSpy loadingSpy{ &logData, SIGNAL( loadingFinished( LoadingStatus ) ) };
+    StreamingLogDataTimerTestAccess::deliver( logData );
+    REQUIRE( loadingSpy.count() == 1 );
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 8;
+    limits.rollingBackupCount = 2;
+    logData.setCaptureLimits( limits );
+    REQUIRE( logData.bindOutputFile( QDir{ tempDir.path() }.filePath( "rolling.log" ),
+                                     LiveLogSaveAnsiMode::Preserve ) );
+    logData.appendUtf8( QByteArrayLiteral( "old-000\n" ) );
+    logData.appendUtf8( QByteArrayLiteral( "old-001\n" ) );
+    REQUIRE( logData.getNbLine() == 2_lcount );
+    StreamingLogDataTimerTestAccess::deliver( logData );
+    loadingSpy.clear();
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( logData ) );
+    SafeQSignalSpy fileSpy{ &logData, SIGNAL( fileChanged( MonitoredFileStatus ) ) };
+
+    if ( finishPartial ) {
+        // Eight unterminated bytes fill the output segment on finishInput,
+        // forcing an actual rotation/trim rather than merely growing the tail.
+        logData.appendUtf8( QByteArrayLiteral( "new-002!" ) );
+        REQUIRE( logData.getNbLine() == 2_lcount );
+        REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( logData ) );
+        REQUIRE( loadingSpy.count() == 0 );
+        logData.finishInput();
+    }
+    else {
+        logData.appendUtf8( QByteArrayLiteral( "new-002\n" ) );
+    }
+
+    // Data and normal invalidation must survive; the RED is only the missing refresh.
+    REQUIRE( logData.getNbLine() == 2_lcount );
+    REQUIRE( logData.getLineString( 0_lnum ) == QStringLiteral( "old-001" ) );
+    REQUIRE( logData.getLineString( 1_lnum )
+             == ( finishPartial ? QStringLiteral( "new-002!" ) : QStringLiteral( "new-002" ) ) );
+    int truncations = 0;
+    for ( int i = 0; i < fileSpy.count(); ++i ) {
+        if ( fileSpy.at( i ).at( 0 ).value<MonitoredFileStatus>()
+             == MonitoredFileStatus::Truncated ) {
+            ++truncations;
+        }
+    }
+    REQUIRE( truncations == 1 );
+    REQUIRE( loadingSpy.count() == 0 );
+    REQUIRE( StreamingLogDataTimerTestAccess::pending( logData ) );
+    StreamingLogDataTimerTestAccess::deliver( logData );
+    REQUIRE( loadingSpy.count() == 1 );
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( logData ) );
+}
+
+TEST_CASE( "Streaming coalescer preserves empty partial UTF8 CRLF and repeat burst delivery",
+           "[streaming][live-presentation-preservation]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    StreamingLogData data{ makeCaptureId(), tempDir.path() };
+    SafeQSignalSpy loadingSpy{ &data, SIGNAL( loadingFinished( LoadingStatus ) ) };
+    StreamingLogDataTimerTestAccess::deliver( data );
+    loadingSpy.clear();
+    data.appendUtf8( {} );
+    data.finishInput();
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
+    const auto utf8 = QString::fromUtf8( "雪" ).toUtf8();
+    data.appendUtf8( utf8.left( 1 ) );
+    data.appendUtf8( {} );
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
+    data.appendUtf8( utf8.mid( 1 ) + '\r' );
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
+    data.appendUtf8( QByteArrayLiteral( "\n" ) );
+    REQUIRE( StreamingLogDataTimerTestAccess::pending( data ) );
+    for ( int batch = 0; batch < 64; ++batch ) {
+        data.appendUtf8( QByteArray::number( batch ) + '\n' );
+    }
+    data.finishInput(); // Does not cause a second delivery while a refresh is pending.
+    REQUIRE( loadingSpy.count() == 0 );
+    StreamingLogDataTimerTestAccess::deliver( data );
+    REQUIRE( loadingSpy.count() == 1 );
+    CHECK( data.getNbLine() == 65_lcount );
+    CHECK( data.getLineString( 0_lnum ) == QString::fromUtf8( "雪" ) );
+    CHECK( data.getLineString( 64_lnum ) == QStringLiteral( "63" ) );
+    data.appendUtf8( QByteArrayLiteral( "tail" ) );
+    REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
+    data.finishInput();
+    REQUIRE( StreamingLogDataTimerTestAccess::pending( data ) );
+    StreamingLogDataTimerTestAccess::deliver( data );
+    REQUIRE( loadingSpy.count() == 2 );
+    CHECK( data.getNbLine() == 66_lcount );
+    CHECK( data.getLineString( 65_lnum ) == QStringLiteral( "tail" ) );
+    data.finishInput();
+    data.appendUtf8( {} );
+    QCoreApplication::processEvents();
+    CHECK_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
+    CHECK( loadingSpy.count() == 2 );
+}
+
+TEST_CASE( "Rolling coalesced delivery exposes the replacement to filtered search",
+           "[streaming][live-presentation-preservation]" )
+{
+    const auto useResultsCache = GENERATE( true, false );
+    CAPTURE( useResultsCache );
+    auto& config = Configuration::get();
+    SearchConfigGuard configGuard{ config };
+    config.setUseSearchResultsCache( useResultsCache );
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    StreamingLogData data{ makeCaptureId(), tempDir.path() };
+    StreamingLogDataTimerTestAccess::deliver( data );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 4096;
+    limits.rollingMaxFileSize = 8;
+    limits.rollingBackupCount = 2;
+    data.setCaptureLimits( limits );
+    REQUIRE( data.bindOutputFile( QDir{ tempDir.path() }.filePath( "search.log" ),
+                                  LiveLogSaveAnsiMode::Preserve ) );
+    data.appendUtf8( QByteArrayLiteral( "old-000\nold-001\n" ) );
+    StreamingLogDataTimerTestAccess::deliver( data );
+    REQUIRE( data.getNbLine().get() == 2 );
+    auto filtered = data.getNewFilteredData();
+    const RegularExpressionPattern pattern{ QStringLiteral( "new" ) };
+    SafeQSignalSpy searchProgressSpy{ filtered.get(), &LogFilteredData::searchProgressed };
+    filtered->runSearch( pattern, 0_lnum, LineNumber{ data.getNbLine().get() } );
+    const auto initialResult
+        = waitForTerminalResult( searchProgressSpy, filtered->currentSearchGeneration() );
+    REQUIRE( initialResult.has_value() );
+    REQUIRE( initialResult->get() == 0 );
+    CHECK( filtered->getNbMatches().get() == 0 );
+
+    // Prove the configured path with a completed unchanged search: a cache hit
+    // emits synchronously without starting an operation; cache OFF searches again.
+    const auto initialOperations = filtered->searchPerformanceCounters().operationStarts;
+    REQUIRE( initialOperations == 1 );
+    searchProgressSpy.clear();
+    filtered->runSearch( pattern, 0_lnum, LineNumber{ data.getNbLine().get() } );
+    if ( useResultsCache ) {
+        REQUIRE( searchProgressSpy.count() == 1 );
+    }
+    const auto repeatedResult
+        = waitForTerminalResult( searchProgressSpy, filtered->currentSearchGeneration() );
+    REQUIRE( repeatedResult.has_value() );
+    REQUIRE( repeatedResult->get() == 0 );
+    REQUIRE( filtered->searchPerformanceCounters().operationStarts
+             == initialOperations + ( useResultsCache ? 0u : 1u ) );
+
+    // Mirror both view boundaries: truncation invalidates the old search/cache,
+    // then coalesced loading completion restarts against the committed window.
+    int truncations = 0;
+    int restarts = 0;
+    QObject::connect( &data, &StreamingLogData::fileChanged, filtered.get(),
+                      [ & ]( MonitoredFileStatus status ) {
+                          if ( status == MonitoredFileStatus::Truncated ) {
+                              ++truncations;
+                              filtered->clearSearch( true );
+                          }
+                      } );
+    QObject::connect( &data, &StreamingLogData::loadingFinished, filtered.get(),
+                      [ & ]( auto ) {
+                          ++restarts;
+                          filtered->runSearch( pattern, 0_lnum,
+                                               LineNumber{ data.getNbLine().get() } );
+                      } );
+    searchProgressSpy.clear();
+    const auto previousOperations = filtered->searchPerformanceCounters().operationStarts;
+    data.appendUtf8( QByteArrayLiteral( "new-002\n" ) );
+    REQUIRE( data.getNbLine().get() == 2 );
+    REQUIRE( truncations == 1 );
+    REQUIRE( restarts == 0 );
+    REQUIRE( StreamingLogDataTimerTestAccess::pending( data ) );
+    // Measure restart's generation advance separately from any invalidation advance.
+    const auto generationBeforeRestart = filtered->currentSearchGeneration();
+    StreamingLogDataTimerTestAccess::deliver( data );
+    REQUIRE( restarts == 1 );
+    REQUIRE( filtered->currentSearchGeneration() == generationBeforeRestart + 1 );
+    const auto replacementResult
+        = waitForTerminalResult( searchProgressSpy, filtered->currentSearchGeneration() );
+    REQUIRE( replacementResult.has_value() );
+    REQUIRE( replacementResult->get() == 1 );
+    CHECK( filtered->searchPerformanceCounters().operationStarts == previousOperations + 1 );
+    CHECK( filtered->getNbMatches().get() == 1 );
+    CHECK( filtered->getMatchingLineNumber( 0_lnum ).get() == 1 );
+    CHECK( data.getLineString( 0_lnum ) == QStringLiteral( "old-001" ) );
+    CHECK( data.getLineString( 1_lnum ) == QStringLiteral( "new-002" ) );
+    filtered->interruptSearch();
+}
 
 TEST_CASE( "StreamingLogData emits its ready signal asynchronously after listeners attach" )
 {

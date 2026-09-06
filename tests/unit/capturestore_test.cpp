@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
+#include <iostream>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -46,11 +48,30 @@
 #endif
 
 #include "capturestore.h"
+#include "logger.h"
 #include "platform/platform_files.h"
 #include "rollingfilemanager.h"
 
 class CaptureStoreTestAccess {
   public:
+    static CaptureStore::MaintenanceOperationsForTesting maintenanceOperations(
+        const CaptureStore& store )
+    {
+        return store.maintenanceOperationsForTesting();
+    }
+
+    static CaptureStore::MaintenanceRetryForTesting maintenanceRetry(
+        const CaptureStore& store )
+    {
+        return store.maintenanceRetryForTesting();
+    }
+
+    static void setBeforeRetryHandoffCallback( CaptureStore& store,
+                                              std::function<void()> callback )
+    {
+        store.setBeforeRetryHandoffCallbackForTesting( std::move( callback ) );
+    }
+
     static void setBeforeRawSnapshotCopyCallback( CaptureStore& store,
                                                   std::function<void()> callback )
     {
@@ -284,6 +305,126 @@ bool createSignalFile( const QString& filePath )
     QFile file( filePath );
     return file.open( QIODevice::WriteOnly | QIODevice::Truncate );
 }
+
+// This directory is shared with real captures. Never glob-delete its contents,
+// or create entries matching an ambient capture's active-marker/gate stem.
+class ScopedCoordinationEntries {
+  public:
+    ScopedCoordinationEntries() = default;
+    ScopedCoordinationEntries( const ScopedCoordinationEntries& ) = delete;
+    ScopedCoordinationEntries& operator=( const ScopedCoordinationEntries& ) = delete;
+
+    ~ScopedCoordinationEntries()
+    {
+        for ( const auto& path : paths_ ) {
+            QFile::remove( path );
+        }
+    }
+
+    void create( int count )
+    {
+        const auto root = captureCoordinationRoot();
+        REQUIRE_FALSE( root.isEmpty() );
+        const QDir directory( root );
+        REQUIRE( directory.exists() );
+        const auto prefix = QStringLiteral( "test-owned-capture-replay-%1-" )
+                                .arg( makeCaptureId() );
+        for ( int index = 0; index < count; ++index ) {
+            const auto path = directory.filePath( prefix + QString::number( index ) );
+            QFile file( path );
+            REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+            paths_.push_back( path );
+        }
+    }
+
+  private:
+    QStringList paths_;
+};
+
+constexpr int SmallAppendCrowdEntries = 256;
+constexpr int SmallAppendRegressionBatches = 512;
+constexpr int SmallAppendReplayBatches = 512;
+constexpr int SmallAppendReplayRepetitions = 3;
+
+enum class SmallAppendLimit { Bytes, Lines, Both };
+
+CaptureStore::Limits smallAppendLimits( SmallAppendLimit mode )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 4 * 1024 * 1024;
+    limits.memoryBudgetBytes = 8 * 1024 * 1024;
+    if ( mode != SmallAppendLimit::Lines ) {
+        limits.rollingMaxFileSize = 8 * 1024 * 1024;
+        limits.rollingBackupCount = 2;
+    }
+    if ( mode != SmallAppendLimit::Bytes ) {
+        limits.maxTotalLines = 100000;
+    }
+    return limits;
+}
+
+struct SmallAppendWorkload {
+    klogg::vector<QByteArray> batches;
+    klogg::vector<QString> lines;
+    QByteArray bytes;
+};
+
+SmallAppendWorkload smallAppendWorkload( int batchCount )
+{
+    SmallAppendWorkload workload;
+    for ( int batchIndex = 0; batchIndex < batchCount; ++batchIndex ) {
+        QByteArray batch;
+        for ( int lineIndex = 0; lineIndex < 2; ++lineIndex ) {
+            const auto line = QStringLiteral( "batch-%1 line-%2 café 日志" )
+                                  .arg( batchIndex, 4, 10, QLatin1Char( '0' ) )
+                                  .arg( lineIndex );
+            workload.lines.push_back( line );
+            batch += line.toUtf8() + '\n';
+        }
+        workload.bytes += batch;
+        workload.batches.push_back( std::move( batch ) );
+    }
+    return workload;
+}
+
+void requireSmallAppendContent( const CaptureStore& store,
+                                const SmallAppendWorkload& workload )
+{
+    REQUIRE( store.boundOutputFile().isEmpty() );
+    REQUIRE( store.stats().fileSize == workload.bytes.size() );
+    REQUIRE( store.stats().memoryBytes == workload.bytes.size() );
+    REQUIRE( store.stats().totalLines == static_cast<qint64>( workload.lines.size() ) );
+    REQUIRE( store.lineCount().get() == workload.lines.size() );
+    REQUIRE( store.lastTrimResult().trimmedLines == 0_lcount );
+    REQUIRE( store.lastTrimResult().trimmedBytes == 0 );
+    REQUIRE( segmentFiles( store.capturePath() ).isEmpty() );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+    const auto raw = store.buildRawLines( 0_lnum, store.lineCount(), codec, {} );
+    REQUIRE( QByteArray( raw.buffer.data(), static_cast<int>( raw.buffer.size() ) )
+             == workload.bytes );
+    const auto decoded = raw.decodeLines();
+    REQUIRE( decoded.size() == workload.lines.size() );
+    for ( size_t index = 0; index < decoded.size(); ++index ) {
+        REQUIRE( decoded[ index ] == workload.lines[ index ] );
+    }
+}
+
+class ScopedReplayLogging {
+  public:
+    explicit ScopedReplayLogging( bool debug )
+    {
+        const auto level = debug ? logging::LogLevel::Debug : logging::LogLevel::None;
+        logging::enableLogging( debug, level );
+        logging::enableFileLogging( debug, level );
+    }
+
+    ~ScopedReplayLogging()
+    {
+        // Restore tests_main.cpp's logging configuration for subsequent cases.
+        logging::enableFileLogging( false );
+        logging::enableLogging( true, logging::LogLevel::Warning );
+    }
+};
 
 #if defined( Q_OS_WIN )
 class ScopedWindowsTestHandle {
@@ -520,6 +661,264 @@ class ActiveCaptureChild {
     QString readyContents_;
 };
 } // namespace
+
+TEST_CASE( "CaptureStore small appends below limits avoid coordinated maintenance",
+           "[capturestore][maintenance-no-work]" )
+{
+    const auto mode = GENERATE( SmallAppendLimit::Bytes, SmallAppendLimit::Lines,
+                               SmallAppendLimit::Both );
+    const auto crowdEntries = GENERATE( 0, SmallAppendCrowdEntries );
+    CAPTURE( static_cast<int>( mode ), crowdEntries );
+    const auto limits = smallAppendLimits( mode );
+    const auto workload = smallAppendWorkload( SmallAppendRegressionBatches );
+    REQUIRE( workload.bytes.size() < limits.segmentTargetBytes );
+    REQUIRE( workload.bytes.size() < limits.memoryBudgetBytes );
+    REQUIRE( ( limits.rollingMaxFileSize == 0
+               || workload.bytes.size() < limits.rollingMaxFileSize ) );
+    REQUIRE( ( limits.maxTotalLines == 0
+               || static_cast<qint64>( workload.lines.size() ) < limits.maxTotalLines ) );
+    ScopedCoordinationEntries crowd;
+    crowd.create( crowdEntries );
+    CaptureStore store( makeCaptureId(), makeTestDir( "capturestore_small_appends" ),
+                        limits );
+    const auto before = CaptureStoreTestAccess::maintenanceOperations( store );
+    for ( const auto& batch : workload.batches ) {
+        const auto appended = store.appendUtf8( batch );
+        REQUIRE( appended.lineCount == 2_lcount );
+        REQUIRE( appended.rawUtf8Lines == batch );
+    }
+    const auto after = CaptureStoreTestAccess::maintenanceOperations( store );
+    requireSmallAppendContent( store, workload );
+    CHECK( after.markerScans - before.markerScans == 0 );
+    CHECK( after.retryGateAttempts - before.retryGateAttempts == 0 );
+    store.deleteCaptureFiles();
+}
+
+TEST_CASE( "CaptureStore direct no-work trim avoids coordinated maintenance",
+           "[capturestore][maintenance-no-work]" )
+{
+    const auto mode = GENERATE( SmallAppendLimit::Bytes, SmallAppendLimit::Lines,
+                               SmallAppendLimit::Both );
+    const auto populated = GENERATE( false, true );
+    CAPTURE( static_cast<int>( mode ), populated );
+    ScopedCoordinationEntries crowd;
+    crowd.create( SmallAppendCrowdEntries );
+    CaptureStore store( makeCaptureId(), makeTestDir( "capturestore_no_work_trim" ),
+                        smallAppendLimits( mode ) );
+    const auto workload = smallAppendWorkload( populated ? 1 : 0 );
+    for ( const auto& batch : workload.batches ) {
+        store.appendUtf8( batch );
+    }
+    // Isolate direct trim from construction and from the append caller.
+    const auto before = CaptureStoreTestAccess::maintenanceOperations( store );
+    const auto trimmed = store.trimToLimits();
+    const auto after = CaptureStoreTestAccess::maintenanceOperations( store );
+    REQUIRE( trimmed.trimmedLines == 0_lcount );
+    REQUIRE( trimmed.trimmedBytes == 0 );
+    requireSmallAppendContent( store, workload );
+    CHECK( after.markerScans - before.markerScans == 0 );
+    CHECK( after.retryGateAttempts - before.retryGateAttempts == 0 );
+    store.deleteCaptureFiles();
+}
+
+TEST_CASE( "CaptureStore pinned maintenance scans only when the final lease releases",
+           "[capturestore][maintenance-lifecycle]" )
+{
+    const auto rootPath = makeTestDir( "capturestore_pinned_maintenance" );
+    const auto captureId = makeCaptureId();
+    std::weak_ptr<void> lifetime;
+    {
+        CaptureStore store( captureId, rootPath, smallAppendLimits( SmallAppendLimit::Both ) );
+        store.appendUtf8( QByteArrayLiteral( "pinned-a\npinned-b\n" ) );
+        REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
+        const auto files = segmentFiles( store.capturePath() );
+        REQUIRE( files.size() == 1 );
+        const auto spilledPath = QDir( store.capturePath() ).filePath( files.front() );
+        auto pinned = CaptureStoreTestAccess::pinFirstSpilledSegment( store );
+        REQUIRE( pinned );
+        lifetime = CaptureStoreTestAccess::capturePathStateLifetime( store );
+
+        const auto before = CaptureStoreTestAccess::maintenanceOperations( store );
+        store.clear();
+        store.trimToLimits();
+        const auto whilePinned = CaptureStoreTestAccess::maintenanceOperations( store );
+        CHECK( whilePinned.markerScans == before.markerScans );
+        REQUIRE( QFileInfo::exists( spilledPath ) );
+
+        pinned.reset();
+        REQUIRE_FALSE( QFileInfo::exists( spilledPath ) );
+        const auto afterRelease = CaptureStoreTestAccess::maintenanceOperations( store );
+        CHECK( afterRelease.markerScans > whilePinned.markerScans );
+        // A completed retirement leaves a historical epoch, not perpetual work.
+        store.trimToLimits();
+        const auto afterNoOp = CaptureStoreTestAccess::maintenanceOperations( store );
+        CHECK( afterNoOp.markerScans == afterRelease.markerScans );
+        CHECK( afterNoOp.retryGateAttempts == afterRelease.retryGateAttempts );
+    }
+    REQUIRE( lifetime.expired() );
+    CaptureStore replacement( captureId, rootPath );
+    REQUIRE( replacement.lineCount() == 0_lcount );
+    replacement.deleteCaptureFiles();
+}
+
+TEST_CASE( "CaptureStore pending gate epochs survive the background handoff window",
+           "[capturestore][maintenance-lifecycle]" )
+{
+    const auto rootPath = makeTestDir( "capturestore_retry_handoff" );
+    const auto captureId = makeCaptureId();
+    CaptureStore store( captureId, rootPath );
+    struct Handoff {
+        std::atomic<bool> paused{ false };
+        std::atomic<bool> release{ false };
+    };
+    const auto handoff = std::make_shared<Handoff>();
+    CaptureStoreTestAccess::setBeforeRetryHandoffCallback( store, [ handoff ] {
+        handoff->paused.store( true, std::memory_order_release );
+        while ( !handoff->release.load( std::memory_order_acquire ) ) {
+            std::this_thread::yield();
+        }
+    } );
+    const auto previousTimeout = CaptureStoreTestAccess::setCapturePathGateTimeout( 20 );
+    struct Attempt {
+        bool held = false;
+        bool holderCompleted = false;
+        bool pending = false;
+        std::uint64_t gateAttempts = 0;
+        std::uint64_t markerScans = 0;
+    };
+    // A deactivation timeout creates a gate epoch with NO physical deletion
+    // work. Keep the gate held through public trim to isolate the epoch guard.
+    const auto attempt = [ & ] {
+        auto sibling = std::make_unique<CaptureStore>( captureId, rootPath );
+        Attempt result;
+        std::atomic<bool> gateHeld{ false };
+        std::atomic<bool> releaseGate{ false };
+        std::thread holder( [ & ] {
+            result.holderCompleted = CaptureStoreTestAccess::holdCapturePathGate(
+                store, [ & ] { gateHeld.store( true, std::memory_order_release ); },
+                [ & ] {
+                    while ( !releaseGate.load( std::memory_order_acquire ) ) {
+                        std::this_thread::yield();
+                    }
+                } );
+        } );
+        result.held = waitForFlag( gateHeld );
+        sibling.reset();
+        const auto retry = CaptureStoreTestAccess::maintenanceRetry( store );
+        result.pending = retry.requested != retry.completed;
+        const auto before = CaptureStoreTestAccess::maintenanceOperations( store );
+        store.trimToLimits();
+        const auto after = CaptureStoreTestAccess::maintenanceOperations( store );
+        result.gateAttempts = after.retryGateAttempts - before.retryGateAttempts;
+        result.markerScans = after.markerScans - before.markerScans;
+        releaseGate.store( true, std::memory_order_release );
+        holder.join();
+        return result;
+    };
+    const auto first = attempt();
+    const auto reachedHandoff = waitForFlag( handoff->paused );
+    const auto beforeSecond = CaptureStoreTestAccess::maintenanceRetry( store );
+    const auto second = attempt();
+    const auto duringHandoff = CaptureStoreTestAccess::maintenanceRetry( store );
+    handoff->release.store( true, std::memory_order_release );
+
+    bool settled = false;
+    QElapsedTimer waitForRetry;
+    waitForRetry.start();
+    while ( !settled && waitForRetry.elapsed() < 15000 ) {
+        const auto retry = CaptureStoreTestAccess::maintenanceRetry( store );
+        settled = retry.requested == retry.completed && !retry.scheduled;
+        std::this_thread::yield();
+    }
+    CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
+    // All holder threads have joined and the background hook has been released
+    // before any assertion; its captured state is shared even on test failure.
+    REQUIRE( first.held );
+    REQUIRE( first.holderCompleted );
+    REQUIRE( first.pending );
+    CHECK( first.gateAttempts == 1 );
+    CHECK( first.markerScans == 0 );
+    REQUIRE( reachedHandoff );
+    REQUIRE( beforeSecond.requested == beforeSecond.completed );
+    REQUIRE( beforeSecond.scheduled );
+    REQUIRE( second.held );
+    REQUIRE( second.holderCompleted );
+    REQUIRE( second.pending );
+    CHECK( second.gateAttempts == 1 );
+    CHECK( second.markerScans == 0 );
+    REQUIRE( duringHandoff.requested > beforeSecond.requested );
+    REQUIRE( duringHandoff.completed == beforeSecond.completed );
+    REQUIRE( settled );
+    const auto beforeNoOp = CaptureStoreTestAccess::maintenanceOperations( store );
+    store.trimToLimits();
+    CHECK( CaptureStoreTestAccess::maintenanceOperations( store ).retryGateAttempts
+           == beforeNoOp.retryGateAttempts );
+    store.deleteCaptureFiles();
+}
+
+// Opt-in capture-boundary replay, not an Android real-device benchmark. Run the
+// same test before/after a fix; timings are observations, never pass thresholds.
+// KLOGG_CAPTURESTORE_REPLAY_DEBUG=2 enables Debug console+file logging separately.
+TEST_CASE( "CaptureStore fixed small-append maintenance replay",
+           "[.capturestore-replay]" )
+{
+    const auto debugSetting = qgetenv( "KLOGG_CAPTURESTORE_REPLAY_DEBUG" );
+    REQUIRE( ( debugSetting.isEmpty() || debugSetting == "0" || debugSetting == "2" ) );
+    const auto debug = debugSetting == "2";
+    const ScopedReplayLogging loggingGuard( debug );
+    const auto limits = smallAppendLimits( SmallAppendLimit::Both );
+    const auto workload = smallAppendWorkload( SmallAppendReplayBatches );
+    ScopedCoordinationEntries crowd;
+    crowd.create( SmallAppendCrowdEntries );
+    const QDir coordinationDirectory( captureCoordinationRoot() );
+    const auto rootPath = makeTestDir( "capturestore_replay" );
+    const auto captureId = makeCaptureId();
+    for ( int repetition = 0; repetition < SmallAppendReplayRepetitions; ++repetition ) {
+        CaptureStore store( captureId, rootPath, limits );
+        const auto directoryEntriesBefore = coordinationDirectory.entryList(
+            QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot ).size();
+        const auto before = CaptureStoreTestAccess::maintenanceOperations( store );
+        const auto cpuStart = std::clock();
+        QElapsedTimer elapsed;
+        elapsed.start();
+        for ( const auto& batch : workload.batches ) {
+            store.appendUtf8( batch );
+        }
+        const auto elapsedNs = elapsed.nsecsElapsed();
+        const auto cpuEnd = std::clock();
+        const auto after = CaptureStoreTestAccess::maintenanceOperations( store );
+        const auto directoryEntriesAfter = coordinationDirectory.entryList(
+            QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot ).size();
+        const auto cpuAvailable = cpuStart != static_cast<std::clock_t>( -1 )
+                                  && cpuEnd != static_cast<std::clock_t>( -1 );
+        const auto cpuMs = cpuAvailable
+                               ? 1000.0 * static_cast<double>( cpuEnd - cpuStart )
+                                     / static_cast<double>( CLOCKS_PER_SEC )
+                               : -1.0;
+        std::cout << "capturestore_replay repetition=" << repetition + 1
+                  << " batches=" << workload.batches.size()
+                  << " lines=" << workload.lines.size()
+                  << " bytes=" << workload.bytes.size()
+                  << " segment_target=" << limits.segmentTargetBytes
+                  << " memory_budget=" << limits.memoryBudgetBytes
+                  << " rolling_bytes=" << limits.rollingMaxFileSize
+                  << " backups=" << limits.rollingBackupCount
+                  << " max_lines=" << limits.maxTotalLines
+                  << " test_owned_entries=" << SmallAppendCrowdEntries
+                  << " directory_entries_before=" << directoryEntriesBefore
+                  << " directory_entries_after=" << directoryEntriesAfter
+                  << " output=unbound logging=" << ( debug ? "debug2-console-file" : "off" )
+                  << " elapsed_ms=" << static_cast<double>( elapsedNs ) / 1000000.0
+                  << " process_cpu_ms=" << cpuMs
+                  << " marker_scans=" << after.markerScans - before.markerScans
+                  << " retry_gate_attempts=" << after.retryGateAttempts - before.retryGateAttempts
+                  << '\n';
+        requireSmallAppendContent( store, workload );
+        // Outside the measured region: remove this capture through its owner so
+        // repeated runs do not accumulate generation sidecars in the directory.
+        store.deleteCaptureFiles();
+    }
+}
 
 TEST_CASE( "Published content wait tolerates a transient empty publication" )
 {
@@ -1339,7 +1738,16 @@ TEST_CASE( "CaptureStore deferred file retirement completes after its local sibl
     REQUIRE( deletingStore.loadFromDisk() );
     deletingStore.deleteCaptureFiles();
     REQUIRE( QFileInfo::exists( capturePath ) );
+    const auto before = CaptureStoreTestAccess::maintenanceOperations( deletingStore );
+    deletingStore.trimToLimits();
+    const auto after = CaptureStoreTestAccess::maintenanceOperations( deletingStore );
+    // Pending retirement is coordinated work even though the background retry
+    // policy cannot run it yet. No file is eligible for physical deletion.
+    CHECK( after.retryGateAttempts - before.retryGateAttempts == 1 );
+    CHECK( after.markerScans == before.markerScans );
 
+    // The deleting store becomes the sole active retirement requester. Its
+    // pending files must promote even though it has not itself deactivated.
     activeSibling.reset();
 
     REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
@@ -1390,7 +1798,8 @@ TEST_CASE( "CaptureStore deferred deletion completes after its local sibling exi
     REQUIRE_FALSE( QFileInfo::exists( capturePath ) );
 }
 
-TEST_CASE( "CaptureStore deletion never adopts another process generation" )
+TEST_CASE( "CaptureStore deletion never adopts another process generation",
+           "[maintenance-lifecycle]" )
 {
     CaptureStore::Limits limits;
     limits.segmentTargetBytes = 64;
@@ -1405,7 +1814,18 @@ TEST_CASE( "CaptureStore deletion never adopts another process generation" )
     REQUIRE( CaptureStoreTestAccess::spillFirstSegment( original ) );
     auto pinnedSegment = CaptureStoreTestAccess::pinFirstSpilledSegment( original );
     REQUIRE( pinnedSegment );
+    const auto originalFiles = segmentFiles( capturePath );
+    REQUIRE( originalFiles.size() == 1 );
+    const auto originalPath = QDir( capturePath ).filePath( originalFiles.front() );
+    const auto beforeNoOps = CaptureStoreTestAccess::maintenanceOperations( original );
+    for ( int call = 0; call < 8; ++call ) {
+        original.trimToLimits();
+    }
+    const auto afterNoOps = CaptureStoreTestAccess::maintenanceOperations( original );
+    CHECK( afterNoOps.markerScans == beforeNoOps.markerScans );
+    CHECK( afterNoOps.retryGateAttempts == beforeNoOps.retryGateAttempts );
 
+    // The foreign owner arrives only AFTER repeated no-work maintenance.
     ActiveCaptureChild child( rootPath, captureId, false );
     REQUIRE( child.startAndWaitUntilReady() );
     REQUIRE( child.captureIdentity()
@@ -1413,9 +1833,19 @@ TEST_CASE( "CaptureStore deletion never adopts another process generation" )
 
     original.deleteCaptureFiles();
     pinnedSegment.reset();
+    const auto beforeRetry = CaptureStoreTestAccess::maintenanceOperations( original );
+    original.trimToLimits();
+    const auto afterRetry = CaptureStoreTestAccess::maintenanceOperations( original );
+    const auto filePreservedWhileForeignActive = QFileInfo::exists( originalPath );
+    const auto directoryPreservedWhileForeignActive = QFileInfo::exists( capturePath );
+    const auto childExited = child.releaseAndWait();
 
-    REQUIRE( QFileInfo::exists( capturePath ) );
-    REQUIRE( child.releaseAndWait() );
+    REQUIRE( filePreservedWhileForeignActive );
+    REQUIRE( directoryPreservedWhileForeignActive );
+    CHECK( afterRetry.markerScans > beforeRetry.markerScans );
+    CHECK( afterRetry.retryGateAttempts > beforeRetry.retryGateAttempts );
+    REQUIRE( childExited );
+    REQUIRE( waitForMissingFile( originalPath ) );
 }
 
 TEST_CASE( "CaptureStore deletion refreshes a generation left by an exited process" )

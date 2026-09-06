@@ -15,6 +15,7 @@ APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 NOTICE = ROOT / "NOTICE"
 BUILD_ACTION = ROOT / ".github" / "actions" / "build-adb-helper" / "action.yml"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
+CI_CONTINUOUS = ROOT / ".github" / "workflows" / "ci-continuous.yml"
 CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yml"
 DOCKER_PACKAGE = ROOT / ".github" / "actions" / "docker-package" / "action.yml"
 MAC_PACKAGE = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
@@ -571,8 +572,9 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
     def test_release_matrix_builds_every_target_and_publishes_source_assets(self):
         build_action = self.required_text(BUILD_ACTION)
         ci_build = self.required_text(CI_BUILD)
+        ci_continuous = self.required_text(CI_CONTINUOUS)
         ci_release = self.required_text(CI_RELEASE)
-        combined = "\n".join((build_action, ci_build, ci_release))
+        combined = "\n".join((build_action, ci_build, ci_continuous, ci_release))
 
         for target in EXPECTED_TARGETS:
             self.assertIn(target, combined)
@@ -599,18 +601,22 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
 
         for marker in (
             "prepare_source_publication.py",
-            "--adb-source-root ./adb-helper-legal-assets",
+            "--adb-source-root adb-helper-legal-assets",
             "klogg-source-publication-manifest.json",
             "packages-publication/SHA256SUMS",
             "./packages-publication/*",
         ):
-            self.assertIn(marker, ci_release)
+            self.assertIn(marker, ci_continuous)
+        self.assertIn("promote_release_publication.py", ci_release)
+        self.assertIn("continuous-publication", ci_release)
+        self.assertIn("./packages-publication/*", ci_release)
 
     def test_release_paths_do_not_use_prebuilt_sdk_path_or_floating_adb(self):
         paths = (
             ADB_CMAKE,
             BUILD_ACTION,
             CI_BUILD,
+            CI_CONTINUOUS,
             CI_RELEASE,
             DOCKER_PACKAGE,
             MAC_PACKAGE,

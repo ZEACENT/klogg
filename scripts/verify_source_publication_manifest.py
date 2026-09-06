@@ -588,6 +588,15 @@ MANIFEST_V2_FIELDS = {
     "evidence_archive",
     "checksums",
 }
+MANIFEST_V3_FIELDS = MANIFEST_V2_FIELDS | {"promotion"}
+PROMOTION_FIELDS = {
+    "source_release_id",
+    "source_tag_sha",
+    "source_manifest_sha256",
+    "source_commit",
+    "source_assets",
+}
+PROMOTION_ASSET_FIELDS = {"id", "name", "sha256"}
 RELEASE_V2_FIELDS = {
     "tag",
     "version",
@@ -1065,6 +1074,70 @@ def verify_component_v2(
     return receipt_hash, {receipt_path.name, archive_path.name, *referenced_support}
 
 
+def verify_promotion_lineage(
+    record: object,
+    manifest_path: pathlib.Path,
+    assets_root: pathlib.Path,
+    release: dict,
+    publication_assets: set[str],
+) -> None:
+    promotion = require_fields(record, PROMOTION_FIELDS, "promotion lineage")
+    release_id = promotion["source_release_id"]
+    if type(release_id) is not int or release_id <= 0:
+        raise PublicationError("invalid promotion source release ID")
+    source_tag_sha = promotion["source_tag_sha"]
+    if not isinstance(source_tag_sha, str) or re.fullmatch(r"[0-9a-f]{40}", source_tag_sha) is None:
+        raise PublicationError("invalid promotion source tag SHA")
+    source_manifest_sha256 = require_sha256(
+        promotion["source_manifest_sha256"], "promotion source manifest"
+    )
+    source_commit = promotion["source_commit"]
+    if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise PublicationError("invalid promotion source commit")
+    if source_commit != release["commit"] or source_tag_sha != source_commit:
+        raise PublicationError("promotion source identity mismatch")
+
+    raw_assets = promotion["source_assets"]
+    if not isinstance(raw_assets, list):
+        raise PublicationError("invalid promotion source asset list")
+    source_assets: dict[str, dict] = {}
+    source_asset_ids: set[int] = set()
+    source_asset_names: list[str] = []
+    for offset, raw_asset in enumerate(raw_assets):
+        asset = require_fields(
+            raw_asset, PROMOTION_ASSET_FIELDS, f"promotion source asset {offset}"
+        )
+        asset_id = asset["id"]
+        if type(asset_id) is not int or asset_id <= 0:
+            raise PublicationError(f"invalid promotion source asset ID: {offset}")
+        if asset_id in source_asset_ids:
+            raise PublicationError(f"duplicate promotion source asset ID: {asset_id}")
+        source_asset_ids.add(asset_id)
+        name = regular_asset_name(asset["name"], "promotion source asset")
+        if name in source_assets:
+            raise PublicationError(f"duplicate promotion source asset name: {name}")
+        require_sha256(asset["sha256"], f"promotion source asset {name}")
+        source_assets[name] = asset
+        source_asset_names.append(name)
+    if source_asset_names != sorted(source_asset_names):
+        raise PublicationError("promotion source asset records are not sorted")
+    if set(source_assets) != publication_assets:
+        missing = sorted(publication_assets - set(source_assets))
+        extra = sorted(set(source_assets) - publication_assets)
+        raise PublicationError(
+            f"promotion source asset coverage mismatch; missing={missing}, extra={extra}"
+        )
+    manifest_record = source_assets[manifest_path.name]
+    if manifest_record["sha256"] != source_manifest_sha256:
+        raise PublicationError("promotion source manifest lineage mismatch")
+
+    for name, asset in source_assets.items():
+        if name in {manifest_path.name, "SHA256SUMS"}:
+            continue
+        if sha256(regular_asset(assets_root, name, "promoted payload asset")) != asset["sha256"]:
+            raise PublicationError(f"promoted payload differs from source asset: {name}")
+
+
 def verify_manifest_v2(
     manifest_path: pathlib.Path,
     assets_root: pathlib.Path,
@@ -1074,11 +1147,17 @@ def verify_manifest_v2(
     expected_version: str,
     expected_commit: str,
     expected_base_url: str,
+    expected_schema_version: int = 2,
 ) -> None:
     document = read_json(manifest_path, "release publication manifest")
-    require_fields(document, MANIFEST_V2_FIELDS, "release publication manifest")
+    manifest_fields = (
+        MANIFEST_V2_FIELDS
+        if expected_schema_version == 2
+        else MANIFEST_V3_FIELDS
+    )
+    require_fields(document, manifest_fields, "release publication manifest")
     require_schema_version(
-        document["schema_version"], 2, "release publication manifest"
+        document["schema_version"], expected_schema_version, "release publication manifest"
     )
     if document["manifest_kind"] != "klogg-release-publication":
         raise PublicationError("unsupported release publication manifest schema")
@@ -1086,6 +1165,10 @@ def verify_manifest_v2(
         raise PublicationError("publication channel mismatch")
     if expected_evidence_level not in EVIDENCE_LEVELS or document["evidence_level"] != expected_evidence_level:
         raise PublicationError("publication evidence level mismatch")
+    if expected_schema_version == 3 and (
+        document["channel"] != "stable" or document["evidence_level"] != "validation"
+    ):
+        raise PublicationError("promotion manifest must describe a stable validation publication")
     release = require_fields(document["release"], RELEASE_V2_FIELDS, "release identity")
     base_url = normalize_base_url(expected_base_url)
     expected_release = {
@@ -1310,6 +1393,14 @@ def verify_manifest_v2(
             f"unlisted or unreferenced release asset; missing={missing}, extra={extra}"
         )
     verify_sha256sums(assets_root, document["checksums"], logical_assets - {"SHA256SUMS"})
+    if expected_schema_version == 3:
+        verify_promotion_lineage(
+            document["promotion"],
+            manifest_path,
+            assets_root,
+            release,
+            actual_regular_assets,
+        )
 
 
 def verify_manifest(
@@ -1346,7 +1437,7 @@ def verify_manifest(
             expected_base_url,
         )
         return
-    if schema == 2 and kind == "klogg-release-publication":
+    if schema in (2, 3) and kind == "klogg-release-publication":
         verify_manifest_v2(
             root_manifest,
             assets_root,
@@ -1356,6 +1447,7 @@ def verify_manifest(
             expected_version,
             expected_commit,
             expected_base_url,
+            expected_schema_version=schema,
         )
         return
     raise PublicationError("unsupported source publication manifest schema")
