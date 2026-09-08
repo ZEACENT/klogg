@@ -1236,40 +1236,90 @@ SCENARIO( "Closing one of several windows deletes its discarded live capture",
 }
 
 namespace {
+class LiveSaveDialogDriver final : public QObject {
+public:
+    explicit LiveSaveDialogDriver( QString chosenPath )
+        : chosenPath_( std::move( chosenPath ) )
+    {
+        QApplication::instance()->installEventFilter( this );
+    }
+
+    ~LiveSaveDialogDriver() override
+    {
+        QApplication::instance()->removeEventFilter( this );
+    }
+
+    const QStringList& suggestions() const { return suggestions_; }
+    bool closed() const { return closed_; }
+
+protected:
+    bool eventFilter( QObject* watched, QEvent* event ) override
+    {
+        if ( event->type() != QEvent::Show ) {
+            return false;
+        }
+
+        auto* modal = qobject_cast<QWidget*>( watched );
+        if ( modal == nullptr || scheduledModal_ == modal ) {
+            return false;
+        }
+
+        if ( auto* dialog = qobject_cast<QFileDialog*>( modal ) ) {
+            scheduledModal_ = dialog;
+            suggestions_ = dialog->selectedFiles();
+            const QPointer<QFileDialog> guard( dialog );
+            QTimer::singleShot( 0, Qt::PreciseTimer, dialog, [ this, guard, dialog ] {
+                if ( scheduledModal_ == dialog ) {
+                    scheduledModal_.clear();
+                }
+                if ( guard.isNull() ) {
+                    return;
+                }
+                if ( chosenPath_.isEmpty() ) {
+                    guard->reject();
+                    closed_ = true;
+                }
+                else {
+                    guard->selectFile( chosenPath_ );
+                    closed_ = QMetaObject::invokeMethod( guard, "accept", Qt::DirectConnection );
+                }
+            } );
+        }
+        else if ( auto* warning = qobject_cast<QMessageBox*>( modal ) ) { // lint-allow: platform-fragile -- queued Show handling drives the real save warning.
+            scheduledModal_ = warning;
+            const QPointer<QMessageBox> guard( warning ); // lint-allow: platform-fragile -- queued guard prevents modal reentrancy and deletion races.
+            QTimer::singleShot( 0, Qt::PreciseTimer, warning, [ this, guard, warning ] {
+                if ( scheduledModal_ == warning ) {
+                    scheduledModal_.clear();
+                }
+                if ( guard.isNull() ) {
+                    return;
+                }
+                if ( auto* save = guard->button( QMessageBox::Save ) ) { // lint-allow: platform-fragile -- deterministic modal choice.
+                    save->click();
+                }
+                else {
+                    guard->reject();
+                }
+            } );
+        }
+        return false;
+    }
+
+private:
+    QString chosenPath_;
+    QStringList suggestions_;
+    QPointer<QWidget> scheduledModal_;
+    bool closed_ = false;
+};
+
 void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
                              const QString& chosenPath = {} )
 {
     REQUIRE( action.isEnabled() );
     const auto nativeDialogsDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
     QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
-    QStringList suggestions;
-    bool closed = false;
-    QObject dialogDriver;
-    QTimer dialogTimer( &dialogDriver );
-    dialogTimer.setTimerType( Qt::PreciseTimer );
-    dialogTimer.setInterval( 1 );
-    QObject::connect( &dialogTimer, &QTimer::timeout, &dialogDriver, [ & ] {
-        if ( auto* dialog = qobject_cast<QFileDialog*>( QApplication::activeModalWidget() ) ) {
-            suggestions = dialog->selectedFiles();
-            if ( chosenPath.isEmpty() ) {
-                dialog->reject();
-                closed = true;
-            }
-            else {
-                dialog->selectFile( chosenPath );
-                closed = QMetaObject::invokeMethod( dialog, "accept", Qt::DirectConnection );
-            }
-        }
-        else if ( auto* warning = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ) ) { // lint-allow: platform-fragile -- PreciseTimer drives the real save warning.
-            if ( auto* save = warning->button( QMessageBox::Save ) ) { // lint-allow: platform-fragile -- deterministic modal choice.
-                save->click();
-            }
-            else {
-                warning->reject();
-            }
-        }
-    } );
-    dialogTimer.start();
+    LiveSaveDialogDriver dialogDriver( chosenPath );
     action.trigger();
     auto* owner = qobject_cast<QWidget*>( action.parent() );
     REQUIRE( waitUiState( [ owner ] {
@@ -1277,11 +1327,11 @@ void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
                || owner->findChild<QProgressDialog*>( QStringLiteral( "liveLogExportProgress" ) )
                       == nullptr;
     } ) );
-    dialogTimer.stop();
     QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
-    REQUIRE( closed );
-    REQUIRE( suggestions.size() == 1 );
-    CHECK( suggestions.front().toStdString() == expectedSuggestion.toStdString() );
+    REQUIRE( dialogDriver.closed() );
+    REQUIRE( dialogDriver.suggestions().size() == 1 );
+    CHECK( dialogDriver.suggestions().front().toStdString()
+           == expectedSuggestion.toStdString() );
 }
 
 void exerciseLiveCountdownRouting( MainWindow& window, Session& session,
