@@ -61,12 +61,25 @@ jobs:
           }
 
           gh_api_retry() {
-            local attempt=1
+            local attempt=1 response error_file status
+            error_file="$(mktemp)"
             while true; do
-              if gh api "$@"; then
+              if response="$(gh api "$@" 2>"$error_file")"; then
+                cat "$error_file" >&2
+                rm -f "$error_file"
+                printf '%s\n' "$response"
                 return 0
+              else
+                status=$?
+              fi
+              cat "$error_file" >&2
+              # This exact CLI validation is local, not a transient API failure.
+              if grep -Fxq "the \`--slurp\` option is not supported with \`--jq\` or \`--template\`" "$error_file"; then
+                rm -f "$error_file"
+                return "$status"
               fi
               if [ "$attempt" -ge "$KLOGG_GH_API_RETRY_ATTEMPTS" ]; then
+                rm -f "$error_file"
                 echo "::error::GitHub API request failed after ${attempt} attempts" >&2
                 return 1
               fi
@@ -96,13 +109,16 @@ jobs:
           [[ "$run_attempt" =~ ^[0-9]+$ ]]
           gate_record=""
           for gate_attempt in $(seq "$run_attempt" -1 1); do
-            gate_record="$(gh_api_retry --paginate --slurp \
-              "${run_api}/attempts/${gate_attempt}/jobs?per_page=100" --jq '
+            # gh rejects --slurp with --jq/--template before making a request.
+            # Fetch every page successfully before applying a single raw filter.
+            gate_pages="$(gh_api_retry --paginate --slurp \
+              "${run_api}/attempts/${gate_attempt}/jobs?per_page=100")"
+            gate_record="$(jq -r '
                 [.[].jobs[] | select(.name == "ci-gate")]
                 | if length == 0 then empty
                   elif length == 1 then .[0] | [.status, .conclusion] | @tsv
                   else error("expected at most one ci-gate job per attempt") end
-              ')"
+              ' <<< "$gate_pages")"
             if [ -n "$gate_record" ]; then
               break
             fi

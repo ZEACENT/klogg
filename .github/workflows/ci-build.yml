@@ -1294,6 +1294,14 @@ jobs:
           name: ios-native-source-cache
           path: ${{ github.workspace }}/ios-native-sources
 
+      - name: Execute pinned os_trace startup C contract
+        shell: bash
+        env:
+          KLOGG_IOS_NATIVE_ARCHIVE_ROOT: ${{ github.workspace }}/ios-native-sources
+        run: |
+          set -euo pipefail
+          python3 "${{ github.workspace }}/tests/scripts/test_libimobiledevice_ostrace_startup.py"
+
       - name: Build disconnected thin iOS native stack
         shell: bash
         run: |

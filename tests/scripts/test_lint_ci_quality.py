@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import os
+import subprocess
+import textwrap
+from unittest import mock
 import tempfile
 import unittest
 
@@ -51,6 +55,204 @@ jobs:
       - run: cmake --build build -t klogg
       - uses: github/codeql-action/analyze@{CODEQL_PINNED} # v4.37.9
 """
+
+
+class WorkflowTimerAndCliPolicyTest(unittest.TestCase):
+    def test_schedule_triggers_are_rejected_in_block_quoted_flow_and_list_forms(self):
+        for trigger in (
+            "on:\n  schedule:\n    - cron: '17 4 * * 0'\n",
+            "'on':\n  'schedule': [{cron: '17 4 * * 0'}]\n",
+            '"on": [push, "schedule"]\n',
+            "on: {push: null, schedule: [{cron: '17 4 * * 0'}]}\n",
+            "on: schedule\n", "on:\n  - push\n  - schedule\n",
+        ):
+            with self.subTest(trigger=trigger):
+                self.assertTrue(MODULE.workflow_schedule_issues(trigger))
+
+    def test_non_timer_events_and_schedule_spoofs_are_accepted(self):
+        for trigger in (
+            "on:\n  push:\n  pull_request:\n  workflow_dispatch:\n",
+            "'on':\n  'workflow_dispatch':\n    inputs:\n      schedule:\n        type: string\n",
+            '"on": [push, "pull_request", workflow_dispatch]\n',
+            "on: workflow_dispatch\n", "on:\n  - push\n  - workflow_dispatch\n",
+            "on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\n  workflow_call:\n",
+        ):
+            with self.subTest(trigger=trigger):
+                text = trigger + '''# on: [schedule]
+jobs:
+  schedule:
+    steps:
+      - run: |
+          printf '%s\\n' 'on: {schedule: []}'
+          # on: schedule
+'''
+                self.assertEqual(MODULE.workflow_schedule_issues(text), [])
+
+    def test_unknown_or_malformed_trigger_structures_fail_closed(self):
+        for trigger in (
+            "on:\n", "on: []\n", "on: [push,,workflow_dispatch]\n",
+            "on: [push\n", "on: 42\n", "on: &events [push]\n",
+            "on:\n  push:\non:\n  workflow_dispatch:\n",
+            "on:\n  push:\n  push:\n", "on:\n  push:\n schedule:\n",
+            "on:\n  unknown_event:\n", "name: 'on: push'\n",
+            # Flow mappings are deliberately outside the repository's bounded
+            # mapping parser; unsupported syntax must not bypass the guard.
+            "on: {push: null}\n",
+            'on: push\n"o\\u006e": [schedule]\n',
+            "on: push\non : [schedule]\n",
+            "on:push\n", "on:\n  push:null\n",
+            "on:\n  'push\":\n",
+        ):
+            with self.subTest(trigger=trigger):
+                self.assertTrue(MODULE.workflow_schedule_issues(trigger))
+
+    def test_real_tree_has_no_timers_and_preserves_non_timer_projections(self):
+        for path in MODULE.ci_manifests(ROOT):
+            if path.parent != ROOT / ".github/workflows":
+                continue
+            text = path.read_text()
+            with self.subTest(workflow=path.name):
+                self.assertEqual(MODULE.workflow_schedule_issues(text), [])
+                expected = {"workflow_dispatch"}
+                if path.name not in ("ci-release.yml", "ci-continuous.yml"):
+                    expected |= {"push", "pull_request"}
+                self.assertEqual(set(MODULE.workflow_trigger_mapping(text)), expected)
+
+    def test_repository_guard_catches_real_workflow_mutations(self):
+        original_read = pathlib.Path.read_text
+        target = ROOT / ".github/workflows/lint.yml"
+        original = target.read_text()
+        mutations = (
+            ("schedule", original.replace("on:\n", "on:\n  schedule:\n    - cron: '7 9 * * *'\n", 1)),
+            ("--slurp", original + '\n# Regression fixture\n  regression:\n    steps:\n      - run: gh api --paginate --slurp /repos/example/releases --jq ".[]"\n'),
+        )
+        for marker, mutated in mutations:
+            with self.subTest(marker=marker):
+                self.assertNotEqual(original, mutated)
+                def read(path, *args, **kwargs):
+                    return mutated if path == target else original_read(path, *args, **kwargs)
+                with mock.patch.object(pathlib.Path, "read_text", read):
+                    issues = MODULE.check_repo(ROOT)
+                self.assertTrue(any("lint.yml" in issue and marker in issue for issue in issues), issues)
+
+    def test_gh_flag_rule_exact_escape_adjacent_fix_near_miss_and_spoofs(self):
+        bad = '''steps:
+  - run: |
+      gate_record="$(gh_api_retry --paginate --slurp \\
+        "/repos/${repo}/jobs?per_page=100" --jq '
+          [.[].jobs[] | select(.name == "ci-gate")]
+        ')"
+'''
+        good = bad.replace('gate_record="$(gh_api_retry', 'pages="$(gh_api_retry').replace(
+            '''"/repos/${repo}/jobs?per_page=100" --jq '\n          [.[].jobs[] | select(.name == "ci-gate")]\n        ')"''',
+            '''"/repos/${repo}/jobs?per_page=100")"\n      gate_record="$(jq -rc '[.[].jobs[] | select(.name == "ci-gate")]' <<< "$pages")"'''
+        )
+        self.assertIn("\\\n", bad)
+        self.assertNotEqual(good, bad)
+        self.assertTrue(MODULE.github_api_flag_issues(bad))
+        self.assertEqual(MODULE.github_api_flag_issues(good), [])
+        for command in (
+            'gh api --paginate /repos/example/jobs --jq ".jobs[]"',
+            'gh api --paginate --slurp /repos/example/jobs',
+            'printf "%s\\n" "gh api --slurp --jq ."',
+            'printf "%s\\n" "gh" "api" "--slurp" "--jq"',
+            'echo gh api --slurp --jq .',
+            '# gh api --paginate --slurp /repos/example/jobs --jq .',
+            'gh api /repos/example --raw-field note="--slurp --jq"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(MODULE.github_api_flag_issues(f"steps:\n  - run: |\n      {command}\n"), [])
+        for option in ('--jq .', '-q .', '--template "{{.}}"', '-t "{{.}}"', '--jq=.', '-q.'):
+            with self.subTest(option=option):
+                self.assertTrue(MODULE.github_api_flag_issues(f"steps:\n  - run: gh api --slurp --paginate /repos/example {option}\n"))
+        self.assertTrue(MODULE.github_api_flag_issues('steps:\n  - run: gh api --slurp --jq "unterminated\n'))
+
+    def test_gh_flag_rule_recognizes_command_substitution_syntax(self):
+        invocation = "gh api --paginate --slurp /repos/example/jobs --jq '.jobs'"
+        for command in (
+            f"pages=$({invocation})",
+            f'pages="$({invocation})"',
+            f"local pages=$({invocation})",
+            f'printf "%s\\n" "$({invocation})"',
+            f'pages="prefix$({invocation})suffix"',
+            f'pages=$(printf "%s" "$({invocation})")',
+            f"true&&{invocation}",
+            f"if {invocation}; then true; fi",
+            f"GH_HOST=example.invalid {invocation}",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(MODULE.github_api_flag_issues(f"steps:\n  - run: |\n      {command}\n"))
+
+    def test_gh_flag_rule_keeps_argument_data_separate_from_shell_syntax(self):
+        for command in (
+            "printf '%s\\n' 'if' 'gh' 'api' '--slurp' '--jq' '.'",
+            "printf '%s\\n' if gh api --slurp --jq .",
+            "printf '%s\\n' ';' 'gh' 'api' '--slurp' '--jq' '.'",
+            "printf '%s\\n' '$(gh api --slurp --jq .)'",
+            r'printf "%s\\n" "\$(gh api --slurp --jq .)"',
+            "printf '%s\\n' then gh_api_retry --slurp --jq .",
+            "gh api --slurp /repos/example/jobs; printf '%s\\n' '--jq' '.'",
+            "gh api --slurp /repos/example/jobs --raw-field ';' --header '--jq'",
+            "gh api --slurp -- /repos/example/jobs --jq .",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(MODULE.github_api_flag_issues(f"steps:\n  - run: |\n      {command}\n"), [])
+
+    def test_gh_guard_accepts_current_workflows_and_classifies_case_bodies(self):
+        for path in MODULE.ci_manifests(ROOT):
+            with self.subTest(workflow=path.name):
+                self.assertEqual(MODULE.github_api_flag_issues(path.read_text()), [])
+        for command, rejected in (
+            ('case "$status" in 0) gh api --slurp /repos/example/jobs ;; esac', False),
+            ('case "$status" in 0) gh api --slurp /repos/example/jobs --jq . ;; esac', True),
+            ('case "$status" in "gh api --slurp --jq .") printf ok ;; esac', False),
+            ('case "$status" in 0) printf "%s" if gh api --slurp --jq . ;; esac', False),
+            ('pages=$(case "$status" in 0) gh api --slurp --jq . ;; *) printf ok ;; esac)', True),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(bool(MODULE.github_api_flag_issues(f"steps:\n  - run: |\n      {command}\n")), rejected)
+
+    def test_repository_gh_guard_rejects_unquoted_substitution_not_printf_data(self):
+        original_read = pathlib.Path.read_text
+        target = ROOT / ".github/workflows/lint.yml"
+        original = target.read_text()
+        for command, rejected in (
+            ("pages=$(gh api --paginate --slurp /repos/example/jobs --jq '.jobs')", True),
+            ("printf '%s\\n' 'if' 'gh' 'api' '--slurp' '--jq' '.'", False),
+        ):
+            with self.subTest(command=command):
+                mutated = original + f"\n  regression:\n    steps:\n      - run: |\n          {command}\n"
+                def read(path, *args, **kwargs):
+                    return mutated if path == target else original_read(path, *args, **kwargs)
+                with mock.patch.object(pathlib.Path, "read_text", read):
+                    issues = MODULE.check_repo(ROOT)
+                flag_issues = [issue for issue in issues if "lint.yml" in issue and "--slurp" in issue]
+                self.assertEqual(bool(flag_issues), rejected, flag_issues)
+
+    def test_static_analysis_event_modes_remain_strict_except_manual_full_report(self):
+        workflow = (ROOT / ".github/workflows/static-analysis.yml").read_text()
+        section = workflow.split("      - name: Resolve authoritative analysis base", 1)[1].split("      - name: Install gcc-13", 1)[0]
+        script = textwrap.dedent(section.split("        run: |\n", 1)[1])
+        for event, manual, expected in (
+            ("pull_request", "full-report", "changed-strict"),
+            ("push", "full-report", "changed-strict"),
+            ("workflow_dispatch", "full-report", "full-report"),
+            ("workflow_dispatch", "changed-strict", "changed-strict"),
+            ("schedule", "full-report", None),
+        ):
+            with self.subTest(event=event, manual=manual), tempfile.TemporaryDirectory() as directory:
+                output = pathlib.Path(directory) / "env"
+                env = {**os.environ, "EVENT_NAME": event, "MANUAL_MODE": manual,
+                       "PR_BASE_SHA": "HEAD", "PUSH_BASE_SHA": "HEAD", "MANUAL_BASE_SHA": "HEAD",
+                       "GITHUB_ENV": str(output)}
+                result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=10)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"KLOGG_ANALYSIS_MODE={expected}", output.read_text())
 
 
 class CiQualityLintTest(unittest.TestCase):
@@ -1933,7 +2135,7 @@ steps:
     def test_static_analysis_full_audit_and_changed_events_do_not_cancel_each_other(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
         self.assertIn("group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}", workflow)
-        self.assertIn("cancel-in-progress: ${{ github.event_name != 'schedule' }}", workflow)
+        self.assertIn("cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}", workflow)
 
     def test_static_analysis_dispatch_is_full_by_default_or_uses_an_explicit_base(self):
         workflow = (ROOT / ".github" / "workflows" / "static-analysis.yml").read_text()
@@ -1956,7 +2158,7 @@ steps:
         good = """\
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 env:
   PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
   PUSH_BASE_SHA: ${{ github.event.before }}
@@ -1995,7 +2197,7 @@ steps:
         )
 
         bad = good.replace(
-            "  cancel-in-progress: ${{ github.event_name != 'schedule' }}",
+            "  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
             "  cancel-in-progress: true",
             1,
         )

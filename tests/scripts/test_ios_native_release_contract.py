@@ -32,6 +32,7 @@ MAC_PACKAGE_ACTION = ROOT / ".github" / "actions" / "agent-package-mac" / "actio
 APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 IOS_LIVE_SERVICES = ROOT / "src" / "ui" / "src" / "iosliveservices.cpp"
 IOS_NATIVE_STREAM = ROOT / "src" / "livecapture" / "src" / "iosnativestream.cpp"
+IOS_NATIVE_HEADER = ROOT / "src" / "livecapture" / "include" / "iosnativestream.h"
 CI_BUILD_WORKFLOW = ROOT / ".github" / "workflows" / "ci-build.yml"
 BUILD_SCRIPT = ROOT / "scripts" / "build_ios_native_stack.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_ios_native_stack.py"
@@ -46,6 +47,95 @@ _VERIFY_SPEC = importlib.util.spec_from_file_location("verify_ios_native_stack",
 assert _VERIFY_SPEC is not None and _VERIFY_SPEC.loader is not None
 VERIFY_MODULE = importlib.util.module_from_spec(_VERIFY_SPEC)
 _VERIFY_SPEC.loader.exec_module(VERIFY_MODULE)
+_CI_SPEC = importlib.util.spec_from_file_location(
+    "ios_native_ci_quality", ROOT / "scripts" / "lint_ci_quality.py"
+)
+assert _CI_SPEC is not None and _CI_SPEC.loader is not None
+CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
+_CI_SPEC.loader.exec_module(CI_MODULE)
+
+IOS_STARTUP_STEP = "Execute pinned os_trace startup C contract"
+IOS_ARCHIVE_ROOT = "${{ github.workspace }}/ios-native-sources"
+IOS_STARTUP_COMMAND = (
+    'python3 "${{ github.workspace }}/tests/scripts/test_libimobiledevice_ostrace_startup.py"'
+)
+IOS_NATIVE_JOBS = {
+    "BuildIosNativeStacks": "x86_64",
+    "BuildIosNativeArm64": "arm64",
+}
+
+
+def ios_startup_ci_issues(text: str) -> list[str]:
+    """Require the small, unconditional C gate in both native source consumers.
+
+    Deliberately accept only the existing job condition and shared-step shape:
+    unknown conditions must not silently narrow event/matrix coverage. Shell
+    bodies are checked as complete commands, not script-name substring matches.
+    """
+    triggers = CI_MODULE.workflow_trigger_mapping(text)
+    jobs = CI_MODULE.workflow_mapping_block(text.splitlines(), "jobs", 0)
+    if triggers is None or jobs is None:
+        return ["malformed workflow triggers/jobs"]
+    if not {"pull_request", "push", "workflow_dispatch"} <= triggers.keys():
+        return ["missing native CI event coverage"]
+    issues = []
+    for name, architecture in IOS_NATIVE_JOBS.items():
+        job = jobs.get(name, (None, []))[1]
+        direct = CI_MODULE.workflow_mapping_block(job, name, 2)
+        if direct is None:
+            issues.append(f"{name}: missing or malformed native job")
+            continue
+        if (
+            direct.get("if", (None,))[0]
+            != "!contains(github.event.head_commit.message, '[skip ci]')"
+            or "continue-on-error" in direct
+            or CI_MODULE.workflow_job_matrix_values(job).get("architecture")
+            != {architecture}
+        ):
+            issues.append(f"{name}: native event/matrix gate changed")
+        steps_value = direct.get("steps", (None,))[0]
+        if name == "BuildIosNativeArm64":
+            if steps_value != "*ios_native_steps":
+                issues.append(f"{name}: must inherit the checked native steps")
+                continue
+            job = jobs.get("BuildIosNativeStacks", (None, []))[1]
+        elif steps_value != "&ios_native_steps":
+            issues.append(f"{name}: missing native steps anchor")
+        steps = CI_MODULE.workflow_step_blocks(job)
+        parsed = [CI_MODULE.workflow_step_fields(step) for step in steps]
+        matches = [i for i, (fields, _) in enumerate(parsed)
+                   if fields.get("name") == IOS_STARTUP_STEP]
+        if len(matches) != 1:
+            issues.append(f"{name}: required actual-C startup step missing or duplicated")
+            continue
+        index = matches[0]
+        fields, children = parsed[index]
+        # Normalize the list item's first key to a mapping to reject duplicate
+        # direct keys and malformed child mappings using the existing parser.
+        normalized = ["      gate:", steps[index][0].replace("- ", "  ", 1)]
+        normalized.extend(steps[index][1:])
+        direct_step = CI_MODULE.workflow_mapping_block(normalized, "gate", 6)
+        environment = CI_MODULE.workflow_mapping_block(steps[index], "env", 8)
+        commands = [line.strip() for line in fields.get("run", "").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        if (
+            direct_step is None
+            or set(fields) != {"name", "shell", "env", "run"}
+            or fields.get("shell") != "bash"
+            or environment is None
+            or children.get("env") != {"KLOGG_IOS_NATIVE_ARCHIVE_ROOT": IOS_ARCHIVE_ROOT}
+            or commands != ["set -euo pipefail", IOS_STARTUP_COMMAND]
+        ):
+            issues.append(f"{name}: startup must execute fail-closed with explicit archives")
+        previous, inputs = parsed[index - 1] if index else ({}, {})
+        if (
+            not previous.get("uses", "").startswith("actions/download-artifact@")
+            or "if" in previous or "continue-on-error" in previous
+            or inputs.get("with", {}).get("name") != "ios-native-source-cache"
+            or inputs.get("with", {}).get("path") != IOS_ARCHIVE_ROOT
+        ):
+            issues.append(f"{name}: startup must immediately follow native archive download")
+    return issues
 
 EXPECTED_SOURCES = {
     "openssl": {
@@ -91,7 +181,7 @@ EXPECTED_LIBIMOBILEDEVICE_PATCH_CHAIN = [
     "patches/0005-ostrace-record-type-callback.patch",
 ]
 EXPECTED_LIBIMOBILEDEVICE_FINAL_TREE_SHA256 = (
-    "a5acf45cb73b96ded80d8944f8c2ee59e74a73181fe41caee2f81a30d9d8587d"
+    "dc0ef5f499295cab2678810ac6cea0ea85be00e554a6395a81a36b6373bdab15"
 )
 EXPECTED_THIN_ARTIFACTS = {
     "x86_64": "15.0",
@@ -171,6 +261,142 @@ def cpm_packages(path: pathlib.Path) -> dict[str, list[str]]:
     return packages
 
 
+class IosStartupCiContractTest(unittest.TestCase):
+    download = (
+        "      - uses: actions/download-artifact@"
+        + CI_MODULE.REVIEWED_ACTION_REVISIONS["actions/download-artifact"]
+        + "\n        with:\n"
+        "          name: ios-native-source-cache\n"
+        "          path: ${{ github.workspace }}/ios-native-sources\n"
+    )
+    startup = (
+        f"      - name: {IOS_STARTUP_STEP}\n"
+        "        shell: bash\n"
+        "        env:\n"
+        "          KLOGG_IOS_NATIVE_ARCHIVE_ROOT: ${{ github.workspace }}/ios-native-sources\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        f"          {IOS_STARTUP_COMMAND}\n"
+    )
+
+    def fixture(self, steps: str | None = None) -> str:
+        return (
+            "on:\n  pull_request:\n  push:\n  workflow_dispatch:\n"
+            "jobs:\n"
+            "  BuildIosNativeStacks:\n"
+            "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - architecture: x86_64\n"
+            "    steps: &ios_native_steps\n"
+            + (self.download + self.startup if steps is None else steps)
+            + "  BuildIosNativeArm64:\n"
+            "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
+            "    strategy:\n      matrix:\n        include:\n"
+            "          - architecture: arm64\n"
+            "    steps: *ios_native_steps\n"
+        )
+
+    def test_real_workflow_requires_actual_c_after_download_on_both_native_legs(self):
+        self.assertEqual(ios_startup_ci_issues(required_text(CI_BUILD_WORKFLOW)), [])
+
+    def test_exact_good_and_adjacent_non_native_jobs_are_valid(self):
+        self.assertEqual(ios_startup_ci_issues(self.fixture()), [])
+        adjacent = (
+            "  OrdinaryPythonDiscovery:\n"
+            "    if: ${{ github.event_name == 'pull_request' }}\n"
+            "    steps:\n      - run: python3 -m unittest discover -s tests/scripts\n"
+            "        continue-on-error: true\n"
+        )
+        self.assertEqual(ios_startup_ci_issues(self.fixture() + adjacent), [])
+        comment = "          # python3 is required even on a cold cache\n"
+        commented = self.fixture().replace("          set -euo pipefail\n", comment + "          set -euo pipefail\n")
+        self.assertEqual(ios_startup_ci_issues(commented), [])
+
+    def test_removed_moved_and_soft_skipped_invocations_fail(self):
+        mutations = {
+            "missing": self.download,
+            "before-download": self.startup + self.download,
+            "after-other-step": self.download + "      - run: true\n" + self.startup,
+            "duplicated": self.download + self.startup + self.startup,
+            "step-if": self.download + self.startup.replace("        shell:", "        if: false\n        shell:"),
+            "continue": self.download + self.startup.replace("        shell:", "        continue-on-error: true\n        shell:"),
+            "secret-gate": self.download + self.startup.replace("        shell:", "        if: ${{ env.RELEASE_SECRET != '' }}\n        shell:"),
+            "wrong-root": self.download + self.startup.replace("/ios-native-sources", "/missing"),
+            "implicit-cache": self.download + self.startup.replace("        env:\n          KLOGG_IOS_NATIVE_ARCHIVE_ROOT: ${{ github.workspace }}/ios-native-sources\n", ""),
+            "unquoted-path": self.download + self.startup.replace(IOS_STARTUP_COMMAND, IOS_STARTUP_COMMAND.replace('"', '')),
+            "ignored-failure": self.download + self.startup.replace(IOS_STARTUP_COMMAND, IOS_STARTUP_COMMAND + " || true"),
+            "early-exit": self.download + self.startup.replace(IOS_STARTUP_COMMAND, "exit 0\n          " + IOS_STARTUP_COMMAND),
+            "download-skipped": self.download.replace("        with:", "        if: false\n        with:") + self.startup,
+        }
+        for name, steps in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertTrue(ios_startup_ci_issues(self.fixture(steps)))
+
+    def test_comments_strings_and_malformed_structure_cannot_spoof_execution(self):
+        good = self.fixture()
+        mutations = {
+            "comment": good.replace(IOS_STARTUP_COMMAND, "# " + IOS_STARTUP_COMMAND),
+            "string": good.replace(IOS_STARTUP_COMMAND, "echo '" + IOS_STARTUP_COMMAND + "'"),
+            "dead-branch": good.replace(IOS_STARTUP_COMMAND, "if false; then " + IOS_STARTUP_COMMAND + "; fi"),
+            "duplicate-run": good.replace("        run: |", "        run: exit 0\n        run: |"),
+            "duplicate-env": good.replace("        env:", "        env: {}\n        env:"),
+            "duplicate-root": good.replace("        run: |", "          KLOGG_IOS_NATIVE_ARCHIVE_ROOT: /missing\n        run: |"),
+            "malformed-env": good.replace("        env:", "        env: ["),
+            "malformed-jobs": good.replace("jobs:", "jobs: ["),
+            "unknown-alias": good.replace("*ios_native_steps", "*missing"),
+            "unknown-condition": good.replace("!contains(github.event.head_commit.message, '[skip ci]')", "fromJSON(inputs.native)"),
+            "job-soft-failure": good.replace("    strategy:", "    continue-on-error: true\n    strategy:", 1),
+            "duplicate-job": good + "  BuildIosNativeStacks:\n    steps: []\n",
+        }
+        for name, text in mutations.items():
+            with self.subTest(mutation=name):
+                self.assertTrue(ios_startup_ci_issues(text))
+
+    def test_real_tree_mutations_cannot_move_gate_to_an_unrelated_job(self):
+        original = required_text(CI_BUILD_WORKFLOW)
+        # Explicit fixture insertion also makes this mutation test useful in RED,
+        # before the production step exists. Never change the on-disk workflow.
+        block = CI_MODULE.workflow_job_blocks(original)["BuildIosNativeStacks"]
+        steps = CI_MODULE.workflow_step_blocks(block)
+        native_step = next((step for step in steps if
+                            CI_MODULE.workflow_step_fields(step)[0].get("name") == IOS_STARTUP_STEP), None)
+        if native_step is not None:
+            original = original.replace("\n".join(native_step), "", 1)
+        self.assertTrue(ios_startup_ci_issues(original))
+        text = original + "\n  Unrelated:\n    steps:\n" + self.startup
+        self.assertTrue(ios_startup_ci_issues(text))
+        download = next(step for step in steps if
+                        CI_MODULE.workflow_step_fields(step)[1].get("with", {}).get("name") == "ios-native-source-cache")
+        download_text = "\n".join(download)
+        wired = original.replace(download_text, download_text + "\n" + self.startup, 1)
+        self.assertEqual(ios_startup_ci_issues(wired), [])
+
+    def test_each_event_and_dispatch_mode_inherits_the_same_required_gate(self):
+        actual = required_text(CI_BUILD_WORKFLOW)
+        triggers = CI_MODULE.workflow_trigger_mapping(actual)
+        self.assertIsNotNone(triggers)
+        for event in ("pull_request", "push", "workflow_dispatch", "schedule"):
+            for mode in (("validation", "release") if event == "workflow_dispatch" else (None,)):
+                with self.subTest(event=event, mode=mode):
+                    # No evaluator is needed: the rule accepts only the existing
+                    # event-neutral job guard and forbids every step-level guard.
+                    fixture = actual
+                    if event != "schedule":
+                        self.assertIn(event, triggers)
+                    elif event not in triggers:
+                        # CI Build has no schedule today; exercise an added
+                        # schedule without making it a production requirement.
+                        fixture = actual.replace("on:\n", "on:\n  schedule:\n    - cron: '7 9 * * *'\n", 1)
+                    self.assertEqual(ios_startup_ci_issues(fixture), [])
+                    guard = f"        if: ${{{{ github.event_name == '{event}'"
+                    if mode:
+                        guard += f" && inputs.qualification-mode == '{mode}'"
+                    guard += " }}\n"
+                    marker = f"      - name: {IOS_STARTUP_STEP}\n"
+                    narrowed = fixture.replace(marker, marker + guard, 1)
+                    self.assertTrue(ios_startup_ci_issues(narrowed))
+
+
 class IosNativeReleaseContractTest(unittest.TestCase):
     def lock(self) -> dict:
         return required_json(LOCK)
@@ -243,6 +469,21 @@ class IosNativeReleaseContractTest(unittest.TestCase):
         body = stop.group(1)
         self.assertIn("state->scheduleCleanup()", body)
         self.assertNotIn("publishStopped", body)
+
+    def test_legacy_syslog_production_callback_has_no_test_operation_counters(self):
+        source = required_text(IOS_NATIVE_STREAM)
+        header = required_text(IOS_NATIVE_HEADER)
+        forbidden = (
+            "legacySyslogOperationsForTesting",
+            "syslogCallbackEntriesForTesting",
+            "syslogAssemblyLocksForTesting",
+            "syslogRecordBufferGrowthsForTesting",
+            "syslogCompletionBufferAllocationsForTesting",
+            "syslogCompletionCopiedBytesForTesting",
+        )
+        for token in forbidden:
+            self.assertNotIn(token, source)
+            self.assertNotIn(token, header)
 
     def test_legal_source_archive_rejects_traversal_member_names(self):
         code = """

@@ -4,8 +4,8 @@ name: "Static analysis"
 # (CMAKE_EXPORT_COMPILE_COMMANDS) to produce build_root/compile_commands.json,
 # then runs two independent analyses:
 #   * clang-tidy via clang-tidy-diff on PRs, pushes, and manual runs with a
-#     CHANGED-LINES-ONLY policy that is strict on new code. A weekly schedule
-#     performs the legacy full-source report-only audit outside the merge path.
+#     CHANGED-LINES-ONLY policy that is strict on new code. Manual full-report
+#     dispatch performs the legacy full-source audit outside the merge path.
 #   * cppcheck --enable=warning,style --error-exitcode=1 over the first-party
 #     src/ compile units.
 # cppcheck returning non-zero, or a clang-tidy-diff finding on a changed
@@ -45,20 +45,18 @@ on:
         description: Required only for changed-strict manual analysis
         required: false
         type: string
-  schedule:
-    - cron: '17 4 * * 0'
 
 concurrency:
   # Full audits and strict event qualification must never cancel one another.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   static-analysis:
     name: "clang-tidy + cppcheck"
     runs-on: ubuntu-24.04
     # Strict changed-scope runs normally finish well below this bound. The
-    # weekly full report-only audit gets enough cold-cache headroom without
+    # manual full report-only audit gets enough cold-cache headroom without
     # forcing master pushes through the same whole-tree workload.
     timeout-minutes: 90
     strategy:
@@ -106,10 +104,6 @@ jobs:
                 exit 1
               }
               base_sha="$MANUAL_BASE_SHA"
-              ;;
-            schedule)
-              echo "KLOGG_ANALYSIS_MODE=full-report" >> "$GITHUB_ENV"
-              exit 0
               ;;
             *) echo "::error::unsupported static-analysis event: $EVENT_NAME"; exit 1 ;;
           esac
@@ -190,7 +184,7 @@ jobs:
               clang-tidy -p "$KLOGG_BUILD_ROOT" \
                 --extra-arg=-Wno-unknown-warning-option "$1"
             ' _ < tidy_files.nul
-            echo "clang-tidy: scheduled full src/ audit complete (findings report-only)."
+            echo "clang-tidy: manual full src/ audit complete (findings report-only)."
           else
             python3 scripts/run_changed_clang_tidy.py \
               --base "$KLOGG_ANALYSIS_BASE" \
@@ -258,7 +252,7 @@ jobs:
             fi
             CC_EXTRA="--error-exitcode=1"
           else
-            # The weekly whole-tree audit reports legacy findings without making
+            # The manual whole-tree audit reports legacy findings without making
             # them a merge gate; configuration and tool failures remain fatal.
             CC_PROJECT=/tmp/cc_src.json
             CC_EXTRA=""
