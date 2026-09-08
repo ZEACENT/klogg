@@ -2789,8 +2789,17 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
 
     const auto outputDirectory = QFileInfo( outputPath ).absoluteDir();
     QDir().mkpath( outputDirectory.absolutePath() );
-    const auto failBinding = [ this ]( OutputFailure failure ) {
-        outputFailure_ = failure;
+    const auto previousOutputFailure = outputFailure_;
+    const auto hadCommittedBinding = !boundOutputFile_.isEmpty();
+    const auto failBinding = [ this, previousOutputFailure,
+                               hadCommittedBinding ]( OutputFailure failure ) {
+        // Candidate setup is transactional. Its failure describes the attempted
+        // destination, not the still-open committed output. Preserve that
+        // binding's health state so later appends cannot misattribute the
+        // candidate error and close a healthy handle.
+        outputFailure_ = hadCommittedBinding
+                             ? previousOutputFailure
+                             : std::optional<OutputFailure>{ failure };
         return false;
     };
     RollingFileManager candidateOutput( outputPath, limits_.rollingMaxFileSize,
@@ -3927,6 +3936,14 @@ CaptureStore::PersistenceResult CaptureStore::persistenceState() const
     result.pendingPartialBytes = partialLine_.size();
     result.pendingBytes = pendingPersistenceBytes_;
     result.pendingSegments = pendingPersistenceSegments_;
+    result.retryableSegments = pendingPersistenceSegments_;
+    const auto hasMutableResidentTail
+        = !segments_.empty() && segments_.back().memoryData
+          && !needsNewSegment();
+    if ( hasMutableResidentTail && !persistenceFailure_.has_value()
+         && result.retryableSegments > 0 ) {
+        --result.retryableSegments;
+    }
     return result;
 }
 
@@ -3942,6 +3959,17 @@ CaptureStore::PersistenceResult CaptureStore::persistPending( int maxSegments, b
     bool failed = false;
     while ( firstResidentSegment_ < segments_.size() ) {
         if ( remaining <= 0 || ( toBudget && memoryBytes_ <= limits_.memoryBudgetBytes ) ) {
+            break;
+        }
+        const auto isMutableTail
+            = firstResidentSegment_ + 1u == segments_.size()
+              && !needsNewSegment();
+        if ( isMutableTail && !force && !toBudget
+             && !persistenceFailure_.has_value() ) {
+            // Quiet-time retry persists sealed work, not the appendable tail.
+            // Spilling that tail after every sparse append would create one
+            // capture file per chunk. Memory pressure and close persistence
+            // still force it, and a failed pressure spill remains retryable.
             break;
         }
         ++persistenceVisitsForTesting_;

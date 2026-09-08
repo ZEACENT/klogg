@@ -121,6 +121,7 @@ public:
     explicit ShellV2FrameDecoder( std::size_t maxPayloadSize = std::size_t{ 16u } * 1024u * 1024u );
 
     DecoderFeedResult<ShellV2Frame> feed( const ByteVector& bytes );
+    ByteVector takeBufferedStdoutPrefix();
     void reset() noexcept;
 
 private:

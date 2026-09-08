@@ -2081,6 +2081,68 @@ TEST_CASE( "Unavailable iOS native transport reports a source-neutral error" )
     CHECK( source.lastError().contains( QStringLiteral( "live log" ), Qt::CaseInsensitive ) );
 }
 
+TEST_CASE( "Sparse live capture persistence schedules only sealed segments",
+           "[livecapture][persistence][sparse-stream][review-red]" )
+{
+    class IdleTransport final : public LiveSourceTransport {
+    public:
+        void start( Generation ) override {}
+        void stop( Generation ) override {}
+        void clearRemoteAsync( Generation, ClearRequestId ) override {}
+        QString lastError() const override { return {}; }
+    };
+    class IdleFactory final : public LiveSourceTransportFactory {
+    public:
+        std::unique_ptr<LiveSourceTransport>
+        create( const LiveSourceTransportConfig& ) const override
+        {
+            return std::make_unique<IdleTransport>();
+        }
+    };
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId,
+                                                       tempDir.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 64;
+    logData->setCaptureLimits( limits );
+    AdbLogcatSessionData sessionData;
+    sessionData.captureId = captureId;
+    sessionData.deviceSerial = QStringLiteral( "SERIAL" );
+    IdleFactory factory;
+    AdbLogcatSource source( sessionData, logData, factory );
+    LiveSourceTransportConfig config;
+    config.deviceId = sessionData.deviceSerial;
+    constexpr LiveSourceTransport::Generation generation = 41u;
+    source.openTransport( generation, config );
+    auto* timer = source.findChild<QTimer*>(
+        QStringLiteral( "liveCapturePersistenceRetry" ) );
+    REQUIRE( timer != nullptr );
+
+    REQUIRE( source.appendTransportBytes(
+                         generation, QByteArrayLiteral( "a\n" ) )
+                 .disposition
+             == klogg::livecapture::DeliveryDisposition::Complete );
+    CHECK_FALSE( timer->isActive() );
+    CHECK( logData->persistenceState().pendingSegments == 1 );
+    CHECK( logData->persistenceState().retryableSegments == 0 );
+
+    REQUIRE( source.appendTransportBytes(
+                         generation, QByteArrayLiteral( "bbbbbb\n" ) )
+                 .disposition
+             == klogg::livecapture::DeliveryDisposition::Complete );
+    CHECK( logData->persistenceState().retryableSegments == 1 );
+    REQUIRE( timer->isActive() );
+    timer->stop();
+    REQUIRE( QMetaObject::invokeMethod( timer, "timeout",
+                                        Qt::DirectConnection ) );
+    CHECK_FALSE( timer->isActive() );
+    CHECK( logData->persistenceState().complete() );
+}
+
 TEST_CASE( "Controller-owned manual reconnect never starts a source-local generation" )
 {
     class RecordingTransport final : public LiveSourceTransport {

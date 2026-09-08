@@ -117,8 +117,10 @@ void AdbLogcatSource::schedulePersistenceRetry()
 {
     if ( !logData_ || !persistenceSchedulingArmed_ ) { return; }
     const auto state = logData_->persistenceState();
-    if ( state.pendingSegments == 0 ) {
-        // A normal partial record is not ready to persist. Only true EOF seals it.
+    if ( state.retryableSegments == 0 ) {
+        // A normal partial record and the appendable segment tail are not ready
+        // to persist. EOF, segment sealing, memory pressure, or an actual failed
+        // spill makes work retryable without creating one file per quiet append.
         persistenceRetryTimer_.stop();
         return;
     }

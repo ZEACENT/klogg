@@ -533,6 +533,20 @@ DecoderFeedResult<ShellV2Frame> ShellV2FrameDecoder::feed( const ByteVector& byt
     return result;
 }
 
+ByteVector ShellV2FrameDecoder::takeBufferedStdoutPrefix()
+{
+    ByteVector stdoutPrefix;
+    if ( buffer_.size() > ShellV2HeaderSize ) {
+        const auto channel = shellChannel( buffer_.front() );
+        if ( channel == ShellV2Channel::Stdout ) {
+            stdoutPrefix = copyRange( buffer_, ShellV2HeaderSize,
+                                      buffer_.size() );
+        }
+    }
+    reset();
+    return stdoutPrefix;
+}
+
 void ShellV2FrameDecoder::reset() noexcept
 {
     buffer_.clear();

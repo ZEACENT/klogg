@@ -2974,6 +2974,41 @@ TEST_CASE( "CaptureStore bindOutputFile overwrites existing files and replays sp
              == QStringLiteral( "alpha\nbeta\ngamma\ndelta\nepsilon\n" ) );
 }
 
+TEST_CASE( "CaptureStore preserves a healthy output after a failed Preserve rebind",
+           "[capturestore][output-binding][rollback][review-red]" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_preserve_failed_rebind_rollback" );
+    const auto originalPath = QDir( rootPath ).filePath(
+        QStringLiteral( "original.log" ) );
+    const auto rejectedPath = QDir( rootPath ).filePath(
+        QStringLiteral( "rejected.log" ) );
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    store.appendUtf8( QByteArrayLiteral( "captured-before-bind\n" ) );
+    REQUIRE( store.bindOutputFile( originalPath, true ) );
+    REQUIRE( store.outputRefersToPath( originalPath ) );
+    REQUIRE_FALSE( store.outputFailure().has_value() );
+    store.appendUtf8( QByteArrayLiteral( "before-rebind\n" ) );
+
+    CaptureStoreTestAccess::failNextOutputReplayWrite( store );
+    REQUIRE_FALSE( store.bindOutputFile( rejectedPath, true ) );
+    CHECK( store.boundOutputFile() == originalPath );
+    CHECK( store.outputRefersToPath( originalPath ) );
+
+    store.appendUtf8( QByteArrayLiteral( "after-failed-rebind-1\n" ) );
+    store.appendUtf8( QByteArrayLiteral( "after-failed-rebind-2\n" ) );
+    store.flush();
+
+    CHECK( store.boundOutputFile() == originalPath );
+    CHECK( store.outputRefersToPath( originalPath ) );
+    CHECK_FALSE( store.outputFailure().has_value() );
+    CHECK_FALSE( QFileInfo::exists( rejectedPath ) );
+    CHECK( readUtf8File( originalPath )
+           == QStringLiteral( "captured-before-bind\nbefore-rebind\n"
+                              "after-failed-rebind-1\nafter-failed-rebind-2\n" ) );
+}
+
 TEST_CASE( "CaptureStore removes a newly created Restore output after replay fails" )
 {
     const auto rootPath = makeTestDir( "capturestore_restore_replay_failure" );
@@ -5792,6 +5827,31 @@ TEST_CASE( "CaptureStore directory failure reports mutation point prefix",
     CHECK( store.appendUtf8( suffix ).disposition == CaptureStore::AppendDisposition::Complete );
     store.finishInput();
     CHECK( store.lineCount() == 3_lcount );
+}
+
+TEST_CASE( "CaptureStore background persistence keeps a sparse mutable tail resident",
+           "[capturestore][storage-persistence][sparse-stream][review-red]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 64;
+    CaptureStore store( makeCaptureId(),
+                        makeTestDir( "capture_sparse_mutable_tail" ),
+                        limits );
+
+    store.appendUtf8( QByteArrayLiteral( "a\n" ) );
+    for ( int retry = 0; retry < 32; ++retry ) {
+        store.retryPersistence();
+    }
+    CHECK( CaptureStoreTestAccess::segmentCount( store ) == 1u );
+    CHECK( segmentFiles( store.capturePath() ).isEmpty() );
+    CHECK( store.persistenceState().pendingSegments == 1 );
+    CHECK( store.persistenceState().retryableSegments == 0 );
+
+    store.appendUtf8( QByteArrayLiteral( "bbbbbb\n" ) );
+    CHECK( store.persistenceState().retryableSegments == 1 );
+    CHECK( store.retryPersistence().complete() );
+    CHECK( segmentFiles( store.capturePath() ).size() == 1 );
 }
 
 TEST_CASE( "CaptureStore persistent spill failure is inspectable bounded and recoverable",

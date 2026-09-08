@@ -1709,6 +1709,60 @@ TEST_CASE( "ADB smart-socket stop accounts for a frame deferred by the productio
     exercise( klogg::livecapture::StopDisposition::SettleAccepted );
 }
 
+TEST_CASE( "ADB smart-socket stop settles the received prefix of an incomplete stdout frame",
+           "[livecapture][adb][transport][stop][partial-frame][settlement][review-red]" )
+{
+    const auto exercise = []( klogg::livecapture::StopDisposition disposition ) {
+        klogg::test::DeterministicAdbSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketTransportConfig config;
+        config.deviceSerial = QString::fromLatin1( StreamSerial );
+        AdbSmartSocketTransport transport( std::move( config ), socketFactory,
+                                           deadlines );
+        TransportProbe probe( transport );
+        std::optional<quint64> stoppedDiscarded;
+        QObject::connect( &transport, &LiveSourceTransport::stopped,
+                          [&]( Generation generation, quint64 discarded ) {
+                              CHECK( generation == StreamGeneration );
+                              stoppedDiscarded = discarded;
+                          } );
+
+        transport.start( StreamGeneration );
+        auto* const featureSocket = socketFactory.socketAt( 0 );
+        REQUIRE( featureSocket != nullptr );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                     + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+        featureSocket->closePeer();
+        auto* const streamSocket = socketFactory.socketAt( 1 );
+        REQUIRE( streamSocket != nullptr );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        REQUIRE( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
+
+        const auto payload = QByteArrayLiteral( "complete-line\npartial-tail" );
+        const auto receivedPrefix = payload.left( payload.size() - 5 );
+        streamSocket->pushIncoming(
+            shellV2Frame( 1u, payload ).left( 5 + receivedPrefix.size() ) );
+        CHECK( probe.received.empty() );
+        transport.requestStop( StreamGeneration, disposition );
+
+        REQUIRE( stoppedDiscarded.has_value() );
+        if ( disposition == klogg::livecapture::StopDisposition::SettleAccepted ) {
+            CHECK( *stoppedDiscarded == 0u );
+            CHECK( probe.receivedBytes() == receivedPrefix );
+        }
+        else {
+            CHECK( *stoppedDiscarded
+                   == static_cast<quint64>( receivedPrefix.size() ) );
+            CHECK( probe.received.empty() );
+        }
+    };
+
+    exercise( klogg::livecapture::StopDisposition::DiscardPending );
+    exercise( klogg::livecapture::StopDisposition::SettleAccepted );
+}
+
 TEST_CASE( "ADB smart-socket terminal settlement survives synchronous transport destruction",
            "[livecapture][adb][transport][terminal][lifetime][review-red]" )
 {

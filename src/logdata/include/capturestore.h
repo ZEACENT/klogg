@@ -128,6 +128,8 @@ public:
     struct PersistenceResult {
         qint64 pendingBytes = 0;
         qint64 pendingSegments = 0;
+        // Sealed segments, plus any resident segment whose failed spill needs retry.
+        qint64 retryableSegments = 0;
         qint64 pendingPartialBytes = 0;
         std::optional<PersistenceFailure> failure;
         // Remaining monotonic backoff, for a caller-owned precise timer/scheduler.

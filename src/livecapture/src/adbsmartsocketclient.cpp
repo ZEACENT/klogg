@@ -242,19 +242,23 @@ public:
     QByteArray takePendingShellStdout( Generation generation, OperationId operationId )
     {
         if ( phase_ != Phase::ShellFrames || generation_ != generation
-             || operationId_ != operationId || !pendingShellFrames_ ) {
+             || operationId_ != operationId ) {
             return {};
         }
 
         QByteArray stdoutBytes;
-        const auto& pending = *pendingShellFrames_;
-        for ( auto index = pending.nextFrame; index < pending.frames.size(); ++index ) {
-            const auto& frame = pending.frames.at( index );
-            if ( frame.channel == ShellV2Channel::Stdout ) {
-                stdoutBytes.append( byteArrayFromBytes( frame.payload ) );
+        if ( pendingShellFrames_ ) {
+            const auto& pending = *pendingShellFrames_;
+            for ( auto index = pending.nextFrame; index < pending.frames.size(); ++index ) {
+                const auto& frame = pending.frames.at( index );
+                if ( frame.channel == ShellV2Channel::Stdout ) {
+                    stdoutBytes.append( byteArrayFromBytes( frame.payload ) );
+                }
             }
+            pendingShellFrames_.reset();
         }
-        pendingShellFrames_.reset();
+        stdoutBytes.append( byteArrayFromBytes(
+            shellDecoder_.takeBufferedStdoutPrefix() ) );
         return stdoutBytes;
     }
 
