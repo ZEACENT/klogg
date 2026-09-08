@@ -3067,6 +3067,39 @@ TEST_CASE( "RollingFileManager keeps every current output handle atomically repl
     CHECK( readUtf8File( filePath ) == QStringLiteral( "published\ntail\n" ) );
 }
 
+TEST_CASE( "RollingFileManager keeps long output paths atomically replaceable",
+           "[rolling][identity][windows][review-red]" )
+{
+    const auto rootPath = makeTestDir( "rolling_long_shared_replace" );
+    auto directoryPath = rootPath;
+    for ( int index = 0; index < 10; ++index ) {
+        directoryPath = QDir( directoryPath ).filePath(
+            QString( 32, QLatin1Char( 'a' ) ) + QString::number( index ) );
+    }
+    REQUIRE( QDir().mkpath( directoryPath ) );
+    const auto filePath = QDir( directoryPath ).filePath(
+        QStringLiteral( "output.log" ) );
+    CHECK( filePath.size()
+           > static_cast<decltype( filePath.size() )>( 260 ) );
+
+    RollingFileManager current( filePath, 0, 0 );
+    REQUIRE( current.open() );
+    REQUIRE( current.write( QByteArrayLiteral( "old\n" ) ) == 4 );
+    REQUIRE( current.flush() );
+
+    QSaveFile staged( filePath );
+    REQUIRE( staged.open( QIODevice::WriteOnly ) );
+    REQUIRE( staged.write( QByteArrayLiteral( "published\n" ) ) == 10 );
+    REQUIRE( staged.commit() );
+    CHECK_FALSE( current.refersToPath( filePath ) );
+
+    RollingFileManager published( filePath, 0, 0 );
+    REQUIRE( published.openExisting() );
+    REQUIRE( published.write( QByteArrayLiteral( "tail\n" ) ) == 5 );
+    REQUIRE( published.flush() );
+    CHECK( readUtf8File( filePath ) == QStringLiteral( "published\ntail\n" ) );
+}
+
 TEST_CASE( "RollingFileManager verifies a staged publication identity before binding",
            "[rolling][identity]" )
 {

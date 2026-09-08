@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QtGlobal>
@@ -14,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <aclapi.h>
+#include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #else
@@ -131,12 +133,29 @@ PACL ownerOnlyAcl( PSID owner, bool directory )
     return acl;
 }
 
+QString extendedNativePath( const QString& path )
+{
+    const auto nativePath = QDir::toNativeSeparators( path );
+    if ( nativePath.startsWith( QStringLiteral( "\\\\?\\" ) )
+         || nativePath.startsWith( QStringLiteral( "\\\\.\\" ) ) ) {
+        return nativePath;
+    }
+
+    const auto absolutePath = QDir::toNativeSeparators(
+        QFileInfo( path ).absoluteFilePath() );
+    if ( absolutePath.startsWith( QStringLiteral( "\\\\" ) ) ) {
+        return QStringLiteral( "\\\\?\\UNC\\" ) + absolutePath.mid( 2 );
+    }
+    return QStringLiteral( "\\\\?\\" ) + absolutePath;
+}
+
 NativeHandle openObject( const QString& path, bool directory, DWORD access )
 {
     const DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT
                         | ( directory ? FILE_FLAG_BACKUP_SEMANTICS : 0 );
+    const auto nativePath = extendedNativePath( path );
     return NativeHandle( CreateFileW(
-        reinterpret_cast<LPCWSTR>( path.utf16() ), access,
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, flags,
         nullptr ) );
 }
@@ -335,8 +354,9 @@ bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode )
                                                         : OPEN_ALWAYS;
     }
 
+    const auto nativePath = extendedNativePath( file.fileName() );
     NativeHandle handle( CreateFileW(
-        reinterpret_cast<LPCWSTR>( file.fileName().utf16() ), access,
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         creation, FILE_ATTRIBUTE_NORMAL, nullptr ) );
     if ( !handle ) {
