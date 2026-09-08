@@ -14,6 +14,7 @@ import zlib
 
 ROOT = pathlib.Path(__file__).parents[2]
 BENCHMARK_SCRIPT = ROOT / "scripts" / "run_live_capture_benchmarks.py"
+BENCHMARK_CORE = ROOT / "benchmarks" / "live_capture_benchmark_core.cpp"
 
 
 class LiveCaptureBenchmarkContractTest(unittest.TestCase):
@@ -35,6 +36,10 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         cls.module = module
+
+    def test_unsigned_strong_counts_are_not_checked_for_negative_values(self):
+        source = BENCHMARK_CORE.read_text(encoding="utf-8")
+        self.assertNotRegex(source, r"\b(?:lineCount|matches)\.get\(\)\s*<\s*0")
 
     @staticmethod
     def record(

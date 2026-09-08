@@ -132,6 +132,8 @@ class StreamingLogData : public SearchableLogData {
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode, OutputBindMode mode );
     QString boundOutputFile() const;
+    bool hasActiveOutputBinding( const QString& outputPath,
+                                 LiveLogSaveAnsiMode ansiMode ) const;
     std::optional<CaptureOutputError> captureOutputError() const;
     std::optional<CaptureOutputError> flushOutputForClose();
     QString captureId() const;

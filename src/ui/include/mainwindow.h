@@ -128,7 +128,10 @@ class MainWindow : public QMainWindow {
     bool event( QEvent* event ) override;
 
   private:
+    friend struct MainWindowLiveSaveTestAccess;
+
     enum class ActionInitiator : std::uint8_t { User, WindowDiscard, App };
+    enum class DiscardCommit : std::uint8_t { PerTab, WindowShutdown };
 
   private Q_SLOTS:
     void open();
@@ -302,8 +305,11 @@ class MainWindow : public QMainWindow {
     void registerAdbLogcatSource( CrawlerWidget* crawler );
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
+    void startLiveLogExport( CrawlerWidget* crawler, const QString& outputPath,
+                             LiveLogSaveAnsiMode ansiMode );
     void startLiveCloseTransaction( CrawlerWidget* crawler,
                                     klogg::livelog::LiveLogCloseTransaction::Mode mode,
+                                    DiscardCommit discardCommit,
                                     std::function<void( bool )> completion );
     void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
     void continueCloseAll();

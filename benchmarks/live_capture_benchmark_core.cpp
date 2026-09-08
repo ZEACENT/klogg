@@ -799,8 +799,7 @@ public:
             parserRecords_, readSnapshot( logData_->captureSnapshot() ), "capture snapshot" ) );
 
         const auto lineCount = logData_->getNbLine();
-        if ( lineCount.get() < 0
-             || static_cast<std::size_t>( lineCount.get() ) != parserRecords_.size() ) {
+        if ( static_cast<std::size_t>( lineCount.get() ) != parserRecords_.size() ) {
             throw std::runtime_error( "benchmark view has an unexpected line count" );
         }
         const auto viewRaw = logData_->getLinesRaw( LineNumber( 0 ), lineCount );
@@ -846,7 +845,7 @@ public:
             parserRecords_.cbegin(), parserRecords_.cend(),
             []( const SyntheticRecord& record ) { return !record.payload.empty(); } ) );
         const auto matches = filtered->getNbMatches();
-        if ( matches.get() < 0 || static_cast<std::size_t>( matches.get() ) != expectedMatches ) {
+        if ( static_cast<std::size_t>( matches.get() ) != expectedMatches ) {
             throw std::runtime_error(
                 "benchmark search terminal result does not match the searchable records: matches="
                 + std::to_string( matches.get() )

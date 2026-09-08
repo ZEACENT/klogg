@@ -1860,8 +1860,16 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
         }
     }
 
-    if ( adbSource->sessionData().boundOutputFile == outputPath
-         && adbSource->sessionData().outputAnsiMode == ansiMode ) {
+    startLiveLogExport( crawler, outputPath, ansiMode );
+}
+
+void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outputPath,
+                                     LiveLogSaveAnsiMode ansiMode )
+{
+    auto* adbSource = session_.getAdbLogcatSource( crawler );
+    auto* exportService = session_.getLiveLogExportService( crawler );
+    if ( adbSource == nullptr || exportService == nullptr
+         || adbSource->hasActiveOutputBinding( outputPath, ansiMode ) ) {
         return;
     }
 
@@ -2548,7 +2556,8 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         const auto mode = initiator == ActionInitiator::App
                               ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
                               : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
-        startLiveCloseTransaction( widget, mode, [ this, widget, initiator ]( bool proceed ) {
+        startLiveCloseTransaction( widget, mode, DiscardCommit::PerTab,
+                                   [ this, widget, initiator ]( bool proceed ) {
             if ( proceed ) {
                 finalizeCrawlerClose( widget, initiator );
             }
@@ -2601,7 +2610,7 @@ void MainWindow::finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator in
 
 void MainWindow::startLiveCloseTransaction(
     CrawlerWidget* crawler, klogg::livelog::LiveLogCloseTransaction::Mode mode,
-    std::function<void( bool )> completion )
+    DiscardCommit discardCommit, std::function<void( bool )> completion )
 {
     if ( crawler == nullptr || liveCloseTransaction_ ) {
         return;
@@ -2645,17 +2654,23 @@ void MainWindow::startLiveCloseTransaction(
                 liveCloseTransaction_->cancel();
             }
         },
-        [ this, controller, resumeOnCancel, completion = std::move( completion ) ](
+        [ this, controller, source, mode, discardCommit, resumeOnCancel,
+          completion = std::move( completion ) ](
             klogg::livelog::LiveLogCloseTransaction::Result result ) mutable {
             const bool proceed
                 = result != klogg::livelog::LiveLogCloseTransaction::Result::Cancelled;
             QTimer::singleShot(
                 0, Qt::PreciseTimer, this,
-                [ this, controller, resumeOnCancel, completion = std::move( completion ),
-                  proceed ]() mutable {
+                [ this, controller, source, mode, discardCommit, resumeOnCancel,
+                  completion = std::move( completion ), proceed ]() mutable {
                     liveCloseTransaction_.reset();
                     if ( !proceed && resumeOnCancel ) {
                         controller->startRequested();
+                    }
+                    if ( proceed
+                         && mode == klogg::livelog::LiveLogCloseTransaction::Mode::Discard
+                         && discardCommit == DiscardCommit::PerTab ) {
+                        source->deleteCaptureFiles();
                     }
                     completion( proceed );
                 } );
@@ -2928,7 +2943,8 @@ void MainWindow::advanceWindowShutdown()
     const auto mode = shutdownPreserveWindowSession_
                           ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
                           : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
-    startLiveCloseTransaction( crawler, mode, [ this ]( bool proceed ) {
+    startLiveCloseTransaction( crawler, mode, DiscardCommit::WindowShutdown,
+                               [ this ]( bool proceed ) {
         if ( !proceed ) {
             abortWindowShutdown();
             return;
@@ -2966,6 +2982,13 @@ void MainWindow::finalizeWindowShutdown()
     suspendSessionPersistence_ = true;
     writeSettings();
     TabGroupManager::get().save();
+    if ( !shutdownPreserveWindowSession_ ) {
+        for ( auto* crawler : shutdownLiveTabs_ ) {
+            if ( auto* source = session_.getAdbLogcatSource( crawler ); source != nullptr ) {
+                source->deleteCaptureFiles();
+            }
+        }
+    }
     session_.close();
     shutdownReadyToAccept_ = true;
     closeAllInProgress_ = true;

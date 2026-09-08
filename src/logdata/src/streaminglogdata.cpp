@@ -691,6 +691,14 @@ QString StreamingLogData::boundOutputFile() const
     return boundOutputFile_;
 }
 
+bool StreamingLogData::hasActiveOutputBinding( const QString& outputPath,
+                                               LiveLogSaveAnsiMode ansiMode ) const
+{
+    const std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
+    return outputSaveAnsiMode_ == ansiMode && !captureOutputError_.has_value()
+           && isOutputFileActive() && outputRefersToPath( outputPath );
+}
+
 std::optional<CaptureOutputError> StreamingLogData::captureOutputError() const
 {
     return captureOutputError_;

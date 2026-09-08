@@ -21,11 +21,13 @@ namespace klogg::livelog {
 LiveLogExportJob::LiveLogExportJob(
     std::shared_ptr<StreamingLogData> data,
     StreamingLogData::OutputExportCandidate candidate, QString outputPath,
-    std::function<void()> beforeSnapshotWrite, std::function<void()> afterPublish )
+    std::function<void()> beforeSnapshotWrite, std::function<void()> beforePublication,
+    std::function<void()> afterPublish )
     : data_( std::move( data ) )
     , candidate_( std::move( candidate ) )
     , outputPath_( std::move( outputPath ) )
     , beforeSnapshotWrite_( std::move( beforeSnapshotWrite ) )
+    , beforePublication_( std::move( beforePublication ) )
     , afterPublish_( std::move( afterPublish ) )
 {
     static const auto registered
@@ -50,10 +52,12 @@ void LiveLogExportJob::start()
 
 void LiveLogExportJob::cancel()
 {
-    if ( publicationStarted_.load( std::memory_order_acquire ) ) {
+    auto expected = PublicationDecision::Writing;
+    if ( !publicationDecision_.compare_exchange_strong(
+             expected, PublicationDecision::Cancelled,
+             std::memory_order_acq_rel, std::memory_order_acquire ) ) {
         return;
     }
-    cancelRequested_.store( true, std::memory_order_release );
     cancelCandidate();
 }
 
@@ -157,7 +161,8 @@ void LiveLogExportJob::run()
         return written;
     };
     const auto cancelled = [ this ] {
-        return cancelRequested_.load( std::memory_order_acquire );
+        return publicationDecision_.load( std::memory_order_acquire )
+               == PublicationDecision::Cancelled;
     };
 
     StreamingLogData::OutputExportEncodingState encodingState;
@@ -196,8 +201,18 @@ void LiveLogExportJob::run()
         complete( LiveLogExportResult::Cancelled );
         return;
     }
+    if ( beforePublication_ ) {
+        beforePublication_();
+    }
 
-    publicationStarted_.store( true, std::memory_order_release );
+    auto expectedDecision = PublicationDecision::Writing;
+    if ( !publicationDecision_.compare_exchange_strong(
+             expectedDecision, PublicationDecision::Publishing,
+             std::memory_order_acq_rel, std::memory_order_acquire ) ) {
+        stagedOutput.cancelWriting();
+        complete( LiveLogExportResult::Cancelled );
+        return;
+    }
     const auto identity = klogg::platform::fileIdentity( stagedOutput );
     if ( !identity.has_value() || !stagedOutput.commit() ) {
         cancelCandidate();
@@ -301,7 +316,7 @@ LiveLogExportService::start( const QString& outputPath, LiveLogSaveAnsiMode ansi
     }
     auto job = std::shared_ptr<LiveLogExportJob>( new LiveLogExportJob(
         data_, *candidate, outputPath, beforeSnapshotWriteForTesting_,
-        afterPublishForTesting_ ) );
+        beforePublicationForTesting_, afterPublishForTesting_ ) );
     activeJob_ = job;
     job->start();
     return job;

@@ -3561,7 +3561,18 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     }
 
     ++spillAttemptsForTesting_;
-    const auto injected = spillFailureForTesting_ ? spillFailureForTesting_() : std::nullopt;
+    bool hasInjectedFailure = false;
+    PersistenceFailure injectedFailure = PersistenceFailure::Directory;
+    if ( spillFailureForTesting_ ) {
+        const auto requestedFailure = spillFailureForTesting_();
+        if ( requestedFailure.has_value() ) {
+            hasInjectedFailure = true;
+            injectedFailure = *requestedFailure;
+        }
+    }
+    const auto injects = [ hasInjectedFailure, injectedFailure ]( PersistenceFailure failure ) {
+        return hasInjectedFailure && injectedFailure == failure;
+    };
     try {
         ensureCaptureDir();
     } catch ( const std::exception& error ) {
@@ -3610,7 +3621,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     }
 
     QString temporaryPath;
-    auto temporaryFile = injected == PersistenceFailure::TemporaryCreate
+    auto temporaryFile = injects( PersistenceFailure::TemporaryCreate )
                              ? std::unique_ptr<QFile>{}
                              : capturePathState_->directory_.createTemporaryFile( temporaryPath );
     if ( !temporaryFile ) {
@@ -3623,7 +3634,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     const auto expectedBytes
         = static_cast<qint64>( segment.memoryData->size() );
     qint64 writtenBytes = 0;
-    if ( failNextSegmentWriteForTesting_ || injected == PersistenceFailure::Write ) {
+    if ( failNextSegmentWriteForTesting_ || injects( PersistenceFailure::Write ) ) {
         failNextSegmentWriteForTesting_ = false;
         const auto partialBytes = qMax<qint64>( 0, expectedBytes - 1 );
         writtenBytes = temporaryFile->write( segment.memoryData->constData(), partialBytes );
@@ -3641,7 +3652,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
 
     const auto flushed = temporaryFile->flush();
     const auto writeSucceeded
-        = writtenBytes == expectedBytes && flushed && injected != PersistenceFailure::Flush;
+        = writtenBytes == expectedBytes && flushed && !injects( PersistenceFailure::Flush );
     if ( !writeSucceeded ) {
         persistenceFailure_
             = writtenBytes != expectedBytes ? PersistenceFailure::Write : PersistenceFailure::Flush;
@@ -3660,7 +3671,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
 
     int publishAttempts = 0;
     while ( true ) {
-        const auto publishResult = injected == PersistenceFailure::Publish || ++publishAttempts > 16
+        const auto publishResult = injects( PersistenceFailure::Publish ) || ++publishAttempts > 16
                                        ? SecureCaptureDirectory::PublishResult::Error
                                        : capturePathState_->directory_.publishTemporaryFile(
                                              temporaryPath, directChildName( segment.filePath ) );

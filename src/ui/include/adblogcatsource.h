@@ -47,6 +47,8 @@ public:
     bool clearAndRestart();
     bool bindOutputFile( const QString& outputPath );
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode );
+    bool hasActiveOutputBinding( const QString& outputPath,
+                                 LiveLogSaveAnsiMode ansiMode ) const;
     bool synchronizeOutputBinding( LiveLogSaveAnsiMode ansiMode );
     void deleteCaptureFiles();
 

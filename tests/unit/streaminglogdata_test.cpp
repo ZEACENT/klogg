@@ -115,6 +115,12 @@ struct LiveLogExportServiceTestAccess {
         service.beforeSnapshotWriteForTesting_ = std::move( callback );
     }
 
+    static void setBeforePublication( LiveLogExportService& service,
+                                      std::function<void()> callback )
+    {
+        service.beforePublicationForTesting_ = std::move( callback );
+    }
+
     static void setAfterPublish( LiveLogExportService& service,
                                  std::function<void()> callback )
     {
@@ -2183,6 +2189,40 @@ TEST_CASE( "Async live save cancel and tail overflow preserve destination and ol
     REQUIRE( old.open( QIODevice::ReadOnly ) );
     CHECK( old.readAll() == QByteArrayLiteral(
                "prefix\nconcurrent-tail-is-larger-than-eight\nold-still-active\n" ) );
+}
+
+TEST_CASE( "Async live save cancellation wins the final publication decision",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, LiveLogSaveAnsiMode::Strip ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier publicationDecision;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationDecision ] { publicationDecision.block(); } );
+    const auto job = service.start( newPath, LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( publicationDecision.waitUntilEnteredWithEvents() );
+
+    job->cancel();
+    publicationDecision.release();
+    job->waitForFinished();
+
+    CHECK( job->result() == klogg::livelog::LiveLogExportResult::Cancelled );
+    CHECK( data->boundOutputFile() == oldPath );
+    REQUIRE( sentinel.open( QIODevice::ReadOnly ) );
+    CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
 }
 
 TEST_CASE( "Published live save reopen failure preserves the old binding and reports truthfully",

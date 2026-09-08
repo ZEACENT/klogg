@@ -79,9 +79,6 @@ void LiveLogCloseTransaction::closeAnywayPossibleLoss()
     if ( stage_ != Stage::AwaitingDecision ) {
         return;
     }
-    if ( mode_ == Mode::Discard ) {
-        source_.deleteCaptureFiles();
-    }
     finish( Result::CloseAnywayPossibleLoss );
 }
 
@@ -142,7 +139,6 @@ void LiveLogCloseTransaction::advance()
                 }
                 return;
             }
-            source_.deleteCaptureFiles();
             finish( Result::ReadyToRemove );
             return;
         }

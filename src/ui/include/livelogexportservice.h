@@ -60,6 +60,7 @@ private:
     LiveLogExportJob( std::shared_ptr<StreamingLogData> data,
                       StreamingLogData::OutputExportCandidate candidate,
                       QString outputPath, std::function<void()> beforeSnapshotWrite,
+                      std::function<void()> beforePublication,
                       std::function<void()> afterPublish );
     void start();
     void run();
@@ -71,14 +72,20 @@ private:
     StreamingLogData::OutputExportTail takeCandidateTail();
     static LiveLogExportResult mapFailure( StreamingLogData::OutputExportFailure failure );
 
+    enum class PublicationDecision : std::uint8_t {
+        Writing,
+        Cancelled,
+        Publishing,
+    };
+
     std::shared_ptr<StreamingLogData> data_;
     StreamingLogData::OutputExportCandidate candidate_;
     QString outputPath_;
     std::thread worker_;
     std::function<void()> beforeSnapshotWrite_;
+    std::function<void()> beforePublication_;
     std::function<void()> afterPublish_;
-    std::atomic_bool cancelRequested_{ false };
-    std::atomic_bool publicationStarted_{ false };
+    std::atomic<PublicationDecision> publicationDecision_{ PublicationDecision::Writing };
     mutable std::mutex stateMutex_;
     std::condition_variable finishedCondition_;
     std::optional<LiveLogExportResult> result_;
@@ -103,6 +110,7 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<LiveLogExportJob> activeJob_;
     std::function<void()> beforeSnapshotWriteForTesting_;
+    std::function<void()> beforePublicationForTesting_;
     std::function<void()> afterPublishForTesting_;
 };
 

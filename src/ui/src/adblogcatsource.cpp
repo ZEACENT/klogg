@@ -422,6 +422,12 @@ bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsi
     return true;
 }
 
+bool AdbLogcatSource::hasActiveOutputBinding( const QString& outputPath,
+                                              LiveLogSaveAnsiMode ansiMode ) const
+{
+    return logData_ && logData_->hasActiveOutputBinding( outputPath, ansiMode );
+}
+
 bool AdbLogcatSource::synchronizeOutputBinding( LiveLogSaveAnsiMode ansiMode )
 {
     if ( !logData_ || logData_->boundOutputFile().isEmpty() ) {
@@ -604,7 +610,7 @@ void AdbLogcatSource::setFinalizedCallback( FinalizedCallback callback )
 
 void AdbLogcatSource::beginDeliveryGeneration( Generation generation )
 {
-    deliverySettlement_.emplace();
+    deliverySettlement_ = DeliverySettlementToken{};
     deliverySettlement_->generation = generation;
 }
 

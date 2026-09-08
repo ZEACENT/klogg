@@ -101,6 +101,13 @@ struct StreamingLogDataTimerTestAccess {
         data.captureOutputError_.reset();
     }
 
+    static void degradeStrippedOutputBinding( StreamingLogData& data,
+                                              CaptureOutputError error )
+    {
+        data.closeDisplayOutputFile( false );
+        data.captureOutputError_ = error;
+    }
+
     static bool pending( const StreamingLogData& data )
     {
         return data.loadingFinishedQueued_ && data.loadingFinishedTimer_.isActive();
@@ -194,6 +201,14 @@ private:
 };
 
 } // namespace klogg::livelog
+
+struct MainWindowLiveSaveTestAccess {
+    static void start( MainWindow& window, CrawlerWidget* crawler,
+                       const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
+    {
+        window.startLiveLogExport( crawler, outputPath, ansiMode );
+    }
+};
 
 struct LivePresentationCrawlerAccess;
 template <>
@@ -1361,9 +1376,14 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     const auto windowIds = sessionInfo.windows();
     const auto windowId = QStringLiteral( "menu-live-%1" )
                               .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto survivorWindowId = QStringLiteral( "menu-live-survivor-%1" )
+                                      .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
     sessionInfo.add( windowId );
     for ( const auto& id : windowIds ) {
         sessionInfo.remove( id );
+    }
+    if ( preservationScenario == 12 ) {
+        sessionInfo.add( survivorWindowId );
     }
 
     std::vector<SessionInfo::OpenFile> files;
@@ -1426,6 +1446,80 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     transport->publishConnected();
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
+
+    if ( preservationScenario == 12 ) {
+        using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+        auto* firstData = Access::data( crawler );
+        auto* secondData = Access::data( otherCrawler );
+        auto* secondSource = appSession->getAdbLogcatSource( otherCrawler );
+        auto* secondController = appSession->getLiveLogController( otherCrawler );
+        REQUIRE( firstData != nullptr );
+        REQUIRE( secondData != nullptr );
+        REQUIRE( secondSource != nullptr );
+        REQUIRE( secondController != nullptr );
+        REQUIRE( secondSource->reconnectSource() );
+        REQUIRE( factory.created.size() == 2u );
+        auto* secondTransport = factory.created.back();
+        secondTransport->publishConnected();
+        REQUIRE( secondController->snapshot().source.status == live::SourceStatus::Streaming );
+
+        transport->publishBytes( QByteArrayLiteral( "first-must-survive-cancel\n" ) );
+        secondTransport->publishBytes( QByteArrayLiteral( "second-must-survive-cancel\n" ) );
+        const auto firstCapturePath = firstData->capturePath();
+        const auto secondCapturePath = secondData->capturePath();
+        REQUIRE( QDir( firstCapturePath ).exists() );
+        REQUIRE( QDir( secondCapturePath ).exists() );
+        QTemporaryDir outputs;
+        REQUIRE( outputs.isValid() );
+        const auto secondOutputPath = outputs.filePath( QStringLiteral( "second-output.log" ) );
+        REQUIRE( secondSource->bindOutputFile( secondOutputPath, LiveLogSaveAnsiMode::Strip ) );
+        StreamingLogDataTimerTestAccess::failOutputForClose( *secondData,
+                                                             CaptureOutputError::Flush );
+
+        auto& config = Configuration::get();
+        const auto previousMinimizeToTray = config.minimizeToTray();
+        config.setMinimizeToTray( false );
+        bool cancelled = false;
+        QTimer modalDriver;
+        modalDriver.setTimerType( Qt::PreciseTimer );
+        modalDriver.setInterval( 1 );
+        QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
+            auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives the window-wide cancel decision.
+            if ( message == nullptr ) {
+                return;
+            }
+            for ( auto* button : message->buttons() ) {
+                if ( button->text().contains( QStringLiteral( "Cancel" ) ) ) {
+                    cancelled = true;
+                    button->click();
+                    return;
+                }
+            }
+        } );
+        modalDriver.start();
+        mainWindow->close();
+        REQUIRE( waitUiState( [ & ] { return cancelled; } ) );
+        modalDriver.stop();
+        REQUIRE( waitUiState( [ & ] {
+            return controller->snapshot().runIntent == live::RunIntent::Running
+                   && secondController->snapshot().runIntent == live::RunIntent::Running
+                   && factory.created.size() >= 4u;
+        } ) );
+        REQUIRE( tabs->count() == 2 );
+        CHECK( firstData->getNbLine() > 0_lcount );
+        CHECK( secondData->getNbLine() > 0_lcount );
+        CHECK( QDir( firstCapturePath ).exists() );
+        CHECK( QDir( secondCapturePath ).exists() );
+
+        StreamingLogDataTimerTestAccess::recoverOutputForClose( *secondData );
+        mainWindow->close();
+        REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+        CHECK_FALSE( QDir( firstCapturePath ).exists() );
+        CHECK_FALSE( QDir( secondCapturePath ).exists() );
+        config.setMinimizeToTray( previousMinimizeToTray );
+        return;
+    }
+
     auto* menu = mainWindow->findChild<QMenu*>( QStringLiteral( "openedFilesMenu" ) );
     REQUIRE( menu != nullptr );
     REQUIRE( menu->actions().size() == 4 ); // Selector, separator, two live documents.
@@ -1713,6 +1807,29 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                 return action->toolTip() == savedPath;
             } ) );
             exerciseLiveSaveDialog( *saveStripped, savedPath );
+            using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+            auto* data = Access::data( crawler );
+            REQUIRE( data != nullptr );
+            StreamingLogDataTimerTestAccess::degradeStrippedOutputBinding(
+                *data, CaptureOutputError::Write );
+            REQUIRE( data->captureOutputError() == CaptureOutputError::Write );
+            REQUIRE_FALSE( source->hasActiveOutputBinding( savedPath,
+                                                           LiveLogSaveAnsiMode::Strip ) );
+            const auto previousJob = appSession->getLiveLogExportService( crawler )->activeJob();
+            REQUIRE( previousJob != nullptr );
+            REQUIRE( previousJob->isFinished() );
+            REQUIRE( previousJob->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+            MainWindowLiveSaveTestAccess::start( *mainWindow, crawler, savedPath,
+                                                 LiveLogSaveAnsiMode::Strip );
+            REQUIRE( waitUiState( [ & ] {
+                const auto active = appSession->getLiveLogExportService( crawler )->activeJob();
+                return active != nullptr && active != previousJob && active->isFinished();
+            } ) );
+            const auto repairJob = appSession->getLiveLogExportService( crawler )->activeJob();
+            REQUIRE( repairJob != nullptr );
+            CHECK( repairJob != previousJob );
+            CHECK( repairJob->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+            CHECK_FALSE( data->captureOutputError().has_value() );
             exerciseLiveSaveDialog( *save, savedPath );
             CHECK( source->sessionData().boundOutputFile == savedPath );
             transport->publishBytes( QByteArrayLiteral( "saved tail\n" ) );
@@ -1856,6 +1973,12 @@ TEST_CASE( "Closing anyway after a live output failure performs the explicit dis
 {
     const auto useIos = GENERATE( false, true );
     exerciseLivePresentation( useIos, false, 11 );
+}
+
+TEST_CASE( "Cancelling multi-tab window shutdown preserves earlier discard candidates",
+           "[ui][session][live-close-owner][live-close-red]" )
+{
+    exerciseLivePresentation( false, false, 12 );
 }
 
 TEST_CASE( "Window close preserves every owner when one live capture cannot persist",
