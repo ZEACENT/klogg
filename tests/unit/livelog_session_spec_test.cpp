@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -42,11 +43,13 @@
 #include <QtGlobal>
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include <QTranslator>
 
 #include "livelogsession.h"
 #include "livestate.h"
@@ -63,6 +66,21 @@ using klogg::livelog::LiveLogSessionSpec;
 using klogg::livelog::ParseResult;
 using klogg::livelog::SourceKind;
 using IosOptions = klogg::livelog::IosOptions;
+
+class LiveLogMessageTranslator final : public QTranslator {
+public:
+    QString translate( const char* context, const char* sourceText,
+                       const char*, int ) const override
+    {
+        if ( QByteArray{ context } == QByteArrayLiteral( "klogg::livelog::messages" )
+             && QByteArray{ sourceText }
+                    == QByteArrayLiteral(
+                        "The saved live capture integrity metadata is invalid or unsupported." ) ) {
+            return QStringLiteral( "translated-invalid-live-integrity" );
+        }
+        return {};
+    }
+};
 
 // Fixed identifiers keep every assertion below deterministic (no generator,
 // no clock, no randomness anywhere in this file).
@@ -251,6 +269,33 @@ TEST_CASE( "Malformed live integrity does not silently become a healthy history"
     const auto result = klogg::livelog::parsePersistedSpec( QString::fromUtf8( QJsonDocument( object ).toJson() ) );
     CHECK_FALSE( result.ok() );
     CHECK( result.hasFatalDiagnostic() );
+}
+
+TEST_CASE( "Invalid live integrity diagnostics use the live-log translation context",
+           "[livelog-session-spec][translation-red]" )
+{
+    auto object = QJsonDocument::fromJson( serializeSpec( makeAndroidSpec() ).toUtf8() ).object();
+    object.insert( QStringLiteral( "integrity" ),
+                   QJsonObject{ { QStringLiteral( "version" ), 99 } } );
+    int argumentCount = 1;
+    char applicationName[] = "livelog-session-spec-test";
+    char* arguments[] = { applicationName, nullptr };
+    std::unique_ptr<QCoreApplication> application;
+    if ( QCoreApplication::instance() == nullptr ) {
+        application = std::make_unique<QCoreApplication>( argumentCount, arguments );
+    }
+    LiveLogMessageTranslator translator;
+    QCoreApplication::installTranslator( &translator );
+    const auto result = klogg::livelog::parsePersistedSpec(
+        QString::fromUtf8( QJsonDocument( object ).toJson() ) );
+    QCoreApplication::removeTranslator( &translator );
+
+    const auto diagnostic = std::find_if(
+        result.diagnostics.cbegin(), result.diagnostics.cend(), []( const Diagnostic& candidate ) {
+            return candidate.code == QStringLiteral( "invalid-live-integrity" );
+        } );
+    REQUIRE( diagnostic != result.diagnostics.cend() );
+    CHECK( diagnostic->message == QStringLiteral( "translated-invalid-live-integrity" ) );
 }
 
 TEST_CASE( "Fresh Android session spec serializes typed fields without raw command data",

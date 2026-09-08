@@ -15,6 +15,7 @@
 #include <optional>
 #include <thread>
 
+#include <QEventLoop>
 #include <QObject>
 #include <QString>
 
@@ -65,9 +66,6 @@ private:
     void start();
     void run();
     void complete( LiveLogExportResult result );
-    void completePublished(
-        const klogg::platform::FileIdentity& identity,
-        StreamingLogData::OutputExportEncodingState encodingState );
     void cancelCandidate();
     StreamingLogData::OutputExportTail takeCandidateTail();
     static LiveLogExportResult mapFailure( StreamingLogData::OutputExportFailure failure );
@@ -85,6 +83,7 @@ private:
     std::function<void()> beforeSnapshotWrite_;
     std::function<void()> beforePublication_;
     std::function<void()> afterPublish_;
+    std::function<void( QEventLoop::ProcessEventsFlags, int )> ownerEventPumpForTesting_;
     std::atomic<PublicationDecision> publicationDecision_{ PublicationDecision::Writing };
     mutable std::mutex stateMutex_;
     std::condition_variable finishedCondition_;

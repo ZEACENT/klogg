@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QTimer>
 
@@ -27,7 +28,11 @@ class LiveLogCloseTransaction final : public QObject {
 public:
     enum class Mode : std::uint8_t { Preserve, Discard };
     enum class Result : std::uint8_t { ReadyToRemove, Cancelled, CloseAnywayPossibleLoss };
-    enum class FailureKind : std::uint8_t { Persistence, OutputFlush };
+    enum class FailureKind : std::uint8_t { StopTimeout, Persistence, OutputFlush };
+
+    struct Config {
+        int stopTimeoutMs = 30'000;
+    };
 
     struct Failure {
         FailureKind kind = FailureKind::Persistence;
@@ -41,6 +46,9 @@ public:
     LiveLogCloseTransaction( LiveLogController& controller, AdbLogcatSource& source,
                              LiveLogExportService& exportService, Mode mode,
                              QObject* parent = nullptr );
+    LiveLogCloseTransaction( LiveLogController& controller, AdbLogcatSource& source,
+                             LiveLogExportService& exportService, Mode mode,
+                             Config config, QObject* parent = nullptr );
 
     void setCallbacks( FailureCallback failure, FinishedCallback finished );
     void start();
@@ -69,7 +77,9 @@ private:
     AdbLogcatSource& source_;
     LiveLogExportService& exportService_;
     Mode mode_;
+    Config config_;
     QTimer timer_;
+    QElapsedTimer stopWait_;
     FailureCallback failureCallback_;
     FinishedCallback finishedCallback_;
     Stage stage_{ Stage::Idle };

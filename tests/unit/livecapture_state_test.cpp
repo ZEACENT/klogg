@@ -666,6 +666,28 @@ TEST_CASE( "stop is idempotent until the cancelled generation completes",
     REQUIRE( projectLiveState( completed.snapshot ).status == PresentationStatus::Stopped );
 }
 
+TEST_CASE( "discard request upgrades an existing settling retirement",
+           "[livecapture][state][generation][stop-disposition-red]" )
+{
+    const auto streaming = streamingState();
+    const auto settling = dispatch(
+        streaming, StopRequested{ at( 200 ), StopDisposition::SettleAccepted } );
+    const auto restart = dispatch( settling.snapshot, StartRequested{ at( 205 ) } );
+    REQUIRE( restart.accepted );
+    REQUIRE( restart.snapshot.runIntent == RunIntent::Running );
+    REQUIRE( restart.snapshot.source.stoppingGeneration == streaming.generation );
+
+    const auto discard = dispatch(
+        restart.snapshot, StopRequested{ at( 210 ), StopDisposition::DiscardPending } );
+
+    REQUIRE( discard.accepted );
+    CHECK( discard.snapshot.source.stoppingDisposition == StopDisposition::DiscardPending );
+    REQUIRE( discard.effects.size() == 1u );
+    CHECK( discard.effects.front().kind == EffectKind::CancelStream );
+    CHECK( discard.effects.front().generation == streaming.generation );
+    CHECK( discard.effects.front().stopDisposition == StopDisposition::DiscardPending );
+}
+
 TEST_CASE( "accepted events cannot move the reducer clock backwards", "[livecapture][state][time]" )
 {
     auto retry = openingState();

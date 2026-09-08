@@ -488,8 +488,19 @@ void AdbLogcatSource::cancelTransport(
         if ( !retiringGeneration_ && stoppedCallback_ ) { stoppedCallback_( generation, 0u ); }
         return;
     }
-    retiringDisposition_ = disposition;
-    if ( stopRequested_ ) { return; }
+    const auto effectiveDisposition
+        = stopRequested_
+                  && retiringDisposition_ == klogg::livecapture::StopDisposition::DiscardPending
+              ? klogg::livecapture::StopDisposition::DiscardPending
+              : disposition;
+    const auto dispositionChanged = effectiveDisposition != retiringDisposition_;
+    retiringDisposition_ = effectiveDisposition;
+    if ( stopRequested_ ) {
+        if ( dispositionChanged && transport_ ) {
+            transport_->requestStop( generation, effectiveDisposition );
+        }
+        return;
+    }
     stopRequested_ = true;
     reportedErrorGeneration_.reset();
     connecting_ = false;
@@ -554,6 +565,7 @@ klogg::livecapture::CaptureDeliveryResult AdbLogcatSource::appendTransportBytes(
     }
     catch ( ... ) {
         result.disposition = DeliveryDisposition::PartialUnknown;
+        result.outputBytes.reset();
         result.failureCode = "capture-outcome-unknown";
     }
     schedulePersistenceRetry();
@@ -617,11 +629,18 @@ void AdbLogcatSource::beginDeliveryGeneration( Generation generation )
 void AdbLogcatSource::settleOfferedDelivery( Generation generation, DeliverySequence sequence )
 {
     if ( !deliverySettlement_ || deliverySettlement_->generation != generation
-         || sequence != deliverySettlement_->settledThroughSequence + 1u
-         || sequence > deliverySettlement_->lastOfferedSequence ) {
+         || sequence <= deliverySettlement_->settledThroughSequence
+         || sequence > deliverySettlement_->lastOfferedSequence
+         || !deliverySettlement_->settledOutOfOrder.insert( sequence ).second ) {
         return;
     }
-    deliverySettlement_->settledThroughSequence = sequence;
+    while ( deliverySettlement_->settledThroughSequence
+                < deliverySettlement_->lastOfferedSequence
+            && deliverySettlement_->settledOutOfOrder.erase(
+                   deliverySettlement_->settledThroughSequence + 1u )
+                   != 0u ) {
+        ++deliverySettlement_->settledThroughSequence;
+    }
     completeRetirementIfSettled( generation );
 }
 
@@ -670,6 +689,7 @@ void AdbLogcatSource::finalizeInput( Generation generation )
     try { result = mapCaptureOutcome( logData_->finishInput() ); }
     catch ( ... ) {
         result.disposition = klogg::livecapture::DeliveryDisposition::PartialUnknown;
+        result.outputBytes.reset();
         result.failureCode = "capture-finalization-unknown";
     }
     schedulePersistenceRetry();

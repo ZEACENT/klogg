@@ -540,8 +540,13 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             auto transition = live::reduce( snapshot_, pending.event, config_.reducer );
             if ( !transition.accepted ) {
                 if ( pending.bytes ) {
-                    addCount( spec_.integrity.discardedBytes,
-                              static_cast<std::uint64_t>( pending.bytes->size() ) );
+                    const auto discarded
+                        = static_cast<std::uint64_t>( pending.bytes->size() );
+                    addCount( spec_.integrity.discardedBytes, discarded );
+                    if ( discarded != 0u ) {
+                        spec_.integrity.gapPossible = true;
+                        spec_.integrity.record( "dispatch-rejected-discarded", discarded );
+                    }
                     notifyPresentationChanged();
                 }
                 if ( pending.deliverySettled ) {
@@ -567,6 +572,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
                     // before already buffered data can be delivered; never replay.
                     live::CaptureDeliveryResult unknown;
                     unknown.disposition = live::DeliveryDisposition::PartialUnknown;
+                    unknown.outputBytes.reset();
                     unknown.failureCode = "capture-outcome-unknown";
                     settleDelivery( effect.generation, unknown,
                                     static_cast<std::uint64_t>( effect.byteCount ) );

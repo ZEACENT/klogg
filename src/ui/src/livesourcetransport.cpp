@@ -243,7 +243,14 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
         QObject::connect( dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
             this, [ notifyStopped ]( int, QProcess::ExitStatus ) { notifyStopped(); } );
         if ( dying->state() == QProcess::NotRunning ) {
-            QTimer::singleShot( 0, dying, notifyStopped );
+            const auto discarded = dying->isReadable()
+                                       ? static_cast<quint64>(
+                                             dying->readAllStandardOutput().size() )
+                                       : quint64{ 0u };
+            QTimer::singleShot( 0, this, [ this, generation, completed, discarded ] {
+                if ( std::exchange( *completed, true ) ) { return; }
+                Q_EMIT stopped( generation, discarded );
+            } );
         }
     }
 

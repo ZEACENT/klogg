@@ -177,14 +177,30 @@ void apply( LiveStateTransition& transition, const StopRequested& event, const L
     advanceNow( snapshot, event.at );
     snapshot.runIntent = RunIntent::Stopped;
     snapshot.startAfterStop = false;
+    const auto existingStoppingGeneration = snapshot.source.stoppingGeneration;
+    const auto existingDisposition = snapshot.source.stoppingDisposition;
     invalidateStreamAttempt( transition );
     snapshot.source.status = SourceStatus::Stopping;
     snapshot.source.stopReason = StopReason::User;
-    snapshot.source.stoppingDisposition = event.disposition;
+    const auto effectiveDisposition
+        = existingStoppingGeneration.has_value()
+                  && existingDisposition == StopDisposition::DiscardPending
+              ? StopDisposition::DiscardPending
+              : event.disposition;
+    snapshot.source.stoppingDisposition = effectiveDisposition;
+    bool cancellationUpdated = false;
     for ( auto& effect : transition.effects ) {
         if ( effect.kind == EffectKind::CancelStream ) {
-            effect.stopDisposition = event.disposition;
+            effect.stopDisposition = effectiveDisposition;
+            cancellationUpdated = true;
         }
+    }
+    if ( existingStoppingGeneration.has_value() && !cancellationUpdated
+         && effectiveDisposition != existingDisposition ) {
+        LiveStateEffect cancellation{ EffectKind::CancelStream, *existingStoppingGeneration,
+                                      Timestamp{ 0 }, 0u };
+        cancellation.stopDisposition = effectiveDisposition;
+        transition.effects.push_back( cancellation );
     }
     snapshot.source.awaitingUserReason.reset();
     snapshot.source.failure.reset();

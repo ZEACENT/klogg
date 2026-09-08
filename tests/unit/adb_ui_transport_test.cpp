@@ -1747,6 +1747,23 @@ bool spyContainsState( const SafeQSignalSpy& spy, LiveSourceTransport::State tar
 }
 } // namespace
 
+TEST_CASE( "ProcessLiveSourceTransport reports stopped after a pending process is deleted" )
+{
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 3000, 20 } );
+    SafeQSignalSpy stoppedSpy( &transport,
+                               SIGNAL( stopped( LiveSourceTransport::Generation, quint64 ) ) );
+    transport.startAsync();
+    REQUIRE( transport.hasPendingStart() );
+
+    transport.stopCurrent();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    QCoreApplication::processEvents();
+
+    REQUIRE( stoppedSpy.count() == 1 );
+    CHECK( stoppedSpy.at( 0 ).at( 1 ).toULongLong() == 0u );
+}
+
 TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started" )
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,

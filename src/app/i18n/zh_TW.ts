@@ -796,6 +796,7 @@
     <message><source>The file was published, but the final live tail could not be transferred. The previous binding remains active.</source><translation>檔案已發佈，但無法傳送最終即時尾端。原繫結仍然有效。</translation></message>
     <message><source>Live capture could not be closed safely</source><translation>無法安全關閉即時擷取</translation></message>
     <message><source>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</source><translation>擷取資料仍在等待處理或無法持久化。現在關閉可能會遺失記憶體中僅存的副本。</translation></message>
+    <message><source>The live source did not stop within the safety deadline. Closing now may discard unsettled input.</source><translation>即時日誌來源未能在安全期限內停止。現在關閉可能會捨棄尚未結算的輸入。</translation></message>
     <message><source>The active live output could not be flushed. Closing now may lose recent output.</source><translation>無法清出作用中的即時輸出。現在關閉可能會遺失最近的輸出。</translation></message>
     <message><source>Close Anyway (Possible Loss)</source><translation>仍然關閉（可能遺失資料）</translation></message>
     <message><source>%1
@@ -2454,6 +2455,10 @@ Capture integrity: %2</source><translation>%1
     <message>
         <source>The saved live-log session has an unrecognized source type; it cannot be restored safely.</source>
         <translation>儲存的即時日誌工作階段包含無法辨識的來源類型，無法安全還原。</translation>
+    </message>
+    <message>
+        <source>The saved live capture integrity metadata is invalid or unsupported.</source>
+        <translation>已儲存的即時擷取完整性中繼資料無效或不受支援。</translation>
     </message>
     <message>
         <source>This session predates transport selection and was migrated once to the built-in transport.</source>

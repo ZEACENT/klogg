@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 #include <QObject>
@@ -132,6 +133,7 @@ private:
         Generation generation{ 0 };
         DeliverySequence lastOfferedSequence{ 0 };
         DeliverySequence settledThroughSequence{ 0 };
+        std::set<DeliverySequence> settledOutOfOrder;
         bool producerStopped{ false };
         bool completing{ false };
         quint64 discardedBytes{ 0u };

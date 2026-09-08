@@ -345,7 +345,8 @@ public:
     void fireLastEvenIfCancelled()
     {
         REQUIRE_FALSE( entries_.empty() );
-        entries_.back().callback();
+        const auto callback = entries_.back().callback;
+        callback();
     }
 
     void fire( AdbSmartSocketDeadlineKind kind )

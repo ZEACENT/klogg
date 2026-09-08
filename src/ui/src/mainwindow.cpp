@@ -2613,6 +2613,7 @@ void MainWindow::startLiveCloseTransaction(
     DiscardCommit discardCommit, std::function<void( bool )> completion )
 {
     if ( crawler == nullptr || liveCloseTransaction_ ) {
+        completion( false );
         return;
     }
     auto* controller = session_.getLiveLogController( crawler );
@@ -2632,12 +2633,20 @@ void MainWindow::startLiveCloseTransaction(
             if ( !liveCloseTransaction_ ) {
                 return;
             }
+            QString failureText;
+            switch ( failure.kind ) {
+            case klogg::livelog::LiveLogCloseTransaction::FailureKind::StopTimeout:
+                failureText = tr( "The live source did not stop within the safety deadline. Closing now may discard unsettled input." );
+                break;
+            case klogg::livelog::LiveLogCloseTransaction::FailureKind::Persistence:
+                failureText = tr( "Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory." );
+                break;
+            case klogg::livelog::LiveLogCloseTransaction::FailureKind::OutputFlush:
+                failureText = tr( "The active live output could not be flushed. Closing now may lose recent output." );
+                break;
+            }
             QMessageBox message( QMessageBox::Warning, tr( "Live capture could not be closed safely" ),
-                                 failure.kind
-                                         == klogg::livelog::LiveLogCloseTransaction::FailureKind::Persistence
-                                     ? tr( "Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory." )
-                                     : tr( "The active live output could not be flushed. Closing now may lose recent output." ),
-                                 QMessageBox::NoButton, this );
+                                 failureText, QMessageBox::NoButton, this );
             auto* retry = message.addButton( tr( "Retry" ), QMessageBox::AcceptRole );
             auto* cancel = message.addButton( tr( "Cancel" ), QMessageBox::RejectRole );
             auto* closeAnyway

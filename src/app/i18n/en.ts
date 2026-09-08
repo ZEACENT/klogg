@@ -796,6 +796,7 @@
     <message><source>The file was published, but the final live tail could not be transferred. The previous binding remains active.</source><translation>The file was published, but the final live tail could not be transferred. The previous binding remains active.</translation></message>
     <message><source>Live capture could not be closed safely</source><translation>Live capture could not be closed safely</translation></message>
     <message><source>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</source><translation>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</translation></message>
+    <message><source>The live source did not stop within the safety deadline. Closing now may discard unsettled input.</source><translation>The live source did not stop within the safety deadline. Closing now may discard unsettled input.</translation></message>
     <message><source>The active live output could not be flushed. Closing now may lose recent output.</source><translation>The active live output could not be flushed. Closing now may lose recent output.</translation></message>
     <message><source>Close Anyway (Possible Loss)</source><translation>Close Anyway (Possible Loss)</translation></message>
     <message><source>%1
@@ -2454,6 +2455,10 @@ Capture integrity: %2</translation></message>
     <message>
         <source>The saved live-log session has an unrecognized source type; it cannot be restored safely.</source>
         <translation>The saved live-log session has an unrecognized source type; it cannot be restored safely.</translation>
+    </message>
+    <message>
+        <source>The saved live capture integrity metadata is invalid or unsupported.</source>
+        <translation>The saved live capture integrity metadata is invalid or unsupported.</translation>
     </message>
     <message>
         <source>This session predates transport selection and was migrated once to the built-in transport.</source>

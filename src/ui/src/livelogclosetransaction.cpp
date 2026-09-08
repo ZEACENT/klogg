@@ -17,12 +17,21 @@ namespace klogg::livelog {
 LiveLogCloseTransaction::LiveLogCloseTransaction(
     LiveLogController& controller, AdbLogcatSource& source,
     LiveLogExportService& exportService, Mode mode, QObject* parent )
+    : LiveLogCloseTransaction( controller, source, exportService, mode, Config{}, parent )
+{
+}
+
+LiveLogCloseTransaction::LiveLogCloseTransaction(
+    LiveLogController& controller, AdbLogcatSource& source,
+    LiveLogExportService& exportService, Mode mode, Config config, QObject* parent )
     : QObject( parent )
     , controller_( controller )
     , source_( source )
     , exportService_( exportService )
     , mode_( mode )
+    , config_( config )
 {
+    config_.stopTimeoutMs = std::max( 0, config_.stopTimeoutMs );
     timer_.setParent( this );
     timer_.setSingleShot( true );
     timer_.setTimerType( Qt::PreciseTimer );
@@ -42,6 +51,7 @@ void LiveLogCloseTransaction::start()
         return;
     }
     stage_ = Stage::AwaitingStop;
+    stopWait_.start();
     controller_.stopRequested( klogg::livecapture::StopDisposition::SettleAccepted );
     scheduleAdvance();
 }
@@ -53,6 +63,12 @@ void LiveLogCloseTransaction::retry()
     }
     const auto failureKind = lastFailureKind_;
     lastFailureKind_.reset();
+    if ( failureKind == FailureKind::StopTimeout ) {
+        stage_ = Stage::AwaitingStop;
+        stopWait_.restart();
+        scheduleAdvance();
+        return;
+    }
     stage_ = Stage::Persisting;
     if ( failureKind == FailureKind::OutputFlush ) {
         scheduleAdvance();
@@ -101,6 +117,15 @@ void LiveLogCloseTransaction::advance()
         return;
     case Stage::AwaitingStop:
         if ( !source_.isInputTerminated() ) {
+            if ( stopWait_.isValid() && stopWait_.elapsed() >= config_.stopTimeoutMs ) {
+                stage_ = Stage::AwaitingDecision;
+                lastFailureKind_ = FailureKind::StopTimeout;
+                if ( failureCallback_ ) {
+                    failureCallback_( Failure{ FailureKind::StopTimeout,
+                                               CaptureStore::PersistenceResult{}, std::nullopt } );
+                }
+                return;
+            }
             scheduleAdvance();
             return;
         }
@@ -152,6 +177,7 @@ void LiveLogCloseTransaction::persistTurn()
     const auto persistence = source_.persistForClose( 32 );
     if ( !persistence.has_value() ) {
         stage_ = Stage::AwaitingStop;
+        stopWait_.restart();
         scheduleAdvance();
         return;
     }
@@ -160,7 +186,9 @@ void LiveLogCloseTransaction::persistTurn()
         flushAndFinish();
         return;
     }
-    if ( persistence->failure.has_value() ) {
+    if ( persistence->failure.has_value()
+         || ( persistence->pendingSegments == 0
+              && persistence->pendingPartialBytes > 0 ) ) {
         stage_ = Stage::AwaitingDecision;
         lastFailureKind_ = FailureKind::Persistence;
         if ( failureCallback_ ) {

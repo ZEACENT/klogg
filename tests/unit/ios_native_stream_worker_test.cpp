@@ -1654,6 +1654,26 @@ TEST_CASE(
     executor.runAllOnWorker();
 }
 
+TEST_CASE( "legacy syslog ignores empty NUL-delimited records",
+           "[ios][native][stream][syslog][chunking][empty-record-red]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 509u, "8.4" ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    CHECK_NOTHROW( state.emitSyslog( "\0\0"s ) );
+    CHECK( observed.bytesAvailable.empty() );
+    CHECK_FALSE( worker.drain().has_value() );
+
+    worker.stop( 509u );
+    executor.runAllOnWorker();
+}
+
 TEST_CASE( "legacy syslog fake adapter delivers one callback per byte without assembly loss",
            "[ios][native][stream][syslog][performance][operations]" )
 {

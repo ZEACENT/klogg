@@ -36,6 +36,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string_view>
 
@@ -132,6 +133,13 @@ struct LiveLogExportServiceTestAccess {
         const std::lock_guard<std::mutex> lock( job.stateMutex_ );
         return job.dataAccessThreadId_;
     }
+
+    static void setOwnerEventPump(
+        LiveLogExportJob& job,
+        std::function<void( QEventLoop::ProcessEventsFlags, int )> callback )
+    {
+        job.ownerEventPumpForTesting_ = std::move( callback );
+    }
 };
 } // namespace klogg::livelog
 
@@ -146,6 +154,11 @@ struct StreamingLogDataTimerTestAccess {
                                        std::function<void()> callback )
     {
         data.captureStore_.beforeSegmentMutationForTesting_ = std::move( callback );
+    }
+    static void beforeOutputExportJournal( StreamingLogData& data,
+                                           std::function<void()> callback )
+    {
+        data.beforeOutputExportJournalForTesting_ = std::move( callback );
     }
 
     static void shortOutput( StreamingLogData& data )
@@ -2111,7 +2124,7 @@ TEST_CASE( "Async live save publishes snapshot concurrent tail and future writes
     ExportBarrier publicationBarrier;
     klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
         service, [ &snapshotBarrier ] { snapshotBarrier.block(); } );
-    klogg::livelog::LiveLogExportServiceTestAccess::setAfterPublish(
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
         service, [ &publicationBarrier ] { publicationBarrier.block(); } );
     const auto job = service.start( newPath, mode, 4096 );
     REQUIRE( job != nullptr );
@@ -2191,6 +2204,93 @@ TEST_CASE( "Async live save cancel and tail overflow preserve destination and ol
                "prefix\nconcurrent-tail-is-larger-than-eight\nold-still-active\n" ) );
 }
 
+TEST_CASE( "Live save validates the final tail before replacing the destination",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, LiveLogSaveAnsiMode::Strip ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier publicationBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    const auto job = service.start( newPath, LiveLogSaveAnsiMode::Strip, 8 );
+    REQUIRE( job != nullptr );
+    REQUIRE( publicationBarrier.waitUntilEnteredWithEvents() );
+
+    data->appendUtf8( QByteArrayLiteral( "tail-larger-than-eight\n" ) );
+    publicationBarrier.release();
+    job->waitForFinished();
+
+    CHECK( job->result() == klogg::livelog::LiveLogExportResult::TailOverflow );
+    CHECK( data->boundOutputFile() == oldPath );
+    REQUIRE( sentinel.open( QIODevice::ReadOnly ) );
+    CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
+}
+
+TEST_CASE( "Live save teardown excludes user input while pumping owner events",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    data->appendUtf8( QByteArrayLiteral( "snapshot\n" ) );
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier workerBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &workerBarrier ] { workerBarrier.block(); } );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( workerBarrier.waitUntilEntered() );
+
+    std::optional<QEventLoop::ProcessEventsFlags> observedFlags;
+    bool released = false;
+    klogg::livelog::LiveLogExportServiceTestAccess::setOwnerEventPump(
+        *job, [ & ]( QEventLoop::ProcessEventsFlags flags, int maximumTime ) {
+            observedFlags = flags;
+            if ( !std::exchange( released, true ) ) {
+                workerBarrier.release();
+            }
+            QCoreApplication::processEvents( flags, maximumTime );
+        } );
+    job->waitForFinished();
+
+    REQUIRE( observedFlags.has_value() );
+    CHECK( observedFlags->testFlag( QEventLoop::ExcludeUserInputEvents ) );
+}
+
+TEST_CASE( "Live save journal allocation failure is contained after capture commit",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    const auto candidate = data.beginOutputExport( LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( candidate.has_value() );
+    StreamingLogDataTimerTestAccess::beforeOutputExportJournal(
+        data, [] { throw std::bad_alloc{}; } );
+
+    CaptureStore::AppendResult appendResult;
+    CHECK_NOTHROW( appendResult = data.appendUtf8( QByteArrayLiteral( "committed-tail\n" ) ) );
+    CHECK( appendResult.committedLines == 1_lcount );
+    CHECK( data.getNbLine() == 1_lcount );
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE( tail.failure.has_value() );
+    CHECK( tail.failure == StreamingLogData::OutputExportFailure::TailOverflow );
+    CHECK( tail.batches.empty() );
+}
+
 TEST_CASE( "Async live save cancellation wins the final publication decision",
            "[streaming][live-save-cutover][live-save-async][live-save-red]" )
 {
@@ -2239,25 +2339,32 @@ TEST_CASE( "Published live save reopen failure preserves the old binding and rep
 
     klogg::livelog::LiveLogExportService service( data );
     ExportBarrier publicationBarrier;
-    klogg::livelog::LiveLogExportServiceTestAccess::setAfterPublish(
+    bool replacementCreated = false;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
         service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    klogg::livelog::LiveLogExportServiceTestAccess::setAfterPublish(
+        service, [ & ] {
+            if ( !QFile::remove( newPath ) ) {
+                return;
+            }
+            QFile replacement( newPath );
+            replacementCreated = replacement.open( QIODevice::WriteOnly )
+                                 && replacement.write( "replacement-sentinel" ) == 20;
+        } );
     const auto job = service.start( newPath, mode, 4096 );
     REQUIRE( job != nullptr );
     REQUIRE( publicationBarrier.waitUntilEnteredWithEvents() );
     data->appendUtf8( QByteArrayLiteral( "after-publication\n" ) );
-    REQUIRE( QFile::remove( newPath ) );
-    QFile replacement( newPath );
-    REQUIRE( replacement.open( QIODevice::WriteOnly ) );
-    REQUIRE( replacement.write( "replacement-sentinel" ) == 20 );
-    replacement.close();
     publicationBarrier.release();
     job->waitForFinished();
 
+    REQUIRE( replacementCreated );
     CHECK( job->result() == klogg::livelog::LiveLogExportResult::PublishedReopenFailed );
     CHECK( data->boundOutputFile() == oldPath );
     data->appendUtf8( QByteArrayLiteral( "old-remains-active\n" ) );
     data->finishInput();
 
+    QFile replacement( newPath );
     REQUIRE( replacement.open( QIODevice::ReadOnly ) );
     CHECK( replacement.readAll() == QByteArrayLiteral( "replacement-sentinel" ) );
     QFile old( oldPath );

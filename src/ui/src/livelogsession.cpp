@@ -482,8 +482,10 @@ ParseResult parsePersistedSpec( const QString& json )
     spec.schemaVersion = kCurrentSpecVersion;
     spec.sourceKind = kind;
     if ( !parseIntegrity( object.value( QStringLiteral( "integrity" ) ), spec.integrity ) ) {
-        result.diagnostics.push_back( fatalDiagnostic( QStringLiteral( "invalid-live-integrity" ),
-            QStringLiteral( "The saved live capture integrity metadata is invalid or unsupported." ) ) );
+        result.diagnostics.push_back( fatalDiagnostic(
+            QStringLiteral( "invalid-live-integrity" ),
+            liveLogMessage(
+                "The saved live capture integrity metadata is invalid or unsupported." ) ) );
         return result;
     }
 

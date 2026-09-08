@@ -20,6 +20,8 @@
 #include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
+class QSaveFile;
+
 enum class LiveLogSaveAnsiMode {
     Strip,
     Preserve,
@@ -106,10 +108,12 @@ class StreamingLogData : public SearchableLogData {
     beginOutputExport( LiveLogSaveAnsiMode ansiMode, qint64 maximumTailBytes );
     OutputExportTail takeOutputExportTail( std::uint64_t candidateId );
     void cancelOutputExport( std::uint64_t candidateId );
-    OutputExportActivation activatePublishedOutputExport(
+    // Runs on the data owner thread. Final-tail validation, atomic publication and
+    // output cutover share the append-ordering critical section.
+    OutputExportActivation publishStagedOutputExport(
         std::uint64_t candidateId, const QString& outputPath,
-        const klogg::platform::FileIdentity& publishedIdentity,
-        OutputExportEncodingState encodingState );
+        OutputExportEncodingState encodingState, QSaveFile& stagedOutput,
+        const std::function<void()>& afterPublish = {} );
     static bool writeOutputExportSnapshot( const OutputExportCandidate& candidate,
                                            OutputExportEncodingState& state,
                                            const OutputExportWrite& write,
@@ -174,6 +178,7 @@ class StreamingLogData : public SearchableLogData {
   private:
     // Tests deliver the existing single-shot timer, never a synthetic completion signal.
     friend struct StreamingLogDataTimerTestAccess;
+    friend struct LiveSourceStreamingLogDataTestAccess;
 
       struct OutputBindResult {
           bool success = false;
@@ -221,7 +226,7 @@ class StreamingLogData : public SearchableLogData {
     void reportCaptureOutputFailure( CaptureOutputError error );
     void checkPreservedOutputState();
     void reportPersistenceState( const CaptureStore::PersistenceResult& state );
-    void journalOutputExport( const CaptureStore::AppendResult& appendResult );
+    void journalOutputExport( const CaptureStore::AppendResult& appendResult ) noexcept;
     static QByteArray transformOutputRecord( const OutputExportCandidate& candidate,
                                              const QByteArray& bytes, bool terminated );
     static bool writeAllOutputBytes( const QByteArray& bytes, const OutputExportWrite& write );
@@ -257,6 +262,7 @@ class StreamingLogData : public SearchableLogData {
     std::optional<CaptureOutputError> captureOutputError_;
     std::optional<CaptureStore::PersistenceFailure> persistenceFailure_;
     std::optional<PendingOutputExport> pendingOutputExport_;
+    std::function<void()> beforeOutputExportJournalForTesting_;
     std::uint64_t nextOutputExportId_ = 0;
     std::uint64_t nextOutputDeliverySequence_ = 0;
     static constexpr std::size_t CachedRawBatchCountLimit = 65536u;

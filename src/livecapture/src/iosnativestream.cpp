@@ -532,6 +532,9 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 return;
             }
 
+            if ( state->syslogRecord.empty() ) {
+                return;
+            }
             state->syslogRecord.push_back( static_cast<std::uint8_t>( '\n' ) );
             auto completedRecord = std::move( state->syslogRecord );
             state->enqueue( std::move( completedRecord ) );

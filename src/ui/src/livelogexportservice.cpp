@@ -74,7 +74,17 @@ void LiveLogExportJob::waitForFinished()
                 continue;
             }
         }
-        QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+        constexpr auto eventFlags = QEventLoop::ExcludeUserInputEvents;
+        if ( ownerEventPumpForTesting_ ) {
+            try {
+                ownerEventPumpForTesting_( eventFlags, 10 );
+            } catch ( ... ) {
+                QCoreApplication::processEvents( eventFlags, 10 );
+            }
+        }
+        else {
+            QCoreApplication::processEvents( eventFlags, 10 );
+        }
     }
     if ( worker_.joinable() && worker_.get_id() != std::this_thread::get_id() ) {
         worker_.join();
@@ -140,8 +150,8 @@ void LiveLogExportJob::run()
     if ( beforeSnapshotWrite_ ) {
         beforeSnapshotWrite_();
     }
-    QSaveFile stagedOutput( outputPath_ );
-    if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
+    auto stagedOutput = std::make_unique<QSaveFile>( outputPath_ );
+    if ( !stagedOutput->open( QIODevice::WriteOnly ) ) {
         cancelCandidate();
         complete( LiveLogExportResult::WriteFailed );
         return;
@@ -151,7 +161,7 @@ void LiveLogExportJob::run()
     bool writeFailed = false;
     const auto write = [ this, &stagedOutput, &bytesWritten,
                          &writeFailed ]( const QByteArray& bytes ) -> qint64 {
-        const auto written = stagedOutput.write( bytes );
+        const auto written = stagedOutput->write( bytes );
         if ( written <= 0 ) {
             writeFailed = true;
             return written;
@@ -168,7 +178,7 @@ void LiveLogExportJob::run()
     StreamingLogData::OutputExportEncodingState encodingState;
     if ( !StreamingLogData::writeOutputExportSnapshot( candidate_, encodingState, write,
                                                        cancelled ) ) {
-        stagedOutput.cancelWriting();
+        stagedOutput->cancelWriting();
         cancelCandidate();
         auto failure = LiveLogExportResult::SnapshotReadFailed;
         if ( cancelled() ) {
@@ -183,20 +193,20 @@ void LiveLogExportJob::run()
 
     const auto tail = takeCandidateTail();
     if ( tail.failure.has_value() ) {
-        stagedOutput.cancelWriting();
+        stagedOutput->cancelWriting();
         cancelCandidate();
         complete( mapFailure( *tail.failure ) );
         return;
     }
     if ( !StreamingLogData::writeOutputExportBatches( candidate_, tail.batches, encodingState,
                                                       write ) ) {
-        stagedOutput.cancelWriting();
+        stagedOutput->cancelWriting();
         cancelCandidate();
         complete( LiveLogExportResult::WriteFailed );
         return;
     }
     if ( cancelled() ) {
-        stagedOutput.cancelWriting();
+        stagedOutput->cancelWriting();
         cancelCandidate();
         complete( LiveLogExportResult::Cancelled );
         return;
@@ -209,27 +219,43 @@ void LiveLogExportJob::run()
     if ( !publicationDecision_.compare_exchange_strong(
              expectedDecision, PublicationDecision::Publishing,
              std::memory_order_acq_rel, std::memory_order_acquire ) ) {
-        stagedOutput.cancelWriting();
+        stagedOutput->cancelWriting();
         complete( LiveLogExportResult::Cancelled );
         return;
     }
-    const auto identity = klogg::platform::fileIdentity( stagedOutput );
-    if ( !identity.has_value() || !stagedOutput.commit() ) {
+    if ( QThread::currentThread() != data_->thread() ) {
+        stagedOutput->moveToThread( data_->thread() );
+    }
+    auto* ownerStagedOutput = stagedOutput.release();
+    StreamingLogData::OutputExportActivation activation;
+    auto publish = [ this, ownerStagedOutput, &activation,
+                     encodingState = std::move( encodingState ) ]() mutable {
+        const std::unique_ptr<QSaveFile> stagedOutputOwner( ownerStagedOutput );
+        {
+            const std::lock_guard<std::mutex> lock( stateMutex_ );
+            dataAccessThreadId_ = std::this_thread::get_id();
+        }
+        activation = data_->publishStagedOutputExport(
+            candidate_.id, outputPath_, std::move( encodingState ),
+            *stagedOutputOwner, afterPublish_ );
+    };
+
+    const auto invoked
+        = QThread::currentThread() == data_->thread()
+              ? ( publish(), true )
+              : QMetaObject::invokeMethod(
+                    data_.get(), publish, Qt::BlockingQueuedConnection );
+    if ( !invoked ) {
+        ownerStagedOutput->deleteLater();
         cancelCandidate();
-        complete( LiveLogExportResult::PublishFailed );
+        complete( LiveLogExportResult::Cancelled );
         return;
     }
 
-    if ( afterPublish_ ) {
-        afterPublish_();
-    }
-    const auto self = shared_from_this();
-    QMetaObject::invokeMethod(
-        data_.get(),
-        [ self, identity = *identity, encodingState = std::move( encodingState ) ]() mutable {
-            self->completePublished( identity, std::move( encodingState ) );
-        },
-        Qt::QueuedConnection );
+    complete( activation.success
+                  ? LiveLogExportResult::Succeeded
+                  : mapFailure( activation.failure.value_or(
+                        StreamingLogData::OutputExportFailure::PublishedCutover ) ) );
 }
 
 void LiveLogExportJob::cancelCandidate()
@@ -266,17 +292,6 @@ StreamingLogData::OutputExportTail LiveLogExportJob::takeCandidateTail()
         tail.failure = StreamingLogData::OutputExportFailure::Cancelled;
     }
     return tail;
-}
-
-void LiveLogExportJob::completePublished(
-    const klogg::platform::FileIdentity& identity,
-    StreamingLogData::OutputExportEncodingState encodingState )
-{
-    const auto activation = data_->activatePublishedOutputExport(
-        candidate_.id, outputPath_, identity, std::move( encodingState ) );
-    complete( activation.success ? LiveLogExportResult::Succeeded
-                                 : mapFailure( activation.failure.value_or(
-                                       StreamingLogData::OutputExportFailure::PublishedCutover ) ) );
 }
 
 void LiveLogExportJob::complete( LiveLogExportResult result )

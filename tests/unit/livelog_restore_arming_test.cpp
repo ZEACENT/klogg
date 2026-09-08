@@ -620,6 +620,8 @@ TEST_CASE( "Real source effects settle capture rejection through the session con
     transport->publishBytes( generation, QByteArrayLiteral( "accepted\n" ) );
     REQUIRE( controller->spec().integrity.acceptedBytes == 9u );
     QByteArray rejected = QByteArrayLiteral( "rejected\n" );
+    QString replacedCapturePath;
+    QString heldCapturePath;
     if ( capacity ) {
         limits.memoryBudgetBytes = 1;
         limits.ingressBudgetBytes = 1;
@@ -627,8 +629,10 @@ TEST_CASE( "Real source effects settle capture rejection through the session con
         rejected = QByteArray( 1024, 'x' );
     }
     else {
-        REQUIRE( QDir{}.rename( data->capturePath(), data->capturePath() + QStringLiteral( "-held" ) ) );
-        REQUIRE( QDir{}.mkpath( data->capturePath() ) );
+        replacedCapturePath = data->capturePath();
+        heldCapturePath = replacedCapturePath + QStringLiteral( "-held" );
+        REQUIRE( QDir{}.rename( replacedCapturePath, heldCapturePath ) );
+        REQUIRE( QDir{}.mkpath( replacedCapturePath ) );
     }
     CHECK_NOTHROW( transport->publishBytes( generation, rejected ) );
     CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
@@ -642,6 +646,11 @@ TEST_CASE( "Real source effects settle capture rejection through the session con
     controller->deviceAvailable( controller->snapshot().generation );
     CHECK( factory.totalStarts() == 1u );
     closeAndDeleteViews( *appSession, opened );
+    if ( !capacity ) {
+        data.reset();
+        REQUIRE( QDir{ replacedCapturePath }.removeRecursively() );
+        REQUIRE( QDir{}.rename( heldCapturePath, replacedCapturePath ) );
+    }
 }
 
 TEST_CASE( "Persisted Android running intent restores inert and reconnects once",

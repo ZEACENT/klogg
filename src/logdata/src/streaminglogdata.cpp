@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 #include <QDir>
 #include <QFileInfo>
@@ -110,17 +111,20 @@ void StreamingLogData::cancelOutputExport( std::uint64_t candidateId )
     }
 }
 
-StreamingLogData::OutputExportActivation StreamingLogData::activatePublishedOutputExport(
+StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputExport(
     std::uint64_t candidateId, const QString& outputPath,
-    const klogg::platform::FileIdentity& publishedIdentity, OutputExportEncodingState encodingState )
+    OutputExportEncodingState encodingState, QSaveFile& stagedOutput,
+    const std::function<void()>& afterPublish )
 {
     std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
     if ( !pendingOutputExport_.has_value() || pendingOutputExport_->id != candidateId ) {
+        stagedOutput.cancelWriting();
         return { false, OutputExportFailure::Cancelled };
     }
     if ( pendingOutputExport_->failure.has_value() ) {
         const auto failure = pendingOutputExport_->failure;
         pendingOutputExport_.reset();
+        stagedOutput.cancelWriting();
         return { false, failure };
     }
 
@@ -131,10 +135,52 @@ StreamingLogData::OutputExportActivation StreamingLogData::activatePublishedOutp
     candidate.codecName = pendingOutputExport_->codecName;
     candidate.prefilterPattern = pendingOutputExport_->prefilterPattern;
     std::vector<OutputExportBatch> tail;
-    tail.reserve( pendingOutputExport_->tail.size() );
-    while ( !pendingOutputExport_->tail.empty() ) {
-        tail.push_back( std::move( pendingOutputExport_->tail.front() ) );
-        pendingOutputExport_->tail.pop_front();
+    try {
+        tail.reserve( pendingOutputExport_->tail.size() );
+        while ( !pendingOutputExport_->tail.empty() ) {
+            tail.push_back( std::move( pendingOutputExport_->tail.front() ) );
+            pendingOutputExport_->tail.pop_front();
+        }
+    }
+    catch ( ... ) {
+        pendingOutputExport_.reset();
+        stagedOutput.cancelWriting();
+        return { false, OutputExportFailure::TailOverflow };
+    }
+
+    std::optional<klogg::platform::FileIdentity> publishedIdentity;
+    try {
+        const auto stagedWrite = [ &stagedOutput ]( const QByteArray& bytes ) {
+            return stagedOutput.write( bytes );
+        };
+        if ( !writeOutputExportBatches( candidate, tail, encodingState, stagedWrite ) ) {
+            pendingOutputExport_.reset();
+            stagedOutput.cancelWriting();
+            return { false, OutputExportFailure::Write };
+        }
+
+        publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
+        if ( !publishedIdentity.has_value() || !stagedOutput.commit() ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::Publish };
+        }
+    }
+    catch ( ... ) {
+        pendingOutputExport_.reset();
+        stagedOutput.cancelWriting();
+        return { false, OutputExportFailure::Write };
+    }
+
+    if ( afterPublish ) {
+        try {
+            afterPublish();
+        }
+        catch ( const std::exception& error ) {
+            LOG_ERROR << "Live export post-publication test hook failed: " << error.what();
+        }
+        catch ( ... ) {
+            LOG_ERROR << "Live export post-publication test hook failed with unknown exception";
+        }
     }
 
     if ( candidate.ansiMode == LiveLogSaveAnsiMode::Strip ) {
@@ -143,11 +189,7 @@ StreamingLogData::OutputExportActivation StreamingLogData::activatePublishedOutp
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedReopen };
         }
-        const auto write = [ &candidateOutput ]( const QByteArray& bytes ) {
-            return candidateOutput.write( bytes );
-        };
-        if ( !writeOutputExportBatches( candidate, tail, encodingState, write )
-             || !candidateOutput.flush() ) {
+        if ( !candidateOutput.flush() ) {
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedCutover };
         }
@@ -160,14 +202,6 @@ StreamingLogData::OutputExportActivation StreamingLogData::activatePublishedOutp
              || klogg::platform::fileIdentity( candidateOutput ) != publishedIdentity ) {
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedReopen };
-        }
-        const auto write = [ &candidateOutput ]( const QByteArray& bytes ) {
-            return candidateOutput.write( bytes );
-        };
-        if ( !writeOutputExportBatches( candidate, tail, encodingState, write )
-             || !candidateOutput.flush() ) {
-            pendingOutputExport_.reset();
-            return { false, OutputExportFailure::PublishedCutover };
         }
         candidateOutput.close();
         if ( !captureStore_.bindOutputFile( outputPath, true ) ) {
@@ -1140,7 +1174,8 @@ void StreamingLogData::checkPreservedOutputState()
     reportCaptureOutputFailure( captureStoreOutputError( captureStore_.outputFailure() ) );
 }
 
-void StreamingLogData::journalOutputExport( const CaptureStore::AppendResult& appendResult )
+void StreamingLogData::journalOutputExport(
+    const CaptureStore::AppendResult& appendResult ) noexcept
 {
     if ( !pendingOutputExport_.has_value() || pendingOutputExport_->failure.has_value() ) {
         return;
@@ -1165,13 +1200,27 @@ void StreamingLogData::journalOutputExport( const CaptureStore::AppendResult& ap
         return;
     }
 
-    OutputExportBatch batch;
-    batch.sequence = ++nextOutputDeliverySequence_;
-    batch.rawUtf8Lines = appendResult.rawUtf8Lines;
-    batch.endOfLines = appendResult.endOfLines;
-    batch.finalRecordUnterminated = appendResult.finalRecordUnterminated;
-    pendingOutputExport_->tailBytes += incomingBytes;
-    pendingOutputExport_->tail.push_back( std::move( batch ) );
+    try {
+        if ( beforeOutputExportJournalForTesting_ ) {
+            beforeOutputExportJournalForTesting_();
+        }
+        if ( nextOutputDeliverySequence_ == std::numeric_limits<std::uint64_t>::max() ) {
+            throw std::overflow_error( "live output export sequence exhausted" );
+        }
+        OutputExportBatch batch;
+        const auto sequence = nextOutputDeliverySequence_ + 1u;
+        batch.sequence = sequence;
+        batch.rawUtf8Lines = appendResult.rawUtf8Lines;
+        batch.endOfLines = appendResult.endOfLines;
+        batch.finalRecordUnterminated = appendResult.finalRecordUnterminated;
+        pendingOutputExport_->tail.push_back( std::move( batch ) );
+        pendingOutputExport_->tailBytes += incomingBytes;
+        nextOutputDeliverySequence_ = sequence;
+    } catch ( ... ) {
+        pendingOutputExport_->failure = OutputExportFailure::TailOverflow;
+        pendingOutputExport_->tail.clear();
+        pendingOutputExport_->tailBytes = 0;
+    }
 }
 
 void StreamingLogData::writeAppendedDisplayLines( CaptureStore::AppendResult& appendResult )

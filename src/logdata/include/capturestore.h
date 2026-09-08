@@ -33,6 +33,7 @@ class CaptureStore {
 
     friend class CaptureStoreTestAccess;
     friend struct StreamingLogDataTimerTestAccess;
+    friend struct LiveSourceStreamingLogDataTestAccess;
 
 public:
     struct Limits {

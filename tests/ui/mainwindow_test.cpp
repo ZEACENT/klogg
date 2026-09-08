@@ -208,6 +208,16 @@ struct MainWindowLiveSaveTestAccess {
     {
         window.startLiveLogExport( crawler, outputPath, ansiMode );
     }
+
+    static std::optional<bool> startInvalidClose( MainWindow& window )
+    {
+        std::optional<bool> completion;
+        window.startLiveCloseTransaction(
+            nullptr, klogg::livelog::LiveLogCloseTransaction::Mode::Discard,
+            MainWindow::DiscardCommit::PerTab,
+            [ &completion ]( bool proceed ) { completion = proceed; } );
+        return completion;
+    }
 };
 
 struct LivePresentationCrawlerAccess;
@@ -1448,6 +1458,8 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
 
     if ( preservationScenario == 12 ) {
+        CHECK( MainWindowLiveSaveTestAccess::startInvalidClose( *mainWindow )
+               == std::optional<bool>{ false } );
         using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
         auto* firstData = Access::data( crawler );
         auto* secondData = Access::data( otherCrawler );
@@ -1984,6 +1996,9 @@ TEST_CASE( "Cancelling multi-tab window shutdown preserves earlier discard candi
 TEST_CASE( "Window close preserves every owner when one live capture cannot persist",
            "[ui][session][live-close-owner]" )
 {
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> persistenceFailure
+        = CaptureStore::PersistenceFailure::Write;
     MenuLiveSourceTransportFactory factory;
     auto appSession = std::make_shared<Session>( factory );
     auto& sessionInfo = SessionInfo::getSynced();
@@ -2049,9 +2064,6 @@ TEST_CASE( "Window close preserves every owner when one live capture cannot pers
     REQUIRE( factory.created.size() == 1 );
     factory.created.front()->publishConnected();
 
-    qint64 now = 0;
-    std::optional<CaptureStore::PersistenceFailure> persistenceFailure
-        = CaptureStore::PersistenceFailure::Write;
     StreamingLogDataTimerTestAccess::spillFault( *data, now, persistenceFailure );
     CaptureStore::Limits limits;
     limits.segmentTargetBytes = 2;

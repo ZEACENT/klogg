@@ -570,11 +570,31 @@ TEST_CASE( "Append exceptions are terminal and do not escape or replay buffered 
     CHECK_NOTHROW( controller.streamBytesReceived( generation, QByteArrayLiteral( "offered\n" ) ) );
     CHECK( calls == 1u );
     CHECK( controller.spec().integrity.discardedBytes == 9u );
+    CHECK( controller.spec().integrity.outputProgressUnknown );
     CHECK( presentedDiscarded == 9u );
     CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
     REQUIRE( controller.snapshot().source.failure.has_value() );
     CHECK( controller.snapshot().source.failure->category == live::ErrorCategory::Capture );
     CHECK( controller.snapshot().source.failure->retryPolicy == live::RetryPolicy::Never );
+}
+
+TEST_CASE( "Rejected live bytes record a visible integrity gap",
+           "[livelog-controller][w2-outcome-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    const auto generation = controller.snapshot().generation;
+
+    controller.streamBytesReceived( generation, QByteArrayLiteral( "unexpected\n" ) );
+
+    const auto& integrity = controller.spec().integrity;
+    CHECK( integrity.discardedBytes == 11u );
+    CHECK( integrity.gapPossible );
+    REQUIRE_FALSE( integrity.recentEvents.empty() );
+    CHECK( integrity.recentEvents.back()
+           == ( live::IntegrityEvent{ "dispatch-rejected-discarded", 11u } ) );
 }
 
 TEST_CASE( "Live byte batches advance data without control presentation notifications",
