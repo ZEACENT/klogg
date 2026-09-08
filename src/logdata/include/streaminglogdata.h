@@ -78,6 +78,7 @@ class StreamingLogData : public SearchableLogData {
         std::uint64_t id = 0;
         std::uint64_t firstTailSequence = 0;
         CaptureStore::Snapshot snapshot;
+        bool snapshotFinalRecordUnterminated = false;
         LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
         QByteArray codecName;
         QString prefilterPattern;
@@ -197,6 +198,7 @@ class StreamingLogData : public SearchableLogData {
         std::uint64_t firstTailSequence = 0;
         qint64 maximumTailBytes = 0;
         qint64 tailBytes = 0;
+        bool snapshotFinalRecordUnterminated = false;
         LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
         QByteArray codecName;
         QString prefilterPattern;

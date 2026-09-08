@@ -2102,6 +2102,37 @@ TEST_CASE( "Streaming output export rejects a noncontiguous cutover journal",
     data.cancelOutputExport( candidate->id );
 }
 
+TEST_CASE( "Live save preserves a finalized zero-byte record before its concurrent tail",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip,
+                                LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    data.appendUtf8( QByteArrayLiteral( "\r" ) );
+    REQUIRE( data.finishInput().committedLines == 1_lcount );
+
+    const auto candidate = data.beginOutputExport( mode, 4096 );
+    REQUIRE( candidate.has_value() );
+    data.appendUtf8( QByteArrayLiteral( "next\n" ) );
+
+    StreamingLogData::OutputExportEncodingState state;
+    QByteArray saved;
+    const auto write = [ &saved ]( const QByteArray& bytes ) {
+        saved.append( bytes );
+        return static_cast<qint64>( bytes.size() );
+    };
+    REQUIRE( StreamingLogData::writeOutputExportSnapshot(
+        *candidate, state, write ) );
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE_FALSE( tail.failure.has_value() );
+    REQUIRE( StreamingLogData::writeOutputExportBatches(
+        *candidate, tail.batches, state, write ) );
+    CHECK( saved == QByteArrayLiteral( "\nnext\n" ) );
+    data.cancelOutputExport( candidate->id );
+}
+
 TEST_CASE( "Async live save publishes snapshot concurrent tail and future writes in order",
            "[streaming][live-save-cutover][live-save-async]" )
 {

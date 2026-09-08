@@ -66,6 +66,8 @@ StreamingLogData::beginOutputExport( LiveLogSaveAnsiMode ansiMode, qint64 maximu
     pending.id = ++nextOutputExportId_;
     pending.firstTailSequence = nextOutputDeliverySequence_ + 1u;
     pending.maximumTailBytes = maximumTailBytes;
+    pending.snapshotFinalRecordUnterminated
+        = captureStore_.finalRecordUnterminated();
     pending.ansiMode = ansiMode;
     pending.codecName = codec_.codec()->name();
     pending.prefilterPattern = prefilterPattern_.pattern();
@@ -75,6 +77,8 @@ StreamingLogData::beginOutputExport( LiveLogSaveAnsiMode ansiMode, qint64 maximu
     candidate.id = pending.id;
     candidate.firstTailSequence = pending.firstTailSequence;
     candidate.snapshot = captureStore_.snapshot();
+    candidate.snapshotFinalRecordUnterminated
+        = pending.snapshotFinalRecordUnterminated;
     candidate.ansiMode = pending.ansiMode;
     candidate.codecName = pending.codecName;
     candidate.prefilterPattern = pending.prefilterPattern;
@@ -131,6 +135,8 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
     OutputExportCandidate candidate;
     candidate.id = pendingOutputExport_->id;
     candidate.firstTailSequence = pendingOutputExport_->firstTailSequence;
+    candidate.snapshotFinalRecordUnterminated
+        = pendingOutputExport_->snapshotFinalRecordUnterminated;
     candidate.ansiMode = pendingOutputExport_->ansiMode;
     candidate.codecName = pendingOutputExport_->codecName;
     candidate.prefilterPattern = pendingOutputExport_->prefilterPattern;
@@ -284,9 +290,9 @@ bool StreamingLogData::writeOutputExportSnapshot( const OutputExportCandidate& c
                 state.needsSeparator = chunk.bytes.back() != '\n';
             }
             if ( chunk.complete ) {
-                if ( !wroteAny ) {
-                    state.needsSeparator = false;
-                }
+                state.needsSeparator
+                    = candidate.snapshotFinalRecordUnterminated
+                      || ( wroteAny && state.needsSeparator );
                 return true;
             }
         }
@@ -322,7 +328,8 @@ bool StreamingLogData::writeOutputExportSnapshot( const OutputExportCandidate& c
             start = end + 1;
         }
         if ( chunk.complete ) {
-            if ( !state.partialRecord.isEmpty() ) {
+            const auto hadUnterminatedBytes = !state.partialRecord.isEmpty();
+            if ( hadUnterminatedBytes ) {
                 auto record = transformOutputRecord( candidate, state.partialRecord, false );
                 if ( state.needsSeparator ) {
                     record.prepend( '\n' );
@@ -331,8 +338,10 @@ bool StreamingLogData::writeOutputExportSnapshot( const OutputExportCandidate& c
                     return false;
                 }
                 state.partialRecord.clear();
-                state.needsSeparator = true;
             }
+            state.needsSeparator
+                = candidate.snapshotFinalRecordUnterminated
+                  || hadUnterminatedBytes;
             return true;
         }
     }
@@ -1116,6 +1125,8 @@ StreamingLogData::OutputBindResult StreamingLogData::writeDisplayLinesToDevice( 
     }
     OutputExportCandidate candidate;
     candidate.snapshot = captureStore_.snapshot();
+    candidate.snapshotFinalRecordUnterminated
+        = captureStore_.finalRecordUnterminated();
     candidate.ansiMode = LiveLogSaveAnsiMode::Strip;
     candidate.codecName = codec_.codec()->name();
     candidate.prefilterPattern = prefilterPattern_.pattern();
