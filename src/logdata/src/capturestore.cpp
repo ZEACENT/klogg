@@ -213,15 +213,16 @@ bool isProcessRunning( qint64 processId )
 }
 
 std::atomic<int> capturePathGateTimeoutMs{ 5000 };
+std::atomic<int> capturePathNamespaceTransitionsForTesting{ 0 };
 constexpr int CaptureRetryAttemptLimit = 8;
 constexpr auto CaptureRetryInitialDelay = std::chrono::milliseconds( 25 );
 constexpr auto CaptureRetryMaximumDelay = std::chrono::milliseconds( 400 );
 
-// activate() reports nullopt only while a competing cleanup is still tearing
-// down the previous generation (a permanently unusable capture path already
-// throws from acquire()). Retrying forever on a wedged teardown would hang the
-// streaming worker thread, so the retry is bounded and escalates to an
-// exception instead.
+// acquire() reports an empty state only for the exact Windows delete-pending
+// namespace transition, while activate() reports nullopt when a competing
+// cleanup retired the acquired generation. Permanently unusable paths still
+// throw. Retrying forever on a wedged teardown would hang the streaming worker
+// thread, so the retry is bounded and escalates to an exception instead.
 constexpr int CaptureActivationMaxAttempts = 100;
 constexpr auto CaptureActivationRetryDelay = std::chrono::milliseconds( 10 );
 
@@ -1188,13 +1189,33 @@ CaptureStore::CapturePathState::acquire( const QString& path, bool createIfMissi
     }
 #endif
 
+    if ( createIfMissing ) {
+        auto pendingTransition
+            = capturePathNamespaceTransitionsForTesting.load(
+                std::memory_order_acquire );
+        while ( pendingTransition > 0
+                && !capturePathNamespaceTransitionsForTesting
+                        .compare_exchange_weak(
+                            pendingTransition, pendingTransition - 1,
+                            std::memory_order_acq_rel,
+                            std::memory_order_acquire ) ) {
+        }
+        if ( pendingTransition > 0 ) {
+            return {};
+        }
+    }
+
     SecureCaptureDirectory directory( path );
-    const auto directoryReady = createIfMissing ? directory.ensureExists()
-                                                : directory.bindExisting();
-    if ( !directoryReady ) {
-        if ( createIfMissing ) {
+    if ( createIfMissing ) {
+        const auto ensureResult = directory.ensureExistsResult();
+        if ( ensureResult == SecureCaptureDirectory::EnsureResult::NamespaceTransition ) {
+            return {};
+        }
+        if ( ensureResult != SecureCaptureDirectory::EnsureResult::Ready ) {
             throw std::runtime_error( "Failed to bind capture directory" );
         }
+    }
+    else if ( !directory.bindExisting() ) {
         return {};
     }
     const auto registryKey = directory.identityKey();
@@ -2059,6 +2080,12 @@ int CaptureStore::setCapturePathGateTimeoutForTesting( int timeoutMs )
 {
     return capturePathGateTimeoutMs.exchange( timeoutMs,
                                               std::memory_order_acq_rel );
+}
+
+void CaptureStore::failNextCapturePathNamespaceTransitionForTesting()
+{
+    capturePathNamespaceTransitionsForTesting.fetch_add(
+        1, std::memory_order_release );
 }
 
 CaptureStore::MaintenanceOperationsForTesting
@@ -3358,6 +3385,10 @@ CaptureStore::ActiveCapturePath CaptureStore::activateCapturePathState()
 {
     for ( int attempt = 0; attempt < CaptureActivationMaxAttempts; ++attempt ) {
         auto candidateState = CapturePathState::acquire( capturePath_ );
+        if ( !candidateState ) {
+            std::this_thread::sleep_for( CaptureActivationRetryDelay );
+            continue;
+        }
         auto activationResult = candidateState->activate();
         if ( activationResult ) {
             return { std::move( candidateState ),

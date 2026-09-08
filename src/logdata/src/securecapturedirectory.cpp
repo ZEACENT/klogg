@@ -198,6 +198,7 @@ constexpr Status StatusObjectNameNotFound = static_cast<Status>( 0xC0000034UL );
 constexpr Status StatusFileIsADirectory = static_cast<Status>( 0xC00000BAUL );
 constexpr Status StatusObjectNameCollision = static_cast<Status>( 0xC0000035UL );
 constexpr Status StatusObjectPathNotFound = static_cast<Status>( 0xC000003AUL );
+constexpr Status StatusDeletePending = static_cast<Status>( 0xC0000056UL );
 } // namespace nt
 
 QString ntStatusHex( nt::Status status )
@@ -472,15 +473,22 @@ ScopedHandle openExistingDirectoryNoFollow( HANDLE parent,
 
 ScopedHandle openOrCreateDirectoryNoFollow( HANDLE parent,
                                             const QString& name,
-                                            ACCESS_MASK access )
+                                            ACCESS_MASK access,
+                                            nt::Status* resultStatus = nullptr )
 {
     nt::Status status = nt::StatusSuccess;
     auto existing = openExistingDirectoryNoFollow( parent, name, access,
                                                    &status );
     if ( existing.valid() ) {
+        if ( resultStatus != nullptr ) {
+            *resultStatus = nt::StatusSuccess;
+        }
         return existing;
     }
     if ( !isMissingStatus( status ) ) {
+        if ( resultStatus != nullptr ) {
+            *resultStatus = status;
+        }
         return {};
     }
 
@@ -493,11 +501,24 @@ ScopedHandle openOrCreateDirectoryNoFollow( HANDLE parent,
         parent, name, access, nt::FileCreate, FILE_ATTRIBUTE_DIRECTORY,
         nt::FileDirectoryFile | nt::FileSynchronousIoNonAlert, &status );
     if ( created.valid() ) {
+        if ( resultStatus != nullptr ) {
+            *resultStatus = nt::StatusSuccess;
+        }
         return isNonReparseDirectory( created.get() ) ? std::move( created )
                                                        : ScopedHandle{};
     }
     if ( status == nt::StatusObjectNameCollision ) {
-        return openExistingDirectoryNoFollow( parent, name, access );
+        auto collided = openExistingDirectoryNoFollow(
+            parent, name, access, &status );
+        if ( collided.valid() ) {
+            if ( resultStatus != nullptr ) {
+                *resultStatus = nt::StatusSuccess;
+            }
+            return collided;
+        }
+    }
+    if ( resultStatus != nullptr ) {
+        *resultStatus = status;
     }
     LOG_WARNING << "SecureCaptureDirectory: directory create failed for "
                 << name << " status " << ntStatusHex( status );
@@ -1387,50 +1408,58 @@ SecureCaptureDirectory::~SecureCaptureDirectory()
 
 bool SecureCaptureDirectory::ensureExists()
 {
+    return ensureExistsResult() == EnsureResult::Ready;
+}
+
+SecureCaptureDirectory::EnsureResult SecureCaptureDirectory::ensureExistsResult()
+{
     if ( impl_->removed ) {
-        return false;
+        return EnsureResult::Error;
     }
 #if defined( Q_OS_WIN )
     if ( impl_->directoryHandle.valid() ) {
-        return isCurrentPath();
+        return isCurrentPath() ? EnsureResult::Ready : EnsureResult::Error;
     }
     if ( !impl_->parentHandle.valid() ) {
         impl_->parentHandle = bindParentPath( impl_->parentPath, true );
         if ( !impl_->parentHandle.valid() ) {
-            return false;
+            return EnsureResult::Error;
         }
     }
+    nt::Status status = nt::StatusSuccess;
     auto directory = openOrCreateDirectoryNoFollow(
-        impl_->parentHandle.get(), impl_->leafName, CaptureAccess );
+        impl_->parentHandle.get(), impl_->leafName, CaptureAccess, &status );
     if ( !directory.valid() ) {
-        return false;
+        return status == nt::StatusDeletePending
+                   ? EnsureResult::NamespaceTransition
+                   : EnsureResult::Error;
     }
     const auto boundIdentity = identityKeyForHandle( directory.get() );
     if ( boundIdentity.isEmpty() ) {
         LOG_WARNING << "SecureCaptureDirectory: no identity for capture "
                        "directory "
                     << impl_->leafName;
-        return false;
+        return EnsureResult::Error;
     }
     impl_->directoryHandle = std::move( directory );
     impl_->identityKey = boundIdentity;
-    return true;
+    return EnsureResult::Ready;
 #else
     if ( impl_->directoryFd >= 0 ) {
-        return isCurrentPath();
+        return isCurrentPath() ? EnsureResult::Ready : EnsureResult::Error;
     }
     if ( impl_->parentFd < 0 ) {
         impl_->parentFd = openDirectory( QFile::encodeName( impl_->parentPath ) );
         if ( impl_->parentFd < 0 ) {
-            return false;
+            return EnsureResult::Error;
         }
     }
     const auto leafName = QFile::encodeName( impl_->leafName );
     if ( ::mkdirat( impl_->parentFd, leafName.constData(), 0700 ) != 0
          && errno != EEXIST ) {
-        return false;
+        return EnsureResult::Error;
     }
-    return bindExisting();
+    return bindExisting() ? EnsureResult::Ready : EnsureResult::Error;
 #endif
 }
 

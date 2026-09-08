@@ -324,6 +324,11 @@ class CaptureStoreTestAccess {
             candidate, std::move( callback ) );
     }
 
+    static void failNextCapturePathNamespaceTransition()
+    {
+        CaptureStore::failNextCapturePathNamespaceTransitionForTesting();
+    }
+
     static void cleanupCapturePaths( const QStringList& capturePaths,
                                      const QDateTime& preserveModifiedAfter )
     {
@@ -2865,6 +2870,18 @@ TEST_CASE( "CaptureStore cleanup snapshot rejects a completed cross-process repl
                               QTextCodec::codecForName( "UTF-8" ),
                               QRegularExpression{} )
              == QStringLiteral( "replacement" ) );
+}
+
+TEST_CASE( "CaptureStore retries a typed capture namespace transition" )
+{
+    const auto rootPath = makeTestDir(
+        "capturestore_typed_namespace_transition" );
+    CaptureStoreTestAccess::failNextCapturePathNamespaceTransition();
+
+    CaptureStore store( makeCaptureId(), rootPath );
+    store.appendUtf8( QByteArrayLiteral( "replacement\n" ) );
+    REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
+    REQUIRE( QFileInfo::exists( store.capturePath() ) );
 }
 
 TEST_CASE( "CaptureStore retries activation after cleanup removes the acquired state" )

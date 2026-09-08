@@ -275,6 +275,7 @@ public:
     bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
                                         std::function<void()> waitForRelease );
     static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    static void failNextCapturePathNamespaceTransitionForTesting();
     // Operation counts stay outside business Stats and are scoped to one path state.
     struct MaintenanceOperationsForTesting {
         std::uint64_t markerScans = 0;
