@@ -6,7 +6,9 @@ import pathlib
 import re
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 import zlib
 
 
@@ -439,6 +441,607 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
                 self.module.require_empty_cleanup_root(root)
 
             self.assertEqual(str(raised.exception), "cleanup root must be empty")
+
+    def fixture_command(self, root, name="fixture with spaces ; no shell", mode="valid"):
+        """Independent executable implementing the current C++ synthetic CLI only."""
+        path = root / (name + ".py")
+        source = r'''
+import argparse, json, pathlib, struct, sys, time, zlib
+p = argparse.ArgumentParser()
+p.add_argument('--arm', choices=['process', 'integrated'], required=True)
+for name in ('records', 'segments', 'generation', 'trial'):
+    p.add_argument('--' + name, type=int, required=True)
+a = p.parse_args()
+pathlib.Path('invocation.json').write_text(json.dumps(sys.argv[1:]))
+MODE = __MODE__
+if (MODE == 'cwd_outcome' or MODE == 'artifact_collision:outcome.json'
+        or (MODE.startswith('artifact_collision:') and pathlib.Path.cwd().name == 'work')):
+    pathlib.Path('outcome.json').write_bytes(b'child-owned sentinel')
+if MODE.startswith('artifact_collision:') and a.trial == 0:
+    # Find the immutable plan independently of the runner's child-cwd layout.
+    root = next(parent for parent in pathlib.Path.cwd().parents
+                if (parent / 'plan.json').is_file())
+    plan = json.loads((root / 'plan.json').read_text())
+    target = MODE.split(':', 1)[1]
+    directory = root / plan['trials'][0]['artifact_dir']
+    if target == 'future':
+        directory = root / plan['trials'][1]['artifact_dir']
+        directory.mkdir()
+        target = 'outcome.json'
+    if target == 'summary.json':
+        directory = root
+    sentinel = directory / target
+    if not sentinel.exists():
+        sentinel.write_bytes(b'child-owned sentinel')
+if MODE == 'timeout':
+    time.sleep(60)
+if MODE == 'exit':
+    sys.stderr.write('private fixture diagnostic\n')
+    sys.exit(7)
+if MODE in ('overflow', 'stderr_overflow'):
+    stream = sys.stderr if MODE == 'stderr_overflow' else sys.stdout
+    stream.write('x' * 200000)
+    stream.flush()
+    sys.exit(0)
+crc = size = 0
+for segment in range(a.segments):
+    for sequence in range(a.records // a.segments + (segment < a.records % a.segments)):
+        payload = f'synthetic-segment-{segment}-record-{sequence}'.encode()
+        frame = struct.pack('>4sHHIQIIQII', b'KLCB', 1, 44, 44 + len(payload),
+                            a.generation, a.trial, segment, sequence, len(payload),
+                            zlib.crc32(payload)) + payload
+        crc = zlib.crc32(frame, crc)
+        size += len(payload)
+m = dict(arm_process=int(a.arm == 'process'), frame_version=1,
+         generation=a.generation, trial=a.trial, fixture_crc32=crc,
+         committed_records=a.records, committed_payload_bytes=size,
+         segment_count=a.segments, normal_stop=1,
+         lifecycle_start_ns=0, lifecycle_ready_ns=10,
+         lifecycle_first_byte_ns=20, lifecycle_first_committed_record_ns=30,
+         lifecycle_last_committed_record_ns=40, lifecycle_stop_ns=50,
+         startup_ns=10, first_byte_latency_ns=10, first_commit_latency_ns=20,
+         throughput_payload_bytes_per_second=size * 1000000000 // 20,
+         teardown_ns=10, correctness_fixture_crc_match=1,
+         correctness_sequence_gap_count=0, correctness_duplicate_count=0,
+         correctness_crc_error_count=0)
+for name in ('process_cpu_ns', 'child_cpu_ns', 'peak_rss_bytes',
+             'voluntary_context_switches', 'involuntary_context_switches',
+             'process_tree_children_started', 'maximum_live_children',
+             'queue_high_water_bytes', 'queue_high_water_chunks',
+             'queue_backpressure_events', 'queue_dropped_records'):
+    m[name + '_available'] = 0
+    m[name + '_synthetic'] = 0
+if MODE in ('measured', 'partial'):
+    if MODE == 'measured' or a.trial % 2 == 0:
+        m['peak_rss_bytes_available'] = 1
+        m['peak_rss_bytes'] = 4096
+    m['queue_high_water_chunks_synthetic'] = 1
+r = dict(schema_version=1, benchmark='synthetic-live-capture-' + a.arm,
+         status='ok', reason_code=None, message='completed', metrics=m)
+if MODE.startswith('mutate:'):
+    key, value = MODE[7:].split('=', 1)
+    if key in r:
+        r[key] = json.loads(value)
+    else:
+        m[key] = json.loads(value)
+if MODE.startswith('missing:'):
+    del m[MODE[8:]]
+if MODE == 'missing_trial' and a.trial == 1:
+    sys.exit(0)
+if MODE == 'failed':
+    r.update(status='failed', reason_code='benchmark_failed', message='failed', metrics={})
+text = json.dumps(r)
+if MODE == 'truncated': text = text[:-2]
+if MODE == 'duplicate_key': text = text.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1')
+if MODE == 'duplicate_result': text += '\n' + text
+if MODE == 'empty': text = ''
+if MODE == 'deep_json': text = '[' * 2000 + '0' + ']' * 2000
+if MODE == 'invalid_utf8':
+    sys.stdout.buffer.write(b'\xff\n')
+    sys.exit(0)
+sys.stdout.write(text + ('\n' if MODE != 'no_newline' else ''))
+'''
+        path.write_text(source.replace("__MODE__", repr(mode)), encoding="utf-8")
+        return [sys.executable, str(path)]
+
+    @staticmethod
+    def fixture_producer(root, name="fixture producer"):
+        path = root / name
+        path.write_bytes(b"fixture-producer")
+        path.chmod(0o700)
+        return path
+
+    @staticmethod
+    def bind_fixture_producer(command, producer):
+        command_file = pathlib.Path(command[1])
+        command_file.write_text(
+            command_file.read_text(encoding="utf-8")
+            + f"\n# embedded fixture producer: {producer}\n",
+            encoding="utf-8",
+        )
+
+    def comparison(self, root, *, mode="valid", **kwargs):
+        before = self.fixture_command(root, mode=mode)
+        after = self.fixture_command(root, name="after executable")
+        before_producer = self.fixture_producer(root, "before fixture producer")
+        after_producer = self.fixture_producer(root, "after fixture producer")
+        self.bind_fixture_producer(before, before_producer)
+        self.bind_fixture_producer(after, after_producer)
+        return self.module.run_comparison(
+            before=before, after=after, output_dir=root / "results",
+            arms=("process",), trial_count=4, records=1, segments=1,
+            generation=7, before_producer=before_producer,
+            after_producer=after_producer, **kwargs,
+        )
+
+    def test_execution_minimal_valid_fixture_completes_cli_abba(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            output = io.StringIO()
+            code = self.module.run_cli([
+                "--before", *command, "--after", *command,
+                "--before-producer", str(producer), "--after-producer", str(producer),
+                "--output-dir", str(root / "new results"), "--arm", "process",
+                "--records", "1", "--segments", "1", "--generation", "7",
+            ], output=output)
+            self.assertEqual(code, 0, output.getvalue())
+            summary = json.loads((root / "new results" / "summary.json").read_text())
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual([r["variant"] for r in summary["trials"]],
+                             ["before", "after", "after", "before"])
+            self.assertEqual([r["trial"] for r in summary["trials"]], list(range(4)))
+            self.assertEqual(len(summary["groups"]), 2)
+            self.assertFalse(summary["coverage"]["real_device"])
+            self.assertFalse(summary["coverage"]["ui_search_save"])
+            self.assertIsNone(summary["requested_duration_ms"])
+            for trial in summary["trials"]:
+                self.assertEqual(trial["status"], "ok")
+                self.assertGreater(trial["wall_elapsed_ns"], 0)
+                directory = root / "new results" / trial["artifact_dir"]
+                self.assertTrue((directory / "stdout.jsonl").is_file())
+                self.assertTrue((directory / "outcome.json").is_file())
+                args = json.loads((root / "new results" / trial["working_dir"] /
+                                   "invocation.json").read_text())
+                self.assertEqual(args, ["--arm", "process", "--records", "1",
+                                       "--segments", "1", "--generation", "7",
+                                       "--trial", str(trial["trial"])])
+            for group in summary["groups"]:
+                self.assertEqual(group["expected_count"], 2)
+                self.assertEqual(group["successful_count"], 2)
+                self.assertEqual(group["metrics"]["startup_ns"]["values"], [10, 10])
+                self.assertIsNone(group["metrics"]["peak_rss_bytes"]["median"])
+
+    def test_execution_child_cwd_cannot_collide_with_runner_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            summary = self.comparison(root, mode="cwd_outcome")
+            self.assertEqual(summary["status"], "ok")
+            for trial in summary["trials"]:
+                directory = root / "results" / trial["artifact_dir"]
+                child_cwd = root / "results" / trial["working_dir"]
+                self.assertNotEqual(child_cwd, directory)
+                self.assertEqual(json.loads((directory / "outcome.json").read_text()), trial)
+                if trial["variant"] == "before":
+                    self.assertEqual((child_cwd / "outcome.json").read_bytes(),
+                                     b"child-owned sentinel")
+
+    def test_execution_artifact_collisions_settle_every_planned_trial(self):
+        for target in ("outcome.json", "stdout.jsonl", "stderr.bin", "future"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                summary = self.comparison(root, mode="artifact_collision:" + target)
+                results = root / "results"
+                persisted = json.loads((results / "summary.json").read_text())
+                self.assertEqual(persisted, summary)
+                self.assertEqual(summary["status"], "failed")
+                self.assertFalse(summary["comparison_valid"])
+                self.assertTrue(all(group["metrics"] is None for group in summary["groups"]))
+                plan = json.loads((results / "plan.json").read_text())
+                self.assertEqual([row["trial"] for row in summary["trials"]],
+                                 [row["trial"] for row in plan["trials"]])
+                failed_index = 1 if target == "future" else 0
+                self.assertEqual([row["status"] for row in summary["trials"]],
+                                 ["failed" if i == failed_index else "ok" for i in range(4)])
+                failed = summary["trials"][failed_index]
+                self.assertIsNotNone(failed["reason_code"])
+                self.assertIsNone(failed["result"])
+                if target in ("future", "outcome.json"):
+                    self.assertFalse(failed["outcome_persisted"])
+                directory = results / failed["artifact_dir"]
+                sentinel = directory / ("outcome.json" if target == "future" else target)
+                self.assertEqual(sentinel.read_bytes(), b"child-owned sentinel")
+                for trial in summary["trials"]:
+                    if trial["outcome_persisted"]:
+                        self.assertEqual(json.loads((results / trial["artifact_dir"] /
+                                                    "outcome.json").read_text()), trial)
+                    if trial["variant"] == "before":
+                        self.assertEqual((results / trial["working_dir"] /
+                                          "outcome.json").read_bytes(), b"child-owned sentinel")
+                if target == "future":
+                    self.assertEqual(list(directory.iterdir()), [sentinel])
+
+    def test_execution_cancellation_contains_future_directory_collision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            event = threading.Event()
+            execute = self.module._run_process
+            def cancel_after_execution(*args, **kwargs):
+                result = execute(*args, **kwargs)
+                event.set()
+                return result
+            with mock.patch.object(self.module, "_run_process", side_effect=cancel_after_execution):
+                summary = self.comparison(root, mode="artifact_collision:future", cancel_event=event)
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual([row["status"] for row in summary["trials"]],
+                             ["ok", "failed", "not_run", "not_run"])
+            self.assertFalse(summary["comparison_valid"])
+            self.assertTrue(all(row["reason_code"] for row in summary["trials"][1:]))
+            self.assertEqual(json.loads((root / "results" / "summary.json").read_text()), summary)
+            sentinel = root / "results" / summary["trials"][1]["artifact_dir"] / "outcome.json"
+            self.assertEqual(sentinel.read_bytes(), b"child-owned sentinel")
+
+    def test_execution_unpersistable_summary_reports_fatal_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root, mode="artifact_collision:summary.json")
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            output = io.StringIO()
+            code = self.module.run_cli([
+                "--before", *command, "--after", *command, "--arm", "process",
+                "--before-producer", str(producer), "--after-producer", str(producer),
+                "--output-dir", str(root / "results"),
+            ], output=output)
+            self.assertEqual(code, 1)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["reason_code"], "artifact_error")
+            self.assertIn("fatal", result["message"])
+            self.assertIn("not persisted", result["message"])
+            self.assertNotIn("see", result["message"])
+            self.assertEqual((root / "results" / "summary.json").read_bytes(),
+                             b"child-owned sentinel")
+            plan = json.loads((root / "results" / "plan.json").read_text())
+            for trial in plan["trials"]:
+                outcome = json.loads((root / "results" / trial["artifact_dir"] /
+                                      "outcome.json").read_text())
+                self.assertEqual(outcome["status"], "ok")
+
+    def test_execution_both_arms_repeated_abba_and_no_shell(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            import subprocess
+            with mock.patch.object(self.module.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+                summary = self.module.run_comparison(
+                    before=command, after=command, output_dir=root / "results",
+                    arms=("process", "integrated"), trial_count=8,
+                    records=3, segments=2, generation=7,
+                    before_producer=producer, after_producer=producer,
+                )
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual(len(summary["trials"]), 16)
+            for arm in ("process", "integrated"):
+                rows = [r for r in summary["trials"] if r["arm"] == arm]
+                self.assertEqual([r["variant"] for r in rows],
+                                 ["before", "after", "after", "before"] * 2)
+            for call in popen.call_args_list:
+                self.assertIs(call.kwargs["shell"], False)
+                self.assertEqual(call.args[0][:2], command)
+                self.assertIn(root, pathlib.Path(call.kwargs["cwd"]).parents)
+
+    def test_execution_rejects_invalid_terminal_results_without_cherry_picking(self):
+        cases = (
+            "exit", "failed", "truncated", "empty", "no_newline", "duplicate_key",
+            "duplicate_result", "invalid_utf8", "deep_json", "overflow", "stderr_overflow",
+            'mutate:benchmark="synthetic-live-capture-integrated"',
+            'mutate:schema_version=true', 'mutate:status=[]',
+            'mutate:trial=99', 'mutate:generation=8', 'mutate:arm_process=0',
+            'mutate:frame_version=2', 'mutate:fixture_crc32=0',
+            'mutate:committed_records=2', 'mutate:committed_payload_bytes=1',
+            'mutate:segment_count=2', 'mutate:normal_stop=0',
+            'mutate:correctness_fixture_crc_match=0',
+            'mutate:correctness_sequence_gap_count=1',
+            'mutate:lifecycle_stop_ns=1', 'mutate:startup_ns=99',
+            'mutate:throughput_payload_bytes_per_second=0',
+            'mutate:queue_high_water_bytes_available=1',
+            'mutate:queue_high_water_bytes=5',
+            'mutate:queue_high_water_bytes_synthetic=2',
+            'mutate:process_cpu_ns_available=NaN',
+            'missing:lifecycle_ready_ns', 'missing:trial',
+            'mutate:unexpected_metric=1',
+        )
+        for mode in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                summary = self.comparison(root, mode=mode)
+                self.assertEqual(summary["status"], "failed")
+                self.assertEqual(len(summary["trials"]), 4)
+                self.assertEqual([r["status"] for r in summary["trials"]],
+                                 ["failed", "ok", "ok", "failed"])
+                self.assertTrue(all(r["reason_code"] for r in summary["trials"]
+                                    if r["status"] == "failed"))
+                self.assertFalse(summary["comparison_valid"])
+                self.assertTrue(all(g["metrics"] is None for g in summary["groups"]))
+                self.assertNotIn("private fixture diagnostic", json.dumps(summary))
+                for artifact in (root / "results").glob("trial-*/*"):
+                    if artifact.name in ("stdout.jsonl", "stderr.bin"):
+                        self.assertLessEqual(artifact.stat().st_size, 65536)
+
+    def test_execution_missing_requested_trial_is_not_a_successful_repeat(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root, mode="missing_trial")
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            summary = self.module.run_comparison(
+                before=command, after=command, output_dir=root / "results",
+                arms=("process",), trial_count=4, records=1, segments=1, generation=7,
+                before_producer=producer, after_producer=producer,
+            )
+            self.assertEqual([r["status"] for r in summary["trials"]],
+                             ["ok", "failed", "ok", "ok"])
+            self.assertFalse(summary["comparison_valid"])
+
+    def test_execution_timeout_and_cancellation_reap_child_and_keep_outcomes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root, mode="timeout")
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            summary = self.module.run_comparison(
+                before=command, after=command, output_dir=root / "results",
+                arms=("process",), trial_count=4, records=1, segments=1,
+                timeout_seconds=0.2, before_producer=producer,
+                after_producer=producer,
+            )
+            # Every child deliberately hangs; no normal startup must beat 200ms.
+            self.assertEqual([r["reason_code"] for r in summary["trials"]], ["timeout"] * 4)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            event = threading.Event()
+            import subprocess
+            children = []
+            real_popen = subprocess.Popen
+            def cancelling_start(*args, **kwargs):
+                child = real_popen(*args, **kwargs)
+                children.append(child)
+                event.set()
+                return child
+            with mock.patch.object(self.module.subprocess, "Popen", side_effect=cancelling_start):
+                summary = self.comparison(root, mode="timeout", cancel_event=event)
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].poll())
+            self.assertEqual([r["status"] for r in summary["trials"]],
+                             ["cancelled", "not_run", "not_run", "not_run"])
+            self.assertTrue((root / "results" / "summary.json").is_file())
+
+    def test_execution_requires_new_output_and_valid_configuration_before_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            (root / "existing").mkdir()
+            sentinel = root / "existing" / "sentinel"
+            sentinel.write_bytes(b"user artifact")
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            base = dict(before=command, after=command, output_dir=root / "results",
+                        arms=("process",), trial_count=4, records=1, segments=1,
+                        before_producer=producer, after_producer=producer)
+            cases = [dict(output_dir=None), dict(output_dir=root / "existing"),
+                     dict(trial_count=2), dict(arms=("native",)), dict(arms=()),
+                     dict(records=0), dict(segments=2), dict(generation=-1),
+                     dict(timeout_seconds=float("nan")), dict(before=[str(root / "absent")])]
+            with mock.patch.object(self.module.subprocess, "Popen") as popen:
+                for overrides in cases:
+                    with self.subTest(overrides=overrides):
+                        with self.assertRaises(self.module.ConfigurationError):
+                            self.module.run_comparison(**{**base, **overrides})
+                popen.assert_not_called()
+            self.assertEqual(sentinel.read_bytes(), b"user artifact")
+            self.assertFalse((root / "results").exists())
+
+    def test_execution_process_arm_requires_and_records_fixture_producer_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            before_producer = root / "before fixture producer"
+            after_producer = root / "after fixture producer"
+            before_producer.write_bytes(b"before-producer")
+            after_producer.write_bytes(b"after-producer")
+            before_producer.chmod(0o700)
+            after_producer.chmod(0o700)
+            self.bind_fixture_producer(command, before_producer)
+            self.bind_fixture_producer(command, after_producer)
+
+            with mock.patch.object(self.module.subprocess, "Popen") as popen:
+                with self.assertRaises(self.module.ConfigurationError):
+                    self.module.run_comparison(
+                        before=command, after=command, output_dir=root / "missing-producer",
+                        arms=("process",), trial_count=4, records=1, segments=1,
+                    )
+                popen.assert_not_called()
+
+            summary = self.module.run_comparison(
+                before=command, after=command, output_dir=root / "results",
+                arms=("process",), trial_count=4, records=1, segments=1,
+                before_producer=before_producer, after_producer=after_producer,
+            )
+            self.assertEqual(summary["status"], "ok")
+            for variant, producer in (("before", before_producer),
+                                      ("after", after_producer)):
+                recorded = summary["provenance"][variant]["process_fixture_producer"]
+                self.assertEqual(recorded["path"], str(producer))
+                self.assertEqual(recorded["resolved_path"], str(producer.resolve()))
+                self.assertEqual(recorded["sha256"],
+                                 self.module._sha256_file(producer))
+                for trial in summary["trials"]:
+                    if trial["variant"] == variant:
+                        self.assertEqual(trial["process_fixture_producer"], recorded)
+
+    def test_execution_process_arm_rejects_unembedded_fixture_producer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            embedded = self.fixture_producer(root, "embedded producer")
+            unrelated = self.fixture_producer(root, "unrelated producer")
+            pathlib.Path(command[1]).write_text(
+                pathlib.Path(command[1]).read_text(encoding="utf-8")
+                + f"\n# embedded producer: {embedded}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.module.ConfigurationError):
+                self.module.run_comparison(
+                    before=command, after=command, output_dir=root / "results",
+                    arms=("process",), trial_count=4, records=1, segments=1,
+                    before_producer=unrelated, after_producer=unrelated,
+                )
+
+    def test_execution_process_arm_fails_closed_when_fixture_producer_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            producer = root / "fixture producer"
+            producer.write_bytes(b"stable")
+            producer.chmod(0o700)
+            self.bind_fixture_producer(command, producer)
+            real_execute = self.module._run_process
+
+            def changed(*args, **kwargs):
+                result = real_execute(*args, **kwargs)
+                producer.write_bytes(b"changed")
+                return result
+
+            with mock.patch.object(self.module, "_run_process", side_effect=changed):
+                summary = self.module.run_comparison(
+                    before=command, after=command, output_dir=root / "results",
+                    arms=("process",), trial_count=4, records=1, segments=1,
+                    before_producer=producer, after_producer=producer,
+                )
+            self.assertEqual(summary["trials"][0]["reason_code"],
+                             "provenance_mismatch")
+            self.assertFalse(summary["comparison_valid"])
+
+    def test_execution_integrated_arm_does_not_require_fixture_producer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            summary = self.module.run_comparison(
+                before=command, after=command, output_dir=root / "results",
+                arms=("integrated",), trial_count=4, records=1, segments=1,
+            )
+            self.assertEqual(summary["status"], "ok")
+            self.assertNotIn("process_fixture_producer", summary["provenance"]["before"])
+            self.assertEqual(
+                summary["performance_interpretation"],
+                {
+                    "scope": "whole supplied executables",
+                    "causal_attribution_available": False,
+                    "elapsed_time_is_gate": False,
+                    "policy": "retain every ordered trial and report observed trade-offs",
+                },
+            )
+
+    def test_execution_counter_availability_and_synthetic_provenance_are_preserved(self):
+        for mode in ("measured", "partial"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                summary = self.comparison(pathlib.Path(temporary), mode=mode)
+                self.assertTrue(summary["comparison_valid"])
+                group = summary["groups"][0]
+                rss = group["metrics"]["peak_rss_bytes"]
+                self.assertEqual(rss["values"], [4096, 4096 if mode == "measured" else None])
+                self.assertEqual(rss["median"], 4096 if mode == "measured" else None)
+                self.assertEqual(group["metrics"]["queue_high_water_chunks"]["synthetic"], [1, 1])
+                self.assertEqual(group["metrics"]["queue_high_water_chunks"]["values"], [None, None])
+
+    def test_execution_bounds_trial_count_before_allocating_order(self):
+        with mock.patch.object(self.module, "balanced_abba_order", side_effect=AssertionError("unbounded allocation")):
+            with self.assertRaises(self.module.ConfigurationError):
+                self.module.run_comparison(
+                    before=[], after=[], output_dir=None, trial_count=10**12,
+                )
+
+    def test_execution_keyboard_interrupt_reaps_running_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            import subprocess
+            real_popen = subprocess.Popen
+            children = []
+            def interrupting_start(*args, **kwargs):
+                child = real_popen(*args, **kwargs)
+                children.append(child)
+                original_wait = child.wait
+                first = True
+                def interrupted_wait(*wait_args, **wait_kwargs):
+                    nonlocal first
+                    if first:
+                        first = False
+                        raise KeyboardInterrupt
+                    return original_wait(*wait_args, **wait_kwargs)
+                child.wait = interrupted_wait
+                return child
+            with mock.patch.object(self.module.subprocess, "Popen", side_effect=interrupting_start):
+                summary = self.comparison(root, mode="timeout")
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].poll())
+            self.assertEqual([r["status"] for r in summary["trials"]],
+                             ["cancelled", "not_run", "not_run", "not_run"])
+
+    def test_execution_cli_failure_and_unsupported_duration_are_terminal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root, mode="exit")
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            output = io.StringIO()
+            code = self.module.run_cli([
+                "--before", *command, "--after", *command, "--arm", "process",
+                "--before-producer", str(producer), "--after-producer", str(producer),
+                "--output-dir", str(root / "results"),
+            ], output=output)
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output.getvalue())["reason_code"], "comparison_failed")
+            self.assertNotIn("private fixture diagnostic", output.getvalue())
+            with mock.patch.object(self.module.subprocess, "Popen") as popen:
+                for argv in (["--duration-ms", "60000"], ["--unknown-" + "x" * 2000],
+                             ["--before", *command, "--after", *command]):
+                    output = io.StringIO()
+                    self.assertEqual(self.module.run_cli(argv, output=output), 1)
+                    self.module.validate_result(json.loads(output.getvalue()))
+                for mode in ("--dry-run", "--list-only"):
+                    self.assertEqual(self.module.run_cli([
+                        mode, "--before", *command, "--after", *command,
+                        "--output-dir", str(root / "must not exist"),
+                    ], output=io.StringIO()), 0)
+                popen.assert_not_called()
+            self.assertFalse((root / "must not exist").exists())
+
+    def test_execution_changed_executable_provenance_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            command = self.fixture_command(root)
+            producer = self.fixture_producer(root)
+            self.bind_fixture_producer(command, producer)
+            real_execute = self.module._run_process
+            def changed(*args, **kwargs):
+                result = real_execute(*args, **kwargs)
+                pathlib.Path(command[1]).write_text("changed after execution")
+                return result
+            with mock.patch.object(self.module, "_run_process", side_effect=changed):
+                summary = self.module.run_comparison(
+                    before=command, after=command, output_dir=root / "results",
+                    arms=("process",), trial_count=4, records=1, segments=1,
+                    before_producer=producer, after_producer=producer,
+                )
+            self.assertEqual(summary["trials"][0]["reason_code"], "provenance_mismatch")
+            self.assertFalse(summary["comparison_valid"])
 
     def test_result_privacy_and_synthetic_target_release_isolation(self):
         tests_cmake = (ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")

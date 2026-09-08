@@ -322,7 +322,10 @@ public:
     {
         controller_ = &controller;
         source_->setControllerCallbacks(
-            [ this ]( auto generation, const QByteArray& bytes ) { receive( generation, bytes ); },
+            [ this ]( auto generation, const QByteArray& bytes, auto settled ) {
+                receive( generation, bytes );
+                if ( settled ) { settled(); }
+            },
             [ this ]( auto generation, LiveSourceTransport::State state ) {
                 stateChanged( generation, state );
             },

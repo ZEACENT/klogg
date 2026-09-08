@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -127,7 +128,7 @@ benchmark::SyntheticArmPlan armPlan( benchmark::BenchmarkArm arm, benchmark::Fra
                                      const std::filesystem::path& captureRoot )
 {
     benchmark::SyntheticArmPlan plan{
-        arm, std::move( fixture ), { 1u, 2u, 3u, 5u, 8u, 13u }, captureRoot, {},
+        arm, std::move( fixture ), { 1u, 2u, 3u, 5u, 8u, 13u }, captureRoot, {}, true,
     };
 #ifdef KLOGG_LIVE_CAPTURE_FIXTURE_PRODUCER_PATH
     plan.producerExecutable = KLOGG_LIVE_CAPTURE_FIXTURE_PRODUCER_PATH;
@@ -166,6 +167,31 @@ void requireCanonicalObservation( const benchmark::ArmObservation& observation,
     REQUIRE( observation.binding.trial == fixture.binding.trial );
     REQUIRE( observation.fixtureCrc32 == fixture.fixtureCrc32 );
     REQUIRE( observation.committedRecords == fixture.records.size() );
+    const auto payloadBytes
+        = std::accumulate( fixture.records.cbegin(), fixture.records.cend(), std::size_t{ 0u },
+                           []( std::size_t total, const benchmark::SyntheticRecord& record ) {
+                               return total + record.payload.size();
+                           } );
+    const benchmark::SequenceCrcLedger expectedLedger{ fixture.records.size(), payloadBytes,
+                                                       fixture.framedBytes.size(),
+                                                       fixture.fixtureCrc32 };
+    INFO( "expected ledger crc=" << expectedLedger.framedCrc32
+                                 << " parser=" << observation.parserLedger.framedCrc32
+                                 << " capture=" << observation.captureLedger.framedCrc32
+                                 << " view=" << observation.viewLedger.framedCrc32
+                                 << " search=" << observation.searchLedger.framedCrc32
+                                 << " save=" << observation.saveLedger.framedCrc32 );
+    CHECK( observation.parserLedger == expectedLedger );
+    CHECK( observation.captureLedger == expectedLedger );
+    CHECK( observation.viewLedger == expectedLedger );
+    CHECK( observation.searchLedger == expectedLedger );
+    CHECK( observation.saveLedger == expectedLedger );
+    CHECK( observation.searchOperationStarts == 1u );
+    CHECK( observation.searchTerminalEvents == 1u );
+    CHECK( observation.qtHeartbeatEvents >= 1u );
+    CHECK( observation.deliverySettlementsAccepted > 0u );
+    CHECK( observation.deliverySettlementsCompleted == observation.deliverySettlementsAccepted );
+    CHECK( observation.retiredDeliverySettlementsCompleted > 0u );
     REQUIRE( observation.normalStop );
     requireCompleteLifecycle( observation.lifecycle );
 }
@@ -452,6 +478,22 @@ TEST_CASE( "Process and integrated arms consume the identical fixture through th
         REQUIRE( observation.committedPayloadBytes == 128u * 1024u );
         REQUIRE( std::filesystem::is_empty( root.path() ) );
     }
+}
+
+TEST_CASE( "Final live ledgers preserve empty records through view search and save",
+           "[benchmark][live-capture][ledger][empty-record][contract]" )
+{
+    const auto fixture = benchmark::makeFramedFixture( benchmark::FixturePlan{
+        binding(),
+        { benchmark::FixtureSegment{ 0u, { ascii( "first" ), {}, ascii( "third" ) } } },
+    } );
+    TemporaryCaptureRoot root( "empty-record-ledger" );
+
+    const auto observation = benchmark::runSyntheticArm(
+        armPlan( benchmark::BenchmarkArm::Integrated, fixture, root.path() ) );
+
+    requireCanonicalObservation( observation, benchmark::BenchmarkArm::Integrated, fixture );
+    REQUIRE( std::filesystem::is_empty( root.path() ) );
 }
 
 TEST_CASE( "Lifecycle validation requires every explicit milestone in monotonic order",

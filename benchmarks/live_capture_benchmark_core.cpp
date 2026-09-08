@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -30,13 +31,16 @@
 #include <QFileInfo>
 #include <QString>
 #include <QTemporaryFile>
+#include <QTimer>
 
 #include "adblogcatsessiondata.h"
 #include "adblogcatsource.h"
+#include "configuration.h"
 #include "iosnativetransport.h"
 #include "livedatastatistics.h"
 #include "livelogcontroller.h"
 #include "livesourcetransport.h"
+#include "logfiltereddata.h"
 #include "streaminglogdata.h"
 
 namespace klogg::benchmarks::livecapture {
@@ -139,6 +143,127 @@ Bytes toBytes( const QByteArray& bytes )
     }
     return result;
 }
+
+Bytes toBytes( const klogg::vector<char>& bytes )
+{
+    Bytes result;
+    result.reserve( bytes.size() );
+    for ( const auto value : bytes ) {
+        result.push_back( static_cast<std::uint8_t>( value ) );
+    }
+    return result;
+}
+
+SequenceCrcLedger sequenceCrcLedger( const std::vector<SyntheticRecord>& records )
+{
+    SequenceCrcLedger ledger;
+    Bytes framed;
+    for ( const auto& record : records ) {
+        if ( record.payload.size()
+             > std::numeric_limits<std::size_t>::max() - ledger.payloadBytes ) {
+            throw std::length_error( "benchmark ledger payload byte count exceeds size limits" );
+        }
+        const auto encoded = encodeFramedRecord( record );
+        if ( encoded.size() > std::numeric_limits<std::size_t>::max() - framed.size() ) {
+            throw std::length_error( "benchmark ledger framed byte count exceeds size limits" );
+        }
+        ledger.payloadBytes += record.payload.size();
+        framed.insert( framed.end(), encoded.cbegin(), encoded.cend() );
+    }
+    ledger.recordCount = records.size();
+    ledger.framedBytes = framed.size();
+    ledger.framedCrc32 = crc32( framed );
+    return ledger;
+}
+
+std::vector<SyntheticRecord>
+recordsFromNormalizedText( const std::vector<SyntheticRecord>& metadata,
+                           const Bytes& normalizedText, const char* stage )
+{
+    std::vector<SyntheticRecord> records;
+    records.reserve( metadata.size() );
+    std::size_t offset = 0u;
+    for ( const auto& expected : metadata ) {
+        if ( expected.payload.size() > normalizedText.size() - offset ) {
+            throw std::runtime_error( std::string{ stage }
+                                      + " ended before the expected record payload" );
+        }
+        auto payloadBegin = normalizedText.cbegin() + static_cast<Bytes::difference_type>( offset );
+        offset += expected.payload.size();
+        auto payloadEnd = normalizedText.cbegin() + static_cast<Bytes::difference_type>( offset );
+        if ( offset >= normalizedText.size()
+             || normalizedText.at( offset ) != static_cast<std::uint8_t>( '\n' ) ) {
+            throw std::runtime_error( std::string{ stage }
+                                      + " did not preserve the normalized record boundary" );
+        }
+        ++offset;
+
+        auto observed = expected;
+        observed.payload.assign( payloadBegin, payloadEnd );
+        observed.payloadCrc32 = crc32( observed.payload );
+        records.push_back( std::move( observed ) );
+    }
+    if ( offset != normalizedText.size() ) {
+        throw std::runtime_error( std::string{ stage }
+                                  + " retained bytes outside the framed-record ledger" );
+    }
+    return records;
+}
+
+Bytes readSnapshot( const CaptureStore::Snapshot& snapshot )
+{
+    CaptureStore::Snapshot::Cursor cursor;
+    Bytes bytes;
+    while ( true ) {
+        const auto chunk = snapshot.readChunk( cursor );
+        if ( chunk.readFailed ) {
+            throw std::runtime_error( "benchmark capture snapshot read failed" );
+        }
+        const auto chunkBytes = toBytes( chunk.bytes );
+        bytes.insert( bytes.end(), chunkBytes.cbegin(), chunkBytes.cend() );
+        if ( chunk.complete ) {
+            return bytes;
+        }
+        if ( chunk.bytes.isEmpty() ) {
+            throw std::runtime_error( "benchmark capture snapshot made no progress" );
+        }
+    }
+}
+
+Bytes writeSaveSnapshot( StreamingLogData& data )
+{
+    constexpr qint64 MaximumConcurrentTailBytes = 1024 * 1024;
+    auto candidate
+        = data.beginOutputExport( LiveLogSaveAnsiMode::Preserve, MaximumConcurrentTailBytes );
+    if ( !candidate ) {
+        throw std::runtime_error( "benchmark save snapshot could not be registered" );
+    }
+
+    try {
+        QByteArray output;
+        StreamingLogData::OutputExportEncodingState encodingState;
+        const auto write = [ &output ]( const QByteArray& bytes ) {
+            output.append( bytes );
+            return static_cast<qint64>( bytes.size() );
+        };
+        if ( !StreamingLogData::writeOutputExportSnapshot( *candidate, encodingState, write ) ) {
+            throw std::runtime_error( "benchmark save snapshot transform failed" );
+        }
+        const auto tail = data.takeOutputExportTail( candidate->id );
+        if ( tail.failure
+             || !StreamingLogData::writeOutputExportBatches( *candidate, tail.batches,
+                                                             encodingState, write ) ) {
+            throw std::runtime_error( "benchmark save tail transform failed" );
+        }
+        data.cancelOutputExport( candidate->id );
+        return toBytes( output );
+    } catch ( ... ) {
+        data.cancelOutputExport( candidate->id );
+        throw;
+    }
+}
+
+bool pumpEventsUntil( const std::function<bool()>& predicate );
 
 std::vector<Bytes> segmentStreams( const FramedFixture& fixture )
 {
@@ -505,6 +630,11 @@ livelog::LiveLogControllerConfig benchmarkControllerConfig()
 }
 
 class BenchmarkPipelineEffects final : public livelog::LiveLogControllerEffects {
+    struct PendingSettlement {
+        ::klogg::livecapture::Generation generation{ 0u };
+        std::function<void()> complete;
+    };
+
 public:
     BenchmarkPipelineEffects( const SyntheticArmPlan& plan, ArmObservation& observation,
                               std::chrono::steady_clock::time_point started,
@@ -534,8 +664,21 @@ public:
     {
         controller_ = &controller;
         source_->setControllerCallbacks(
-            [ this ]( auto generation, const QByteArray& bytes ) {
+            [ this ]( auto generation, const QByteArray& bytes, auto settled ) {
                 acceptTransportBytes( generation, bytes );
+                if ( !settled ) {
+                    return;
+                }
+                ++observation_.deliverySettlementsAccepted;
+                if ( plan_.verifyFinalLedgers ) {
+                    // Contract mode holds the real source settlement until the
+                    // reconnect/Stop barrier, modelling a paused or slow host sink.
+                    pendingSettlements_.push_back( { generation, std::move( settled ) } );
+                }
+                else {
+                    settled();
+                    ++observation_.deliverySettlementsCompleted;
+                }
             },
             [ this ]( auto generation, LiveSourceTransport::State state ) {
                 transportStateChanged( generation, state );
@@ -611,6 +754,22 @@ public:
         return observation_.committedRecords;
     }
 
+    void releasePendingSettlements()
+    {
+        auto pending = std::exchange( pendingSettlements_, std::deque<PendingSettlement>{} );
+        for ( auto& settlement : pending ) {
+            const auto retired = controller_ == nullptr
+                                 || controller_->snapshot().generation != settlement.generation
+                                 || controller_->snapshot().source.status
+                                        != ::klogg::livecapture::SourceStatus::Streaming;
+            settlement.complete();
+            ++observation_.deliverySettlementsCompleted;
+            if ( retired ) {
+                ++observation_.retiredDeliverySettlementsCompleted;
+            }
+        }
+    }
+
     void finishDecoder()
     {
         auto final = decoder_.finish();
@@ -624,6 +783,95 @@ public:
                 = DecodeFailure{ DecodeFailureKind::MalformedFrame, 0u,
                                  plan_.fixture.framedBytes.size(), receivedFramedBytes_.size() };
         }
+    }
+
+    void verifyFinalLedgers()
+    {
+        if ( !plan_.verifyFinalLedgers ) {
+            return;
+        }
+        if ( parserRecords_.size() != plan_.fixture.records.size() ) {
+            throw std::runtime_error( "benchmark parser ledger has an unexpected record count" );
+        }
+
+        observation_.parserLedger = sequenceCrcLedger( parserRecords_ );
+        observation_.captureLedger = sequenceCrcLedger( recordsFromNormalizedText(
+            parserRecords_, readSnapshot( logData_->captureSnapshot() ), "capture snapshot" ) );
+
+        const auto lineCount = logData_->getNbLine();
+        if ( lineCount.get() < 0
+             || static_cast<std::size_t>( lineCount.get() ) != parserRecords_.size() ) {
+            throw std::runtime_error( "benchmark view has an unexpected line count" );
+        }
+        const auto viewRaw = logData_->getLinesRaw( LineNumber( 0 ), lineCount );
+        observation_.viewLedger = sequenceCrcLedger(
+            recordsFromNormalizedText( parserRecords_, toBytes( viewRaw.buffer ), "live view" ) );
+
+        static_cast<void>( Configuration::getSynced() );
+        auto filtered = logData_->getNewFilteredData();
+        auto expectedGeneration = filtered->currentSearchGeneration();
+        QTimer heartbeat;
+        heartbeat.setTimerType( Qt::PreciseTimer );
+        heartbeat.setInterval( 0 );
+        QObject::connect( &heartbeat, &QTimer::timeout, &heartbeat,
+                          [ this ] { ++observation_.qtHeartbeatEvents; } );
+        QObject::connect( filtered.get(), &LogFilteredData::searchProgressed,
+                          QCoreApplication::instance(),
+                          [ this, &expectedGeneration ]( LinesCount, int progress, LineNumber,
+                                                         quint64 generation ) {
+                              if ( generation == expectedGeneration && progress >= 100 ) {
+                                  ++observation_.searchTerminalEvents;
+                              }
+                          } );
+        const auto operationsBefore = filtered->searchPerformanceCounters().operationStarts;
+        heartbeat.start();
+        filtered->runSearch( RegularExpressionPattern{ QStringLiteral( "." ) }, LineNumber( 0 ),
+                             LineNumber( lineCount.get() ) );
+        expectedGeneration = filtered->currentSearchGeneration();
+        if ( !pumpEventsUntil( [ this ] {
+                 return observation_.searchTerminalEvents > 0u
+                        && observation_.qtHeartbeatEvents > 0u;
+             } ) ) {
+            heartbeat.stop();
+            throw std::runtime_error( "benchmark search did not reach its terminal barrier" );
+        }
+        heartbeat.stop();
+        const auto operationsAfter = filtered->searchPerformanceCounters().operationStarts;
+        if ( operationsAfter < operationsBefore ) {
+            throw std::runtime_error( "benchmark search operation counter regressed" );
+        }
+        observation_.searchOperationStarts = operationsAfter - operationsBefore;
+
+        const auto expectedMatches = static_cast<std::size_t>( std::count_if(
+            parserRecords_.cbegin(), parserRecords_.cend(),
+            []( const SyntheticRecord& record ) { return !record.payload.empty(); } ) );
+        const auto matches = filtered->getNbMatches();
+        if ( matches.get() < 0 || static_cast<std::size_t>( matches.get() ) != expectedMatches ) {
+            throw std::runtime_error(
+                "benchmark search terminal result does not match the searchable records: matches="
+                + std::to_string( matches.get() )
+                + " expected=" + std::to_string( expectedMatches ) );
+        }
+
+        // Search engines intentionally do not report zero-length matches for a blank
+        // line. Expose all source lines only after the terminal barrier, then verify
+        // the filtered view's complete ordered source mapping, including blanks.
+        filtered->setAllLinesVisible( true );
+        const auto visibleLines = filtered->getNbLine();
+        if ( visibleLines != lineCount ) {
+            throw std::runtime_error( "benchmark filtered view did not catch up to all lines" );
+        }
+        Bytes searchText;
+        for ( LinesCount::UnderlyingType index = 0; index < visibleLines.get(); ++index ) {
+            const auto sourceLine = filtered->getMatchingLineNumber( LineNumber( index ) );
+            const auto raw = logData_->getLinesRaw( sourceLine, LinesCount( 1 ) );
+            const auto recordBytes = toBytes( raw.buffer );
+            searchText.insert( searchText.end(), recordBytes.cbegin(), recordBytes.cend() );
+        }
+        observation_.searchLedger = sequenceCrcLedger(
+            recordsFromNormalizedText( parserRecords_, searchText, "live search" ) );
+        observation_.saveLedger = sequenceCrcLedger( recordsFromNormalizedText(
+            parserRecords_, writeSaveSnapshot( *logData_ ), "save snapshot" ) );
     }
 
     void cleanup()
@@ -712,6 +960,9 @@ private:
                                                 report.segmentTransitions.cbegin(),
                                                 report.segmentTransitions.cend() );
         for ( const auto& record : report.records ) {
+            if ( plan_.verifyFinalLedgers ) {
+                parserRecords_.push_back( record );
+            }
             auto committed = record.payload;
             committed.push_back( static_cast<std::uint8_t>( '\n' ) );
             const auto linesBefore = logData_->getNbLine();
@@ -741,6 +992,8 @@ private:
     livelog::LiveLogController* controller_{ nullptr };
     Bytes receivedFramedBytes_;
     Bytes pendingTransportBytes_;
+    std::vector<SyntheticRecord> parserRecords_;
+    std::deque<PendingSettlement> pendingSettlements_;
     std::optional<DecodeFailure> decodeFailure_;
     std::optional<::klogg::livecapture::LiveSourceError> failure_;
     bool readyRecorded_{ false };
@@ -850,6 +1103,7 @@ ArmObservation runSyntheticArm( const SyntheticArmPlan& plan )
             }
             if ( segment + 1u < segmentCounts.size() ) {
                 controller.reconnectRequested();
+                effects.releasePendingSettlements();
                 controller.deviceAvailable( controller.snapshot().generation );
             }
         }
@@ -860,12 +1114,14 @@ ArmObservation runSyntheticArm( const SyntheticArmPlan& plan )
         }
 
         controller.stopRequested();
+        effects.releasePendingSettlements();
         if ( !pumpEventsUntil( [ &controller ] {
                  return controller.snapshot().source.status
                         == ::klogg::livecapture::SourceStatus::Stopped;
              } ) ) {
             throw std::runtime_error( "synthetic transport did not stop" );
         }
+        effects.verifyFinalLedgers();
         observation.normalStop = true;
         effects.detach();
         effects.cleanup();
