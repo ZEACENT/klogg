@@ -778,6 +778,36 @@
         <source>Live log source error</source>
         <translation>Live log source error</translation>
     </message>
+    <message><source>Capture spool persistence is currently degraded.</source><translation>Capture spool persistence is currently degraded.</translation></message>
+    <message><source>Capture spool persistence was degraded earlier in this session.</source><translation>Capture spool persistence was degraded earlier in this session.</translation></message>
+    <message><source>One or more gaps in the captured stream are possible.</source><translation>One or more gaps in the captured stream are possible.</translation></message>
+    <message><source>Some source records may have been replayed after reconnecting.</source><translation>Some source records may have been replayed after reconnecting.</translation></message>
+    <message><source>Some host-side capture or output progress is uncertain.</source><translation>Some host-side capture or output progress is uncertain.</translation></message>
+    <message><source>Completeness of records supplied by the device cannot be verified.</source><translation>Completeness of records supplied by the device cannot be verified.</translation></message>
+    <message><source>Save live log with integrity warning</source><translation>Save live log with integrity warning</translation></message>
+    <message><source>The saved data may be incomplete or contain replayed records. %1</source><translation>The saved data may be incomplete or contain replayed records. %1</translation></message>
+    <message><source>Saving live log to %1</source><translation>Saving live log to %1</translation></message>
+    <message><source>Saving live log... %1 bytes written</source><translation>Saving live log... %1 bytes written</translation></message>
+    <message><source>Another save is already running for this live capture.</source><translation>Another save is already running for this live capture.</translation></message>
+    <message><source>The live log changed faster than the bounded save journal could keep up. The previous output binding is still active.</source><translation>The live log changed faster than the bounded save journal could keep up. The previous output binding is still active.</translation></message>
+    <message><source>Capture progress became uncertain during the save. The candidate was not published as complete.</source><translation>Capture progress became uncertain during the save. The candidate was not published as complete.</translation></message>
+    <message><source>The candidate output file could not be published atomically.</source><translation>The candidate output file could not be published atomically.</translation></message>
+    <message><source>The file was published, but could not be reopened as the active live output. The previous binding remains active.</source><translation>The file was published, but could not be reopened as the active live output. The previous binding remains active.</translation></message>
+    <message><source>The file was published, but the final live tail could not be transferred. The previous binding remains active.</source><translation>The file was published, but the final live tail could not be transferred. The previous binding remains active.</translation></message>
+    <message><source>Live capture could not be closed safely</source><translation>Live capture could not be closed safely</translation></message>
+    <message><source>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</source><translation>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</translation></message>
+    <message><source>The active live output could not be flushed. Closing now may lose recent output.</source><translation>The active live output could not be flushed. Closing now may lose recent output.</translation></message>
+    <message><source>Close Anyway (Possible Loss)</source><translation>Close Anyway (Possible Loss)</translation></message>
+    <message><source>%1
+Capture integrity: %2</source><translation>%1
+Capture integrity: %2</translation></message>
+    <message><source> - Capture integrity warning: %1</source><translation> - Capture integrity warning: %1</translation></message>
+    <message><source>Saving the live log was cancelled.</source><translation>Saving the live log was cancelled.</translation></message>
+    <message><source>The captured snapshot could not be read.</source><translation>The captured snapshot could not be read.</translation></message>
+    <message><source>The candidate output file could not be written.</source><translation>The candidate output file could not be written.</translation></message>
+    <message><source>Saving the live log failed.</source><translation>Saving the live log failed.</translation></message>
+    <message><source>Cancel</source><translation>Cancel</translation></message>
+    <message><source>Retry</source><translation>Retry</translation></message>
 </context>
 <context>
     <name>OptionsDialog</name>

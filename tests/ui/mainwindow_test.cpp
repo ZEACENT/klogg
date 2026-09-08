@@ -40,6 +40,8 @@
 #include <QMap>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -82,6 +84,23 @@
 #include "uimessage.h"
 
 struct StreamingLogDataTimerTestAccess {
+    static void spillFault( StreamingLogData& data, qint64& now,
+                            std::optional<CaptureStore::PersistenceFailure>& failure )
+    {
+        data.captureStore_.spillClockForTesting_ = [ &now ] { return now; };
+        data.captureStore_.spillFailureForTesting_ = [ &failure ] { return failure; };
+    }
+
+    static void failOutputForClose( StreamingLogData& data, CaptureOutputError error )
+    {
+        data.captureOutputError_ = error;
+    }
+
+    static void recoverOutputForClose( StreamingLogData& data )
+    {
+        data.captureOutputError_.reset();
+    }
+
     static bool pending( const StreamingLogData& data )
     {
         return data.loadingFinishedQueued_ && data.loadingFinishedTimer_.isActive();
@@ -317,7 +336,14 @@ private:
 class MenuLiveSourceTransport final : public LiveSourceTransport {
 public:
     void start( Generation generation ) override { startedGeneration = generation; }
-    void stop( Generation ) override {}
+    void stop( Generation generation ) override
+    {
+        if ( deferStop ) {
+            pendingStoppedGeneration = generation;
+            return;
+        }
+        Q_EMIT stateChanged( generation, State::Disconnected );
+    }
     void clearRemoteAsync( Generation, ClearRequestId ) override {}
     QString lastError() const override { return {}; }
 
@@ -329,7 +355,16 @@ public:
     {
         Q_EMIT bytesReceived( startedGeneration, bytes );
     }
+    void publishStopped()
+    {
+        REQUIRE( pendingStoppedGeneration.has_value() );
+        const auto generation = *pendingStoppedGeneration;
+        pendingStoppedGeneration.reset();
+        Q_EMIT stateChanged( generation, State::Disconnected );
+    }
     Generation startedGeneration{ 0 };
+    bool deferStop = false;
+    std::optional<Generation> pendingStoppedGeneration;
 };
 
 class MenuLiveSourceTransportFactory final : public LiveSourceTransportFactory {
@@ -1185,7 +1220,10 @@ void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
     QStringList suggestions;
     bool closed = false;
     QObject dialogDriver;
-    QTimer::singleShot( 0, Qt::PreciseTimer, &dialogDriver, [ & ] {
+    QTimer dialogTimer( &dialogDriver );
+    dialogTimer.setTimerType( Qt::PreciseTimer );
+    dialogTimer.setInterval( 1 );
+    QObject::connect( &dialogTimer, &QTimer::timeout, &dialogDriver, [ & ] {
         if ( auto* dialog = qobject_cast<QFileDialog*>( QApplication::activeModalWidget() ) ) {
             suggestions = dialog->selectedFiles();
             if ( chosenPath.isEmpty() ) {
@@ -1197,11 +1235,24 @@ void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
                 closed = QMetaObject::invokeMethod( dialog, "accept", Qt::DirectConnection );
             }
         }
-        else if ( auto* modal = qobject_cast<QDialog*>( QApplication::activeModalWidget() ) ) {
-            modal->reject();
+        else if ( auto* warning = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ) ) { // lint-allow: platform-fragile -- PreciseTimer drives the real save warning.
+            if ( auto* save = warning->button( QMessageBox::Save ) ) { // lint-allow: platform-fragile -- deterministic modal choice.
+                save->click();
+            }
+            else {
+                warning->reject();
+            }
         }
     } );
+    dialogTimer.start();
     action.trigger();
+    auto* owner = qobject_cast<QWidget*>( action.parent() );
+    REQUIRE( waitUiState( [ owner ] {
+        return owner == nullptr
+               || owner->findChild<QProgressDialog*>( QStringLiteral( "liveLogExportProgress" ) )
+                      == nullptr;
+    } ) );
+    dialogTimer.stop();
     QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
     REQUIRE( closed );
     REQUIRE( suggestions.size() == 1 );
@@ -1332,6 +1383,12 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         }
         data.autoReconnectEnabled = true;
         data.adbBackend = AdbTransportBackend::SmartSocket;
+        if ( preservationScenario == 7 ) {
+            data.integrity.gapPossible = true;
+            data.integrity.replayPossible = true;
+            data.integrity.discardedBytes = 17;
+            data.integrity.record( "restored-host-gap", 17 );
+        }
         files.emplace_back( data.documentId(), 0, QString{}, data.persistedSourceType(),
                             data.displayName(), klogg::livelog::serializeSpec(
                                                     klogg::livelog::sessionSpecFromSessionData( data ) ) );
@@ -1462,6 +1519,128 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         auto* disconnect = mainWindow->findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
         REQUIRE( info != nullptr );
         REQUIRE( disconnect != nullptr );
+        if ( preservationScenario == 8 ) {
+            using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+            auto* data = Access::data( crawler );
+            REQUIRE( data != nullptr );
+            transport->publishBytes( QByteArrayLiteral( "user-close-preserved-until-stop\n" ) );
+            const auto capturePath = data->capturePath();
+            REQUIRE( QDir( capturePath ).exists() );
+            transport->deferStop = true;
+            auto& config = Configuration::get();
+            const auto previousConfirm = config.confirmTabClose();
+            config.setConfirmTabClose( false );
+            auto* close = mainWindow->findChild<QAction*>( QStringLiteral( "closeAction" ) );
+            REQUIRE( close != nullptr );
+            close->trigger();
+            CHECK( tabs->count() == 2 );
+            CHECK( appSession->openedDocuments().size() == 2 );
+            CHECK_FALSE( source->isInputTerminated() );
+            CHECK( data->getNbLine() > 0_lcount );
+            transport->publishStopped();
+            REQUIRE( waitUiState( [ & ] { return tabs->count() == 1; } ) );
+            CHECK( appSession->openedDocuments().size() == 1 );
+            CHECK_FALSE( QDir( capturePath ).exists() );
+            config.setConfirmTabClose( previousConfirm );
+            menu->removeEventFilter( &changes );
+            mainWindow->close();
+            REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+            return;
+        }
+        if ( preservationScenario >= 9 && preservationScenario <= 11 ) {
+            using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+            auto* data = Access::data( crawler );
+            REQUIRE( data != nullptr );
+            const auto outputPath = documents.filePath( QStringLiteral( "discard-flush.log" ) );
+            REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Preserve ) );
+            transport->publishBytes( QByteArrayLiteral( "must-survive-safe-decision\n" ) );
+            const auto capturePath = data->capturePath();
+            REQUIRE( QDir( capturePath ).exists() );
+            StreamingLogDataTimerTestAccess::failOutputForClose( *data,
+                                                                 CaptureOutputError::Flush );
+
+            auto& config = Configuration::get();
+            const auto previousConfirm = config.confirmTabClose();
+            config.setConfirmTabClose( false );
+            bool decisionMade = false;
+            QTimer modalDriver;
+            modalDriver.setTimerType( Qt::PreciseTimer );
+            modalDriver.setInterval( 1 );
+            QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
+                auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
+                if ( message == nullptr ) {
+                    return;
+                }
+                const auto decisionText
+                    = preservationScenario == 9
+                          ? QStringLiteral( "Cancel" )
+                          : preservationScenario == 10 ? QStringLiteral( "Retry" )
+                                                       : QStringLiteral( "Close Anyway" );
+                for ( auto* button : message->buttons() ) {
+                    if ( button->text().contains( decisionText ) ) {
+                        if ( preservationScenario == 10 ) {
+                            StreamingLogDataTimerTestAccess::recoverOutputForClose( *data );
+                        }
+                        decisionMade = true;
+                        button->click();
+                        return;
+                    }
+                }
+            } );
+            modalDriver.start();
+            auto* close = mainWindow->findChild<QAction*>( QStringLiteral( "closeAction" ) );
+            REQUIRE( close != nullptr );
+            close->trigger();
+            REQUIRE( waitUiState( [ & ] { return decisionMade; } ) );
+            modalDriver.stop();
+            config.setConfirmTabClose( previousConfirm );
+            menu->removeEventFilter( &changes );
+
+            if ( preservationScenario == 9 ) {
+                REQUIRE( tabs->count() == 2 );
+                CHECK( appSession->openedDocuments().size() == 2 );
+                CHECK( QDir( capturePath ).exists() );
+                CHECK( data->getNbLine() > 0_lcount );
+                REQUIRE( waitUiState( [ & ] {
+                    return controller->snapshot().runIntent == live::RunIntent::Running
+                           && factory.created.size() >= 2;
+                } ) );
+                StreamingLogDataTimerTestAccess::recoverOutputForClose( *data );
+                controller->stopRequested();
+            }
+            else {
+                REQUIRE( waitUiState( [ & ] { return tabs->count() == 1; } ) );
+                CHECK( appSession->openedDocuments().size() == 1 );
+                CHECK_FALSE( QDir( capturePath ).exists() );
+            }
+            mainWindow->close();
+            return;
+        }
+        if ( preservationScenario == 7 ) {
+            REQUIRE( controller->controlPresentation().integrity.gapPossible );
+            REQUIRE( controller->controlPresentation().integrity.replayPossible );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Capture integrity:" ) ) );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "gaps" ) ) );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "replayed" ) ) );
+            CHECK( info->text().contains( QStringLiteral( "Capture integrity warning:" ) ) );
+
+            controller->captureHealthChanged(
+                false,
+                live::LiveSourceError{ live::ErrorCategory::Capture,
+                                       "capture-persistence-degraded",
+                                       live::ErrorScope::Capture, live::RetryPolicy::Never,
+                                       "Capture spool persistence is degraded.", {} } );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "currently degraded" ) ) );
+            controller->captureHealthChanged( true );
+            CHECK_FALSE( tabs->tabToolTip( 0 ).contains( QStringLiteral( "currently degraded" ) ) );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "degraded earlier" ) ) );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "gaps" ) ) );
+            CHECK( controller->controlPresentation().integrity.discardedBytes == 17 );
+            menu->removeEventFilter( &changes );
+            controller->stopRequested();
+            mainWindow->close();
+            return;
+        }
         const auto current = tabs->currentWidget() == crawler;
         const auto sentinel = QStringLiteral( "presentation-route-sentinel" );
         const auto seedRouteProbes = [ & ] {
@@ -1486,7 +1665,8 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                                             live::ErrorScope::Capture, live::RetryPolicy::Never,
                                             "first output diagnostic", {} };
         controller->outputBindingChanged( live::OutputBindingState::Degraded, error );
-        CHECK( info->text() == ( current ? appSession->getDisplayName( crawler ) : sentinel ) );
+        CHECK( ( current ? info->text().startsWith( appSession->getDisplayName( crawler ) )
+                         : info->text() == sentinel ) );
         CHECK( disconnect->isEnabled() == current );
         CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "first output diagnostic" ) ) );
         CHECK( changes.added == 0 );
@@ -1494,7 +1674,8 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         seedRouteProbes();
         error.message = "replacement diagnostic";
         controller->outputBindingChanged( live::OutputBindingState::Degraded, error );
-        CHECK( info->text() == ( current ? appSession->getDisplayName( crawler ) : sentinel ) );
+        CHECK( ( current ? info->text().startsWith( appSession->getDisplayName( crawler ) )
+                         : info->text() == sentinel ) );
         CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "replacement diagnostic" ) ) );
         CHECK( disconnect->isEnabled() == current );
         CHECK( changes.added == 0 );
@@ -1520,7 +1701,9 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             exerciseLiveSaveDialog( *save, expectedSuggestion, savedPath );
             REQUIRE( source->sessionData().boundOutputFile == savedPath );
             CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
-            CHECK( info->text() == QDir::toNativeSeparators( savedPath ) );
+            CHECK( info->text().startsWith( QDir::toNativeSeparators( savedPath ) ) );
+            CHECK( QDir::toNativeSeparators( appSession->getAssociatedPath( crawler ) )
+                   == QDir::toNativeSeparators( savedPath ) );
             INFO( "Saved tab tooltip: " << tabs->tabToolTip( 0 ).toStdString() );
             CHECK( tabs->tabToolTip( 0 ) == QDir::toNativeSeparators( savedPath ) );
             REQUIRE( changes.added > 0 );
@@ -1638,6 +1821,177 @@ TEST_CASE( "Live save suggests clean filenames and preserves chosen paths",
 {
     const auto useIos = GENERATE( false, true );
     exerciseLivePresentation( useIos, false, 4 );
+}
+
+TEST_CASE( "Restored live integrity history remains visible after current health recovers",
+           "[ui][session][live-integrity]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 7 );
+}
+
+TEST_CASE( "User live tab close waits for real stop before deleting its capture owner",
+           "[ui][session][live-close-owner]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 8 );
+}
+
+TEST_CASE( "Cancelling a live close after output flush failure preserves and resumes its owner",
+           "[ui][session][live-close-owner][live-close-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 9 );
+}
+
+TEST_CASE( "Retrying a live close repeats the failed flush before removing its owner",
+           "[ui][session][live-close-owner]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 10 );
+}
+
+TEST_CASE( "Closing anyway after a live output failure performs the explicit discard",
+           "[ui][session][live-close-owner]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 11 );
+}
+
+TEST_CASE( "Window close preserves every owner when one live capture cannot persist",
+           "[ui][session][live-close-owner]" )
+{
+    MenuLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restoreGuard{ sessionInfo };
+    const auto windowId = QStringLiteral( "live-close-owner-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    const auto existingWindows = sessionInfo.windows();
+    sessionInfo.add( windowId );
+    for ( const auto& existing : existingWindows ) {
+        sessionInfo.remove( existing );
+    }
+
+    QTemporaryDir files;
+    REQUIRE( files.isValid() );
+    const auto filePath = files.filePath( QStringLiteral( "ordinary.log" ) );
+    QFile ordinary( filePath );
+    REQUIRE( ordinary.open( QIODevice::WriteOnly ) );
+    REQUIRE( ordinary.write( "ordinary\n" ) == 9 );
+    ordinary.close();
+
+    AdbLogcatSessionData liveData{
+        QStringLiteral( "unused-test-backend" ), QStringLiteral( "close-device" ),
+        QStringLiteral( "Close device" ), QString{},
+        QUuid::createUuid().toString( QUuid::WithoutBraces ), QString{},
+        LiveLogSourceType::AdbLogcat,
+    };
+    liveData.adbBackend = AdbTransportBackend::SmartSocket;
+    liveData.autoReconnectEnabled = true;
+    sessionInfo.setOpenFiles(
+        windowId,
+        { SessionInfo::OpenFile( liveData.documentId(), 0, {}, liveData.persistedSourceType(),
+                                 liveData.displayName(),
+                                 klogg::livelog::serializeSpec(
+                                     klogg::livelog::sessionSpecFromSessionData( liveData ) ) ),
+          SessionInfo::OpenFile( filePath, 0, {}, {}, QFileInfo( filePath ).fileName(), {} ) } );
+    sessionInfo.setCurrentFileIndex( windowId, 0 );
+    sessionInfo.save();
+
+    auto mainWindow = std::make_unique<MainWindow>( WindowSession{ appSession, windowId, 0 } );
+    mainWindow->resize( 900, 600 );
+    mainWindow->show();
+    mainWindow->reloadSession();
+    auto* tabs = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 2; } ) );
+    auto* liveCrawler = qobject_cast<CrawlerWidget*>( tabs->widget( 0 ) );
+    auto* fileCrawler = qobject_cast<CrawlerWidget*>( tabs->widget( 1 ) );
+    REQUIRE( liveCrawler != nullptr );
+    REQUIRE( fileCrawler != nullptr );
+    REQUIRE( waitUiState( [ & ] {
+        return liveCrawler->isFirstLoadDone() && fileCrawler->isFirstLoadDone();
+    } ) );
+    QTest::qWait( 200 );
+
+    auto* source = appSession->getAdbLogcatSource( liveCrawler );
+    auto* controller = appSession->getLiveLogController( liveCrawler );
+    using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+    auto* data = Access::data( liveCrawler );
+    REQUIRE( source != nullptr );
+    REQUIRE( controller != nullptr );
+    REQUIRE( data != nullptr );
+    REQUIRE( source->reconnectSource() );
+    REQUIRE( factory.created.size() == 1 );
+    factory.created.front()->publishConnected();
+
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> persistenceFailure
+        = CaptureStore::PersistenceFailure::Write;
+    StreamingLogDataTimerTestAccess::spillFault( *data, now, persistenceFailure );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.memoryBudgetBytes = 1;
+    data->setCaptureLimits( limits );
+    factory.created.front()->publishBytes( QByteArrayLiteral( "a\nb\nc\n" ) );
+    REQUIRE( data->getNbLine() > 0_lcount );
+    const auto readableBeforeClose = data->getLinesRaw( 0_lnum, data->getNbLine() );
+    REQUIRE_FALSE( readableBeforeClose.buffer.empty() );
+
+    bool cancelled = false;
+    QTimer modalDriver;
+    modalDriver.setTimerType( Qt::PreciseTimer );
+    modalDriver.setInterval( 1 );
+    QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
+        auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
+        if ( message == nullptr ) {
+            return;
+        }
+        for ( auto* button : message->buttons() ) {
+            if ( button->text().contains( QStringLiteral( "Cancel" ) ) ) {
+                cancelled = true;
+                button->click();
+                return;
+            }
+        }
+    } );
+    modalDriver.start();
+    mainWindow->close();
+    REQUIRE( waitUiState( [ & ] { return cancelled; } ) );
+    modalDriver.stop();
+    REQUIRE( waitUiState( [ & ] {
+        return controller->snapshot().runIntent == klogg::livecapture::RunIntent::Running
+               && factory.created.size() >= 2;
+    } ) );
+    REQUIRE( tabs->count() == 2 );
+    CHECK( tabs->widget( 0 ) == liveCrawler );
+    CHECK( tabs->widget( 1 ) == fileCrawler );
+    CHECK( appSession->openedDocuments().size() == 2 );
+    CHECK( data->getNbLine() > 0_lcount );
+    CHECK_FALSE( data->getLinesRaw( 0_lnum, data->getNbLine() ).buffer.empty() );
+
+    persistenceFailure.reset();
+    now += 5000;
+    QTimer finalDecisionDriver;
+    finalDecisionDriver.setTimerType( Qt::PreciseTimer );
+    finalDecisionDriver.setInterval( 1 );
+    QObject::connect( &finalDecisionDriver, &QTimer::timeout, &finalDecisionDriver, [] {
+        auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
+        if ( message == nullptr ) {
+            return;
+        }
+        for ( auto* button : message->buttons() ) {
+            if ( button->text().contains( QStringLiteral( "Close Anyway" ) ) ) {
+                button->click();
+                return;
+            }
+        }
+    } );
+    finalDecisionDriver.start();
+    mainWindow->close();
+    REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
+    finalDecisionDriver.stop();
 }
 
 SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )

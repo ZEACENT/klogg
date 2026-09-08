@@ -48,13 +48,16 @@
 #include <QTranslator>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "configuration.h"
 #include "crawlerwidget.h"
 #include "downloader.h"
 #include "iconloader.h"
+#include "livelogclosetransaction.h"
 #include "pathline.h"
 #include "quickfindmux.h"
 #include "quickfindwidget.h"
@@ -299,6 +302,15 @@ class MainWindow : public QMainWindow {
     void registerAdbLogcatSource( CrawlerWidget* crawler );
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
+    void startLiveCloseTransaction( CrawlerWidget* crawler,
+                                    klogg::livelog::LiveLogCloseTransaction::Mode mode,
+                                    std::function<void( bool )> completion );
+    void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
+    void continueCloseAll();
+    void beginWindowShutdown( bool preserveWindowSession );
+    void advanceWindowShutdown();
+    void abortWindowShutdown();
+    void finalizeWindowShutdown();
 
     WindowSession session_;
     AdbLiveServices* adbLiveServices_{ nullptr };
@@ -425,6 +437,14 @@ class MainWindow : public QMainWindow {
     bool isCloseFromTray_ = false;
     bool suspendSessionPersistence_ = false;
     bool shutdownInProgress_ = false;
+    bool shutdownReadyToAccept_ = false;
+    bool shutdownPreserveWindowSession_ = false;
+    bool closeAllInProgress_ = false;
+    ActionInitiator closeAllInitiator_{ ActionInitiator::User };
+    std::unique_ptr<klogg::livelog::LiveLogCloseTransaction> liveCloseTransaction_;
+    std::vector<CrawlerWidget*> shutdownLiveTabs_;
+    std::vector<CrawlerWidget*> shutdownResumeTabs_;
+    std::size_t shutdownLiveTabIndex_ = 0;
 
     // Debounce timer for session persistence (see scheduleSessionPersistence).
     QTimer sessionPersistenceTimer_;

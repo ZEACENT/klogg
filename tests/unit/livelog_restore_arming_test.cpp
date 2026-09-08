@@ -52,6 +52,7 @@
 #include <QStringList>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QUuid>
 
 #include "adbinfrastructuremanager.h"
 #include "adblogcatsource.h"
@@ -150,6 +151,9 @@ public:
     void stop( Generation generation ) override
     {
         stopGenerations.push_back( generation );
+        // This in-memory fake owns no asynchronous producer. Real transports
+        // publish the separate acknowledgement only after their cleanup barrier.
+        Q_EMIT stateChanged( generation, State::Disconnected );
     }
 
     void clearRemoteAsync( Generation, ClearRequestId ) override {}
@@ -586,6 +590,60 @@ TEST_CASE( "Explicit runtime start intent still drives the reducer",
     CHECK( snapshot.source.status == live::SourceStatus::WaitingForInfrastructure );
 }
 
+TEST_CASE( "Real source effects settle capture rejection through the session controller",
+           "[livelog-restore-arming][session][w2-integrated-sink]" )
+{
+    const auto capacity = GENERATE( false, true );
+    ScopedSessionWindows windowsGuard;
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto spec = makeAndroidSpec();
+    spec.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    const auto windowId = QStringLiteral( "w2-real-sink-window" );
+    seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
+                                   klogg::livelog::serializeSpec( spec ) } } );
+    auto opened = restoreSession( *appSession, windowId );
+    REQUIRE( opened.size() == 1 );
+    auto* source = appSession->getAdbLogcatSource( opened.front().second );
+    auto* controller = appSession->getLiveLogController( opened.front().second );
+    auto* view = dynamic_cast<NullView*>( opened.front().second );
+    REQUIRE( view != nullptr );
+    auto data = std::dynamic_pointer_cast<StreamingLogData>( view->data() );
+    REQUIRE( data != nullptr );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 1;
+    data->setCaptureLimits( limits );
+    REQUIRE( source->reconnectSource() );
+    const auto generation = controller->snapshot().generation;
+    auto* transport = factory.createdTransports.back();
+    transport->publishState( generation, LiveSourceTransport::State::Connected );
+    transport->publishBytes( generation, QByteArrayLiteral( "accepted\n" ) );
+    REQUIRE( controller->spec().integrity.acceptedBytes == 9u );
+    QByteArray rejected = QByteArrayLiteral( "rejected\n" );
+    if ( capacity ) {
+        limits.memoryBudgetBytes = 1;
+        limits.ingressBudgetBytes = 1;
+        data->setCaptureLimits( limits );
+        rejected = QByteArray( 1024, 'x' );
+    }
+    else {
+        REQUIRE( QDir{}.rename( data->capturePath(), data->capturePath() + QStringLiteral( "-held" ) ) );
+        REQUIRE( QDir{}.mkpath( data->capturePath() ) );
+    }
+    CHECK_NOTHROW( transport->publishBytes( generation, rejected ) );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
+    REQUIRE( controller->snapshot().source.failure.has_value() );
+    CHECK( controller->snapshot().source.failure->category == live::ErrorCategory::Capture );
+    CHECK( controller->snapshot().source.failure->retryPolicy == live::RetryPolicy::Never );
+    CHECK( controller->spec().integrity.acceptedBytes == 9u );
+    CHECK( controller->spec().integrity.discardedBytes == static_cast<std::uint64_t>( rejected.size() ) );
+    CHECK( data->getNbLine() == 1_lcount );
+    CHECK( source->isInputTerminated() );
+    controller->deviceAvailable( controller->snapshot().generation );
+    CHECK( factory.totalStarts() == 1u );
+    closeAndDeleteViews( *appSession, opened );
+}
+
 TEST_CASE( "Persisted Android running intent restores inert and reconnects once",
            "[livelog-restore-arming][session][inert-restore]" )
 {
@@ -597,6 +655,10 @@ TEST_CASE( "Persisted Android running intent restores inert and reconnects once"
     const auto windowId = QStringLiteral( "livelog-inert-android-window" );
     auto spec = makeAndroidSpec();
     spec.boundOutputFile = outputDir.filePath( QStringLiteral( "android-restored.log" ) );
+    spec.integrity.gapPossible = true;
+    spec.integrity.acceptedBytes = std::uint64_t{ 9007199254740993ULL };
+    spec.integrity.discardedBytes = 7u;
+    spec.integrity.record( "historical-discard", 7u );
     seedWindowFiles( windowId, { { spec.displayName(), QStringLiteral( "adb_logcat" ),
                                    klogg::livelog::serializeSpec( spec ) } } );
 
@@ -616,6 +678,9 @@ TEST_CASE( "Persisted Android running intent restores inert and reconnects once"
     CHECK( source->sessionData().runIntent == live::RunIntent::Stopped );
     CHECK( source->sessionData().deviceSerial == spec.device.deviceId );
     CHECK( source->sessionData().captureId == spec.captureId );
+    CHECK( controller->spec().integrity == spec.integrity );
+    CHECK( source->sessionData().integrity == spec.integrity );
+    CHECK( controller->controlPresentation().integrity.gapPossible );
     CHECK( source->sessionData().androidBuffers == spec.android.buffers );
     CHECK( source->sessionData().androidFilterSpec == spec.android.filterSpec );
     CHECK( source->sessionData().androidPriority == spec.android.priority );
@@ -1459,8 +1524,11 @@ TEST_CASE( "iOS catalog snapshots arm only after reconnect and retire the matchi
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
 
     catalog.publish( { 2u, {} } );
-    CHECK( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
     CHECK_FALSE( factory.createdTransports.front()->stopGenerations.empty() );
+    catalog.publish( { 3u, { entry } } );
+    CHECK( controller->snapshot().source.status == live::SourceStatus::Failed );
+    CHECK( factory.totalStarts() == 1u );
     closeAndDeleteViews( *appSession, opened );
 }
 

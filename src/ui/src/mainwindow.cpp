@@ -98,6 +98,7 @@
 #include "adblogcatdialog.h"
 #include "adblogcatsource.h"
 #include "livelogcontroller.h"
+#include "livelogexportservice.h"
 #include "clipboard.h"
 #include "crawlerwidget.h"
 #include "decompressor.h"
@@ -145,6 +146,90 @@ void signalCrawlerToFollowFile( CrawlerWidget* crawler_widget )
 constexpr int SessionPersistenceDebounceMs = 750;
 
 static constexpr auto ClipboardMaxTry = 5;
+
+bool hasHistoricalCapturePersistenceWarning(
+    const klogg::livecapture::LiveIntegritySummary& integrity )
+{
+    return std::any_of( integrity.recentEvents.cbegin(), integrity.recentEvents.cend(),
+                        []( const auto& event ) {
+                            return event.code == "capture-persistence-degraded";
+                        } );
+}
+
+bool hasUnresolvedLiveIntegrityWarning(
+    const klogg::livelog::LiveLogControlPresentation& presentation )
+{
+    const auto& integrity = presentation.integrity;
+    return !presentation.captureHealthy || hasHistoricalCapturePersistenceWarning( integrity )
+           || integrity.sourceCompletenessUnknown
+           || integrity.gapPossible || integrity.replayPossible || integrity.discardedBytes > 0
+           || integrity.uncertainBytes > 0 || integrity.outputProgressUnknown;
+}
+
+QString liveIntegrityWarningText(
+    const klogg::livelog::LiveLogControlPresentation& presentation )
+{
+    QStringList warnings;
+    const auto& integrity = presentation.integrity;
+    if ( !presentation.captureHealthy ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "Capture spool persistence is currently degraded." );
+    }
+    else if ( hasHistoricalCapturePersistenceWarning( integrity ) ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "Capture spool persistence was degraded earlier in this session." );
+    }
+    if ( integrity.gapPossible || integrity.discardedBytes > 0 ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "One or more gaps in the captured stream are possible." );
+    }
+    if ( integrity.replayPossible ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "Some source records may have been replayed after reconnecting." );
+    }
+    if ( integrity.uncertainBytes > 0 || integrity.outputProgressUnknown ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "Some host-side capture or output progress is uncertain." );
+    }
+    if ( integrity.sourceCompletenessUnknown ) {
+        warnings << QCoreApplication::translate(
+            "MainWindow", "Completeness of records supplied by the device cannot be verified." );
+    }
+    return warnings.join( QLatin1Char( ' ' ) );
+}
+
+QString liveExportFailureText( klogg::livelog::LiveLogExportResult result )
+{
+    using Result = klogg::livelog::LiveLogExportResult;
+    switch ( result ) {
+    case Result::Succeeded:
+        return {};
+    case Result::Cancelled:
+        return QCoreApplication::translate( "MainWindow", "Saving the live log was cancelled." );
+    case Result::Busy:
+        return QCoreApplication::translate(
+            "MainWindow", "Another save is already running for this live capture." );
+    case Result::TailOverflow:
+        return QCoreApplication::translate(
+            "MainWindow", "The live log changed faster than the bounded save journal could keep up. The previous output binding is still active." );
+    case Result::PartialUnknown:
+        return QCoreApplication::translate(
+            "MainWindow", "Capture progress became uncertain during the save. The candidate was not published as complete." );
+    case Result::SnapshotReadFailed:
+        return QCoreApplication::translate( "MainWindow", "The captured snapshot could not be read." );
+    case Result::WriteFailed:
+        return QCoreApplication::translate( "MainWindow", "The candidate output file could not be written." );
+    case Result::PublishFailed:
+        return QCoreApplication::translate( "MainWindow", "The candidate output file could not be published atomically." );
+    case Result::PublishedReopenFailed:
+        return QCoreApplication::translate(
+            "MainWindow", "The file was published, but could not be reopened as the active live output. The previous binding remains active." );
+    case Result::PublishedCutoverFailed:
+        return QCoreApplication::translate(
+            "MainWindow", "The file was published, but the final live tail could not be transferred. The previous binding remains active." );
+    }
+    return QCoreApplication::translate( "MainWindow", "Saving the live log failed." );
+}
 
 std::optional<const char*>
 filterFavoritesImportWarningSource( PredefinedFiltersCollection::LoadStatus status )
@@ -1614,9 +1699,27 @@ void MainWindow::closeTab( ActionInitiator initiator )
 // Close all tabs
 void MainWindow::closeAll( ActionInitiator initiator )
 {
-    while ( mainTabWidget_.count() ) {
-        closeTab( 0, initiator );
+    if ( closeAllInProgress_ || liveCloseTransaction_ ) {
+        return;
     }
+    closeAllInProgress_ = true;
+    closeAllInitiator_ = initiator;
+    continueCloseAll();
+}
+
+void MainWindow::continueCloseAll()
+{
+    if ( !closeAllInProgress_ || liveCloseTransaction_ ) {
+        return;
+    }
+    if ( mainTabWidget_.count() == 0 ) {
+        closeAllInProgress_ = false;
+        if ( shutdownReadyToAccept_ ) {
+            QTimer::singleShot( 0, Qt::PreciseTimer, this, [ this ] { close(); } );
+        }
+        return;
+    }
+    closeTab( 0, closeAllInitiator_ );
 }
 
 // Select all the text in the currently selected view
@@ -1720,7 +1823,9 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
     }
 
     auto* adbSource = session_.getAdbLogcatSource( crawler );
-    if ( !adbSource ) {
+    auto* exportService = session_.getLiveLogExportService( crawler );
+    auto* controller = session_.getLiveLogController( crawler );
+    if ( !adbSource || !exportService ) {
         return;
     }
 
@@ -1741,17 +1846,73 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
         return;
     }
 
-    if ( !adbSource->bindOutputFile( outputPath, ansiMode ) ) {
-        QMessageBox::critical( this, tr( "Save live log" ),
-                               tr( "Failed to bind live capture to %1" ).arg( outputPath ) );
+    if ( controller != nullptr ) {
+        const auto presentation = controller->controlPresentation();
+        if ( hasUnresolvedLiveIntegrityWarning( presentation ) ) {
+            QMessageBox warning( QMessageBox::Warning, tr( "Save live log with integrity warning" ),
+                                 tr( "The saved data may be incomplete or contain replayed records. %1" )
+                                     .arg( liveIntegrityWarningText( presentation ) ),
+                                 QMessageBox::Save | QMessageBox::Cancel, this );
+            warning.setDefaultButton( QMessageBox::Cancel );
+            if ( warning.exec() != QMessageBox::Save ) {
+                return;
+            }
+        }
+    }
+
+    if ( adbSource->sessionData().boundOutputFile == outputPath
+         && adbSource->sessionData().outputAnsiMode == ansiMode ) {
         return;
     }
 
-    updateLiveTabAppearance( crawler );
-    updateMenuBarFromDocument( crawler );
-    updateOpenedFilesMenu();
-    updateInfoLine();
-    scheduleSessionPersistence();
+    const auto job = exportService->start( outputPath, ansiMode );
+    if ( !job ) {
+        QMessageBox::information( this, tr( "Save live log" ),
+                                  liveExportFailureText(
+                                      klogg::livelog::LiveLogExportResult::Busy ) );
+        return;
+    }
+
+    auto* progress = new QProgressDialog( tr( "Saving live log to %1" ).arg( outputPath ),
+                                          tr( "Cancel" ), 0, 0, this );
+    progress->setObjectName( QStringLiteral( "liveLogExportProgress" ) );
+    progress->setWindowTitle( tr( "Save live log" ) );
+    progress->setWindowModality( Qt::WindowModal );
+    progress->setMinimumDuration( 0 );
+    progress->setAutoClose( false );
+    progress->setAutoReset( false );
+    connect( progress, &QProgressDialog::canceled, job.get(), &klogg::livelog::LiveLogExportJob::cancel );
+    connect( job.get(), &klogg::livelog::LiveLogExportJob::progressChanged, progress,
+             [ progress ]( qint64 bytes ) {
+                 progress->setLabelText(
+                     MainWindow::tr( "Saving live log... %1 bytes written" ).arg( bytes ) );
+             } );
+
+    const QPointer<MainWindow> windowGuard( this );
+    const QPointer<CrawlerWidget> crawlerGuard( crawler );
+    const QPointer<AdbLogcatSource> sourceGuard( adbSource );
+    connect( job.get(), &klogg::livelog::LiveLogExportJob::finished, this,
+             [ windowGuard, crawlerGuard, sourceGuard, progress, ansiMode,
+               job ]( klogg::livelog::LiveLogExportResult result ) {
+                 progress->close();
+                 progress->deleteLater();
+                 if ( windowGuard == nullptr || crawlerGuard == nullptr || sourceGuard == nullptr ) {
+                     return;
+                 }
+                 if ( result == klogg::livelog::LiveLogExportResult::Succeeded ) {
+                     sourceGuard->synchronizeOutputBinding( ansiMode );
+                     windowGuard->updateLiveTabAppearance( crawlerGuard );
+                     windowGuard->updateMenuBarFromDocument( crawlerGuard );
+                     windowGuard->updateOpenedFilesMenu();
+                     windowGuard->updateInfoLine();
+                     windowGuard->scheduleSessionPersistence();
+                 }
+                 else if ( result != klogg::livelog::LiveLogExportResult::Cancelled ) {
+                     QMessageBox::warning( windowGuard, MainWindow::tr( "Save live log" ),
+                                           liveExportFailureText( result ) );
+                 }
+             } );
+    progress->show();
 }
 
 void MainWindow::disconnectCurrentSource()
@@ -2310,6 +2471,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
                 msgBox.setCheckBox( dontAskCheckBox );
 
                 if ( msgBox.exec() != QMessageBox::Yes ) {
+                    closeAllInProgress_ = false;
                     return;
                 }
 
@@ -2342,6 +2504,9 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         }
 
         folder_widget->deleteLater();
+        if ( closeAllInProgress_ ) {
+            QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueCloseAll );
+        }
         return;
     }
 
@@ -2349,9 +2514,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
 
     assert( widget );
 
-    const auto documentId = session_.getDocumentId( widget );
     const auto displayName = session_.getDisplayName( widget );
-    const auto associatedPath = session_.getAssociatedPath( widget );
     const auto documentKind = session_.getDocumentKind( widget );
 
     // Show confirmation dialog for user-initiated closes if enabled
@@ -2378,6 +2541,40 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         }
     }
 
+    if ( documentKind == DocumentKind::AdbLogcat && !shutdownReadyToAccept_ ) {
+        if ( liveCloseTransaction_ ) {
+            return;
+        }
+        const auto mode = initiator == ActionInitiator::App
+                              ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
+                              : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
+        startLiveCloseTransaction( widget, mode, [ this, widget, initiator ]( bool proceed ) {
+            if ( proceed ) {
+                finalizeCrawlerClose( widget, initiator );
+            }
+            else {
+                closeAllInProgress_ = false;
+            }
+        } );
+        return;
+    }
+
+    finalizeCrawlerClose( widget, initiator );
+}
+
+void MainWindow::finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator )
+{
+    if ( widget == nullptr ) {
+        return;
+    }
+    const auto index = mainTabWidget_.indexOf( widget );
+    if ( index < 0 ) {
+        return;
+    }
+    const auto documentId = session_.getDocumentId( widget );
+    const auto associatedPath = session_.getAssociatedPath( widget );
+    const auto documentKind = session_.getDocumentKind( widget );
+
     widget->stopLoading();
     mainTabWidget_.removeCrawler( index );
 
@@ -2391,29 +2588,79 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
         groupManager.save();
     }
 
-    if ( documentKind == DocumentKind::AdbLogcat ) {
-        if ( auto* controller = session_.getLiveLogController( widget ) ) {
-            controller->stopRequested();
-        }
-        if ( auto* adbSource = session_.getAdbLogcatSource( widget ) ) {
-            // Preserve captures only while this window remains in the shutdown
-            // session. User-closed tabs and discarded multi-window sessions are final.
-            const bool discardsCapture = initiator == ActionInitiator::User
-                                         || initiator == ActionInitiator::WindowDiscard;
-            if ( discardsCapture && !session_.exitRequested() ) {
-                adbSource->deleteCaptureFiles();
-            }
-        }
-    }
-
     session_.close( widget );
-
     updateOpenedFilesMenu();
     if ( !shutdownInProgress_ ) {
         scheduleSessionPersistence();
     }
-
     widget->deleteLater();
+    if ( closeAllInProgress_ ) {
+        QTimer::singleShot( 0, Qt::PreciseTimer, this, &MainWindow::continueCloseAll );
+    }
+}
+
+void MainWindow::startLiveCloseTransaction(
+    CrawlerWidget* crawler, klogg::livelog::LiveLogCloseTransaction::Mode mode,
+    std::function<void( bool )> completion )
+{
+    if ( crawler == nullptr || liveCloseTransaction_ ) {
+        return;
+    }
+    auto* controller = session_.getLiveLogController( crawler );
+    auto* source = session_.getAdbLogcatSource( crawler );
+    auto* exportService = session_.getLiveLogExportService( crawler );
+    if ( controller == nullptr || source == nullptr || exportService == nullptr ) {
+        completion( false );
+        return;
+    }
+
+    const bool resumeOnCancel
+        = controller->snapshot().runIntent == klogg::livecapture::RunIntent::Running;
+    liveCloseTransaction_ = std::make_unique<klogg::livelog::LiveLogCloseTransaction>(
+        *controller, *source, *exportService, mode );
+    liveCloseTransaction_->setCallbacks(
+        [ this ]( const klogg::livelog::LiveLogCloseTransaction::Failure& failure ) {
+            if ( !liveCloseTransaction_ ) {
+                return;
+            }
+            QMessageBox message( QMessageBox::Warning, tr( "Live capture could not be closed safely" ),
+                                 failure.kind
+                                         == klogg::livelog::LiveLogCloseTransaction::FailureKind::Persistence
+                                     ? tr( "Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory." )
+                                     : tr( "The active live output could not be flushed. Closing now may lose recent output." ),
+                                 QMessageBox::NoButton, this );
+            auto* retry = message.addButton( tr( "Retry" ), QMessageBox::AcceptRole );
+            auto* cancel = message.addButton( tr( "Cancel" ), QMessageBox::RejectRole );
+            auto* closeAnyway
+                = message.addButton( tr( "Close Anyway (Possible Loss)" ), QMessageBox::DestructiveRole );
+            message.setDefaultButton( qobject_cast<QPushButton*>( cancel ) );
+            message.exec();
+            if ( message.clickedButton() == retry ) {
+                liveCloseTransaction_->retry();
+            }
+            else if ( message.clickedButton() == closeAnyway ) {
+                liveCloseTransaction_->closeAnywayPossibleLoss();
+            }
+            else {
+                liveCloseTransaction_->cancel();
+            }
+        },
+        [ this, controller, resumeOnCancel, completion = std::move( completion ) ](
+            klogg::livelog::LiveLogCloseTransaction::Result result ) mutable {
+            const bool proceed
+                = result != klogg::livelog::LiveLogCloseTransaction::Result::Cancelled;
+            QTimer::singleShot(
+                0, Qt::PreciseTimer, this,
+                [ this, controller, resumeOnCancel, completion = std::move( completion ),
+                  proceed ]() mutable {
+                    liveCloseTransaction_.reset();
+                    if ( !proceed && resumeOnCancel ) {
+                        controller->startRequested();
+                    }
+                    completion( proceed );
+                } );
+        } );
+    liveCloseTransaction_->start();
 }
 
 void MainWindow::currentTabChanged( int index )
@@ -2643,31 +2890,112 @@ void MainWindow::loadFileNonInteractive( const QString& file_name )
 // Events
 //
 
+void MainWindow::beginWindowShutdown( bool preserveWindowSession )
+{
+    if ( shutdownInProgress_ ) {
+        return;
+    }
+    shutdownInProgress_ = true;
+    shutdownPreserveWindowSession_ = preserveWindowSession;
+    shutdownLiveTabs_.clear();
+    shutdownResumeTabs_.clear();
+    shutdownLiveTabIndex_ = 0;
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        auto* crawler = qobject_cast<CrawlerWidget*>( mainTabWidget_.widget( index ) );
+        if ( crawler == nullptr || session_.getDocumentKind( crawler ) != DocumentKind::AdbLogcat ) {
+            continue;
+        }
+        shutdownLiveTabs_.push_back( crawler );
+        if ( const auto* controller = session_.getLiveLogController( crawler );
+             controller != nullptr
+             && controller->snapshot().runIntent == klogg::livecapture::RunIntent::Running ) {
+            shutdownResumeTabs_.push_back( crawler );
+        }
+    }
+    advanceWindowShutdown();
+}
+
+void MainWindow::advanceWindowShutdown()
+{
+    if ( !shutdownInProgress_ || liveCloseTransaction_ ) {
+        return;
+    }
+    if ( shutdownLiveTabIndex_ >= shutdownLiveTabs_.size() ) {
+        finalizeWindowShutdown();
+        return;
+    }
+    auto* crawler = shutdownLiveTabs_.at( shutdownLiveTabIndex_ );
+    const auto mode = shutdownPreserveWindowSession_
+                          ? klogg::livelog::LiveLogCloseTransaction::Mode::Preserve
+                          : klogg::livelog::LiveLogCloseTransaction::Mode::Discard;
+    startLiveCloseTransaction( crawler, mode, [ this ]( bool proceed ) {
+        if ( !proceed ) {
+            abortWindowShutdown();
+            return;
+        }
+        ++shutdownLiveTabIndex_;
+        advanceWindowShutdown();
+    } );
+}
+
+void MainWindow::abortWindowShutdown()
+{
+    for ( auto* crawler : shutdownResumeTabs_ ) {
+        if ( crawler != nullptr && mainTabWidget_.indexOf( crawler ) >= 0 ) {
+            if ( auto* controller = session_.getLiveLogController( crawler );
+                 controller != nullptr
+                 && controller->snapshot().runIntent == klogg::livecapture::RunIntent::Stopped ) {
+                controller->startRequested();
+            }
+        }
+    }
+    shutdownLiveTabs_.clear();
+    shutdownResumeTabs_.clear();
+    shutdownLiveTabIndex_ = 0;
+    shutdownInProgress_ = false;
+    shutdownPreserveWindowSession_ = false;
+    suspendSessionPersistence_ = false;
+}
+
+void MainWindow::finalizeWindowShutdown()
+{
+    // Every live owner is now stopped, export-quiescent, flushed and (for a
+    // preserved window) capture-persisted. Persist tab/session metadata while
+    // every owner is still present, then begin irreversible removal.
+    sessionPersistenceTimer_.stop();
+    suspendSessionPersistence_ = true;
+    writeSettings();
+    TabGroupManager::get().save();
+    session_.close();
+    shutdownReadyToAccept_ = true;
+    closeAllInProgress_ = true;
+    closeAllInitiator_ = shutdownPreserveWindowSession_ ? ActionInitiator::App
+                                                         : ActionInitiator::WindowDiscard;
+    continueCloseAll();
+}
+
 // Closes the application
 void MainWindow::closeEvent( QCloseEvent* event )
 {
+    if ( shutdownReadyToAccept_ && mainTabWidget_.count() == 0 ) {
+        trayIcon_->hide();
+        Q_EMIT windowClosed();
+        event->accept();
+        return;
+    }
+    if ( shutdownInProgress_ ) {
+        event->ignore();
+        return;
+    }
     if ( !isCloseFromTray_ && this->isVisible() && Configuration::get().minimizeToTray() ) {
         event->ignore();
         trayIcon_->show();
         this->hide();
+        return;
     }
-    else {
-        // The last window remains persisted for normal application shutdown;
-        // closing one of several windows removes that session permanently.
-        const bool preserveWindowSession = session_.close();
 
-        shutdownInProgress_ = true;
-        suspendSessionPersistence_ = true;
-        writeSettings();
-        TabGroupManager::get().save();
-
-        closeAll( preserveWindowSession ? ActionInitiator::App
-                                         : ActionInitiator::WindowDiscard );
-        trayIcon_->hide();
-        Q_EMIT windowClosed();
-
-        event->accept();
-    }
+    event->ignore();
+    beginWindowShutdown( session_.preservesOnClose() );
 }
 
 // Minimize handling the application
@@ -3219,6 +3547,24 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
                 toolTip = tr( "%1\nOutput error: %2" ).arg( toolTip, outputError );
             }
         }
+
+        if ( hasUnresolvedLiveIntegrityWarning( projection ) ) {
+            const auto& integrity = projection.integrity;
+            const bool hostLossOrUncertainty
+                = !projection.captureHealthy
+                  || hasHistoricalCapturePersistenceWarning( integrity )
+                  || integrity.gapPossible || integrity.discardedBytes > 0
+                  || integrity.uncertainBytes > 0
+                  || integrity.outputProgressUnknown;
+            const bool tooltipWarning = hostLossOrUncertainty || integrity.replayPossible;
+            if ( hostLossOrUncertainty ) {
+                liveStatus = LiveTabStatus::Error;
+            }
+            if ( tooltipWarning ) {
+                toolTip = tr( "%1\nCapture integrity: %2" )
+                              .arg( toolTip, liveIntegrityWarningText( projection ) );
+            }
+        }
     }
 
     mainTabWidget_.setLiveTabStatus( tabIndex, liveStatus );
@@ -3521,8 +3867,16 @@ void MainWindow::updateInfoLine()
     infoLine->hideGauge();
 
     const auto associatedPath = session_.getAssociatedPath( crawler );
-    const auto currentFile = QDir::toNativeSeparators(
+    const auto infoPath = QDir::toNativeSeparators(
         associatedPath.isEmpty() ? session_.getDisplayName( crawler ) : associatedPath );
+    auto currentFile = infoPath;
+    if ( const auto* controller = session_.getLiveLogController( crawler ) ) {
+        const auto projection = controller->controlPresentation();
+        if ( hasUnresolvedLiveIntegrityWarning( projection ) ) {
+            currentFile += tr( " - Capture integrity warning: %1" )
+                               .arg( liveIntegrityWarningText( projection ) );
+        }
+    }
 
     uint64_t fileSize;
     uint64_t fileNbLine;
@@ -3531,7 +3885,7 @@ void MainWindow::updateInfoLine()
     session_.getFileInfo( crawler, &fileSize, &fileNbLine, &lastModified );
 
     infoLine->setText( currentFile );
-    infoLine->setPath( currentFile );
+    infoLine->setPath( infoPath );
     sizeField->setText( readableSize( fileSize ) );
     encodingField->setText( crawler->encodingText() );
 

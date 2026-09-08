@@ -48,6 +48,22 @@ public:
     virtual void openStream( livecapture::Generation generation,
                              const LiveSourceTransportConfig& config ) = 0;
     virtual void appendBytes( livecapture::Generation generation, const QByteArray& bytes ) = 0;
+    // Compatibility effects are synchronous: successful return accepts the batch.
+    // Real storage effects override this to report W1's authoritative outcome.
+    virtual livecapture::CaptureDeliveryResult acceptBytes(
+        livecapture::Generation generation, const QByteArray& bytes )
+    {
+        appendBytes( generation, bytes );
+        livecapture::CaptureDeliveryResult result;
+        result.acceptedBytes = static_cast<std::uint64_t>( bytes.size() );
+        return result;
+    }
+    virtual void retireStream( livecapture::Generation generation,
+                               livecapture::StopDisposition disposition )
+    {
+        (void)disposition;
+        cancelStream( generation );
+    }
 };
 
 struct LiveLogControllerConfig {
@@ -75,6 +91,9 @@ struct LiveLogControlPresentation {
     livecapture::OutputBindingState outputBinding{ livecapture::OutputBindingState::Healthy };
     std::optional<OutputError> outputBindingError;
     std::optional<std::int64_t> retryCountdownSeconds;
+    bool captureHealthy{ true };
+    std::optional<OutputError> captureHealthError;
+    livecapture::LiveIntegritySummary integrity;
 
     bool sameControlState( const LiveLogControlPresentation& other ) const;
 };
@@ -106,8 +125,11 @@ public:
 
     void armRunIntent();
     void startRequested();
-    void stopRequested();
-    void stopCompleted( livecapture::Generation generation );
+    void stopRequested( livecapture::StopDisposition disposition
+                            = livecapture::StopDisposition::DiscardPending );
+    void stopCompleted( livecapture::Generation generation, std::uint64_t discardedBytes = 0 );
+    void inputTerminated( livecapture::Generation generation,
+                          const livecapture::CaptureDeliveryResult& result );
     void reconnectRequested();
     void refreshPresentationTime();
 
@@ -125,9 +147,13 @@ public:
     void protocolServiceReady( livecapture::Generation generation );
     void streamHandleOpened( livecapture::Generation generation );
     void streamReadArmed( livecapture::Generation generation );
-    void streamBytesReceived( livecapture::Generation generation, const QByteArray& bytes );
+    using DeliverySettledCallback = std::function<void()>;
+    void streamBytesReceived( livecapture::Generation generation, const QByteArray& bytes,
+                              DeliverySettledCallback settled = {} );
     void streamStable( livecapture::Generation generation );
     void streamFailed( livecapture::Generation generation, livecapture::LiveSourceError error );
+    void captureHealthChanged( bool healthy,
+                               std::optional<livecapture::LiveSourceError> error = std::nullopt );
     void outputBindingChanged( livecapture::OutputBindingState state,
                                std::optional<livecapture::LiveSourceError> error = std::nullopt );
 
@@ -138,10 +164,14 @@ private:
     struct PendingDispatch {
         livecapture::LiveStateEvent event;
         std::optional<QByteArray> bytes;
+        DeliverySettledCallback deliverySettled;
     };
 
-    void dispatch( const livecapture::LiveStateEvent& event, const QByteArray* bytes = nullptr );
+    void dispatch( const livecapture::LiveStateEvent& event, const QByteArray* bytes = nullptr,
+                   DeliverySettledCallback deliverySettled = {} );
     void execute( const livecapture::LiveStateEffect& effect, const QByteArray* bytes );
+    void settleDelivery( livecapture::Generation generation,
+                         const livecapture::CaptureDeliveryResult& result, std::uint64_t offered );
     livecapture::Timestamp retryDelay( unsigned attempt ) const;
     LiveSourceTransportConfig transportConfig() const;
     void cancelScheduledRetry();
@@ -157,6 +187,7 @@ private:
     std::unique_ptr<ProductionRuntime> productionRuntime_;
     LiveLogControllerEffects& effects_;
     std::optional<LiveLogScheduler::Token> retryToken_;
+    std::optional<livecapture::Generation> openedGeneration_;
     std::deque<PendingDispatch> pendingDispatches_;
     LiveLogControlPresentation lastControlPresentation_;
     PresentationChangedCallback presentationChangedCallback_;
@@ -166,6 +197,8 @@ private:
 LiveSourceTransportConfig makeLiveSourceTransportConfig( const LiveLogSessionSpec& spec );
 std::optional<livecapture::adb::AdbSmartSocketTransportConfig>
 makeAdbSmartSocketTransportConfig( const LiveSourceTransportConfig& config );
+std::optional<livecapture::LiveSourceError>
+validateIosNativeOptions( const LiveSourceTransportConfig& config );
 std::optional<livecapture::ios::IosNativeStreamConfig>
 makeIosNativeStreamConfig( const LiveSourceTransportConfig& config );
 

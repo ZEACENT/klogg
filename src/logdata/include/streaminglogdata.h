@@ -1,18 +1,22 @@
 #ifndef STREAMINGLOGDATA_H
 #define STREAMINGLOGDATA_H
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include <QFile>
 #include <QRegularExpression>
 #include <QTimer>
 
 #include "capturestore.h"
+#include "platform/platform_files.h"
 #include "rollingfilemanager.h"
 #include "searchablelogdata.h"
 
@@ -49,8 +53,79 @@ class StreamingLogData : public SearchableLogData {
     explicit StreamingLogData( QString captureId, QString captureRoot = {} );
     ~StreamingLogData() override;
 
-    void appendUtf8( const QByteArray& data );
-    void finishInput();
+    enum class OutputExportFailure : std::uint8_t {
+        Busy,
+        Cancelled,
+        TailOverflow,
+        PartialUnknown,
+        SnapshotRead,
+        Write,
+        Publish,
+        PublishedReopen,
+        PublishedCutover,
+    };
+
+    struct OutputExportBatch {
+        std::uint64_t sequence = 0;
+        QByteArray rawUtf8Lines;
+        klogg::vector<qint64> endOfLines;
+        bool finalRecordUnterminated = false;
+    };
+
+    struct OutputExportCandidate {
+        std::uint64_t id = 0;
+        std::uint64_t firstTailSequence = 0;
+        CaptureStore::Snapshot snapshot;
+        LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
+        QByteArray codecName;
+        QString prefilterPattern;
+    };
+
+    struct OutputExportTail {
+        std::vector<OutputExportBatch> batches;
+        std::optional<OutputExportFailure> failure;
+    };
+
+    struct OutputExportEncodingState {
+        QByteArray partialRecord;
+        std::optional<std::uint64_t> nextTailSequence;
+        bool needsSeparator = false;
+    };
+
+    struct OutputExportActivation {
+        bool success = false;
+        std::optional<OutputExportFailure> failure;
+    };
+
+    using OutputExportWrite = std::function<qint64( const QByteArray& )>;
+    using OutputExportCancelled = std::function<bool()>;
+
+    // Registers the cutover journal before fixing the immutable snapshot boundary.
+    // Only one candidate may be pending for a capture.
+    std::optional<OutputExportCandidate>
+    beginOutputExport( LiveLogSaveAnsiMode ansiMode, qint64 maximumTailBytes );
+    OutputExportTail takeOutputExportTail( std::uint64_t candidateId );
+    void cancelOutputExport( std::uint64_t candidateId );
+    OutputExportActivation activatePublishedOutputExport(
+        std::uint64_t candidateId, const QString& outputPath,
+        const klogg::platform::FileIdentity& publishedIdentity,
+        OutputExportEncodingState encodingState );
+    static bool writeOutputExportSnapshot( const OutputExportCandidate& candidate,
+                                           OutputExportEncodingState& state,
+                                           const OutputExportWrite& write,
+                                           const OutputExportCancelled& cancelled = {} );
+    static bool writeOutputExportBatches( const OutputExportCandidate& candidate,
+                                          const std::vector<OutputExportBatch>& batches,
+                                          OutputExportEncodingState& state,
+                                          const OutputExportWrite& write );
+    bool hasPendingOutputExport() const;
+
+    CaptureStore::AppendResult appendUtf8( const QByteArray& data );
+    CaptureStore::AppendResult finishInput();
+    CaptureStore::PersistenceResult persistCapture( int maxSegments = 32 );
+    CaptureStore::PersistenceResult retryPersistence( int maxSegments = 8 );
+    CaptureStore::PersistenceResult persistenceState() const;
+    CaptureStore::Snapshot captureSnapshot() const;
     void clearCapture();
     void setCaptureLimits( CaptureStore::Limits limits );
     bool bindOutputFile( const QString& outputPath );
@@ -58,6 +133,7 @@ class StreamingLogData : public SearchableLogData {
     bool bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode, OutputBindMode mode );
     QString boundOutputFile() const;
     std::optional<CaptureOutputError> captureOutputError() const;
+    std::optional<CaptureOutputError> flushOutputForClose();
     QString captureId() const;
     QString capturePath() const;
     void deleteCaptureFiles();
@@ -75,6 +151,8 @@ class StreamingLogData : public SearchableLogData {
 
   Q_SIGNALS:
       void captureOutputChanged( bool healthy, CaptureOutputError error );
+      // Current spool health, not a claim that pending bytes are durable.
+      void capturePersistenceChanged( bool healthy, CaptureStore::PersistenceFailure error );
 
   protected:
     QString doGetLineString( LineNumber line ) const override;
@@ -107,6 +185,18 @@ class StreamingLogData : public SearchableLogData {
         klogg::vector<qint64> endOfLines;
     };
 
+    struct PendingOutputExport {
+        std::uint64_t id = 0;
+        std::uint64_t firstTailSequence = 0;
+        qint64 maximumTailBytes = 0;
+        qint64 tailBytes = 0;
+        LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
+        QByteArray codecName;
+        QString prefilterPattern;
+        std::deque<OutputExportBatch> tail;
+        std::optional<OutputExportFailure> failure;
+    };
+
     void scheduleLoadingFinished( int delayMs = 0 );
     ProcessedAnsiLine processedAnsiLine( LineNumber line ) const;
     void clearAnsiDisplayCache();
@@ -121,27 +211,28 @@ class StreamingLogData : public SearchableLogData {
     void closeDisplayOutputFile( bool clearBinding = true );
     static CaptureOutputError
     captureStoreOutputError( std::optional<CaptureStore::OutputFailure> failure );
-    OutputBindResult writeDisplayLinesToDevice( LineNumber first, LinesCount count,
-                                                QIODevice* output );
-    OutputBindResult writeDisplayLinesToOutput( LineNumber first, LinesCount count,
-                                                bool reportFailures = true,
-                                                bool allowRotation = true );
+    OutputBindResult writeDisplayLinesToDevice( QIODevice* output );
+    QByteArray displayOutputRecord( const QByteArray& bytes, bool terminated ) const;
     bool isOutputFileActive() const;
     bool outputRefersToPath( const QString& path ) const;
     void reportCaptureOutputHealthy();
     void reportCaptureOutputFailure( CaptureOutputError error );
     void checkPreservedOutputState();
-    // Writes the lines appended in `appendResult` to the Strip-mode display
-    // file.  Addresses the appended lines by their current tail position so it
-    // is correct even when trimming has shifted line numbers — never by a
-    // [previous, current) delta (which underflows when trimming removes more
-    // lines than were added).
-    void writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult );
+    void reportPersistenceState( const CaptureStore::PersistenceResult& state );
+    void journalOutputExport( const CaptureStore::AppendResult& appendResult );
+    static QByteArray transformOutputRecord( const OutputExportCandidate& candidate,
+                                             const QByteArray& bytes, bool terminated );
+    static bool writeAllOutputBytes( const QByteArray& bytes, const OutputExportWrite& write );
+    // Transform only the confirmed accepted normalized batch, never the retained tail.
+    void writeAppendedDisplayLines( CaptureStore::AppendResult& appendResult );
     klogg::vector<QString> getLines( LineNumber first, LinesCount number ) const;
+    static qint64 cachedRawBatchMetadataBytes( const CachedRawBatch& batch );
     void rememberAppendedRawLines( const CaptureStore::AppendResult& appendResult );
     std::optional<RawLines> tryBuildCachedRawLines( LineNumber first, LinesCount number ) const;
 
   private:
+    // Serializes capture mutation, candidate registration and final cutover.
+    mutable std::recursive_mutex appendOrderingMutex_;
     CaptureStore captureStore_;
     TextCodecHolder codec_;
     QRegularExpression prefilterPattern_;
@@ -157,11 +248,29 @@ class StreamingLogData : public SearchableLogData {
     RollingFileManager rollingDisplayOutput_;
     qint64 rollingMaxFileSize_ = 0;
     int rollingBackupCount_ = 0;
+    bool displayOutputNeedsSeparator_ = false;
+    std::function<qint64( const QByteArray& )> outputWriteForTesting_;
+    qint64 replayPeakBufferForTesting_ = 0;
     LiveLogSaveAnsiMode outputSaveAnsiMode_ = LiveLogSaveAnsiMode::Strip;
     std::optional<CaptureOutputError> captureOutputError_;
+    std::optional<CaptureStore::PersistenceFailure> persistenceFailure_;
+    std::optional<PendingOutputExport> pendingOutputExport_;
+    std::uint64_t nextOutputExportId_ = 0;
+    std::uint64_t nextOutputDeliverySequence_ = 0;
+    static constexpr std::size_t CachedRawBatchCountLimit = 65536u;
+    static constexpr qint64 CachedRawBatchMetadataBytesLimit = 32LL * 1024 * 1024;
+    static constexpr qint64 CachedRawBatchTargetBytes = 64LL * 1024;
+    static constexpr LinesCount::UnderlyingType CachedRawBatchLineLimit = 4096;
+
     mutable std::mutex cachedRawBatchesMutex_;
-    std::deque<CachedRawBatch> cachedRawBatches_;
+    // Queries retain immutable shared batches after releasing this lock. New
+    // appends may coalesce only into a uniquely-owned tail batch.
+    std::deque<std::shared_ptr<CachedRawBatch>> cachedRawBatches_;
     qint64 cachedRawBytes_ = 0;
+    qint64 cachedRawMetadataBytes_ = 0;
+    std::size_t cachedRawBatchCountLimit_ = CachedRawBatchCountLimit;
+    qint64 cachedRawMetadataBytesLimit_ = CachedRawBatchMetadataBytesLimit;
+    mutable std::uint64_t cachedRawLookupBatchVisitsForTesting_ = 0;
     mutable std::mutex ansiDisplayCacheMutex_;
     mutable std::deque<LineNumber::UnderlyingType> ansiDisplayCacheOrder_;
     mutable std::unordered_map<LineNumber::UnderlyingType, ProcessedAnsiLine> ansiDisplayCache_;

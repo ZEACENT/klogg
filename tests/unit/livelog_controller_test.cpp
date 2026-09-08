@@ -18,6 +18,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -244,6 +245,17 @@ public:
         observe( Kind::AppendBytes, generation, {}, bytes );
     }
 
+    live::CaptureDeliveryResult acceptBytes( live::Generation generation,
+                                              const QByteArray& bytes ) override
+    {
+        appendBytes( generation, bytes );
+        if ( reportedResult ) { return *reportedResult; }
+        live::CaptureDeliveryResult result;
+        result.acceptedBytes = static_cast<std::uint64_t>( bytes.size() );
+        return result;
+    }
+    std::optional<live::CaptureDeliveryResult> reportedResult;
+
     std::size_t count( Kind kind ) const
     {
         return static_cast<std::size_t>( std::count_if(
@@ -327,6 +339,243 @@ void checkProjectionMatches( const livelog::LiveLogController& controller )
 }
 
 } // namespace
+
+TEST_CASE( "Retirement completion is not an authorization availability notification",
+           "[livelog-controller][w2-authorization-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.userActionRequired( generation, live::AwaitingUserReason::Trust );
+    controller.stopCompleted( generation );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::AwaitingUser );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
+    controller.deviceAvailable( controller.snapshot().generation );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 2u );
+}
+
+TEST_CASE( "Stop completion cannot hide a terminal capture finalization failure",
+           "[livelog-controller][w2-finalize-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.streamBytesReceived( generation, QByteArrayLiteral( "partial" ) );
+    controller.stopRequested( live::StopDisposition::SettleAccepted );
+    live::CaptureDeliveryResult failure;
+    failure.disposition = live::DeliveryDisposition::Rejected;
+    failure.failureCode = "capture-directory";
+    controller.inputTerminated( generation, failure );
+    controller.stopCompleted( generation );
+    REQUIRE( controller.snapshot().source.failure.has_value() );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
+    CHECK( controller.spec().integrity.acceptedBytes == 7u );
+    CHECK_FALSE( controller.snapshot().source.stoppingGeneration.has_value() );
+}
+
+TEST_CASE( "A throwing postcommit observer cannot erase queued capture deliveries",
+           "[livelog-controller][w2-observer-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    bool first = true;
+    controller.setPresentationChangedCallback( [&]( auto, auto ) {
+        if ( std::exchange( first, false ) ) {
+            controller.streamBytesReceived( generation, QByteArrayLiteral( "tail" ) );
+            throw std::runtime_error( "presentation observer failed after capture" );
+        }
+    } );
+    controller.streamBytesReceived( generation, QByteArrayLiteral( "head" ) );
+    CHECK_NOTHROW( controller.captureHealthChanged( false, outputBindingError() ) );
+    CHECK( controller.spec().integrity.acceptedBytes == 8u );
+    CHECK( effects.count( RecordingEffects::Kind::AppendBytes ) == 2u );
+}
+
+TEST_CASE( "Capture health recovers independently without erasing historical integrity",
+           "[livelog-controller][w2-presentation-red]" )
+{
+    auto spec = androidSpec();
+    spec.integrity.gapPossible = true;
+    spec.integrity.discardedBytes = 33u;
+    spec.integrity.record( "historical-discard", 33u );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( spec, controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    unsigned notifications = 0;
+    controller.setPresentationChangedCallback( [&]( auto, auto ) { ++notifications; } );
+    controller.captureHealthChanged( false, outputBindingError() );
+    CHECK_FALSE( controller.controlPresentation().captureHealthy );
+    CHECK( controller.controlPresentation().captureHealthError.has_value() );
+    CHECK( notifications == 1u );
+    controller.captureHealthChanged( true );
+    CHECK( notifications == 2u );
+    CHECK( controller.controlPresentation().captureHealthy );
+    CHECK( controller.controlPresentation().integrity.gapPossible );
+    CHECK( controller.controlPresentation().integrity.discardedBytes == 33u );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
+}
+
+TEST_CASE( "Authoritative acceptance settles known partial unknown and postcommit observer outcomes",
+           "[livelog-controller][w2-outcome-red]" )
+{
+    const auto disposition = GENERATE( live::DeliveryDisposition::Complete,
+        live::DeliveryDisposition::Rejected, live::DeliveryDisposition::PartialKnown,
+        live::DeliveryDisposition::PartialUnknown );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    live::CaptureDeliveryResult outcome;
+    outcome.disposition = disposition;
+    outcome.acceptedBytes = disposition == live::DeliveryDisposition::Rejected ? 0u
+        : disposition == live::DeliveryDisposition::Complete ? 4u : 2u;
+    outcome.committedBytes = 99u; // Includes an earlier partial, not retained-line delta.
+    outcome.committedLines = 7u;
+    outcome.notificationFailed = disposition == live::DeliveryDisposition::Complete;
+    outcome.outputBytes = 11u;
+    effects.reportedResult = outcome;
+    CHECK_NOTHROW( controller.streamBytesReceived( generation, QByteArrayLiteral( "abcd" ) ) );
+    const auto& integrity = controller.spec().integrity;
+    CHECK( integrity.offeredBytes == 4u );
+    CHECK( integrity.dequeuedBytes == 4u );
+    CHECK( integrity.acceptedBytes == outcome.acceptedBytes );
+    CHECK( integrity.uncertainBytes
+        == ( disposition == live::DeliveryDisposition::PartialUnknown ? 2u : 0u ) );
+    CHECK( integrity.discardedBytes
+        == ( disposition == live::DeliveryDisposition::PartialUnknown ? 0u : 4u - outcome.acceptedBytes ) );
+    CHECK( integrity.committedBytes == 99u );
+    CHECK( integrity.committedLines == 7u );
+    CHECK( integrity.outputBytes == 11u );
+    CHECK( integrity.sourceCompletenessUnknown );
+    CHECK( effects.count( RecordingEffects::Kind::AppendBytes ) == 1u );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
+}
+
+TEST_CASE( "Recovery policy cannot be bypassed by catalog notification order",
+           "[livelog-controller][w2-control-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    const auto catalogFirst = GENERATE( false, true );
+    const auto infrastructureLoss = GENERATE( false, true );
+    const auto authorizationLoss = GENERATE( false, true );
+    auto spec = useIos ? iosSpec() : androidSpec();
+    spec.capture.autoReconnectEnabled = false;
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( spec, controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    auto loseAvailability = [&] {
+        if ( infrastructureLoss ) {
+            controller.infrastructureChanged( live::InfrastructureStatus::Unavailable );
+        }
+        else if ( authorizationLoss ) {
+            controller.userActionRequired( controller.snapshot().generation, live::AwaitingUserReason::Trust );
+        }
+        else {
+            controller.deviceAbsent( controller.snapshot().generation );
+        }
+    };
+    if ( catalogFirst ) { loseAvailability(); }
+    controller.streamFailed( generation, retryableStreamError() );
+    if ( !catalogFirst ) { loseAvailability(); }
+    controller.stopCompleted( generation );
+    controller.infrastructureChanged( live::InfrastructureStatus::Ready );
+    controller.deviceAvailable( controller.snapshot().generation );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
+    controller.reconnectRequested();
+    controller.deviceAvailable( controller.snapshot().generation );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 2u );
+}
+
+TEST_CASE( "Permanent capture failure survives later absence and availability",
+           "[livelog-controller][w2-control-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.streamFailed( generation, outputBindingError() );
+    controller.stopCompleted( generation );
+    controller.deviceAbsent( controller.snapshot().generation );
+    controller.infrastructureChanged( live::InfrastructureStatus::Unavailable );
+    controller.infrastructureChanged( live::InfrastructureStatus::Ready );
+    controller.deviceAvailable( controller.snapshot().generation );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
+    CHECK( controller.snapshot().source.failure.has_value() );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
+}
+
+TEST_CASE( "Automatic retirement waits for the registered stop barrier before opening",
+           "[livelog-controller][w2-control-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.deviceAbsent( generation );
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK( controller.spec().integrity.replayPossible );
+    REQUIRE( controller.snapshot().generation != generation );
+    controller.deviceAvailable( controller.snapshot().generation );
+    controller.protocolServiceReady( generation );
+    controller.streamReadArmed( generation );
+    controller.stopCompleted( generation + 19u );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
+    controller.stopCompleted( generation );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 2u );
+}
+
+TEST_CASE( "Append exceptions are terminal and do not escape or replay buffered deliveries",
+           "[livelog-controller][w2-control-red]" )
+{
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    unsigned calls = 0;
+    std::uint64_t presentedDiscarded = 0;
+    controller.setPresentationChangedCallback( [&]( auto presentation, auto ) {
+        presentedDiscarded = presentation.integrity.discardedBytes;
+    } );
+    effects.beforeRecord = [&]( auto kind, auto ) {
+        if ( kind == RecordingEffects::Kind::AppendBytes ) {
+            ++calls;
+            controller.streamBytesReceived( generation, QByteArrayLiteral( "buffered\n" ) );
+            throw std::runtime_error( "sink failed after unknown mutation" );
+        }
+    };
+    CHECK_NOTHROW( controller.streamBytesReceived( generation, QByteArrayLiteral( "offered\n" ) ) );
+    CHECK( calls == 1u );
+    CHECK( controller.spec().integrity.discardedBytes == 9u );
+    CHECK( presentedDiscarded == 9u );
+    CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
+    REQUIRE( controller.snapshot().source.failure.has_value() );
+    CHECK( controller.snapshot().source.failure->category == live::ErrorCategory::Capture );
+    CHECK( controller.snapshot().source.failure->retryPolicy == live::RetryPolicy::Never );
+}
 
 TEST_CASE( "Live byte batches advance data without control presentation notifications",
            "[livelog-controller][live-presentation-red]" )
@@ -457,6 +706,12 @@ TEST_CASE( "Control presentation preserves diagnostics gates and recovery",
         CHECK( observed.back().awaitingUserReason == reason );
     }
     for ( const auto* message : { "Infrastructure failed", "Changed infrastructure diagnostic" } ) {
+        if ( controller.snapshot().source.status == live::SourceStatus::Failed ) {
+            if ( controller.snapshot().source.stoppingGeneration ) {
+                controller.stopCompleted( *controller.snapshot().source.stoppingGeneration );
+            }
+            controller.reconnectRequested();
+        }
         auto failure = retryableStreamError();
         failure.message = message;
         failure.retryPolicy = live::RetryPolicy::Never;
@@ -542,6 +797,7 @@ TEST_CASE( "Presentation countdown uses nonnegative ceil seconds without changin
     std::vector<livelog::LiveLogPresentationChange> changes;
     controller.setPresentationChangedCallback( [ & ]( auto, auto change ) { changes.push_back( change ); } );
     controller.streamFailed( controller.snapshot().generation, retryableStreamError() );
+    controller.stopCompleted( *controller.snapshot().source.stoppingGeneration );
     REQUIRE( changes.size() == 1u );
     CHECK( changes.back() == livelog::LiveLogPresentationChange::Control );
     CHECK( controller.controlPresentation().retryAttempt == 1u );
@@ -571,6 +827,7 @@ TEST_CASE( "Presentation countdown uses nonnegative ceil seconds without changin
     CHECK( changes.back() == livelog::LiveLogPresentationChange::Control );
     CHECK_FALSE( controller.controlPresentation().retryCountdownSeconds.has_value() );
     controller.stopRequested();
+    controller.stopCompleted( *controller.snapshot().source.stoppingGeneration );
     const auto count = changes.size();
     controller.streamBytesReceived( controller.snapshot().generation - 1u, QByteArrayLiteral( "stale\n" ) );
     controller.streamFailed( controller.snapshot().generation - 1u, retryableStreamError() );
@@ -799,6 +1056,7 @@ TEST_CASE( "Retry countdown belongs to each tab and is driven by injected time",
 
     clock.set( at( 1000 ) );
     first.streamFailed( firstGeneration, retryableStreamError( "first" ) );
+    first.stopCompleted( firstGeneration );
     const auto firstTimer = scheduler.latestToken();
     CHECK( scheduler.deadline( firstTimer ) == at( 2000 ) );
 
@@ -834,6 +1092,7 @@ TEST_CASE( "Stable interval resets exponential backoff but first bytes do not",
     const auto firstGeneration = controller.snapshot().generation;
     clock.set( at( 100 ) );
     controller.streamFailed( firstGeneration, retryableStreamError() );
+    controller.stopCompleted( firstGeneration );
     const auto firstRetry = scheduler.latestToken();
     CHECK( scheduler.deadline( firstRetry ) == at( 1100 ) );
 
@@ -870,6 +1129,7 @@ TEST_CASE( "Retry exhaustion removes the countdown and leaves no active retry ca
         const auto generation = controller.snapshot().generation;
         clock.set( at( static_cast<std::int64_t>( failure ) * 1000 ) );
         controller.streamFailed( generation, retryableStreamError() );
+        controller.stopCompleted( generation );
         if ( failure < 3u ) {
             CHECK( controller.presentation().retryCountdownVisible );
             const auto retry = scheduler.latestToken();
@@ -961,6 +1221,7 @@ TEST_CASE( "Typed Android options reach transport config and command on every ge
 
     clock.set( at( 100 ) );
     controller.reconnectRequested();
+    controller.stopCompleted( first.generation );
     const auto reconnectGeneration = controller.snapshot().generation;
     controller.deviceAvailable( reconnectGeneration );
     const auto second = effects.latest( RecordingEffects::Kind::OpenStream );
@@ -971,8 +1232,8 @@ TEST_CASE( "Typed Android options reach transport config and command on every ge
     CHECK( second.config.androidPid == first.config.androidPid );
 }
 
-TEST_CASE( "Typed iOS options reach native worker config unchanged on reconnect",
-           "[livelog-controller][red][ios-options]" )
+TEST_CASE( "Unsupported typed iOS options stay correlated but native conversion rejects them",
+           "[livelog-controller][ios-options][validation][w3-ios-options-red]" )
 {
     ManualClock clock;
     ManualScheduler scheduler;
@@ -988,15 +1249,11 @@ TEST_CASE( "Typed iOS options reach native worker config unchanged on reconnect"
     CHECK( first.config.iosJsonOutput );
 
     const auto worker = livelog::makeIosNativeStreamConfig( first.config );
-    REQUIRE( worker.has_value() );
-    CHECK( worker->logOptions.level == "debug" );
-    CHECK( worker->logOptions.categories
-           == std::vector<std::string>{ "network", "signpost" } );
-    CHECK( worker->logOptions.subsystem == "com.example.app" );
-    CHECK( worker->logOptions.outputFormat == ios::IosLogOutputFormat::Json );
+    CHECK_FALSE( worker.has_value() );
 
     clock.set( at( 100 ) );
     controller.reconnectRequested();
+    controller.stopCompleted( first.generation );
     const auto reconnectGeneration = controller.snapshot().generation;
     controller.deviceAvailable( reconnectGeneration );
     const auto second = effects.latest( RecordingEffects::Kind::OpenStream );
@@ -1041,6 +1298,7 @@ TEST_CASE( "Stale generation callbacks and cancelled scheduled effects are ignor
     clock.set( at( 1000 ) );
     controller.streamFailed( failedGeneration, retryableStreamError() );
     const auto staleTimer = scheduler.latestToken();
+    controller.stopCompleted( failedGeneration );
     controller.reconnectRequested();
     const auto currentGeneration = controller.snapshot().generation;
     const auto effectCount = effects.records.size();
@@ -1073,7 +1331,7 @@ TEST_CASE( "Reentrant effect callbacks wait until the current effect batch is re
 
     effects.beforeRecord = [ &controller, &effects ]( RecordingEffects::Kind kind,
                                                       live::Generation generation ) {
-        if ( kind != RecordingEffects::Kind::InvalidateGeneration ) {
+        if ( kind != RecordingEffects::Kind::StartInfrastructure ) {
             return;
         }
         effects.beforeRecord = {};
@@ -1083,14 +1341,17 @@ TEST_CASE( "Reentrant effect callbacks wait until the current effect batch is re
     clock.set( at( 500 ) );
     controller.reconnectRequested();
 
-    REQUIRE( effects.records.size() == 4u );
+    REQUIRE( effects.records.size() == 2u );
+    controller.stopCompleted( oldGeneration );
+    REQUIRE( effects.records.size() == 5u );
     CHECK( effects.records.at( 0 ).kind == RecordingEffects::Kind::InvalidateGeneration );
     CHECK( effects.records.at( 1 ).kind == RecordingEffects::Kind::CancelStream );
     CHECK( effects.records.at( 1 ).generation == oldGeneration );
-    CHECK( effects.records.at( 2 ).kind == RecordingEffects::Kind::StartInfrastructure );
-    CHECK( effects.records.at( 2 ).generation == controller.snapshot().generation );
-    CHECK( effects.records.at( 3 ).kind == RecordingEffects::Kind::OpenStream );
+    CHECK( effects.records.at( 2 ).kind == RecordingEffects::Kind::InvalidateGeneration );
+    CHECK( effects.records.at( 3 ).kind == RecordingEffects::Kind::StartInfrastructure );
     CHECK( effects.records.at( 3 ).generation == controller.snapshot().generation );
+    CHECK( effects.records.at( 4 ).kind == RecordingEffects::Kind::OpenStream );
+    CHECK( effects.records.at( 4 ).generation == controller.snapshot().generation );
     CHECK( controller.snapshot().source.status == live::SourceStatus::OpeningStream );
 }
 
@@ -1171,6 +1432,7 @@ TEST_CASE( "A scheduler that completes inline cannot leave a stale retry token",
 
     controller.streamFailed( controller.snapshot().generation, retryableStreamError() );
 
+    controller.stopCompleted( *controller.snapshot().source.stoppingGeneration );
     CHECK( scheduler.scheduleCalls == 1 );
     CHECK( controller.snapshot().source.status == live::SourceStatus::OpeningStream );
     CHECK_FALSE( controller.snapshot().retryTimer.has_value() );

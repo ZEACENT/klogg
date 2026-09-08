@@ -212,6 +212,47 @@ private:
 
 } // namespace
 
+TEST_CASE( "Live integrity persists exact uint64 values and bounded historical events",
+           "[livelog-session-spec][w2-integrity-red]" )
+{
+    auto spec = makeAndroidSpec();
+    spec.integrity.acceptedBytes = std::numeric_limits<std::uint64_t>::max() - 2u;
+    spec.integrity.offeredBytes = std::numeric_limits<std::uint64_t>::max();
+    spec.integrity.dequeuedBytes = spec.integrity.offeredBytes;
+    spec.integrity.discardedBytes = 2u;
+    spec.integrity.gapPossible = true;
+    spec.integrity.replayPossible = true;
+    for ( unsigned i = 0; i < 100u; ++i ) { spec.integrity.record( "stream-retired", i ); }
+    CHECK( spec.integrity.recentEvents.size() == live::LiveIntegritySummary::MaxRecentEvents );
+    CHECK( spec.integrity.olderEvents == 68u );
+    const auto json = serializeSpec( spec );
+    const auto parsed = klogg::livelog::parsePersistedSpec( json );
+    REQUIRE( parsed.ok() );
+    CHECK( parsed.spec->integrity == spec.integrity );
+    const auto bridged = klogg::livelog::sessionSpecFromSessionData(
+        klogg::livelog::sessionDataFromSpec( spec ) );
+    CHECK( bridged.integrity == spec.integrity );
+    const auto runtime = klogg::livelog::sessionDataFromSpec( spec );
+    const auto legacyRoundtrip = AdbLogcatSessionData::fromJson(
+        QString::fromUtf8( QJsonDocument( runtime.toJson() ).toJson() ) );
+    CHECK( legacyRoundtrip.integrity == spec.integrity );
+    CHECK( json.contains( QStringLiteral( "18446744073709551613" ) ) );
+}
+
+TEST_CASE( "Malformed live integrity does not silently become a healthy history",
+           "[livelog-session-spec][w2-integrity-red]" )
+{
+    const auto bad = GENERATE( QStringLiteral( R"({"version":99})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":9007199254740993})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":"-1"})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":"18446744073709551616"})" ) );
+    auto object = QJsonDocument::fromJson( serializeSpec( makeAndroidSpec() ).toUtf8() ).object();
+    object.insert( QStringLiteral( "integrity" ), QJsonDocument::fromJson( bad.toUtf8() ).object() );
+    const auto result = klogg::livelog::parsePersistedSpec( QString::fromUtf8( QJsonDocument( object ).toJson() ) );
+    CHECK_FALSE( result.ok() );
+    CHECK( result.hasFatalDiagnostic() );
+}
+
 TEST_CASE( "Fresh Android session spec serializes typed fields without raw command data",
            "[livelog-session-spec]" )
 {

@@ -23,6 +23,7 @@
 #include "adblogcatsource.h"
 #include "ioscatalogprovider.h"
 #include "livelogcontroller.h"
+#include "livelogexportservice.h"
 #include "livelogsession.h"
 #include "log.h"
 
@@ -108,13 +109,32 @@ public:
     ~SessionLiveLogEffects() override
     {
         QObject::disconnect( captureConnection_ );
+        QObject::disconnect( persistenceConnection_ );
         stopAvailabilityObservation();
         source_->setControllerCallbacks( {}, {}, {} );
+        source_->setStoppedCallback( {} );
+        source_->setFinalizedCallback( {} );
     }
 
     void attach( klogg::livelog::LiveLogController& controller )
     {
         controller_ = &controller;
+        source_->setFinalizedCallback( [ this ]( auto generation, const auto& result ) {
+            controller_->inputTerminated( generation, result );
+        } );
+        source_->setStoppedCallback( [ this ]( auto generation, auto discarded ) {
+            controller_->stopCompleted( generation, discarded );
+        } );
+        persistenceConnection_ = QObject::connect(
+            source_.get(), &AdbLogcatSource::capturePersistenceChanged, source_.get(),
+            [ this ]( bool healthy, CaptureStore::PersistenceFailure error ) {
+                if ( healthy ) { controller_->captureHealthChanged( true ); return; }
+                controller_->captureHealthChanged( false, klogg::livecapture::LiveSourceError{
+                    klogg::livecapture::ErrorCategory::Capture, "capture-persistence-degraded",
+                    klogg::livecapture::ErrorScope::Capture, klogg::livecapture::RetryPolicy::Never,
+                    "Capture spool persistence is degraded; buffered data remains at risk.",
+                    std::to_string( static_cast<unsigned>( error ) ) } );
+            } );
         captureConnection_ = QObject::connect(
             source_.get(), &AdbLogcatSource::captureOutputChanged, source_.get(),
             [ this ]( bool healthy, CaptureOutputError error ) {
@@ -130,8 +150,8 @@ public:
                                                    outputBindingError( error ) );
             } );
         source_->setControllerCallbacks(
-            [ this ]( auto generation, const QByteArray& bytes ) {
-                controller_->streamBytesReceived( generation, bytes );
+            [ this ]( auto generation, const QByteArray& bytes, auto settled ) {
+                controller_->streamBytesReceived( generation, bytes, std::move( settled ) );
             },
             [ this ]( auto generation, LiveSourceTransport::State state ) {
                 switch ( state ) {
@@ -177,12 +197,13 @@ public:
 
     void cancelStream( klogg::livecapture::Generation generation ) override
     {
-        source_->cancelTransport( generation );
-        if ( controller_ != nullptr
-             && controller_->snapshot().source.status
-                    == klogg::livecapture::SourceStatus::Stopping ) {
-            controller_->stopCompleted( generation );
-        }
+        retireStream( generation, klogg::livecapture::StopDisposition::DiscardPending );
+    }
+
+    void retireStream( klogg::livecapture::Generation generation,
+                       klogg::livecapture::StopDisposition disposition ) override
+    {
+        source_->cancelTransport( generation, disposition );
         if ( controller_ != nullptr
              && controller_->snapshot().runIntent == klogg::livecapture::RunIntent::Stopped ) {
             stopAvailabilityObservation();
@@ -220,6 +241,12 @@ public:
                       const QByteArray& bytes ) override
     {
         source_->appendTransportBytes( generation, bytes );
+    }
+
+    klogg::livecapture::CaptureDeliveryResult acceptBytes(
+        klogg::livecapture::Generation generation, const QByteArray& bytes ) override
+    {
+        return source_->appendTransportBytes( generation, bytes );
     }
 
 private:
@@ -436,6 +463,7 @@ private:
     klogg::livecapture::adb::AdbInfrastructureLease adbLease_;
     QMetaObject::Connection adbConnection_;
     QMetaObject::Connection captureConnection_;
+    QMetaObject::Connection persistenceConnection_;
     std::optional<klogg::livecapture::ios::IosCatalogSnapshotProvider::SubscriptionId>
         iosSubscription_;
     std::uint64_t iosObservationEpoch_{ 0 };
@@ -609,7 +637,8 @@ ViewInterface* Session::openFolder( const QString& folderPath,
                                    nullptr, // adbLogcatSource
                                    view,
                                    nullptr, // liveLogEffects
-                                   nullptr } } ); // liveLogController
+                                   nullptr, // liveLogController
+                                   nullptr } } ); // liveLogExportService
 
     return view;
 }
@@ -689,6 +718,14 @@ Session::getLiveLogController( const ViewInterface* view ) const
     const OpenFile* file = findOpenFileFromView( view );
     assert( file );
     return file->liveLogController.get();
+}
+
+klogg::livelog::LiveLogExportService*
+Session::getLiveLogExportService( const ViewInterface* view ) const
+{
+    const OpenFile* file = findOpenFileFromView( view );
+    assert( file );
+    return file->liveLogExportService.get();
 }
 
 QStringList Session::lastRestoreRejections() const
@@ -779,6 +816,7 @@ ViewInterface* Session::openAlways( const QString& file_name,
                            log_filtered_data,
                            {},
                            view,
+                           {},
                            {},
                            {} } } );
 
@@ -884,11 +922,12 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
         }
     }
 
+    auto liveExportService = std::make_shared<klogg::livelog::LiveLogExportService>( logData );
     openFiles_.insert( { view,
                          { runtimeSessionData.documentId(), runtimeSessionData.documentId(),
                            runtimeSessionData.displayName(), runtimeSessionData.associatedPath(),
                            DocumentKind::AdbLogcat, logData, logFilteredData, adbSource, view,
-                           liveEffects, liveController } } );
+                           liveEffects, liveController, liveExportService } } );
 
     return view;
 }
@@ -1137,6 +1176,11 @@ void WindowSession::restoreGeometry( QByteArray* geometry ) const
 {
     const auto& session = SessionInfo::getSynced();
     *geometry = session.geometry( windowId_ );
+}
+
+bool WindowSession::preservesOnClose() const
+{
+    return appSession_->exitRequested() || SessionInfo::getSynced().windows().size() <= 1;
 }
 
 bool WindowSession::close()

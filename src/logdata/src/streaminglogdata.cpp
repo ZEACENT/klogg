@@ -1,5 +1,8 @@
 #include "streaminglogdata.h"
 
+#include <algorithm>
+#include <limits>
+
 #include <QDir>
 #include <QFileInfo>
 #include <QMetaObject>
@@ -47,8 +50,302 @@ StreamingLogData::~StreamingLogData()
     closeDisplayOutputFile();
 }
 
-void StreamingLogData::appendUtf8( const QByteArray& data )
+std::optional<StreamingLogData::OutputExportCandidate>
+StreamingLogData::beginOutputExport( LiveLogSaveAnsiMode ansiMode, qint64 maximumTailBytes )
 {
+    std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    if ( pendingOutputExport_.has_value() || maximumTailBytes <= 0 ) {
+        return std::nullopt;
+    }
+
+    if ( nextOutputExportId_ == std::numeric_limits<std::uint64_t>::max() ) {
+        nextOutputExportId_ = 0;
+    }
+    PendingOutputExport pending;
+    pending.id = ++nextOutputExportId_;
+    pending.firstTailSequence = nextOutputDeliverySequence_ + 1u;
+    pending.maximumTailBytes = maximumTailBytes;
+    pending.ansiMode = ansiMode;
+    pending.codecName = codec_.codec()->name();
+    pending.prefilterPattern = prefilterPattern_.pattern();
+    pendingOutputExport_ = pending;
+
+    OutputExportCandidate candidate;
+    candidate.id = pending.id;
+    candidate.firstTailSequence = pending.firstTailSequence;
+    candidate.snapshot = captureStore_.snapshot();
+    candidate.ansiMode = pending.ansiMode;
+    candidate.codecName = pending.codecName;
+    candidate.prefilterPattern = pending.prefilterPattern;
+    return candidate;
+}
+
+StreamingLogData::OutputExportTail
+StreamingLogData::takeOutputExportTail( std::uint64_t candidateId )
+{
+    std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    OutputExportTail result;
+    if ( !pendingOutputExport_.has_value() || pendingOutputExport_->id != candidateId ) {
+        result.failure = OutputExportFailure::Cancelled;
+        return result;
+    }
+    if ( pendingOutputExport_->failure.has_value() ) {
+        result.failure = pendingOutputExport_->failure;
+        return result;
+    }
+    result.batches.reserve( pendingOutputExport_->tail.size() );
+    while ( !pendingOutputExport_->tail.empty() ) {
+        result.batches.push_back( std::move( pendingOutputExport_->tail.front() ) );
+        pendingOutputExport_->tail.pop_front();
+    }
+    pendingOutputExport_->tailBytes = 0;
+    return result;
+}
+
+void StreamingLogData::cancelOutputExport( std::uint64_t candidateId )
+{
+    std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    if ( pendingOutputExport_.has_value() && pendingOutputExport_->id == candidateId ) {
+        pendingOutputExport_.reset();
+    }
+}
+
+StreamingLogData::OutputExportActivation StreamingLogData::activatePublishedOutputExport(
+    std::uint64_t candidateId, const QString& outputPath,
+    const klogg::platform::FileIdentity& publishedIdentity, OutputExportEncodingState encodingState )
+{
+    std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    if ( !pendingOutputExport_.has_value() || pendingOutputExport_->id != candidateId ) {
+        return { false, OutputExportFailure::Cancelled };
+    }
+    if ( pendingOutputExport_->failure.has_value() ) {
+        const auto failure = pendingOutputExport_->failure;
+        pendingOutputExport_.reset();
+        return { false, failure };
+    }
+
+    OutputExportCandidate candidate;
+    candidate.id = pendingOutputExport_->id;
+    candidate.firstTailSequence = pendingOutputExport_->firstTailSequence;
+    candidate.ansiMode = pendingOutputExport_->ansiMode;
+    candidate.codecName = pendingOutputExport_->codecName;
+    candidate.prefilterPattern = pendingOutputExport_->prefilterPattern;
+    std::vector<OutputExportBatch> tail;
+    tail.reserve( pendingOutputExport_->tail.size() );
+    while ( !pendingOutputExport_->tail.empty() ) {
+        tail.push_back( std::move( pendingOutputExport_->tail.front() ) );
+        pendingOutputExport_->tail.pop_front();
+    }
+
+    if ( candidate.ansiMode == LiveLogSaveAnsiMode::Strip ) {
+        RollingFileManager candidateOutput( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
+        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedReopen };
+        }
+        const auto write = [ &candidateOutput ]( const QByteArray& bytes ) {
+            return candidateOutput.write( bytes );
+        };
+        if ( !writeOutputExportBatches( candidate, tail, encodingState, write )
+             || !candidateOutput.flush() ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedCutover };
+        }
+        rollingDisplayOutput_ = std::move( candidateOutput );
+        captureStore_.bindOutputFile( QString{} );
+    }
+    else {
+        QFile candidateOutput( outputPath );
+        if ( !candidateOutput.open( QIODevice::WriteOnly | QIODevice::Append )
+             || klogg::platform::fileIdentity( candidateOutput ) != publishedIdentity ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedReopen };
+        }
+        const auto write = [ &candidateOutput ]( const QByteArray& bytes ) {
+            return candidateOutput.write( bytes );
+        };
+        if ( !writeOutputExportBatches( candidate, tail, encodingState, write )
+             || !candidateOutput.flush() ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedCutover };
+        }
+        candidateOutput.close();
+        if ( !captureStore_.bindOutputFile( outputPath, true ) ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedReopen };
+        }
+        closeDisplayOutputFile( false );
+    }
+
+    outputSaveAnsiMode_ = candidate.ansiMode;
+    displayOutputNeedsSeparator_ = encodingState.needsSeparator;
+    {
+        const std::lock_guard<std::mutex> pathLock( boundOutputFileMutex_ );
+        boundOutputFile_ = outputPath;
+    }
+    pendingOutputExport_.reset();
+    reportCaptureOutputHealthy();
+    startOutputFlushTimer();
+    return { true, std::nullopt };
+}
+
+bool StreamingLogData::writeAllOutputBytes( const QByteArray& bytes,
+                                            const OutputExportWrite& write )
+{
+    qint64 offset = 0;
+    while ( offset < bytes.size() ) {
+        const auto written = write( bytes.mid( static_cast<int>( offset ) ) );
+        if ( written <= 0 || written > bytes.size() - offset ) {
+            return false;
+        }
+        offset += written;
+    }
+    return true;
+}
+
+QByteArray StreamingLogData::transformOutputRecord( const OutputExportCandidate& candidate,
+                                                    const QByteArray& bytes, bool terminated )
+{
+    QByteArray output;
+    if ( candidate.ansiMode == LiveLogSaveAnsiMode::Preserve ) {
+        output = bytes;
+    }
+    else {
+        auto* codec = QTextCodec::codecForName( candidate.codecName );
+        if ( codec == nullptr ) {
+            codec = QTextCodec::codecForName( "UTF-8" );
+        }
+        auto line = codec->toUnicode( bytes );
+        if ( !candidate.prefilterPattern.isEmpty() ) {
+            line.remove( QRegularExpression( candidate.prefilterPattern ) );
+        }
+        output = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+    }
+    if ( terminated ) {
+        output.append( '\n' );
+    }
+    return output;
+}
+
+bool StreamingLogData::writeOutputExportSnapshot( const OutputExportCandidate& candidate,
+                                                  OutputExportEncodingState& state,
+                                                  const OutputExportWrite& write,
+                                                  const OutputExportCancelled& cancelled )
+{
+    CaptureStore::Snapshot::Cursor cursor;
+    if ( candidate.ansiMode == LiveLogSaveAnsiMode::Preserve ) {
+        bool wroteAny = false;
+        while ( true ) {
+            if ( cancelled && cancelled() ) {
+                return false;
+            }
+            const auto chunk = candidate.snapshot.readChunk( cursor, 64 * 1024 );
+            if ( chunk.readFailed || !writeAllOutputBytes( chunk.bytes, write ) ) {
+                return false;
+            }
+            if ( !chunk.bytes.isEmpty() ) {
+                wroteAny = true;
+                state.needsSeparator = chunk.bytes.back() != '\n';
+            }
+            if ( chunk.complete ) {
+                if ( !wroteAny ) {
+                    state.needsSeparator = false;
+                }
+                return true;
+            }
+        }
+    }
+
+    while ( true ) {
+        if ( cancelled && cancelled() ) {
+            return false;
+        }
+        const auto chunk = candidate.snapshot.readChunk( cursor, 64 * 1024 );
+        if ( chunk.readFailed ) {
+            return false;
+        }
+        klogg::ContainerIndex start = 0;
+        while ( start < chunk.bytes.size() ) {
+            const auto end = chunk.bytes.indexOf( '\n', start );
+            if ( end < 0 ) {
+                state.partialRecord.append( chunk.bytes.constData() + start,
+                                            type_safe::narrow_cast<int>( chunk.bytes.size() - start ) );
+                break;
+            }
+            state.partialRecord.append( chunk.bytes.constData() + start,
+                                        type_safe::narrow_cast<int>( end - start ) );
+            auto record = transformOutputRecord( candidate, state.partialRecord, true );
+            if ( state.needsSeparator ) {
+                record.prepend( '\n' );
+            }
+            if ( !writeAllOutputBytes( record, write ) ) {
+                return false;
+            }
+            state.partialRecord.clear();
+            state.needsSeparator = false;
+            start = end + 1;
+        }
+        if ( chunk.complete ) {
+            if ( !state.partialRecord.isEmpty() ) {
+                auto record = transformOutputRecord( candidate, state.partialRecord, false );
+                if ( state.needsSeparator ) {
+                    record.prepend( '\n' );
+                }
+                if ( !writeAllOutputBytes( record, write ) ) {
+                    return false;
+                }
+                state.partialRecord.clear();
+                state.needsSeparator = true;
+            }
+            return true;
+        }
+    }
+}
+
+bool StreamingLogData::writeOutputExportBatches( const OutputExportCandidate& candidate,
+                                                 const std::vector<OutputExportBatch>& batches,
+                                                 OutputExportEncodingState& state,
+                                                 const OutputExportWrite& write )
+{
+    if ( !state.nextTailSequence.has_value() ) {
+        state.nextTailSequence = candidate.firstTailSequence;
+    }
+    for ( const auto& batch : batches ) {
+        if ( batch.sequence != *state.nextTailSequence ) {
+            return false;
+        }
+        qint64 start = 0;
+        for ( const auto end : batch.endOfLines ) {
+            const auto unterminated
+                = batch.finalRecordUnterminated && end == batch.endOfLines.back();
+            auto record = transformOutputRecord(
+                candidate,
+                batch.rawUtf8Lines.mid( static_cast<int>( start ),
+                                       static_cast<int>( end - start - 1 ) ),
+                !unterminated );
+            if ( state.needsSeparator ) {
+                record.prepend( '\n' );
+            }
+            if ( !writeAllOutputBytes( record, write ) ) {
+                return false;
+            }
+            state.needsSeparator = unterminated;
+            start = end;
+        }
+        state.nextTailSequence = batch.sequence + 1u;
+    }
+    return true;
+}
+
+bool StreamingLogData::hasPendingOutputExport() const
+{
+    std::lock_guard<std::recursive_mutex> lock( appendOrderingMutex_ );
+    return pendingOutputExport_.has_value();
+}
+
+CaptureStore::AppendResult StreamingLogData::appendUtf8( const QByteArray& data )
+{
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
 #ifdef KLOGG_PERF_MEASURE_STREAMING
     const auto t0 = std::chrono::steady_clock::now();
 #endif
@@ -65,8 +362,15 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
     const auto t1 = std::chrono::steady_clock::now();
 #endif
 
-    const auto appendResult = captureStore_.appendUtf8( data );
-    checkPreservedOutputState();
+    auto appendResult = captureStore_.appendUtf8( data );
+    journalOutputExport( appendResult );
+    try {
+        // Output consumes the accepted batch before any cache allocation or observer.
+        writeAppendedDisplayLines( appendResult );
+        if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && appendResult.outputFailure ) {
+            reportCaptureOutputFailure( captureStoreOutputError( appendResult.outputFailure ) );
+        }
+        checkPreservedOutputState();
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING
     const auto t2 = std::chrono::steady_clock::now();
@@ -91,12 +395,6 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
 #endif
 
     const auto currentLineCount = captureStore_.lineCount();
-    // Write the freshly appended lines to the Strip-mode display file.  This
-    // MUST go by appended count / tail position (see writeAppendedDisplayLines),
-    // NOT by a [previousLineCount, currentLineCount) delta: trimming can remove
-    // more lines than were appended, making currentLineCount < previousLineCount
-    // and underflowing the uint64 range -> std::length_error -> SIGABRT.
-    writeAppendedDisplayLines( appendResult );
     if ( wasTrimmed ) {
         Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     }
@@ -120,44 +418,68 @@ void StreamingLogData::appendUtf8( const QByteArray& data )
              << " cache_us=" << cacheUs
              << " total_us=" << totalUs;
 #endif
+    reportPersistenceState( appendResult.persistence );
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Streaming observer failed after capture commit: " << error.what();
+        appendResult.notificationFailed = true;
+    } catch ( ... ) {
+        LOG_ERROR << "Streaming observer failed after capture commit with unknown exception";
+        appendResult.notificationFailed = true;
+    }
+    return appendResult;
 }
 
-void StreamingLogData::finishInput()
+CaptureStore::AppendResult StreamingLogData::finishInput()
 {
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
     stopOutputFlushTimer();
     const auto previousLineCount = captureStore_.lineCount();
-    const auto appendResult = captureStore_.finishInput();
-    checkPreservedOutputState();
+    auto appendResult = captureStore_.finishInput();
+    journalOutputExport( appendResult );
+    try {
+        // Output consumes the accepted batch before any cache allocation or observer.
+        writeAppendedDisplayLines( appendResult );
+        if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && appendResult.outputFailure ) {
+            reportCaptureOutputFailure( captureStoreOutputError( appendResult.outputFailure ) );
+        }
+        checkPreservedOutputState();
 
-    // finishInput() can rotate+trim the Preserve-mode output via the single-line
-    // commit path (commitLine -> appendOutputBytes). Handle it exactly like
-    // appendUtf8() so caches stay consistent and Truncated fires — previously
-    // finishInput() skipped this entirely.
-    const auto trimResult = consumeTrimResult();
-    const bool wasTrimmed = trimResult.trimmedLines > 0_lcount;
-    const auto preAppendTotal = static_cast<qint64>( previousLineCount.get() );
-    if ( !wasTrimmed
-         || static_cast<qint64>( trimResult.trimmedLines.get() ) <= preAppendTotal ) {
-        rememberAppendedRawLines( appendResult );
-    }
+        // finishInput() can rotate+trim the Preserve-mode output. Handle it exactly like
+        // appendUtf8() so caches stay consistent and Truncated fires — previously
+        // finishInput() skipped this entirely.
+        const auto trimResult = consumeTrimResult();
+        const bool wasTrimmed = trimResult.trimmedLines > 0_lcount;
+        const auto preAppendTotal = static_cast<qint64>( previousLineCount.get() );
+        if ( !wasTrimmed
+             || static_cast<qint64>( trimResult.trimmedLines.get() ) <= preAppendTotal ) {
+            rememberAppendedRawLines( appendResult );
+        }
 
-    // Same tail-position write as appendUtf8() — never an underflowing delta.
-    writeAppendedDisplayLines( appendResult );
-    if ( wasTrimmed ) {
-        Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
+        if ( wasTrimmed ) {
+            Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
+        }
+        const auto currentLineCount = captureStore_.lineCount();
+        if ( currentLineCount != previousLineCount ) {
+            Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
+        }
+        if ( appendResult.lineCount > 0_lcount || wasTrimmed ) {
+            scheduleLoadingFinished();
+        }
+        if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && rollingDisplayOutput_.isValid()
+             && !rollingDisplayOutput_.flush() ) {
+            closeDisplayOutputFile( false );
+            appendResult.outputFailure = CaptureStore::OutputFailure::Flush;
+            reportCaptureOutputFailure( CaptureOutputError::Flush );
+        }
+        reportPersistenceState( appendResult.persistence );
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Streaming observer failed after capture commit: " << error.what();
+        appendResult.notificationFailed = true;
+    } catch ( ... ) {
+        LOG_ERROR << "Streaming observer failed after capture commit with unknown exception";
+        appendResult.notificationFailed = true;
     }
-    const auto currentLineCount = captureStore_.lineCount();
-    if ( currentLineCount != previousLineCount ) {
-        Q_EMIT fileChanged( MonitoredFileStatus::DataAdded );
-    }
-    if ( appendResult.lineCount > 0_lcount || wasTrimmed ) {
-        scheduleLoadingFinished();
-    }
-    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip
-         && rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
-        closeDisplayOutputFile( false );
-        reportCaptureOutputFailure( CaptureOutputError::Flush );
-    }
+    return appendResult;
 }
 
 CaptureStore::TrimResult StreamingLogData::consumeTrimResult()
@@ -173,6 +495,7 @@ CaptureStore::TrimResult StreamingLogData::consumeTrimResult()
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
         cachedRawBatches_.clear();
         cachedRawBytes_ = 0;
+        cachedRawMetadataBytes_ = 0;
     }
     clearAnsiDisplayCache();
     return trimResult;
@@ -180,6 +503,8 @@ CaptureStore::TrimResult StreamingLogData::consumeTrimResult()
 
 void StreamingLogData::clearCapture()
 {
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
+    pendingOutputExport_.reset();
     const auto timerWasActive = outputFlushTimer_.isActive();
     stopOutputFlushTimer();
     captureStore_.clear();
@@ -188,10 +513,12 @@ void StreamingLogData::clearCapture()
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
         cachedRawBatches_.clear();
         cachedRawBytes_ = 0;
+        cachedRawMetadataBytes_ = 0;
     }
     const auto boundPath = boundOutputFile();
     if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip && !boundPath.isEmpty() ) {
         if ( rollingDisplayOutput_.clearIfCurrent() ) {
+            displayOutputNeedsSeparator_ = false;
             reportCaptureOutputHealthy();
         }
         else {
@@ -214,6 +541,7 @@ void StreamingLogData::clearCapture()
         startOutputFlushTimer();
     }
 
+    reportPersistenceState( captureStore_.persistenceState() );
     Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
     scheduleLoadingFinished();
 }
@@ -223,6 +551,12 @@ void StreamingLogData::setCaptureLimits( CaptureStore::Limits limits )
     rollingMaxFileSize_ = limits.rollingMaxFileSize;
     rollingBackupCount_ = limits.rollingBackupCount;
     captureStore_.setLimits( std::move( limits ) );
+    const auto trimmed = consumeTrimResult();
+    if ( trimmed.trimmedLines > 0_lcount ) {
+        Q_EMIT fileChanged( MonitoredFileStatus::Truncated );
+        scheduleLoadingFinished();
+    }
+    reportPersistenceState( captureStore_.persistenceState() );
 }
 
 CaptureOutputError
@@ -255,6 +589,10 @@ bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAns
 bool StreamingLogData::bindOutputFile( const QString& outputPath, LiveLogSaveAnsiMode ansiMode,
                                        OutputBindMode mode )
 {
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
+    if ( pendingOutputExport_.has_value() ) {
+        return false;
+    }
     stopOutputFlushTimer();
     const auto previousOutputPath = boundOutputFile();
     const auto previousAnsiMode = outputSaveAnsiMode_;
@@ -358,6 +696,22 @@ std::optional<CaptureOutputError> StreamingLogData::captureOutputError() const
     return captureOutputError_;
 }
 
+std::optional<CaptureOutputError> StreamingLogData::flushOutputForClose()
+{
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
+    if ( outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Strip ) {
+        if ( rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
+            reportCaptureOutputFailure( CaptureOutputError::Flush );
+            return CaptureOutputError::Flush;
+        }
+    }
+    else {
+        captureStore_.flush();
+        checkPreservedOutputState();
+    }
+    return captureOutputError_;
+}
+
 QString StreamingLogData::captureId() const
 {
     return captureStore_.captureId();
@@ -370,6 +724,8 @@ QString StreamingLogData::capturePath() const
 
 void StreamingLogData::deleteCaptureFiles()
 {
+    std::lock_guard<std::recursive_mutex> orderingLock( appendOrderingMutex_ );
+    pendingOutputExport_.reset();
     closeDisplayOutputFile();
     captureStore_.bindOutputFile( QString{} );
     captureStore_.deleteCaptureFiles();
@@ -620,8 +976,7 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
             CaptureOutputError replayError = CaptureOutputError::Write;
             const auto stagedResult = klogg::stagedoutput::publishSibling(
                 outputPath, [ this, &replayError ]( QIODevice* output ) {
-                    const auto replay = writeDisplayLinesToDevice(
-                        0_lnum, captureStore_.lineCount(), output );
+                    const auto replay = writeDisplayLinesToDevice( output );
                     replayError = replay.error;
                     return replay.success;
                 } );
@@ -657,8 +1012,7 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
         if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
             return { false, CaptureOutputError::Open };
         }
-        const auto replay
-            = writeDisplayLinesToDevice( 0_lnum, captureStore_.lineCount(), &stagedOutput );
+        const auto replay = writeDisplayLinesToDevice( &stagedOutput );
         if ( !replay.success ) {
             stagedOutput.cancelWriting();
             return { false, replay.error };
@@ -676,6 +1030,12 @@ StreamingLogData::openDisplayOutputFile( const QString& outputPath, bool preserv
         }
     }
 
+    QFile tail( outputPath );
+    if ( !tail.open( QIODevice::ReadOnly ) ) {
+        return { false, CaptureOutputError::Open };
+    }
+    displayOutputNeedsSeparator_
+        = tail.size() > 0 && ( !tail.seek( tail.size() - 1 ) || tail.read( 1 ) != "\n" );
     rollingDisplayOutput_ = std::move( candidateOutput );
     const std::lock_guard<std::mutex> lock( boundOutputFileMutex_ );
     boundOutputFile_ = outputPath;
@@ -692,86 +1052,39 @@ void StreamingLogData::closeDisplayOutputFile( bool clearBinding )
     }
 }
 
-StreamingLogData::OutputBindResult
-StreamingLogData::writeDisplayLinesToDevice( LineNumber first, LinesCount count, QIODevice* output )
+QByteArray StreamingLogData::displayOutputRecord( const QByteArray& bytes, bool terminated ) const
 {
-    if ( !output || count <= 0_lcount ) {
-        return { true, CaptureOutputError::Open };
+    auto line = codec_.codec()->toUnicode( bytes );
+    if ( !prefilterPattern_.pattern().isEmpty() ) {
+        line.remove( prefilterPattern_ );
     }
-    const auto lines = getLines( first, count );
-    for ( const auto& line : lines ) {
-        auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
-        outputLine.append( '\n' );
-        qint64 offset = 0;
-        while ( offset < outputLine.size() ) {
-            const auto written
-                = output->write( outputLine.constData() + offset, outputLine.size() - offset );
-            if ( written <= 0 ) {
-                return { false, CaptureOutputError::Write };
-            }
-            offset += written;
-        }
+    auto output = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
+    if ( terminated ) {
+        output.append( '\n' );
     }
-    return { true, CaptureOutputError::Open };
+    return output;
 }
 
-StreamingLogData::OutputBindResult StreamingLogData::writeDisplayLinesToOutput( LineNumber first,
-                                                                                LinesCount count,
-                                                                                bool reportFailures,
-                                                                                bool allowRotation )
+StreamingLogData::OutputBindResult StreamingLogData::writeDisplayLinesToDevice( QIODevice* output )
 {
-    if ( !rollingDisplayOutput_.isValid() || count <= 0_lcount ) {
-        return { true, CaptureOutputError::Open };
+    if ( !output ) {
+        return { false, CaptureOutputError::Write };
     }
-    if ( !allowRotation ) {
-        const auto result
-            = writeDisplayLinesToDevice( first, count, rollingDisplayOutput_.currentFile() );
-        if ( !result.success && reportFailures ) {
-            closeDisplayOutputFile( false );
-            reportCaptureOutputFailure( result.error );
-        }
-        else if ( result.success && !rollingDisplayOutput_.flush() ) {
-            if ( reportFailures ) {
-                closeDisplayOutputFile( false );
-                reportCaptureOutputFailure( CaptureOutputError::Flush );
-            }
-            return { false, CaptureOutputError::Flush };
-        }
-        return result;
-    }
-
-    const auto lines = getLines( first, count );
-    for ( const auto& line : lines ) {
-        auto outputLine = processAnsiSequences( line, AnsiProcessingMode::Strip ).text.toUtf8();
-        outputLine.append( '\n' );
-
-        qint64 offset = 0;
-        while ( offset < outputLine.size() ) {
-            const auto remaining = outputLine.mid( static_cast<int>( offset ) );
-            const auto written = rollingDisplayOutput_.write( remaining );
-            if ( written <= 0 ) {
-                if ( reportFailures ) {
-                    closeDisplayOutputFile( false );
-                    reportCaptureOutputFailure( CaptureOutputError::Write );
-                }
-                return { false, CaptureOutputError::Write };
-            }
-            offset += written;
-        }
-
-        // If rotation happened, the display file is now a rolling window.
-        // No need to trim CaptureStore here — it handles its own trimming
-        // when the Preserve mode rolling file rotates.
-    }
-
-    if ( !rollingDisplayOutput_.flush() ) {
-        if ( reportFailures ) {
-            closeDisplayOutputFile( false );
-            reportCaptureOutputFailure( CaptureOutputError::Flush );
-        }
-        return { false, CaptureOutputError::Flush };
-    }
-    return { true, CaptureOutputError::Open };
+    OutputExportCandidate candidate;
+    candidate.snapshot = captureStore_.snapshot();
+    candidate.ansiMode = LiveLogSaveAnsiMode::Strip;
+    candidate.codecName = codec_.codec()->name();
+    candidate.prefilterPattern = prefilterPattern_.pattern();
+    OutputExportEncodingState state;
+    replayPeakBufferForTesting_ = 0;
+    const auto write = [ this, output ]( const QByteArray& bytes ) {
+        replayPeakBufferForTesting_
+            = qMax<qint64>( replayPeakBufferForTesting_, bytes.size() );
+        return output->write( bytes );
+    };
+    return writeOutputExportSnapshot( candidate, state, write )
+               ? OutputBindResult{ true, CaptureOutputError::Open }
+               : OutputBindResult{ false, CaptureOutputError::Write };
 }
 
 bool StreamingLogData::isOutputFileActive() const
@@ -819,7 +1132,41 @@ void StreamingLogData::checkPreservedOutputState()
     reportCaptureOutputFailure( captureStoreOutputError( captureStore_.outputFailure() ) );
 }
 
-void StreamingLogData::writeAppendedDisplayLines( const CaptureStore::AppendResult& appendResult )
+void StreamingLogData::journalOutputExport( const CaptureStore::AppendResult& appendResult )
+{
+    if ( !pendingOutputExport_.has_value() || pendingOutputExport_->failure.has_value() ) {
+        return;
+    }
+    if ( appendResult.disposition == CaptureStore::AppendDisposition::PartialUnknown ) {
+        pendingOutputExport_->failure = OutputExportFailure::PartialUnknown;
+        pendingOutputExport_->tail.clear();
+        pendingOutputExport_->tailBytes = 0;
+        return;
+    }
+    if ( appendResult.lineCount <= 0_lcount || appendResult.rawUtf8Lines.isEmpty() ) {
+        return;
+    }
+
+    const auto incomingBytes = static_cast<qint64>( appendResult.rawUtf8Lines.size() );
+    if ( incomingBytes > pendingOutputExport_->maximumTailBytes
+         || pendingOutputExport_->tailBytes
+                    > pendingOutputExport_->maximumTailBytes - incomingBytes ) {
+        pendingOutputExport_->failure = OutputExportFailure::TailOverflow;
+        pendingOutputExport_->tail.clear();
+        pendingOutputExport_->tailBytes = 0;
+        return;
+    }
+
+    OutputExportBatch batch;
+    batch.sequence = ++nextOutputDeliverySequence_;
+    batch.rawUtf8Lines = appendResult.rawUtf8Lines;
+    batch.endOfLines = appendResult.endOfLines;
+    batch.finalRecordUnterminated = appendResult.finalRecordUnterminated;
+    pendingOutputExport_->tailBytes += incomingBytes;
+    pendingOutputExport_->tail.push_back( std::move( batch ) );
+}
+
+void StreamingLogData::writeAppendedDisplayLines( CaptureStore::AppendResult& appendResult )
 {
     if ( outputSaveAnsiMode_ != LiveLogSaveAnsiMode::Strip ) {
         return;
@@ -830,21 +1177,56 @@ void StreamingLogData::writeAppendedDisplayLines( const CaptureStore::AppendResu
         return;
     }
 
-    // CaptureStore::trimToLimits() removes oldest segments from the FRONT, so
-    // the freshly appended lines always live at the TAIL, at
-    // [totalLines - appended, totalLines).  Addressing them there is correct
-    // whether or not trimming occurred, and cannot underflow.
-    //
-    // The previous code used writeDisplayLinesToOutput(previousLineCount,
-    // currentLineCount - previousLineCount): when trimming removed more lines
-    // than were appended, currentLineCount < previousLineCount, the uint64
-    // subtraction wrapped to ~2^64, and getLines() reserve() threw
-    // std::length_error("vector") -> uncaught on the macOS main event loop ->
-    // SIGABRT (objc_exception_rethrow -> -[NSApplication run]).
-    const auto totalLines = captureStore_.lineCount().get();
-    const auto safeAppended = std::min( appended, totalLines );
-    const auto firstLine = totalLines - safeAppended;
-    writeDisplayLinesToOutput( LineNumber( firstLine ), LinesCount( safeAppended ) );
+    // The normalized committed batch owns records even if retention has already
+    // removed them. Never reconstruct an output transaction from the display tail.
+    appendResult.outputAttempted = rollingDisplayOutput_.isValid();
+    appendResult.outputBytes = 0;
+    try {
+        qint64 start = 0;
+        for ( const auto end : appendResult.endOfLines ) {
+            if ( !rollingDisplayOutput_.isValid() ) {
+                break;
+            }
+            const auto bytes = appendResult.rawUtf8Lines.mid( static_cast<int>( start ),
+                                                              static_cast<int>( end - start - 1 ) );
+            const bool unterminated
+                = appendResult.finalRecordUnterminated && end == appendResult.endOfLines.back();
+            auto output = displayOutputRecord( bytes, !unterminated );
+            if ( displayOutputNeedsSeparator_ ) {
+                output.prepend( '\n' );
+            }
+            qint64 offset = 0;
+            while ( offset < output.size() ) {
+                const auto remaining = output.mid( static_cast<int>( offset ) );
+                const auto written = outputWriteForTesting_
+                                         ? outputWriteForTesting_( remaining )
+                                         : rollingDisplayOutput_.write( remaining );
+                if ( written <= 0 ) {
+                    closeDisplayOutputFile( false );
+                    appendResult.outputFailure = CaptureStore::OutputFailure::Write;
+                    return;
+                }
+                *appendResult.outputBytes += written;
+                offset += written;
+            }
+            displayOutputNeedsSeparator_ = unterminated;
+            start = end;
+        }
+        if ( rollingDisplayOutput_.isValid() && !rollingDisplayOutput_.flush() ) {
+            closeDisplayOutputFile( false );
+            appendResult.outputFailure = CaptureStore::OutputFailure::Flush;
+        }
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Streaming output exception after capture commit: " << error.what();
+        appendResult.outputBytes.reset();
+        appendResult.outputFailure = CaptureStore::OutputFailure::Write;
+        closeDisplayOutputFile( false );
+    } catch ( ... ) {
+        LOG_ERROR << "Streaming output unknown exception after capture commit";
+        appendResult.outputBytes.reset();
+        appendResult.outputFailure = CaptureStore::OutputFailure::Write;
+        closeDisplayOutputFile( false );
+    }
 }
 
 klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount number ) const
@@ -865,25 +1247,82 @@ klogg::vector<QString> StreamingLogData::getLines( LineNumber first, LinesCount 
     return lines;
 }
 
+qint64 StreamingLogData::cachedRawBatchMetadataBytes( const CachedRawBatch& batch )
+{
+    constexpr auto fixedBytes = static_cast<qint64>( sizeof( CachedRawBatch ) );
+    constexpr auto entryBytes = static_cast<qint64>( sizeof( qint64 ) );
+    const auto maximumEntries = static_cast<std::uintmax_t>(
+        ( std::numeric_limits<qint64>::max() - fixedBytes ) / entryBytes );
+    const auto capacity = static_cast<std::uintmax_t>( batch.endOfLines.capacity() );
+    if ( capacity > maximumEntries ) {
+        return std::numeric_limits<qint64>::max();
+    }
+    return fixedBytes + static_cast<qint64>( capacity ) * entryBytes;
+}
+
 void StreamingLogData::rememberAppendedRawLines( const CaptureStore::AppendResult& appendResult )
 {
     if ( appendResult.lineCount <= 0_lcount || appendResult.rawUtf8Lines.isEmpty() ) {
         return;
     }
 
-    CachedRawBatch batch;
-    batch.firstLine = appendResult.firstLine;
-    batch.lineCount = appendResult.lineCount;
-    batch.rawUtf8Lines = appendResult.rawUtf8Lines;
-    batch.endOfLines = appendResult.endOfLines;
-
     std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
-    cachedRawBytes_ += batch.rawUtf8Lines.size();
-    cachedRawBatches_.push_back( std::move( batch ) );
+    const auto incomingBytes = static_cast<qint64>( appendResult.rawUtf8Lines.size() );
+    bool merged = false;
+    if ( !cachedRawBatches_.empty() ) {
+        auto& tail = cachedRawBatches_.back();
+        const auto combinedBytes = static_cast<qint64>( tail->rawUtf8Lines.size() ) + incomingBytes;
+        const auto combinedLines = tail->lineCount.get() + appendResult.lineCount.get();
+        if ( tail.use_count() == 1 && tail->firstLine + tail->lineCount == appendResult.firstLine
+             && combinedBytes <= CachedRawBatchTargetBytes
+             && combinedLines <= CachedRawBatchLineLimit ) {
+            const auto previousMetadataBytes = cachedRawBatchMetadataBytes( *tail );
+            const auto byteOffset = static_cast<qint64>( tail->rawUtf8Lines.size() );
+            tail->rawUtf8Lines.append( appendResult.rawUtf8Lines );
+            for ( const auto lineEnd : appendResult.endOfLines ) {
+                tail->endOfLines.push_back( byteOffset + lineEnd );
+            }
+            tail->lineCount = LinesCount( combinedLines );
+            cachedRawMetadataBytes_
+                = qMax<qint64>( 0, cachedRawMetadataBytes_ - previousMetadataBytes );
+            const auto mergedMetadataBytes = cachedRawBatchMetadataBytes( *tail );
+            cachedRawMetadataBytes_
+                = mergedMetadataBytes
+                          > std::numeric_limits<qint64>::max() - cachedRawMetadataBytes_
+                      ? std::numeric_limits<qint64>::max()
+                      : cachedRawMetadataBytes_ + mergedMetadataBytes;
+            merged = true;
+        }
+    }
 
-    while ( cachedRawBytes_ > CachedRawBatchBytesLimit && !cachedRawBatches_.empty() ) {
-        cachedRawBytes_ -= cachedRawBatches_.front().rawUtf8Lines.size();
+    if ( !merged ) {
+        auto batch = std::make_shared<CachedRawBatch>();
+        batch->firstLine = appendResult.firstLine;
+        batch->lineCount = appendResult.lineCount;
+        batch->rawUtf8Lines = appendResult.rawUtf8Lines;
+        batch->endOfLines = appendResult.endOfLines;
+        const auto metadataBytes = cachedRawBatchMetadataBytes( *batch );
+        cachedRawMetadataBytes_
+            = metadataBytes > std::numeric_limits<qint64>::max() - cachedRawMetadataBytes_
+                  ? std::numeric_limits<qint64>::max()
+                  : cachedRawMetadataBytes_ + metadataBytes;
+        cachedRawBatches_.push_back( std::move( batch ) );
+    }
+    cachedRawBytes_ += incomingBytes;
+
+    while ( !cachedRawBatches_.empty()
+            && ( cachedRawBytes_ > CachedRawBatchBytesLimit
+                 || cachedRawBatches_.size() > cachedRawBatchCountLimit_
+                 || cachedRawMetadataBytes_ > cachedRawMetadataBytesLimit_ ) ) {
+        const auto& oldest = *cachedRawBatches_.front();
+        cachedRawBytes_ -= oldest.rawUtf8Lines.size();
+        cachedRawMetadataBytes_
+            = qMax<qint64>( 0, cachedRawMetadataBytes_ - cachedRawBatchMetadataBytes( oldest ) );
         cachedRawBatches_.pop_front();
+    }
+    if ( cachedRawBatches_.empty() ) {
+        cachedRawBytes_ = 0;
+        cachedRawMetadataBytes_ = 0;
     }
 }
 
@@ -894,6 +1333,52 @@ StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) 
         return RawLines{};
     }
 
+    struct CachedRawSlice {
+        std::shared_ptr<const CachedRawBatch> batch;
+        size_t localStart = 0;
+        size_t localEnd = 0;
+    };
+
+    auto nextLine = first;
+    const auto requestedEnd = first + number;
+    std::vector<CachedRawSlice> slices;
+    slices.reserve( 4u );
+    {
+        std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
+        auto batchIt = std::lower_bound(
+            cachedRawBatches_.cbegin(), cachedRawBatches_.cend(), nextLine,
+            [ this ]( const auto& batch, LineNumber line ) {
+                ++cachedRawLookupBatchVisitsForTesting_;
+                return batch->firstLine + batch->lineCount <= line;
+            } );
+        for ( ; batchIt != cachedRawBatches_.cend(); ++batchIt ) {
+            ++cachedRawLookupBatchVisitsForTesting_;
+            const auto& batch = **batchIt;
+            const auto batchEnd = batch.firstLine + batch.lineCount;
+            if ( batch.firstLine > nextLine ) {
+                break;
+            }
+
+            const auto localStart
+                = static_cast<size_t>( nextLine.get() - batch.firstLine.get() );
+            const auto localEnd = static_cast<size_t>(
+                qMin( batchEnd.get(), requestedEnd.get() ) - batch.firstLine.get() );
+            if ( localStart >= localEnd || localEnd > batch.endOfLines.size() ) {
+                break;
+            }
+
+            slices.push_back( { *batchIt, localStart, localEnd } );
+            nextLine = LineNumber(
+                batch.firstLine.get() + static_cast<LineNumber::UnderlyingType>( localEnd ) );
+            if ( nextLine >= requestedEnd ) {
+                break;
+            }
+        }
+    }
+    if ( nextLine < requestedEnd ) {
+        return std::nullopt;
+    }
+
     RawLines rawLines;
     rawLines.startLine = first;
     auto* utf8Codec = QTextCodec::codecForName( "UTF-8" );
@@ -902,40 +1387,55 @@ StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) 
     rawLines.textDecoder.encodingParams.isUtf8Compatible = true;
     rawLines.textDecoder.encodingParams.lineFeedWidth = 1;
 
-    auto nextLine = first;
-    const auto requestedEnd = first + number;
-
-    std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
-    for ( const auto& batch : cachedRawBatches_ ) {
-        const auto batchEnd = batch.firstLine + batch.lineCount;
-        if ( batchEnd <= nextLine ) {
-            continue;
+    for ( const auto& slice : slices ) {
+        const auto& batch = *slice.batch;
+        const auto byteStart
+            = slice.localStart == 0 ? 0 : batch.endOfLines[ slice.localStart - 1 ];
+        const auto byteEnd = batch.endOfLines[ slice.localEnd - 1 ];
+        if ( byteStart < 0 || byteEnd < byteStart
+             || byteEnd > static_cast<qint64>( batch.rawUtf8Lines.size() ) ) {
+            return std::nullopt;
         }
-        if ( batch.firstLine > nextLine ) {
-            break;
-        }
-
-        const auto localStart = static_cast<size_t>( nextLine.get() - batch.firstLine.get() );
-        const auto localEnd = static_cast<size_t>(
-            qMin( batchEnd.get(), requestedEnd.get() ) - batch.firstLine.get() );
-        if ( localStart >= localEnd || localEnd > batch.endOfLines.size() ) {
-            break;
-        }
-
-        const auto byteStart = localStart == 0 ? 0 : batch.endOfLines[ localStart - 1 ];
-        const auto byteEnd = batch.endOfLines[ localEnd - 1 ];
         const auto existingBytes = klogg::ssize( rawLines.buffer );
         rawLines.buffer.insert( rawLines.buffer.end(), batch.rawUtf8Lines.constData() + byteStart,
                                 batch.rawUtf8Lines.constData() + byteEnd );
-        for ( auto i = localStart; i < localEnd; ++i ) {
-            rawLines.endOfLines.push_back( existingBytes + batch.endOfLines[ i ] - byteStart );
-        }
-
-        nextLine = LineNumber( batch.firstLine.get() + static_cast<LineNumber::UnderlyingType>( localEnd ) );
-        if ( nextLine >= requestedEnd ) {
-            return rawLines;
+        for ( auto line = slice.localStart; line < slice.localEnd; ++line ) {
+            rawLines.endOfLines.push_back( existingBytes + batch.endOfLines[ line ] - byteStart );
         }
     }
+    return rawLines;
+}
 
-    return std::nullopt;
+void StreamingLogData::reportPersistenceState( const CaptureStore::PersistenceResult& state )
+{
+    if ( state.failure == persistenceFailure_ ) {
+        return;
+    }
+    const auto error = state.failure ? *state.failure : *persistenceFailure_;
+    persistenceFailure_ = state.failure;
+    Q_EMIT capturePersistenceChanged( !state.failure, error );
+}
+
+CaptureStore::PersistenceResult StreamingLogData::persistCapture( int maxSegments )
+{
+    const auto result = captureStore_.persistCapture( maxSegments );
+    reportPersistenceState( result );
+    return result;
+}
+
+CaptureStore::PersistenceResult StreamingLogData::retryPersistence( int maxSegments )
+{
+    const auto result = captureStore_.retryPersistence( maxSegments );
+    reportPersistenceState( result );
+    return result;
+}
+
+CaptureStore::PersistenceResult StreamingLogData::persistenceState() const
+{
+    return captureStore_.persistenceState();
+}
+
+CaptureStore::Snapshot StreamingLogData::captureSnapshot() const
+{
+    return captureStore_.snapshot();
 }

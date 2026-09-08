@@ -70,6 +70,10 @@ public:
 
     virtual void start( Generation generation ) = 0;
     virtual void stop( Generation generation ) = 0;
+    // Completion means producer admission and native ownership have been released.
+    // The default is for synchronous transports whose Disconnected is final.
+    virtual void requestStop( Generation generation,
+                              klogg::livecapture::StopDisposition disposition );
     virtual void clearRemoteAsync( Generation generation, ClearRequestId requestId ) = 0;
 
     // Before publishing State::Error, every transport must populate lastError()
@@ -85,6 +89,7 @@ protected:
     void recordDeliveredChunk( Generation generation, std::size_t byteCount );
 
 Q_SIGNALS:
+    void stopped( LiveSourceTransport::Generation generation, quint64 discardedBytes );
     void bytesReceived( LiveSourceTransport::Generation generation, const QByteArray& data );
     void stateChanged( LiveSourceTransport::Generation generation,
                        LiveSourceTransport::State state );
@@ -94,6 +99,7 @@ Q_SIGNALS:
                               const QString& error );
 
 private:
+    std::optional<Generation> pendingStop_;
     mutable std::mutex statisticsMutex_;
     klogg::livecapture::LiveDataStatistics statistics_;
 };
@@ -130,6 +136,8 @@ public:
 
     void start( Generation generation ) override;
     void stop( Generation generation ) override;
+    void requestStop( Generation generation,
+                      klogg::livecapture::StopDisposition disposition ) override;
     void clearRemoteAsync( Generation generation, ClearRequestId requestId ) override;
     QString lastError() const override;
 

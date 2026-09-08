@@ -1,6 +1,7 @@
 #include "adblogcatsource.h"
 
 #include <limits>
+#include <algorithm>
 #include <utility>
 
 #include <QPointer>
@@ -91,10 +92,39 @@ AdbLogcatSource::AdbLogcatSource( AdbLogcatSessionData sessionData,
     , logData_( std::move( logData ) )
     , transportFactory_( &transportFactory )
 {
+    persistenceRetryTimer_.setParent( this );
+    persistenceRetryTimer_.setObjectName( QStringLiteral( "liveCapturePersistenceRetry" ) );
+    persistenceRetryTimer_.setTimerType( Qt::PreciseTimer );
+    persistenceRetryTimer_.setSingleShot( true );
+    connect( &persistenceRetryTimer_, &QTimer::timeout, this, [ this ] {
+        if ( logData_ && persistenceSchedulingArmed_ ) {
+            logData_->retryPersistence( 8 );
+            schedulePersistenceRetry();
+        }
+    } );
     if ( logData_ ) {
         connect( logData_.get(), &StreamingLogData::captureOutputChanged, this,
                  &AdbLogcatSource::captureOutputChanged );
+        connect( logData_.get(), &StreamingLogData::capturePersistenceChanged, this,
+            [ this ]( bool healthy, CaptureStore::PersistenceFailure error ) {
+                schedulePersistenceRetry();
+                Q_EMIT capturePersistenceChanged( healthy, error );
+            } );
     }
+}
+
+void AdbLogcatSource::schedulePersistenceRetry()
+{
+    if ( !logData_ || !persistenceSchedulingArmed_ ) { return; }
+    const auto state = logData_->persistenceState();
+    if ( state.pendingSegments == 0 ) {
+        // A normal partial record is not ready to persist. Only true EOF seals it.
+        persistenceRetryTimer_.stop();
+        return;
+    }
+    const auto delay = std::clamp<qint64>( state.retryAfterMs.value_or( 25 ), 1,
+                                         std::numeric_limits<int>::max() );
+    persistenceRetryTimer_.start( static_cast<int>( delay ) );
 }
 
 AdbLogcatSource::~AdbLogcatSource()
@@ -129,14 +159,29 @@ void AdbLogcatSource::wireTransport()
     }
     connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
              [ this ]( Generation generation, const QByteArray& data ) {
-                 if ( activeGeneration_ != generation ) {
+                 if ( activeGeneration_ != generation
+                      && !( retiringGeneration_ == generation
+                            && retiringDisposition_ == klogg::livecapture::StopDisposition::SettleAccepted ) ) {
                      return;
                  }
                  if ( controllerBytes_ ) {
-                     controllerBytes_( generation, data );
+                     if ( !deliverySettlement_
+                          || deliverySettlement_->generation != generation
+                          || deliverySettlement_->producerStopped ) {
+                         return;
+                     }
+                     const auto sequence = ++deliverySettlement_->lastOfferedSequence;
+                     const QPointer<AdbLogcatSource> guard( this );
+                     auto settled = [ guard, generation, sequence ] {
+                         if ( guard ) { guard->settleOfferedDelivery( generation, sequence ); }
+                     };
+                     try { controllerBytes_( generation, data, settled ); }
+                     catch ( ... ) {
+                         settled();
+                     }
                  }
                  else if ( logData_ ) {
-                     logData_->appendUtf8( data );
+                     appendTransportBytes( generation, data );
                  }
              } );
     connect( transport_.get(), &LiveSourceTransport::stateChanged, this,
@@ -156,6 +201,24 @@ void AdbLogcatSource::wireTransport()
                  LOG_WARNING << "live log transport error " << error;
                  Q_EMIT errorOccurred( lastError_ );
              } );
+    connect( transport_.get(), &LiveSourceTransport::stopped, this,
+        [ this ]( Generation generation, quint64 discarded ) {
+            if ( activeGeneration_ == generation ) {
+                // A transport can finish its own terminal retirement before the
+                // controller or a later user action requests Stop. Adopt that real
+                // producer acknowledgement instead of losing the only completion.
+                activeGeneration_.reset();
+                retiringGeneration_ = generation;
+                retiringDisposition_ = klogg::livecapture::StopDisposition::SettleAccepted;
+            }
+            if ( retiringGeneration_ != generation || !deliverySettlement_
+                 || deliverySettlement_->generation != generation ) {
+                return;
+            }
+            deliverySettlement_->producerStopped = true;
+            deliverySettlement_->discardedBytes = discarded;
+            completeRetirementIfSettled( generation );
+        } );
     connect( transport_.get(), &LiveSourceTransport::clearRemoteFinished, this,
              &AdbLogcatSource::finishClear );
 }
@@ -180,8 +243,10 @@ void AdbLogcatSource::retireTransport()
 
 void AdbLogcatSource::startTransport()
 {
+    persistenceSchedulingArmed_ = true;
     const auto generation = nextGeneration();
     reportedErrorGeneration_.reset();
+    beginDeliveryGeneration( generation );
     activeGeneration_ = generation;
     connecting_ = true;
     transport_->start( generation );
@@ -193,6 +258,10 @@ bool AdbLogcatSource::connectSource()
         lastError_ = tr( "This compatibility session is read-only." );
         setState( State::Error );
         return false;
+    }
+    if ( retiringGeneration_ ) {
+        restartAfterStop_ = true;
+        return true;
     }
     if ( state_ == State::Connected || connecting_ ) {
         return true;
@@ -225,15 +294,10 @@ void AdbLogcatSource::disconnectSource()
     }
     connecting_ = false;
     restartAfterClear_ = false;
+    restartAfterStop_ = false;
     reportedErrorGeneration_.reset();
-    const auto generation = activeGeneration_;
-    activeGeneration_.reset();
-    if ( transport_ && generation.has_value() ) {
-        transport_->stop( *generation );
-    }
-    if ( logData_ ) {
-        logData_->finishInput();
-    }
+    const auto generation = activeGeneration_ ? activeGeneration_ : retiringGeneration_;
+    if ( generation ) { cancelTransport( *generation ); }
     setState( State::Disconnected );
 }
 
@@ -270,14 +334,23 @@ bool AdbLogcatSource::clearAndRestart()
         }
         return true;
     }
-    const auto shouldRestart = state_ == State::Connected || connecting_;
+    const auto shouldRestart = state_ == State::Connected || connecting_ || retiringGeneration_.has_value();
+    if ( activeGeneration_ || retiringGeneration_ ) {
+        clearAfterStop_ = true;
+        restartAfterStop_ = shouldRestart;
+        if ( controllerStop_ ) { controllerStop_(); }
+        else {
+            const auto generation = activeGeneration_ ? *activeGeneration_ : *retiringGeneration_;
+            cancelTransport( generation );
+        }
+        return true;
+    }
+    return performClear( shouldRestart );
+}
+
+bool AdbLogcatSource::performClear( bool shouldRestart )
+{
     const auto isIosLogStream = sessionData_.sourceType == LiveLogSourceType::IosLogStream;
-    if ( controllerStop_ ) {
-        controllerStop_();
-    }
-    else {
-        disconnectSource();
-    }
     if ( logData_ ) {
         logData_->clearCapture();
     }
@@ -349,6 +422,16 @@ bool AdbLogcatSource::bindOutputFile( const QString& outputPath, LiveLogSaveAnsi
     return true;
 }
 
+bool AdbLogcatSource::synchronizeOutputBinding( LiveLogSaveAnsiMode ansiMode )
+{
+    if ( !logData_ || logData_->boundOutputFile().isEmpty() ) {
+        return false;
+    }
+    sessionData_.boundOutputFile = logData_->boundOutputFile();
+    sessionData_.outputAnsiMode = ansiMode;
+    return true;
+}
+
 void AdbLogcatSource::deleteCaptureFiles()
 {
     if ( logData_ ) {
@@ -375,24 +458,36 @@ void AdbLogcatSource::setControllerCallbacks( BytesCallback bytes, StateCallback
 
 void AdbLogcatSource::invalidateTransportGeneration( Generation generation )
 {
-    Q_UNUSED( generation );
+    if ( activeGeneration_ && activeGeneration_ != generation ) {
+        retiringGeneration_ = activeGeneration_;
+        activeGeneration_.reset();
+        retiringDisposition_ = klogg::livecapture::StopDisposition::SettleAccepted;
+    }
 }
 
-void AdbLogcatSource::cancelTransport( Generation generation )
+void AdbLogcatSource::setStoppedCallback( StoppedCallback callback )
 {
-    if ( activeGeneration_ != generation ) {
+    stoppedCallback_ = std::move( callback );
+}
+
+void AdbLogcatSource::cancelTransport(
+    Generation generation, klogg::livecapture::StopDisposition disposition )
+{
+    if ( activeGeneration_ == generation ) {
+        retiringGeneration_ = generation;
+        activeGeneration_.reset();
+    }
+    if ( retiringGeneration_ != generation ) {
+        // Startup may have no transport at all: this owner has nothing to release.
+        if ( !retiringGeneration_ && stoppedCallback_ ) { stoppedCallback_( generation, 0u ); }
         return;
     }
-    activeGeneration_.reset();
+    retiringDisposition_ = disposition;
+    if ( stopRequested_ ) { return; }
+    stopRequested_ = true;
     reportedErrorGeneration_.reset();
     connecting_ = false;
-    if ( transport_ ) {
-        transport_->stop( generation );
-    }
-    if ( logData_ ) {
-        logData_->finishInput();
-    }
-    setState( State::Disconnected );
+    if ( transport_ ) { transport_->requestStop( generation, disposition ); }
 }
 
 void AdbLogcatSource::openTransport( Generation generation,
@@ -431,17 +526,169 @@ void AdbLogcatSource::openTransport( Generation generation,
         }
         return;
     }
+    persistenceSchedulingArmed_ = true;
+    beginDeliveryGeneration( generation );
     activeGeneration_ = generation;
     connecting_ = true;
     lastError_.clear();
     transport_->start( generation );
 }
 
-void AdbLogcatSource::appendTransportBytes( Generation generation, const QByteArray& bytes )
+klogg::livecapture::CaptureDeliveryResult AdbLogcatSource::appendTransportBytes(
+    Generation generation, const QByteArray& bytes )
 {
-    if ( activeGeneration_ == generation && logData_ ) {
-        logData_->appendUtf8( bytes );
+    using namespace klogg::livecapture;
+    CaptureDeliveryResult result;
+    if ( !logData_ || ( activeGeneration_ != generation && retiringGeneration_ != generation ) ) {
+        result.disposition = DeliveryDisposition::Rejected;
+        return result;
     }
+    try {
+        result = mapCaptureOutcome( logData_->appendUtf8( bytes ) );
+    }
+    catch ( ... ) {
+        result.disposition = DeliveryDisposition::PartialUnknown;
+        result.failureCode = "capture-outcome-unknown";
+    }
+    schedulePersistenceRetry();
+    if ( !controllerBytes_ && ( result.failureCode || result.notificationFailed
+                               || result.disposition != DeliveryDisposition::Complete ) ) {
+        const LiveSourceError error{ ErrorCategory::Capture,
+            result.failureCode.value_or( "capture-notification-failed" ), ErrorScope::Capture,
+            RetryPolicy::Never, "The live capture could not accept all input safely.", {} };
+        lastError_ = QString::fromStdString( error.message );
+        setState( State::Error );
+        if ( controllerFailure_ ) { controllerFailure_( generation, error ); }
+    }
+    return result;
+}
+
+klogg::livecapture::CaptureDeliveryResult AdbLogcatSource::mapCaptureOutcome(
+    const CaptureStore::AppendResult& outcome )
+{
+    using namespace klogg::livecapture;
+    CaptureDeliveryResult result;
+        switch ( outcome.disposition ) {
+        case CaptureStore::AppendDisposition::Complete:
+            result.disposition = DeliveryDisposition::Complete; break;
+        case CaptureStore::AppendDisposition::RejectedUnchanged:
+            result.disposition = DeliveryDisposition::Rejected; break;
+        case CaptureStore::AppendDisposition::PartialKnown:
+            result.disposition = DeliveryDisposition::PartialKnown; break;
+        case CaptureStore::AppendDisposition::PartialUnknown:
+            result.disposition = DeliveryDisposition::PartialUnknown; break;
+        }
+        result.acceptedBytes = static_cast<std::uint64_t>( outcome.acceptedBytes );
+        result.committedBytes = static_cast<std::uint64_t>( outcome.committedBytes );
+        result.committedLines = outcome.committedLines.get();
+        result.outputBytes = outcome.outputBytes
+            ? std::optional<std::uint64_t>{ static_cast<std::uint64_t>( *outcome.outputBytes ) }
+            : std::nullopt;
+        result.notificationFailed = outcome.notificationFailed;
+        if ( outcome.failure ) {
+            switch ( *outcome.failure ) {
+            case CaptureStore::CaptureFailure::Capacity: result.failureCode = "capture-capacity"; break;
+            case CaptureStore::CaptureFailure::Directory: result.failureCode = "capture-directory"; break;
+            case CaptureStore::CaptureFailure::SegmentIds: result.failureCode = "capture-segment-ids"; break;
+            case CaptureStore::CaptureFailure::Allocation: result.failureCode = "capture-allocation"; break;
+            case CaptureStore::CaptureFailure::Unexpected: result.failureCode = "capture-unexpected"; break;
+            }
+        }
+    return result;
+}
+
+void AdbLogcatSource::setFinalizedCallback( FinalizedCallback callback )
+{
+    finalizedCallback_ = std::move( callback );
+}
+
+void AdbLogcatSource::beginDeliveryGeneration( Generation generation )
+{
+    deliverySettlement_.emplace();
+    deliverySettlement_->generation = generation;
+}
+
+void AdbLogcatSource::settleOfferedDelivery( Generation generation, DeliverySequence sequence )
+{
+    if ( !deliverySettlement_ || deliverySettlement_->generation != generation
+         || sequence != deliverySettlement_->settledThroughSequence + 1u
+         || sequence > deliverySettlement_->lastOfferedSequence ) {
+        return;
+    }
+    deliverySettlement_->settledThroughSequence = sequence;
+    completeRetirementIfSettled( generation );
+}
+
+void AdbLogcatSource::completeRetirementIfSettled( Generation generation )
+{
+    if ( retiringGeneration_ != generation || !deliverySettlement_
+         || deliverySettlement_->generation != generation || deliverySettlement_->completing
+         || !deliverySettlement_->producerStopped
+         || deliverySettlement_->settledThroughSequence
+                != deliverySettlement_->lastOfferedSequence ) {
+        return;
+    }
+
+    deliverySettlement_->completing = true;
+    const auto discarded = deliverySettlement_->discardedBytes;
+    const bool preserveTerminalError
+        = state_ == State::Error
+          && retiringDisposition_ == klogg::livecapture::StopDisposition::SettleAccepted;
+    const QPointer<AdbLogcatSource> guard( this );
+    // Only real producer completion plus settlement of every registered delivery
+    // seals partial input. Arbitrary stale callbacks cannot register after stopped.
+    finalizeInput( generation );
+    if ( !guard ) { return; }
+
+    guard->retiringGeneration_.reset();
+    guard->stopRequested_ = false;
+    guard->deliverySettlement_.reset();
+    const auto callback = guard->stoppedCallback_;
+    const bool clear = std::exchange( guard->clearAfterStop_, false );
+    const bool restart = std::exchange( guard->restartAfterStop_, false );
+    if ( !preserveTerminalError ) { guard->setState( State::Disconnected ); }
+    if ( !guard ) { return; }
+    if ( callback ) { callback( generation, discarded ); }
+    if ( !guard ) { return; }
+    if ( clear ) { guard->performClear( restart ); }
+    else if ( restart ) {
+        if ( guard->controllerRestart_ ) { guard->controllerRestart_(); }
+        else { guard->connectSource(); }
+    }
+}
+
+void AdbLogcatSource::finalizeInput( Generation generation )
+{
+    if ( !logData_ ) { return; }
+    klogg::livecapture::CaptureDeliveryResult result;
+    try { result = mapCaptureOutcome( logData_->finishInput() ); }
+    catch ( ... ) {
+        result.disposition = klogg::livecapture::DeliveryDisposition::PartialUnknown;
+        result.failureCode = "capture-finalization-unknown";
+    }
+    schedulePersistenceRetry();
+    if ( finalizedCallback_ ) { finalizedCallback_( generation, result ); }
+}
+
+bool AdbLogcatSource::isInputTerminated() const
+{
+    return !activeGeneration_ && !retiringGeneration_;
+}
+
+std::optional<CaptureStore::PersistenceResult> AdbLogcatSource::persistForClose( int maxSegments )
+{
+    if ( !isInputTerminated() ) { return std::nullopt; }
+    if ( !logData_ ) { return CaptureStore::PersistenceResult{}; }
+    // This is one bounded preparation turn, not an async export or a durability promise.
+    return logData_->persistCapture( maxSegments );
+}
+
+std::optional<CaptureOutputError> AdbLogcatSource::flushOutputForClose()
+{
+    if ( !isInputTerminated() || !logData_ ) {
+        return CaptureOutputError::Flush;
+    }
+    return logData_->flushOutputForClose();
 }
 
 void AdbLogcatSource::setState( State state )
@@ -464,11 +711,9 @@ void AdbLogcatSource::setStateFromTransport( Generation generation,
             diagnostic.toStdString() } );
         const auto terminalText
             = diagnostic.isEmpty() ? QString::fromStdString( failure.message ) : diagnostic;
-        const auto logData = logData_;
         QPointer<AdbLogcatSource> guard( this );
 
         connecting_ = false;
-        if ( logData ) { logData->finishInput(); }
         if ( !guard ) { return; }
 
         guard->lastError_ = terminalText;

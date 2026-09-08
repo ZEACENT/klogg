@@ -145,6 +145,95 @@ bool carriesRawCliOptions( const QJsonObject& object )
     return !arguments.isEmpty();
 }
 
+using Integrity = livecapture::LiveIntegritySummary;
+struct IntegrityCounter {
+    const char* key;
+    std::uint64_t Integrity::* member;
+};
+constexpr IntegrityCounter IntegrityCounters[]{
+    { "offeredBytes", &Integrity::offeredBytes }, { "dequeuedBytes", &Integrity::dequeuedBytes },
+    { "acceptedBytes", &Integrity::acceptedBytes }, { "committedBytes", &Integrity::committedBytes },
+    { "committedLines", &Integrity::committedLines }, { "discardedBytes", &Integrity::discardedBytes },
+    { "uncertainBytes", &Integrity::uncertainBytes }, { "outputBytes", &Integrity::outputBytes },
+    { "olderEvents", &Integrity::olderEvents }
+};
+struct IntegrityFlag {
+    const char* key;
+    bool Integrity::* member;
+};
+constexpr IntegrityFlag IntegrityFlags[]{
+    { "sourceCompletenessUnknown", &Integrity::sourceCompletenessUnknown },
+    { "gapPossible", &Integrity::gapPossible }, { "replayPossible", &Integrity::replayPossible },
+    { "outputProgressUnknown", &Integrity::outputProgressUnknown }
+};
+
+QJsonObject serializeIntegrity( const Integrity& value )
+{
+    QJsonObject object;
+    object.insert( QStringLiteral( "version" ), static_cast<int>( Integrity::SchemaVersion ) );
+    for ( const auto& field : IntegrityCounters ) {
+        object.insert( QLatin1String( field.key ),
+                       QString::number( static_cast<qulonglong>( value.*field.member ) ) );
+    }
+    for ( const auto& field : IntegrityFlags ) {
+        object.insert( QLatin1String( field.key ), value.*field.member );
+    }
+    QJsonArray events;
+    for ( const auto& event : value.recentEvents ) {
+        QJsonObject item;
+        item.insert( QStringLiteral( "code" ), QString::fromStdString( event.code ) );
+        item.insert( QStringLiteral( "bytes" ), QString::number( static_cast<qulonglong>( event.bytes ) ) );
+        events.append( item );
+    }
+    object.insert( QStringLiteral( "recentEvents" ), events );
+    return object;
+}
+
+bool parseExactCount( const QJsonValue& value, std::uint64_t& count )
+{
+    if ( !value.isString() ) { return false; }
+    const auto text = value.toString();
+    bool valid = false;
+    const auto parsed = text.toULongLong( &valid, 10 );
+    if ( !valid || QString::number( parsed ) != text ) { return false; }
+    count = static_cast<std::uint64_t>( parsed );
+    return true;
+}
+
+bool parseIntegrity( const QJsonValue& value, Integrity& result )
+{
+    if ( value.isUndefined() ) { return true; } // Historical sessions remain explicitly unknown.
+    if ( !value.isObject() ) { return false; }
+    const auto object = value.toObject();
+    const auto version = object.value( QStringLiteral( "version" ) );
+    if ( !version.isDouble() || version.toDouble() != Integrity::SchemaVersion ) { return false; }
+    for ( const auto& field : IntegrityCounters ) {
+        const auto count = object.value( QLatin1String( field.key ) );
+        if ( !count.isUndefined() && !parseExactCount( count, result.*field.member ) ) { return false; }
+    }
+    for ( const auto& field : IntegrityFlags ) {
+        const auto flag = object.value( QLatin1String( field.key ) );
+        if ( flag.isUndefined() ) { continue; }
+        if ( !flag.isBool() ) { return false; }
+        result.*field.member = flag.toBool();
+    }
+    if ( !result.sourceCompletenessUnknown ) { return false; }
+    const auto events = object.value( QStringLiteral( "recentEvents" ) );
+    if ( !events.isUndefined() && !events.isArray() ) { return false; }
+    // Reject oversized untrusted metadata rather than allocating an unbounded event history.
+    if ( events.toArray().size() > static_cast<int>( Integrity::MaxRecentEvents ) ) { return false; }
+    for ( const auto& event : events.toArray() ) {
+        if ( !event.isObject() ) { return false; }
+        const auto item = event.toObject();
+        const auto code = item.value( QStringLiteral( "code" ) ).toString();
+        std::uint64_t bytes = 0;
+        if ( code.isEmpty() || code.size() > 96
+             || !parseExactCount( item.value( QStringLiteral( "bytes" ) ), bytes ) ) { return false; }
+        result.record( code.toStdString(), bytes );
+    }
+    return true;
+}
+
 // Payload eras: the current typed schema (schemaVersion >= 1) and the flat
 // AdbLogcatSessionData JSON written before it (no or zero schemaVersion).
 enum class PayloadEra : std::uint8_t { Current, LegacyFlat };
@@ -190,6 +279,19 @@ QString captureIdentifierAlreadyInUse()
 }
 
 } // namespace messages
+
+QJsonObject serializeIntegritySummary( const livecapture::LiveIntegritySummary& summary )
+{
+    return serializeIntegrity( summary );
+}
+
+bool parseIntegritySummary( const QJsonValue& value, livecapture::LiveIntegritySummary& summary )
+{
+    livecapture::LiveIntegritySummary parsed;
+    if ( !parseIntegrity( value, parsed ) ) { return false; }
+    summary = std::move( parsed );
+    return true;
+}
 
 QString serializeSpec( const LiveLogSessionSpec& spec )
 {
@@ -253,6 +355,7 @@ QString serializeSpec( const LiveLogSessionSpec& spec )
     capture.insert( QStringLiteral( "captureMaxFileSize" ), spec.capture.captureMaxFileSize );
     capture.insert( QStringLiteral( "captureBackupCount" ), spec.capture.captureBackupCount );
     object.insert( QStringLiteral( "capture" ), capture );
+    object.insert( QStringLiteral( "integrity" ), serializeIntegrity( spec.integrity ) );
 
     object.insert( QStringLiteral( "boundOutputFile" ), spec.boundOutputFile );
 
@@ -378,6 +481,11 @@ ParseResult parsePersistedSpec( const QString& json )
     LiveLogSessionSpec spec;
     spec.schemaVersion = kCurrentSpecVersion;
     spec.sourceKind = kind;
+    if ( !parseIntegrity( object.value( QStringLiteral( "integrity" ) ), spec.integrity ) ) {
+        result.diagnostics.push_back( fatalDiagnostic( QStringLiteral( "invalid-live-integrity" ),
+            QStringLiteral( "The saved live capture integrity metadata is invalid or unsupported." ) ) );
+        return result;
+    }
 
     // Backend discriminator. Defaults fail closed to the application-owned
     // transports; the compatibility process backends survive only when the
@@ -611,14 +719,15 @@ std::vector<Diagnostic> validateSpec( const LiveLogSessionSpec& spec,
         }
     }
 
-    if ( spec.sourceKind == SourceKind::IosSyslog
-         && ( !spec.ios.level.trimmed().isEmpty() || !spec.ios.categories.isEmpty()
-              || !spec.ios.subsystem.trimmed().isEmpty()
-              || spec.ios.outputFormat != IosOptions::OutputFormat::Default ) ) {
-        diagnostics.push_back( fatalDiagnostic(
-            QStringLiteral( "unsupported-ios-log-options" ),
-            liveLogMessage( "Saved iOS level, category, subsystem, and JSON options are not "
-                            "supported by the native stream yet." ) ) );
+    if ( spec.sourceKind == SourceKind::IosSyslog ) {
+        const auto optionError
+            = validateIosNativeOptions( makeLiveSourceTransportConfig( spec ) );
+        if ( optionError.has_value() ) {
+            diagnostics.push_back( fatalDiagnostic(
+                QString::fromStdString( optionError->code ),
+                liveLogMessage( "Saved iOS level, category, subsystem, and JSON options are not "
+                                "supported by the native stream yet." ) ) );
+        }
     }
 
     return diagnostics;
@@ -688,6 +797,7 @@ LiveLogSessionSpec sessionSpecFromSessionData( const AdbLogcatSessionData& sessi
                                  ? DeviceIdentity::Connection::Network
                                  : DeviceIdentity::Connection::Usb;
     spec.runIntent = sessionData.runIntent;
+    spec.integrity = sessionData.integrity;
     spec.android.buffers = sessionData.androidBuffers;
     spec.android.filterSpec = sessionData.androidFilterSpec;
     spec.android.priority = sessionData.androidPriority;
@@ -734,6 +844,7 @@ AdbLogcatSessionData sessionDataFromSpec( const LiveLogSessionSpec& spec )
               ? klogg::livecapture::ios::NativeConnectionType::Network
               : klogg::livecapture::ios::NativeConnectionType::Usb;
     sessionData.runIntent = spec.runIntent;
+    sessionData.integrity = spec.integrity;
     sessionData.androidBuffers = spec.android.buffers;
     sessionData.androidFilterSpec = spec.android.filterSpec;
     sessionData.androidPriority = spec.android.priority;

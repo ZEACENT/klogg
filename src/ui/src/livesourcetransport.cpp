@@ -46,6 +46,22 @@ LiveSourceTransport::LiveSourceTransport( QObject* parent )
     Q_UNUSED( registeredState );
     Q_UNUSED( registeredGeneration );
     Q_UNUSED( registeredRequest );
+    connect( this, &LiveSourceTransport::stateChanged, this,
+        [ this ]( Generation generation, State state ) {
+            if ( state == State::Disconnected && pendingStop_ == generation ) {
+                pendingStop_.reset();
+                Q_EMIT stopped( generation, 0u );
+            }
+        } );
+}
+
+void LiveSourceTransport::requestStop(
+    Generation generation, klogg::livecapture::StopDisposition disposition )
+{
+    (void)disposition;
+    if ( pendingStop_ == generation ) { return; }
+    pendingStop_ = generation;
+    stop( generation );
 }
 
 std::optional<klogg::livecapture::LiveSourceError> LiveSourceTransport::lastStructuredError() const
@@ -179,6 +195,7 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
         return;
     }
 
+    const auto generation = processContext_ ? processContext_->generation : Generation{ 0 };
     auto dyingProcess = std::move( process_ );
     processContext_.reset();
     auto* const dying = dyingProcess.get();
@@ -214,6 +231,21 @@ void ProcessLiveSourceTransport::retireCurrentProcess()
     // schedules prompt deletion, while QObject parentage closes the lifetime if
     // the event loop stops or the transport is destroyed first.
     dying->setParent( this );
+    if ( generation != 0u ) {
+        const auto completed = std::make_shared<bool>( false );
+        const auto notifyStopped = [ this, generation, completed, dying ] {
+            if ( std::exchange( *completed, true ) ) { return; }
+            // Legacy processes have no graceful ingress queue. Report only the
+            // host bytes actually available here, never guess source-side loss.
+            const auto discarded = static_cast<quint64>( dying->readAllStandardOutput().size() );
+            Q_EMIT stopped( generation, discarded );
+        };
+        QObject::connect( dying, qOverload<int, QProcess::ExitStatus>( &QProcess::finished ),
+            this, [ notifyStopped ]( int, QProcess::ExitStatus ) { notifyStopped(); } );
+        if ( dying->state() == QProcess::NotRunning ) {
+            QTimer::singleShot( 0, dying, notifyStopped );
+        }
+    }
 
     // A new generation must never reuse the QProcess whose callbacks are
     // currently unwinding. Create the fresh process before external callbacks
@@ -373,6 +405,13 @@ void ProcessLiveSourceTransport::stop( Generation generation )
     asyncStartupPhase_ = AsyncStartupPhase::Idle;
     retireCurrentProcess();
     setState( generation, State::Disconnected );
+}
+
+void ProcessLiveSourceTransport::requestStop(
+    Generation generation, klogg::livecapture::StopDisposition disposition )
+{
+    (void)disposition; // No graceful queue exists; retirement reports explicit available-byte discard.
+    stop( generation );
 }
 
 void ProcessLiveSourceTransport::clearRemoteAsync( Generation generation, ClearRequestId requestId )

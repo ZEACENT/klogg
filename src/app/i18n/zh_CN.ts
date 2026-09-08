@@ -778,6 +778,36 @@
         <source>Live log source error</source>
         <translation>实时日志源错误</translation>
     </message>
+    <message><source>Capture spool persistence is currently degraded.</source><translation>捕获缓存的持久化当前处于降级状态。</translation></message>
+    <message><source>Capture spool persistence was degraded earlier in this session.</source><translation>此会话中捕获缓存的持久化曾处于降级状态。</translation></message>
+    <message><source>One or more gaps in the captured stream are possible.</source><translation>捕获的数据流中可能存在一个或多个缺口。</translation></message>
+    <message><source>Some source records may have been replayed after reconnecting.</source><translation>重新连接后，部分源记录可能被重复传送。</translation></message>
+    <message><source>Some host-side capture or output progress is uncertain.</source><translation>部分主机端捕获或输出进度无法确定。</translation></message>
+    <message><source>Completeness of records supplied by the device cannot be verified.</source><translation>无法验证设备提供记录的完整性。</translation></message>
+    <message><source>Save live log with integrity warning</source><translation>在完整性警告下保存实时日志</translation></message>
+    <message><source>The saved data may be incomplete or contain replayed records. %1</source><translation>保存的数据可能不完整或包含重复传送的记录。%1</translation></message>
+    <message><source>Saving live log to %1</source><translation>正在将实时日志保存到 %1</translation></message>
+    <message><source>Saving live log... %1 bytes written</source><translation>正在保存实时日志……已写入 %1 字节</translation></message>
+    <message><source>Another save is already running for this live capture.</source><translation>此实时捕获已有另一个保存任务正在运行。</translation></message>
+    <message><source>The live log changed faster than the bounded save journal could keep up. The previous output binding is still active.</source><translation>实时日志变化速度超过了有界保存日志的处理能力。原输出绑定仍然有效。</translation></message>
+    <message><source>Capture progress became uncertain during the save. The candidate was not published as complete.</source><translation>保存期间捕获进度变得无法确定。候选文件未被标记为完整并发布。</translation></message>
+    <message><source>The candidate output file could not be published atomically.</source><translation>无法以原子方式发布候选输出文件。</translation></message>
+    <message><source>The file was published, but could not be reopened as the active live output. The previous binding remains active.</source><translation>文件已发布，但无法重新打开为活动实时输出。原绑定仍然有效。</translation></message>
+    <message><source>The file was published, but the final live tail could not be transferred. The previous binding remains active.</source><translation>文件已发布，但无法传送最终实时尾部。原绑定仍然有效。</translation></message>
+    <message><source>Live capture could not be closed safely</source><translation>无法安全关闭实时捕获</translation></message>
+    <message><source>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</source><translation>捕获数据仍在等待处理或无法持久化。现在关闭可能会丢失内存中仅存的副本。</translation></message>
+    <message><source>The active live output could not be flushed. Closing now may lose recent output.</source><translation>无法刷新活动实时输出。现在关闭可能会丢失最近的输出。</translation></message>
+    <message><source>Close Anyway (Possible Loss)</source><translation>仍然关闭（可能丢失数据）</translation></message>
+    <message><source>%1
+Capture integrity: %2</source><translation>%1
+捕获完整性：%2</translation></message>
+    <message><source> - Capture integrity warning: %1</source><translation> - 捕获完整性警告：%1</translation></message>
+    <message><source>Saving the live log was cancelled.</source><translation>实时日志保存已取消。</translation></message>
+    <message><source>The captured snapshot could not be read.</source><translation>无法读取捕获快照。</translation></message>
+    <message><source>The candidate output file could not be written.</source><translation>无法写入候选输出文件。</translation></message>
+    <message><source>Saving the live log failed.</source><translation>保存实时日志失败。</translation></message>
+    <message><source>Cancel</source><translation>取消</translation></message>
+    <message><source>Retry</source><translation>重试</translation></message>
 </context>
 <context>
     <name>OptionsDialog</name>

@@ -42,6 +42,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/pathline.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/logmainview.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogcontroller.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogclosetransaction.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogexportservice.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livelogsession.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/livesourcetransport.h
   ${CMAKE_CURRENT_SOURCE_DIR}/include/mainwindow.h
@@ -129,6 +131,8 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/pathline.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/logmainview.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogcontroller.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogclosetransaction.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogexportservice.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livelogsession.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/livesourcetransport.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/mainwindow.cpp

@@ -778,6 +778,36 @@
         <source>Live log source error</source>
         <translation>即時日誌來源錯誤</translation>
     </message>
+    <message><source>Capture spool persistence is currently degraded.</source><translation>擷取暫存的持久化目前處於降級狀態。</translation></message>
+    <message><source>Capture spool persistence was degraded earlier in this session.</source><translation>此工作階段中擷取暫存的持久化曾處於降級狀態。</translation></message>
+    <message><source>One or more gaps in the captured stream are possible.</source><translation>擷取的資料流中可能存在一個或多個缺口。</translation></message>
+    <message><source>Some source records may have been replayed after reconnecting.</source><translation>重新連線後，部分來源記錄可能被重複傳送。</translation></message>
+    <message><source>Some host-side capture or output progress is uncertain.</source><translation>部分主機端擷取或輸出進度無法確定。</translation></message>
+    <message><source>Completeness of records supplied by the device cannot be verified.</source><translation>無法驗證裝置所提供記錄的完整性。</translation></message>
+    <message><source>Save live log with integrity warning</source><translation>在完整性警告下儲存即時日誌</translation></message>
+    <message><source>The saved data may be incomplete or contain replayed records. %1</source><translation>儲存的資料可能不完整或包含重複傳送的記錄。%1</translation></message>
+    <message><source>Saving live log to %1</source><translation>正在將即時日誌儲存至 %1</translation></message>
+    <message><source>Saving live log... %1 bytes written</source><translation>正在儲存即時日誌……已寫入 %1 位元組</translation></message>
+    <message><source>Another save is already running for this live capture.</source><translation>此即時擷取已有另一個儲存工作正在執行。</translation></message>
+    <message><source>The live log changed faster than the bounded save journal could keep up. The previous output binding is still active.</source><translation>即時日誌變更速度超過有界儲存日誌的處理能力。原輸出繫結仍然有效。</translation></message>
+    <message><source>Capture progress became uncertain during the save. The candidate was not published as complete.</source><translation>儲存期間擷取進度變得無法確定。候選檔案未被標記為完整並發佈。</translation></message>
+    <message><source>The candidate output file could not be published atomically.</source><translation>無法以不可分割方式發佈候選輸出檔案。</translation></message>
+    <message><source>The file was published, but could not be reopened as the active live output. The previous binding remains active.</source><translation>檔案已發佈，但無法重新開啟為作用中的即時輸出。原繫結仍然有效。</translation></message>
+    <message><source>The file was published, but the final live tail could not be transferred. The previous binding remains active.</source><translation>檔案已發佈，但無法傳送最終即時尾端。原繫結仍然有效。</translation></message>
+    <message><source>Live capture could not be closed safely</source><translation>無法安全關閉即時擷取</translation></message>
+    <message><source>Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory.</source><translation>擷取資料仍在等待處理或無法持久化。現在關閉可能會遺失記憶體中僅存的副本。</translation></message>
+    <message><source>The active live output could not be flushed. Closing now may lose recent output.</source><translation>無法清出作用中的即時輸出。現在關閉可能會遺失最近的輸出。</translation></message>
+    <message><source>Close Anyway (Possible Loss)</source><translation>仍然關閉（可能遺失資料）</translation></message>
+    <message><source>%1
+Capture integrity: %2</source><translation>%1
+擷取完整性：%2</translation></message>
+    <message><source> - Capture integrity warning: %1</source><translation> - 擷取完整性警告：%1</translation></message>
+    <message><source>Saving the live log was cancelled.</source><translation>即時日誌儲存已取消。</translation></message>
+    <message><source>The captured snapshot could not be read.</source><translation>無法讀取擷取快照。</translation></message>
+    <message><source>The candidate output file could not be written.</source><translation>無法寫入候選輸出檔案。</translation></message>
+    <message><source>Saving the live log failed.</source><translation>儲存即時日誌失敗。</translation></message>
+    <message><source>Cancel</source><translation>取消</translation></message>
+    <message><source>Retry</source><translation>重試</translation></message>
 </context>
 <context>
     <name>OptionsDialog</name>

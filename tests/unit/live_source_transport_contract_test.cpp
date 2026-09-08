@@ -27,14 +27,18 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QDir>
 #include <QPointer>
 #include <QProcess>
 #include <QString>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QMetaObject>
 #include <QUuid>
 
 #include "adblogcatsource.h"
 #include "ioslogprocesstransport.h"
+#include "livelogcontroller.h"
 #include "livesourcetransport.h"
 #include "livestate.h"
 #include "streaminglogdata.h"
@@ -70,9 +74,14 @@ public:
     void stop( Generation generation ) override
     {
         stopGenerations.push_back( generation );
+        if ( deferStop ) { return; }
         if ( emitRetiredCallbacksDuringStop ) {
             Q_EMIT stateChanged( generation, State::Connected );
-            Q_EMIT bytesReceived( generation, QByteArrayLiteral( "retired-during-stop\n" ) );
+            Q_EMIT bytesReceived( generation,
+                                  stopTail.isEmpty()
+                                      ? QByteArrayLiteral( "retired-during-stop\n" )
+                                      : stopTail );
+            if ( duringStop ) { duringStop(); }
             Q_EMIT errorOccurred( generation, QStringLiteral( "intentional-cancellation" ) );
         }
         Q_EMIT stateChanged( generation, State::Disconnected );
@@ -147,7 +156,10 @@ public:
         }
     };
 
+    bool deferStop = false;
     bool emitRetiredCallbacksDuringStop = false;
+    QByteArray stopTail;
+    std::function<void()> duringStop;
     std::optional<klogg::livecapture::LiveSourceError> structuredError;
     std::vector<Generation> startGenerations;
     std::vector<Generation> stopGenerations;
@@ -260,11 +272,229 @@ public:
     mutable std::vector<LiveSourceTransportConfig> requestedConfigs;
 };
 
+class SourceControllerEffects final : public klogg::livelog::LiveLogControllerEffects {
+public:
+    explicit SourceControllerEffects( AdbLogcatSource& source )
+        : source_( source )
+    {
+    }
+
+    void invalidateGeneration( Generation generation ) override
+    {
+        source_.invalidateTransportGeneration( generation );
+    }
+
+    void cancelStream( Generation generation ) override
+    {
+        source_.cancelTransport( generation );
+    }
+
+    void retireStream( Generation generation,
+                       klogg::livecapture::StopDisposition disposition ) override
+    {
+        source_.cancelTransport( generation, disposition );
+    }
+
+    void startInfrastructure( Generation ) override {}
+
+    void openStream( Generation generation, const LiveSourceTransportConfig& config ) override
+    {
+        source_.openTransport( generation, config );
+    }
+
+    void appendBytes( Generation generation, const QByteArray& bytes ) override
+    {
+        (void)source_.appendTransportBytes( generation, bytes );
+    }
+
+    klogg::livecapture::CaptureDeliveryResult acceptBytes(
+        Generation generation, const QByteArray& bytes ) override
+    {
+        return source_.appendTransportBytes( generation, bytes );
+    }
+
+private:
+    AdbLogcatSource& source_;
+};
+
+klogg::livelog::LiveLogSessionSpec controllerSessionSpec()
+{
+    klogg::livelog::LiveLogSessionSpec spec;
+    spec.captureId = QStringLiteral( "source-controller-settlement" );
+    spec.sourceKind = klogg::livelog::SourceKind::AndroidLogcat;
+    spec.androidBackend = klogg::livelog::AndroidBackend::SmartSocket;
+    spec.device.deviceId = QStringLiteral( "device" );
+    spec.runIntent = klogg::livecapture::RunIntent::Running;
+    spec.capture.autoReconnectEnabled = true;
+    return spec;
+}
+
 QString makeCaptureId()
 {
     return QUuid::createUuid().toString( QUuid::WithoutBraces );
 }
 } // namespace
+
+TEST_CASE( "Clear does not destroy accepted input or start remote work before true stopped",
+           "[livecapture][transport][w2-clear-barrier-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    REQUIRE( source.connectSource() );
+    auto* transport = factory.lastTransport;
+    const auto generation = transport->startGenerations.back();
+    transport->publishState( generation, LiveSourceTransport::State::Connected );
+    transport->publishBytes( generation, QByteArrayLiteral( "preserve-until-stopped\n" ) );
+    transport->deferStop = true;
+    REQUIRE( source.clearAndRestart() );
+    CHECK( data->getNbLine() == 1_lcount );
+    CHECK( transport->clearRequests.empty() );
+    transport->publishState( generation, LiveSourceTransport::State::Disconnected );
+    CHECK( data->getNbLine() == 0_lcount );
+    CHECK( transport->clearRequests.size() == 1u );
+}
+
+TEST_CASE( "Controller retirement settles a synchronous ADB tail before finalization and restart",
+           "[livecapture][transport][controller][w2-settlement-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    SourceControllerEffects effects( source );
+    auto spec = controllerSessionSpec();
+    klogg::livelog::LiveLogController controller(
+        spec, klogg::livelog::LiveLogControllerConfig{}, effects );
+    int finalizations = 0;
+
+    source.setControllerCallbacks(
+        [&]( Generation generation, const QByteArray& bytes, auto settled ) {
+            controller.streamBytesReceived( generation, bytes, std::move( settled ) );
+        },
+        [&]( Generation generation, LiveSourceTransport::State state ) {
+            if ( state == LiveSourceTransport::State::Connected ) {
+                controller.protocolServiceReady( generation );
+                controller.streamHandleOpened( generation );
+                controller.streamReadArmed( generation );
+            }
+        },
+        [&]( Generation generation, klogg::livecapture::LiveSourceError error ) {
+            controller.streamFailed( generation, std::move( error ) );
+        } );
+    source.setFinalizedCallback( [&]( Generation generation, const auto& result ) {
+        ++finalizations;
+        controller.inputTerminated( generation, result );
+    } );
+    source.setStoppedCallback( [&]( Generation generation, std::uint64_t discarded ) {
+        CHECK( finalizations == 1 );
+        REQUIRE( data->getNbLine().get() == 1u );
+        CHECK( data->getLineString( 0_lnum ) == QStringLiteral( "partial tail" ) );
+        controller.stopCompleted( generation, discarded );
+    } );
+
+    controller.armRunIntent();
+    controller.infrastructureChanged( klogg::livecapture::InfrastructureStatus::Ready,
+                                      klogg::livecapture::InfrastructureOwnership::ExternalShared );
+    controller.deviceAvailable( controller.snapshot().generation );
+    REQUIRE( factory.lastTransport != nullptr );
+    auto* const retiringTransport = factory.lastTransport;
+    const auto retiringGeneration = controller.snapshot().generation;
+    retiringTransport->publishState( retiringGeneration, LiveSourceTransport::State::Connected );
+    REQUIRE( controller.snapshot().source.status
+             == klogg::livecapture::SourceStatus::Streaming );
+
+    retiringTransport->publishBytes( retiringGeneration, QByteArrayLiteral( "partial" ) );
+    REQUIRE( data->getNbLine().get() == 0u );
+    retiringTransport->stopTail = QByteArrayLiteral( " tail\n" );
+    retiringTransport->emitRetiredCallbacksDuringStop = true;
+    retiringTransport->duringStop = [&] {
+        CHECK( factory.requestedConfigs.size() == 1u );
+        controller.deviceAvailable( controller.snapshot().generation );
+        CHECK( factory.requestedConfigs.size() == 1u );
+    };
+
+    controller.deviceAbsent( retiringGeneration );
+
+    CHECK( finalizations == 1 );
+    REQUIRE( data->getNbLine().get() == 1u );
+    CHECK( data->getLineString( 0_lnum ) == QStringLiteral( "partial tail" ) );
+    CHECK( factory.requestedConfigs.size() == 2u );
+    CHECK_FALSE( controller.snapshot().source.stoppingGeneration.has_value() );
+    retiringTransport->publishBytes( retiringGeneration, QByteArrayLiteral( "stale\n" ) );
+    CHECK( finalizations == 1 );
+    CHECK( data->getNbLine().get() == 1u );
+}
+
+TEST_CASE( "Source persistence retry is bounded precise and never finalizes normal partial input",
+           "[livecapture][transport][w2-health-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    source.openTransport( 501u, LiveSourceTransportConfig{} );
+    source.appendTransportBytes( 501u, QByteArrayLiteral( "normal-partial" ) );
+    auto* retry = source.findChild<QTimer*>( QStringLiteral( "liveCapturePersistenceRetry" ) );
+    REQUIRE( retry != nullptr );
+    CHECK_FALSE( retry->isActive() );
+    CHECK( data->getNbLine() == 0_lcount );
+    source.appendTransportBytes( 501u, QByteArrayLiteral( "\nnext-partial" ) );
+    const auto path = data->capturePath();
+    REQUIRE( QDir{}.rename( path, path + QStringLiteral( "-held" ) ) );
+    REQUIRE( QDir{}.mkpath( path ) );
+    const auto state = data->persistCapture( 1 );
+    REQUIRE( state.failure.has_value() );
+    REQUIRE( state.retryAfterMs.has_value() );
+    CHECK( retry->isActive() );
+    CHECK( retry->timerType() == Qt::PreciseTimer );
+    CHECK( retry->interval() >= *state.retryAfterMs );
+    CHECK( retry->interval() > 0 );
+    REQUIRE( QMetaObject::invokeMethod( retry, "timeout", Qt::DirectConnection ) );
+    CHECK( data->getNbLine() == 1_lcount );
+    CHECK( data->persistenceState().pendingPartialBytes == 12 );
+}
+
+TEST_CASE( "Common source reports actual capture rejection as a terminal typed failure",
+           "[livecapture][transport][w2-sink-red]" )
+{
+    const auto capacity = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    CaptureStore::Limits segmentLimits;
+    segmentLimits.segmentTargetBytes = 1;
+    data->setCaptureLimits( segmentLimits );
+    REQUIRE( data->appendUtf8( QByteArrayLiteral( "committed\n" ) ).acceptedBytes == 10 );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSessionData spec;
+    AdbLogcatSource source( spec, data, factory );
+    std::vector<klogg::livecapture::LiveSourceError> failures;
+    source.setControllerCallbacks( {}, {}, [&]( auto, auto error ) { failures.push_back( error ); } );
+    source.openTransport( 401u, LiveSourceTransportConfig{} );
+    QByteArray ingress = QByteArrayLiteral( "must-not-disappear\n" );
+    if ( capacity ) {
+        CaptureStore::Limits limits;
+        limits.memoryBudgetBytes = 1;
+        limits.ingressBudgetBytes = 1;
+        data->setCaptureLimits( limits );
+        ingress = QByteArray( 1024, 'x' );
+    }
+    else {
+        const auto path = data->capturePath();
+        REQUIRE( QDir{}.rename( path, path + QStringLiteral( "-original" ) ) );
+        REQUIRE( QDir{}.mkpath( path ) );
+    }
+    CHECK_NOTHROW( source.appendTransportBytes( 401u, ingress ) );
+    REQUIRE( failures.size() == 1u );
+    CHECK( failures.front().category == klogg::livecapture::ErrorCategory::Capture );
+    CHECK( failures.front().retryPolicy == klogg::livecapture::RetryPolicy::Never );
+    CHECK( data->getNbLine() == 1_lcount );
+}
 
 TEST_CASE( "ProcessLiveSourceTransport start is nonblocking and immediately Connecting",
            "[livecapture][transport][contract]" )
@@ -570,7 +800,7 @@ TEST_CASE( "AdbLogcatSource stops terminal delivery after synchronous source des
     CHECK( controllerFailures == 0 );
 }
 
-TEST_CASE( "AdbLogcatSource finalizes input before a reentrant terminal disconnect",
+TEST_CASE( "AdbLogcatSource finalizes accepted partial only after a reentrant terminal stop",
            "[livecapture][transport][factory][source][error][ordering][reentrant][ios]" )
 {
     QTemporaryDir captureRoot;
@@ -597,8 +827,9 @@ TEST_CASE( "AdbLogcatSource finalizes input before a reentrant terminal disconne
     QObject::connect( &source, &AdbLogcatSource::errorOccurred, &source,
                       [ & ]( const QString& ) {
                           ++sourceDiagnostics;
-                          CHECK( logData->getNbLine().get() == 1u );
+                          CHECK( logData->getNbLine().get() == 0u );
                           source.disconnectSource();
+                          CHECK( logData->getNbLine().get() == 1u );
                       } );
 
     REQUIRE( source.connectSource() );

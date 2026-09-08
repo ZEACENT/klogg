@@ -54,6 +54,77 @@
 
 class CaptureStoreTestAccess {
   public:
+      static void spillFault( CaptureStore& store, qint64& now,
+                              std::optional<CaptureStore::PersistenceFailure>& failure )
+      {
+          store.spillClockForTesting_ = [ &now ] { return now; };
+          store.spillFailureForTesting_ = [ &failure ] { return failure; };
+      }
+      static std::uint64_t persistenceVisits( const CaptureStore& store )
+      {
+          return store.persistenceVisitsForTesting_;
+      }
+      static std::uint64_t spillAttempts( const CaptureStore& store )
+      {
+          return store.spillAttemptsForTesting_;
+      }
+      static void shortOutput( CaptureStore& store )
+      {
+          store.outputWriteForTesting_ = [ &store ]( const QByteArray& bytes ) {
+              return store.rollingOutput_.currentFile()->write( bytes.left( 1 ) );
+          };
+      }
+      static void afterSpillPublish( CaptureStore& store, std::function<void()> callback )
+      {
+          store.afterSpillPublishForTesting_ = std::move( callback );
+      }
+      static void segmentByteLimit( CaptureStore& store, qint64 limit )
+      {
+          store.segmentByteLimitForTesting_ = limit;
+      }
+      static size_t segmentCount( const CaptureStore& store )
+      {
+          return store.segments_.size();
+      }
+      static std::vector<int> segmentMaxLineLengths( const CaptureStore& store )
+      {
+          const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+          std::vector<int> maxima;
+          maxima.reserve( store.segments_.size() );
+          for ( const auto& segment : store.segments_ ) {
+              maxima.push_back( segment.maxLineLength );
+          }
+          return maxima;
+      }
+      static std::uint64_t maxLineLengthLineVisits( const CaptureStore& store )
+      {
+          const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+          return store.maxLineLengthLineVisitsForTesting_;
+      }
+      static std::uint64_t commitIndexReservations( const CaptureStore& store )
+      {
+          const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+          return store.commitIndexReservationsForTesting_;
+      }
+      static std::uint64_t trimChecks( const CaptureStore& store )
+      {
+          const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+          return store.trimChecksForTesting_;
+      }
+      static std::uint64_t ingressBoundaryCopies( const CaptureStore& store )
+      {
+          const std::lock_guard<std::recursive_mutex> lock( store.mutex_ );
+          return store.ingressBoundaryCopiesForTesting_;
+      }
+      static void beforeAppendMaintenance( CaptureStore& store, std::function<void()> callback )
+      {
+          store.beforeAppendMaintenanceForTesting_ = std::move( callback );
+      }
+      static void beforeSegmentMutation( CaptureStore& store, std::function<void()> callback )
+      {
+          store.beforeSegmentMutationForTesting_ = std::move( callback );
+      }
+
     static CaptureStore::MaintenanceOperationsForTesting maintenanceOperations(
         const CaptureStore& store )
     {
@@ -3045,6 +3116,47 @@ TEST_CASE( "CaptureStore finishInput commits a trailing partial line without add
     REQUIRE( readUtf8File( outputPath ) == QStringLiteral( "partial-line" ) );
 }
 
+TEST_CASE( "CaptureStore finalized records survive resume and reload without merging",
+           "[capturestore][storage-integrity]" )
+{
+    const bool spillBetween = GENERATE( false, true );
+    const bool bindOutput = GENERATE( false, true );
+    const auto root = makeTestDir( "capturestore_resume_boundary" );
+    const auto id = makeCaptureId();
+    const auto output = QDir( root ).filePath( "output.log" );
+    auto* codec = QTextCodec::codecForName( "UTF-8" );
+    {
+        CaptureStore store( id, root );
+        if ( bindOutput ) {
+            REQUIRE( store.bindOutputFile( output ) );
+        }
+        store.appendUtf8( "a" );
+        store.finishInput();
+        if ( bindOutput ) {
+            CHECK( readUtf8File( output ) == "a" ); // EOF alone is unchanged.
+        }
+        if ( spillBetween ) {
+            REQUIRE( CaptureStoreTestAccess::spillLastSegment( store ) );
+        }
+        store.appendUtf8( "b\n" );
+        store.finishInput();
+        REQUIRE( store.lineCount() == 2_lcount );
+        CHECK( store.lineAt( 0_lnum, codec, {} ) == "a" );
+        CHECK( store.lineAt( 1_lnum, codec, {} ) == "b" );
+        if ( bindOutput ) {
+            CHECK( readUtf8File( output ) == "a\nb\n" );
+        }
+    }
+    CaptureStore restored( id, root );
+    REQUIRE( restored.loadFromDisk() );
+    REQUIRE( restored.lineCount() == 2_lcount );
+    CHECK( restored.lineAt( 0_lnum, codec, {} ) == "a" );
+    CHECK( restored.lineAt( 1_lnum, codec, {} ) == "b" );
+    restored.appendUtf8( "c" );
+    restored.finishInput();
+    CHECK( restored.lineCount() == 3_lcount );
+}
+
 TEST_CASE( "CaptureStore keeps a finished partial line when rolling output rotates" )
 {
     CaptureStore::Limits limits;
@@ -4494,23 +4606,16 @@ TEST_CASE( "CaptureStore rejects segment id exhaustion before increment" )
     REQUIRE( store.loadFromDisk() );
     SECTION( "terminated input" )
     {
-        REQUIRE_THROWS_AS( store.appendUtf8( QByteArrayLiteral( "new\n" ) ),
-                           std::overflow_error );
+        const auto result = store.appendUtf8( QByteArrayLiteral( "new\n" ) );
+        REQUIRE( result.disposition == CaptureStore::AppendDisposition::RejectedUnchanged );
+        REQUIRE( result.failure == CaptureStore::CaptureFailure::SegmentIds );
     }
     SECTION( "unterminated input is rejected before destruction" )
     {
-        bool rejected = false;
-        try {
-            store.appendUtf8( QByteArrayLiteral( "new-tail" ) );
-        } catch ( const std::overflow_error& ) {
-            rejected = true;
-        }
-        if ( !rejected ) {
-            // Keep the RED path exception-safe: old code buffered the fragment and
-            // would otherwise throw from the implicitly noexcept destructor.
-            store.deleteCaptureFiles();
-        }
-        REQUIRE( rejected );
+        const auto result = store.appendUtf8( QByteArrayLiteral( "new-tail" ) );
+        REQUIRE( result.disposition == CaptureStore::AppendDisposition::RejectedUnchanged );
+        REQUIRE( result.failure == CaptureStore::CaptureFailure::SegmentIds );
+        REQUIRE( result.pendingPartialBytes == 0 );
     }
 }
 
@@ -4574,18 +4679,11 @@ TEST_CASE( "CaptureStore rejects appends that exceed remaining segment ids atomi
         input = QByteArrayLiteral( "1234567\n7654321\n" );
     }
 
-    bool rejected = false;
-    try {
-        store.appendUtf8( input );
-    } catch ( const std::overflow_error& ) {
-        rejected = true;
-    }
-    if ( !rejected ) {
-        // Keep the RED path exception-safe when an unterminated tail was accepted.
-        store.deleteCaptureFiles();
-    }
-
-    REQUIRE( rejected );
+    const auto result = store.appendUtf8( input );
+    REQUIRE( result.disposition == CaptureStore::AppendDisposition::RejectedUnchanged );
+    REQUIRE( result.failure == CaptureStore::CaptureFailure::SegmentIds );
+    REQUIRE( result.acceptedBytes == 0 );
+    REQUIRE( result.pendingPartialBytes == 0 );
     REQUIRE( store.lineCount() == 1_lcount );
     REQUIRE( segmentFiles( capturePath ) == originalFiles );
 }
@@ -4616,7 +4714,10 @@ TEST_CASE( "CaptureStore retains a partial line when changed limits exhaust ids"
     auto closedLimits = limits;
     closedLimits.segmentTargetBytes = 1;
     store.setLimits( closedLimits );
-    REQUIRE_THROWS_AS( store.finishInput(), std::overflow_error );
+    const auto rejected = store.finishInput();
+    REQUIRE( rejected.disposition == CaptureStore::AppendDisposition::RejectedUnchanged );
+    REQUIRE( rejected.failure == CaptureStore::CaptureFailure::SegmentIds );
+    REQUIRE( rejected.pendingPartialBytes == 4 );
     REQUIRE( store.lineCount() == 2_lcount );
 
     store.setLimits( limits );
@@ -4888,6 +4989,102 @@ TEST_CASE( "CaptureStore trimToLimits returns correct trim result" )
 
     // The remaining data should be within the new limit
     CHECK( store.stats().fileSize <= 32 );
+}
+
+TEST_CASE( "CaptureStore eviction uses segment maxima without revisiting line metadata",
+           "[capturestore][performance][max-line][operations]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 1024 * 1024;
+    limits.maxTotalLines = 64;
+
+    CaptureStore store( makeCaptureId(), makeTestDir( "capturestore_segment_max_trim" ), limits );
+    QByteArray longest( 31, 'L' );
+    longest.append( '\n' );
+    REQUIRE_FALSE( store.appendUtf8( longest ).failure.has_value() );
+    for ( int line = 1; line < 64; ++line ) {
+        REQUIRE_FALSE( store.appendUtf8( QByteArrayLiteral( "1234567\n" ) ).failure.has_value() );
+    }
+    REQUIRE( store.lineCount() == 64_lcount );
+    REQUIRE( store.maxLineLength() == 31_length );
+
+    const auto visitsBefore = CaptureStoreTestAccess::maxLineLengthLineVisits( store );
+    REQUIRE_FALSE( store.appendUtf8( QByteArrayLiteral( "7654321\n" ) ).failure.has_value() );
+    const auto visitsAfter = CaptureStoreTestAccess::maxLineLengthLineVisits( store );
+    const auto segmentMaxima = CaptureStoreTestAccess::segmentMaxLineLengths( store );
+
+    INFO( "line metadata visits=" << ( visitsAfter - visitsBefore )
+                                   << " surviving segments=" << segmentMaxima.size() );
+    CHECK( visitsAfter == visitsBefore );
+    CHECK( store.lineCount() == 64_lcount );
+    CHECK( store.maxLineLength() == 7_length );
+    CHECK( segmentMaxima.size() == 64u );
+    CHECK( std::all_of( segmentMaxima.cbegin(), segmentMaxima.cend(),
+                        []( int maximum ) { return maximum == 7; } ) );
+    CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), QRegularExpression{} )
+           == QStringLiteral( "1234567" ) );
+}
+
+TEST_CASE( "CaptureStore capture indexes grow geometrically under single-line appends",
+           "[capturestore][performance][index-reserve][operations]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 1024 * 1024;
+    limits.memoryBudgetBytes = 2 * 1024 * 1024;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capturestore_index_reserve" ), limits );
+
+    constexpr int AppendedLines = 4096;
+    for ( int line = 0; line < AppendedLines; ++line ) {
+        REQUIRE_FALSE( store.appendUtf8( QByteArrayLiteral( "line\n" ) ).failure.has_value() );
+    }
+
+    const auto reservations = CaptureStoreTestAccess::commitIndexReservations( store );
+    const auto trimChecks = CaptureStoreTestAccess::trimChecks( store );
+    const auto ingressBoundaryCopies = CaptureStoreTestAccess::ingressBoundaryCopies( store );
+    INFO( "capture index reserve operations=" << reservations
+                                               << " unlimited trim checks=" << trimChecks
+                                               << " ingress boundary copies="
+                                               << ingressBoundaryCopies );
+    CHECK( store.lineCount() == LinesCount( AppendedLines ) );
+    CHECK( reservations <= 32u );
+    CHECK( trimChecks == 0u );
+    CHECK( ingressBoundaryCopies == 0u );
+}
+
+TEST_CASE( "CaptureStore reload retains segment maxima for spill and later rebase",
+           "[capturestore][performance][max-line][reload]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 16;
+    const auto captureId = makeCaptureId();
+    const auto rootPath = makeTestDir( "capturestore_segment_max_reload" );
+    {
+        CaptureStore store( captureId, rootPath, limits );
+        REQUIRE_FALSE( store.appendUtf8( QByteArray( 15, 'L' ) + '\n' ).failure.has_value() );
+        REQUIRE_FALSE( store.appendUtf8( QByteArrayLiteral( "1234567\n7654321\n" ) )
+                           .failure.has_value() );
+        REQUIRE( store.persistCapture().complete() );
+    }
+
+    CaptureStore reloaded( captureId, rootPath, limits );
+    REQUIRE( reloaded.loadFromDisk() );
+    const auto loadedMaxima = CaptureStoreTestAccess::segmentMaxLineLengths( reloaded );
+    REQUIRE( loadedMaxima.size() == 3u );
+    CHECK( loadedMaxima == std::vector<int>{ 15, 7, 7 } );
+    REQUIRE( reloaded.maxLineLength() == 15_length );
+
+    const auto visitsBefore = CaptureStoreTestAccess::maxLineLengthLineVisits( reloaded );
+    limits.maxTotalLines = 2;
+    reloaded.setLimits( limits );
+    const auto visitsAfter = CaptureStoreTestAccess::maxLineLengthLineVisits( reloaded );
+    INFO( "reload trim line metadata visits=" << ( visitsAfter - visitsBefore ) );
+    CHECK( visitsAfter == visitsBefore );
+    CHECK( reloaded.lineCount() == 2_lcount );
+    CHECK( reloaded.maxLineLength() == 7_length );
+    CHECK( CaptureStoreTestAccess::segmentMaxLineLengths( reloaded )
+           == std::vector<int>{ 7, 7 } );
 }
 
 TEST_CASE( "CaptureStore cumulative line counts are correct after front-trim" )
@@ -5509,4 +5706,562 @@ TEST_CASE( "CaptureStore AppendResult firstLine reflects post-trim position", "[
     const auto expectedFirst = static_cast<LineNumber::UnderlyingType>(
         total > result.lineCount.get() ? total - result.lineCount.get() : 0 );
     REQUIRE( result.firstLine.get() == expectedFirst );
+}
+
+TEST_CASE( "CaptureStore outcomes separate ingress partial and normalized commit",
+           "[capturestore][storage-outcome]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.maxTotalLines = 1;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_outcome" ), limits );
+    auto result = store.appendUtf8( "ab" );
+    CHECK( result.acceptedBytes == 2 );
+    CHECK( result.committedBytes == 0 );
+    CHECK( result.pendingPartialBytes == 2 );
+    result = store.appendUtf8( "\r\nc\nd" );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::Complete );
+    CHECK( result.acceptedBytes == 5 );
+    CHECK( result.committedBytes == 5 );
+    CHECK( result.committedLines == 2_lcount );
+    CHECK( result.pendingPartialBytes == 1 );
+    CHECK( result.rawUtf8Lines == "ab\nc\n" );
+    result = store.finishInput();
+    CHECK( result.acceptedBytes == 0 );
+    CHECK( result.committedBytes == 1 );
+    CHECK( result.committedLines == 1_lcount );
+    CHECK( result.pendingPartialBytes == 0 );
+}
+
+TEST_CASE( "CaptureStore directory failure reports mutation point prefix",
+           "[capturestore][storage-outcome]" )
+{
+    const auto failAt = GENERATE( 1, 2 );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    const auto root = makeTestDir( "capture_prefix" );
+    CaptureStore store( makeCaptureId(), root, limits );
+    const auto output = QDir( root ).filePath( "output.log" );
+    REQUIRE( store.bindOutputFile( output ) );
+    REQUIRE( store.appendUtf8( "a" ).lineCount == 0_lcount );
+    int calls = 0;
+    CaptureStoreTestAccess::beforeSegmentMutation( store, [ & ] {
+        if ( ++calls == failAt ) {
+            throw std::runtime_error( "Injected directory identity failure" );
+        }
+    } );
+    const auto result = store.appendUtf8( "\r\nb\ntail" );
+    CHECK( result.disposition
+           == ( failAt == 1 ? CaptureStore::AppendDisposition::RejectedUnchanged
+                            : CaptureStore::AppendDisposition::PartialKnown ) );
+    CHECK( result.failure == CaptureStore::CaptureFailure::Directory );
+    CHECK( result.acceptedBytes == ( failAt == 1 ? 0 : 2 ) );
+    CHECK( result.committedBytes == ( failAt == 1 ? 0 : 2 ) );
+    CHECK( result.committedLines
+           == LinesCount( static_cast<LinesCount::UnderlyingType>( failAt - 1 ) ) );
+    CHECK( result.pendingPartialBytes == ( failAt == 1 ? 1 : 0 ) );
+    CHECK( result.rawUtf8Lines == ( failAt == 1 ? QByteArray{} : QByteArray( "a\n" ) ) );
+    store.flush();
+    CHECK( readUtf8File( output ) == ( failAt == 1 ? QString{} : QStringLiteral( "a\n" ) ) );
+    CaptureStoreTestAccess::beforeSegmentMutation( store, {} );
+    const auto suffix = QByteArray( "\r\nb\ntail" ).mid( static_cast<int>( result.acceptedBytes ) );
+    CHECK( store.appendUtf8( suffix ).disposition == CaptureStore::AppendDisposition::Complete );
+    store.finishInput();
+    CHECK( store.lineCount() == 3_lcount );
+}
+
+TEST_CASE( "CaptureStore persistent spill failure is inspectable bounded and recoverable",
+           "[capturestore][storage-persistence]" )
+{
+    using Failure = CaptureStore::PersistenceFailure;
+    const auto stage
+        = GENERATE( Failure::TemporaryCreate, Failure::Write, Failure::Flush, Failure::Publish );
+    qint64 now = 0;
+    std::optional<Failure> failure = stage;
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.memoryBudgetBytes = 4;
+    limits.ingressBudgetBytes = 32;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_spill_retry" ), limits );
+    CaptureStoreTestAccess::spillFault( store, now, failure );
+    const auto append = store.appendUtf8( "a\nb\nc\n" );
+    CHECK( append.disposition == CaptureStore::AppendDisposition::Complete );
+    CHECK( append.persistence.failure == stage );
+    CHECK( append.persistence.pendingBytes == 6 );
+    CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "a" );
+    const auto attempts = CaptureStoreTestAccess::spillAttempts( store );
+    CHECK( attempts == 1 );
+    for ( int i = 0; i < 6; ++i ) {
+        store.appendUtf8( "z\n" );
+        store.retryPersistence();
+    }
+    CHECK( CaptureStoreTestAccess::spillAttempts( store ) == attempts );
+    CHECK_FALSE( store.persistenceState().complete() );
+    now += 5000;
+    store.retryPersistence();
+    CHECK( CaptureStoreTestAccess::spillAttempts( store ) == attempts + 1 );
+    const auto explicitFailure = store.persistCapture();
+    CHECK( explicitFailure.failure == stage );
+    CHECK_FALSE( explicitFailure.complete() );
+    failure.reset();
+    now += 10000;
+    auto recovered = store.retryPersistence( 32 );
+    CHECK( recovered.complete() );
+    CHECK( store.stats().memoryBytes == 0 );
+    CHECK( store.lineCount() == 9_lcount );
+    CHECK( store.lineAt( 8_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "z" );
+}
+
+TEST_CASE( "CaptureStore refuses ingress beyond its payload envelope without losing partial",
+           "[capturestore][storage-persistence]" )
+{
+    CaptureStore::Limits limits;
+    limits.memoryBudgetBytes = 4;
+    limits.ingressBudgetBytes = 8;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_ingress_envelope" ), limits );
+    REQUIRE( store.appendUtf8( "ab" ).disposition == CaptureStore::AppendDisposition::Complete );
+    const auto result = store.appendUtf8( QByteArray( 20, 'x' ) );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::RejectedUnchanged );
+    CHECK( result.failure == CaptureStore::CaptureFailure::Capacity );
+    CHECK( result.acceptedBytes == 0 );
+    CHECK( result.pendingPartialBytes == 2 );
+    CHECK( store.finishInput().committedBytes == 2 );
+    CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "ab" );
+}
+
+TEST_CASE( "CaptureStore explicit persistence reports partial and limit changes spill immediately",
+           "[capturestore][storage-persistence]" )
+{
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> failure
+        = CaptureStore::PersistenceFailure::Write;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_explicit_persist" ) );
+    CaptureStoreTestAccess::spillFault( store, now, failure );
+    store.appendUtf8( "a\nb" );
+    auto state = store.persistCapture();
+    CHECK_FALSE( state.complete() );
+    CHECK( state.pendingPartialBytes == 1 );
+    CHECK( state.pendingBytes == 2 );
+    CHECK( state.failure == failure );
+    failure.reset();
+    store.finishInput();
+    CaptureStore::Limits limits;
+    limits.memoryBudgetBytes = 1;
+    store.setLimits( limits );
+    CHECK( store.stats().memoryBytes <= 1 );
+    CHECK( store.persistenceState().complete() );
+}
+
+TEST_CASE( "CaptureStore lease snapshot streams bounded stable chunks after clear",
+           "[capturestore][storage-snapshot]" )
+{
+    const bool disk = GENERATE( false, true );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_chunk_snapshot" ), limits );
+    store.appendUtf8( "a" );
+    store.finishInput();
+    store.appendUtf8( "bc\nd" );
+    store.finishInput();
+    if ( disk ) {
+        REQUIRE( store.persistCapture().complete() );
+    }
+    const auto snapshot = store.snapshot();
+    store.clear();
+    store.appendUtf8( "replacement\n" );
+    store.deleteCaptureFiles();
+    CaptureStore::Snapshot::Cursor cursor;
+    QByteArray replay;
+    bool completed = false;
+    for ( int i = 0; i < 10; ++i ) {
+        const auto chunk = snapshot.readChunk( cursor, 2 );
+        REQUIRE_FALSE( chunk.readFailed );
+        REQUIRE( chunk.bytes.size() <= 2 );
+        replay += chunk.bytes;
+        if ( chunk.complete ) {
+            completed = true;
+            break;
+        }
+    }
+    CHECK( completed );
+    CHECK( replay == "a\nbc\nd" );
+}
+
+TEST_CASE( "CaptureStore empty finalized record retains its boundary on reload",
+           "[capturestore][storage-snapshot]" )
+{
+    const auto root = makeTestDir( "capture_empty_eof" );
+    const auto id = makeCaptureId();
+    {
+        CaptureStore store( id, root );
+        store.appendUtf8( "\r" );
+        const auto finished = store.finishInput();
+        CHECK( finished.committedLines == 1_lcount );
+        CHECK( finished.committedBytes == 0 );
+        REQUIRE( store.persistCapture().complete() );
+    }
+    CaptureStore store( id, root );
+    store.loadFromDisk();
+    CHECK( store.lineCount() == 1_lcount );
+    store.appendUtf8( "a\n" );
+    CHECK( store.lineCount() == 2_lcount );
+}
+
+TEST_CASE( "CaptureStore output short failure never changes capture acceptance",
+           "[capturestore][storage-output-facts]" )
+{
+    const auto root = makeTestDir( "capture_output_facts" );
+    CaptureStore store( makeCaptureId(), root );
+    REQUIRE( store.bindOutputFile( QDir( root ).filePath( "output.log" ) ) );
+    CaptureStoreTestAccess::shortOutput( store );
+    const auto result = store.appendUtf8( "abc\n" );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::Complete );
+    CHECK( result.acceptedBytes == 4 );
+    CHECK( result.committedBytes == 4 );
+    CHECK( result.outputAttempted );
+    CHECK( result.outputBytes == 1 );
+    CHECK( result.outputFailure == CaptureStore::OutputFailure::Write );
+    CHECK( store.lineCount() == 1_lcount );
+}
+
+TEST_CASE( "CaptureStore unknown exceptions cannot invite whole batch replay",
+           "[capturestore][storage-output-facts]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_unknown" ), limits );
+    int calls = 0;
+    CaptureStoreTestAccess::beforeSegmentMutation( store, [ & ] {
+        if ( ++calls == 2 ) {
+            throw 42;
+        }
+    } );
+    const auto result = store.appendUtf8( "a\nb\n" );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::PartialUnknown );
+    CHECK( result.acceptedBytes == 2 );
+    CHECK( result.committedBytes == 2 );
+    CHECK( result.committedLines == 1_lcount );
+    CaptureStoreTestAccess::beforeSegmentMutation( store, {} );
+}
+
+TEST_CASE( "CaptureStore failed persistence health resets on explicit clear",
+           "[capturestore][storage-followup]" )
+{
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> failure
+        = CaptureStore::PersistenceFailure::Write;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_clear_health" ) );
+    CaptureStoreTestAccess::spillFault( store, now, failure );
+    store.appendUtf8( "a\n" );
+    CHECK_FALSE( store.persistCapture().complete() );
+    store.clear();
+    CHECK( store.persistenceState().complete() );
+}
+
+TEST_CASE( "CaptureStore persistence bookkeeping does not scan persisted history",
+           "[capturestore][storage-bounded-work]" )
+{
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_persist_work" ), limits );
+    store.appendUtf8( QByteArray( "a\n" ).repeated( 200 ) );
+    REQUIRE( store.persistCapture( 256 ).complete() );
+    const auto before = CaptureStoreTestAccess::persistenceVisits( store );
+    store.appendUtf8( "b\n" );
+    REQUIRE( store.persistCapture( 1 ).complete() );
+    CHECK( CaptureStoreTestAccess::persistenceVisits( store ) - before <= 3 );
+}
+
+TEST_CASE( "CaptureStore degraded retention cannot evict the only readable copy",
+           "[capturestore][storage-bounded-work]" )
+{
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> failure
+        = CaptureStore::PersistenceFailure::Write;
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    limits.memoryBudgetBytes = 1;
+    limits.ingressBudgetBytes = 16;
+    limits.maxTotalLines = 1;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_degraded_window" ), limits );
+    CaptureStoreTestAccess::spillFault( store, now, failure );
+    store.appendUtf8( "a\nb\n" );
+    CHECK( store.lineCount() == 2_lcount );
+    CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "a" );
+    int refusals = 0;
+    for ( int i = 0; i < 20; ++i ) {
+        if ( store.appendUtf8( "z\n" ).disposition
+             == CaptureStore::AppendDisposition::RejectedUnchanged ) {
+            ++refusals;
+        }
+    }
+    CHECK( refusals > 0 );
+    CHECK( CaptureStoreTestAccess::spillAttempts( store ) == 1 );
+    CHECK( store.stats().memoryBytes <= 18 );
+    failure.reset();
+    now += 5000;
+    CHECK( store.retryPersistence( 32 ).complete() );
+    store.trimToLimits();
+    CHECK( store.lineCount() == 1_lcount );
+}
+
+TEST_CASE( "CaptureStore retry deadline and snapshot requests are bounded",
+           "[capturestore][storage-final-hardening]" )
+{
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> failure
+        = CaptureStore::PersistenceFailure::Write;
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_deadline" ) );
+    CaptureStoreTestAccess::spillFault( store, now, failure );
+    store.appendUtf8( QByteArray( 70000, 'x' ) + "\n" );
+    store.persistCapture();
+    CHECK( store.persistenceState().retryAfterMs == 5000 );
+    now += 123;
+    CHECK( store.persistenceState().retryAfterMs == 4877 );
+    const auto snapshot = store.snapshot();
+    CaptureStore::Snapshot::Cursor cursor;
+    CHECK( snapshot.readChunk( cursor, 100000 ).bytes.size() <= 64 * 1024 );
+    cursor.offset = -1;
+    CHECK( snapshot.readChunk( cursor ).readFailed );
+    failure.reset();
+    CHECK( store.persistCapture().complete() );
+    CHECK_FALSE( store.persistenceState().retryAfterMs.has_value() );
+}
+
+TEST_CASE( "CaptureStore actual directory identity changes report the committed prefix",
+           "[capturestore][storage-final-hardening]" )
+{
+    const auto failAt = GENERATE( 1, 2 );
+    const auto root = makeTestDir( "capture_identity_outcome" );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    CaptureStore store( makeCaptureId(), root, limits );
+    const auto path = store.capturePath();
+    const auto moved = path + ".moved";
+    bool replaced = false;
+    int calls = 0;
+    CaptureStoreTestAccess::beforeSegmentMutation( store, [ & ] {
+        if ( ++calls != failAt ) {
+            return;
+        }
+        replaced = QDir().rename( path, moved );
+        if ( !replaced ) {
+            // Windows may prevent replacing a pinned directory; retain the
+            // same deterministic mutation-point failure on that platform.
+            throw std::runtime_error( "Directory replacement denied by OS" );
+        }
+        REQUIRE( QDir().mkpath( path ) );
+    } );
+    const auto result = store.appendUtf8( "a\nb\n" );
+    CHECK( result.failure == CaptureStore::CaptureFailure::Directory );
+    CHECK( result.acceptedBytes == 2 * ( failAt - 1 ) );
+    CHECK( result.committedBytes == 2 * ( failAt - 1 ) );
+    CHECK( result.disposition
+           == ( failAt == 1 ? CaptureStore::AppendDisposition::RejectedUnchanged
+                            : CaptureStore::AppendDisposition::PartialKnown ) );
+    if ( replaced ) {
+        CHECK( QDir( path ).entryList( QDir::Files ).isEmpty() );
+        REQUIRE( QDir().rmdir( path ) );
+        REQUIRE( QDir().rename( moved, path ) );
+    }
+    CaptureStoreTestAccess::beforeSegmentMutation( store, {} );
+    CHECK( store.persistCapture().complete() );
+}
+
+TEST_CASE( "CaptureStore final partial output short failure preserves accepted records",
+           "[capturestore][storage-final-hardening]" )
+{
+    const auto root = makeTestDir( "capture_final_output" );
+    CaptureStore store( makeCaptureId(), root );
+    const auto output = QDir( root ).filePath( "output.log" );
+    REQUIRE( store.bindOutputFile( output ) );
+    store.appendUtf8( "a" );
+    store.finishInput();
+    CaptureStoreTestAccess::shortOutput( store );
+    store.appendUtf8( "bc" );
+    const auto result = store.finishInput();
+    CHECK( result.acceptedBytes == 0 );
+    CHECK( result.committedBytes == 2 );
+    CHECK( result.outputBytes == 2 ); // separator + confirmed first content byte
+    CHECK( result.outputFailure == CaptureStore::OutputFailure::Write );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::Complete );
+    CHECK( readUtf8File( output ) == "a\nb" );
+    CHECK( store.lineCount() == 2_lcount );
+}
+
+TEST_CASE( "CaptureStore pending publication never adopts a same length replacement",
+           "[capturestore][storage-publication-identity]" )
+{
+    const auto root = makeTestDir( "capture_pending_identity" );
+    const auto captureId = makeCaptureId();
+    CaptureStore store( captureId, root );
+    REQUIRE( store.appendUtf8( "abc\n" ).committedBytes == 4 );
+    CaptureStoreTestAccess::afterSpillPublish( store, [] { throw std::bad_alloc{}; } );
+    const auto interrupted = store.persistCapture();
+    REQUIRE_FALSE( interrupted.complete() );
+    REQUIRE( interrupted.pendingBytes == 4 );
+    REQUIRE( interrupted.pendingSegments == 1 );
+    REQUIRE( store.stats().memoryBytes == 4 );
+    CaptureStoreTestAccess::afterSpillPublish( store, {} );
+
+    const auto files = segmentFiles( store.capturePath() );
+    REQUIRE( files.size() == 1 );
+    const auto published = QDir( store.capturePath() ).filePath( files.front() );
+    const auto original = QDir( root ).filePath( "original.log" );
+    REQUIRE( readUtf8File( published ) == "abc\n" );
+    REQUIRE( QFile::rename( published, original ) );
+    QFile replacement( published );
+    REQUIRE( replacement.open( QIODevice::WriteOnly | QIODevice::NewOnly ) );
+    REQUIRE( replacement.write( "xyz\n" ) == 4 );
+    replacement.close();
+
+    const auto checkClearPreservesReplacement = [ & ] {
+        store.clear();
+        CHECK( store.persistenceState().complete() );
+        CHECK( store.persistenceState().pendingBytes == 0 );
+        CHECK( store.persistenceState().pendingSegments == 0 );
+        CHECK( store.stats().memoryBytes == 0 );
+        CHECK( store.lineCount() == 0_lcount );
+        CHECK( readUtf8File( published ) == "xyz\n" );
+        CHECK( readUtf8File( original ) == "abc\n" );
+        CHECK( segmentFiles( store.capturePath() ) == files );
+    };
+
+    SECTION( "Clear without retry does not acquire replacement ownership" )
+    {
+        checkClearPreservesReplacement();
+    }
+    SECTION( "Retry refuses the replacement and retains the original RAM copy" )
+    {
+        const auto failed = store.persistCapture();
+        CHECK_FALSE( failed.complete() );
+        CHECK( failed.failure == CaptureStore::PersistenceFailure::Publish );
+        CHECK( failed.pendingBytes == 4 );
+        CHECK( failed.pendingSegments == 1 );
+        CHECK( store.stats().memoryBytes == 4 );
+        CHECK( store.lineCount() == 1_lcount );
+        CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "abc" );
+        CaptureStore::Snapshot::Cursor cursor;
+        const auto chunk = store.snapshot().readChunk( cursor );
+        CHECK_FALSE( chunk.readFailed );
+        CHECK( chunk.complete );
+        CHECK( chunk.bytes == "abc\n" );
+        CHECK( readUtf8File( published ) == "xyz\n" );
+        CHECK( segmentFiles( store.capturePath() ) == files );
+
+        SECTION( "Clear after retry preserves the replacement" )
+        {
+            checkClearPreservesReplacement();
+        }
+        SECTION( "Returning the original identity resumes without duplicate publication" )
+        {
+            REQUIRE( QFile::remove( published ) ); // Only this test's replacement fixture.
+            REQUIRE( QFile::rename( original, published ) );
+            const auto resumed = store.persistCapture();
+            CHECK( resumed.complete() );
+            CHECK( resumed.pendingBytes == 0 );
+            CHECK( resumed.pendingSegments == 0 );
+            CHECK( store.stats().memoryBytes == 0 );
+            CHECK( CaptureStoreTestAccess::segmentCount( store ) == 1 );
+            CHECK( segmentFiles( store.capturePath() ) == files );
+            CHECK( readUtf8File( published ) == "abc\n" );
+            {
+                CaptureStore restored( captureId, root );
+                REQUIRE( restored.loadFromDisk() );
+                CHECK( restored.lineCount() == 1_lcount );
+                CHECK( restored.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} )
+                       == "abc" );
+            }
+            store.clear();
+            CHECK( segmentFiles( store.capturePath() ).isEmpty() );
+        }
+    }
+}
+
+TEST_CASE( "CaptureStore failed post-publication allocation cannot replay duplicate segments",
+           "[capturestore][storage-publication-guard]" )
+{
+    const auto root = makeTestDir( "capture_publish_exception" );
+    const auto id = makeCaptureId();
+    {
+        CaptureStore store( id, root );
+        store.appendUtf8( "abc\n" );
+        CaptureStoreTestAccess::afterSpillPublish( store, [] { throw std::bad_alloc{}; } );
+        const auto interrupted = store.persistCapture();
+        CHECK_FALSE( interrupted.complete() );
+        CHECK( interrupted.pendingBytes == 4 );
+        CHECK( interrupted.pendingSegments == 1 );
+        CHECK( store.stats().memoryBytes == 4 );
+        CHECK( store.lineCount() == 1_lcount );
+        CHECK( store.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "abc" );
+        const auto files = segmentFiles( store.capturePath() );
+        REQUIRE( files.size() == 1 );
+        CaptureStoreTestAccess::afterSpillPublish( store, {} );
+        const auto resumed = store.persistCapture();
+        CHECK( resumed.complete() );
+        CHECK( resumed.pendingBytes == 0 );
+        CHECK( resumed.pendingSegments == 0 );
+        CHECK( store.stats().memoryBytes == 0 );
+        CHECK( segmentFiles( store.capturePath() ) == files );
+        CHECK( readUtf8File( QDir( store.capturePath() ).filePath( files.front() ) ) == "abc\n" );
+    }
+    CaptureStore restored( id, root );
+    REQUIRE( restored.loadFromDisk() );
+    CHECK( restored.lineCount() == 1_lcount );
+    CHECK( restored.lineAt( 0_lnum, QTextCodec::codecForName( "UTF-8" ), {} ) == "abc" );
+}
+
+TEST_CASE( "CaptureStore reserves new ids before exceeding the segment container bound",
+           "[capturestore][storage-publication-guard]" )
+{
+    CaptureStore store( makeCaptureId(), makeTestDir( "capture_container_bound" ) );
+    CaptureStoreTestAccess::segmentByteLimit( store, 8 );
+    REQUIRE( store.appendUtf8( "12345\n" ).disposition
+             == CaptureStore::AppendDisposition::Complete );
+    REQUIRE( store.appendUtf8( "67890\n" ).disposition
+             == CaptureStore::AppendDisposition::Complete );
+    CHECK( CaptureStoreTestAccess::segmentCount( store ) == 2 );
+    CHECK( store.lineCount() == 2_lcount );
+}
+
+TEST_CASE( "CaptureStore published but unleased segments are sealed and retire on clear",
+           "[capturestore][storage-publication-resume]" )
+{
+    const bool clear = GENERATE( false, true );
+    const auto root = makeTestDir( "capture_unleased_boundary" );
+    const auto id = makeCaptureId();
+    {
+        CaptureStore store( id, root );
+        store.appendUtf8( "a\n" );
+        CaptureStoreTestAccess::afterSpillPublish( store, [] { throw std::bad_alloc{}; } );
+        REQUIRE_FALSE( store.persistCapture().complete() );
+        if ( clear ) {
+            store.clear();
+        }
+        REQUIRE( store.appendUtf8( "b\n" ).committedBytes == 2 );
+        CaptureStoreTestAccess::afterSpillPublish( store, {} );
+        REQUIRE( store.persistCapture().complete() );
+    }
+    CaptureStore restored( id, root );
+    restored.loadFromDisk();
+    CHECK( restored.lineCount() == ( clear ? 1_lcount : 2_lcount ) );
+    CHECK( restored.lineAt( clear ? 0_lnum : 1_lnum, QTextCodec::codecForName( "UTF-8" ), {} )
+           == "b" );
+}
+
+TEST_CASE( "CaptureStore maintenance exceptions retain confirmed capture and output facts",
+           "[capturestore][storage-maintenance-outcome]" )
+{
+    const auto root = makeTestDir( "capture_maintenance_outcome" );
+    CaptureStore store( makeCaptureId(), root );
+    REQUIRE( store.bindOutputFile( QDir( root ).filePath( "output.log" ) ) );
+    CaptureStoreTestAccess::beforeAppendMaintenance( store, [] { throw std::bad_alloc{}; } );
+    const auto result = store.appendUtf8( "a\ntail" );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::PartialUnknown );
+    CHECK( result.acceptedBytes == 6 );
+    CHECK( result.committedBytes == 2 );
+    CHECK( result.pendingPartialBytes == 4 );
+    CHECK( result.outputBytes == 2 );
+    CHECK( result.failure == CaptureStore::CaptureFailure::Unexpected );
+    CaptureStoreTestAccess::beforeAppendMaintenance( store, {} );
 }

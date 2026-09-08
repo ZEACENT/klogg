@@ -26,6 +26,8 @@
 #include <QtGlobal>
 
 #include <QString>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QStringList>
 
 #include "adblogcatsessiondata.h"
@@ -102,6 +104,7 @@ struct LiveLogSessionSpec {
     AndroidOptions android;
     IosOptions ios;
     CaptureOutputOptions capture;
+    livecapture::LiveIntegritySummary integrity;
     QString boundOutputFile;
 
     // Event flag: true only when THIS restore performed the one-time
@@ -153,6 +156,8 @@ QString compatibilityTransportReadOnly();
 QString captureIdentifierAlreadyInUse();
 } // namespace messages
 
+QJsonObject serializeIntegritySummary( const livecapture::LiveIntegritySummary& summary );
+bool parseIntegritySummary( const QJsonValue& value, livecapture::LiveIntegritySummary& summary );
 QString serializeSpec( const LiveLogSessionSpec& spec );
 ParseResult parsePersistedSpec( const QString& json );
 bool usesCompatibilityTransport( const LiveLogSessionSpec& spec ) noexcept;
