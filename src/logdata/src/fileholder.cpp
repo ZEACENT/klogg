@@ -1,9 +1,5 @@
 #include "fileholder.h"
 
-#ifndef Q_OS_WIN
-#include <sys/stat.h>
-#endif
-
 #include "log.h"
 #include "platform/platform_files.h"
 #include <QtCore/QFileInfo>
@@ -131,44 +127,17 @@ QFile* FileHolder::getFile()
 
 FileId FileId::getFileId( const QString& filename )
 {
-#ifdef Q_OS_WIN
-    DWORD shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-
-    int accessRights = GENERIC_READ;
-    DWORD creationDisp = OPEN_EXISTING;
-
-    // Create the file handle.
-    SECURITY_ATTRIBUTES securityAtts = { sizeof( SECURITY_ATTRIBUTES ), NULL, FALSE };
-
-    HANDLE fileHandle
-        = CreateFileW( (const wchar_t*)filename.utf16(), accessRights, shareMode, &securityAtts,
-                       creationDisp, FILE_FLAG_BACKUP_SEMANTICS, NULL );
-
-    if ( fileHandle == INVALID_HANDLE_VALUE ) {
-        LOG_DEBUG << "Failed to get file info for " << filename.toStdString() << ", gle "
-                  << ::GetLastError();
-        return FileId{};
-    }
-
-    using FileHandleGuard = std::unique_ptr<void, decltype( &CloseHandle )>;
-    auto fileHandleGuard = FileHandleGuard{ fileHandle, CloseHandle };
-
-    BY_HANDLE_FILE_INFORMATION info;
-    if ( !::GetFileInformationByHandle( fileHandle, &info ) ) {
-        LOG_DEBUG << "Failed to get file info for " << filename.toStdString() << ", gle "
-                  << ::GetLastError();
-        return FileId{};
-    }
-
-    ULARGE_INTEGER fileIndex = { info.nFileIndexLow, info.nFileIndexHigh };
-    return FileId{ fileIndex.QuadPart, static_cast<uint64_t>( info.dwVolumeSerialNumber ) };
-#else
-    struct stat info;
-    if ( lstat( filename.toUtf8().constData(), &info ) != 0 ) {
+    QFile file( filename );
+    if ( !klogg::platform::openFileSharedForReplacement(
+             file, QIODevice::ReadOnly ) ) {
         LOG_DEBUG << "Failed to get file info for " << filename.toStdString();
         return FileId{};
     }
 
-    return FileId{ info.st_ino, static_cast<uint64_t>( info.st_dev ) };
-#endif
+    const auto identity = klogg::platform::fileIdentity( file );
+    if ( !identity.has_value() ) {
+        LOG_DEBUG << "Failed to read file identity for " << filename.toStdString();
+        return FileId{};
+    }
+    return FileId{ identity->file, identity->device };
 }
