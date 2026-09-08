@@ -2107,6 +2107,36 @@ TEST_CASE( "Cancelling multi-tab window shutdown preserves earlier discard candi
     exerciseLivePresentation( false, false, 12 );
 }
 
+TEST_CASE( "Concurrent window close reservations preserve the final session",
+           "[ui][session][live-close-owner][review-red]" )
+{
+    auto appSession = std::make_shared<Session>();
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restoreGuard{ sessionInfo };
+    const auto suffix = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    const auto firstId = QStringLiteral( "concurrent-close-a-%1" ).arg( suffix );
+    const auto secondId = QStringLiteral( "concurrent-close-b-%1" ).arg( suffix );
+    const auto existingWindows = sessionInfo.windows();
+    sessionInfo.add( firstId );
+    sessionInfo.add( secondId );
+    for ( const auto& existing : existingWindows ) {
+        sessionInfo.remove( existing );
+    }
+    REQUIRE( sessionInfo.windows().size() == 2 );
+    sessionInfo.save();
+
+    WindowSession first{ appSession, firstId, 0 };
+    WindowSession second{ appSession, secondId, 1 };
+    const auto firstDisposition = first.beginClose();
+    const auto secondDisposition = second.beginClose();
+    CHECK( firstDisposition == WindowSession::CloseDisposition::Discard );
+    CHECK( secondDisposition == WindowSession::CloseDisposition::Preserve );
+
+    CHECK_FALSE( first.close( firstDisposition ) );
+    CHECK( second.close( secondDisposition ) );
+    CHECK( sessionInfo.windows() == QStringList{ secondId } );
+}
+
 TEST_CASE( "Window close preserves every owner when one live capture cannot persist",
            "[ui][session][live-close-owner]" )
 {

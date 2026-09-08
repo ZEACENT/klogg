@@ -1161,6 +1161,52 @@ OpenedDocumentsList WindowSession::restore( const std::function<ViewInterface*()
     return result;
 }
 
+bool Session::reserveDiscardOnClose( const QString& windowId )
+{
+    if ( exitRequested_ ) {
+        return false;
+    }
+    if ( closingDiscardReservations_.contains( windowId ) ) {
+        return true;
+    }
+
+    const auto windows = SessionInfo::getSynced().windows();
+    if ( !windows.contains( windowId ) ) {
+        return false;
+    }
+    std::size_t unreservedWindows = 0;
+    for ( const auto& existingWindowId : windows ) {
+        if ( !closingDiscardReservations_.contains( existingWindowId ) ) {
+            ++unreservedWindows;
+        }
+    }
+    if ( unreservedWindows <= 1u ) {
+        return false;
+    }
+
+    closingDiscardReservations_.insert( windowId );
+    return true;
+}
+
+void Session::cancelDiscardOnClose( const QString& windowId )
+{
+    closingDiscardReservations_.remove( windowId );
+}
+
+bool Session::commitWindowClose( const QString& windowId, bool preserve )
+{
+    closingDiscardReservations_.remove( windowId );
+    if ( preserve ) {
+        return true;
+    }
+
+    auto& session = SessionInfo::getSynced();
+    const auto isRemoved = session.remove( windowId );
+    session.save();
+    LOG_INFO << "session is removed " << isRemoved;
+    return !isRemoved;
+}
+
 WindowSession::WindowSession( std::shared_ptr<Session> appSession, const QString& id, size_t index )
     : appSession_{ std::move( appSession ) }
     , windowId_{ id }
@@ -1178,24 +1224,28 @@ void WindowSession::restoreGeometry( QByteArray* geometry ) const
     *geometry = session.geometry( windowId_ );
 }
 
-bool WindowSession::preservesOnClose() const
+WindowSession::CloseDisposition WindowSession::beginClose()
 {
-    return appSession_->exitRequested() || SessionInfo::getSynced().windows().size() <= 1;
+    return appSession_->reserveDiscardOnClose( windowId_ )
+               ? CloseDisposition::Discard
+               : CloseDisposition::Preserve;
+}
+
+void WindowSession::cancelClose( CloseDisposition disposition )
+{
+    if ( disposition == CloseDisposition::Discard ) {
+        appSession_->cancelDiscardOnClose( windowId_ );
+    }
 }
 
 bool WindowSession::close()
 {
+    return close( beginClose() );
+}
+
+bool WindowSession::close( CloseDisposition disposition )
+{
     LOG_INFO << "close window session " << windowId_;
-
-    if ( appSession_->exitRequested() ) {
-        return true;
-    }
-
-    auto& session = SessionInfo::getSynced();
-    auto isRemoved = session.remove( windowId_ );
-    session.save();
-
-    LOG_INFO << "session is removed " << isRemoved;
-
-    return !isRemoved;
+    return appSession_->commitWindowClose(
+        windowId_, disposition == CloseDisposition::Preserve );
 }

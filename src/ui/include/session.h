@@ -20,6 +20,7 @@
 #ifndef SESSION_H
 #define SESSION_H
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -226,6 +227,11 @@ private:
     klogg::livecapture::adb::AdbInfrastructureManager* adbInfrastructure_{ nullptr };
     klogg::livecapture::ios::IosCatalogSnapshotProvider* iosCatalog_{ nullptr };
     bool exitRequested_ = false;
+    QSet<QString> closingDiscardReservations_;
+
+    bool reserveDiscardOnClose( const QString& windowId );
+    void cancelDiscardOnClose( const QString& windowId );
+    bool commitWindowClose( const QString& windowId, bool preserve );
 
     QStringList restoreRejections_;
     QStringList restoreNotices_;
@@ -413,9 +419,16 @@ public:
     void save( const std::vector<SaveFileInfo>& view_list, const QByteArray& geometry,
                int current_file_index );
 
-    bool preservesOnClose() const;
+    enum class CloseDisposition : std::uint8_t {
+        Preserve,
+        Discard,
+    };
+
+    CloseDisposition beginClose();
+    void cancelClose( CloseDisposition disposition );
     // returns true if caller needs to save settings
     bool close();
+    bool close( CloseDisposition disposition );
 
 private:
     std::shared_ptr<Session> appSession_;

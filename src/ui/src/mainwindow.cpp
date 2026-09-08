@@ -2924,13 +2924,16 @@ void MainWindow::loadFileNonInteractive( const QString& file_name )
 // Events
 //
 
-void MainWindow::beginWindowShutdown( bool preserveWindowSession )
+void MainWindow::beginWindowShutdown()
 {
     if ( shutdownInProgress_ ) {
         return;
     }
+    shutdownCloseDisposition_ = session_.beginClose();
     shutdownInProgress_ = true;
-    shutdownPreserveWindowSession_ = preserveWindowSession;
+    shutdownPreserveWindowSession_
+        = shutdownCloseDisposition_
+              == WindowSession::CloseDisposition::Preserve;
     shutdownLiveTabs_.clear();
     shutdownResumeTabs_.clear();
     shutdownLiveTabIndex_ = 0;
@@ -2989,6 +2992,10 @@ void MainWindow::abortWindowShutdown()
     shutdownLiveTabIndex_ = 0;
     shutdownInProgress_ = false;
     shutdownPreserveWindowSession_ = false;
+    if ( shutdownCloseDisposition_.has_value() ) {
+        session_.cancelClose( shutdownCloseDisposition_.value() );
+        shutdownCloseDisposition_.reset();
+    }
     suspendSessionPersistence_ = false;
 }
 
@@ -3008,7 +3015,10 @@ void MainWindow::finalizeWindowShutdown()
             }
         }
     }
-    session_.close();
+    const auto closeDisposition = shutdownCloseDisposition_.value_or(
+        WindowSession::CloseDisposition::Preserve );
+    session_.close( closeDisposition );
+    shutdownCloseDisposition_.reset();
     shutdownReadyToAccept_ = true;
     closeAllInProgress_ = true;
     closeAllInitiator_ = shutdownPreserveWindowSession_ ? ActionInitiator::App
@@ -3037,7 +3047,7 @@ void MainWindow::closeEvent( QCloseEvent* event )
     }
 
     event->ignore();
-    beginWindowShutdown( session_.preservesOnClose() );
+    beginWindowShutdown();
 }
 
 // Minimize handling the application

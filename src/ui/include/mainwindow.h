@@ -51,6 +51,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "configuration.h"
@@ -314,7 +315,7 @@ class MainWindow : public QMainWindow {
                                     std::function<void( bool )> completion );
     void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
     void continueCloseAll();
-    void beginWindowShutdown( bool preserveWindowSession );
+    void beginWindowShutdown();
     void advanceWindowShutdown();
     void abortWindowShutdown();
     void finalizeWindowShutdown();
@@ -446,6 +447,7 @@ class MainWindow : public QMainWindow {
     bool shutdownInProgress_ = false;
     bool shutdownReadyToAccept_ = false;
     bool shutdownPreserveWindowSession_ = false;
+    std::optional<WindowSession::CloseDisposition> shutdownCloseDisposition_;
     bool closeAllInProgress_ = false;
     ActionInitiator closeAllInitiator_{ ActionInitiator::User };
     std::unique_ptr<klogg::livelog::LiveLogCloseTransaction> liveCloseTransaction_;
