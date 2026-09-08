@@ -2885,6 +2885,12 @@ TEST_CASE( "CaptureStore retries activation after cleanup removes the acquired s
     std::exception_ptr constructionError;
     std::thread constructorThread;
     bool acquiredBeforeRemoval = false;
+    bool successorNamespaceCreatedBeforeOldHandleClosed = false;
+    CaptureStoreTestAccess::setAfterCandidateRecursiveRemovalQuarantineCallback(
+        cleanupCandidates.front(), [ & ] {
+            successorNamespaceCreatedBeforeOldHandleClosed
+                = QDir{}.mkpath( capturePath );
+        } );
     CaptureStoreTestAccess::cleanupCaptureCandidates(
         cleanupCandidates, QDateTime::currentDateTimeUtc().addSecs( 5 ),
         [ & ]( const QString& ) {
@@ -2916,6 +2922,7 @@ TEST_CASE( "CaptureStore retries activation after cleanup removes the acquired s
     }
 
     REQUIRE( acquiredBeforeRemoval );
+    REQUIRE( successorNamespaceCreatedBeforeOldHandleClosed );
     REQUIRE_FALSE( constructionError );
     REQUIRE( activatedStore );
     activatedStore->appendUtf8( QByteArrayLiteral( "replacement\n" ) );

@@ -305,6 +305,7 @@ class MainWindow : public QMainWindow {
     void registerAdbLogcatSource( CrawlerWidget* crawler );
     void updateLiveTabAppearance( CrawlerWidget* crawler );
     void saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode );
+    QString selectLiveLogOutputPath( CrawlerWidget* crawler );
     void startLiveLogExport( CrawlerWidget* crawler, const QString& outputPath,
                              LiveLogSaveAnsiMode ansiMode );
     void startLiveCloseTransaction( CrawlerWidget* crawler,

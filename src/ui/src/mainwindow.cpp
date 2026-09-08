@@ -1822,26 +1822,13 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
         return;
     }
 
-    auto* adbSource = session_.getAdbLogcatSource( crawler );
     auto* exportService = session_.getLiveLogExportService( crawler );
     auto* controller = session_.getLiveLogController( crawler );
-    if ( !adbSource || !exportService ) {
+    if ( !exportService ) {
         return;
     }
 
-    auto suggestedPath = adbSource->sessionData().boundOutputFile;
-    if ( suggestedPath.isEmpty() ) {
-        const auto stem = klogg::suggestedFileNameStem( session_.getDisplayName( crawler ),
-                                                        QStringLiteral( "live-log" ) );
-        suggestedPath = QDir::home().filePath( stem + QStringLiteral( ".log" ) );
-    }
-
-    QString outputPath;
-    {
-        ScopedMainWindowShortcutSuspender shortcutSuspender( this );
-        outputPath = QFileDialog::getSaveFileName( this, tr( "Save live log" ), suggestedPath,
-                                                   tr( "Log files (*.log *.txt);;All files (*)" ) );
-    }
+    const auto outputPath = selectLiveLogOutputPath( crawler );
     if ( outputPath.isEmpty() ) {
         return;
     }
@@ -1861,6 +1848,27 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
     }
 
     startLiveLogExport( crawler, outputPath, ansiMode );
+}
+
+QString MainWindow::selectLiveLogOutputPath( CrawlerWidget* crawler )
+{
+    auto* source = session_.getAdbLogcatSource( crawler );
+    if ( source == nullptr ) {
+        return {};
+    }
+
+    auto suggestedPath = source->sessionData().boundOutputFile;
+    if ( suggestedPath.isEmpty() ) {
+        const auto stem = klogg::suggestedFileNameStem(
+            session_.getDisplayName( crawler ), QStringLiteral( "live-log" ) );
+        suggestedPath = QDir::home().filePath(
+            stem + QStringLiteral( ".log" ) );
+    }
+
+    ScopedMainWindowShortcutSuspender shortcutSuspender( this );
+    return QFileDialog::getSaveFileName(
+        this, tr( "Save live log" ), suggestedPath,
+        tr( "Log files (*.log *.txt);;All files (*)" ) );
 }
 
 void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outputPath,

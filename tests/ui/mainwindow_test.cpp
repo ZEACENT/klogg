@@ -203,6 +203,12 @@ private:
 } // namespace klogg::livelog
 
 struct MainWindowLiveSaveTestAccess {
+    static QString selectOutputPath( MainWindow& window,
+                                     CrawlerWidget* crawler )
+    {
+        return window.selectLiveLogOutputPath( crawler );
+    }
+
     static void start( MainWindow& window, CrawlerWidget* crawler,
                        const QString& outputPath, LiveLogSaveAnsiMode ansiMode )
     {
@@ -1250,6 +1256,7 @@ public:
     }
 
     const QStringList& suggestions() const { return suggestions_; }
+    const QStringList& warnings() const { return warnings_; }
     bool closed() const { return closed_; }
 
 protected:
@@ -1285,20 +1292,17 @@ protected:
                 }
             } );
         }
-        else if ( auto* warning = qobject_cast<QMessageBox*>( modal ) ) { // lint-allow: platform-fragile -- queued Show handling drives the real save warning.
+        else if ( auto* warning = qobject_cast<QMessageBox*>( modal ) ) { // lint-allow: platform-fragile -- filename-only saves must never need a second modal.
             scheduledModal_ = warning;
-            const QPointer<QMessageBox> guard( warning ); // lint-allow: platform-fragile -- queued guard prevents modal reentrancy and deletion races.
+            warnings_.append( warning->windowTitle() + QLatin1Char( ':' )
+                              + warning->text() + QLatin1Char( ':' )
+                              + warning->informativeText() );
+            const QPointer<QMessageBox> guard( warning ); // lint-allow: platform-fragile -- queued rejection avoids entering the modal during showEvent.
             QTimer::singleShot( 0, Qt::PreciseTimer, warning, [ this, guard, warning ] {
                 if ( scheduledModal_ == warning ) {
                     scheduledModal_.clear();
                 }
-                if ( guard.isNull() ) {
-                    return;
-                }
-                if ( auto* save = guard->button( QMessageBox::Save ) ) { // lint-allow: platform-fragile -- deterministic modal choice.
-                    save->click();
-                }
-                else {
+                if ( !guard.isNull() ) {
                     guard->reject();
                 }
             } );
@@ -1309,29 +1313,30 @@ protected:
 private:
     QString chosenPath_;
     QStringList suggestions_;
+    QStringList warnings_;
     QPointer<QWidget> scheduledModal_;
     bool closed_ = false;
 };
 
-void exerciseLiveSaveDialog( QAction& action, const QString& expectedSuggestion,
-                             const QString& chosenPath = {} )
+QString exerciseLiveSaveDialog( MainWindow& window, CrawlerWidget* crawler,
+                                const QString& expectedSuggestion,
+                                const QString& chosenPath = {} )
 {
-    REQUIRE( action.isEnabled() );
     const auto nativeDialogsDisabled = QCoreApplication::testAttribute( Qt::AA_DontUseNativeDialogs );
     QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, true );
     LiveSaveDialogDriver dialogDriver( chosenPath );
-    action.trigger();
-    auto* owner = qobject_cast<QWidget*>( action.parent() );
-    REQUIRE( waitUiState( [ owner ] {
-        return owner == nullptr
-               || owner->findChild<QProgressDialog*>( QStringLiteral( "liveLogExportProgress" ) )
-                      == nullptr;
-    } ) );
+    const auto selectedPath = MainWindowLiveSaveTestAccess::selectOutputPath(
+        window, crawler );
     QCoreApplication::setAttribute( Qt::AA_DontUseNativeDialogs, nativeDialogsDisabled );
+    INFO( "Unexpected live-save warnings: "
+          << dialogDriver.warnings().join( QStringLiteral( " | " ) ).toStdString() );
+    REQUIRE( dialogDriver.warnings().isEmpty() );
     REQUIRE( dialogDriver.closed() );
     REQUIRE( dialogDriver.suggestions().size() == 1 );
     CHECK( dialogDriver.suggestions().front().toStdString()
            == expectedSuggestion.toStdString() );
+    CHECK( selectedPath == chosenPath );
+    return selectedPath;
 }
 
 void exerciseLiveCountdownRouting( MainWindow& window, Session& session,
@@ -1849,12 +1854,31 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             auto* saveStripped = mainWindow->findChild<QAction*>( QStringLiteral( "saveCurrentLiveLogStripAnsiAction" ) );
             REQUIRE( save != nullptr );
             REQUIRE( saveStripped != nullptr );
-            exerciseLiveSaveDialog( *saveStripped, expectedSuggestion );
-            exerciseLiveSaveDialog( *save, expectedSuggestion );
+
+            // Keep this test at the filename-dialog boundary. Integrity
+            // confirmation and existing-file cutovers have independent coverage
+            // and must not be combined into one nested-modal stress scenario.
+            REQUIRE( save->isEnabled() );
+            REQUIRE( saveStripped->isEnabled() );
+            exerciseLiveSaveDialog( *mainWindow, crawler, expectedSuggestion );
             CHECK( source->sessionData().boundOutputFile.isEmpty() );
             CHECK_FALSE( QFile::exists( savedPath ) );
             CHECK( appSession->getDisplayName( crawler ) == displayName );
-            exerciseLiveSaveDialog( *save, expectedSuggestion, savedPath );
+            const auto selectedPath = exerciseLiveSaveDialog(
+                *mainWindow, crawler, expectedSuggestion, savedPath );
+            REQUIRE( selectedPath == savedPath );
+            MainWindowLiveSaveTestAccess::start(
+                *mainWindow, crawler, selectedPath,
+                LiveLogSaveAnsiMode::Preserve );
+            REQUIRE( waitUiState( [ & ] {
+                const auto active
+                    = appSession->getLiveLogExportService( crawler )->activeJob();
+                return active != nullptr && active->isFinished();
+            } ) );
+            REQUIRE( appSession->getLiveLogExportService( crawler )
+                         ->activeJob()
+                         ->result()
+                     == klogg::livelog::LiveLogExportResult::Succeeded );
             REQUIRE( source->sessionData().boundOutputFile == savedPath );
             CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
             CHECK( info->text().startsWith( QDir::toNativeSeparators( savedPath ) ) );
@@ -1868,37 +1892,57 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             CHECK( std::any_of( savedEntries.begin(), savedEntries.end(), [ & ]( const auto* action ) {
                 return action->toolTip() == savedPath;
             } ) );
-            exerciseLiveSaveDialog( *saveStripped, savedPath );
+        }
+        else if ( preservationScenario == 13 ) {
+            const auto savedPath = documents.filePath( "same-path-cutover.log" );
+            auto* exportService = appSession->getLiveLogExportService( crawler );
+            REQUIRE( exportService != nullptr );
+            const auto startExport = [ & ]( LiveLogSaveAnsiMode ansiMode ) {
+                const auto previousJob = exportService->activeJob();
+                MainWindowLiveSaveTestAccess::start( *mainWindow, crawler,
+                                                     savedPath, ansiMode );
+                REQUIRE( waitUiState( [ & ] {
+                    const auto active = exportService->activeJob();
+                    return active != nullptr && active != previousJob
+                           && active->isFinished();
+                } ) );
+                const auto completedJob = exportService->activeJob();
+                REQUIRE( completedJob != nullptr );
+                REQUIRE( completedJob->result()
+                         == klogg::livelog::LiveLogExportResult::Succeeded );
+                return completedJob;
+            };
+
+            startExport( LiveLogSaveAnsiMode::Preserve );
+            REQUIRE( source->hasActiveOutputBinding(
+                savedPath, LiveLogSaveAnsiMode::Preserve ) );
+            startExport( LiveLogSaveAnsiMode::Strip );
+            REQUIRE( source->hasActiveOutputBinding(
+                savedPath, LiveLogSaveAnsiMode::Strip ) );
+
             using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
             auto* data = Access::data( crawler );
             REQUIRE( data != nullptr );
             StreamingLogDataTimerTestAccess::degradeStrippedOutputBinding(
                 *data, CaptureOutputError::Write );
             REQUIRE( data->captureOutputError() == CaptureOutputError::Write );
-            REQUIRE_FALSE( source->hasActiveOutputBinding( savedPath,
-                                                           LiveLogSaveAnsiMode::Strip ) );
-            const auto previousJob = appSession->getLiveLogExportService( crawler )->activeJob();
-            REQUIRE( previousJob != nullptr );
-            REQUIRE( previousJob->isFinished() );
-            REQUIRE( previousJob->result() == klogg::livelog::LiveLogExportResult::Succeeded );
-            MainWindowLiveSaveTestAccess::start( *mainWindow, crawler, savedPath,
-                                                 LiveLogSaveAnsiMode::Strip );
-            REQUIRE( waitUiState( [ & ] {
-                const auto active = appSession->getLiveLogExportService( crawler )->activeJob();
-                return active != nullptr && active != previousJob && active->isFinished();
-            } ) );
-            const auto repairJob = appSession->getLiveLogExportService( crawler )->activeJob();
-            REQUIRE( repairJob != nullptr );
-            CHECK( repairJob != previousJob );
-            CHECK( repairJob->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+            REQUIRE_FALSE( source->hasActiveOutputBinding(
+                savedPath, LiveLogSaveAnsiMode::Strip ) );
+            startExport( LiveLogSaveAnsiMode::Strip );
             CHECK_FALSE( data->captureOutputError().has_value() );
-            exerciseLiveSaveDialog( *save, savedPath );
+            REQUIRE( source->hasActiveOutputBinding(
+                savedPath, LiveLogSaveAnsiMode::Strip ) );
+
+            startExport( LiveLogSaveAnsiMode::Preserve );
+            REQUIRE( source->hasActiveOutputBinding(
+                savedPath, LiveLogSaveAnsiMode::Preserve ) );
             CHECK( source->sessionData().boundOutputFile == savedPath );
             transport->publishBytes( QByteArrayLiteral( "saved tail\n" ) );
             source->disconnectSource();
             QFile saved{ savedPath };
             REQUIRE( saved.open( QIODevice::ReadOnly ) );
-            CHECK( saved.readAll() == QByteArrayLiteral( "preserved\nsaved tail\n" ) );
+            CHECK( saved.readAll()
+                   == QByteArrayLiteral( "preserved\nsaved tail\n" ) );
         }
         menu->removeEventFilter( &changes );
         controller->stopRequested();
@@ -2000,6 +2044,13 @@ TEST_CASE( "Live save suggests clean filenames and preserves chosen paths",
 {
     const auto useIos = GENERATE( false, true );
     exerciseLivePresentation( useIos, false, 4 );
+}
+
+TEST_CASE( "Live save repairs and switches an existing output without reopening its filename dialog",
+           "[ui][session][live-save-cutover]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 13 );
 }
 
 TEST_CASE( "Restored live integrity history remains visible after current health recovers",

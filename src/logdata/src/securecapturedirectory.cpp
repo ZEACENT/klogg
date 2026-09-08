@@ -274,6 +274,7 @@ constexpr ACCESS_MASK FileDeleteAccess
 constexpr auto FileDispositionInfoExClass
     = static_cast<FILE_INFO_BY_HANDLE_CLASS>( 21 );
 constexpr DWORD FileDispositionFlagDelete = 0x00000001UL;
+constexpr DWORD FileDispositionFlagPosixSemantics = 0x00000002UL;
 constexpr DWORD FileDispositionFlagIgnoreReadonlyAttribute = 0x00000010UL;
 
 struct ExtendedFileDispositionInfo {
@@ -676,8 +677,12 @@ bool markDeleteByHandle( HANDLE handle, HANDLE attributeRoot = nullptr,
         return false;
     }
 
+    // POSIX disposition removes the public name as part of this operation,
+    // rather than leaving it in NTFS delete-pending state until every handle
+    // closes. Capture activation can then create its successor generation
+    // without racing a successfully removed predecessor's stale namespace.
     ExtendedFileDispositionInfo extendedDisposition{
-        FileDispositionFlagDelete
+        FileDispositionFlagDelete | FileDispositionFlagPosixSemantics
         | FileDispositionFlagIgnoreReadonlyAttribute };
     if ( SetFileInformationByHandle(
              handle, FileDispositionInfoExClass, &extendedDisposition,
@@ -2195,6 +2200,12 @@ bool SecureCaptureDirectory::removeRecursively()
          || !removeWindowsTreeContents( guardedRoot.get() )
          || !markDeleteByHandle( guardedRoot.get() ) ) {
         return false;
+    }
+    auto afterQuarantineCallback = std::move(
+        impl_->afterRecursiveRemovalQuarantineCallbackForTesting );
+    impl_->afterRecursiveRemovalQuarantineCallbackForTesting = {};
+    if ( afterQuarantineCallback ) {
+        afterQuarantineCallback();
     }
     guardedRoot.reset();
     impl_->directoryHandle.reset();
