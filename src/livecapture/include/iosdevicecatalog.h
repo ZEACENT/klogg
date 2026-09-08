@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "ioscatalogprovider.h"
 #include "iosnativeapi.h"
@@ -20,16 +21,29 @@
 namespace klogg::livecapture::ios {
 
 using IosCatalogTask = std::function<void()>;
-// The execution boundary must defer work until after the caller returns. Native
-// callbacks use it specifically to avoid invoking observers or unsubscribe while
-// libusbmuxd holds its listener mutex. Tasks may run concurrently; the catalog
-// serializes snapshot observer delivery.
+// Execution boundaries must defer work until after the caller returns. Native
+// callbacks use the publication executor specifically to avoid invoking observers
+// or unsubscribe while libusbmuxd holds its listener mutex. Metadata execution is
+// a separate bounded dependency so a blocking RPC cannot delay publication.
 using IosCatalogExecutor = std::function<void( IosCatalogTask )>;
+
+// Metadata is owned by endpoint identity rather than an unkeyed FIFO. The
+// executor retains at most one pending replacement per key, while cancellation
+// leaves an already-running request to its catalog generation/epoch stale gate.
+struct IosCatalogMetadataExecutor {
+    std::function<bool( std::string, IosCatalogTask )> submitLatest;
+    std::function<bool( const std::string& )> cancelLatest;
+    std::function<void()> clearPendingLatest;
+};
 
 class IosDeviceCatalog final : public IosCatalogSnapshotProvider,
                                public IosCatalogMetadataRequester {
 public:
     IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor executor );
+    IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+                      IosCatalogExecutor metadataExecutor );
+    IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+                      IosCatalogMetadataExecutor metadataExecutor );
     ~IosDeviceCatalog() override;
 
     IosDeviceCatalog( const IosDeviceCatalog& ) = delete;

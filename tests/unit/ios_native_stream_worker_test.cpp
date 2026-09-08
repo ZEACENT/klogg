@@ -98,6 +98,7 @@ struct FakeNative {
     NativeSyslogRelayErrorCallback syslogErrorCallback{ nullptr };
     void* osTraceContext{ nullptr };
     void* syslogContext{ nullptr };
+    std::uint64_t syslogCallbackInvocations{ 0u };
     bool blockOsTraceReceive{ false };
     bool receiveEntered{ false };
     bool receiveInterrupted{ false };
@@ -328,6 +329,7 @@ struct FakeNative {
         }
         beginCallback();
         for ( const auto byte : bytes ) {
+            ++syslogCallbackInvocations;
             syslogCallback( byte, syslogContext );
         }
         finishCallback();
@@ -1463,7 +1465,7 @@ TEST_CASE( "os_trace rejects epochs the device time zone cannot represent",
 }
 
 TEST_CASE( "os_trace callback copies decodes formats and queues bytes without unwinding into C",
-           "[ios][native][stream][callback][ownership][format]" )
+           "[ios][native][stream][callback][ownership][format][notification]" )
 {
     FakeNative state;
     fake = &state;
@@ -1510,6 +1512,11 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
 
     observed.throwFromBytesAvailable = true;
     CHECK_NOTHROW( state.emitOsTrace( 2u, osTracePacket( "observer throws" ) ) );
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-live-notification-failed" );
+    CHECK( observed.errors.front().second.error.category == ErrorCategory::Backend );
+    CHECK( observed.errors.front().second.error.retryPolicy == RetryPolicy::Backoff );
+    CHECK( executor.pending() == 1u );
     CHECK_FALSE( state.callbackTeardownViolation() );
     worker.stop( 41u );
     executor.runAllOnWorker();
@@ -1644,6 +1651,38 @@ TEST_CASE(
     CHECK_FALSE( state.callbackTeardownViolation() );
 
     worker.stop( 51u );
+    executor.runAllOnWorker();
+}
+
+TEST_CASE( "legacy syslog fake adapter delivers one callback per byte without assembly loss",
+           "[ios][native][stream][syslog][performance][operations]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 510u, "8.4" ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    std::string record( 4096u, 'x' );
+    record.push_back( '\0' );
+    state.emitSyslog( record );
+
+    INFO( "fake syslog callback invocations=" << state.syslogCallbackInvocations );
+    CHECK( state.syslogCallbackInvocations == record.size() );
+    REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 510u } );
+    const auto drained = worker.drain();
+    REQUIRE( drained.has_value() );
+    CHECK( drained->sourceChunks == 1u );
+    REQUIRE( drained->bytes.size() == record.size() );
+    CHECK( std::all_of( drained->bytes.cbegin(), drained->bytes.cend() - 1,
+                        []( std::uint8_t byte ) { return byte == static_cast<std::uint8_t>( 'x' ); } ) );
+    CHECK( drained->bytes.back() == static_cast<std::uint8_t>( '\n' ) );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+
+    worker.stop( 510u );
     executor.runAllOnWorker();
 }
 

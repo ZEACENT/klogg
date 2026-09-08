@@ -58,9 +58,11 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         std::weak_ptr<State> state;
     };
 
-    State( IosNativeApi nativeApi, IosCatalogExecutor catalogExecutor )
+    State( IosNativeApi nativeApi, IosCatalogExecutor catalogPublicationExecutor,
+           IosCatalogMetadataExecutor catalogMetadataExecutor )
         : api( nativeApi )
-        , executor( std::move( catalogExecutor ) )
+        , publicationExecutor( std::move( catalogPublicationExecutor ) )
+        , metadataExecutor( std::move( catalogMetadataExecutor ) )
     {
     }
 
@@ -94,24 +96,51 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         return true;
     }
 
-    void applyEventToSnapshot( const CopiedNativeEvent& event )
+    void cancelPendingMetadata( const IosEndpointKey& endpoint ) const noexcept
+    {
+        if ( !metadataExecutor.cancelLatest ) {
+            return;
+        }
+        try {
+            static_cast<void>( metadataExecutor.cancelLatest( endpointIdentity( endpoint ) ) );
+        } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+            // Cancellation is a stale-work optimization. Catalog generation and
+            // endpoint epoch gates remain the fail-closed correctness boundary.
+        }
+    }
+
+    void clearPendingMetadata() const noexcept
+    {
+        if ( !metadataExecutor.clearPendingLatest ) {
+            return;
+        }
+        try {
+            metadataExecutor.clearPendingLatest();
+        } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+            // Running and rejected queued work remains guarded by stale checks.
+        }
+    }
+
+    bool applyEventToSnapshot( const CopiedNativeEvent& event )
     {
         switch ( event.type ) {
         case NativeEventType::Add:
         case NativeEventType::Paired:
             if ( addOrRearmEndpoint( current, event.endpoint, nextEpoch ) ) {
                 latestMetadataRequest.erase( endpointIdentity( event.endpoint ) );
+                return true;
             }
-            break;
+            return false;
         case NativeEventType::Remove: {
             const auto found = findEntry( current, event.endpoint );
             if ( found != current.entries.end() ) {
                 current.entries.erase( found );
             }
             latestMetadataRequest.erase( endpointIdentity( event.endpoint ) );
-            break;
+            return true;
         }
         }
+        return false;
     }
 
     void notify()
@@ -160,29 +189,21 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         notify();
     }
 
-    void acceptNativeEvent( CopiedNativeEvent event )
+    void dispatchNotification( Generation generation )
     {
         IosCatalogExecutor dispatch;
-        Generation generation{ 0 };
         {
             std::lock_guard<std::mutex> lock( mutex );
-            if ( lifecycle == Lifecycle::Starting ) {
-                startupEvents.push_back( std::move( event ) );
+            if ( lifecycle != Lifecycle::Running || current.generation != generation
+                 || callbacks.empty() ) {
                 return;
             }
-            if ( lifecycle != Lifecycle::Running ) {
-                return;
-            }
-            applyEventToSnapshot( event );
-            generation = current.generation;
-            if ( !callbacks.empty() ) {
-                dispatch = executor;
-            }
+            dispatch = publicationExecutor;
         }
-
         if ( !dispatch ) {
             return;
         }
+
         const std::weak_ptr<State> weakState = weak_from_this();
         try {
             dispatch( [ weakState, generation ] {
@@ -191,8 +212,35 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
                 }
             } );
         } catch ( ... ) { // NOLINT(bugprone-empty-catch)
-            // Never allow an executor failure to cross the libimobiledevice callback ABI.
+            // Snapshot state is already current. Executor rejection must not unwind
+            // through a native callback or a metadata worker exception boundary.
         }
+    }
+
+    void acceptNativeEvent( CopiedNativeEvent event )
+    {
+        Generation generation{ 0 };
+        {
+            std::lock_guard<std::mutex> schedulingLock( metadataSchedulingMutex );
+            bool cancelPending = false;
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+                if ( lifecycle == Lifecycle::Starting ) {
+                    startupEvents.push_back( std::move( event ) );
+                    return;
+                }
+                if ( lifecycle != Lifecycle::Running ) {
+                    return;
+                }
+                cancelPending = applyEventToSnapshot( event );
+                generation = current.generation;
+            }
+            if ( cancelPending ) {
+                cancelPendingMetadata( event.endpoint );
+            }
+        }
+
+        dispatchNotification( generation );
     }
 
     std::optional<LiveSourceError> startupFailure() const
@@ -218,12 +266,16 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         }
         callbackContext.reset();
         {
-            std::lock_guard<std::mutex> lock( mutex );
-            lifecycle = Lifecycle::Starting;
-            ++current.generation;
-            current.entries.clear();
-            latestMetadataRequest.clear();
-            startupEvents.clear();
+            std::lock_guard<std::mutex> schedulingLock( metadataSchedulingMutex );
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+                lifecycle = Lifecycle::Starting;
+                ++current.generation;
+                current.entries.clear();
+                latestMetadataRequest.clear();
+                startupEvents.clear();
+            }
+            clearPendingMetadata();
         }
 
         auto failStart = [ this ]( std::string code, std::string detail ) {
@@ -307,10 +359,14 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
     {
         std::lock_guard<std::recursive_mutex> lifecycleLock( lifecycleMutex );
         {
-            std::lock_guard<std::mutex> lock( mutex );
-            lifecycle = Lifecycle::Stopped;
-            latestMetadataRequest.clear();
-            startupEvents.clear();
+            std::lock_guard<std::mutex> schedulingLock( metadataSchedulingMutex );
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+                lifecycle = Lifecycle::Stopped;
+                latestMetadataRequest.clear();
+                startupEvents.clear();
+            }
+            clearPendingMetadata();
         }
         // The pinned libimobiledevice/libusbmuxd unsubscribe path removes this
         // callback context under its listener lock before returning. Keeping State
@@ -360,6 +416,7 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
                                   std::optional<IosDeviceMetadata> metadata,
                                   std::optional<IosCatalogError> error )
     {
+        Generation generation{ 0u };
         {
             std::lock_guard<std::mutex> lock( mutex );
             if ( lifecycle != Lifecycle::Running
@@ -376,15 +433,18 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
             found->metadata = std::move( metadata );
             found->error = std::move( error );
             latestMetadataRequest.erase( latest );
+            generation = current.generation;
         }
-        notify();
+        dispatchNotification( generation );
     }
 
     mutable std::mutex mutex;
+    std::mutex metadataSchedulingMutex;
     std::recursive_mutex lifecycleMutex;
     std::recursive_mutex notificationMutex;
     IosNativeApi api;
-    IosCatalogExecutor executor;
+    IosCatalogExecutor publicationExecutor;
+    IosCatalogMetadataExecutor metadataExecutor;
     IosCatalogSnapshot current;
     Lifecycle lifecycle{ Lifecycle::Stopped };
     std::optional<LiveSourceError> startupError;
@@ -399,7 +459,30 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
 };
 
 IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor executor )
-    : state_( std::make_shared<State>( api, std::move( executor ) ) )
+    : IosDeviceCatalog( api, executor, executor )
+{
+}
+
+IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+                                    IosCatalogExecutor metadataExecutor )
+    : IosDeviceCatalog(
+          api, std::move( publicationExecutor ),
+          IosCatalogMetadataExecutor{
+              [ executor = std::move( metadataExecutor ) ]( std::string, IosCatalogTask task ) {
+                  if ( !executor ) {
+                      return false;
+                  }
+                  executor( std::move( task ) );
+                  return true;
+              },
+              {}, {} } )
+{
+}
+
+IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+                                    IosCatalogMetadataExecutor metadataExecutor )
+    : state_( std::make_shared<State>( api, std::move( publicationExecutor ),
+                                      std::move( metadataExecutor ) ) )
 {
 }
 
@@ -423,18 +506,27 @@ void IosDeviceCatalog::stop()
 void IosDeviceCatalog::requestMetadata( IosEndpointKey endpoint )
 {
     const auto state = state_;
-    if ( !state->executor ) {
-        return;
-    }
+    std::lock_guard<std::mutex> schedulingLock( state->metadataSchedulingMutex );
     const auto request = state->beginMetadataRequest( endpoint );
     if ( !request ) {
         return;
     }
 
+    const auto reject = [ &state, &request ] {
+        state->completeMetadataRequest(
+            *request, std::nullopt,
+            classifyIosNativeError( IosNativeError{ IosNativeErrorDomain::Idevice, -1,
+                                                    "metadata executor rejected the task" } ) );
+    };
+    if ( !state->metadataExecutor.submitLatest ) {
+        reject();
+        return;
+    }
     const auto api = state->api;
     const std::weak_ptr<State> weakState = state;
     try {
-        state->executor( [ api, weakState, request = *request ] {
+        const auto accepted = state->metadataExecutor.submitLatest(
+            endpointIdentity( request->endpoint ), [ api, weakState, request = *request ] {
             const auto locked = weakState.lock();
             if ( !locked || !locked->isMetadataRequestCurrent( request ) ) {
                 return;
@@ -520,11 +612,11 @@ void IosDeviceCatalog::requestMetadata( IosEndpointKey endpoint )
 
             locked->completeMetadataRequest( request, std::move( metadata ), std::nullopt );
         } );
+        if ( !accepted ) {
+            reject();
+        }
     } catch ( ... ) { // NOLINT(bugprone-empty-catch)
-        state->completeMetadataRequest(
-            *request, std::nullopt,
-            classifyIosNativeError( IosNativeError{ IosNativeErrorDomain::Idevice, -1,
-                                                    "metadata executor rejected the task" } ) );
+        reject();
     }
 }
 

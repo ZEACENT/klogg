@@ -10,16 +10,20 @@ UNIT_CMAKE = ROOT / "tests" / "unit" / "CMakeLists.txt"
 
 
 class IosCompilerPortabilityContractTest(unittest.TestCase):
-    def test_syslog_byte_copy_avoids_gcc13_iterator_provenance_warning(self):
+    def test_syslog_completion_moves_owned_bytes_without_iterator_copy(self):
         source = STREAM_SOURCE.read_text(encoding="utf-8")
+        callback = source.split("static void syslogByte", 1)[1].split(
+            "static void syslogError", 1
+        )[0]
         self.assertNotIn(
             "completed.assign( state->syslogRecord.begin(), state->syslogRecord.end() )",
-            source,
+            callback,
         )
+        self.assertNotIn("std::memcpy", callback)
         self.assertIn(
-            "std::memcpy( completed.data(), completedRecord.data(), completed.size() )",
-            source,
+            "auto completedRecord = std::move( state->syslogRecord );", callback
         )
+        self.assertIn("state->enqueue( std::move( completedRecord ) );", callback)
 
     def test_admission_constructors_do_not_shadow_members_under_gcc(self):
         source = STREAM_SOURCE.read_text(encoding="utf-8")

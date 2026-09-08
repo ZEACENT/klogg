@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
 
 namespace klogg::livecapture::ios {
@@ -45,39 +46,64 @@ LiveSourceError clearUnsupportedError()
                             "The native relay is read-only and never reports fake clear success." };
 }
 
+bool postQueuedTask( QObject& context, IosNativeTransport::QueuedTask task )
+{
+    return QMetaObject::invokeMethod(
+        &context, [ task = std::move( task ) ]() mutable { task(); }, Qt::QueuedConnection );
+}
+
 } // namespace
 
 struct IosNativeTransport::CallbackGate final
     : public std::enable_shared_from_this<IosNativeTransport::CallbackGate> {
+    explicit CallbackGate( QueuedDispatcher value )
+        : dispatcher( std::move( value ) )
+    {
+    }
+
     template <typename Callback>
-    void post( Callback callback )
+    bool post( Callback callback )
     {
         const auto self = shared_from_this();
         std::lock_guard<std::mutex> lock( mutex );
         if ( transport == nullptr ) {
-            return;
+            return true;
         }
         // Hold the gate while enqueueing so destruction cannot detach and delete
-        // the QObject between target selection and invokeMethod(). The queued
-        // closure re-checks the raw pointer on the object's own Qt thread.
-        QMetaObject::invokeMethod(
-            transport,
-            [ self, callback = std::move( callback ) ]() mutable {
-                try {
-                    IosNativeTransport* target = nullptr;
-                    {
-                        std::lock_guard<std::mutex> callbackLock( self->mutex );
-                        target = self->transport;
-                    }
-                    if ( target != nullptr ) {
-                        callback( *target );
-                    }
-                } catch ( ... ) { // NOLINT(bugprone-empty-catch)
-                    // Qt queued callbacks are an exception boundary. A failed
-                    // observer or allocation must not escape the event dispatcher.
-                }
-            },
-            Qt::QueuedConnection );
+        // the QObject between target selection and dispatch. The queued closure
+        // re-checks the raw pointer on the object's own Qt thread.
+        QueuedTask task = [ self, callback = std::move( callback ) ]() mutable {
+            IosNativeTransport* target = nullptr;
+            {
+                std::lock_guard<std::mutex> callbackLock( self->mutex );
+                target = self->transport;
+            }
+            QPointer<IosNativeTransport> guard( target );
+            try {
+                if ( guard ) { callback( *guard ); }
+            } catch ( ... ) {
+                if ( !guard ) { return; }
+                guard->reportDrainFailure();
+                if ( guard && guard->nativeStopped_ ) { guard->completeStopped(); }
+            }
+        };
+
+        constexpr unsigned DispatchAttempts = 2u;
+        bool queued = false;
+        for ( unsigned attempt = 0u; attempt < DispatchAttempts && !queued; ++attempt ) {
+            try {
+                queued = dispatcher( *transport, task );
+            } catch ( ... ) {
+                queued = false;
+            }
+        }
+        if ( queued ) {
+            return true;
+        }
+        // A rejected notification cannot consume the sole non-empty-queue
+        // wakeup. Use the normal Qt dispatcher once as a bounded fallback;
+        // there is no timer, polling loop, or unbounded retry path.
+        return postQueuedTask( *transport, std::move( task ) );
     }
 
     void detach() noexcept
@@ -86,16 +112,24 @@ struct IosNativeTransport::CallbackGate final
         transport = nullptr;
     }
 
+    QueuedDispatcher dispatcher;
     std::mutex mutex;
     IosNativeTransport* transport{ nullptr };
 };
 
 IosNativeTransport::IosNativeTransport( const IosNativeStreamWorkerFactory& workerFactory,
                                         IosNativeStreamConfig config, QObject* parent )
+    : IosNativeTransport( workerFactory, std::move( config ), postQueuedTask, parent )
+{
+}
+
+IosNativeTransport::IosNativeTransport( const IosNativeStreamWorkerFactory& workerFactory,
+                                        IosNativeStreamConfig config,
+                                        QueuedDispatcher dispatcher, QObject* parent )
     : LiveSourceTransport( parent )
     , workerFactory_( workerFactory )
     , baseConfig_( std::move( config ) )
-    , callbackGate_( std::make_shared<CallbackGate>() )
+    , callbackGate_( std::make_shared<CallbackGate>( std::move( dispatcher ) ) )
 {
     callbackGate_->transport = this;
 }
@@ -107,11 +141,7 @@ IosNativeTransport::~IosNativeTransport()
     if ( session_ != nullptr ) {
         session_->shutdown();
     }
-    for ( auto& retired : retiredSessions_ ) {
-        retired.session->shutdown();
-    }
     session_.reset();
-    retiredSessions_.clear();
 }
 
 void IosNativeTransport::start( Generation generation )
@@ -120,11 +150,35 @@ void IosNativeTransport::start( Generation generation )
         return;
     }
 
-    retireCurrent( true );
+    if ( retiringGeneration_ || activeGeneration_ ) {
+        pendingStart_ = generation;
+        if ( activeGeneration_ ) { requestStop( *activeGeneration_, StopDisposition::DiscardPending ); }
+        return;
+    }
     activeGeneration_ = generation;
+    discardedBytes_ = 0u;
+    drainFailed_ = false;
+    nativeStopped_ = false;
+    drainScheduled_ = false;
+    queueWorkPending_ = false;
+    pendingBatch_.reset();
+    pendingOffset_ = 0u;
     lastError_.clear();
     lastStructuredError_.reset();
+    pendingFailure_.reset();
     resetStatistics( generation );
+
+    if ( const auto error = validateIosLogOptions( baseConfig_.logOptions ); error.has_value() ) {
+        lastStructuredError_ = *error;
+        lastError_ = diagnosticText( *error );
+        const auto terminalText = lastError_;
+        QPointer<IosNativeTransport> guard( this );
+        publishState( generation, State::Error );
+        if ( guard && guard->activeGeneration_ == generation ) {
+            Q_EMIT guard->errorOccurred( generation, terminalText );
+        }
+        return;
+    }
 
     auto config = baseConfig_;
     config.generation = generation;
@@ -134,8 +188,12 @@ void IosNativeTransport::start( Generation generation )
         gate->post( [ value ]( IosNativeTransport& transport ) { transport.postReady( value ); } );
     };
     callbacks.bytesAvailable = [ gate ]( Generation value ) {
-        gate->post(
-            [ value ]( IosNativeTransport& transport ) { transport.postBytesAvailable( value ); } );
+        if ( !gate->post(
+                 [ value ]( IosNativeTransport& transport ) {
+                     transport.postBytesAvailable( value );
+                 } ) ) {
+            throw std::runtime_error( "iOS queue notification dispatch was rejected" );
+        }
     };
     callbacks.failed = [ gate ]( Generation value, const ClassifiedIosNativeError& error ) {
         auto ownedError = error;
@@ -185,15 +243,32 @@ void IosNativeTransport::start( Generation generation )
 
 void IosNativeTransport::stop( Generation generation )
 {
-    if ( activeGeneration_ != generation ) {
+    requestStop( generation, StopDisposition::DiscardPending );
+}
+
+void IosNativeTransport::requestStop( Generation generation, StopDisposition disposition )
+{
+    if ( retiringGeneration_ == generation ) {
+        if ( disposition == StopDisposition::DiscardPending ) { stopDisposition_ = disposition; }
         return;
     }
-    retireCurrent( true );
-    publishState( generation, State::Disconnected );
+    if ( activeGeneration_ != generation ) { return; }
+    activeGeneration_.reset();
+    retiringGeneration_ = generation;
+    stopDisposition_ = disposition;
+    if ( session_ ) {
+        // Closes producer admission and wakes enqueueWait before native cleanup.
+        // Keep session/queue/callbacks owned until the worker releases admission.
+        session_->stop( generation );
+    }
+    else {
+        postStopped( generation );
+    }
 }
 
 void IosNativeTransport::clearRemoteAsync( Generation generation, ClearRequestId requestId )
 {
+    if ( retiringGeneration_ ) { return; }
     if ( activeGeneration_.has_value() && activeGeneration_.value() != generation ) {
         return;
     }
@@ -204,7 +279,7 @@ void IosNativeTransport::clearRemoteAsync( Generation generation, ClearRequestId
     QMetaObject::invokeMethod(
         this,
         [ guard, generation, requestId ] {
-            if ( guard == nullptr ) {
+            if ( guard == nullptr || guard->retiringGeneration_ ) {
                 return;
             }
             if ( guard->activeGeneration_.has_value()
@@ -255,10 +330,11 @@ void IosNativeTransport::serviceShutdown()
         session_.reset();
     }
     activeGeneration_.reset();
-    for ( auto& retired : retiredSessions_ ) {
-        retired.session->shutdown();
-    }
-    retiredSessions_.clear();
+    retiringGeneration_.reset();
+    pendingBatch_.reset();
+    queueWorkPending_ = false;
+    pendingFailure_.reset();
+    pendingStart_.reset();
     if ( generation.has_value() ) {
         publishState( *generation, State::Disconnected );
     }
@@ -266,78 +342,171 @@ void IosNativeTransport::serviceShutdown()
 
 void IosNativeTransport::postReady( Generation generation )
 {
-    if ( activeGeneration_ == generation && !shuttingDown_ ) {
+    if ( activeGeneration_ == generation && !shuttingDown_ && !pendingFailure_ ) {
         publishState( generation, State::Connected );
     }
 }
 
 void IosNativeTransport::postBytesAvailable( Generation generation )
 {
-    if ( activeGeneration_ == generation && !shuttingDown_ ) {
-        drainCurrent( generation );
+    if ( ( activeGeneration_ == generation || retiringGeneration_ == generation ) && !shuttingDown_ ) {
+        queueWorkPending_ = true;
+        (void)drainCurrent( generation );
     }
 }
 
 void IosNativeTransport::postFailure( Generation generation, ClassifiedIosNativeError error )
 {
     if ( activeGeneration_ != generation || shuttingDown_
-         || ( stateGeneration_ == generation && state_ == State::Error ) ) {
+         || ( stateGeneration_ == generation && state_ == State::Error ) || pendingFailure_ ) {
         return;
     }
-    drainCurrent( generation );
-    if ( activeGeneration_ != generation ) {
+
+    pendingFailure_ = std::move( error );
+    QPointer<IosNativeTransport> guard( this );
+    if ( !drainCurrent( generation ) || !guard ) {
         return;
     }
+    if ( guard->pendingBatch_ || guard->queueWorkPending_ ) {
+        guard->scheduleDrain( generation );
+        return;
+    }
+    (void)guard->publishPendingFailureIfReady( generation );
+}
+
+void IosNativeTransport::postStopped( Generation generation )
+{
+    if ( ( activeGeneration_ != generation && retiringGeneration_ != generation ) || shuttingDown_ ) {
+        return;
+    }
+    nativeStopped_ = true;
+    QPointer<IosNativeTransport> guard( this );
+    try {
+        if ( !drainCurrent( generation ) || !guard ) { return; }
+    }
+    catch ( ... ) {
+        if ( !guard ) { return; }
+        guard->reportDrainFailure();
+    }
+    if ( guard && !guard->publishPendingFailureIfReady( generation ) ) { return; }
+    if ( guard ) { guard->completeStopped(); }
+}
+
+void IosNativeTransport::completeStopped()
+{
+    if ( !nativeStopped_ ) { return; }
+    const auto generation = activeGeneration_ ? *activeGeneration_ : retiringGeneration_.value_or( 0u );
+    if ( !drainFailed_
+         && ( pendingBatch_ || queueWorkPending_
+              || ( session_ && session_->statistics().queuedBytes != 0u ) ) ) {
+        scheduleDrain( generation );
+        return;
+    }
+    if ( drainFailed_ && session_ ) {
+        try {
+            discardedBytes_ += static_cast<quint64>( session_->statistics().queuedBytes );
+        }
+        catch ( ... ) {
+            // Release the stopped worker even when exact final accounting is unavailable.
+            if ( lastStructuredError_ ) {
+                lastStructuredError_->nativeDetail
+                    = "The final native queue statistics were unavailable during retirement.";
+                lastError_ = diagnosticText( *lastStructuredError_ );
+            }
+        }
+    }
+    if ( drainFailed_ && pendingBatch_ ) {
+        discardedBytes_ += static_cast<quint64>( pendingBatch_->bytes.size() - pendingOffset_ );
+        pendingBatch_.reset();
+    }
+    nativeStopped_ = false;
+    const bool preserveTerminalError = stateGeneration_ == generation && state_ == State::Error;
+    activeGeneration_.reset();
+    retiringGeneration_.reset();
+    queueWorkPending_ = false;
+    session_.reset();
+    const auto successor = std::exchange( pendingStart_, std::nullopt );
+    const auto discarded = discardedBytes_;
+    QPointer<IosNativeTransport> guard( this );
+    if ( !preserveTerminalError ) { publishState( generation, State::Disconnected ); }
+    if ( !guard ) { return; }
+    Q_EMIT stopped( generation, discarded );
+    if ( guard && successor && !guard->activeGeneration_ && !guard->retiringGeneration_ ) {
+        guard->start( *successor );
+    }
+}
+
+bool IosNativeTransport::drainCurrent( Generation generation )
+{
+    if ( session_ == nullptr || drainFailed_
+         || ( activeGeneration_ != generation && retiringGeneration_ != generation ) ) {
+        return true;
+    }
+    if ( !pendingBatch_ ) {
+        pendingBatch_ = session_->drain();
+        pendingOffset_ = 0u;
+        queueWorkPending_ = false;
+    }
+    if ( !pendingBatch_ ) { return true; }
+    if ( pendingBatch_->generation != generation ) {
+        reportDrainFailure();
+        return true;
+    }
+    const auto remaining = pendingBatch_->bytes.size() - pendingOffset_;
+    if ( retiringGeneration_ == generation && stopDisposition_ == StopDisposition::DiscardPending ) {
+        discardedBytes_ += static_cast<quint64>( remaining );
+        pendingBatch_.reset();
+        if ( queueWorkPending_ ) { scheduleDrain( generation ); }
+        return true;
+    }
+    const auto byteCount = std::min( remaining, std::size_t{ 64u } * 1024u );
+    const QByteArray bytes( reinterpret_cast<const char*>( pendingBatch_->bytes.data() + pendingOffset_ ),
+                            static_cast<int>( byteCount ) );
+    // Advance the one authoritative delivery cursor before observers can reenter.
+    pendingOffset_ += byteCount;
+    if ( pendingOffset_ == pendingBatch_->bytes.size() ) { pendingBatch_.reset(); }
+    if ( pendingBatch_ || queueWorkPending_ ) { scheduleDrain( generation ); }
+    const QPointer<IosNativeTransport> guard( this );
+    Q_EMIT bytesReceived( generation, bytes );
+    return !guard.isNull();
+}
+
+bool IosNativeTransport::publishPendingFailureIfReady( Generation generation )
+{
+    if ( !pendingFailure_ || pendingBatch_ || queueWorkPending_ ) {
+        return true;
+    }
+
+    auto error = std::move( *pendingFailure_ );
+    pendingFailure_.reset();
     error.error.awaitingUserReason = error.awaitingUserReason;
     lastStructuredError_ = std::move( error.error );
     lastError_ = diagnosticText( *lastStructuredError_ );
     const auto terminalText = lastError_;
     QPointer<IosNativeTransport> guard( this );
     publishState( generation, State::Error );
-    if ( guard != nullptr ) {
+    if ( guard ) {
         Q_EMIT guard->errorOccurred( generation, terminalText );
     }
+    return !guard.isNull();
 }
 
-void IosNativeTransport::postStopped( Generation generation )
+void IosNativeTransport::reportDrainFailure()
 {
-    const auto retired = std::remove_if(
-        retiredSessions_.begin(), retiredSessions_.end(),
-        [ generation ]( const auto& entry ) { return entry.generation == generation; } );
-    if ( retired != retiredSessions_.end() ) {
-        retiredSessions_.erase( retired, retiredSessions_.end() );
+    if ( drainFailed_ ) { return; }
+    pendingFailure_.reset();
+    drainFailed_ = true;
+    const auto generation = activeGeneration_ ? activeGeneration_ : retiringGeneration_;
+    if ( !generation ) { return; }
+    lastStructuredError_ = LiveSourceError{ ErrorCategory::Capture, "native-delivery-failed",
+        ErrorScope::Capture, RetryPolicy::Never,
+        "Native log delivery failed; capture completeness is uncertain.", {} };
+    lastError_ = diagnosticText( *lastStructuredError_ );
+    QPointer<IosNativeTransport> guard( this );
+    publishState( *generation, State::Error );
+    if ( guard && guard->activeGeneration_ == generation ) {
+        guard->requestStop( *generation, StopDisposition::SettleAccepted );
     }
-    if ( activeGeneration_ != generation || shuttingDown_ ) {
-        return;
-    }
-    drainCurrent( generation );
-    if ( activeGeneration_ == generation ) {
-        const bool preserveTerminalError = stateGeneration_ == generation && state_ == State::Error;
-        activeGeneration_.reset();
-        session_.reset();
-        if ( !preserveTerminalError ) {
-            publishState( generation, State::Disconnected );
-        }
-    }
-}
-
-void IosNativeTransport::drainCurrent( Generation generation )
-{
-    if ( session_ == nullptr || activeGeneration_ != generation ) {
-        return;
-    }
-    // drain() removes the entire pending batch and wakes the native producer.
-    // A refill schedules its own empty-to-nonempty notification; do not chase it
-    // here or a busy stream can starve queued stop requests on the Qt thread.
-    const auto batch = session_->drain();
-    if ( !batch.has_value() || batch->generation != generation || batch->bytes.empty() ) {
-        return;
-    }
-    const auto maximum = static_cast<std::size_t>( std::numeric_limits<int>::max() );
-    const auto byteCount = std::min( batch->bytes.size(), maximum );
-    const QByteArray bytes( reinterpret_cast<const char*>( batch->bytes.data() ),
-                            static_cast<int>( byteCount ) );
-    Q_EMIT bytesReceived( generation, bytes );
 }
 
 void IosNativeTransport::publishState( Generation generation, State state )
@@ -350,19 +519,18 @@ void IosNativeTransport::publishState( Generation generation, State state )
     Q_EMIT stateChanged( generation, state );
 }
 
-void IosNativeTransport::retireCurrent( bool requestStop )
+void IosNativeTransport::scheduleDrain( Generation generation )
 {
-    if ( session_ == nullptr ) {
-        activeGeneration_.reset();
-        return;
-    }
-    const auto generation = activeGeneration_;
-    activeGeneration_.reset();
-    if ( requestStop && generation.has_value() ) {
-        session_->stop( *generation );
-    }
-    retiredSessions_.push_back(
-        RetiredSession{ generation.value_or( 0u ), std::move( session_ ) } );
+    if ( drainScheduled_ ) { return; }
+    drainScheduled_ = true;
+    callbackGate_->post( [ generation ]( IosNativeTransport& transport ) {
+        const QPointer<IosNativeTransport> guard( &transport );
+        transport.drainScheduled_ = false;
+        if ( transport.activeGeneration_ != generation && transport.retiringGeneration_ != generation ) { return; }
+        if ( !transport.drainCurrent( generation ) || !guard ) { return; }
+        if ( !guard->publishPendingFailureIfReady( generation ) ) { return; }
+        guard->completeStopped();
+    } );
 }
 
 } // namespace klogg::livecapture::ios

@@ -41,6 +41,7 @@
 
 #include "adbprotocol.h"
 #include "adbsmartsocketclient.h"
+#include "adb_smart_socket_test_support.h"
 
 namespace {
 using namespace klogg::livecapture;
@@ -2044,4 +2045,224 @@ TEST_CASE( "ADB smart-socket survives synchronous connect deadline expiry",
     CHECK( probe.first( ClientCallback::Kind::Error ).errorCode
            == AdbSmartSocketErrorCode::ConnectTimeout );
     CHECK( deadlines.wasCancelled( deadlines.immediateToken() ) );
+}
+
+TEST_CASE( "ADB smart-socket frame delivery survives synchronous client destruction",
+           "[livecapture][adb][network][client][budget][lifetime][review-red]" )
+{
+    constexpr Generation generation = 900u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9900u;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto client = std::make_unique<AdbSmartSocketClient>(
+        AdbSmartSocketClientConfig{}, socketFactory, deadlines );
+    QPointer<AdbSmartSocketClient> guard( client.get() );
+    int deliveries = 0;
+    QObject::connect( client.get(), &AdbSmartSocketClient::shellStdoutReceived,
+                      [&]( Generation, AdbSmartSocketClient::OperationId,
+                           const QByteArray& ) {
+                          ++deliveries;
+                          client.reset();
+                      } );
+
+    client->startShellService( generation, operationId,
+                               TransportSelection{ TransportKind::Serial, "lifetime-device" },
+                               std::string{ "shell,v2,raw:logcat" } );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+
+    CHECK_NOTHROW( socket->pushIncoming(
+        shellV2Frame( 1u, QByteArrayLiteral( "first" ) )
+        + shellV2Frame( 1u, QByteArrayLiteral( "must-not-run" ) ) ) );
+    CHECK( guard.isNull() );
+    CHECK( deliveries == 1 );
+}
+
+TEST_CASE( "ADB smart-socket production defaults yield after a finite shell frame turn",
+           "[livecapture][adb][network][client][budget][frames][w3-red]" )
+{
+    constexpr Generation generation = 901u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9901u;
+    constexpr int frameCount = 257;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    AdbSmartSocketClientConfig config;
+    AdbSmartSocketClient client( config, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.startShellService( generation, operationId,
+                              TransportSelection{ TransportKind::Serial, "budget-device" },
+                              std::string{ "shell,v2,raw:logcat" } );
+    REQUIRE( socketFactory.socketCount() == 1 );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    CHECK( socket->readBufferSize() > 0 );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    REQUIRE( probe.count( ClientCallback::Kind::Stdout ) == 0 );
+
+    QByteArray burst;
+    for ( int index = 0; index < frameCount; ++index ) {
+        burst.append( shellV2Frame( 1u, QByteArray( 1, static_cast<char>( index ) ) ) );
+    }
+
+    int framesAtYield = -1;
+    bool yieldMarkerQueued = false;
+    socket->setAfterRead( [&] {
+        if ( !yieldMarkerQueued ) {
+            yieldMarkerQueued = QMetaObject::invokeMethod(
+                &client,
+                [&] { framesAtYield = probe.count( ClientCallback::Kind::Stdout ); },
+                Qt::QueuedConnection );
+        }
+    } );
+
+    socket->pushIncoming( burst );
+
+    REQUIRE( pumpEventsUntil( [&] { return framesAtYield >= 0; } ) );
+    CHECK( framesAtYield == 256 );
+    REQUIRE( pumpEventsUntil( [&] {
+        return probe.count( ClientCallback::Kind::Stdout ) == frameCount;
+    } ) );
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+    CHECK( probe.count( ClientCallback::Kind::Exit ) == 0 );
+    CHECK( probe.allCallbacksMatch( generation, operationId ) );
+}
+
+TEST_CASE( "ADB smart-socket production defaults bound socket reads per event turn",
+           "[livecapture][adb][network][client][budget][bytes][w3-red]" )
+{
+    constexpr Generation generation = 902u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9902u;
+    constexpr int expectedReadsInFirstTurn = 4;
+    constexpr int payloadBytes = 5 * 64 * 1024;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    AdbSmartSocketClientConfig config;
+    AdbSmartSocketClient client( config, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.startShellService( generation, operationId,
+                              TransportSelection{ TransportKind::Serial, "byte-budget-device" },
+                              std::string{ "shell,v2,raw:logcat" } );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    const auto readsBeforeBurst = socket->requestedReadSizes().size();
+
+    using ReadCount = decltype( socket->requestedReadSizes().size() );
+    ReadCount readsAtYield = -1;
+    int stdoutAtYield = -1;
+    bool yieldMarkerQueued = false;
+    socket->setAfterRead( [&] {
+        if ( !yieldMarkerQueued ) {
+            yieldMarkerQueued = QMetaObject::invokeMethod(
+                &client,
+                [&] {
+                    readsAtYield = socket->requestedReadSizes().size() - readsBeforeBurst;
+                    stdoutAtYield = probe.count( ClientCallback::Kind::Stdout );
+                },
+                Qt::QueuedConnection );
+        }
+    } );
+
+    const auto payload = QByteArray( payloadBytes, 'b' );
+    socket->pushIncoming( shellV2Frame( 1u, payload ) );
+
+    REQUIRE( pumpEventsUntil( [&] { return readsAtYield >= 0; } ) );
+    CHECK( readsAtYield == static_cast<ReadCount>( expectedReadsInFirstTurn ) );
+    CHECK( stdoutAtYield == 0 );
+    REQUIRE( pumpEventsUntil(
+        [&] { return probe.count( ClientCallback::Kind::Stdout ) == 1; } ) );
+    CHECK( probe.first( ClientCallback::Kind::Stdout ).bytes == payload );
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+}
+
+TEST_CASE( "ADB smart-socket cancellation between budgeted turns invalidates buffered frames",
+           "[livecapture][adb][network][client][budget][cancel][w3-red]" )
+{
+    constexpr Generation generation = 903u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9903u;
+    constexpr int frameCount = 257;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    AdbSmartSocketClient client( AdbSmartSocketClientConfig{}, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.startShellService( generation, operationId,
+                              TransportSelection{ TransportKind::Serial, "cancel-device" },
+                              std::string{ "shell,v2,raw:logcat" } );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+
+    QByteArray burst;
+    for ( int index = 0; index < frameCount; ++index ) {
+        burst.append( shellV2Frame( 1u, QByteArray( 1, 'x' ) ) );
+    }
+    burst.append( shellV2Frame( 3u, QByteArray( 1, '\0' ) ) );
+
+    bool cancellationQueued = false;
+    bool cancellationRan = false;
+    socket->setAfterRead( [&] {
+        if ( !cancellationQueued ) {
+            cancellationQueued = QMetaObject::invokeMethod(
+                &client,
+                [&] {
+                    client.cancelGeneration( generation );
+                    cancellationRan = true;
+                },
+                Qt::QueuedConnection );
+        }
+    } );
+
+    socket->pushIncoming( burst );
+    REQUIRE( pumpEventsUntil( [&] { return cancellationRan; } ) );
+    QCoreApplication::processEvents( QEventLoop::AllEvents );
+
+    CHECK( probe.count( ClientCallback::Kind::Stdout ) == 256 );
+    CHECK( probe.count( ClientCallback::Kind::Exit ) == 0 );
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+}
+
+TEST_CASE( "ADB shell completion deadline is cancelled and stale after generation cancellation",
+           "[livecapture][adb][network][client][deadline][cancel][stale][w3-clear-red]" )
+{
+    constexpr Generation generation = 904u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9904u;
+    constexpr int completionTimeoutMs = 4321;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    AdbSmartSocketClient client( AdbSmartSocketClientConfig{}, socketFactory, deadlines );
+    ClientProbe probe( client );
+
+    client.startShellService( generation, operationId,
+                              TransportSelection{ TransportKind::Serial, "deadline-device" },
+                              std::string{ "shell,v2,raw:logcat -c" }, completionTimeoutMs );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    REQUIRE( deadlines.hasActive( AdbSmartSocketDeadlineKind::Read ) );
+    const auto deadline = deadlines.activeToken( AdbSmartSocketDeadlineKind::Read );
+    CHECK( deadlines.timeoutMs( deadline ) == completionTimeoutMs );
+
+    client.cancelGeneration( generation );
+    CHECK_FALSE( deadlines.isActive( deadline ) );
+    deadlines.fireLastEvenIfCancelled();
+    socket->pushIncoming(
+        shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 0 ) ) ) );
+    QCoreApplication::processEvents( QEventLoop::AllEvents );
+
+    CHECK( probe.count( ClientCallback::Kind::Error ) == 0 );
+    CHECK( probe.count( ClientCallback::Kind::Exit ) == 0 );
 }

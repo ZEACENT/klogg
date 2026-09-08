@@ -400,13 +400,17 @@ QString makeCaptureId()
 bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData,
                        unsigned long long lineCount )
 {
+    const auto reached = [ & ] {
+        const auto current = logData->getNbLine().get();
+        return lineCount == 0u ? current == 0u : current >= lineCount;
+    };
     QElapsedTimer deadline;
     deadline.start();
-    while ( logData->getNbLine().get() < lineCount && deadline.elapsed() < 5000 ) {
+    while ( !reached() && deadline.elapsed() < 5000 ) {
         QCoreApplication::processEvents();
         QTest::qWait( 50 );
     }
-    return logData->getNbLine().get() >= lineCount;
+    return reached();
 }
 
 bool waitForSourceState( const AdbLogcatSource& source, AdbLogcatSource::State state )
@@ -2086,6 +2090,12 @@ TEST_CASE( "Controller-owned manual reconnect never starts a source-local genera
             Q_EMIT stateChanged( generation, State::Connected );
         }
 
+        void finishStop( Generation generation )
+        {
+            REQUIRE( std::find( stops.cbegin(), stops.cend(), generation ) != stops.cend() );
+            Q_EMIT stateChanged( generation, State::Disconnected );
+        }
+
         void finishClear()
         {
             REQUIRE( clearGeneration.has_value() );
@@ -2145,10 +2155,20 @@ TEST_CASE( "Controller-owned manual reconnect never starts a source-local genera
 
     int controllerStops = 0;
     controllerRestarts = 0;
-    source.setControllerCallbacks( {}, {}, {}, [ &controllerStops ] { ++controllerStops; },
-                                   [ &controllerRestarts ] { ++controllerRestarts; } );
+    source.setControllerCallbacks(
+        {}, {}, {},
+        [&] {
+            ++controllerStops;
+            source.cancelTransport( 41u );
+        },
+        [ &controllerRestarts ] { ++controllerRestarts; } );
     REQUIRE( source.clearAndRestart() );
     REQUIRE( controllerStops == 1 );
+    CHECK( factory.created->stops
+           == std::vector<LiveSourceTransport::Generation>{ 41u } );
+    CHECK_FALSE( factory.created->clearGeneration.has_value() );
+
+    factory.created->finishStop( 41u );
     REQUIRE( factory.created->clearGeneration.has_value() );
 
     REQUIRE( source.reconnectSource() );
@@ -2283,7 +2303,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     clearTimer.start();
     REQUIRE( source.clearAndRestart() );
     REQUIRE( clearTimer.elapsed() < 2000 );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
 
     source.disconnectSource();
     drainLiveSourceEvents( 200 );
@@ -2330,7 +2350,7 @@ TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear 
     REQUIRE( waitForLineCount( logData, 1 ) );
 
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );
 
@@ -2390,7 +2410,7 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
     marker.close();
 
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE_FALSE( source.lastError().isEmpty() );
 

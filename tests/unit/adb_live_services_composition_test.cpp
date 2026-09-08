@@ -369,6 +369,7 @@ public:
     void stop( Generation generation ) override
     {
         if ( activeGeneration == generation ) {
+            if ( deferStop ) { return; }
             activeGeneration.reset();
             Q_EMIT stateChanged( generation, State::Disconnected );
         }
@@ -382,6 +383,11 @@ public:
     QString lastError() const override
     {
         return lastError_;
+    }
+
+    std::optional<LiveSourceError> lastStructuredError() const override
+    {
+        return lastStructuredError_;
     }
 
     klogg::livecapture::LiveDataStatistics statistics() const override
@@ -399,6 +405,17 @@ public:
     {
         REQUIRE( activeGeneration.has_value() );
         lastError_ = std::move( error );
+        lastStructuredError_.reset();
+        const auto generation = *activeGeneration;
+        Q_EMIT stateChanged( generation, State::Error );
+        Q_EMIT errorOccurred( generation, lastError_ );
+    }
+
+    void publishTypedError( LiveSourceError error )
+    {
+        REQUIRE( activeGeneration.has_value() );
+        lastStructuredError_ = std::move( error );
+        lastError_ = QString::fromStdString( lastStructuredError_->message );
         const auto generation = *activeGeneration;
         Q_EMIT stateChanged( generation, State::Error );
         Q_EMIT errorOccurred( generation, lastError_ );
@@ -409,11 +426,13 @@ public:
         statistics_ = statistics;
     }
 
+    bool deferStop{ false };
     std::optional<Generation> activeGeneration;
     std::vector<std::pair<Generation, ClearRequestId>> clearRequests;
 
 private:
     QString lastError_;
+    std::optional<LiveSourceError> lastStructuredError_;
     klogg::livecapture::LiveDataStatistics statistics_;
 };
 
@@ -848,6 +867,46 @@ TEST_CASE( "managed transport synchronous stop from Connecting cannot acquire an
     CHECK( dependencies.transportSocketFactory.creationCount == 0 );
 }
 
+TEST_CASE( "Managed ADB forwards real retiring tail and stopped without premature completion",
+           "[livecapture][adb][composition][w2-managed-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto applicationDir = root.filePath( QStringLiteral( "package/bin" ) );
+    const auto runtimeDir = root.filePath( QStringLiteral( "user/runtime" ) );
+    REQUIRE( QDir().mkpath( runtimeDir ) );
+    createPackagedHelper( applicationDir );
+    ServicesDependencies dependencies;
+    ScriptedManagedTransportFactory innerFactory;
+    AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ), dependencies.refs( &innerFactory ) );
+    auto transport = services.create( smartSocketConfig( QStringLiteral( "serial-current" ) ) );
+    unsigned completions = 0;
+    QByteArray captured;
+    QObject::connect( transport.get(), &LiveSourceTransport::stopped,
+        [&]( auto, auto ) { ++completions; } );
+    QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+        [&]( auto, const auto& bytes ) { captured += bytes; } );
+    transport->start( 802u );
+    dependencies.probe.completeReady( 0 );
+    REQUIRE( innerFactory.created.size() == 1u );
+    auto inner = innerFactory.created.front();
+    inner->deferStop = true;
+    const auto infrastructureFirst = GENERATE( 0, 1, 2 );
+    if ( infrastructureFirst != 0 ) {
+        dependencies.supervisorScheduler.fire( AdbServerScheduleKind::HealthProbe );
+        if ( infrastructureFirst == 1 ) { dependencies.probe.completeAbsent( 1 ); }
+        else { dependencies.probe.completeReady( 1, "adb-server:replacement" ); }
+    }
+    transport->requestStop( 802u, klogg::livecapture::StopDisposition::SettleAccepted );
+    CHECK( completions == 0u );
+    REQUIRE( inner != nullptr );
+    Q_EMIT inner->bytesReceived( 802u, QByteArrayLiteral( "accepted-tail\n" ) );
+    CHECK( captured == QByteArrayLiteral( "accepted-tail\n" ) );
+    inner->deferStop = false;
+    inner->stop( 802u );
+    CHECK( completions == 1u );
+}
+
 TEST_CASE( "managed transport retains its stopped epoch adapter for source clear requests",
            "[livecapture][adb][composition][transport][clear][lifecycle]" )
 {
@@ -882,7 +941,7 @@ TEST_CASE( "managed transport retains its stopped epoch adapter for source clear
     CHECK( clearResults.empty() );
 }
 
-TEST_CASE( "managed transport publishes Connecting when ready infrastructure is lost",
+TEST_CASE( "managed transport publishes a typed failure without retiring before controller policy",
            "[livecapture][adb][composition][transport][infrastructure][state]" )
 {
     QTemporaryDir root;
@@ -914,7 +973,9 @@ TEST_CASE( "managed transport publishes Connecting when ready infrastructure is 
     dependencies.supervisorScheduler.fire( AdbServerScheduleKind::HealthProbe );
     dependencies.probe.completeAbsent( 1 );
 
-    CHECK( states.back() == LiveSourceTransport::State::Connecting );
+    CHECK( states.back() == LiveSourceTransport::State::Error );
+    REQUIRE( transport->lastStructuredError().has_value() );
+    CHECK( innerFactory.created.front() != nullptr );
 }
 
 TEST_CASE( "managed transport publishes the inner diagnostic with terminal Error state",
@@ -952,6 +1013,50 @@ TEST_CASE( "managed transport publishes the inner diagnostic with terminal Error
     CHECK( errorObservedWithState == QStringLiteral( "feature negotiation failed" ) );
 }
 
+TEST_CASE( "managed transport exposes the complete inner typed error before Error observers run",
+           "[livecapture][adb][composition][transport][error][typed][w3-clear-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto applicationDir = root.filePath( QStringLiteral( "package/bin" ) );
+    const auto runtimeDir = root.filePath( QStringLiteral( "user/runtime" ) );
+    REQUIRE( QDir().mkpath( runtimeDir ) );
+    createPackagedHelper( applicationDir );
+
+    ServicesDependencies dependencies;
+    ScriptedManagedTransportFactory innerFactory;
+    AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ),
+                              dependencies.refs( &innerFactory ) );
+    auto transport = services.create( smartSocketConfig( QStringLiteral( "typed-device" ) ) );
+    REQUIRE( transport != nullptr );
+    std::optional<LiveSourceError> observed;
+    QObject::connect( transport.get(), &LiveSourceTransport::stateChanged, transport.get(),
+                      [&transport, &observed]( Generation, LiveSourceTransport::State state ) {
+                          if ( state == LiveSourceTransport::State::Error ) {
+                              observed = transport->lastStructuredError();
+                          }
+                      } );
+
+    transport->start( 86u );
+    dependencies.probe.completeReady( 0, "adb-server:ready" );
+    REQUIRE( innerFactory.created.size() == 1u );
+    const LiveSourceError expected{ ErrorCategory::Stream,
+                                    "adb-read-timeout",
+                                    ErrorScope::Stream,
+                                    RetryPolicy::Backoff,
+                                    "ADB logcat stream timed out.",
+                                    "read phase expired after ACK" };
+    innerFactory.created.front()->publishTypedError( expected );
+
+    REQUIRE( observed.has_value() );
+    CHECK( observed->category == expected.category );
+    CHECK( observed->code == expected.code );
+    CHECK( observed->scope == expected.scope );
+    CHECK( observed->retryPolicy == expected.retryPolicy );
+    CHECK( observed->message == expected.message );
+    CHECK( observed->nativeDetail == expected.nativeDetail );
+}
+
 TEST_CASE( "managed transport suppresses a terminal diagnostic made stale by Error reentrancy",
            "[livecapture][adb][composition][transport][error][reentrant]" )
 {
@@ -984,7 +1089,7 @@ TEST_CASE( "managed transport suppresses a terminal diagnostic made stale by Err
     CHECK( services.manager().activeLeaseCount() == 0u );
 }
 
-TEST_CASE( "managed transport accumulates saturating statistics across infrastructure epochs",
+TEST_CASE( "managed transport preserves retired statistics for owner aggregation across explicit runs",
            "[livecapture][adb][composition][transport][statistics][epoch]" )
 {
     QTemporaryDir root;
@@ -1021,9 +1126,14 @@ TEST_CASE( "managed transport accumulates saturating statistics across infrastru
 
     dependencies.supervisorScheduler.fire( AdbServerScheduleKind::HealthProbe );
     dependencies.probe.completeReady( 1, "adb-server:replacement" );
+    REQUIRE( innerFactory.created.size() == 1u );
+    auto statistics = transport->statistics();
+    CHECK( statistics.receivedBytes == first.receivedBytes );
+    transport->stop( generation );
+    transport->start( generation + 1u );
     REQUIRE( innerFactory.created.size() == 2u );
     klogg::livecapture::LiveDataStatistics second;
-    second.generation = generation;
+    second.generation = generation + 1u;
     second.receivedBytes = 10u;
     second.receivedChunks = 6u;
     second.queuedBytes = 3u;
@@ -1036,7 +1146,8 @@ TEST_CASE( "managed transport accumulates saturating statistics across infrastru
     second.highWaterQueuedChunks = 3u;
     innerFactory.created.back()->setStatistics( second );
 
-    const auto statistics = transport->statistics();
+    CHECK( transport->statistics().generation == generation + 1u );
+    klogg::livecapture::accumulateLiveDataStatistics( statistics, transport->statistics() );
     CHECK( statistics.generation == generation );
     CHECK( statistics.receivedBytes == std::numeric_limits<std::size_t>::max() );
     CHECK( statistics.receivedChunks == 10u );
@@ -1084,7 +1195,7 @@ TEST_CASE( "managed SmartSocket transport rejects stale manager generations befo
     CHECK( dependencies.transportSocketFactory.creationCount == 1 );
 }
 
-TEST_CASE( "managed SmartSocket transport replaces old infrastructure epochs with correlated runs",
+TEST_CASE( "managed SmartSocket transport requires a correlated explicit run after epoch replacement",
            "[livecapture][adb][composition][transport][epoch][correlation]" )
 {
     QTemporaryDir root;
@@ -1115,11 +1226,16 @@ TEST_CASE( "managed SmartSocket transport replaces old infrastructure epochs wit
 
     CHECK( services.manager().snapshot().infrastructureEpoch == firstEpoch + 1u );
     CHECK( dependencies.trackerSocketFactory.creationCount == 2 );
-    CHECK( dependencies.transportSocketFactory.creationCount == 2 );
+    CHECK( dependencies.transportSocketFactory.creationCount == 1 );
     CHECK( std::all_of( stateGenerations.cbegin(), stateGenerations.cend(),
                         []( Generation generation ) { return generation == 17u; } ) );
+    REQUIRE( transport->lastStructuredError().has_value() );
+    CHECK( transport->lastStructuredError()->code == "adb-infrastructure-replaced" );
 
     dependencies.probe.repeatReadyEvenIfCancelled( 0 );
+    CHECK( dependencies.transportSocketFactory.creationCount == 1 );
+    transport->stop( 17u );
+    transport->start( 18u );
     CHECK( dependencies.transportSocketFactory.creationCount == 2 );
 }
 

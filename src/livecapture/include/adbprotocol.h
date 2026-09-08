@@ -165,6 +165,7 @@ struct LogcatCommandOptions {
 std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled );
 std::string normalizeLogcatStreamError( const std::string& diagnostic );
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options );
+ProtocolResult<std::string> buildClearLogcatService( const std::vector<LogBuffer>& buffers );
 std::string buildClearLogcatService();
 
 } // namespace klogg::livecapture::adb

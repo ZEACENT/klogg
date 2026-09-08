@@ -18,9 +18,11 @@
 #include <QPointer>
 #include <QString>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -41,6 +43,7 @@
 #include "session.h"
 
 namespace {
+using klogg::livecapture::ErrorCategory;
 using klogg::livecapture::Generation;
 using klogg::livecapture::LiveDataBatch;
 using klogg::livecapture::LiveDataStatistics;
@@ -257,6 +260,237 @@ TEST_CASE( "bounded serial executor releases shutdown when a native task remains
     }
 }
 
+TEST_CASE( "bounded metadata executor reaches but never exceeds named concurrency",
+           "[ios][native][composition][catalog][metadata][concurrency][bounded]" )
+{
+    using namespace std::chrono_literals;
+    constexpr std::size_t Capacity = 3u;
+    constexpr std::size_t TaskCount = 12u;
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::size_t active{ 0u };
+        std::size_t maximumActive{ 0u };
+        std::size_t started{ 0u };
+        std::size_t finished{ 0u };
+        bool release{ false };
+    } gate;
+
+    klogg::livecapture::BoundedConcurrentExecutor executor( Capacity, 100ms );
+    for ( std::size_t task = 0u; task < TaskCount; ++task ) {
+        REQUIRE( executor.post( [ &gate ] {
+            std::unique_lock<std::mutex> lock( gate.mutex );
+            ++gate.active;
+            ++gate.started;
+            gate.maximumActive = std::max( gate.maximumActive, gate.active );
+            gate.changed.notify_all();
+            gate.changed.wait( lock, [ & ] { return gate.release; } );
+            --gate.active;
+            ++gate.finished;
+            gate.changed.notify_all();
+        } ) );
+    }
+
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started == Capacity; } );
+        CHECK( gate.active == Capacity );
+        CHECK( gate.maximumActive == Capacity );
+        CHECK( gate.started == Capacity );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.finished == TaskCount; } );
+    }
+
+    CHECK( gate.maximumActive == Capacity );
+}
+
+TEST_CASE( "bounded metadata executor coalesces keyed backlog without losing capacity or fairness",
+           "[ios][native][composition][catalog][metadata][concurrency][bounded][coalescing]" )
+{
+    constexpr std::size_t Capacity = 3u;
+    constexpr std::size_t ReplacementCount = 64u;
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::size_t active{ 0u };
+        std::size_t maximumActive{ 0u };
+        std::size_t started{ 0u };
+        std::size_t finished{ 0u };
+        bool release{ false };
+        bool unrelatedRan{ false };
+        std::vector<std::size_t> replacementEpochs;
+    } gate;
+
+    klogg::livecapture::BoundedConcurrentExecutor executor( Capacity,
+                                                             std::chrono::milliseconds{ 100 } );
+    const auto blockingTask = [ &gate ] {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        ++gate.active;
+        ++gate.started;
+        gate.maximumActive = std::max( gate.maximumActive, gate.active );
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+        --gate.active;
+        ++gate.finished;
+        gate.changed.notify_all();
+    };
+    REQUIRE( executor.submitLatest( "device-a", blockingTask ) );
+    REQUIRE( executor.submitLatest( "device-b", blockingTask ) );
+    REQUIRE( executor.submitLatest( "device-c", blockingTask ) );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started == Capacity; } );
+    }
+
+    for ( std::size_t epoch = 1u; epoch <= ReplacementCount; ++epoch ) {
+        REQUIRE( executor.submitLatest( "device-a", [ &gate, epoch ] {
+            std::lock_guard<std::mutex> lock( gate.mutex );
+            gate.replacementEpochs.push_back( epoch );
+            ++gate.finished;
+            gate.changed.notify_all();
+        } ) );
+        CHECK( executor.pendingLatestCountForTest() == 1u );
+        CHECK( executor.runningLatestCountForTest() == Capacity );
+    }
+    REQUIRE( executor.submitLatest( "unrelated-device", [ &gate ] {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.unrelatedRan = true;
+        ++gate.finished;
+        gate.changed.notify_all();
+    } ) );
+    CHECK( executor.pendingLatestCountForTest() == 2u );
+
+    {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.finished == Capacity + 2u; } );
+    }
+
+    CHECK( gate.maximumActive == Capacity );
+    CHECK( gate.unrelatedRan );
+    CHECK( gate.replacementEpochs == std::vector<std::size_t>{ ReplacementCount } );
+    CHECK( executor.pendingLatestCountForTest() == 0u );
+}
+
+TEST_CASE( "bounded metadata executor cancels keyed pending work deterministically",
+           "[ios][native][composition][catalog][metadata][bounded][coalescing][cancellation]" )
+{
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+        std::vector<std::string> executed;
+    } gate;
+
+    klogg::livecapture::BoundedConcurrentExecutor executor( 1u,
+                                                             std::chrono::milliseconds{ 100 } );
+    REQUIRE( executor.submitLatest( "running", [ &gate ] {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.started = true;
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+        gate.executed.emplace_back( "running" );
+        gate.changed.notify_all();
+    } ) );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started; } );
+    }
+
+    REQUIRE( executor.submitLatest( "removed", [ &gate ] {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.executed.emplace_back( "removed" );
+        gate.changed.notify_all();
+    } ) );
+    REQUIRE( executor.submitLatest( "generation-stale", [ &gate ] {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.executed.emplace_back( "generation-stale" );
+        gate.changed.notify_all();
+    } ) );
+    CHECK( executor.pendingLatestCountForTest() == 2u );
+    CHECK( executor.cancelLatest( "removed" ) );
+    CHECK_FALSE( executor.cancelLatest( "missing" ) );
+    CHECK( executor.pendingLatestCountForTest() == 1u );
+    executor.clearPendingLatest();
+    CHECK( executor.pendingLatestCountForTest() == 0u );
+    REQUIRE( executor.submitLatest( "current", [ &gate ] {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.executed.emplace_back( "current" );
+        gate.changed.notify_all();
+    } ) );
+
+    {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.executed.size() == 2u; } );
+    }
+
+    CHECK( gate.executed == std::vector<std::string>{ "running", "current" } );
+}
+
+TEST_CASE( "bounded metadata executor shutdown does not wait for a blocked RPC",
+           "[ios][native][composition][catalog][metadata][shutdown][barrier]" )
+{
+    using namespace std::chrono_literals;
+    struct Gate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+        bool taskFinished{ false };
+        bool shutdownReturned{ false };
+    } gate;
+
+    auto executor = std::make_unique<klogg::livecapture::BoundedConcurrentExecutor>( 2u, 100ms );
+    REQUIRE( executor->post( [ &gate ] {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.started = true;
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+        gate.taskFinished = true;
+        gate.changed.notify_all();
+    } ) );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started; } );
+    }
+
+    std::thread shutdown( [ & ] {
+        executor->shutdownAsync();
+        executor.reset();
+        {
+            std::lock_guard<std::mutex> lock( gate.mutex );
+            gate.shutdownReturned = true;
+        }
+        gate.changed.notify_all();
+    } );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.shutdownReturned; } );
+        CHECK_FALSE( gate.taskFinished );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    shutdown.join();
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.taskFinished; } );
+    }
+}
+
 TEST_CASE( "iOS backend persistence makes native fresh and legacy process explicit",
            "[ios][native][composition][persistence][migration]" )
 {
@@ -301,6 +535,14 @@ TEST_CASE( "iOS composition requests initial endpoint metadata once with its cat
 
     catalogAddress->publish( catalogAddress->snapshot() );
     CHECK( catalogAddress->metadataRequests.size() == 1u );
+    CHECK( IosLiveServicesTestAccess::metadataObservationEntryCount( services ) == 1u );
+
+    auto completed = catalogAddress->snapshot();
+    completed.entries.front().metadata
+        = IosDeviceMetadata{ "Owned phone", "iPhone17,1", "20.0" };
+    catalogAddress->publish( completed );
+    CHECK( catalogAddress->metadataRequests.size() == 1u );
+    CHECK( IosLiveServicesTestAccess::metadataObservationEntryCount( services ) == 0u );
 
     services.shutdown();
     auto afterShutdown = catalogAddress->snapshot();
@@ -357,6 +599,34 @@ TEST_CASE( "iOS composition re-requests an endpoint once after catalog generatio
 
     catalogAddress->publish( restartedSnapshot );
     CHECK( catalogAddress->metadataRequests.size() == 2u );
+}
+
+TEST_CASE( "iOS metadata observation bookkeeping stays bounded across endpoint churn",
+           "[ios][native][composition][catalog][metadata][churn][bounded]" )
+{
+    auto catalog = std::make_unique<MemoryCatalog>();
+    auto* const catalogAddress = catalog.get();
+    IosLiveServices services( std::move( catalog ), nullptr );
+    REQUIRE( catalogAddress->metadataRequests.size() == 1u );
+    CHECK( IosLiveServicesTestAccess::metadataObservationEntryCount( services ) == 1u );
+
+    constexpr Generation ChurnCount = 64u;
+    for ( Generation cycle = 1u; cycle <= ChurnCount; ++cycle ) {
+        auto removed = catalogAddress->snapshot();
+        removed.entries.clear();
+        catalogAddress->publish( removed );
+        CHECK( IosLiveServicesTestAccess::metadataObservationEntryCount( services ) == 0u );
+
+        auto readded = removed;
+        readded.entries.push_back( IosCatalogEntry{
+            IosEndpointKey{ "owned-device", NativeConnectionType::Usb }, 3u + cycle,
+            std::nullopt, std::nullopt } );
+        catalogAddress->publish( readded );
+        CHECK( IosLiveServicesTestAccess::metadataObservationEntryCount( services ) == 1u );
+    }
+
+    CHECK( catalogAddress->metadataRequests.size()
+           == static_cast<std::size_t>( ChurnCount + 1u ) );
 }
 
 TEST_CASE( "iOS composition re-requests metadata after a recoverable error is rearmed",
@@ -512,6 +782,50 @@ TEST_CASE( "iOS composition refuses legacy executable and free-form arguments wi
     CHECK( services.lastConfigurationError()->code == "ios-legacy-process-options-unsupported" );
     CHECK( services.lastConfigurationError()->retryPolicy == RetryPolicy::Never );
     CHECK( services.lastConfigurationError()->nativeDetail.find( "python" ) != std::string::npos );
+}
+
+TEST_CASE( "iOS composition rejects unsupported filter and JSON options before worker creation",
+           "[ios][native][composition][options][validation][w3-ios-options-red]" )
+{
+    struct UnsupportedOption {
+        const char* name;
+        std::function<void( LiveSourceTransportConfig& )> apply;
+    };
+    const std::array cases{
+        UnsupportedOption{ "level", []( LiveSourceTransportConfig& config ) {
+                              config.iosLevel = QStringLiteral( "debug" );
+                          } },
+        UnsupportedOption{ "category", []( LiveSourceTransportConfig& config ) {
+                              config.iosCategories = QStringList{ QStringLiteral( "network" ) };
+                          } },
+        UnsupportedOption{ "subsystem", []( LiveSourceTransportConfig& config ) {
+                              config.iosSubsystem = QStringLiteral( "com.example.app" );
+                          } },
+        UnsupportedOption{ "JSON", []( LiveSourceTransportConfig& config ) {
+                              config.iosJsonOutput = true;
+                          } },
+    };
+
+    for ( const auto& value : cases ) {
+        DYNAMIC_SECTION( value.name )
+        {
+            auto workerState = std::make_shared<WorkerState>();
+            IosLiveServices services(
+                std::make_unique<MemoryCatalog>(),
+                std::make_unique<RecordingWorkerFactory>( workerState ) );
+            auto config = iosConfig();
+            value.apply( config );
+
+            auto transport = services.create( config );
+
+            CHECK( transport == nullptr );
+            CHECK( workerState->configs.empty() );
+            REQUIRE( services.lastConfigurationError().has_value() );
+            CHECK( services.lastConfigurationError()->code == "unsupported-ios-log-options" );
+            CHECK( services.lastConfigurationError()->category == ErrorCategory::Configuration );
+            CHECK( services.lastConfigurationError()->retryPolicy == RetryPolicy::Never );
+        }
+    }
 }
 
 TEST_CASE( "iOS composition never claims Android sources or substitutes a process transport",

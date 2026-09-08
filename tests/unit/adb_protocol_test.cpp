@@ -629,6 +629,11 @@ TEST_CASE( "typed ADB logcat command builder owns ordered source-device wall-tim
               "-b system -b crash -T 25 --pid 4242 'ActivityManager:I' '*:S'" );
 
     CHECK( buildClearLogcatService() == "shell,v2,raw:logcat -c" );
+    const auto selectedClear
+        = buildClearLogcatService( { LogBuffer::Main, LogBuffer::Crash } );
+    REQUIRE( selectedClear.value.has_value() );
+    CHECK_FALSE( selectedClear.error.has_value() );
+    CHECK( *selectedClear.value == "shell,v2,raw:logcat -b main -b crash -c" );
 }
 
 TEST_CASE( "ADB logcat diagnostics classify only rejected owned format modifiers",

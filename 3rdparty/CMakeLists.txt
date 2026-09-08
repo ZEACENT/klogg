@@ -167,7 +167,7 @@ if(KLOGG_FETCH_IOS_NATIVE_DEPENDENCIES)
     ${libimobiledevice_SOURCE_DIR}
     149f7623c672c1fa73122c7119a12bfc0012f2ac
     0a6c741d6361d9bb83c0b73e1a463969f2f98da39b518df72f3c24ca3213695e
-    a5acf45cb73b96ded80d8944f8c2ee59e74a73181fe41caee2f81a30d9d8587d
+    dc0ef5f499295cab2678810ac6cea0ea85be00e554a6395a81a36b6373bdab15
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0001-fix-ostrace-live-packet-leak.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0002-interrupt-live-capture-receive.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/libimobiledevice/patches/0003-passive-lockdown-handshake.patch

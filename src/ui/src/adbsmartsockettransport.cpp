@@ -100,6 +100,7 @@ QString contextualError( const QString& operation, AdbSmartSocketErrorCode code,
     case AdbSmartSocketErrorCode::ConnectTimeout:
     case AdbSmartSocketErrorCode::WriteTimeout:
     case AdbSmartSocketErrorCode::ReadTimeout:
+    case AdbSmartSocketErrorCode::OperationTimeout:
         return QObject::tr( "%1 timed out: %2" ).arg( operation, diagnostic );
     case AdbSmartSocketErrorCode::Connection:
     case AdbSmartSocketErrorCode::Protocol:
@@ -108,6 +109,54 @@ QString contextualError( const QString& operation, AdbSmartSocketErrorCode code,
     }
 
     return QObject::tr( "%1 failed: %2" ).arg( operation, diagnostic );
+}
+
+LiveSourceError typedSmartSocketError( AdbSmartSocketErrorCode code, const QString& message,
+                                       const QString& nativeDetail )
+{
+    ErrorCategory category = ErrorCategory::Stream;
+    ErrorScope scope = ErrorScope::Stream;
+    RetryPolicy retry = RetryPolicy::Backoff;
+    const char* stableCode = "adb-stream-failed";
+    switch ( code ) {
+    case AdbSmartSocketErrorCode::Connection:
+        category = ErrorCategory::Infrastructure;
+        scope = ErrorScope::Infrastructure;
+        retry = RetryPolicy::WaitForInfrastructure;
+        stableCode = "adb-connection-failed";
+        break;
+    case AdbSmartSocketErrorCode::Protocol:
+        category = ErrorCategory::Backend;
+        stableCode = "adb-protocol-error";
+        break;
+    case AdbSmartSocketErrorCode::RemoteFailure:
+        category = ErrorCategory::Service;
+        scope = ErrorScope::Service;
+        stableCode = "adb-remote-service-failed";
+        break;
+    case AdbSmartSocketErrorCode::UnexpectedEof:
+        stableCode = "adb-unexpected-eof";
+        break;
+    case AdbSmartSocketErrorCode::ConnectTimeout:
+        category = ErrorCategory::Infrastructure;
+        scope = ErrorScope::Infrastructure;
+        retry = RetryPolicy::WaitForInfrastructure;
+        stableCode = "adb-connect-timeout";
+        break;
+    case AdbSmartSocketErrorCode::WriteTimeout:
+        stableCode = "adb-write-timeout";
+        break;
+    case AdbSmartSocketErrorCode::ReadTimeout:
+        stableCode = "adb-read-timeout";
+        break;
+    case AdbSmartSocketErrorCode::OperationTimeout:
+        category = ErrorCategory::Service;
+        scope = ErrorScope::Service;
+        stableCode = "adb-operation-timeout";
+        break;
+    }
+    return LiveSourceError{ category, stableCode, scope, retry, message.toStdString(),
+                            nativeDetail.toStdString() };
 }
 
 } // namespace
@@ -147,7 +196,14 @@ public:
         queue_.reset( generation );
         activeGeneration_ = generation;
         terminal_ = false;
+        pendingStreamBytes_.clear();
+        pendingStreamOffset_ = 0;
+        streamOperationId_.reset();
+        streamClientPaused_ = false;
+        backpressureStatistics_ = LiveDataStatistics{};
+        backpressureStatistics_.generation = generation;
         lastError_.clear();
+        lastStructuredError_.reset();
         streamStderr_.clear();
         setState( generation, LiveSourceTransport::State::Connecting );
 
@@ -165,20 +221,59 @@ public:
                                              TransportHostService::Features );
     }
 
-    void stop( Generation generation )
+    void stop( Generation generation, StopDisposition disposition = StopDisposition::DiscardPending )
     {
         if ( activeGeneration_ != generation ) {
             return;
         }
 
-        // Invalidate first so synchronous cancellation callbacks are stale.
+        QByteArray pendingTail;
+        if ( pendingStreamOffset_ < pendingStreamBytes_.size() ) {
+            pendingTail = pendingStreamBytes_.mid( pendingStreamOffset_ );
+        }
+        QByteArray clientTail;
+        if ( streamClient_ && streamOperationId_.has_value() ) {
+            clientTail = streamClient_->takePendingShellStdout( generation, *streamOperationId_ );
+        }
+        pendingStreamBytes_.clear();
+        pendingStreamOffset_ = 0;
+        streamClientPaused_ = false;
+
+        // Invalidate first so synchronous cancellation callbacks and queued read
+        // continuations are stale before accepted tail settlement begins.
         activeGeneration_.reset();
         terminal_ = false;
         ++queueEpoch_;
         queuePumpScheduled_ = false;
-        queue_.reset( generation );
+        // All ADB producers are Qt-thread clients; cancelling them closes admission.
+        // LiveDataQueue::close is permanent and would poison a later explicit start.
         cancelStreamClients( generation );
-        setState( generation, LiveSourceTransport::State::Disconnected );
+        const auto tail = queue_.drain();
+        quint64 discarded = 0u;
+        QPointer<AdbSmartSocketTransport> guard( &transport_ );
+        if ( tail && !tail->bytes.empty() ) {
+            if ( disposition == StopDisposition::SettleAccepted ) {
+                Q_EMIT guard->bytesReceived( generation, byteArray( tail->bytes ) );
+                if ( !guard ) { return; }
+            }
+            else { discarded = static_cast<quint64>( tail->bytes.size() ); }
+        }
+        if ( !pendingTail.isEmpty() ) {
+            if ( disposition == StopDisposition::SettleAccepted ) {
+                Q_EMIT guard->bytesReceived( generation, pendingTail );
+                if ( !guard ) { return; }
+            }
+            else { discarded += static_cast<quint64>( pendingTail.size() ); }
+        }
+        if ( !clientTail.isEmpty() ) {
+            if ( disposition == StopDisposition::SettleAccepted ) {
+                Q_EMIT guard->bytesReceived( generation, clientTail );
+                if ( !guard ) { return; }
+            }
+            else { discarded += static_cast<quint64>( clientTail.size() ); }
+        }
+        guard->impl_->setState( generation, LiveSourceTransport::State::Disconnected );
+        if ( guard ) { Q_EMIT guard->stopped( generation, discarded ); }
     }
 
     void clearRemoteAsync( Generation generation, LiveSourceTransport::ClearRequestId requestId )
@@ -200,9 +295,16 @@ public:
         return lastError_;
     }
 
+    std::optional<LiveSourceError> lastStructuredError() const
+    {
+        return lastStructuredError_;
+    }
+
     LiveDataStatistics statistics() const
     {
-        return queue_.statistics();
+        auto result = queue_.statistics();
+        accumulateLiveDataStatistics( result, backpressureStatistics_ );
+        return result;
     }
 
 private:
@@ -264,6 +366,9 @@ private:
 
                 retireFeatureClient( generation );
                 if ( !supportsShellV2( features ) ) {
+                    lastStructuredError_ = LiveSourceError{ ErrorCategory::Service,
+                        "adb-shell-v2-unsupported", ErrorScope::Service, RetryPolicy::Never,
+                        "The selected ADB device does not support shell_v2.", {} };
                     failStream(
                         generation,
                         QObject::tr(
@@ -282,10 +387,11 @@ private:
                      || featureClient_ != client || !isActive( generation ) ) {
                     return;
                 }
-                failStream(
-                    generation,
-                    contextualError( QObject::tr( "Selected ADB device features negotiation" ),
-                                     code, diagnostic ) );
+                const auto error
+                    = contextualError( QObject::tr( "Selected ADB device features negotiation" ),
+                                       code, diagnostic );
+                lastStructuredError_ = typedSmartSocketError( code, error, diagnostic );
+                failStream( generation, error );
             } );
     }
 
@@ -293,16 +399,25 @@ private:
     {
         const auto service = buildLogcatService( config_.logcatOptions );
         if ( service.error.has_value() ) {
+            lastStructuredError_ = LiveSourceError{
+                ErrorCategory::Configuration, "adb-logcat-options-invalid", ErrorScope::Stream,
+                RetryPolicy::Never, service.error->message, service.error->message
+            };
             failStream( generation, QString::fromStdString( service.error->message ) );
             return;
         }
         if ( !service.value.has_value() ) {
-            failStream( generation,
-                        QObject::tr( "ADB logcat service builder returned no request." ) );
+            const auto error = QObject::tr( "ADB logcat service builder returned no request." );
+            lastStructuredError_ = LiveSourceError{
+                ErrorCategory::Internal, "adb-logcat-builder-empty", ErrorScope::Stream,
+                RetryPolicy::Never, error.toStdString(), {}
+            };
+            failStream( generation, error );
             return;
         }
 
         const auto operationId = nextOperationId();
+        streamOperationId_ = operationId;
         streamClient_ = createClient();
         auto* const client = streamClient_.data();
         connectStreamClient( client, generation, operationId );
@@ -360,6 +475,10 @@ private:
                     error.append( QString::fromStdString(
                         normalizeLogcatStreamError( diagnostic.toStdString() ) ) );
                 }
+                lastStructuredError_ = LiveSourceError{
+                    ErrorCategory::Stream, "adb-logcat-exited", ErrorScope::Stream,
+                    RetryPolicy::Backoff, error.toStdString(), diagnostic.toStdString()
+                };
                 failStream( generation, error );
             } );
         QObject::connect(
@@ -379,6 +498,12 @@ private:
                     error.append( QStringLiteral( " " ) );
                     error.append( stderrDiagnostic );
                 }
+                auto nativeDetail = diagnostic;
+                if ( !stderrDiagnostic.isEmpty() && stderrDiagnostic != nativeDetail ) {
+                    nativeDetail.append( QLatin1Char( '\n' ) );
+                    nativeDetail.append( stderrDiagnostic );
+                }
+                lastStructuredError_ = typedSmartSocketError( code, error, nativeDetail );
                 failStream( generation, error );
             } );
     }
@@ -407,9 +532,19 @@ private:
                     return;
                 }
 
+                const auto service = buildClearLogcatService( config_.logcatOptions.buffers );
+                if ( service.error.has_value() || !service.value.has_value() ) {
+                    const auto diagnostic
+                        = service.error.has_value()
+                              ? QString::fromStdString( service.error->message )
+                              : QObject::tr( "ADB logcat clear service builder returned no request." );
+                    completeClear( operationId, false, diagnostic );
+                    return;
+                }
+
                 found->second.phase = ClearPhase::Shell;
                 client->startShellService( generation, operationId, transportSelection(),
-                                           buildClearLogcatService() );
+                                           *service.value, config_.clientConfig.readTimeoutMs );
             } );
         QObject::connect(
             client, &AdbSmartSocketClient::shellStderrReceived, &transport_,
@@ -470,19 +605,105 @@ private:
             } );
     }
 
-    void enqueueStreamBytes( Generation generation, const QByteArray& bytes )
+    bool queueHasCapacityFor( std::size_t byteCount ) const
     {
-        const auto result = queue_.tryEnqueue( LiveDataChunk{ generation, byteVector( bytes ) } );
-        switch ( result ) {
-        case LiveDataEnqueueResult::Accepted:
-        case LiveDataEnqueueResult::StaleGeneration:
-        case LiveDataEnqueueResult::Closed:
-            return;
-        case LiveDataEnqueueResult::Backpressure:
-            failStream( generation,
-                        QObject::tr( "ADB logcat queue backpressure limit was exceeded." ) );
+        if ( config_.queueLimits.maxQueuedChunks == 0u
+             || byteCount > config_.queueLimits.maxQueuedBytes ) {
+            return false;
+        }
+        const auto statistics = queue_.statistics();
+        return statistics.queuedChunks < config_.queueLimits.maxQueuedChunks
+               && statistics.queuedBytes <= config_.queueLimits.maxQueuedBytes - byteCount;
+    }
+
+    void pauseStreamClient( Generation generation, std::size_t byteCount )
+    {
+        if ( streamClientPaused_ ) {
             return;
         }
+        streamClientPaused_ = true;
+        recordLiveDataBackpressure( backpressureStatistics_, byteCount );
+        if ( streamClient_ && streamOperationId_.has_value() ) {
+            streamClient_->pauseShellOutput( generation, *streamOperationId_ );
+        }
+    }
+
+    void resumeStreamClient( Generation generation )
+    {
+        if ( !streamClientPaused_ ) {
+            return;
+        }
+        streamClientPaused_ = false;
+        if ( streamClient_ && streamOperationId_.has_value() ) {
+            streamClient_->resumeShellOutput( generation, *streamOperationId_ );
+        }
+    }
+
+    void drainPendingStreamBytes( Generation generation )
+    {
+        if ( !isActive( generation ) || pendingStreamBytes_.isEmpty() ) {
+            return;
+        }
+        if ( config_.queueLimits.maxQueuedBytes == 0u
+             || config_.queueLimits.maxQueuedChunks == 0u ) {
+            lastStructuredError_ = LiveSourceError{
+                ErrorCategory::Configuration, "adb-live-queue-invalid-capacity",
+                ErrorScope::Stream, RetryPolicy::Never,
+                "The ADB live-data queue capacity must be positive.",
+                "Both byte and chunk limits must accept at least one bounded stream slice."
+            };
+            failStream( generation, QString::fromStdString( lastStructuredError_->message ) );
+            return;
+        }
+
+        const auto maximumSlice
+            = std::min( config_.queueLimits.maxQueuedBytes,
+                        static_cast<std::size_t>( std::numeric_limits<int>::max() ) );
+        while ( pendingStreamOffset_ < pendingStreamBytes_.size() ) {
+            const auto remaining = pendingStreamBytes_.size() - pendingStreamOffset_;
+            using ByteArrayIndex = decltype( pendingStreamBytes_.size() );
+            const auto byteCount
+                = std::min( remaining, static_cast<ByteArrayIndex>( maximumSlice ) );
+            const auto chunkByteCount = static_cast<std::size_t>( byteCount );
+            if ( !queueHasCapacityFor( chunkByteCount ) ) {
+                pauseStreamClient( generation, chunkByteCount );
+                return;
+            }
+
+            const auto chunk = pendingStreamBytes_.mid( pendingStreamOffset_, byteCount );
+            const auto result
+                = queue_.tryEnqueue( LiveDataChunk{ generation, byteVector( chunk ) } );
+            if ( result == LiveDataEnqueueResult::StaleGeneration
+                 || result == LiveDataEnqueueResult::Closed ) {
+                return;
+            }
+            if ( result == LiveDataEnqueueResult::Backpressure ) {
+                failStream( generation,
+                            QObject::tr( "ADB logcat queue capacity changed unexpectedly." ) );
+                return;
+            }
+            pendingStreamOffset_ += byteCount;
+        }
+
+        pendingStreamBytes_.clear();
+        pendingStreamOffset_ = 0;
+        resumeStreamClient( generation );
+    }
+
+    void enqueueStreamBytes( Generation generation, const QByteArray& bytes )
+    {
+        if ( !pendingStreamBytes_.isEmpty() ) {
+            lastStructuredError_ = LiveSourceError{
+                ErrorCategory::Internal, "adb-delivery-while-paused", ErrorScope::Stream,
+                RetryPolicy::Never,
+                "ADB delivered another shell frame while the bounded consumer was paused.", {}
+            };
+            failStream( generation, QString::fromStdString( lastStructuredError_->message ) );
+            return;
+        }
+        pendingStreamBytes_ = bytes;
+        pendingStreamOffset_ = 0;
+        drainPendingStreamBytes( generation );
     }
 
     void scheduleQueuePump()
@@ -510,19 +731,23 @@ private:
         }
 
         const auto batch = queue_.drain();
-        if ( !batch.has_value() || batch->generation != generation ) {
-            return;
+        if ( batch.has_value() && batch->generation == generation ) {
+            const auto bytes = byteArray( batch->bytes );
+            if ( bytes.isEmpty() && !batch->bytes.empty() ) {
+                failStream( generation,
+                            QObject::tr( "ADB logcat queue batch exceeds Qt byte-array limits." ) );
+                return;
+            }
+            if ( !bytes.isEmpty() ) {
+                const QPointer<AdbSmartSocketTransport> guard( &transport_ );
+                Q_EMIT transport_.bytesReceived( generation, bytes );
+                if ( guard.isNull() ) {
+                    return;
+                }
+            }
         }
 
-        const auto bytes = byteArray( batch->bytes );
-        if ( bytes.isEmpty() && !batch->bytes.empty() ) {
-            failStream( generation,
-                        QObject::tr( "ADB logcat queue batch exceeds Qt byte-array limits." ) );
-            return;
-        }
-        if ( !bytes.isEmpty() ) {
-            Q_EMIT transport_.bytesReceived( generation, bytes );
-        }
+        drainPendingStreamBytes( generation );
     }
 
     void failStream( Generation generation, QString error )
@@ -534,22 +759,30 @@ private:
         // The client can report stdout and a terminal frame/EOF from the same
         // socket read. Preserve wire order across the asynchronous queue boundary:
         // all accepted stdout must be delivered before the terminal state/error.
+        const QPointer<AdbSmartSocketTransport> guard( &transport_ );
         pumpQueue( generation );
-        if ( !isActive( generation ) ) {
+        if ( guard.isNull() || !isActive( generation ) ) {
             return;
         }
 
         terminal_ = true;
         lastError_ = std::move( error );
+        if ( !lastStructuredError_ ) {
+            lastStructuredError_ = LiveSourceError{ ErrorCategory::Stream, "adb-stream-failed",
+                ErrorScope::Stream, RetryPolicy::Backoff, lastError_.toStdString(), {} };
+        }
         const auto terminalError = lastError_;
         retireFeatureClient( generation );
         retireStreamClient( generation );
         setState( generation, LiveSourceTransport::State::Error );
+        if ( guard.isNull() ) {
+            return;
+        }
 
         // stateChanged is synchronous and may start a replacement generation,
         // which clears lastError_. The failed generation still owns exactly one
         // correlated diagnostic, matching ProcessLiveSourceTransport's contract.
-        Q_EMIT transport_.errorOccurred( generation, terminalError );
+        Q_EMIT guard->errorOccurred( generation, terminalError );
     }
 
     void completeClear( AdbSmartSocketClient::OperationId operationId, bool succeeded,
@@ -579,6 +812,8 @@ private:
     void retireStreamClient( Generation generation )
     {
         retireClient( streamClient_, generation );
+        streamOperationId_.reset();
+        streamClientPaused_ = false;
     }
 
     void retireClient( QPointer<AdbSmartSocketClient>& client, Generation generation )
@@ -641,10 +876,16 @@ private:
     std::optional<Generation> stateGeneration_;
     LiveSourceTransport::State state_{ LiveSourceTransport::State::Disconnected };
     QString lastError_;
+    std::optional<LiveSourceError> lastStructuredError_;
     QByteArray streamStderr_;
+    QByteArray pendingStreamBytes_;
+    decltype( QByteArray{}.size() ) pendingStreamOffset_{ 0 };
+    std::optional<AdbSmartSocketClient::OperationId> streamOperationId_;
+    LiveDataStatistics backpressureStatistics_;
     AdbSmartSocketClient::OperationId nextOperationId_{ 0 };
     std::uint64_t queueEpoch_{ 0 };
     bool queuePumpScheduled_{ false };
+    bool streamClientPaused_{ false };
     bool terminal_{ false };
 };
 
@@ -674,6 +915,16 @@ void AdbSmartSocketTransport::start( Generation generation )
 void AdbSmartSocketTransport::stop( Generation generation )
 {
     impl_->stop( generation );
+}
+
+void AdbSmartSocketTransport::requestStop( Generation generation, StopDisposition disposition )
+{
+    impl_->stop( generation, disposition );
+}
+
+std::optional<LiveSourceError> AdbSmartSocketTransport::lastStructuredError() const
+{
+    return impl_->lastStructuredError();
 }
 
 void AdbSmartSocketTransport::clearRemoteAsync( Generation generation, ClearRequestId requestId )
