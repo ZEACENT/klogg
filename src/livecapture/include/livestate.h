@@ -71,7 +71,7 @@ struct LiveIntegritySummary {
     bool gapPossible{ false };
     bool replayPossible{ false };
     std::vector<IntegrityEvent> recentEvents;
-    void record( std::string code, std::uint64_t bytes = 0 );
+    void record( const std::string& code, std::uint64_t bytes = 0 );
     bool operator==( const LiveIntegritySummary& other ) const;
 };
 

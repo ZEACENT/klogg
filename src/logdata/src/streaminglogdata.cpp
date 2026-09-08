@@ -149,6 +149,7 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
     }
 
     std::optional<klogg::platform::FileIdentity> publishedIdentity;
+    RollingFileManager candidateOutput( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
     try {
         const auto stagedWrite = [ &stagedOutput ]( const QByteArray& bytes ) {
             return stagedOutput.write( bytes );
@@ -163,6 +164,10 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
         if ( !publishedIdentity.has_value() || !stagedOutput.commit() ) {
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::Publish };
+        }
+        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
+            pendingOutputExport_.reset();
+            return { false, OutputExportFailure::PublishedReopen };
         }
     }
     catch ( ... ) {
@@ -183,12 +188,15 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
         }
     }
 
+    // Keep the verified publication handle open through cutover. On platforms
+    // that permit unlinking an open file this also prevents inode reuse from
+    // making a same-name replacement compare equal to the published identity.
+    if ( !candidateOutput.refersToPath( outputPath ) ) {
+        pendingOutputExport_.reset();
+        return { false, OutputExportFailure::PublishedReopen };
+    }
+
     if ( candidate.ansiMode == LiveLogSaveAnsiMode::Strip ) {
-        RollingFileManager candidateOutput( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
-        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
-            pendingOutputExport_.reset();
-            return { false, OutputExportFailure::PublishedReopen };
-        }
         if ( !candidateOutput.flush() ) {
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedCutover };
@@ -197,16 +205,10 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
         captureStore_.bindOutputFile( QString{} );
     }
     else {
-        QFile candidateOutput( outputPath );
-        if ( !candidateOutput.open( QIODevice::WriteOnly | QIODevice::Append )
-             || klogg::platform::fileIdentity( candidateOutput ) != publishedIdentity ) {
+        if ( !captureStore_.adoptPublishedOutputFile(
+                 std::move( candidateOutput ), outputPath, encodingState.needsSeparator ) ) {
             pendingOutputExport_.reset();
-            return { false, OutputExportFailure::PublishedReopen };
-        }
-        candidateOutput.close();
-        if ( !captureStore_.bindOutputFile( outputPath, true ) ) {
-            pendingOutputExport_.reset();
-            return { false, OutputExportFailure::PublishedReopen };
+            return { false, OutputExportFailure::PublishedCutover };
         }
         closeDisplayOutputFile( false );
     }

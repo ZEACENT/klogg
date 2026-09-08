@@ -58,7 +58,7 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
         std::weak_ptr<State> state;
     };
 
-    State( IosNativeApi nativeApi, IosCatalogExecutor catalogPublicationExecutor,
+    State( const IosNativeApi& nativeApi, IosCatalogExecutor catalogPublicationExecutor,
            IosCatalogMetadataExecutor catalogMetadataExecutor )
         : api( nativeApi )
         , publicationExecutor( std::move( catalogPublicationExecutor ) )
@@ -458,12 +458,12 @@ struct IosDeviceCatalog::State final : std::enable_shared_from_this<State> {
     NativeEventSubscription subscription;
 };
 
-IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor executor )
+IosDeviceCatalog::IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor executor )
     : IosDeviceCatalog( api, executor, executor )
 {
 }
 
-IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+IosDeviceCatalog::IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor publicationExecutor,
                                     IosCatalogExecutor metadataExecutor )
     : IosDeviceCatalog(
           api, std::move( publicationExecutor ),
@@ -479,7 +479,7 @@ IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publica
 {
 }
 
-IosDeviceCatalog::IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+IosDeviceCatalog::IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor publicationExecutor,
                                     IosCatalogMetadataExecutor metadataExecutor )
     : state_( std::make_shared<State>( api, std::move( publicationExecutor ),
                                       std::move( metadataExecutor ) ) )

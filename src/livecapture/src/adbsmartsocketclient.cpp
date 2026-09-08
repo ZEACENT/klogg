@@ -606,6 +606,8 @@ private:
             if ( guard.isNull() ) {
                 return false;
             }
+            // A direct callback can synchronously replace the active operation.
+            // cppcheck-suppress knownConditionTrueFalse
             if ( serial != operationSerial_ || phase_ != Phase::HostReply ) {
                 return false;
             }

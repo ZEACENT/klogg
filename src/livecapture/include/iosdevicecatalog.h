@@ -39,10 +39,10 @@ struct IosCatalogMetadataExecutor {
 class IosDeviceCatalog final : public IosCatalogSnapshotProvider,
                                public IosCatalogMetadataRequester {
 public:
-    IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor executor );
-    IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+    IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor executor );
+    IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor publicationExecutor,
                       IosCatalogExecutor metadataExecutor );
-    IosDeviceCatalog( IosNativeApi api, IosCatalogExecutor publicationExecutor,
+    IosDeviceCatalog( const IosNativeApi& api, IosCatalogExecutor publicationExecutor,
                       IosCatalogMetadataExecutor metadataExecutor );
     ~IosDeviceCatalog() override;
 

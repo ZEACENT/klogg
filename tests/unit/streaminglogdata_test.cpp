@@ -1942,8 +1942,8 @@ TEST_CASE( "Streaming Strip replay uses bounded chunks and the live transform",
     StreamingLogData data( makeCaptureId(), root.path() );
     data.setDisplayEncoding( "ISO-8859-1" );
     data.setPrefilter( "prefix:" );
-    const QByteArray record
-        = QByteArray( "prefix:\033[31m" ) + char( 0xe9 ) + QByteArray( 1000, 'x' ) + "\033[0m\n";
+    const QByteArray record = QByteArray( "prefix:\033[31m" ) + QByteArray::fromHex( "e9" )
+                              + QByteArray( 1000, 'x' ) + "\033[0m\n";
     const QByteArray batch = record.repeated( 200 );
     const auto livePath = QDir( root.path() ).filePath( "live.log" );
     REQUIRE( data.bindOutputFile( livePath ) );
@@ -2325,7 +2325,7 @@ TEST_CASE( "Async live save cancellation wins the final publication decision",
     CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
 }
 
-TEST_CASE( "Published live save reopen failure preserves the old binding and reports truthfully",
+TEST_CASE( "Published live save never adopts a same-path replacement",
            "[streaming][live-save-cutover][live-save-async]" )
 {
     const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
@@ -2358,19 +2358,36 @@ TEST_CASE( "Published live save reopen failure preserves the old binding and rep
     publicationBarrier.release();
     job->waitForFinished();
 
-    REQUIRE( replacementCreated );
-    CHECK( job->result() == klogg::livelog::LiveLogExportResult::PublishedReopenFailed );
-    CHECK( data->boundOutputFile() == oldPath );
-    data->appendUtf8( QByteArrayLiteral( "old-remains-active\n" ) );
-    data->finishInput();
+    if ( replacementCreated ) {
+        CHECK( job->result() == klogg::livelog::LiveLogExportResult::PublishedReopenFailed );
+        CHECK( data->boundOutputFile() == oldPath );
+        data->appendUtf8( QByteArrayLiteral( "old-remains-active\n" ) );
+        data->finishInput();
 
-    QFile replacement( newPath );
-    REQUIRE( replacement.open( QIODevice::ReadOnly ) );
-    CHECK( replacement.readAll() == QByteArrayLiteral( "replacement-sentinel" ) );
-    QFile old( oldPath );
-    REQUIRE( old.open( QIODevice::ReadOnly ) );
-    CHECK( old.readAll()
-           == QByteArrayLiteral( "prefix\nafter-publication\nold-remains-active\n" ) );
+        QFile replacement( newPath );
+        REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+        CHECK( replacement.readAll() == QByteArrayLiteral( "replacement-sentinel" ) );
+        QFile old( oldPath );
+        REQUIRE( old.open( QIODevice::ReadOnly ) );
+        CHECK( old.readAll()
+               == QByteArrayLiteral( "prefix\nafter-publication\nold-remains-active\n" ) );
+    }
+    else {
+        // Windows may deny replacement while the verified handle is open. That
+        // is also safe: cutover succeeds only to the published file.
+        CHECK( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+        CHECK( data->boundOutputFile() == newPath );
+        data->appendUtf8( QByteArrayLiteral( "new-remains-active\n" ) );
+        data->finishInput();
+
+        QFile published( newPath );
+        REQUIRE( published.open( QIODevice::ReadOnly ) );
+        CHECK( published.readAll()
+               == QByteArrayLiteral( "prefix\nafter-publication\nnew-remains-active\n" ) );
+        QFile old( oldPath );
+        REQUIRE( old.open( QIODevice::ReadOnly ) );
+        CHECK( old.readAll() == QByteArrayLiteral( "prefix\nafter-publication\n" ) );
+    }
 }
 
 TEST_CASE( "Streaming limit changes invalidate caches and report persistence health",

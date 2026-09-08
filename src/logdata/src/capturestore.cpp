@@ -2841,6 +2841,23 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
     return true;
 }
 
+bool CaptureStore::adoptPublishedOutputFile( RollingFileManager output,
+                                             const QString& outputPath,
+                                             bool needsSeparator )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( outputPath.isEmpty() || !output.refersToPath( outputPath ) || !output.flush() ) {
+        return false;
+    }
+
+    rollingOutput_ = std::move( output );
+    outputNeedsSeparator_ = needsSeparator;
+    boundOutputFile_ = outputPath;
+    outputFailure_.reset();
+    resetOutputFlushCounters();
+    return true;
+}
+
 void CaptureStore::setLimits( Limits limits )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );

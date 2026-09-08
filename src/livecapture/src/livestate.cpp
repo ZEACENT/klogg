@@ -590,7 +590,7 @@ bool reconnectEnabled( SourceStatus status )
 
 } // namespace
 
-void LiveIntegritySummary::record( std::string code, std::uint64_t bytes )
+void LiveIntegritySummary::record( const std::string& code, std::uint64_t bytes )
 {
     if ( recentEvents.size() >= MaxRecentEvents ) {
         const auto excess = recentEvents.size() - MaxRecentEvents + 1u;

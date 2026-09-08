@@ -206,6 +206,8 @@ public:
     // opened append-only and the current capture is NOT replayed into it, so
     // previously streamed content already on disk is kept (session restore).
     bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
+    bool adoptPublishedOutputFile( RollingFileManager output, const QString& outputPath,
+                                   bool needsSeparator );
     void setLimits( Limits limits );
     QString boundOutputFile() const;
     bool outputRefersToPath( const QString& path ) const;
