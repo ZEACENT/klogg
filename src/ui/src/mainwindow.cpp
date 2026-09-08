@@ -1907,27 +1907,29 @@ void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outp
     const QPointer<MainWindow> windowGuard( this );
     const QPointer<CrawlerWidget> crawlerGuard( crawler );
     const QPointer<AdbLogcatSource> sourceGuard( adbSource );
-    connect( job.get(), &klogg::livelog::LiveLogExportJob::finished, this,
-             [ windowGuard, crawlerGuard, sourceGuard, progress, ansiMode,
-               job ]( klogg::livelog::LiveLogExportResult result ) {
-                 progress->close();
-                 progress->deleteLater();
-                 if ( windowGuard == nullptr || crawlerGuard == nullptr || sourceGuard == nullptr ) {
-                     return;
-                 }
-                 if ( result == klogg::livelog::LiveLogExportResult::Succeeded ) {
-                     sourceGuard->synchronizeOutputBinding( ansiMode );
-                     windowGuard->updateLiveTabAppearance( crawlerGuard );
-                     windowGuard->updateMenuBarFromDocument( crawlerGuard );
-                     windowGuard->updateOpenedFilesMenu();
-                     windowGuard->updateInfoLine();
-                     windowGuard->scheduleSessionPersistence();
-                 }
-                 else if ( result != klogg::livelog::LiveLogExportResult::Cancelled ) {
-                     QMessageBox::warning( windowGuard, MainWindow::tr( "Save live log" ),
-                                           liveExportFailureText( result ) );
-                 }
-             } );
+    job->onFinished(
+        this,
+        [ windowGuard, crawlerGuard, sourceGuard, progress, ansiMode,
+          job ]( klogg::livelog::LiveLogExportResult result ) {
+            progress->close();
+            progress->deleteLater();
+            if ( windowGuard == nullptr || crawlerGuard == nullptr
+                 || sourceGuard == nullptr ) {
+                return;
+            }
+            if ( result == klogg::livelog::LiveLogExportResult::Succeeded ) {
+                sourceGuard->synchronizeOutputBinding( ansiMode );
+                windowGuard->updateLiveTabAppearance( crawlerGuard );
+                windowGuard->updateMenuBarFromDocument( crawlerGuard );
+                windowGuard->updateOpenedFilesMenu();
+                windowGuard->updateInfoLine();
+                windowGuard->scheduleSessionPersistence();
+            }
+            else if ( result != klogg::livelog::LiveLogExportResult::Cancelled ) {
+                klogg::ui::warning( windowGuard, MainWindow::tr( "Save live log" ),
+                                    liveExportFailureText( result ) );
+            }
+        } );
     progress->show();
 }
 

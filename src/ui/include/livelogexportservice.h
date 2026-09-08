@@ -45,6 +45,8 @@ public:
 
     void cancel();
     void waitForFinished();
+    void onFinished( QObject* context,
+                     std::function<void( LiveLogExportResult )> callback );
     bool isFinished() const;
     std::optional<LiveLogExportResult> result() const;
     QString outputPath() const;

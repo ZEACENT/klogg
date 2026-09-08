@@ -25,6 +25,7 @@
 
 #include <QFile>
 #include <QFileDevice>
+#include <QIODevice>
 #include <QString>
 
 namespace klogg::platform {
@@ -37,6 +38,11 @@ struct FileIdentity {
 bool operator==( const FileIdentity& left, const FileIdentity& right );
 bool operator!=( const FileIdentity& left, const FileIdentity& right );
 std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
+
+// Open a QFile while allowing its pathname to be atomically replaced. On
+// Windows this adds FILE_SHARE_DELETE to Qt's normal sharing contract; other
+// platforms delegate to QFile::open().
+bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode );
 
 // Whether the platform uses exclusive file locks (Windows). When true, the
 // "keep file closed" option is shown in preferences.

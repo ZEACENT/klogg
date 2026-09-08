@@ -15,6 +15,7 @@
 #include <QMetaType>
 #include <QSaveFile>
 #include <QThread>
+#include <QTimer>
 
 namespace klogg::livelog {
 
@@ -89,6 +90,31 @@ void LiveLogExportJob::waitForFinished()
     if ( worker_.joinable() && worker_.get_id() != std::this_thread::get_id() ) {
         worker_.join();
     }
+}
+
+void LiveLogExportJob::onFinished(
+    QObject* context, std::function<void( LiveLogExportResult )> callback )
+{
+    if ( context == nullptr || !callback ) {
+        return;
+    }
+
+    std::optional<LiveLogExportResult> completedResult;
+    {
+        const std::lock_guard<std::mutex> lock( stateMutex_ );
+        if ( !result_.has_value() ) {
+            QObject::connect( this, &LiveLogExportJob::finished, context,
+                              std::move( callback ) );
+            return;
+        }
+        completedResult = result_;
+    }
+
+    QTimer::singleShot(
+        0, Qt::PreciseTimer, context,
+        [ callback = std::move( callback ), result = completedResult.value() ] {
+            callback( result );
+        } );
 }
 
 bool LiveLogExportJob::isFinished() const

@@ -1897,6 +1897,15 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             const auto savedPath = documents.filePath( "same-path-cutover.log" );
             auto* exportService = appSession->getLiveLogExportService( crawler );
             REQUIRE( exportService != nullptr );
+            int exportWarnings = 0;
+            [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+                [ &exportWarnings ]( klogg::ui::MessageKind kind, QWidget*,
+                                     const QString&, const QString& ) {
+                    if ( kind == klogg::ui::MessageKind::Warning ) {
+                        ++exportWarnings;
+                    }
+                }
+            };
             const auto startExport = [ & ]( LiveLogSaveAnsiMode ansiMode ) {
                 const auto previousJob = exportService->activeJob();
                 MainWindowLiveSaveTestAccess::start( *mainWindow, crawler,
@@ -1910,6 +1919,10 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                 REQUIRE( completedJob != nullptr );
                 REQUIRE( completedJob->result()
                          == klogg::livelog::LiveLogExportResult::Succeeded );
+                REQUIRE( waitUiState( [ & ] {
+                    return source->hasActiveOutputBinding( savedPath, ansiMode );
+                } ) );
+                CHECK( exportWarnings == 0 );
                 return completedJob;
             };
 

@@ -305,8 +305,9 @@ bool RollingFileManager::openExisting(
         currentFile_ = std::make_unique<QFile>();
     }
     currentFile_->setFileName( basePath_ );
-    if ( !currentFile_->open( QIODevice::WriteOnly | QIODevice::ExistingOnly
-                             | QIODevice::Append ) ) {
+    if ( !klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                | QIODevice::Append ) ) {
         return false;
     }
     if ( expectedIdentity.has_value() ) {
@@ -632,7 +633,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // A truncating open always starts a fresh file, regardless of whether the
     // path already exists (FreshSave semantics).
     if ( truncate ) {
-        if ( !currentFile_->open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+        if ( !klogg::platform::openFileSharedForReplacement(
+                 *currentFile_, QIODevice::WriteOnly | QIODevice::Truncate ) ) {
             LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
             return false;
         }
@@ -645,7 +647,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // NewOnly (O_EXCL) succeeds only when the path did not exist, so the result
     // cannot race a pre-open QFileInfo::exists() probe. On success the file was
     // created by this open.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
         currentBytes_ = 0;
         openedNewFile_ = true;
         return true;
@@ -657,7 +660,9 @@ bool RollingFileManager::openNewFile( bool truncate )
     // openedNewFile_ = false for a file this open just created. Restore-mode
     // callers gate capture replay on that flag, so the new file would be left
     // empty and the buffered content lost.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::ExistingOnly | QIODevice::Append ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                | QIODevice::Append ) ) {
         currentBytes_ = currentFile_->size();
         openedNewFile_ = false;
         return true;
@@ -668,7 +673,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // atomically; the result now correctly reports a brand-new file. A second
     // NewOnly failure means the path reappeared in the meantime (or a genuine
     // open error) — surface it.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
         currentBytes_ = 0;
         openedNewFile_ = true;
         return true;
@@ -795,8 +801,14 @@ bool RollingFileManager::rotateInternal()
                     << rotatedPath;
         // Restore: reopen old file as current
         currentFile_->setFileName( basePath_ );
-        (void) currentFile_->open( QIODevice::WriteOnly | QIODevice::Append );
-        currentBytes_ = currentFile_->size();
+        if ( klogg::platform::openFileSharedForReplacement(
+                 *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                    | QIODevice::Append ) ) {
+            currentBytes_ = currentFile_->size();
+        }
+        else {
+            currentBytes_ = 0;
+        }
         QFile::remove( tmpPath );
         if ( backupCount_ == 0 ) {
             QFile::remove( keepAllPendingPath( basePath_ ) );
@@ -812,8 +824,15 @@ bool RollingFileManager::rotateInternal()
         const auto restoredCurrent = QFile::rename( rotatedPath, basePath_ );
         if ( restoredCurrent ) {
             currentFile_->setFileName( basePath_ );
-            (void) currentFile_->open( QIODevice::WriteOnly | QIODevice::Append );
-            currentBytes_ = currentFile_->size();
+            if ( klogg::platform::openFileSharedForReplacement(
+                     *currentFile_, QIODevice::WriteOnly
+                                        | QIODevice::ExistingOnly
+                                        | QIODevice::Append ) ) {
+                currentBytes_ = currentFile_->size();
+            }
+            else {
+                currentBytes_ = 0;
+            }
             if ( backupCount_ == 0 ) {
                 QFile::remove( keepAllPendingPath( basePath_ ) );
             }

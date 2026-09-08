@@ -2161,6 +2161,31 @@ TEST_CASE( "Async live save publishes snapshot concurrent tail and future writes
            == prefix + QByteArrayLiteral( "tail-2\ntail-3\ncutover-4\n" ) );
 }
 
+TEST_CASE( "Live save completion remains observable after a fast export finishes",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    data->appendUtf8( QByteArrayLiteral( "snapshot\n" ) );
+
+    klogg::livelog::LiveLogExportService service( data );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    job->waitForFinished();
+    REQUIRE( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+
+    QObject context;
+    int completions = 0;
+    job->onFinished( &context, [ &completions ]( auto result ) {
+        CHECK( result == klogg::livelog::LiveLogExportResult::Succeeded );
+        ++completions;
+    } );
+    QCoreApplication::processEvents();
+    CHECK( completions == 1 );
+}
+
 TEST_CASE( "Async live save cancel and tail overflow preserve destination and old binding",
            "[streaming][live-save-cutover][live-save-async]" )
 {

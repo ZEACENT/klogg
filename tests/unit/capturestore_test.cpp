@@ -3026,6 +3026,47 @@ TEST_CASE( "CaptureStore removes a newly created Restore output after replay fai
                .isEmpty() );
 }
 
+TEST_CASE( "RollingFileManager keeps every current output handle atomically replaceable",
+           "[rolling][identity][windows][review-red]" )
+{
+    const auto openScenario = GENERATE( 0, 1, 2 );
+    const auto rootPath = makeTestDir( "rolling_shared_replace" );
+    const auto filePath = QDir( rootPath ).filePath( QStringLiteral( "output.log" ) );
+
+    if ( openScenario == 1 ) {
+        QFile existing( filePath );
+        REQUIRE( existing.open( QIODevice::WriteOnly ) );
+        REQUIRE( existing.write( QByteArrayLiteral( "existing\n" ) ) > 0 );
+    }
+
+    RollingFileManager current( filePath, openScenario == 2 ? 4 : 0, 1 );
+    const auto opened = openScenario == 1 ? current.openExisting() : current.open();
+    REQUIRE( opened );
+    if ( openScenario == 2 ) {
+        REQUIRE( current.write( QByteArrayLiteral( "old\n" ) ) == 4 );
+        REQUIRE( current.rotated() );
+    }
+    else {
+        REQUIRE( current.write( QByteArrayLiteral( "old\n" ) ) == 4 );
+        REQUIRE( current.flush() );
+    }
+    REQUIRE( current.refersToPath( filePath ) );
+
+    QSaveFile staged( filePath );
+    REQUIRE( staged.open( QIODevice::WriteOnly ) );
+    REQUIRE( staged.write( QByteArrayLiteral( "published\n" ) ) == 10 );
+    const auto publishedIdentity = klogg::platform::fileIdentity( staged );
+    REQUIRE( publishedIdentity.has_value() );
+    REQUIRE( staged.commit() );
+
+    CHECK_FALSE( current.refersToPath( filePath ) );
+    RollingFileManager published( filePath, 0, 0 );
+    REQUIRE( published.openExisting( publishedIdentity ) );
+    REQUIRE( published.write( QByteArrayLiteral( "tail\n" ) ) == 5 );
+    REQUIRE( published.flush() );
+    CHECK( readUtf8File( filePath ) == QStringLiteral( "published\ntail\n" ) );
+}
+
 TEST_CASE( "RollingFileManager verifies a staged publication identity before binding",
            "[rolling][identity]" )
 {

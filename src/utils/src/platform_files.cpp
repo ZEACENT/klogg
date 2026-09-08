@@ -68,6 +68,13 @@ public:
         return handle_;
     }
 
+    HANDLE release()
+    {
+        const auto handle = handle_;
+        handle_ = INVALID_HANDLE_VALUE;
+        return handle;
+    }
+
     explicit operator bool() const
     {
         return handle_ != INVALID_HANDLE_VALUE;
@@ -289,6 +296,84 @@ std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
     }
     return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
                          static_cast<std::uint64_t>( info.st_ino ) };
+#endif
+}
+
+bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode )
+{
+#if defined( Q_OS_WIN )
+    if ( file.isOpen() || file.fileName().isEmpty() ) {
+        return false;
+    }
+
+    const bool read = mode.testFlag( QIODevice::ReadOnly );
+    const bool write = mode.testFlag( QIODevice::WriteOnly );
+    const bool newOnly = mode.testFlag( QIODevice::NewOnly );
+    const bool existingOnly = mode.testFlag( QIODevice::ExistingOnly );
+    if ( ( !read && !write ) || ( newOnly && existingOnly ) ) {
+        return false;
+    }
+
+    DWORD access = 0;
+    if ( read ) {
+        access |= GENERIC_READ;
+    }
+    if ( write ) {
+        access |= GENERIC_WRITE;
+    }
+
+    DWORD creation = OPEN_EXISTING;
+    if ( newOnly ) {
+        creation = CREATE_NEW;
+    }
+    else if ( existingOnly ) {
+        creation = mode.testFlag( QIODevice::Truncate ) ? TRUNCATE_EXISTING
+                                                        : OPEN_EXISTING;
+    }
+    else if ( write ) {
+        creation = mode.testFlag( QIODevice::Truncate ) ? CREATE_ALWAYS
+                                                        : OPEN_ALWAYS;
+    }
+
+    NativeHandle handle( CreateFileW(
+        reinterpret_cast<LPCWSTR>( file.fileName().utf16() ), access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        creation, FILE_ATTRIBUTE_NORMAL, nullptr ) );
+    if ( !handle ) {
+        return false;
+    }
+
+    int descriptorFlags = _O_BINARY;
+    if ( read && write ) {
+        descriptorFlags |= _O_RDWR;
+    }
+    else if ( write ) {
+        descriptorFlags |= _O_WRONLY;
+    }
+    else {
+        descriptorFlags |= _O_RDONLY;
+    }
+    if ( mode.testFlag( QIODevice::Append ) ) {
+        descriptorFlags |= _O_APPEND;
+    }
+
+    const auto descriptor = _open_osfhandle(
+        reinterpret_cast<intptr_t>( handle.get() ), descriptorFlags );
+    if ( descriptor == -1 ) {
+        return false;
+    }
+    (void) handle.release();
+
+    const auto adoptedMode
+        = mode & ~( QIODevice::NewOnly | QIODevice::ExistingOnly
+                    | QIODevice::Truncate );
+    if ( file.open( descriptor, adoptedMode, QFileDevice::AutoCloseHandle ) ) {
+        return true;
+    }
+    _close( descriptor );
+    return false;
+#else
+    return file.open( mode );
 #endif
 }
 
