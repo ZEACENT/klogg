@@ -2644,55 +2644,17 @@ void MainWindow::startLiveCloseTransaction(
             if ( !liveCloseTransaction_ ) {
                 return;
             }
-            QString failureText;
-            switch ( failure.kind ) {
-            case klogg::livelog::LiveLogCloseTransaction::FailureKind::StopTimeout:
-                failureText = tr( "The live source did not stop within the safety deadline. Closing now may discard unsettled input." );
-                break;
-            case klogg::livelog::LiveLogCloseTransaction::FailureKind::Persistence:
-                failureText = tr( "Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory." );
-                break;
-            case klogg::livelog::LiveLogCloseTransaction::FailureKind::OutputFlush:
-                failureText = tr( "The active live output could not be flushed. Closing now may lose recent output." );
-                break;
-            }
-            // Decision codes are assigned explicitly because QMessageBox
-            // result values for custom buttons are not portable across Qt
-            // versions. Connecting each button to done() makes the real
-            // exec() return the same code an injected dialog handler returns,
-            // so tests can decide through the injectable boundary without
-            // showing a modal at all.
-            enum class CloseDecision : std::uint8_t { Retry = 1, Cancel = 2, CloseAnyway = 3 };
-            QMessageBox message( QMessageBox::Warning, tr( "Live capture could not be closed safely" ),
-                                 failureText, QMessageBox::NoButton, this );
-            auto* retry = message.addButton( tr( "Retry" ), QMessageBox::AcceptRole );
-            auto* cancel = message.addButton( tr( "Cancel" ), QMessageBox::RejectRole );
-            auto* closeAnyway
-                = message.addButton( tr( "Close Anyway (Possible Loss)" ), QMessageBox::DestructiveRole );
-            message.setDefaultButton( qobject_cast<QPushButton*>( cancel ) );
-            QObject::connect( retry, &QPushButton::clicked, &message, [ &message ] {
-                message.done( static_cast<int>( CloseDecision::Retry ) );
-            } );
-            QObject::connect( cancel, &QPushButton::clicked, &message, [ &message ] {
-                message.done( static_cast<int>( CloseDecision::Cancel ) );
-            } );
-            QObject::connect( closeAnyway, &QPushButton::clicked, &message, [ &message ] {
-                message.done( static_cast<int>( CloseDecision::CloseAnyway ) );
-            } );
-            const auto decision = static_cast<CloseDecision>( klogg::ui::execDialog( message ) );
-            switch ( decision ) {
-            case CloseDecision::Retry:
-                liveCloseTransaction_->retry();
-                break;
-            case CloseDecision::CloseAnyway:
-                liveCloseTransaction_->closeAnywayPossibleLoss();
-                break;
-            case CloseDecision::Cancel:
-            default:
-                // Escape or a closed dialog must fail safe to Cancel.
-                liveCloseTransaction_->cancel();
-                break;
-            }
+            // The failure callback fires from a transaction timer. Showing a
+            // modal from inside that timer context nests a modal event loop
+            // in a timer dispatch, which crashes in QMessageBox::showEvent on
+            // the Windows x86 offscreen platform plugin (InitOnceExecuteOnce
+            // race). Queue the dialog to the outer event loop instead.
+            QMetaObject::invokeMethod(
+                this,
+                [ this, failure ] {
+                    showLiveCloseFailureDialog( failure );
+                },
+                Qt::QueuedConnection );
         },
         [ this, controller, source, mode, discardCommit, resumeOnCancel,
           completion = std::move( completion ) ](
@@ -2716,6 +2678,63 @@ void MainWindow::startLiveCloseTransaction(
                 } );
         } );
     liveCloseTransaction_->start();
+}
+
+void MainWindow::showLiveCloseFailureDialog(
+    const klogg::livelog::LiveLogCloseTransaction::Failure& failure )
+{
+    if ( !liveCloseTransaction_ ) {
+        return;
+    }
+    QString failureText;
+    switch ( failure.kind ) {
+    case klogg::livelog::LiveLogCloseTransaction::FailureKind::StopTimeout:
+        failureText = tr( "The live source did not stop within the safety deadline. Closing now may discard unsettled input." );
+        break;
+    case klogg::livelog::LiveLogCloseTransaction::FailureKind::Persistence:
+        failureText = tr( "Capture data is still pending or could not be persisted. Closing now may lose the only remaining copy in memory." );
+        break;
+    case klogg::livelog::LiveLogCloseTransaction::FailureKind::OutputFlush:
+        failureText = tr( "The active live output could not be flushed. Closing now may lose recent output." );
+        break;
+    }
+    // Decision codes are assigned explicitly because QMessageBox result
+    // values for custom buttons are not portable across Qt versions
+    // (probed: a RejectRole click yields 1 on Qt 5.15 but 3 on Qt 6).
+    // Connecting each button to done() makes the real exec() return the same
+    // code an injected dialog handler returns, so tests can decide through
+    // the injectable boundary without showing a modal at all.
+    enum class CloseDecision : std::uint8_t { Retry = 1, Cancel = 2, CloseAnyway = 3 };
+    QMessageBox message( QMessageBox::Warning, tr( "Live capture could not be closed safely" ),
+                         failureText, QMessageBox::NoButton, this );
+    auto* retry = message.addButton( tr( "Retry" ), QMessageBox::AcceptRole );
+    auto* cancel = message.addButton( tr( "Cancel" ), QMessageBox::RejectRole );
+    auto* closeAnyway
+        = message.addButton( tr( "Close Anyway (Possible Loss)" ), QMessageBox::DestructiveRole );
+    message.setDefaultButton( qobject_cast<QPushButton*>( cancel ) );
+    QObject::connect( retry, &QPushButton::clicked, &message, [ &message ] {
+        message.done( static_cast<int>( CloseDecision::Retry ) );
+    } );
+    QObject::connect( cancel, &QPushButton::clicked, &message, [ &message ] {
+        message.done( static_cast<int>( CloseDecision::Cancel ) );
+    } );
+    QObject::connect( closeAnyway, &QPushButton::clicked, &message, [ &message ] {
+        message.done( static_cast<int>( CloseDecision::CloseAnyway ) );
+    } );
+    const auto decision = static_cast<CloseDecision>( klogg::ui::execDialog( message ) );
+    switch ( decision ) {
+    case CloseDecision::Retry:
+        liveCloseTransaction_->retry();
+        break;
+    case CloseDecision::CloseAnyway:
+        liveCloseTransaction_->closeAnywayPossibleLoss();
+        break;
+    case CloseDecision::Cancel:
+    default:
+        // Escape or a closed dialog must fail safe to Cancel.
+        liveCloseTransaction_->cancel();
+        break;
+    }
 }
 
 void MainWindow::currentTabChanged( int index )

@@ -1599,37 +1599,15 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         const auto previousMinimizeToTray = config.minimizeToTray();
         config.setMinimizeToTray( false );
         bool cancelled = false;
-        bool cancelClickScheduled = false;
-        QTimer modalDriver;
-        modalDriver.setTimerType( Qt::PreciseTimer );
-        modalDriver.setInterval( 1 );
-        QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
-            auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives the window-wide cancel decision.
-            if ( message == nullptr || cancelClickScheduled ) {
-                return;
-            }
-            for ( auto* button : message->buttons() ) {
-                if ( button->text().contains( QStringLiteral( "Cancel" ) ) ) {
-                    // Defer the click into the dialog's own event loop. A
-                    // click while the dialog is still inside its show phase
-                    // unwinds the close transaction through showEvent on the
-                    // stack, which crashes slow 32-bit offscreen runners.
-                    cancelClickScheduled = true;
-                    QMetaObject::invokeMethod(
-                        message,
-                        [ button, &cancelled ] {
-                            cancelled = true;
-                            button->click();
-                        },
-                        Qt::QueuedConnection );
-                    return;
-                }
-            }
-        } );
-        modalDriver.start();
+        // Decide through the injectable dialog boundary (Retry=1, Cancel=2,
+        // Close Anyway=3): no real modal is shown, so the decision cannot
+        // race QMessageBox::showEvent on slow 32-bit offscreen runners.
+        const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+            cancelled = true;
+            return 2; // Cancel
+        } };
         mainWindow->close();
         REQUIRE( waitUiState( [ & ] { return cancelled; } ) );
-        modalDriver.stop();
         REQUIRE( waitUiState( [ & ] {
             return controller->snapshot().runIntent == live::RunIntent::Running
                    && secondController->snapshot().runIntent == live::RunIntent::Running
@@ -2279,37 +2257,15 @@ TEST_CASE( "Window close preserves every owner when one live capture cannot pers
     REQUIRE_FALSE( readableBeforeClose.buffer.empty() );
 
     bool cancelled = false;
-    bool cancelClickScheduled = false;
-    QTimer modalDriver;
-    modalDriver.setTimerType( Qt::PreciseTimer );
-    modalDriver.setInterval( 1 );
-    QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
-        auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
-        if ( message == nullptr || cancelClickScheduled ) {
-            return;
-        }
-        for ( auto* button : message->buttons() ) {
-            if ( button->text().contains( QStringLiteral( "Cancel" ) ) ) {
-                // Defer the click into the dialog's own event loop. A click
-                // while the dialog is still inside its show phase unwinds the
-                // close transaction through showEvent on the stack, which
-                // crashes slow 32-bit offscreen runners.
-                cancelClickScheduled = true;
-                QMetaObject::invokeMethod(
-                    message,
-                    [ button, &cancelled ] {
-                        cancelled = true;
-                        button->click();
-                    },
-                    Qt::QueuedConnection );
-                return;
-            }
-        }
-    } );
-    modalDriver.start();
+    // Decide through the injectable dialog boundary (Retry=1, Cancel=2,
+    // Close Anyway=3): no real modal is shown, so the decision cannot race
+    // QMessageBox::showEvent on slow 32-bit offscreen runners.
+    const klogg::ui::ScopedDialogHandler cancelHandler{ [ & ]( QDialog& ) {
+        cancelled = true;
+        return 2; // Cancel
+    } };
     mainWindow->close();
     REQUIRE( waitUiState( [ & ] { return cancelled; } ) );
-    modalDriver.stop();
     REQUIRE( waitUiState( [ & ] {
         return controller->snapshot().runIntent == klogg::livecapture::RunIntent::Running
                && factory.created.size() >= 2;
@@ -2323,34 +2279,11 @@ TEST_CASE( "Window close preserves every owner when one live capture cannot pers
 
     persistenceFailure.reset();
     now += 5000;
-    bool closeAnywayClickScheduled = false;
-    QTimer finalDecisionDriver;
-    finalDecisionDriver.setTimerType( Qt::PreciseTimer );
-    finalDecisionDriver.setInterval( 1 );
-    QObject::connect( &finalDecisionDriver, &QTimer::timeout, &finalDecisionDriver, [ & ] {
-        auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
-        if ( message == nullptr || closeAnywayClickScheduled ) {
-            return;
-        }
-        for ( auto* button : message->buttons() ) {
-            if ( button->text().contains( QStringLiteral( "Close Anyway" ) ) ) {
-                // Defer the click into the dialog's own event loop. A click
-                // while the dialog is still inside its show phase unwinds the
-                // close transaction through showEvent on the stack, which
-                // crashes slow 32-bit offscreen runners.
-                closeAnywayClickScheduled = true;
-                QMetaObject::invokeMethod(
-                    message,
-                    [ button ] { button->click(); },
-                    Qt::QueuedConnection );
-                return;
-            }
-        }
-    } );
-    finalDecisionDriver.start();
+    const klogg::ui::ScopedDialogHandler closeAnywayHandler{ []( QDialog& ) {
+        return 3; // Close Anyway (Possible Loss)
+    } };
     mainWindow->close();
     REQUIRE( waitUiState( [ & ] { return tabs->count() == 0; } ) );
-    finalDecisionDriver.stop();
 }
 
 SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui][session][ios]" )

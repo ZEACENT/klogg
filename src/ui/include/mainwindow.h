@@ -313,6 +313,8 @@ class MainWindow : public QMainWindow {
                                     klogg::livelog::LiveLogCloseTransaction::Mode mode,
                                     DiscardCommit discardCommit,
                                     std::function<void( bool )> completion );
+    void showLiveCloseFailureDialog(
+        const klogg::livelog::LiveLogCloseTransaction::Failure& failure );
     void finalizeCrawlerClose( CrawlerWidget* widget, ActionInitiator initiator );
     void continueCloseAll();
     void beginWindowShutdown();
