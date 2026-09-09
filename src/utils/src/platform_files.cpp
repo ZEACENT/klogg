@@ -149,6 +149,17 @@ QString extendedNativePath( const QString& path )
     return QStringLiteral( "\\\\?\\" ) + absolutePath;
 }
 
+std::optional<FileIdentity> fileIdentityForHandle( HANDLE handle )
+{
+    BY_HANDLE_FILE_INFORMATION info{};
+    if ( !GetFileInformationByHandle( handle, &info ) ) {
+        return std::nullopt;
+    }
+    const auto fileIndex = ( static_cast<std::uint64_t>( info.nFileIndexHigh ) << 32u )
+                           | static_cast<std::uint64_t>( info.nFileIndexLow );
+    return FileIdentity{ info.dwVolumeSerialNumber, fileIndex };
+}
+
 NativeHandle openObject( const QString& path, bool directory, DWORD access )
 {
     const DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT
@@ -301,16 +312,30 @@ std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
     if ( nativeHandle == -1 ) {
         return std::nullopt;
     }
-    BY_HANDLE_FILE_INFORMATION info{};
-    if ( !GetFileInformationByHandle( reinterpret_cast<HANDLE>( nativeHandle ), &info ) ) {
-        return std::nullopt;
-    }
-    const auto fileIndex = ( static_cast<std::uint64_t>( info.nFileIndexHigh ) << 32u )
-                           | static_cast<std::uint64_t>( info.nFileIndexLow );
-    return FileIdentity{ info.dwVolumeSerialNumber, fileIndex };
+    return fileIdentityForHandle( reinterpret_cast<HANDLE>( nativeHandle ) );
 #else
     struct stat info{};
     if ( ::fstat( file.handle(), &info ) != 0 ) {
+        return std::nullopt;
+    }
+    return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
+                         static_cast<std::uint64_t>( info.st_ino ) };
+#endif
+}
+
+std::optional<FileIdentity> fileIdentity( const QString& path )
+{
+#if defined( Q_OS_WIN )
+    const auto nativePath = extendedNativePath( path );
+    NativeHandle handle( CreateFileW(
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ) );
+    return handle ? fileIdentityForHandle( handle.get() ) : std::nullopt;
+#else
+    const auto encodedPath = QFile::encodeName( path );
+    struct stat info{};
+    if ( ::stat( encodedPath.constData(), &info ) != 0 ) {
         return std::nullopt;
     }
     return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),

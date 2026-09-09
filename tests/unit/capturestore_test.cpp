@@ -3086,6 +3086,7 @@ TEST_CASE( "RollingFileManager keeps long output paths atomically replaceable",
     REQUIRE( current.open() );
     REQUIRE( current.write( QByteArrayLiteral( "old\n" ) ) == 4 );
     REQUIRE( current.flush() );
+    REQUIRE( current.refersToPath( filePath ) );
 
     QSaveFile staged( filePath );
     REQUIRE( staged.open( QIODevice::WriteOnly ) );
@@ -3095,6 +3096,7 @@ TEST_CASE( "RollingFileManager keeps long output paths atomically replaceable",
 
     RollingFileManager published( filePath, 0, 0 );
     REQUIRE( published.openExisting() );
+    REQUIRE( published.refersToPath( filePath ) );
     REQUIRE( published.write( QByteArrayLiteral( "tail\n" ) ) == 5 );
     REQUIRE( published.flush() );
     CHECK( readUtf8File( filePath ) == QStringLiteral( "published\ntail\n" ) );

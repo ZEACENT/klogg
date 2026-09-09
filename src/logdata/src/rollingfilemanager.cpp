@@ -9,13 +9,6 @@
 #include <QFileInfo>
 #include <QSaveFile>
 
-#ifdef Q_OS_WIN
-#include <io.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#endif
-
 #include "log.h"
 
 namespace {
@@ -353,39 +346,10 @@ bool RollingFileManager::refersToPath( const QString& path ) const
     if ( currentFile_ == nullptr || !currentFile_->isOpen() || path.isEmpty() ) {
         return false;
     }
-#ifdef Q_OS_WIN
-    const auto nativeHandle = _get_osfhandle( static_cast<int>( currentFile_->handle() ) );
-    if ( nativeHandle == -1 ) {
-        return false;
-    }
-    const auto currentHandle = reinterpret_cast<HANDLE>( nativeHandle );
-    if ( currentHandle == INVALID_HANDLE_VALUE ) {
-        return false;
-    }
-    const auto pathHandle
-        = CreateFileW( reinterpret_cast<LPCWSTR>( path.utf16() ), FILE_READ_ATTRIBUTES,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr );
-    if ( pathHandle == INVALID_HANDLE_VALUE ) {
-        return false;
-    }
-    BY_HANDLE_FILE_INFORMATION currentInfo{};
-    BY_HANDLE_FILE_INFORMATION pathInfo{};
-    const auto currentInfoRead = GetFileInformationByHandle( currentHandle, &currentInfo );
-    const auto pathInfoRead = GetFileInformationByHandle( pathHandle, &pathInfo );
-    CloseHandle( pathHandle );
-    return currentInfoRead && pathInfoRead
-           && currentInfo.dwVolumeSerialNumber == pathInfo.dwVolumeSerialNumber
-           && currentInfo.nFileIndexHigh == pathInfo.nFileIndexHigh
-           && currentInfo.nFileIndexLow == pathInfo.nFileIndexLow;
-#else
-    struct stat currentInfo{};
-    struct stat pathInfo{};
-    const auto encodedPath = QFile::encodeName( path );
-    return ::fstat( currentFile_->handle(), &currentInfo ) == 0
-           && ::stat( encodedPath.constData(), &pathInfo ) == 0
-           && currentInfo.st_dev == pathInfo.st_dev && currentInfo.st_ino == pathInfo.st_ino;
-#endif
+    const auto currentIdentity = klogg::platform::fileIdentity( *currentFile_ );
+    const auto pathIdentity = klogg::platform::fileIdentity( path );
+    return currentIdentity.has_value() && pathIdentity.has_value()
+           && currentIdentity.value() == pathIdentity.value();
 }
 
 bool RollingFileManager::clearIfCurrent()

@@ -1926,12 +1926,21 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                 return completedJob;
             };
 
-            startExport( LiveLogSaveAnsiMode::Preserve );
+            auto completedPreserveJob
+                = startExport( LiveLogSaveAnsiMode::Preserve );
             REQUIRE( source->hasActiveOutputBinding(
                 savedPath, LiveLogSaveAnsiMode::Preserve ) );
-            startExport( LiveLogSaveAnsiMode::Strip );
+            std::weak_ptr<klogg::livelog::LiveLogExportJob> previousJob
+                = completedPreserveJob;
+            completedPreserveJob.reset();
+            auto completedStripJob
+                = startExport( LiveLogSaveAnsiMode::Strip );
             REQUIRE( source->hasActiveOutputBinding(
                 savedPath, LiveLogSaveAnsiMode::Strip ) );
+            REQUIRE( waitUiState( [ &previousJob ] {
+                return previousJob.expired();
+            } ) );
+            completedStripJob.reset();
 
             using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
             auto* data = Access::data( crawler );

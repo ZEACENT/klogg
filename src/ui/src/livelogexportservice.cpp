@@ -322,6 +322,11 @@ StreamingLogData::OutputExportTail LiveLogExportJob::takeCandidateTail()
 
 void LiveLogExportJob::complete( LiveLogExportResult result )
 {
+    // A completed job retains only its observable result. Releasing the
+    // immutable snapshot here lets CaptureStore retire trimmed spill files
+    // even while the service keeps the latest job available to the UI.
+    candidate_.snapshot = CaptureStore::Snapshot{};
+
     {
         const std::lock_guard<std::mutex> lock( stateMutex_ );
         if ( result_.has_value() ) {

@@ -2217,6 +2217,37 @@ TEST_CASE( "Live save completion remains observable after a fast export finishes
     CHECK( completions == 1 );
 }
 
+TEST_CASE( "Completed live save releases its capture snapshot leases",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 4;
+    limits.memoryBudgetBytes = 1;
+    data->setCaptureLimits( limits );
+    data->appendUtf8( QByteArrayLiteral( "a\nb\nc\n" ) );
+    REQUIRE( data->persistCapture().complete() );
+
+    QDir captureDirectory( data->capturePath() );
+    const auto persistedSegments = captureDirectory.entryList(
+        { QStringLiteral( "segment_*.log" ) }, QDir::Files );
+    REQUIRE_FALSE( persistedSegments.isEmpty() );
+
+    klogg::livelog::LiveLogExportService service( data );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    job->waitForFinished();
+    REQUIRE( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+
+    data->clearCapture();
+    for ( const auto& segment : persistedSegments ) {
+        CHECK_FALSE( QFileInfo::exists( captureDirectory.filePath( segment ) ) );
+    }
+}
+
 TEST_CASE( "Async live save cancel and tail overflow preserve destination and old binding",
            "[streaming][live-save-cutover][live-save-async]" )
 {

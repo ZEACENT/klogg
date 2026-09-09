@@ -1909,8 +1909,8 @@ void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outp
     const QPointer<AdbLogcatSource> sourceGuard( adbSource );
     job->onFinished(
         this,
-        [ windowGuard, crawlerGuard, sourceGuard, progress, ansiMode,
-          job ]( klogg::livelog::LiveLogExportResult result ) {
+        [ windowGuard, crawlerGuard, sourceGuard, progress,
+          ansiMode ]( klogg::livelog::LiveLogExportResult result ) {
             progress->close();
             progress->deleteLater();
             if ( windowGuard == nullptr || crawlerGuard == nullptr
