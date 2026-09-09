@@ -16,6 +16,7 @@
 #include <QTimeZone>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <condition_variable>
 #include <cstddef>
@@ -370,6 +371,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
     void enqueue( std::vector<std::uint8_t> bytes ) noexcept
     {
+        const auto byteCount = bytes.size();
         LiveDataEnqueueResult result = LiveDataEnqueueResult::Closed;
         try {
             // Native readers deliver callbacks serially off the GUI thread.
@@ -383,7 +385,13 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                                     "Unable to allocate queued iOS log bytes." );
             return;
         }
-        if ( result == LiveDataEnqueueResult::Backpressure ) {
+        if ( result == LiveDataEnqueueResult::Closed ) {
+            // Callback admission preceded stop, but queue admission did not. Keep
+            // this complete normalized record separate from accepted queue bytes.
+            rejectedBeforeEnqueueBytes.fetch_add( byteCount, std::memory_order_relaxed );
+            rejectedBeforeEnqueueChunks.fetch_add( 1u, std::memory_order_relaxed );
+        }
+        else if ( result == LiveDataEnqueueResult::Backpressure ) {
             // enqueueWait only rejects records that can never fit, not transient
             // pressure. Retrying this same record cannot restore progress.
             publishBoundaryFailure( ErrorCategory::Stream, "ios-live-record-too-large",
@@ -950,6 +958,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     IosNativeSessionLease admissionLease;
     std::shared_ptr<State> cleanupRetention;
     LiveDataQueue queue;
+    std::atomic<std::size_t> rejectedBeforeEnqueueBytes{ 0u };
+    std::atomic<std::size_t> rejectedBeforeEnqueueChunks{ 0u };
 
     mutable std::mutex controlMutex;
     std::condition_variable callbacksChanged;
@@ -1051,7 +1061,12 @@ std::size_t IosNativeStreamWorker::waitingProducerCount() const
 LiveDataStatistics IosNativeStreamWorker::statistics() const
 {
     if ( state_ != nullptr ) {
-        return state_->queue.statistics();
+        auto result = state_->queue.statistics();
+        result.rejectedBeforeEnqueueBytes
+            = state_->rejectedBeforeEnqueueBytes.load( std::memory_order_relaxed );
+        result.rejectedBeforeEnqueueChunks
+            = state_->rejectedBeforeEnqueueChunks.load( std::memory_order_relaxed );
+        return result;
     }
     return {};
 }

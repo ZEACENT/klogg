@@ -84,6 +84,8 @@ struct ScriptedSessionState {
     std::optional<int> throwOnStatisticsCall;
     int drainCalls{ 0 };
     mutable int statisticsCalls{ 0 };
+    std::size_t rejectedBeforeEnqueueBytes{ 0u };
+    std::size_t rejectedBeforeEnqueueChunks{ 0u };
     std::function<void()> afterDrain;
 };
 
@@ -139,7 +141,10 @@ public:
              || state_->throwOnStatisticsCall == state_->statisticsCalls ) {
             throw std::runtime_error( "scripted statistics failure" );
         }
-        return state_->queue.statistics();
+        auto result = state_->queue.statistics();
+        result.rejectedBeforeEnqueueBytes = state_->rejectedBeforeEnqueueBytes;
+        result.rejectedBeforeEnqueueChunks = state_->rejectedBeforeEnqueueChunks;
+        return result;
     }
 
 private:
@@ -359,6 +364,79 @@ TEST_CASE( "Native automatic retirement settles accepted tail in bounded deliver
     CHECK( stopped == 1u );
     CHECK( delivered == 256u * 1024u );
     CHECK( maximumDelivery <= 64u * 1024u );
+}
+
+TEST_CASE( "Native retirement counts final pre-enqueue rejections exactly once",
+           "[ios][native][transport][stop][statistics][review-rejected-admission]" )
+{
+    // Explicit settlement, explicit discard, and native automatic failure all
+    // retire through the same final gap ledger, independently of accepted bytes.
+    const auto stopPath = GENERATE( 0, 1, 2 );
+    CAPTURE( stopPath );
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    constexpr std::size_t acceptedBytes = 192u * 1024u;
+    constexpr std::size_t rejectedBytes = 2u;
+    constexpr Generation generation = 708u;
+    config.queueLimits.maxQueuedBytes = acceptedBytes;
+    IosNativeTransport transport( factory, config );
+    std::size_t delivered = 0u;
+    std::vector<std::pair<Generation, quint64>> settlements;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) {
+                          delivered += static_cast<std::size_t>( bytes.size() );
+                      } );
+    QObject::connect( &transport, &LiveSourceTransport::stopped,
+                      [&]( Generation value, quint64 discarded ) {
+                          settlements.emplace_back( value, discarded );
+                      } );
+
+    transport.start( generation );
+    const auto session = factory.latest();
+    const auto callbacks = session->callbacks;
+    factory.publishBytes( 0u, std::string( acceptedBytes, 'a' ), false );
+    CHECK( transport.statistics().rejectedBeforeEnqueueBytes == 0u );
+    if ( stopPath == 2 ) {
+        factory.publishFailure( 0u, disconnectError() );
+    }
+    else {
+        transport.requestStop( generation,
+                               stopPath == 0
+                                   ? klogg::livecapture::StopDisposition::SettleAccepted
+                                   : klogg::livecapture::StopDisposition::DiscardPending );
+    }
+    CHECK( settlements.empty() );
+    // The blocked callback only returns after stop closes its queue. These
+    // counters become final at native stopped, not at the earlier stop request.
+    session->rejectedBeforeEnqueueBytes = rejectedBytes;
+    session->rejectedBeforeEnqueueChunks = 1u;
+    factory.publishStopped( 0u );
+    for ( unsigned turn = 0u; turn < 8u; ++turn ) { drainQtEvents(); }
+
+    const auto discardedAcceptedBytes = stopPath == 1 ? acceptedBytes : 0u;
+    REQUIRE( settlements.size() == 1u );
+    CHECK( settlements.front().first == generation );
+    CHECK( settlements.front().second
+           == static_cast<quint64>( discardedAcceptedBytes + rejectedBytes ) );
+    CHECK( delivered == acceptedBytes - discardedAcceptedBytes );
+    CHECK( delivered + settlements.front().second == acceptedBytes + rejectedBytes );
+    CHECK( session->destroyed );
+    const auto statisticsCalls = session->statisticsCalls;
+    callbacks.stopped( generation );
+    callbacks.bytesAvailable( generation );
+    drainQtEvents();
+    CHECK( settlements.size() == 1u );
+    CHECK( session->statisticsCalls == statisticsCalls );
+
+    // A new one-shot session must not inherit the previous generation's gap.
+    transport.start( generation + 1u );
+    transport.requestStop( generation + 1u,
+                           klogg::livecapture::StopDisposition::SettleAccepted );
+    factory.publishStopped( 1u );
+    drainQtEvents();
+    REQUIRE( settlements.size() == 2u );
+    CHECK( settlements.back().first == generation + 1u );
+    CHECK( settlements.back().second == 0u );
 }
 
 TEST_CASE( "Native retiring drain can be cancelled fairly after one bounded delivery",

@@ -35,6 +35,9 @@ struct LiveDataStatistics {
     std::size_t deliveredChunks{ 0 };
     std::size_t backpressuredBytes{ 0 };
     std::size_t backpressuredChunks{ 0 };
+    // Complete source records rejected before queue admission, not queued or delivered bytes.
+    std::size_t rejectedBeforeEnqueueBytes{ 0 };
+    std::size_t rejectedBeforeEnqueueChunks{ 0 };
     std::size_t highWaterQueuedBytes{ 0 };
     std::size_t highWaterQueuedChunks{ 0 };
 };

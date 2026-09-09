@@ -1893,7 +1893,7 @@ TEST_CASE( "native synchronous startup bursts drain before ready without losing 
 }
 
 TEST_CASE( "native terminal paths unblock full queues before cleanup or consumer drain",
-           "[ios][native][stream][queue][backpressure][cancellation]" )
+           "[ios][native][stream][queue][backpressure][cancellation][review-rejected-admission]" )
 {
     const bool duringStartup = GENERATE( false, true );
     const auto terminalPath = GENERATE( 0, 1, 2 ); // stop, shutdown, native failure
@@ -1958,8 +1958,14 @@ TEST_CASE( "native terminal paths unblock full queues before cleanup or consumer
     REQUIRE( retained.has_value() );
     CHECK( retained->bytes == std::vector<std::uint8_t>{ 'a', '\n' } );
     CHECK( retained->sourceChunks == 1u );
-    CHECK( worker.statistics().receivedChunks == 1u );
-    CHECK( worker.statistics().backpressuredChunks == 0u );
+    const auto statistics = worker.statistics();
+    CHECK( statistics.receivedBytes == 2u );
+    CHECK( statistics.receivedChunks == 1u );
+    CHECK( statistics.deliveredBytes == 2u );
+    CHECK( statistics.queuedBytes == 0u );
+    CHECK( statistics.backpressuredChunks == 0u );
+    CHECK( statistics.rejectedBeforeEnqueueBytes == 2u );
+    CHECK( statistics.rejectedBeforeEnqueueChunks == 1u );
     CHECK( observed.stopped == std::vector<Generation>{ 54u } );
     CHECK( observed.errors.size() == ( terminalPath == 2 ? 1u : 0u ) );
     CHECK( observed.ready.size() == ( duringStartup ? 0u : 1u ) );

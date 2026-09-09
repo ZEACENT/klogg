@@ -396,17 +396,17 @@ void IosNativeTransport::completeStopped()
 {
     if ( !nativeStopped_ ) { return; }
     const auto generation = activeGeneration_ ? *activeGeneration_ : retiringGeneration_.value_or( 0u );
-    if ( !drainFailed_
-         && ( pendingBatch_ || queueWorkPending_
-              || ( session_ && session_->statistics().queuedBytes != 0u ) ) ) {
+    if ( !drainFailed_ && ( pendingBatch_ || queueWorkPending_ ) ) {
         scheduleDrain( generation );
         return;
     }
-    if ( drainFailed_ && session_ ) {
+    LiveDataStatistics finalStatistics;
+    if ( session_ ) {
         try {
-            discardedBytes_ += static_cast<quint64>( session_->statistics().queuedBytes );
+            finalStatistics = session_->statistics();
         }
         catch ( ... ) {
+            if ( !drainFailed_ ) { throw; }
             // Release the stopped worker even when exact final accounting is unavailable.
             if ( lastStructuredError_ ) {
                 lastStructuredError_->nativeDetail
@@ -414,6 +414,17 @@ void IosNativeTransport::completeStopped()
                 lastError_ = diagnosticText( *lastStructuredError_ );
             }
         }
+    }
+    if ( !drainFailed_ && finalStatistics.queuedBytes != 0u ) {
+        scheduleDrain( generation );
+        return;
+    }
+    // Native stopped follows callback quiescence and native join, so rejected
+    // records are final. Add them only on this terminal path, never per drain
+    // turn, and independently of already-accounted queued/pending bytes.
+    discardedBytes_ += static_cast<quint64>( finalStatistics.rejectedBeforeEnqueueBytes );
+    if ( drainFailed_ ) {
+        discardedBytes_ += static_cast<quint64>( finalStatistics.queuedBytes );
     }
     if ( drainFailed_ && pendingBatch_ ) {
         discardedBytes_ += static_cast<quint64>( pendingBatch_->bytes.size() - pendingOffset_ );
