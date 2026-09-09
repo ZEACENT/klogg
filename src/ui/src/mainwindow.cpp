@@ -2488,7 +2488,7 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
                 QCheckBox* dontAskCheckBox = new QCheckBox( tr( "Don't ask again" ) );
                 msgBox.setCheckBox( dontAskCheckBox );
 
-                if ( msgBox.exec() != QMessageBox::Yes ) {
+                if ( klogg::ui::execDialog( msgBox ) != QMessageBox::Yes ) {
                     closeAllInProgress_ = false;
                     return;
                 }
@@ -2548,7 +2548,8 @@ void MainWindow::closeTab( int index, ActionInitiator initiator )
             QCheckBox* dontAskCheckBox = new QCheckBox( tr( "Don't ask again" ) );
             msgBox.setCheckBox( dontAskCheckBox );
 
-            if ( msgBox.exec() != QMessageBox::Yes ) {
+            if ( klogg::ui::execDialog( msgBox ) != QMessageBox::Yes ) {
+                closeAllInProgress_ = false;
                 return;
             }
 

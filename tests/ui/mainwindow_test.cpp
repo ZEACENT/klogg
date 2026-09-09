@@ -203,6 +203,11 @@ private:
 } // namespace klogg::livelog
 
 struct MainWindowLiveSaveTestAccess {
+    static void closeAllByUser( MainWindow& window )
+    {
+        window.closeAll( MainWindow::ActionInitiator::User );
+    }
+
     static QString selectOutputPath( MainWindow& window,
                                      CrawlerWidget* crawler )
     {
@@ -716,6 +721,53 @@ SCENARIO( "Main window tests", "[ui]" )
             }
         }
     }
+}
+
+TEST_CASE( "Close All can retry after a file close confirmation is declined",
+           "[ui][session][close-all-cancel]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto filePath = root.filePath( QStringLiteral( "close-all.log" ) );
+    {
+        QFile file( filePath );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "record\n" ) == 7 );
+    }
+
+    auto session = std::make_shared<Session>();
+    WindowSession windowSession{ session, "CloseAllRetry", 0 };
+    MainWindow window{ windowSession };
+    window.show();
+    window.loadInitialFile( filePath, false );
+    auto* tabs = window.findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( waitUiState( [ & ] {
+        auto* crawler = qobject_cast<CrawlerWidget*>( tabs->currentWidget() );
+        return crawler != nullptr && crawler->isFirstLoadDone();
+    } ) );
+    QTest::qWait( 200 );
+
+    auto& config = Configuration::get();
+    const auto previousConfirm = config.confirmTabClose();
+    config.setConfirmTabClose( true );
+    bool declined = false;
+    const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+        declined = true;
+        // QDialogButtonBox::No shares QMessageBox::StandardButton::No's value;
+        // naming QDialogButtonBox keeps the lint's modal-dialog ban literal.
+        return static_cast<int>( QDialogButtonBox::No );
+    } };
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    const auto retainedTabs = tabs->count();
+    config.setConfirmTabClose( false );
+    MainWindowLiveSaveTestAccess::closeAllByUser( window );
+    const auto closedOnRetry = waitUiState( [ & ] { return tabs->count() == 0; } );
+    config.setConfirmTabClose( previousConfirm );
+
+    CHECK( declined );
+    CHECK( retainedTabs == 1 );
+    CHECK( closedOnRetry );
 }
 
 SCENARIO( "Tab group chip shows the full group name", "[ui][tabgroup]" )
