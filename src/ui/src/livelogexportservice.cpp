@@ -6,7 +6,9 @@
 
 #include "livelogexportservice.h"
 
+#include <algorithm>
 #include <chrono>
+#include <exception>
 #include <utility>
 
 #include <QCoreApplication>
@@ -17,7 +19,22 @@
 #include <QThread>
 #include <QTimer>
 
+#include "logger.h"
+
 namespace klogg::livelog {
+
+struct LiveLogExportJob::OwnerCall {
+    explicit OwnerCall( std::function<void()> callback )
+        : operation( std::move( callback ) )
+    {
+    }
+
+    std::function<void()> operation;
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool completed = false;
+    std::exception_ptr failure;
+};
 
 LiveLogExportJob::LiveLogExportJob(
     std::shared_ptr<StreamingLogData> data,
@@ -31,6 +48,7 @@ LiveLogExportJob::LiveLogExportJob(
     , beforePublication_( std::move( beforePublication ) )
     , afterPublish_( std::move( afterPublish ) )
 {
+    moveToThread( data_->thread() );
     static const auto registered
         = qRegisterMetaType<LiveLogExportResult>( "klogg::livelog::LiveLogExportResult" );
     Q_UNUSED( registered );
@@ -217,7 +235,18 @@ void LiveLogExportJob::run()
         return;
     }
 
-    const auto tail = takeCandidateTail();
+    StreamingLogData::OutputExportTail tail;
+    try {
+        tail = takeCandidateTail();
+    }
+    catch ( ... ) {
+        // An owner-side tail handoff that threw leaves the tail state unknown;
+        // the export cannot claim a complete or replayable result.
+        stagedOutput->cancelWriting();
+        cancelCandidate();
+        complete( LiveLogExportResult::PartialUnknown );
+        return;
+    }
     if ( tail.failure.has_value() ) {
         stagedOutput->cancelWriting();
         cancelCandidate();
@@ -266,11 +295,16 @@ void LiveLogExportJob::run()
             *stagedOutputOwner, afterPublish_ );
     };
 
-    const auto invoked
-        = QThread::currentThread() == data_->thread()
-              ? ( publish(), true )
-              : QMetaObject::invokeMethod(
-                    data_.get(), publish, Qt::BlockingQueuedConnection );
+    bool invoked = false;
+    try {
+        invoked = invokeOnDataThread( publish );
+    }
+    catch ( ... ) {
+        // The owner-side publication threw: whether the destination was
+        // replaced is unknown, so the result must not claim success.
+        complete( LiveLogExportResult::PartialUnknown );
+        return;
+    }
     if ( !invoked ) {
         ownerStagedOutput->deleteLater();
         cancelCandidate();
@@ -293,11 +327,80 @@ void LiveLogExportJob::cancelCandidate()
         }
         data_->cancelOutputExport( candidate_.id );
     };
-    if ( QThread::currentThread() == data_->thread() ) {
-        cancel();
-        return;
+    // Cancellation also runs from destructors; a failed owner call must not
+    // escape it. The owner's state remains authoritative for any later call.
+    try {
+        invokeOnDataThread( cancel );
     }
-    QMetaObject::invokeMethod( data_.get(), cancel, Qt::BlockingQueuedConnection );
+    catch ( const std::exception& error ) {
+        LOG_ERROR << "Live save cancellation owner call failed: " << error.what();
+    }
+    catch ( ... ) {
+        LOG_ERROR << "Live save cancellation owner call failed";
+    }
+}
+
+bool LiveLogExportJob::invokeOnDataThread( const std::function<void()>& operation )
+{
+    if ( QThread::currentThread() == data_->thread() ) {
+        operation();
+        return true;
+    }
+
+    const auto call = std::make_shared<OwnerCall>( operation );
+    {
+        const std::lock_guard<std::mutex> lock( ownerCallsMutex_ );
+        ownerCalls_.push_back( call );
+    }
+
+    // Qt transports only a wakeup, never a transient callable or result. The
+    // mailbox publishes requests and each call's condition publishes results,
+    // including when Qt itself is not instrumented by ThreadSanitizer.
+    if ( !QMetaObject::invokeMethod( this, "executeOwnerCalls", Qt::QueuedConnection ) ) {
+        const std::lock_guard<std::mutex> lock( ownerCallsMutex_ );
+        const auto queued = std::find( ownerCalls_.begin(), ownerCalls_.end(), call );
+        if ( queued != ownerCalls_.end() ) {
+            ownerCalls_.erase( queued );
+            return false;
+        }
+        // An earlier wakeup already took this call. Its result remains binding.
+    }
+
+    std::unique_lock<std::mutex> lock( call->mutex );
+    call->finished.wait( lock, [ &call ] { return call->completed; } );
+    if ( call->failure ) {
+        std::rethrow_exception( call->failure );
+    }
+    return true;
+}
+
+void LiveLogExportJob::executeOwnerCalls()
+{
+    while ( true ) {
+        std::shared_ptr<OwnerCall> call;
+        {
+            const std::lock_guard<std::mutex> lock( ownerCallsMutex_ );
+            if ( ownerCalls_.empty() ) {
+                return;
+            }
+            call = std::move( ownerCalls_.front() );
+            ownerCalls_.pop_front();
+        }
+
+        std::exception_ptr failure;
+        try {
+            call->operation();
+        }
+        catch ( ... ) {
+            failure = std::current_exception();
+        }
+        {
+            const std::lock_guard<std::mutex> lock( call->mutex );
+            call->failure = failure;
+            call->completed = true;
+        }
+        call->finished.notify_all();
+    }
 }
 
 StreamingLogData::OutputExportTail LiveLogExportJob::takeCandidateTail()
@@ -310,11 +413,7 @@ StreamingLogData::OutputExportTail LiveLogExportJob::takeCandidateTail()
         }
         tail = data_->takeOutputExportTail( candidate_.id );
     };
-    if ( QThread::currentThread() == data_->thread() ) {
-        take();
-        return tail;
-    }
-    if ( !QMetaObject::invokeMethod( data_.get(), take, Qt::BlockingQueuedConnection ) ) {
+    if ( !invokeOnDataThread( take ) ) {
         tail.failure = StreamingLogData::OutputExportFailure::Cancelled;
     }
     return tail;

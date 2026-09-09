@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -56,6 +57,9 @@ Q_SIGNALS:
     void progressChanged( qint64 bytesWritten );
     void finished( klogg::livelog::LiveLogExportResult result );
 
+private Q_SLOTS:
+    void executeOwnerCalls();
+
 private:
     friend class LiveLogExportService;
     friend struct LiveLogExportServiceTestAccess;
@@ -69,6 +73,7 @@ private:
     void run();
     void complete( LiveLogExportResult result );
     void cancelCandidate();
+    bool invokeOnDataThread( const std::function<void()>& operation );
     StreamingLogData::OutputExportTail takeCandidateTail();
     static LiveLogExportResult mapFailure( StreamingLogData::OutputExportFailure failure );
 
@@ -87,6 +92,9 @@ private:
     std::function<void()> afterPublish_;
     std::function<void( QEventLoop::ProcessEventsFlags, int )> ownerEventPumpForTesting_;
     std::atomic<PublicationDecision> publicationDecision_{ PublicationDecision::Writing };
+    struct OwnerCall;
+    std::mutex ownerCallsMutex_;
+    std::deque<std::shared_ptr<OwnerCall>> ownerCalls_;
     mutable std::mutex stateMutex_;
     std::condition_variable finishedCondition_;
     std::optional<LiveLogExportResult> result_;
