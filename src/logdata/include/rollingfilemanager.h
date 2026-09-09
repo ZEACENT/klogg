@@ -56,6 +56,12 @@ class RollingFileManager {
     // TOCTOU window between that check and the actual open().
     bool openedNewFile() const;
     bool refersToPath( const QString& path ) const;
+    // QSaveFile replacement on Windows requires the destination writer closed,
+    // even with FILE_SHARE_DELETE. Flush and close only when this handle owns
+    // path (including aliases). Serialize writes across the entire transaction;
+    // reopen the returned identity only if publication did not succeed.
+    std::optional<klogg::platform::FileIdentity>
+    suspendForReplacement( const QString& path );
     // Truncate through the active handle only when it still owns basePath_.
     // Returns false without modifying any pathname after external replacement.
     bool clearIfCurrent();

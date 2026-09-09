@@ -210,6 +210,14 @@ public:
     bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
     bool adoptPublishedOutputFile( RollingFileManager output, const QString& outputPath,
                                    bool needsSeparator );
+    // The caller must exclude appends throughout suspension and publication.
+    // Restore only after a failed commit; a published replacement has consumed
+    // the old binding and a failed cutover must abandon it instead.
+    std::optional<klogg::platform::FileIdentity>
+    suspendOutputForReplacement( const QString& outputPath );
+    bool restoreOutputAfterFailedReplacement(
+        const klogg::platform::FileIdentity& expectedIdentity );
+    void abandonOutputAfterFailedReplacement( OutputFailure failure );
     void setLimits( Limits limits );
     QString boundOutputFile() const;
     bool outputRefersToPath( const QString& path ) const;

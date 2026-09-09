@@ -40,9 +40,9 @@ bool operator!=( const FileIdentity& left, const FileIdentity& right );
 std::optional<FileIdentity> fileIdentity( const QFileDevice& file );
 std::optional<FileIdentity> fileIdentity( const QString& path );
 
-// Open a QFile while allowing its pathname to be atomically replaced. On
-// Windows this adds FILE_SHARE_DELETE to Qt's normal sharing contract; other
-// platforms delegate to QFile::open().
+// Open a QFile with shared deletion/rename access. On Windows this adds
+// FILE_SHARE_DELETE to Qt's normal sharing contract, but QSaveFile replacement
+// still requires suspending the destination writer. Other platforms use QFile::open().
 bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode );
 
 // Whether the platform uses exclusive file locks (Windows). When true, the

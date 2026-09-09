@@ -155,6 +155,8 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
     }
 
     std::optional<klogg::platform::FileIdentity> publishedIdentity;
+    std::optional<SuspendedOutputBinding> suspendedOutput;
+    bool published = false;
     RollingFileManager candidateOutput( outputPath, rollingMaxFileSize_, rollingBackupCount_ );
     try {
         const auto stagedWrite = [ &stagedOutput ]( const QByteArray& bytes ) {
@@ -167,19 +169,41 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
         }
 
         publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
-        if ( !publishedIdentity.has_value() || !stagedOutput.commit() ) {
+        if ( !publishedIdentity.has_value() ) {
+            pendingOutputExport_.reset();
+            stagedOutput.cancelWriting();
+            return { false, OutputExportFailure::Publish };
+        }
+        if ( !suspendOutputForReplacement( outputPath, suspendedOutput ) ) {
+            pendingOutputExport_.reset();
+            stagedOutput.cancelWriting();
+            return { false, OutputExportFailure::Publish };
+        }
+        if ( !stagedOutput.commit() ) {
+            restoreOutputAfterFailedReplacement( suspendedOutput );
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::Publish };
         }
+        published = true;
         if ( !candidateOutput.openExisting( publishedIdentity ) ) {
+            abandonOutputAfterFailedReplacement(
+                suspendedOutput, CaptureStore::OutputFailure::Open );
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedReopen };
         }
     }
     catch ( ... ) {
+        if ( published ) {
+            abandonOutputAfterFailedReplacement(
+                suspendedOutput, CaptureStore::OutputFailure::Open );
+        }
+        else {
+            restoreOutputAfterFailedReplacement( suspendedOutput );
+            stagedOutput.cancelWriting();
+        }
         pendingOutputExport_.reset();
-        stagedOutput.cancelWriting();
-        return { false, OutputExportFailure::Write };
+        return { false, published ? OutputExportFailure::PublishedReopen
+                                  : OutputExportFailure::Write };
     }
 
     if ( afterPublish ) {
@@ -198,12 +222,16 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
     // that permit unlinking an open file this also prevents inode reuse from
     // making a same-name replacement compare equal to the published identity.
     if ( !candidateOutput.refersToPath( outputPath ) ) {
+        abandonOutputAfterFailedReplacement(
+            suspendedOutput, CaptureStore::OutputFailure::Open );
         pendingOutputExport_.reset();
         return { false, OutputExportFailure::PublishedReopen };
     }
 
     if ( candidate.ansiMode == LiveLogSaveAnsiMode::Strip ) {
         if ( !candidateOutput.flush() ) {
+            abandonOutputAfterFailedReplacement(
+                suspendedOutput, CaptureStore::OutputFailure::Flush );
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedCutover };
         }
@@ -213,6 +241,8 @@ StreamingLogData::OutputExportActivation StreamingLogData::publishStagedOutputEx
     else {
         if ( !captureStore_.adoptPublishedOutputFile(
                  std::move( candidateOutput ), outputPath, encodingState.needsSeparator ) ) {
+            abandonOutputAfterFailedReplacement(
+                suspendedOutput, CaptureStore::OutputFailure::Open );
             pendingOutputExport_.reset();
             return { false, OutputExportFailure::PublishedCutover };
         }
@@ -1157,6 +1187,69 @@ bool StreamingLogData::outputRefersToPath( const QString& path ) const
     return outputSaveAnsiMode_ == LiveLogSaveAnsiMode::Preserve
                ? captureStore_.outputRefersToPath( path )
                : rollingDisplayOutput_.refersToPath( path );
+}
+
+bool StreamingLogData::suspendOutputForReplacement(
+    const QString& outputPath,
+    std::optional<SuspendedOutputBinding>& suspended )
+{
+    suspended.reset();
+    if ( !outputRefersToPath( outputPath ) ) {
+        return true;
+    }
+
+    SuspendedOutputBinding binding;
+    binding.ansiMode = outputSaveAnsiMode_;
+    const auto identity
+        = binding.ansiMode == LiveLogSaveAnsiMode::Preserve
+              ? captureStore_.suspendOutputForReplacement( outputPath )
+              : rollingDisplayOutput_.suspendForReplacement( outputPath );
+    if ( !identity.has_value() ) {
+        abandonOutputAfterFailedReplacement(
+            binding, CaptureStore::OutputFailure::Flush );
+        return false;
+    }
+    binding.identity = *identity;
+    suspended = binding;
+    return true;
+}
+
+bool StreamingLogData::restoreOutputAfterFailedReplacement(
+    const std::optional<SuspendedOutputBinding>& suspended )
+{
+    if ( !suspended.has_value() ) {
+        return true;
+    }
+    const auto restored
+        = suspended->ansiMode == LiveLogSaveAnsiMode::Preserve
+              ? captureStore_.restoreOutputAfterFailedReplacement(
+                    suspended->identity )
+              : rollingDisplayOutput_.openExisting( suspended->identity );
+    if ( !restored ) {
+        abandonOutputAfterFailedReplacement(
+            suspended, CaptureStore::OutputFailure::Open );
+        return false;
+    }
+    reportCaptureOutputHealthy();
+    return true;
+}
+
+void StreamingLogData::abandonOutputAfterFailedReplacement(
+    const std::optional<SuspendedOutputBinding>& suspended,
+    CaptureStore::OutputFailure failure )
+{
+    if ( !suspended.has_value() ) {
+        // An unrelated destination failed; the committed writer was untouched.
+        return;
+    }
+    if ( suspended->ansiMode == LiveLogSaveAnsiMode::Preserve ) {
+        captureStore_.abandonOutputAfterFailedReplacement( failure );
+    }
+    else {
+        closeDisplayOutputFile( false );
+    }
+    stopOutputFlushTimer();
+    reportCaptureOutputFailure( captureStoreOutputError( failure ) );
 }
 
 void StreamingLogData::reportCaptureOutputHealthy()

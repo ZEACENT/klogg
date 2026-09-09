@@ -193,6 +193,11 @@ class StreamingLogData : public SearchableLogData {
         klogg::vector<qint64> endOfLines;
     };
 
+    struct SuspendedOutputBinding {
+        LiveLogSaveAnsiMode ansiMode = LiveLogSaveAnsiMode::Strip;
+        klogg::platform::FileIdentity identity;
+    };
+
     struct PendingOutputExport {
         std::uint64_t id = 0;
         std::uint64_t firstTailSequence = 0;
@@ -224,6 +229,14 @@ class StreamingLogData : public SearchableLogData {
     QByteArray displayOutputRecord( const QByteArray& bytes, bool terminated ) const;
     bool isOutputFileActive() const;
     bool outputRefersToPath( const QString& path ) const;
+    bool suspendOutputForReplacement(
+        const QString& outputPath,
+        std::optional<SuspendedOutputBinding>& suspended );
+    bool restoreOutputAfterFailedReplacement(
+        const std::optional<SuspendedOutputBinding>& suspended );
+    void abandonOutputAfterFailedReplacement(
+        const std::optional<SuspendedOutputBinding>& suspended,
+        CaptureStore::OutputFailure failure );
     void reportCaptureOutputHealthy();
     void reportCaptureOutputFailure( CaptureOutputError error );
     void checkPreservedOutputState();

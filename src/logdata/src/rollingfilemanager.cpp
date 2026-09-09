@@ -352,6 +352,22 @@ bool RollingFileManager::refersToPath( const QString& path ) const
            && currentIdentity.value() == pathIdentity.value();
 }
 
+std::optional<klogg::platform::FileIdentity>
+RollingFileManager::suspendForReplacement( const QString& path )
+{
+    if ( currentFile_ == nullptr || !refersToPath( path )
+         || !currentFile_->flush() ) {
+        return std::nullopt;
+    }
+    const auto identity = klogg::platform::fileIdentity( *currentFile_ );
+    if ( !identity.has_value() ) {
+        return std::nullopt;
+    }
+    currentFile_->close();
+    currentBytes_ = 0;
+    return identity;
+}
+
 bool RollingFileManager::clearIfCurrent()
 {
     if ( !refersToPath( basePath_ ) || !currentFile_->flush() || !currentFile_->resize( 0 ) ) {

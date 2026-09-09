@@ -2791,12 +2791,25 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
     QDir().mkpath( outputDirectory.absolutePath() );
     const auto previousOutputFailure = outputFailure_;
     const auto hadCommittedBinding = !boundOutputFile_.isEmpty();
-    const auto failBinding = [ this, previousOutputFailure,
-                               hadCommittedBinding ]( OutputFailure failure ) {
-        // Candidate setup is transactional. Its failure describes the attempted
-        // destination, not the still-open committed output. Preserve that
-        // binding's health state so later appends cannot misattribute the
-        // candidate error and close a healthy handle.
+    std::optional<klogg::platform::FileIdentity> suspendedIdentity;
+    bool published = false;
+    const auto failBinding = [ this, previousOutputFailure, hadCommittedBinding,
+                               &suspendedIdentity, &published ]( OutputFailure failure ) {
+        if ( suspendedIdentity.has_value() ) {
+            if ( !published
+                 && restoreOutputAfterFailedReplacement( *suspendedIdentity ) ) {
+                outputFailure_ = previousOutputFailure;
+            }
+            else {
+                // Successful publication consumed the old destination. Never
+                // reopen it, or leave its closed manager logically active.
+                abandonOutputAfterFailedReplacement(
+                    published ? failure : OutputFailure::Open );
+            }
+            return false;
+        }
+        // Candidate failure does not describe a separate, still-open committed
+        // output. Preserve that binding's health and handle without reopening.
         outputFailure_ = hadCommittedBinding
                              ? previousOutputFailure
                              : std::optional<OutputFailure>{ failure };
@@ -2805,76 +2818,90 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
     RollingFileManager candidateOutput( outputPath, limits_.rollingMaxFileSize,
                                         limits_.rollingBackupCount );
 
-    if ( preserveExisting ) {
-        if ( !candidateOutput.openExisting() ) {
-            const auto stagedResult
-                = klogg::stagedoutput::publishSibling( outputPath, [ this ]( QIODevice* output ) {
-                      return writeCaptureToDevice( output );
-                  } );
-            std::optional<klogg::platform::FileIdentity> publishedIdentity;
-            switch ( stagedResult.result ) {
-            case klogg::stagedoutput::Result::Published:
-                publishedIdentity = stagedResult.identity;
-                if ( !publishedIdentity.has_value() ) {
+    try {
+        if ( preserveExisting ) {
+            if ( !candidateOutput.openExisting() ) {
+                const auto stagedResult = klogg::stagedoutput::publishSibling(
+                    outputPath, [ this ]( QIODevice* output ) {
+                        return writeCaptureToDevice( output );
+                    } );
+                std::optional<klogg::platform::FileIdentity> publishedIdentity;
+                switch ( stagedResult.result ) {
+                case klogg::stagedoutput::Result::Published:
+                    publishedIdentity = stagedResult.identity;
+                    if ( !publishedIdentity.has_value() ) {
+                        return failBinding( OutputFailure::Open );
+                    }
+                    break;
+                case klogg::stagedoutput::Result::DestinationExists:
+                    break;
+                case klogg::stagedoutput::Result::WriteFailure:
+                    return failBinding( OutputFailure::Write );
+                case klogg::stagedoutput::Result::FlushFailure:
+                    return failBinding( OutputFailure::Flush );
+                case klogg::stagedoutput::Result::OpenFailure:
+                case klogg::stagedoutput::Result::PublishFailure:
                     return failBinding( OutputFailure::Open );
                 }
-                break;
-            case klogg::stagedoutput::Result::DestinationExists:
-                break;
-            case klogg::stagedoutput::Result::WriteFailure:
-                return failBinding( OutputFailure::Write );
-            case klogg::stagedoutput::Result::FlushFailure:
-                return failBinding( OutputFailure::Flush );
-            case klogg::stagedoutput::Result::OpenFailure:
-            case klogg::stagedoutput::Result::PublishFailure:
+                candidateOutput = RollingFileManager(
+                    outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
+                if ( !candidateOutput.openExisting( publishedIdentity ) ) {
+                    return failBinding( OutputFailure::Open );
+                }
+            }
+        }
+        else {
+            // Replay while the committed writer is still active. Suspend only
+            // its matching identity, immediately before atomic publication.
+            QSaveFile stagedOutput( outputPath );
+            if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
                 return failBinding( OutputFailure::Open );
             }
-            candidateOutput = RollingFileManager(
-                outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
+            if ( !writeCaptureToDevice( &stagedOutput ) ) {
+                stagedOutput.cancelWriting();
+                return failBinding( OutputFailure::Write );
+            }
+            const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
+            if ( !publishedIdentity.has_value() ) {
+                stagedOutput.cancelWriting();
+                return failBinding( OutputFailure::Open );
+            }
+            if ( rollingOutput_.refersToPath( outputPath ) ) {
+                suspendedIdentity = suspendOutputForReplacement( outputPath );
+                if ( !suspendedIdentity.has_value() ) {
+                    stagedOutput.cancelWriting();
+                    abandonOutputAfterFailedReplacement( OutputFailure::Flush );
+                    return false;
+                }
+            }
+            if ( !stagedOutput.commit() ) {
+                return failBinding( OutputFailure::Flush );
+            }
+            published = true;
             if ( !candidateOutput.openExisting( publishedIdentity ) ) {
                 return failBinding( OutputFailure::Open );
             }
         }
-    }
-    else {
-        // FreshSave publishes through QSaveFile after overwrite confirmation, so
-        // a replay or commit failure cannot expose a truncated public destination.
-        QSaveFile stagedOutput( outputPath );
-        if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
-            return failBinding( OutputFailure::Open );
-        }
-        if ( !writeCaptureToDevice( &stagedOutput ) ) {
-            stagedOutput.cancelWriting();
-            return failBinding( OutputFailure::Write );
-        }
-        const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
-        if ( !publishedIdentity.has_value() ) {
-            stagedOutput.cancelWriting();
-            return failBinding( OutputFailure::Open );
-        }
-        if ( !stagedOutput.commit() ) {
-            return failBinding( OutputFailure::Flush );
-        }
-        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
-            return failBinding( OutputFailure::Open );
-        }
-    }
 
-    // Commit only after the candidate is fully published and opened. Moving the
-    // manager transfers its live QFile handle, so failure leaves the previous
-    // output identity and flush counters untouched.
-    QFile tail( outputPath );
-    if ( !tail.open( QIODevice::ReadOnly ) ) {
-        return failBinding( OutputFailure::Open );
+        // An exact append boundary requires readable EOF, even for a writable
+        // Restore destination. Guessing would either merge records or add a
+        // blank line, so an unreadable destination fails closed.
+        QFile tail( outputPath );
+        if ( !tail.open( QIODevice::ReadOnly ) ) {
+            return failBinding( OutputFailure::Open );
+        }
+        const bool needsSeparator
+            = tail.size() > 0 && ( !tail.seek( tail.size() - 1 ) || tail.read( 1 ) != "\n" );
+        rollingOutput_ = std::move( candidateOutput );
+        outputNeedsSeparator_ = needsSeparator;
+        boundOutputFile_ = outputPath;
+        outputFailure_.reset();
+        resetOutputFlushCounters();
+        return true;
     }
-    const bool needsSeparator
-        = tail.size() > 0 && ( !tail.seek( tail.size() - 1 ) || tail.read( 1 ) != "\n" );
-    rollingOutput_ = std::move( candidateOutput );
-    outputNeedsSeparator_ = needsSeparator;
-    boundOutputFile_ = outputPath;
-    outputFailure_.reset();
-    resetOutputFlushCounters();
-    return true;
+    catch ( ... ) {
+        return failBinding( published ? OutputFailure::Open : OutputFailure::Write );
+    }
 }
 
 bool CaptureStore::adoptPublishedOutputFile( RollingFileManager output,
@@ -2892,6 +2919,40 @@ bool CaptureStore::adoptPublishedOutputFile( RollingFileManager output,
     outputFailure_.reset();
     resetOutputFlushCounters();
     return true;
+}
+
+std::optional<klogg::platform::FileIdentity>
+CaptureStore::suspendOutputForReplacement( const QString& outputPath )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    const auto identity = rollingOutput_.suspendForReplacement( outputPath );
+    if ( identity.has_value() ) {
+        resetOutputFlushCounters();
+    }
+    return identity;
+}
+
+bool CaptureStore::restoreOutputAfterFailedReplacement(
+    const klogg::platform::FileIdentity& expectedIdentity )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( !rollingOutput_.openExisting( expectedIdentity ) ) {
+        abandonOutputAfterFailedReplacement( OutputFailure::Open );
+        return false;
+    }
+    outputFailure_.reset();
+    resetOutputFlushCounters();
+    return true;
+}
+
+void CaptureStore::abandonOutputAfterFailedReplacement( OutputFailure failure )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    rollingOutput_.close();
+    rollingOutput_ = RollingFileManager();
+    boundOutputFile_.clear();
+    outputFailure_ = failure;
+    resetOutputFlushCounters();
 }
 
 void CaptureStore::setLimits( Limits limits )
@@ -2958,6 +3019,15 @@ void CaptureStore::deleteCaptureFiles()
     segments_.clear();
     fileSize_ = 0;
     memoryBytes_ = 0;
+    // A reused store starts an empty persistence queue, just as clear() and
+    // loadFromDisk() do. Retaining the old cursor skips the successor's first
+    // resident segments; old pending counts and backoff also belong to the
+    // deleted generation, not to subsequently accepted data.
+    pendingPersistenceBytes_ = 0;
+    pendingPersistenceSegments_ = 0;
+    firstResidentSegment_ = 0;
+    persistenceFailure_.reset();
+    nextSpillRetryMs_.reset();
     totalLines_ = 0;
     maxLineLength_ = 0;
     lastModified_ = QDateTime{};
