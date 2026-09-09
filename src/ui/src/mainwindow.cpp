@@ -2656,6 +2656,13 @@ void MainWindow::startLiveCloseTransaction(
                 failureText = tr( "The active live output could not be flushed. Closing now may lose recent output." );
                 break;
             }
+            // Decision codes are assigned explicitly because QMessageBox
+            // result values for custom buttons are not portable across Qt
+            // versions. Connecting each button to done() makes the real
+            // exec() return the same code an injected dialog handler returns,
+            // so tests can decide through the injectable boundary without
+            // showing a modal at all.
+            enum class CloseDecision : std::uint8_t { Retry = 1, Cancel = 2, CloseAnyway = 3 };
             QMessageBox message( QMessageBox::Warning, tr( "Live capture could not be closed safely" ),
                                  failureText, QMessageBox::NoButton, this );
             auto* retry = message.addButton( tr( "Retry" ), QMessageBox::AcceptRole );
@@ -2663,15 +2670,28 @@ void MainWindow::startLiveCloseTransaction(
             auto* closeAnyway
                 = message.addButton( tr( "Close Anyway (Possible Loss)" ), QMessageBox::DestructiveRole );
             message.setDefaultButton( qobject_cast<QPushButton*>( cancel ) );
-            message.exec();
-            if ( message.clickedButton() == retry ) {
+            QObject::connect( retry, &QPushButton::clicked, &message, [ &message ] {
+                message.done( static_cast<int>( CloseDecision::Retry ) );
+            } );
+            QObject::connect( cancel, &QPushButton::clicked, &message, [ &message ] {
+                message.done( static_cast<int>( CloseDecision::Cancel ) );
+            } );
+            QObject::connect( closeAnyway, &QPushButton::clicked, &message, [ &message ] {
+                message.done( static_cast<int>( CloseDecision::CloseAnyway ) );
+            } );
+            const auto decision = static_cast<CloseDecision>( klogg::ui::execDialog( message ) );
+            switch ( decision ) {
+            case CloseDecision::Retry:
                 liveCloseTransaction_->retry();
-            }
-            else if ( message.clickedButton() == closeAnyway ) {
+                break;
+            case CloseDecision::CloseAnyway:
                 liveCloseTransaction_->closeAnywayPossibleLoss();
-            }
-            else {
+                break;
+            case CloseDecision::Cancel:
+            default:
+                // Escape or a closed dialog must fail safe to Cancel.
                 liveCloseTransaction_->cancel();
+                break;
             }
         },
         [ this, controller, source, mode, discardCommit, resumeOnCancel,

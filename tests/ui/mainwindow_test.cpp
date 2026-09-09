@@ -1787,48 +1787,24 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             const auto previousConfirm = config.confirmTabClose();
             config.setConfirmTabClose( false );
             bool decisionMade = false;
-            bool decisionClickScheduled = false;
-            QTimer modalDriver;
-            modalDriver.setTimerType( Qt::PreciseTimer );
-            modalDriver.setInterval( 1 );
-            QObject::connect( &modalDriver, &QTimer::timeout, &modalDriver, [ & ] {
-                auto* message = qobject_cast<QMessageBox*>( QApplication::activeModalWidget() ); // lint-allow: platform-fragile -- PreciseTimer drives an explicit close decision.
-                if ( message == nullptr || decisionClickScheduled ) {
-                    return;
+            // Decide through the injectable dialog boundary: production
+            // returns the same explicit decision codes from the real exec(),
+            // and no modal is ever shown here. A real offscreen modal on slow
+            // 32-bit runners can crash inside QMessageBox::showEvent, so the
+            // decision path must not depend on showing it.
+            const klogg::ui::ScopedDialogHandler dialogHandler{ [ & ]( QDialog& ) {
+                decisionMade = true;
+                if ( preservationScenario == 10 ) {
+                    StreamingLogDataTimerTestAccess::recoverOutputForClose( *data );
+                    return 1; // Retry
                 }
-                const auto decisionText
-                    = preservationScenario == 9
-                          ? QStringLiteral( "Cancel" )
-                          : preservationScenario == 10 ? QStringLiteral( "Retry" )
-                                                       : QStringLiteral( "Close Anyway" );
-                for ( auto* button : message->buttons() ) {
-                    if ( button->text().contains( decisionText ) ) {
-                        if ( preservationScenario == 10 ) {
-                            StreamingLogDataTimerTestAccess::recoverOutputForClose( *data );
-                        }
-                        // Defer the click into the dialog's own event loop.
-                        // A click while the dialog is still inside its show
-                        // phase unwinds the close transaction through
-                        // showEvent on the stack, which crashes slow 32-bit
-                        // offscreen runners.
-                        decisionClickScheduled = true;
-                        QMetaObject::invokeMethod(
-                            message,
-                            [ button, &decisionMade ] {
-                                decisionMade = true;
-                                button->click();
-                            },
-                            Qt::QueuedConnection );
-                        return;
-                    }
-                }
-            } );
-            modalDriver.start();
+                return preservationScenario == 9 ? 2 // Cancel
+                                                 : 3; // Close Anyway
+            } };
             auto* close = mainWindow->findChild<QAction*>( QStringLiteral( "closeAction" ) );
             REQUIRE( close != nullptr );
             close->trigger();
             REQUIRE( waitUiState( [ & ] { return decisionMade; } ) );
-            modalDriver.stop();
             config.setConfirmTabClose( previousConfirm );
             menu->removeEventFilter( &changes );
 
