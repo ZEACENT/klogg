@@ -481,6 +481,55 @@ TEST_CASE( "Source retirement consumes out-of-order delivery settlements",
     CHECK( source.isInputTerminated() );
 }
 
+TEST_CASE( "Controller callback exceptions report unknown delivery before settlement",
+           "[livecapture][transport][controller][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    SourceControllerEffects effects( source );
+    klogg::livelog::LiveLogController controller(
+        controllerSessionSpec(), klogg::livelog::LiveLogControllerConfig{}, effects );
+    source.setControllerCallbacks(
+        []( Generation, const QByteArray&, auto ) { throw std::bad_alloc{}; },
+        [&]( Generation generation, LiveSourceTransport::State state ) {
+            if ( state == LiveSourceTransport::State::Connected ) {
+                controller.protocolServiceReady( generation );
+                controller.streamHandleOpened( generation );
+                controller.streamReadArmed( generation );
+            }
+        },
+        [&]( Generation generation, klogg::livecapture::LiveSourceError error ) {
+            controller.streamFailed( generation, std::move( error ) );
+        } );
+    source.setDeliveryFailedCallback(
+        [&]( Generation generation, const auto& result, std::uint64_t offeredBytes ) {
+            controller.streamDeliveryFailed( generation, result, offeredBytes );
+        } );
+
+    controller.armRunIntent();
+    controller.infrastructureChanged(
+        klogg::livecapture::InfrastructureStatus::Ready,
+        klogg::livecapture::InfrastructureOwnership::ExternalShared );
+    controller.deviceAvailable( controller.snapshot().generation );
+    auto* transport = factory.lastTransport;
+    REQUIRE( transport != nullptr );
+    const auto generation = controller.snapshot().generation;
+    transport->publishState( generation, LiveSourceTransport::State::Connected );
+    REQUIRE( controller.snapshot().source.status
+             == klogg::livecapture::SourceStatus::Streaming );
+
+    transport->publishBytes( generation, QByteArrayLiteral( "lost\n" ) );
+
+    CHECK( controller.spec().integrity.uncertainBytes == 5u );
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK( controller.spec().integrity.outputProgressUnknown );
+    CHECK( controller.snapshot().source.status
+           == klogg::livecapture::SourceStatus::Failed );
+}
+
 TEST_CASE( "Source forwards a discard upgrade to an existing retirement",
            "[livecapture][transport][stop-disposition-red]" )
 {

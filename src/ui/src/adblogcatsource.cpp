@@ -179,6 +179,21 @@ void AdbLogcatSource::wireTransport()
                      };
                      try { controllerBytes_( generation, data, settled ); }
                      catch ( ... ) {
+                         klogg::livecapture::CaptureDeliveryResult unknown;
+                         unknown.disposition
+                             = klogg::livecapture::DeliveryDisposition::PartialUnknown;
+                         unknown.outputBytes.reset();
+                         unknown.failureCode = "capture-outcome-unknown";
+                         if ( deliveryFailedCallback_ ) {
+                             try {
+                                 deliveryFailedCallback_(
+                                     generation, unknown,
+                                     static_cast<std::uint64_t>( data.size() ) );
+                             }
+                             catch ( ... ) {
+                                 LOG_ERROR << "Failed to report an unknown live delivery outcome";
+                             }
+                         }
                          settled();
                      }
                  }
@@ -620,6 +635,12 @@ klogg::livecapture::CaptureDeliveryResult AdbLogcatSource::mapCaptureOutcome(
 void AdbLogcatSource::setFinalizedCallback( FinalizedCallback callback )
 {
     finalizedCallback_ = std::move( callback );
+}
+
+void AdbLogcatSource::setDeliveryFailedCallback(
+    DeliveryFailedCallback callback )
+{
+    deliveryFailedCallback_ = std::move( callback );
 }
 
 void AdbLogcatSource::beginDeliveryGeneration( Generation generation )

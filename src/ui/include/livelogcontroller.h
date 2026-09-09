@@ -150,6 +150,9 @@ public:
     using DeliverySettledCallback = std::function<void()>;
     void streamBytesReceived( livecapture::Generation generation, const QByteArray& bytes,
                               DeliverySettledCallback settled = {} );
+    void streamDeliveryFailed(
+        livecapture::Generation generation,
+        const livecapture::CaptureDeliveryResult& result, std::uint64_t offeredBytes );
     void streamStable( livecapture::Generation generation );
     void streamFailed( livecapture::Generation generation, livecapture::LiveSourceError error );
     void captureHealthChanged( bool healthy,

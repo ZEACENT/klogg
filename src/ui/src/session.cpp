@@ -114,6 +114,7 @@ public:
         source_->setControllerCallbacks( {}, {}, {} );
         source_->setStoppedCallback( {} );
         source_->setFinalizedCallback( {} );
+        source_->setDeliveryFailedCallback( {} );
     }
 
     void attach( klogg::livelog::LiveLogController& controller )
@@ -122,6 +123,11 @@ public:
         source_->setFinalizedCallback( [ this ]( auto generation, const auto& result ) {
             controller_->inputTerminated( generation, result );
         } );
+        source_->setDeliveryFailedCallback(
+            [ this ]( auto generation, const auto& result, std::uint64_t offeredBytes ) {
+                controller_->streamDeliveryFailed( generation, result,
+                                                   offeredBytes );
+            } );
         source_->setStoppedCallback( [ this ]( auto generation, auto discarded ) {
             controller_->stopCompleted( generation, discarded );
         } );

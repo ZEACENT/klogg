@@ -71,6 +71,10 @@ public:
     using FinalizedCallback = std::function<void( LiveSourceTransport::Generation,
         const klogg::livecapture::CaptureDeliveryResult& )>;
     void setFinalizedCallback( FinalizedCallback callback );
+    using DeliveryFailedCallback = std::function<void(
+        LiveSourceTransport::Generation,
+        const klogg::livecapture::CaptureDeliveryResult&, std::uint64_t )>;
+    void setDeliveryFailedCallback( DeliveryFailedCallback callback );
     bool isInputTerminated() const;
     // nullopt until real stopped; a value is one bounded persistence turn, not fsync.
     std::optional<CaptureStore::PersistenceResult> persistForClose( int maxSegments = 32 );
@@ -150,6 +154,7 @@ private:
     BytesCallback controllerBytes_;
     StateCallback controllerState_;
     FailureCallback controllerFailure_;
+    DeliveryFailedCallback deliveryFailedCallback_;
     ControlCallback controllerStop_;
     ControlCallback controllerRestart_;
     bool retiredCleanupScheduled_{ false };

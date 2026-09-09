@@ -456,6 +456,14 @@ void LiveLogController::streamBytesReceived( live::Generation generation, const 
               &bytes, std::move( settled ) );
 }
 
+void LiveLogController::streamDeliveryFailed(
+    live::Generation generation, const live::CaptureDeliveryResult& result,
+    std::uint64_t offeredBytes )
+{
+    settleDelivery( generation, result, offeredBytes );
+    notifyPresentationChanged();
+}
+
 void LiveLogController::streamStable( live::Generation generation )
 {
     dispatch( live::StreamStable{ generation, clock_->now() } );
