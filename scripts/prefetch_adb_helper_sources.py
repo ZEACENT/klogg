@@ -13,11 +13,23 @@ import pathlib
 import shutil
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 
 RAW_ARCHIVE_IDENTITY = "raw-sha256"
 CANONICAL_TAR_GZ_IDENTITY = "canonical-tar-gz-v1"
+
+# Locked source archives occasionally answer transient 5xx; a bounded retry
+# with linear backoff keeps the prefetch job resilient without masking real
+# lock defects such as 404.
+DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_RETRY_BASE_SECONDS = 1.0
+RETRYABLE_STATUS_CODES = frozenset({408, 429})
+
+
+def is_transient_http_status(code: int) -> bool:
+    return code >= 500 or code in RETRYABLE_STATUS_CODES
 SUPPORTED_ARCHIVE_IDENTITIES = {RAW_ARCHIVE_IDENTITY, CANONICAL_TAR_GZ_IDENTITY}
 
 
@@ -330,15 +342,34 @@ def safe_extract(
     return matched_exclusions
 
 
-def download(url: str, destination: pathlib.Path) -> None:
+def download(
+    url: str,
+    destination: pathlib.Path,
+    attempts: int = DOWNLOAD_ATTEMPTS,
+    backoff_seconds: float = DOWNLOAD_RETRY_BASE_SECONDS,
+    sleep=time.sleep,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
         temporary = pathlib.Path(stream.name)
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "klogg-adb-source-prefetch/1"})
-        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
-            shutil.copyfileobj(response, output)
-        temporary.replace(destination)
+        for attempt in range(attempts):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "klogg-adb-source-prefetch/1"})
+                with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+                temporary.replace(destination)
+                return
+            except urllib.error.HTTPError as error:
+                # Locked source hosts intermittently answer 502/503; a client
+                # error is a lock or network defect that retrying cannot fix.
+                if not is_transient_http_status(error.code) or attempt + 1 >= attempts:
+                    raise
+                error.close()
+            except OSError:
+                if attempt + 1 >= attempts:
+                    raise
+            sleep(backoff_seconds * (attempt + 1))
     finally:
         temporary.unlink(missing_ok=True)
 
