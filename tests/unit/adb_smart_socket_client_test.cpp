@@ -2081,6 +2081,75 @@ TEST_CASE( "ADB smart-socket frame delivery survives synchronous client destruct
     CHECK( deliveries == 1 );
 }
 
+TEST_CASE( "ADB smart-socket peer closure survives synchronous client destruction",
+           "[livecapture][adb][network][client][terminal][lifetime][socket-close][review-red]" )
+{
+    constexpr Generation generation = 903u;
+    constexpr AdbSmartSocketClient::OperationId operationId = 9903u;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto client = std::make_unique<AdbSmartSocketClient>(
+        AdbSmartSocketClientConfig{}, socketFactory, deadlines );
+    QPointer<AdbSmartSocketClient> guard( client.get() );
+    int deliveries = 0;
+
+    SECTION( "one-shot host reply observer destroys the client at EOF" )
+    {
+        QObject::connect( client.get(), &AdbSmartSocketClient::hostReplyReceived,
+                          [&]( Generation deliveredGeneration,
+                               AdbSmartSocketClient::OperationId deliveredOperationId,
+                               const QByteArray& reply ) {
+                              CHECK( deliveredGeneration == generation );
+                              CHECK( deliveredOperationId == operationId );
+                              CHECK( reply == QByteArrayLiteral( "shell_v2" ) );
+                              ++deliveries;
+                              client.reset();
+                          } );
+        client->requestHostService( generation, operationId, HostService::ServerFeatures );
+        auto* const socket = socketFactory.socketAt( 0 );
+        REQUIRE( socket != nullptr );
+        socket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                              + hostReplyFrame( QByteArrayLiteral( "shell_v2" ) ) );
+    }
+
+    SECTION( "shell EOF error observer destroys the client" )
+    {
+        QObject::connect( client.get(), &AdbSmartSocketClient::errorOccurred,
+                          [&]( Generation deliveredGeneration,
+                               AdbSmartSocketClient::OperationId deliveredOperationId,
+                               AdbSmartSocketErrorCode code, const QString& ) {
+                              CHECK( deliveredGeneration == generation );
+                              CHECK( deliveredOperationId == operationId );
+                              CHECK( code == AdbSmartSocketErrorCode::UnexpectedEof );
+                              ++deliveries;
+                              client.reset();
+                          } );
+        client->startShellService(
+            generation, operationId,
+            TransportSelection{ TransportKind::Serial, "closure-lifetime-device" },
+            std::string{ "shell,v2,raw:logcat" } );
+        auto* const socket = socketFactory.socketAt( 0 );
+        REQUIRE( socket != nullptr );
+        socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        socket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    }
+
+    REQUIRE_FALSE( guard.isNull() );
+    REQUIRE( deliveries == 0 );
+    auto* const socket = socketFactory.socketAt( 0 );
+    REQUIRE( socket != nullptr );
+    // Unlike readyRead delivery, EOF completes inside the socketClosed caller.
+    // The observer deletes the client before that caller resumes.
+    CHECK_NOTHROW( socket->closePeer() );
+    CHECK( guard.isNull() );
+    CHECK( deliveries == 1 );
+    // The retired socket must outlive the mid-signal client destruction as a
+    // deferred deletion, not die as a child of the destroyed client.
+    processDeferredDeletes();
+    CHECK( socketFactory.liveSocketCount() == 0 );
+}
+
 TEST_CASE( "ADB smart-socket production defaults yield after a finite shell frame turn",
            "[livecapture][adb][network][client][budget][frames][w3-red]" )
 {

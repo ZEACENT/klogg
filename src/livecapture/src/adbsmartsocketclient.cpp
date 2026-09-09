@@ -947,7 +947,11 @@ private:
         socketClosureError_
             = socket_ != nullptr ? socket_->error() : QAbstractSocket::UnknownSocketError;
         socketClosureDiagnostic_ = socket_ != nullptr ? socket_->errorString() : QString{};
+        const QPointer<AdbSmartSocketClient> guard( &client_ );
         consumeAvailableBytes();
+        if ( guard.isNull() ) {
+            return;
+        }
         tryCompleteSocketClosure();
     }
 
@@ -1080,6 +1084,12 @@ private:
             else {
                 retiredSocket->disconnectFromHost();
             }
+            // The socket is parented to the client, and completion may be
+            // emitted while the client (or an observer) deletes it from inside
+            // a socket signal. Releasing the parent here keeps the emitting
+            // sender alive until the queued deletion runs instead of letting
+            // ~QObject destroy the socket mid-emission.
+            retiredSocket->setParent( nullptr );
             retiredSocket->deleteLater();
         }
     }

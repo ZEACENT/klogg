@@ -143,6 +143,13 @@ public:
         return static_cast<int>( sockets_.size() );
     }
 
+    int liveSocketCount() const
+    {
+        return static_cast<int>( std::count_if(
+            sockets_.begin(), sockets_.end(),
+            []( const QPointer<DeterministicAdbSocket>& socket ) { return !socket.isNull(); } ) );
+    }
+
 private:
     QVector<QPointer<DeterministicAdbSocket>> sockets_;
 };
