@@ -173,6 +173,7 @@ private:
     void dispatch( const livecapture::LiveStateEvent& event, const QByteArray* bytes = nullptr,
                    DeliverySettledCallback deliverySettled = {} );
     void execute( const livecapture::LiveStateEffect& effect, const QByteArray* bytes );
+    void observeIntegrityTransition( const livecapture::LiveStateSnapshot& previousSnapshot );
     void settleDelivery( livecapture::Generation generation,
                          const livecapture::CaptureDeliveryResult& result, std::uint64_t offered );
     livecapture::Timestamp retryDelay( unsigned attempt ) const;
@@ -190,7 +191,7 @@ private:
     std::unique_ptr<ProductionRuntime> productionRuntime_;
     LiveLogControllerEffects& effects_;
     std::optional<LiveLogScheduler::Token> retryToken_;
-    std::optional<livecapture::Generation> openedGeneration_;
+    bool replayRiskPending_{ false };
     std::deque<PendingDispatch> pendingDispatches_;
     LiveLogControlPresentation lastControlPresentation_;
     PresentationChangedCallback presentationChangedCallback_;

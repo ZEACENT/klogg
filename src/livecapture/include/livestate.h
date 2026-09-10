@@ -67,7 +67,6 @@ struct LiveIntegritySummary {
     std::uint64_t outputBytes{ 0 };
     std::uint64_t olderEvents{ 0 };
     bool outputProgressUnknown{ false };
-    bool sourceCompletenessUnknown{ true };
     bool gapPossible{ false };
     bool replayPossible{ false };
     std::vector<IntegrityEvent> recentEvents;

@@ -545,6 +545,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             auto pending = std::move( pendingDispatches_.front() );
             pendingDispatches_.pop_front();
 
+            const auto previousSnapshot = snapshot_;
             auto transition = live::reduce( snapshot_, pending.event, config_.reducer );
             if ( !transition.accepted ) {
                 if ( pending.bytes ) {
@@ -565,6 +566,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             }
 
             snapshot_ = std::move( transition.snapshot );
+            observeIntegrityTransition( previousSnapshot );
             const auto* pendingBytes
                 = pending.bytes.has_value() ? &pending.bytes.value() : nullptr;
             for ( const auto& effect : transition.effects ) {
@@ -600,6 +602,41 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
     dispatching_ = false;
 }
 
+void LiveLogController::observeIntegrityTransition(
+    const live::LiveStateSnapshot& previousSnapshot )
+{
+    const bool connectedStreamInterrupted
+        = previousSnapshot.source.status == live::SourceStatus::Streaming
+          && snapshot_.source.status != live::SourceStatus::Streaming
+          && snapshot_.runIntent == live::RunIntent::Running;
+    if ( connectedStreamInterrupted ) {
+        if ( !spec_.integrity.gapPossible ) {
+            spec_.integrity.gapPossible = true;
+            spec_.integrity.record( "connected-stream-interrupted" );
+        }
+        if ( spec_.sourceKind == SourceKind::AndroidLogcat
+             && !spec_.integrity.replayPossible ) {
+            replayRiskPending_ = true;
+        }
+    }
+
+    if ( snapshot_.runIntent == live::RunIntent::Stopped ) {
+        replayRiskPending_ = false;
+        return;
+    }
+
+    const bool replacementConnected
+        = previousSnapshot.source.status != live::SourceStatus::Streaming
+          && snapshot_.source.status == live::SourceStatus::Streaming;
+    if ( replacementConnected && replayRiskPending_ ) {
+        replayRiskPending_ = false;
+        if ( !spec_.integrity.replayPossible ) {
+            spec_.integrity.replayPossible = true;
+            spec_.integrity.record( "source-replay-possible" );
+        }
+    }
+}
+
 void LiveLogController::execute( const live::LiveStateEffect& effect, const QByteArray* bytes )
 {
     switch ( effect.kind ) {
@@ -607,20 +644,12 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
         effects_.invalidateGeneration( effect.generation );
         break;
     case live::EffectKind::CancelStream:
-        if ( openedGeneration_ == effect.generation ) {
-            openedGeneration_.reset();
-            spec_.integrity.gapPossible = true;
-            if ( spec_.sourceKind == SourceKind::AndroidLogcat ) { spec_.integrity.replayPossible = true; }
-            spec_.integrity.record( effect.stopDisposition == live::StopDisposition::SettleAccepted
-                                      ? "stream-retired" : "user-stopped" );
-        }
         effects_.retireStream( effect.generation, effect.stopDisposition );
         break;
     case live::EffectKind::StartInfrastructure:
         effects_.startInfrastructure( effect.generation );
         break;
     case live::EffectKind::OpenStream:
-        openedGeneration_ = effect.generation;
         effects_.openStream( effect.generation, transportConfig() );
         break;
     case live::EffectKind::AppendBytes:

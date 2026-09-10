@@ -156,12 +156,11 @@ bool hasHistoricalCapturePersistenceWarning(
                         } );
 }
 
-bool hasUnresolvedLiveIntegrityWarning(
+bool hasLiveIntegrityWarning(
     const klogg::livelog::LiveLogControlPresentation& presentation )
 {
     const auto& integrity = presentation.integrity;
     return !presentation.captureHealthy || hasHistoricalCapturePersistenceWarning( integrity )
-           || integrity.sourceCompletenessUnknown
            || integrity.gapPossible || integrity.replayPossible || integrity.discardedBytes > 0
            || integrity.uncertainBytes > 0 || integrity.outputProgressUnknown;
 }
@@ -190,10 +189,6 @@ QString liveIntegrityWarningText(
     if ( integrity.uncertainBytes > 0 || integrity.outputProgressUnknown ) {
         warnings << QCoreApplication::translate(
             "MainWindow", "Some host-side capture or output progress is uncertain." );
-    }
-    if ( integrity.sourceCompletenessUnknown ) {
-        warnings << QCoreApplication::translate(
-            "MainWindow", "Completeness of records supplied by the device cannot be verified." );
     }
     return warnings.join( QLatin1Char( ' ' ) );
 }
@@ -1835,7 +1830,7 @@ void MainWindow::saveCurrentLiveLog( LiveLogSaveAnsiMode ansiMode )
 
     if ( controller != nullptr ) {
         const auto presentation = controller->controlPresentation();
-        if ( hasUnresolvedLiveIntegrityWarning( presentation ) ) {
+        if ( hasLiveIntegrityWarning( presentation ) ) {
             QMessageBox warning( QMessageBox::Warning, tr( "Save live log with integrity warning" ),
                                  tr( "The saved data may be incomplete or contain replayed records. %1" )
                                      .arg( liveIntegrityWarningText( presentation ) ),
@@ -3616,7 +3611,6 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
         }
 
         if ( projection.outputBinding == klogg::livecapture::OutputBindingState::Degraded ) {
-            liveStatus = LiveTabStatus::Error;
             if ( projection.outputBindingError.has_value() ) {
                 QString outputError;
                 const auto& error = *projection.outputBindingError;
@@ -3640,22 +3634,9 @@ void MainWindow::updateLiveTabAppearance( CrawlerWidget* crawler )
             }
         }
 
-        if ( hasUnresolvedLiveIntegrityWarning( projection ) ) {
-            const auto& integrity = projection.integrity;
-            const bool hostLossOrUncertainty
-                = !projection.captureHealthy
-                  || hasHistoricalCapturePersistenceWarning( integrity )
-                  || integrity.gapPossible || integrity.discardedBytes > 0
-                  || integrity.uncertainBytes > 0
-                  || integrity.outputProgressUnknown;
-            const bool tooltipWarning = hostLossOrUncertainty || integrity.replayPossible;
-            if ( hostLossOrUncertainty ) {
-                liveStatus = LiveTabStatus::Error;
-            }
-            if ( tooltipWarning ) {
-                toolTip = tr( "%1\nCapture integrity: %2" )
-                              .arg( toolTip, liveIntegrityWarningText( projection ) );
-            }
+        if ( hasLiveIntegrityWarning( projection ) ) {
+            toolTip = tr( "%1\nCapture integrity: %2" )
+                          .arg( toolTip, liveIntegrityWarningText( projection ) );
         }
     }
 
@@ -3964,7 +3945,7 @@ void MainWindow::updateInfoLine()
     auto currentFile = infoPath;
     if ( const auto* controller = session_.getLiveLogController( crawler ) ) {
         const auto projection = controller->controlPresentation();
-        if ( hasUnresolvedLiveIntegrityWarning( projection ) ) {
+        if ( hasLiveIntegrityWarning( projection ) ) {
             currentFile += tr( " - Capture integrity warning: %1" )
                                .arg( liveIntegrityWarningText( projection ) );
         }

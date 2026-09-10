@@ -1481,6 +1481,15 @@ void exerciseLiveCountdownRouting( MainWindow& window, Session& session,
     }
 }
 
+LiveTabStatus liveTabStatus( const TabbedCrawlerWidget& tabs, int index )
+{
+    const auto* tabBar = tabs.findChild<QTabBar*>();
+    REQUIRE( tabBar != nullptr );
+    const auto value = tabBar->tabData( index ).toMap().value( QStringLiteral( "liveStatus" ) );
+    REQUIRE( value.isValid() );
+    return static_cast<LiveTabStatus>( value.toInt() );
+}
+
 void exerciseLivePresentation( bool useIos, bool background, int preservationScenario = -1,
                                bool countdown = false )
 {
@@ -1721,6 +1730,43 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         auto* disconnect = mainWindow->findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
         REQUIRE( info != nullptr );
         REQUIRE( disconnect != nullptr );
+        if ( preservationScenario == 14 ) {
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Connected );
+            CHECK_FALSE( info->text().contains( QStringLiteral( "Capture integrity warning:" ) ) );
+            CHECK_FALSE( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Capture integrity:" ) ) );
+
+            controller->captureHealthChanged(
+                false,
+                live::LiveSourceError{ live::ErrorCategory::Capture,
+                                       "capture-persistence-degraded",
+                                       live::ErrorScope::Capture, live::RetryPolicy::Never,
+                                       "Capture spool persistence is degraded.", {} } );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Connected );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "currently degraded" ) ) );
+            controller->captureHealthChanged( true );
+
+            controller->outputBindingChanged(
+                live::OutputBindingState::Degraded,
+                live::LiveSourceError{ live::ErrorCategory::Capture, "output-write-failed",
+                                       live::ErrorScope::Capture, live::RetryPolicy::Never,
+                                       "The output file could not be written.", {} } );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Connected );
+            CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Output error:" ) ) );
+            controller->outputBindingChanged( live::OutputBindingState::Healthy );
+
+            controller->streamFailed(
+                controller->snapshot().generation,
+                live::LiveSourceError{ live::ErrorCategory::Stream, "presentation-retry",
+                                       live::ErrorScope::Stream, live::RetryPolicy::Backoff,
+                                       "Deterministic stream interruption", {} } );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Reconnecting );
+            controller->stopRequested( live::StopDisposition::SettleAccepted );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Disconnected );
+
+            menu->removeEventFilter( &changes );
+            mainWindow->close();
+            return;
+        }
         if ( preservationScenario == 8 ) {
             using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
             auto* data = Access::data( crawler );
@@ -1809,6 +1855,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
         if ( preservationScenario == 7 ) {
             REQUIRE( controller->controlPresentation().integrity.gapPossible );
             REQUIRE( controller->controlPresentation().integrity.replayPossible );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Connected );
             CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Capture integrity:" ) ) );
             CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "gaps" ) ) );
             CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "replayed" ) ) );
@@ -1826,8 +1873,18 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "degraded earlier" ) ) );
             CHECK( tabs->tabToolTip( 0 ).contains( QStringLiteral( "gaps" ) ) );
             CHECK( controller->controlPresentation().integrity.discardedBytes == 17 );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Connected );
+
+            controller->streamFailed(
+                controller->snapshot().generation,
+                live::LiveSourceError{ live::ErrorCategory::Stream, "integrity-retry",
+                                       live::ErrorScope::Stream, live::RetryPolicy::Backoff,
+                                       "Deterministic stream interruption", {} } );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Reconnecting );
+            controller->stopRequested( live::StopDisposition::SettleAccepted );
+            CHECK( liveTabStatus( *tabs, 0 ) == LiveTabStatus::Disconnected );
+
             menu->removeEventFilter( &changes );
-            controller->stopRequested();
             mainWindow->close();
             return;
         }
@@ -2104,7 +2161,14 @@ TEST_CASE( "Live save repairs and switches an existing output without reopening 
     exerciseLivePresentation( useIos, false, 13 );
 }
 
-TEST_CASE( "Restored live integrity history remains visible after current health recovers",
+TEST_CASE( "Fresh live capture keeps lifecycle status separate from diagnostics",
+           "[ui][session][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 14 );
+}
+
+TEST_CASE( "Restored live integrity history remains visible without replacing lifecycle status",
            "[ui][session][live-integrity]" )
 {
     const auto useIos = GENERATE( false, true );
@@ -2356,7 +2420,7 @@ SCENARIO( "MainWindow restored iOS live log tabs show disconnected state", "[ui]
                && tabArea->tabToolTip( 0 ).contains(
                    QStringLiteral( "The bound capture output could not be written." ) );
     } ) );
-    CHECK( tabArea->tabIcon( 0 ).cacheKey() != disconnectedIconKey );
+    CHECK( tabArea->tabIcon( 0 ).cacheKey() == disconnectedIconKey );
 
     runInUiThread(
         [ source ] { Q_EMIT source->captureOutputChanged( true, CaptureOutputError::Write ); } );

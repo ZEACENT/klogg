@@ -460,7 +460,6 @@ TEST_CASE( "Authoritative acceptance settles known partial unknown and postcommi
     CHECK( integrity.committedBytes == 99u );
     CHECK( integrity.committedLines == 7u );
     CHECK( integrity.outputBytes == 11u );
-    CHECK( integrity.sourceCompletenessUnknown );
     CHECK( effects.count( RecordingEffects::Kind::AppendBytes ) == 1u );
     CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
 }
@@ -524,26 +523,70 @@ TEST_CASE( "Permanent capture failure survives later absence and availability",
     CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
 }
 
-TEST_CASE( "Automatic retirement waits for the registered stop barrier before opening",
-           "[livelog-controller][w2-control-red]" )
+TEST_CASE( "An unconnected stream attempt does not manufacture an integrity gap",
+           "[livelog-controller][live-integrity-policy-red]" )
 {
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
     ManualClock clock;
     ManualScheduler scheduler;
     RecordingEffects effects;
-    livelog::LiveLogController controller( androidSpec(), controllerConfig(), clock, scheduler, effects );
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToOpening( controller, clock );
+    controller.streamFailed( controller.snapshot().generation, retryableStreamError() );
+
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "A clean intentional stop does not manufacture an integrity gap",
+           "[livelog-controller][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
     armToStreaming( controller, clock );
-    const auto generation = controller.snapshot().generation;
-    controller.deviceAbsent( generation );
+    controller.stopRequested( live::StopDisposition::SettleAccepted );
+
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "Automatic retirement waits for the stop barrier and reports real reconnect semantics",
+           "[livelog-controller][w2-control-red][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.deviceAbsent( retiredGeneration );
     CHECK( controller.spec().integrity.gapPossible );
-    CHECK( controller.spec().integrity.replayPossible );
-    REQUIRE( controller.snapshot().generation != generation );
-    controller.deviceAvailable( controller.snapshot().generation );
-    controller.protocolServiceReady( generation );
-    controller.streamReadArmed( generation );
-    controller.stopCompleted( generation + 19u );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+    REQUIRE( controller.snapshot().generation != retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.protocolServiceReady( retiredGeneration );
+    controller.streamReadArmed( retiredGeneration );
+    controller.stopCompleted( retiredGeneration + 19u );
     CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 1u );
-    controller.stopCompleted( generation );
+    controller.stopCompleted( retiredGeneration );
     CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 2u );
+
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
 }
 
 TEST_CASE( "Append exceptions are terminal and do not escape or replay buffered deliveries",

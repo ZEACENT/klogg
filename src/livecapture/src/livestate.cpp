@@ -606,12 +606,12 @@ bool LiveIntegritySummary::operator==( const LiveIntegritySummary& other ) const
 {
     return std::tie( offeredBytes, dequeuedBytes, acceptedBytes, committedBytes, committedLines,
                     discardedBytes, uncertainBytes, outputBytes, olderEvents, outputProgressUnknown,
-                    sourceCompletenessUnknown, gapPossible, replayPossible, recentEvents )
+                    gapPossible, replayPossible, recentEvents )
         == std::tie( other.offeredBytes, other.dequeuedBytes, other.acceptedBytes,
                      other.committedBytes, other.committedLines, other.discardedBytes,
                      other.uncertainBytes, other.outputBytes, other.olderEvents,
-                     other.outputProgressUnknown, other.sourceCompletenessUnknown,
-                     other.gapPossible, other.replayPossible, other.recentEvents );
+                     other.outputProgressUnknown, other.gapPossible, other.replayPossible,
+                     other.recentEvents );
 }
 
 LiveStateSnapshot initialLiveState()
