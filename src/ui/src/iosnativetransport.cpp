@@ -420,9 +420,11 @@ void IosNativeTransport::completeStopped()
         return;
     }
     // Native stopped follows callback quiescence and native join, so rejected
-    // records are final. Add them only on this terminal path, never per drain
-    // turn, and independently of already-accounted queued/pending bytes.
+    // complete records and the legacy assembler's incomplete tail are final. Add
+    // both only on this terminal path, never per drain turn, and independently of
+    // already-accounted queued/pending bytes.
     discardedBytes_ += static_cast<quint64>( finalStatistics.rejectedBeforeEnqueueBytes );
+    discardedBytes_ += static_cast<quint64>( finalStatistics.incompleteSourceRecordBytes );
     if ( drainFailed_ ) {
         discardedBytes_ += static_cast<quint64>( finalStatistics.queuedBytes );
     }

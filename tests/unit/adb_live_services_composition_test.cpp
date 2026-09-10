@@ -1120,6 +1120,9 @@ TEST_CASE( "managed transport preserves retired statistics for owner aggregation
     first.deliveredChunks = 3u;
     first.backpressuredBytes = 5u;
     first.backpressuredChunks = 1u;
+    first.rejectedBeforeEnqueueBytes = std::numeric_limits<std::size_t>::max() - 3u;
+    first.rejectedBeforeEnqueueChunks = 2u;
+    first.incompleteSourceRecordBytes = 7u;
     first.highWaterQueuedBytes = 7u;
     first.highWaterQueuedChunks = 2u;
     innerFactory.created.front()->setStatistics( first );
@@ -1142,6 +1145,9 @@ TEST_CASE( "managed transport preserves retired statistics for owner aggregation
     second.deliveredChunks = 5u;
     second.backpressuredBytes = 13u;
     second.backpressuredChunks = 4u;
+    second.rejectedBeforeEnqueueBytes = 10u;
+    second.rejectedBeforeEnqueueChunks = 4u;
+    second.incompleteSourceRecordBytes = 11u;
     second.highWaterQueuedBytes = 5u;
     second.highWaterQueuedChunks = 3u;
     innerFactory.created.back()->setStatistics( second );
@@ -1157,6 +1163,9 @@ TEST_CASE( "managed transport preserves retired statistics for owner aggregation
     CHECK( statistics.deliveredChunks == 8u );
     CHECK( statistics.backpressuredBytes == 18u );
     CHECK( statistics.backpressuredChunks == 5u );
+    CHECK( statistics.rejectedBeforeEnqueueBytes == std::numeric_limits<std::size_t>::max() );
+    CHECK( statistics.rejectedBeforeEnqueueChunks == 6u );
+    CHECK( statistics.incompleteSourceRecordBytes == 18u );
     CHECK( statistics.highWaterQueuedBytes == 7u );
     CHECK( statistics.highWaterQueuedChunks == 3u );
 }

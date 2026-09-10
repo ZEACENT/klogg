@@ -18,9 +18,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -29,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "iosnativeapi.h"
 #include "iosnativestream.h"
 #include "iosnativetransport.h"
 #include "livedataqueue.h"
@@ -220,6 +225,164 @@ public:
 
     mutable std::vector<std::shared_ptr<ScriptedSessionState>> sessions;
 };
+
+struct LegacySyslogNativeState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    NativeSyslogRelayCallback callback{ nullptr };
+    NativeSyslogRelayErrorCallback errorCallback{ nullptr };
+    void* context{ nullptr };
+    bool started{ false };
+
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        callback = nullptr;
+        errorCallback = nullptr;
+        context = nullptr;
+        started = false;
+    }
+
+    bool waitUntilStarted()
+    {
+        std::unique_lock<std::mutex> lock( mutex );
+        return changed.wait_for( lock, std::chrono::seconds{ 2 }, [ this ] { return started; } );
+    }
+
+    void emit( const std::string& bytes )
+    {
+        NativeSyslogRelayCallback observedCallback = nullptr;
+        void* observedContext = nullptr;
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            observedCallback = callback;
+            observedContext = context;
+        }
+        REQUIRE( observedCallback != nullptr );
+        for ( const auto byte : bytes ) {
+            observedCallback( byte, observedContext );
+        }
+    }
+};
+
+LegacySyslogNativeState legacySyslogNative;
+const auto LegacyDeviceHandle = reinterpret_cast<NativeIdevice>( 0x1101 );
+const auto LegacyLockdownHandle = reinterpret_cast<NativeLockdownClient>( 0x1202 );
+const auto LegacyServiceHandle = reinterpret_cast<NativeServiceDescriptor>( 0x1303 );
+const auto LegacySyslogHandle = reinterpret_cast<NativeSyslogRelayClient>( 0x1505 );
+
+NativePairRecordResult legacyReadPairRecord( const char*, char** record, std::uint32_t* size )
+{
+    auto bytes = std::make_unique<char[]>( 1u );
+    bytes[ 0 ] = 'p';
+    *record = bytes.release();
+    *size = 1u;
+    return NativePairRecordResult::Present;
+}
+
+void legacyFreePairRecord( char* record )
+{
+    delete[] record;
+}
+
+std::int32_t legacyNewDevice( NativeIdevice* device, const char*, NativeConnectionOption )
+{
+    *device = LegacyDeviceHandle;
+    return 0;
+}
+
+std::int32_t legacyFreeDevice( NativeIdevice )
+{
+    return 0;
+}
+
+std::int32_t legacyNewLockdown( NativeIdevice, NativeLockdownClient* client, const char* )
+{
+    *client = LegacyLockdownHandle;
+    return 0;
+}
+
+std::int32_t legacyFreeLockdown( NativeLockdownClient )
+{
+    return 0;
+}
+
+std::int32_t legacyStartService( NativeLockdownClient, const char*,
+                                 NativeServiceDescriptor* service )
+{
+    *service = LegacyServiceHandle;
+    return 0;
+}
+
+std::int32_t legacyFreeService( NativeServiceDescriptor )
+{
+    return 0;
+}
+
+std::int32_t legacyGetString( NativeLockdownClient, const char*, const char* key, char** value )
+{
+    if ( key == nullptr || std::string{ key } != "ProductVersion" ) {
+        return -1;
+    }
+    auto bytes = std::make_unique<char[]>( 4u );
+    std::memcpy( bytes.get(), "8.4", 4u );
+    *value = bytes.release();
+    return 0;
+}
+
+void legacyFreeString( char* value )
+{
+    delete[] value;
+}
+
+std::int32_t legacyNewSyslog( NativeIdevice, NativeServiceDescriptor,
+                              NativeSyslogRelayClient* client )
+{
+    *client = LegacySyslogHandle;
+    return 0;
+}
+
+std::int32_t legacyStartSyslog( NativeSyslogRelayClient, NativeSyslogRelayCallback callback,
+                                NativeSyslogRelayErrorCallback error, void* context )
+{
+    std::lock_guard<std::mutex> lock( legacySyslogNative.mutex );
+    legacySyslogNative.callback = callback;
+    legacySyslogNative.errorCallback = error;
+    legacySyslogNative.context = context;
+    legacySyslogNative.started = true;
+    legacySyslogNative.changed.notify_all();
+    return 0;
+}
+
+std::int32_t legacyStopSyslog( NativeSyslogRelayClient )
+{
+    return 0;
+}
+
+std::int32_t legacyFreeSyslog( NativeSyslogRelayClient )
+{
+    return 0;
+}
+
+IosNativeApi legacySyslogApi()
+{
+    IosNativeApi api{};
+    api.deviceNewWithOptions = &legacyNewDevice;
+    api.deviceFree = &legacyFreeDevice;
+    api.lockdownClientNewWithExistingPair = &legacyNewLockdown;
+    api.lockdownClientFree = &legacyFreeLockdown;
+    api.lockdownStartService = &legacyStartService;
+    api.serviceDescriptorFree = &legacyFreeService;
+    api.lockdownGetStringValue = &legacyGetString;
+    api.nativeStringFree = &legacyFreeString;
+    api.readPairRecord = &legacyReadPairRecord;
+    api.pairRecordFree = &legacyFreePairRecord;
+    api.syslogRelayClientNew = &legacyNewSyslog;
+    api.syslogRelayStart = &legacyStartSyslog;
+    api.syslogRelayStop = &legacyStopSyslog;
+    api.syslogRelayClientFree = &legacyFreeSyslog;
+    return api;
+}
 
 IosNativeStreamConfig nativeConfig()
 {
@@ -437,6 +600,33 @@ TEST_CASE( "Native retirement counts final pre-enqueue rejections exactly once",
     REQUIRE( settlements.size() == 2u );
     CHECK( settlements.back().first == generation + 1u );
     CHECK( settlements.back().second == 0u );
+}
+
+TEST_CASE( "Native transport reports a quiescent legacy syslog partial exactly once",
+           "[ios][native][transport][syslog][stop][partial][accounting][p0-red]" )
+{
+    auto& nativeState = legacySyslogNative;
+    nativeState.reset();
+    DefaultIosNativeStreamWorkerFactory workerFactory( legacySyslogApi() );
+    IosNativeTransport transport( workerFactory, nativeConfig() );
+    SafeQSignalSpy stoppedSpy( &transport, &LiveSourceTransport::stopped );
+    constexpr Generation generation = 709u;
+    const std::string partialRecord = "unterminated transport bytes";
+
+    transport.start( generation );
+    REQUIRE( nativeState.waitUntilStarted() );
+    nativeState.emit( partialRecord );
+
+    transport.requestStop( generation, klogg::livecapture::StopDisposition::SettleAccepted );
+    REQUIRE( stoppedSpy.safeWait( 3000 ) );
+    REQUIRE( stoppedSpy.count() == 1 );
+    CHECK( stoppedSpy.at( 0 ).at( 0 ).toULongLong() == generation );
+    CHECK( stoppedSpy.at( 0 ).at( 1 ).toULongLong()
+           == static_cast<qulonglong>( partialRecord.size() ) );
+
+    transport.requestStop( generation, klogg::livecapture::StopDisposition::SettleAccepted );
+    drainQtEvents();
+    CHECK( stoppedSpy.count() == 1 );
 }
 
 TEST_CASE( "Native retiring drain can be cancelled fairly after one bounded delivery",

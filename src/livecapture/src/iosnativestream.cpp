@@ -348,6 +348,30 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         }
     }
 
+    void recordIncompleteSourceRecordBytes( std::size_t byteCount ) noexcept
+    {
+        auto current = incompleteSourceRecordBytes.load( std::memory_order_relaxed );
+        const auto maximum = std::numeric_limits<std::size_t>::max();
+        while ( true ) {
+            const auto updated = byteCount > maximum - current ? maximum : current + byteCount;
+            if ( incompleteSourceRecordBytes.compare_exchange_weak(
+                     current, updated, std::memory_order_relaxed ) ) {
+                return;
+            }
+        }
+    }
+
+    void snapshotIncompleteSourceRecord() noexcept
+    {
+        std::lock_guard<std::mutex> lock( controlMutex );
+        if ( incompleteSourceRecordSnapshotted ) {
+            return;
+        }
+        incompleteSourceRecordSnapshotted = true;
+        recordIncompleteSourceRecordBytes( syslogRecord.size() );
+        syslogRecord.clear();
+    }
+
     void publishStopped() noexcept
     {
         bool shouldPublish = false;
@@ -529,6 +553,8 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             }
             if ( byte != '\0' ) {
                 if ( state->syslogRecord.size() >= state->config.maximumSyslogRecordBytes ) {
+                    state->recordIncompleteSourceRecordBytes( state->syslogRecord.size() );
+                    state->recordIncompleteSourceRecordBytes( 1u );
                     state->syslogRecord.clear();
                     state->publishFailure( localError(
                         ErrorCategory::Stream, "ios-syslog-record-too-large", ErrorScope::Stream,
@@ -935,6 +961,11 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             api.syslogRelayStop( closingSyslog.get() );
         }
 
+        // Native stop/join is the final callback quiescence boundary. Snapshot the
+        // legacy assembler only here so an incomplete source record is terminal
+        // accounting, never a complete-record queue rejection.
+        snapshotIncompleteSourceRecord();
+
         // One-shot ownership order is deliberate: callback completion first,
         // then stop/join, stream client, service descriptor, lockdownd client,
         // and finally idevice.
@@ -960,6 +991,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     LiveDataQueue queue;
     std::atomic<std::size_t> rejectedBeforeEnqueueBytes{ 0u };
     std::atomic<std::size_t> rejectedBeforeEnqueueChunks{ 0u };
+    std::atomic<std::size_t> incompleteSourceRecordBytes{ 0u };
 
     mutable std::mutex controlMutex;
     std::condition_variable callbacksChanged;
@@ -980,6 +1012,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     bool streamIsOsTrace{ false };
     bool retired{ false };
     bool terminal{ false };
+    bool incompleteSourceRecordSnapshotted{ false };
     bool stoppedPublished{ false };
 };
 
@@ -1066,6 +1099,8 @@ LiveDataStatistics IosNativeStreamWorker::statistics() const
             = state_->rejectedBeforeEnqueueBytes.load( std::memory_order_relaxed );
         result.rejectedBeforeEnqueueChunks
             = state_->rejectedBeforeEnqueueChunks.load( std::memory_order_relaxed );
+        result.incompleteSourceRecordBytes
+            = state_->incompleteSourceRecordBytes.load( std::memory_order_relaxed );
         return result;
     }
     return {};

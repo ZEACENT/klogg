@@ -151,6 +151,9 @@ public:
     void stop( Generation generation ) override
     {
         stopGenerations.push_back( generation );
+        if ( deferStop ) {
+            return;
+        }
         // This in-memory fake owns no asynchronous producer. Real transports
         // publish the separate acknowledgement only after their cleanup barrier.
         Q_EMIT stateChanged( generation, State::Disconnected );
@@ -178,6 +181,11 @@ public:
         Q_EMIT bytesReceived( generation, bytes );
     }
 
+    void publishStopped( Generation generation, quint64 discarded )
+    {
+        Q_EMIT stopped( generation, discarded );
+    }
+
     void publishTerminalError( Generation generation, live::LiveSourceError error )
     {
         structuredError_ = std::move( error );
@@ -199,6 +207,7 @@ public:
 
     std::vector<Generation> startGenerations;
     std::vector<Generation> stopGenerations;
+    bool deferStop{ false };
     bool stopObservedBeforeTerminalText{ false };
     int terminalTextEmissions{ 0 };
 
@@ -651,6 +660,60 @@ TEST_CASE( "Real source effects settle capture rejection through the session con
         REQUIRE( QDir{ replacedCapturePath }.removeRecursively() );
         REQUIRE( QDir{}.rename( heldCapturePath, replacedCapturePath ) );
     }
+}
+
+TEST_CASE( "Session stop waits for authoritative stopped after transport Disconnected",
+           "[livelog-restore-arming][session][stop][ordering][integrity][p0-red]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    auto appSession = std::make_shared<Session>( factory );
+    auto spec = makeAndroidSpec();
+    spec.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+    auto* view = appSession->openAdbLogcat(
+        klogg::livelog::sessionDataFromSpec( spec ),
+        []() -> ViewInterface* {
+            // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+            return new NullView();
+        },
+        true );
+    REQUIRE( view != nullptr );
+    auto* const source = appSession->getAdbLogcatSource( view );
+    auto* const controller = appSession->getLiveLogController( view );
+    REQUIRE( source != nullptr );
+    REQUIRE( controller != nullptr );
+    REQUIRE( factory.createdTransports.size() == 1u );
+    const auto generation = controller->snapshot().generation;
+    auto* const originalTransport = factory.createdTransports.front();
+    originalTransport->publishState( generation, LiveSourceTransport::State::Connected );
+    REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
+
+    originalTransport->deferStop = true;
+    controller->stopRequested( live::StopDisposition::SettleAccepted );
+    REQUIRE( controller->snapshot().source.stoppingGeneration == generation );
+
+    // Model a source-owned transport callback that was already admitted while
+    // controller retirement was entering its authoritative stopped barrier.
+    source->openTransport( generation,
+                           klogg::livelog::makeLiveSourceTransportConfig( controller->spec() ) );
+    REQUIRE( factory.createdTransports.size() == 2u );
+    auto* const callbackTransport = factory.createdTransports.back();
+    callbackTransport->publishState( generation, LiveSourceTransport::State::Disconnected );
+
+    CHECK( controller->snapshot().source.stoppingGeneration == generation );
+    CHECK( controller->spec().integrity.discardedBytes == 0u );
+
+    constexpr quint64 discardedTailBytes = 23u;
+    callbackTransport->publishStopped( generation, discardedTailBytes );
+
+    CHECK_FALSE( controller->snapshot().source.stoppingGeneration.has_value() );
+    CHECK( controller->spec().integrity.discardedBytes == discardedTailBytes );
+    CHECK( controller->spec().integrity.gapPossible );
+
+    callbackTransport->publishStopped( generation, discardedTailBytes );
+    CHECK( controller->spec().integrity.discardedBytes == discardedTailBytes );
+
+    appSession->close( view );
+    delete view;
 }
 
 TEST_CASE( "Persisted Android running intent restores inert and reconnects once",

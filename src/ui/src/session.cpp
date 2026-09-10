@@ -168,10 +168,7 @@ public:
                     break;
                 case LiveSourceTransport::State::Disconnected:
                     if ( controller_->snapshot().runIntent
-                         == klogg::livecapture::RunIntent::Stopped ) {
-                        controller_->stopCompleted( generation );
-                    }
-                    else {
+                         != klogg::livecapture::RunIntent::Stopped ) {
                         controller_->streamFailed(
                             generation,
                             klogg::livecapture::LiveSourceError{

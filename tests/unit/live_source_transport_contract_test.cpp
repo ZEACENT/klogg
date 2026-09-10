@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -134,6 +135,11 @@ public:
     {
         lastError_ = error;
         Q_EMIT errorOccurred( generation, error );
+    }
+
+    void publishStopped( Generation generation, quint64 discarded = 0u )
+    {
+        Q_EMIT stopped( generation, discarded );
     }
 
     void publishTerminalError( Generation generation,
@@ -479,6 +485,58 @@ TEST_CASE( "Source retirement consumes out-of-order delivery settlements",
 
     CHECK( stopped == 1 );
     CHECK( source.isInputTerminated() );
+}
+
+TEST_CASE( "Source retirement contains finalization callback exceptions and remains reusable",
+           "[livecapture][transport][finalization][exception][p0-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    unsigned settledDeliveries = 0u;
+    unsigned finalized = 0u;
+    unsigned stopped = 0u;
+    std::uint64_t observedDiscarded = 0u;
+    source.setControllerCallbacks(
+        [&]( Generation generation, const QByteArray& bytes, auto settled ) {
+            const auto result = source.appendTransportBytes( generation, bytes );
+            CHECK( result.disposition == klogg::livecapture::DeliveryDisposition::Complete );
+            ++settledDeliveries;
+            settled();
+        },
+        {}, {} );
+    source.setFinalizedCallback( [&]( Generation, const auto& ) {
+        ++finalized;
+        throw std::runtime_error( "injected finalization observer failure" );
+    } );
+    source.setStoppedCallback( [&]( Generation, std::uint64_t discarded ) {
+        ++stopped;
+        observedDiscarded = discarded;
+    } );
+
+    REQUIRE( source.connectSource() );
+    auto* const transport = factory.lastTransport;
+    REQUIRE( transport != nullptr );
+    const auto generation = transport->startGenerations.back();
+    transport->publishBytes( generation, QByteArrayLiteral( "settled before finalization\n" ) );
+    REQUIRE( settledDeliveries == 1u );
+    transport->deferStop = true;
+    source.cancelTransport( generation, klogg::livecapture::StopDisposition::SettleAccepted );
+
+    CHECK_NOTHROW( transport->publishStopped( generation, 13u ) );
+    CHECK( source.isInputTerminated() );
+    CHECK( finalized == 1u );
+    CHECK( stopped == 1u );
+    CHECK( observedDiscarded == 13u );
+    CHECK_NOTHROW( transport->publishStopped( generation, 13u ) );
+    CHECK( finalized == 1u );
+    CHECK( stopped == 1u );
+
+    source.setFinalizedCallback( {} );
+    REQUIRE( source.connectSource() );
+    CHECK( transport->startGenerations.size() == 2u );
 }
 
 TEST_CASE( "Controller callback exceptions report unknown delivery before settlement",
