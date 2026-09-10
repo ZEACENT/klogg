@@ -218,12 +218,12 @@ std::int32_t fakeGetStringValue( NativeLockdownClient client, const char*, const
 {
     fake->metadataThreads.push_back( std::this_thread::get_id() );
     const auto call = ++fake->stringCalls;
-    if ( fake->onStringCall ) {
-        fake->onStringCall( call );
-    }
     const auto* lockdown = static_cast<FakeLockdown*>( client );
     const auto id = endpointId( lockdown->device->udid, lockdown->device->connection );
     const auto result = fake->metadata.at( id );
+    if ( fake->onStringCall ) {
+        fake->onStringCall( call );
+    }
     if ( result.error != 0 || fake->stringFailureCall == call ) {
         if ( fake->allocateStringOnError ) {
             auto owned = std::make_unique<char[]>( 8 );
@@ -293,16 +293,18 @@ public:
         return tasks_.size();
     }
 
+    IosCatalogTask takeNext()
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        REQUIRE_FALSE( tasks_.empty() );
+        auto task = std::move( tasks_.front() );
+        tasks_.erase( tasks_.begin() );
+        return task;
+    }
+
     void runNextOnWorker()
     {
-        IosCatalogTask task;
-        {
-            std::lock_guard<std::mutex> lock( mutex_ );
-            REQUIRE_FALSE( tasks_.empty() );
-            task = std::move( tasks_.front() );
-            tasks_.erase( tasks_.begin() );
-        }
-        std::thread worker( std::move( task ) );
+        std::thread worker( takeNext() );
         worker.join();
     }
 
@@ -316,6 +318,82 @@ public:
 private:
     mutable std::mutex mutex_;
     std::vector<IosCatalogTask> tasks_;
+};
+
+class ManualLatestExecutor {
+public:
+    IosCatalogMetadataExecutor executor()
+    {
+        return IosCatalogMetadataExecutor{
+            [ this ]( std::string key, IosCatalogTask task ) {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                const auto pending = std::find_if(
+                    tasks_.begin(), tasks_.end(), [ &key ]( const Entry& entry ) {
+                        return entry.key == key;
+                    } );
+                if ( pending != tasks_.end() ) {
+                    pending->task = std::move( task );
+                }
+                else {
+                    tasks_.push_back( Entry{ std::move( key ), std::move( task ) } );
+                }
+                return true;
+            },
+            [ this ]( const std::string& key ) {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                const auto pending = std::find_if(
+                    tasks_.begin(), tasks_.end(), [ &key ]( const Entry& entry ) {
+                        return entry.key == key;
+                    } );
+                if ( pending == tasks_.end() ) {
+                    return false;
+                }
+                tasks_.erase( pending );
+                return true;
+            },
+            [ this ] {
+                std::lock_guard<std::mutex> lock( mutex_ );
+                tasks_.clear();
+                ++clearCalls_;
+            } };
+    }
+
+    std::size_t pending() const
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        return tasks_.size();
+    }
+
+    std::size_t clearCalls() const
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        return clearCalls_;
+    }
+
+    IosCatalogTask takeNext()
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        REQUIRE_FALSE( tasks_.empty() );
+        auto task = std::move( tasks_.front().task );
+        tasks_.erase( tasks_.begin() );
+        return task;
+    }
+
+    void runNextOnWorker()
+    {
+        std::thread worker( takeNext() );
+        worker.join();
+    }
+
+private:
+    struct Entry {
+        std::string key;
+        IosCatalogTask task;
+    };
+
+    mutable std::mutex mutex_;
+    std::vector<Entry> tasks_;
+    std::size_t clearCalls_{ 0u };
 };
 
 const IosCatalogEntry* findEntry( const IosCatalogSnapshot& snapshot, const std::string& udid,
@@ -532,6 +610,108 @@ TEST_CASE( "metadata query uses endpoint connection option and never runs on cal
     catalog.stop();
 }
 
+TEST_CASE( "blocked metadata does not delay unrelated catalog publication",
+           "[ios][catalog][metadata][publication][isolation]" )
+{
+    struct RpcGate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+    } gate;
+
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "device-a", NativeConnectionType::Usb } };
+    state.metadata[ "device-a@usb" ] = { 0, "Blocked phone", "iPhone17,1", "20.0" };
+    state.onStringCall = [ & ]( int call ) {
+        if ( call != 1 ) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.started = true;
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+    };
+
+    ManualExecutor publicationExecutor;
+    ManualExecutor metadataExecutor;
+    IosDeviceCatalog catalog( makeApi(), publicationExecutor.executor(),
+                              metadataExecutor.executor() );
+    std::vector<IosCatalogSnapshot> notifications;
+    catalog.subscribe( [ & ]( const IosCatalogSnapshot& snapshot ) {
+        notifications.push_back( snapshot );
+    } );
+    REQUIRE( catalog.start() );
+    notifications.clear();
+
+    catalog.requestMetadata( IosEndpointKey{ "device-a", NativeConnectionType::Usb } );
+    REQUIRE( metadataExecutor.pending() == 1u );
+    std::thread blockedMetadata( metadataExecutor.takeNext() );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started; } );
+    }
+
+    state.emit( NativeEventType::Add, "device-b", NativeConnectionType::Network );
+    const auto addedSnapshot = catalog.snapshot();
+    const auto* addedEntry
+        = findEntry( addedSnapshot, "device-b", NativeConnectionType::Network );
+    const auto addedEpoch = addedEntry != nullptr ? addedEntry->epoch : Generation{ 0u };
+    const bool addPublicationWasQueued = publicationExecutor.pending() == 1u;
+    if ( addPublicationWasQueued ) {
+        publicationExecutor.runNextOnWorker();
+    }
+    const bool addPublishedBeforeRelease
+        = !notifications.empty()
+          && findEntry( notifications.back(), "device-b", NativeConnectionType::Network ) != nullptr;
+
+    state.emit( NativeEventType::Remove, "device-b", NativeConnectionType::Network );
+    const bool removalImmediatelyCurrent
+        = findEntry( catalog.snapshot(), "device-b", NativeConnectionType::Network ) == nullptr;
+    const bool removePublicationWasQueued = publicationExecutor.pending() == 1u;
+    if ( removePublicationWasQueued ) {
+        publicationExecutor.runNextOnWorker();
+    }
+    const bool removePublishedBeforeRelease
+        = !notifications.empty()
+          && findEntry( notifications.back(), "device-b", NativeConnectionType::Network ) == nullptr;
+
+    state.emit( NativeEventType::Add, "device-b", NativeConnectionType::Network );
+    const auto readdedSnapshot = catalog.snapshot();
+    const auto* readdedEntry
+        = findEntry( readdedSnapshot, "device-b", NativeConnectionType::Network );
+    const bool readdImmediatelyCurrent
+        = readdedEntry != nullptr && readdedEntry->epoch > addedEpoch;
+    const bool readdPublicationWasQueued = publicationExecutor.pending() == 1u;
+    if ( readdPublicationWasQueued ) {
+        publicationExecutor.runNextOnWorker();
+    }
+    const bool readdPublishedBeforeRelease
+        = !notifications.empty()
+          && findEntry( notifications.back(), "device-b", NativeConnectionType::Network ) != nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    blockedMetadata.join();
+    metadataExecutor.runAllOnWorker();
+    publicationExecutor.runAllOnWorker();
+
+    CHECK( addedEntry != nullptr );
+    CHECK( addPublicationWasQueued );
+    CHECK( addPublishedBeforeRelease );
+    CHECK( removalImmediatelyCurrent );
+    CHECK( removePublicationWasQueued );
+    CHECK( removePublishedBeforeRelease );
+    CHECK( readdImmediatelyCurrent );
+    CHECK( readdPublicationWasQueued );
+    CHECK( readdPublishedBeforeRelease );
+    catalog.stop();
+}
+
 TEST_CASE( "catalog rejects metadata from a stale endpoint epoch after remove and re-add",
            "[ios][catalog][generation][epoch][stale]" )
 {
@@ -566,6 +746,180 @@ TEST_CASE( "catalog rejects metadata from a stale endpoint epoch after remove an
     CHECK(
         findEntry( catalog.snapshot(), "reused", NativeConnectionType::Usb )->metadata->displayName
         == "new incarnation" );
+    catalog.stop();
+}
+
+TEST_CASE( "catalog keyed metadata backlog stays bounded across endpoint epoch churn",
+           "[ios][catalog][metadata][generation][epoch][churn][bounded][coalescing]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "churned", NativeConnectionType::Usb } };
+    state.metadata[ "churned@usb" ] = { 0, "newest incarnation", "newest", "64" };
+    ManualExecutor publicationExecutor;
+    ManualLatestExecutor metadataExecutor;
+    IosDeviceCatalog catalog( makeApi(), publicationExecutor.executor(),
+                              metadataExecutor.executor() );
+    REQUIRE( catalog.start() );
+    const IosEndpointKey endpoint{ "churned", NativeConnectionType::Usb };
+
+    catalog.requestMetadata( endpoint );
+    REQUIRE( metadataExecutor.pending() == 1u );
+    auto blockedOldRequest = metadataExecutor.takeNext();
+
+    constexpr Generation ChurnCount = 64u;
+    for ( Generation cycle = 1u; cycle <= ChurnCount; ++cycle ) {
+        state.emit( NativeEventType::Remove, endpoint.udid, endpoint.connectionType );
+        CHECK( metadataExecutor.pending() == 0u );
+        state.emit( NativeEventType::Add, endpoint.udid, endpoint.connectionType );
+        catalog.requestMetadata( endpoint );
+        CHECK( metadataExecutor.pending() == 1u );
+    }
+
+    std::thread staleWorker( std::move( blockedOldRequest ) );
+    staleWorker.join();
+    CHECK( state.deviceNewCalls == 0 );
+    CHECK( state.lockdownNewCalls == 0 );
+    CHECK( state.stringCalls == 0 );
+
+    metadataExecutor.runNextOnWorker();
+    const auto snapshot = catalog.snapshot();
+    const auto* current = findEntry( snapshot, endpoint.udid, endpoint.connectionType );
+    REQUIRE( current != nullptr );
+    REQUIRE( current->metadata.has_value() );
+    CHECK( current->metadata->displayName == "newest incarnation" );
+    CHECK( state.deviceNewCalls == 1 );
+    CHECK( state.lockdownNewCalls == 1 );
+    CHECK( state.stringCalls == 3 );
+    catalog.stop();
+}
+
+TEST_CASE( "catalog clears keyed metadata backlog on restart and stop",
+           "[ios][catalog][metadata][generation][restart][shutdown][cancellation]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "generation-key", NativeConnectionType::Usb } };
+    state.metadata[ "generation-key@usb" ] = { 0, "current", "model", "1" };
+    ManualExecutor publicationExecutor;
+    ManualLatestExecutor metadataExecutor;
+    IosDeviceCatalog catalog( makeApi(), publicationExecutor.executor(),
+                              metadataExecutor.executor() );
+    const IosEndpointKey endpoint{ "generation-key", NativeConnectionType::Usb };
+
+    REQUIRE( catalog.start() );
+    CHECK( metadataExecutor.clearCalls() == 1u );
+    const auto firstGeneration = catalog.snapshot().generation;
+    catalog.requestMetadata( endpoint );
+    REQUIRE( metadataExecutor.pending() == 1u );
+    catalog.stop();
+    CHECK( metadataExecutor.pending() == 0u );
+    CHECK( metadataExecutor.clearCalls() == 2u );
+
+    REQUIRE( catalog.start() );
+    CHECK( metadataExecutor.clearCalls() == 3u );
+    CHECK( catalog.snapshot().generation > firstGeneration );
+    catalog.requestMetadata( endpoint );
+    REQUIRE( metadataExecutor.pending() == 1u );
+    catalog.stop();
+    CHECK( metadataExecutor.pending() == 0u );
+    CHECK( metadataExecutor.clearCalls() == 4u );
+    CHECK( state.deviceNewCalls == 0 );
+}
+
+TEST_CASE( "catalog reports keyed metadata executor rejection on the current endpoint",
+           "[ios][catalog][metadata][bounded][rejection][fail-closed]" )
+{
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "rejected", NativeConnectionType::Usb } };
+    ManualExecutor publicationExecutor;
+    IosCatalogMetadataExecutor rejectingExecutor{
+        []( std::string, IosCatalogTask ) { return false; }, {}, {} };
+    IosDeviceCatalog catalog( makeApi(), publicationExecutor.executor(),
+                              std::move( rejectingExecutor ) );
+    REQUIRE( catalog.start() );
+
+    catalog.requestMetadata( IosEndpointKey{ "rejected", NativeConnectionType::Usb } );
+
+    const auto snapshot = catalog.snapshot();
+    const auto* entry = findEntry( snapshot, "rejected", NativeConnectionType::Usb );
+    REQUIRE( entry != nullptr );
+    REQUIRE( entry->error.has_value() );
+    CHECK( entry->error->error.code == "ios-native-error" );
+    CHECK( entry->error->error.nativeDetail.find( "metadata executor rejected" )
+           != std::string::npos );
+    CHECK( state.deviceNewCalls == 0 );
+    catalog.stop();
+}
+
+TEST_CASE( "blocked stale metadata cannot overwrite a re-added endpoint epoch",
+           "[ios][catalog][metadata][generation][epoch][stale][barrier]" )
+{
+    struct RpcGate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+    } gate;
+
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "reused-blocked", NativeConnectionType::Usb } };
+    state.metadata[ "reused-blocked@usb" ] = { 0, "old incarnation", "old", "1" };
+    state.onStringCall = [ & ]( int call ) {
+        if ( call != 1 ) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.started = true;
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+    };
+
+    ManualExecutor publicationExecutor;
+    ManualExecutor metadataExecutor;
+    IosDeviceCatalog catalog( makeApi(), publicationExecutor.executor(),
+                              metadataExecutor.executor() );
+    REQUIRE( catalog.start() );
+    const IosEndpointKey endpoint{ "reused-blocked", NativeConnectionType::Usb };
+    const auto oldEpoch = findEntry( catalog.snapshot(), endpoint.udid,
+                                     endpoint.connectionType )->epoch;
+
+    catalog.requestMetadata( endpoint );
+    std::thread oldRequest( metadataExecutor.takeNext() );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started; } );
+    }
+
+    state.emit( NativeEventType::Remove, endpoint.udid, endpoint.connectionType );
+    state.emit( NativeEventType::Add, endpoint.udid, endpoint.connectionType );
+    const auto newEpoch = findEntry( catalog.snapshot(), endpoint.udid,
+                                     endpoint.connectionType )->epoch;
+    CHECK( newEpoch > oldEpoch );
+    state.metadata[ "reused-blocked@usb" ] = { 0, "new incarnation", "new", "2" };
+    catalog.requestMetadata( endpoint );
+
+    {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    oldRequest.join();
+    CHECK_FALSE( findEntry( catalog.snapshot(), endpoint.udid, endpoint.connectionType )
+                     ->metadata.has_value() );
+
+    metadataExecutor.runAllOnWorker();
+    publicationExecutor.runAllOnWorker();
+    const auto currentSnapshot = catalog.snapshot();
+    const auto* current = findEntry( currentSnapshot, endpoint.udid, endpoint.connectionType );
+    INFO( "device calls=" << state.deviceNewCalls << ", lockdown calls=" << state.lockdownNewCalls
+                            << ", string calls=" << state.stringCalls );
+    REQUIRE( current != nullptr );
+    REQUIRE( current->metadata.has_value() );
+    CHECK( current->epoch == newEpoch );
+    CHECK( current->metadata->displayName == "new incarnation" );
     catalog.stop();
 }
 
@@ -847,6 +1201,61 @@ TEST_CASE( "catalog rejects malformed list outputs and unknown endpoint transpor
         CHECK( catalog.snapshot().entries.empty() );
         catalog.stop();
     }
+}
+
+TEST_CASE( "stop during a blocked metadata RPC publishes no callback and keeps state alive",
+           "[ios][catalog][metadata][shutdown][cancellation][barrier][lifetime]" )
+{
+    struct RpcGate {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool started{ false };
+        bool release{ false };
+    } gate;
+
+    FakeNative state;
+    fake = &state;
+    state.listed = { { "blocked-stop", NativeConnectionType::Usb } };
+    state.metadata[ "blocked-stop@usb" ] = { 0, "late", "late", "1" };
+    state.onStringCall = [ & ]( int call ) {
+        if ( call != 1 ) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.started = true;
+        gate.changed.notify_all();
+        gate.changed.wait( lock, [ & ] { return gate.release; } );
+    };
+
+    ManualExecutor publicationExecutor;
+    ManualExecutor metadataExecutor;
+    auto catalog = std::make_unique<IosDeviceCatalog>(
+        makeApi(), publicationExecutor.executor(), metadataExecutor.executor() );
+    int notifications = 0;
+    catalog->subscribe( [ & ]( const IosCatalogSnapshot& ) { ++notifications; } );
+    REQUIRE( catalog->start() );
+    const auto notificationsAfterStart = notifications;
+    catalog->requestMetadata( IosEndpointKey{ "blocked-stop", NativeConnectionType::Usb } );
+    std::thread blockedMetadata( metadataExecutor.takeNext() );
+    {
+        std::unique_lock<std::mutex> lock( gate.mutex );
+        gate.changed.wait( lock, [ & ] { return gate.started; } );
+    }
+
+    catalog->stop();
+    catalog.reset();
+    {
+        std::lock_guard<std::mutex> lock( gate.mutex );
+        gate.release = true;
+    }
+    gate.changed.notify_all();
+    blockedMetadata.join();
+    publicationExecutor.runAllOnWorker();
+
+    CHECK( notifications == notificationsAfterStart );
+    CHECK( state.stringCalls == 1 );
+    CHECK( state.lockdownFreeCalls == 1 );
+    CHECK( state.deviceFreeCalls == 1 );
 }
 
 TEST_CASE( "metadata cancellation prevents native effects after stop",

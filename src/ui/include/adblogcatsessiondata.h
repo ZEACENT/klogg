@@ -31,6 +31,7 @@ struct AdbLogcatSessionData {
     bool migratedFromLegacySession = false;
 
     klogg::livecapture::RunIntent runIntent{ klogg::livecapture::RunIntent::Stopped };
+    klogg::livecapture::LiveIntegritySummary integrity;
     QStringList androidBuffers;
     QString androidFilterSpec;
     QString androidPriority;

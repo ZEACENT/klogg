@@ -9,13 +9,6 @@
 #include <QFileInfo>
 #include <QSaveFile>
 
-#ifdef Q_OS_WIN
-#include <io.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#endif
-
 #include "log.h"
 
 namespace {
@@ -305,8 +298,9 @@ bool RollingFileManager::openExisting(
         currentFile_ = std::make_unique<QFile>();
     }
     currentFile_->setFileName( basePath_ );
-    if ( !currentFile_->open( QIODevice::WriteOnly | QIODevice::ExistingOnly
-                             | QIODevice::Append ) ) {
+    if ( !klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                | QIODevice::Append ) ) {
         return false;
     }
     if ( expectedIdentity.has_value() ) {
@@ -352,39 +346,26 @@ bool RollingFileManager::refersToPath( const QString& path ) const
     if ( currentFile_ == nullptr || !currentFile_->isOpen() || path.isEmpty() ) {
         return false;
     }
-#ifdef Q_OS_WIN
-    const auto nativeHandle = _get_osfhandle( static_cast<int>( currentFile_->handle() ) );
-    if ( nativeHandle == -1 ) {
-        return false;
+    const auto currentIdentity = klogg::platform::fileIdentity( *currentFile_ );
+    const auto pathIdentity = klogg::platform::fileIdentity( path );
+    return currentIdentity.has_value() && pathIdentity.has_value()
+           && currentIdentity.value() == pathIdentity.value();
+}
+
+std::optional<klogg::platform::FileIdentity>
+RollingFileManager::suspendForReplacement( const QString& path )
+{
+    if ( currentFile_ == nullptr || !refersToPath( path )
+         || !currentFile_->flush() ) {
+        return std::nullopt;
     }
-    const auto currentHandle = reinterpret_cast<HANDLE>( nativeHandle );
-    if ( currentHandle == INVALID_HANDLE_VALUE ) {
-        return false;
+    const auto identity = klogg::platform::fileIdentity( *currentFile_ );
+    if ( !identity.has_value() ) {
+        return std::nullopt;
     }
-    const auto pathHandle
-        = CreateFileW( reinterpret_cast<LPCWSTR>( path.utf16() ), FILE_READ_ATTRIBUTES,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr );
-    if ( pathHandle == INVALID_HANDLE_VALUE ) {
-        return false;
-    }
-    BY_HANDLE_FILE_INFORMATION currentInfo{};
-    BY_HANDLE_FILE_INFORMATION pathInfo{};
-    const auto currentInfoRead = GetFileInformationByHandle( currentHandle, &currentInfo );
-    const auto pathInfoRead = GetFileInformationByHandle( pathHandle, &pathInfo );
-    CloseHandle( pathHandle );
-    return currentInfoRead && pathInfoRead
-           && currentInfo.dwVolumeSerialNumber == pathInfo.dwVolumeSerialNumber
-           && currentInfo.nFileIndexHigh == pathInfo.nFileIndexHigh
-           && currentInfo.nFileIndexLow == pathInfo.nFileIndexLow;
-#else
-    struct stat currentInfo{};
-    struct stat pathInfo{};
-    const auto encodedPath = QFile::encodeName( path );
-    return ::fstat( currentFile_->handle(), &currentInfo ) == 0
-           && ::stat( encodedPath.constData(), &pathInfo ) == 0
-           && currentInfo.st_dev == pathInfo.st_dev && currentInfo.st_ino == pathInfo.st_ino;
-#endif
+    currentFile_->close();
+    currentBytes_ = 0;
+    return identity;
 }
 
 bool RollingFileManager::clearIfCurrent()
@@ -632,7 +613,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // A truncating open always starts a fresh file, regardless of whether the
     // path already exists (FreshSave semantics).
     if ( truncate ) {
-        if ( !currentFile_->open( QIODevice::WriteOnly | QIODevice::Truncate ) ) {
+        if ( !klogg::platform::openFileSharedForReplacement(
+                 *currentFile_, QIODevice::WriteOnly | QIODevice::Truncate ) ) {
             LOG_WARNING << "RollingFileManager: failed to open " << basePath_;
             return false;
         }
@@ -645,7 +627,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // NewOnly (O_EXCL) succeeds only when the path did not exist, so the result
     // cannot race a pre-open QFileInfo::exists() probe. On success the file was
     // created by this open.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
         currentBytes_ = 0;
         openedNewFile_ = true;
         return true;
@@ -657,7 +640,9 @@ bool RollingFileManager::openNewFile( bool truncate )
     // openedNewFile_ = false for a file this open just created. Restore-mode
     // callers gate capture replay on that flag, so the new file would be left
     // empty and the buffered content lost.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::ExistingOnly | QIODevice::Append ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                | QIODevice::Append ) ) {
         currentBytes_ = currentFile_->size();
         openedNewFile_ = false;
         return true;
@@ -668,7 +653,8 @@ bool RollingFileManager::openNewFile( bool truncate )
     // atomically; the result now correctly reports a brand-new file. A second
     // NewOnly failure means the path reappeared in the meantime (or a genuine
     // open error) — surface it.
-    if ( currentFile_->open( QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *currentFile_, QIODevice::WriteOnly | QIODevice::NewOnly ) ) {
         currentBytes_ = 0;
         openedNewFile_ = true;
         return true;
@@ -795,8 +781,14 @@ bool RollingFileManager::rotateInternal()
                     << rotatedPath;
         // Restore: reopen old file as current
         currentFile_->setFileName( basePath_ );
-        (void) currentFile_->open( QIODevice::WriteOnly | QIODevice::Append );
-        currentBytes_ = currentFile_->size();
+        if ( klogg::platform::openFileSharedForReplacement(
+                 *currentFile_, QIODevice::WriteOnly | QIODevice::ExistingOnly
+                                    | QIODevice::Append ) ) {
+            currentBytes_ = currentFile_->size();
+        }
+        else {
+            currentBytes_ = 0;
+        }
         QFile::remove( tmpPath );
         if ( backupCount_ == 0 ) {
             QFile::remove( keepAllPendingPath( basePath_ ) );
@@ -812,8 +804,15 @@ bool RollingFileManager::rotateInternal()
         const auto restoredCurrent = QFile::rename( rotatedPath, basePath_ );
         if ( restoredCurrent ) {
             currentFile_->setFileName( basePath_ );
-            (void) currentFile_->open( QIODevice::WriteOnly | QIODevice::Append );
-            currentBytes_ = currentFile_->size();
+            if ( klogg::platform::openFileSharedForReplacement(
+                     *currentFile_, QIODevice::WriteOnly
+                                        | QIODevice::ExistingOnly
+                                        | QIODevice::Append ) ) {
+                currentBytes_ = currentFile_->size();
+            }
+            else {
+                currentBytes_ = 0;
+            }
             if ( backupCount_ == 0 ) {
                 QFile::remove( keepAllPendingPath( basePath_ ) );
             }

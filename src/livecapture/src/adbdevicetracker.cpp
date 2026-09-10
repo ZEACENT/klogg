@@ -175,6 +175,8 @@ const char* trackerErrorCode( AdbSmartSocketErrorCode code )
         return "adb-track-write-timeout";
     case AdbSmartSocketErrorCode::ReadTimeout:
         return "adb-track-read-timeout";
+    case AdbSmartSocketErrorCode::OperationTimeout:
+        return "adb-track-operation-timeout";
     }
     return "adb-track-failed";
 }

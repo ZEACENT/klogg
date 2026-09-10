@@ -1,68 +1,20 @@
 #include "fileholder.h"
 
-#ifdef Q_OS_WIN
-#include <fcntl.h>
-#include <windows.h>
-#include <io.h>
-#else
-#include <sys/stat.h>
-#endif
-
 #include "log.h"
+#include "platform/platform_files.h"
 #include <QtCore/QFileInfo>
 
 namespace {
 void openFileByHandle( QFile* file )
 {
-    bool openedByHandle = false;
-
-#ifdef Q_OS_WIN
-    //
-    // The following code is adapted from Qt's QFSFileEnginePrivate::nativeOpen()
-    // by including the FILE_SHARE_DELETE share mode.
-    //
-
-    // Enable full sharing.
-    DWORD shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-
-    int accessRights = GENERIC_READ;
-    DWORD creationDisp = OPEN_EXISTING;
-
-    // Create the file handle.
-    SECURITY_ATTRIBUTES securityAtts = { sizeof( SECURITY_ATTRIBUTES ), NULL, FALSE };
-    HANDLE fileHandle
-        = CreateFileW( (const wchar_t*)file->fileName().utf16(), accessRights, shareMode,
-                       &securityAtts, creationDisp, FILE_ATTRIBUTE_NORMAL, NULL );
-
-    if ( fileHandle != INVALID_HANDLE_VALUE ) {
-        LOG_INFO << "Got native file handle " << (intptr_t)fileHandle;
-        // Convert the HANDLE to an fd and pass it to QFile's foreign-open
-        // function. The fd owns the handle, so when QFile later closes
-        // the fd the handle will be closed too.
-        int fd = _open_osfhandle( (intptr_t)fileHandle, _O_RDONLY );
-        LOG_INFO << "Got fd " << fd;
-        if ( fd != -1 ) {
-            openedByHandle = file->open( fd, QIODevice::ReadOnly, QFile::AutoCloseHandle );
-        }
-        else {
-            LOG_WARNING << "Failed to open file by handle " << file->fileName();
-            ::CloseHandle( fileHandle );
-        }
-    }
-    else {
-        LOG_WARNING << "Failed to open file by handle " << file->fileName();
-    }
-#endif
-    if ( !openedByHandle ) {
-        openedByHandle = file->open( QIODevice::ReadOnly );
-        if ( !openedByHandle ) {
-            LOG_WARNING << "Failed to open file " << file->fileName() << " error "
-                        << file->errorString();
-        }
-    }
-    if ( openedByHandle ) {
+    if ( klogg::platform::openFileSharedForReplacement(
+             *file, QIODevice::ReadOnly ) ) {
         LOG_INFO << "QFile opened";
+        return;
     }
+
+    LOG_WARNING << "Failed to open file " << file->fileName() << " error "
+                << file->errorString();
 }
 } // namespace
 
@@ -175,44 +127,17 @@ QFile* FileHolder::getFile()
 
 FileId FileId::getFileId( const QString& filename )
 {
-#ifdef Q_OS_WIN
-    DWORD shareMode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-
-    int accessRights = GENERIC_READ;
-    DWORD creationDisp = OPEN_EXISTING;
-
-    // Create the file handle.
-    SECURITY_ATTRIBUTES securityAtts = { sizeof( SECURITY_ATTRIBUTES ), NULL, FALSE };
-
-    HANDLE fileHandle
-        = CreateFileW( (const wchar_t*)filename.utf16(), accessRights, shareMode, &securityAtts,
-                       creationDisp, FILE_FLAG_BACKUP_SEMANTICS, NULL );
-
-    if ( fileHandle == INVALID_HANDLE_VALUE ) {
-        LOG_DEBUG << "Failed to get file info for " << filename.toStdString() << ", gle "
-                  << ::GetLastError();
-        return FileId{};
-    }
-
-    using FileHandleGuard = std::unique_ptr<void, decltype( &CloseHandle )>;
-    auto fileHandleGuard = FileHandleGuard{ fileHandle, CloseHandle };
-
-    BY_HANDLE_FILE_INFORMATION info;
-    if ( !::GetFileInformationByHandle( fileHandle, &info ) ) {
-        LOG_DEBUG << "Failed to get file info for " << filename.toStdString() << ", gle "
-                  << ::GetLastError();
-        return FileId{};
-    }
-
-    ULARGE_INTEGER fileIndex = { info.nFileIndexLow, info.nFileIndexHigh };
-    return FileId{ fileIndex.QuadPart, static_cast<uint64_t>( info.dwVolumeSerialNumber ) };
-#else
-    struct stat info;
-    if ( lstat( filename.toUtf8().constData(), &info ) != 0 ) {
+    QFile file( filename );
+    if ( !klogg::platform::openFileSharedForReplacement(
+             file, QIODevice::ReadOnly ) ) {
         LOG_DEBUG << "Failed to get file info for " << filename.toStdString();
         return FileId{};
     }
 
-    return FileId{ info.st_ino, static_cast<uint64_t>( info.st_dev ) };
-#endif
+    const auto identity = klogg::platform::fileIdentity( file );
+    if ( !identity.has_value() ) {
+        LOG_DEBUG << "Failed to read file identity for " << filename.toStdString();
+        return FileId{};
+    }
+    return FileId{ identity->file, identity->device };
 }

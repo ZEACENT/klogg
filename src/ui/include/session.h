@@ -20,6 +20,7 @@
 #ifndef SESSION_H
 #define SESSION_H
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -52,6 +53,7 @@ class IosCatalogSnapshotProvider;
 namespace klogg::livelog {
 class LiveLogController;
 class LiveLogControllerEffects;
+class LiveLogExportService;
 }
 
 enum class DocumentKind {
@@ -131,6 +133,7 @@ public:
     DocumentKind getDocumentKind( const ViewInterface* view ) const;
     AdbLogcatSource* getAdbLogcatSource( const ViewInterface* view ) const;
     klogg::livelog::LiveLogController* getLiveLogController( const ViewInterface* view ) const;
+    klogg::livelog::LiveLogExportService* getLiveLogExportService( const ViewInterface* view ) const;
 
     // Human-readable refusals recorded during the most recent restore pass,
     // one per skipped live tab (e.g. sessions saved with raw command-line
@@ -187,6 +190,7 @@ private:
         ViewInterface* view;
         std::shared_ptr<klogg::livelog::LiveLogControllerEffects> liveLogEffects;
         std::shared_ptr<klogg::livelog::LiveLogController> liveLogController;
+        std::shared_ptr<klogg::livelog::LiveLogExportService> liveLogExportService;
     };
 
     // Open a file without checking if it is existing/readable
@@ -223,6 +227,11 @@ private:
     klogg::livecapture::adb::AdbInfrastructureManager* adbInfrastructure_{ nullptr };
     klogg::livecapture::ios::IosCatalogSnapshotProvider* iosCatalog_{ nullptr };
     bool exitRequested_ = false;
+    QSet<QString> closingDiscardReservations_;
+
+    bool reserveDiscardOnClose( const QString& windowId );
+    void cancelDiscardOnClose( const QString& windowId );
+    bool commitWindowClose( const QString& windowId, bool preserve );
 
     QStringList restoreRejections_;
     QStringList restoreNotices_;
@@ -331,6 +340,12 @@ public:
         return appSession_->getLiveLogController( view );
     }
 
+    klogg::livelog::LiveLogExportService*
+    getLiveLogExportService( const ViewInterface* view ) const
+    {
+        return appSession_->getLiveLogExportService( view );
+    }
+
     QStringList lastRestoreRejections() const
     {
         return appSession_->lastRestoreRejections();
@@ -404,8 +419,16 @@ public:
     void save( const std::vector<SaveFileInfo>& view_list, const QByteArray& geometry,
                int current_file_index );
 
+    enum class CloseDisposition : std::uint8_t {
+        Preserve,
+        Discard,
+    };
+
+    CloseDisposition beginClose();
+    void cancelClose( CloseDisposition disposition );
     // returns true if caller needs to save settings
     bool close();
+    bool close( CloseDisposition disposition );
 
 private:
     std::shared_ptr<Session> appSession_;

@@ -32,17 +32,177 @@
 #include <QThread>
 #include <QUuid>
 
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <mutex>
+#include <new>
 #include <optional>
 #include <string_view>
 
 #include "capturestore.h"
 #include "configuration.h"
+#include "livelogexportservice.h"
 #include "logfiltereddata.h"
 #include "streaminglogdata.h"
 #include "test_utils.h"
 
+TEST_CASE( "Streaming output receives the complete accepted batch before capture retention",
+           "[streaming][storage-integrity]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto output = QDir( root.path() ).filePath( "output.log" );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.maxTotalLines = 2;
+    data.setCaptureLimits( limits );
+    REQUIRE( data.bindOutputFile( output, mode ) );
+    const QByteArray batch(
+        "\033[31ma\033[0m\r\n\033[31mb\033[0m\n\033[31mc\033[0m\n\033[31md\033[0m\n" );
+    data.appendUtf8( batch );
+    data.finishInput();
+    REQUIRE( data.getNbLine() <= 2_lcount );
+    QFile saved( output );
+    REQUIRE( saved.open( QIODevice::ReadOnly ) );
+    auto expected = batch;
+    expected.replace( "\r\n", "\n" );
+    CHECK( saved.readAll()
+           == ( mode == LiveLogSaveAnsiMode::Strip ? QByteArray( "a\nb\nc\nd\n" ) : expected ) );
+}
+
+TEST_CASE( "Streaming output preserves finalized boundaries for replay and restore",
+           "[streaming][capture-output][storage-integrity]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
+    const bool restore = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto output = QDir( root.path() ).filePath( "boundary.log" );
+    StreamingLogData data( QUuid::createUuid().toString( QUuid::WithoutBraces ), root.path() );
+    if ( restore ) {
+        QFile file( output );
+        REQUIRE( file.open( QIODevice::WriteOnly ) );
+        REQUIRE( file.write( "a" ) == 1 );
+        file.close();
+        REQUIRE( data.bindOutputFile( output, mode, OutputBindMode::Restore ) );
+    }
+    else {
+        data.appendUtf8( "a" );
+        data.finishInput();
+        data.appendUtf8( "b" );
+        data.finishInput();
+        REQUIRE( data.bindOutputFile( output, mode ) );
+    }
+    {
+        QFile file( output );
+        REQUIRE( file.open( QIODevice::ReadOnly ) );
+        CHECK( file.readAll() == ( restore ? QByteArray( "a" ) : QByteArray( "a\nb" ) ) );
+    }
+    data.appendUtf8( "c" );
+    data.finishInput();
+    QFile file( output );
+    REQUIRE( file.open( QIODevice::ReadOnly ) );
+    CHECK( file.readAll() == ( restore ? QByteArray( "a\nc" ) : QByteArray( "a\nb\nc" ) ) );
+}
+
+namespace klogg::livelog {
+struct LiveLogExportServiceTestAccess {
+    static void setBeforeSnapshotWrite( LiveLogExportService& service,
+                                        std::function<void()> callback )
+    {
+        service.beforeSnapshotWriteForTesting_ = std::move( callback );
+    }
+
+    static void setBeforePublication( LiveLogExportService& service,
+                                      std::function<void()> callback )
+    {
+        service.beforePublicationForTesting_ = std::move( callback );
+    }
+
+    static void setAfterPublish( LiveLogExportService& service,
+                                 std::function<void()> callback )
+    {
+        service.afterPublishForTesting_ = std::move( callback );
+    }
+
+    static std::thread::id dataAccessThreadId( const LiveLogExportJob& job )
+    {
+        const std::lock_guard<std::mutex> lock( job.stateMutex_ );
+        return job.dataAccessThreadId_;
+    }
+
+    static void setOwnerEventPump(
+        LiveLogExportJob& job,
+        std::function<void( QEventLoop::ProcessEventsFlags, int )> callback )
+    {
+        job.ownerEventPumpForTesting_ = std::move( callback );
+    }
+};
+} // namespace klogg::livelog
+
 struct StreamingLogDataTimerTestAccess {
+    static void spillFault( StreamingLogData& data, qint64& now,
+                            std::optional<CaptureStore::PersistenceFailure>& failure )
+    {
+        data.captureStore_.spillClockForTesting_ = [ &now ] { return now; };
+        data.captureStore_.spillFailureForTesting_ = [ &failure ] { return failure; };
+    }
+    static void beforeSegmentMutation( StreamingLogData& data,
+                                       std::function<void()> callback )
+    {
+        data.captureStore_.beforeSegmentMutationForTesting_ = std::move( callback );
+    }
+    static void beforeOutputExportJournal( StreamingLogData& data,
+                                           std::function<void()> callback )
+    {
+        data.beforeOutputExportJournalForTesting_ = std::move( callback );
+    }
+
+    static void shortOutput( StreamingLogData& data )
+    {
+        data.outputWriteForTesting_
+            = [ &data, calls = 0 ]( const QByteArray& bytes ) mutable -> qint64 {
+            if ( ++calls > 1 ) {
+                return -1;
+            }
+            return data.rollingDisplayOutput_.currentFile()->write( bytes.left( 1 ) );
+        };
+    }
+    static qint64 replayPeak( const StreamingLogData& data )
+    {
+        return data.replayPeakBufferForTesting_;
+    }
+
+    struct RawCacheStats {
+        size_t batches = 0;
+        qint64 metadataBytes = 0;
+        std::uint64_t lookupBatchVisits = 0;
+    };
+
+    static void rawCacheLimits( StreamingLogData& data, size_t maximumBatches,
+                                qint64 maximumMetadataBytes )
+    {
+        std::lock_guard<std::mutex> lock( data.cachedRawBatchesMutex_ );
+        data.cachedRawBatchCountLimit_ = maximumBatches;
+        data.cachedRawMetadataBytesLimit_ = maximumMetadataBytes;
+    }
+
+    static RawCacheStats rawCacheStats( const StreamingLogData& data )
+    {
+        std::lock_guard<std::mutex> lock( data.cachedRawBatchesMutex_ );
+        return { data.cachedRawBatches_.size(), data.cachedRawMetadataBytes_,
+                 data.cachedRawLookupBatchVisitsForTesting_ };
+    }
+
+    static void resetRawCacheLookupVisits( const StreamingLogData& data )
+    {
+        std::lock_guard<std::mutex> lock( data.cachedRawBatchesMutex_ );
+        data.cachedRawLookupBatchVisitsForTesting_ = 0;
+    }
+
     static bool pending( const StreamingLogData& data )
     {
         return data.loadingFinishedQueued_ && data.loadingFinishedTimer_.isActive();
@@ -1177,6 +1337,56 @@ TEST_CASE( "Streaming live search dispatches while updates keep arriving" )
     REQUIRE( observedDispatchDuringSteadyUpdates );
 }
 
+TEST_CASE( "Streaming raw tail lookup skips bounded historical batches",
+           "[streaming][raw-cache][performance][operations]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    constexpr int BatchCount = 4096;
+    for ( int batch = 0; batch < BatchCount; ++batch ) {
+        const auto result
+            = logData.appendUtf8( QByteArrayLiteral( "record-" ) + QByteArray::number( batch ) + '\n' );
+        REQUIRE_FALSE( result.failure.has_value() );
+    }
+
+    StreamingLogDataTimerTestAccess::resetRawCacheLookupVisits( logData );
+    const auto tail = logData.getLinesRaw( LineNumber( BatchCount - 1 ), 1_lcount );
+    REQUIRE( tail.decodeLines() == klogg::vector<QString>{ QStringLiteral( "record-4095" ) } );
+    const auto stats = StreamingLogDataTimerTestAccess::rawCacheStats( logData );
+    INFO( "tail lookup batch visits=" << stats.lookupBatchVisits
+                                      << " cached batches=" << stats.batches );
+    CHECK( stats.lookupBatchVisits <= 32u );
+    CHECK( stats.batches <= 64u );
+}
+
+TEST_CASE( "Streaming raw cache bounds tiny-batch and line-index metadata",
+           "[streaming][raw-cache][performance][bounded]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    constexpr size_t MaximumBatches = 8u;
+    constexpr qint64 MaximumMetadataBytes = 512;
+    StreamingLogDataTimerTestAccess::rawCacheLimits( logData, MaximumBatches,
+                                                     MaximumMetadataBytes );
+    for ( int batch = 0; batch < 32; ++batch ) {
+        const auto result = logData.appendUtf8( QByteArrayLiteral( "x\n" ) );
+        REQUIRE_FALSE( result.failure.has_value() );
+    }
+
+    const auto stats = StreamingLogDataTimerTestAccess::rawCacheStats( logData );
+    INFO( "cached batches=" << stats.batches << " metadata bytes=" << stats.metadataBytes );
+    CHECK( stats.batches <= MaximumBatches );
+    CHECK( stats.metadataBytes <= MaximumMetadataBytes );
+    CHECK( logData.getLinesRaw( 0_lnum, 1_lcount ).decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "x" ) } );
+    CHECK( logData.getLinesRaw( 31_lnum, 1_lcount ).decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "x" ) } );
+}
+
 TEST_CASE( "Streaming live search covers append batches with partial line boundaries" )
 {
     QTemporaryDir tempDir;
@@ -1666,7 +1876,9 @@ TEST_CASE( "StreamingLogData Restore replays the capture when the saved file is 
     REQUIRE( loadingSpyB.safeWait() );
     REQUIRE( logDataB.getNbLine().get() == 3 );
     CaptureStore::Limits limits;
-    limits.rollingMaxFileSize = 8;
+    // The capture window applies immediately. Keep all 18 bytes in its two
+    // files while replay still exceeds one output file (and must not rotate).
+    limits.rollingMaxFileSize = 10;
     limits.rollingBackupCount = 2;
     logDataB.setCaptureLimits( limits );
 
@@ -1679,4 +1891,626 @@ TEST_CASE( "StreamingLogData Restore replays the capture when the saved file is 
     REQUIRE( after.open( QIODevice::ReadOnly ) );
     CHECK( after.readAll() == QByteArrayLiteral( "line1\nline2\nline3\n" ) );
     CHECK_FALSE( QFileInfo::exists( outputPath + QStringLiteral( ".0" ) ) );
+}
+
+TEST_CASE( "Streaming forwards capture outcomes and explicit persistence",
+           "[streaming][storage-persistence]" )
+{
+    QTemporaryDir root;
+    StreamingLogData data( makeCaptureId(), root.path() );
+    auto appended = data.appendUtf8( "a\nb" );
+    CHECK( appended.acceptedBytes == 3 );
+    CHECK( appended.committedBytes == 2 );
+    CHECK( appended.pendingPartialBytes == 1 );
+    CHECK_FALSE( data.persistCapture().complete() );
+    const auto finished = data.finishInput();
+    CHECK( finished.acceptedBytes == 0 );
+    CHECK( finished.committedBytes == 1 );
+    CHECK( data.persistCapture().complete() );
+}
+
+TEST_CASE( "Streaming output failure and throwing observer retain committed outcome",
+           "[streaming][storage-output-facts]" )
+{
+    const bool observer = GENERATE( false, true );
+    QTemporaryDir root;
+    StreamingLogData data( makeCaptureId(), root.path() );
+    REQUIRE( data.bindOutputFile( QDir( root.path() ).filePath( "output.log" ) ) );
+    if ( observer ) {
+        QObject::connect( &data, &StreamingLogData::fileChanged, &data, []( MonitoredFileStatus ) {
+            throw std::runtime_error( "observer failed" );
+        } );
+    }
+    else {
+        StreamingLogDataTimerTestAccess::shortOutput( data );
+    }
+    const auto result = data.appendUtf8( "abc\n" );
+    CHECK( result.disposition == CaptureStore::AppendDisposition::Complete );
+    CHECK( result.committedBytes == 4 );
+    CHECK( result.acceptedBytes == 4 );
+    CHECK( result.notificationFailed == observer );
+    if ( !observer ) {
+        CHECK( result.outputFailure == CaptureStore::OutputFailure::Write );
+        CHECK( result.outputBytes == 1 );
+    }
+}
+
+TEST_CASE( "Streaming Strip replay uses bounded chunks and the live transform",
+           "[streaming][storage-output-facts]" )
+{
+    QTemporaryDir root;
+    StreamingLogData data( makeCaptureId(), root.path() );
+    data.setDisplayEncoding( "ISO-8859-1" );
+    data.setPrefilter( "prefix:" );
+    const QByteArray record = QByteArray( "prefix:\033[31m" ) + QByteArray::fromHex( "e9" )
+                              + QByteArray( 1000, 'x' ) + "\033[0m\n";
+    const QByteArray batch = record.repeated( 200 );
+    const auto livePath = QDir( root.path() ).filePath( "live.log" );
+    REQUIRE( data.bindOutputFile( livePath ) );
+    data.appendUtf8( batch );
+    const auto replayPath = QDir( root.path() ).filePath( "replay.log" );
+    REQUIRE( data.bindOutputFile( replayPath ) );
+    QFile live( livePath ), replay( replayPath );
+    REQUIRE( live.open( QIODevice::ReadOnly ) );
+    REQUIRE( replay.open( QIODevice::ReadOnly ) );
+    CHECK( live.readAll() == replay.readAll() );
+    CHECK( StreamingLogDataTimerTestAccess::replayPeak( data ) > 0 );
+    CHECK( StreamingLogDataTimerTestAccess::replayPeak( data ) <= 64 * 1024 + record.size() );
+}
+
+TEST_CASE( "Streaming clear resets finalized output separators", "[streaming][storage-followup]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    StreamingLogData data( makeCaptureId(), root.path() );
+    const auto output = QDir( root.path() ).filePath( "clear.log" );
+    REQUIRE( data.bindOutputFile( output, mode ) );
+    data.appendUtf8( "a" );
+    data.finishInput();
+    data.clearCapture();
+    data.appendUtf8( "b\n" );
+    data.finishInput();
+    QFile file( output );
+    REQUIRE( file.open( QIODevice::ReadOnly ) );
+    CHECK( file.readAll() == "b\n" );
+}
+
+class ExportBarrier {
+public:
+    ~ExportBarrier()
+    {
+        release();
+    }
+
+    void block()
+    {
+        std::unique_lock<std::mutex> lock( mutex_ );
+        entered_ = true;
+        condition_.notify_all();
+        condition_.wait( lock, [ this ] { return released_; } );
+    }
+
+    bool waitUntilEntered()
+    {
+        std::unique_lock<std::mutex> lock( mutex_ );
+        return condition_.wait_for( lock, std::chrono::milliseconds{ 500 },
+                                    [ this ] { return entered_; } );
+    }
+
+    bool waitUntilEnteredWithEvents()
+    {
+        QElapsedTimer deadline;
+        deadline.start();
+        while ( deadline.elapsed() < 1000 ) {
+            QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
+            std::unique_lock<std::mutex> lock( mutex_ );
+            if ( entered_ ) {
+                return true;
+            }
+            condition_.wait_for( lock, std::chrono::milliseconds{ 5 } );
+        }
+        return false;
+    }
+
+    void release()
+    {
+        const std::lock_guard<std::mutex> lock( mutex_ );
+        released_ = true;
+        condition_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool entered_ = false;
+    bool released_ = false;
+};
+
+TEST_CASE( "Streaming output export fixes a snapshot boundary before retaining its concurrent tail",
+           "[streaming][live-save-cutover][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    data.appendUtf8( "prefix-0\nprefix-1\n" );
+
+    const auto candidate = data.beginOutputExport( LiveLogSaveAnsiMode::Strip, 1024 );
+    REQUIRE( candidate.has_value() );
+    REQUIRE( data.hasPendingOutputExport() );
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.maxTotalLines = 1;
+    data.setCaptureLimits( limits );
+    data.appendUtf8( "tail-2\ntail-3\n" );
+
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE_FALSE( tail.failure.has_value() );
+    REQUIRE( tail.batches.size() == 1 );
+    CHECK( tail.batches.front().rawUtf8Lines == QByteArrayLiteral( "tail-2\ntail-3\n" ) );
+    data.cancelOutputExport( candidate->id );
+}
+
+TEST_CASE( "Streaming output export rejects a concurrent PartialUnknown outcome",
+           "[streaming][live-save-cutover]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    data.setCaptureLimits( limits );
+    const auto candidate = data.beginOutputExport( LiveLogSaveAnsiMode::Preserve, 1024 );
+    REQUIRE( candidate.has_value() );
+    int mutations = 0;
+    StreamingLogDataTimerTestAccess::beforeSegmentMutation( data, [ &mutations ] {
+        if ( ++mutations == 2 ) {
+            throw 42;
+        }
+    } );
+    const auto append = data.appendUtf8( QByteArrayLiteral( "a\nb\n" ) );
+    REQUIRE( append.disposition == CaptureStore::AppendDisposition::PartialUnknown );
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    CHECK( tail.failure == StreamingLogData::OutputExportFailure::PartialUnknown );
+    data.cancelOutputExport( candidate->id );
+    StreamingLogDataTimerTestAccess::beforeSegmentMutation( data, {} );
+}
+
+TEST_CASE( "Streaming output export rejects a noncontiguous cutover journal",
+           "[streaming][live-save-cutover][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    const auto candidate = data.beginOutputExport( LiveLogSaveAnsiMode::Preserve, 1024 );
+    REQUIRE( candidate.has_value() );
+    data.appendUtf8( QByteArrayLiteral( "tail\n" ) );
+    auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE_FALSE( tail.failure.has_value() );
+    REQUIRE( tail.batches.size() == 1 );
+    tail.batches.front().sequence += 1u;
+
+    StreamingLogData::OutputExportEncodingState state;
+    QByteArray written;
+    const auto write = [ &written ]( const QByteArray& bytes ) {
+        written.append( bytes );
+        return static_cast<qint64>( bytes.size() );
+    };
+    CHECK_FALSE( StreamingLogData::writeOutputExportBatches( *candidate, tail.batches, state,
+                                                             write ) );
+    CHECK( written.isEmpty() );
+    data.cancelOutputExport( candidate->id );
+}
+
+TEST_CASE( "Live save preserves a finalized zero-byte record before its concurrent tail",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip,
+                                LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    data.appendUtf8( QByteArrayLiteral( "\r" ) );
+    REQUIRE( data.finishInput().committedLines == 1_lcount );
+
+    const auto candidate = data.beginOutputExport( mode, 4096 );
+    REQUIRE( candidate.has_value() );
+    data.appendUtf8( QByteArrayLiteral( "next\n" ) );
+
+    StreamingLogData::OutputExportEncodingState state;
+    QByteArray saved;
+    const auto write = [ &saved ]( const QByteArray& bytes ) {
+        saved.append( bytes );
+        return static_cast<qint64>( bytes.size() );
+    };
+    REQUIRE( StreamingLogData::writeOutputExportSnapshot(
+        *candidate, state, write ) );
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE_FALSE( tail.failure.has_value() );
+    REQUIRE( StreamingLogData::writeOutputExportBatches(
+        *candidate, tail.batches, state, write ) );
+    CHECK( saved == QByteArrayLiteral( "\nnext\n" ) );
+    data.cancelOutputExport( candidate->id );
+}
+
+TEST_CASE( "Async live save publishes snapshot concurrent tail and future writes in order",
+           "[streaming][live-save-cutover][live-save-async]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, mode ) );
+    data->appendUtf8( QByteArrayLiteral( "\033[31mprefix-0\033[0m\nprefix-1\n" ) );
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier snapshotBarrier;
+    ExportBarrier publicationBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &snapshotBarrier ] { snapshotBarrier.block(); } );
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    const auto job = service.start( newPath, mode, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE_FALSE( service.start( root.filePath( QStringLiteral( "second.log" ) ), mode, 4096 ) );
+    REQUIRE( snapshotBarrier.waitUntilEntered() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.maxTotalLines = 1;
+    data->setCaptureLimits( limits );
+    data->appendUtf8( QByteArrayLiteral( "tail-2\ntail-3\n" ) );
+    snapshotBarrier.release();
+    REQUIRE( publicationBarrier.waitUntilEnteredWithEvents() );
+    data->appendUtf8( QByteArrayLiteral( "cutover-4\n" ) );
+    publicationBarrier.release();
+    job->waitForFinished();
+    REQUIRE( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+    CHECK( job->workerThreadId() != std::this_thread::get_id() );
+    CHECK( klogg::livelog::LiveLogExportServiceTestAccess::dataAccessThreadId( *job )
+           == std::this_thread::get_id() );
+
+    data->appendUtf8( QByteArrayLiteral( "future-5\n" ) );
+    data->finishInput();
+    QFile saved( newPath );
+    REQUIRE( saved.open( QIODevice::ReadOnly ) );
+    const auto prefix = mode == LiveLogSaveAnsiMode::Strip
+                            ? QByteArrayLiteral( "prefix-0\nprefix-1\n" )
+                            : QByteArrayLiteral( "\033[31mprefix-0\033[0m\nprefix-1\n" );
+    CHECK( saved.readAll()
+           == prefix + QByteArrayLiteral( "tail-2\ntail-3\ncutover-4\nfuture-5\n" ) );
+
+    QFile old( oldPath );
+    REQUIRE( old.open( QIODevice::ReadOnly ) );
+    CHECK( old.readAll()
+           == prefix + QByteArrayLiteral( "tail-2\ntail-3\ncutover-4\n" ) );
+}
+
+TEST_CASE( "Live save completion remains observable after a fast export finishes",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    data->appendUtf8( QByteArrayLiteral( "snapshot\n" ) );
+
+    klogg::livelog::LiveLogExportService service( data );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    job->waitForFinished();
+    REQUIRE( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+
+    QObject context;
+    int completions = 0;
+    job->onFinished( &context, [ &completions ]( auto result ) {
+        CHECK( result == klogg::livelog::LiveLogExportResult::Succeeded );
+        ++completions;
+    } );
+    QCoreApplication::processEvents();
+    CHECK( completions == 1 );
+}
+
+TEST_CASE( "Completed live save releases its capture snapshot leases",
+           "[streaming][live-save-cutover][live-save-async][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 4;
+    limits.memoryBudgetBytes = 1;
+    data->setCaptureLimits( limits );
+    data->appendUtf8( QByteArrayLiteral( "a\nb\nc\n" ) );
+    REQUIRE( data->persistCapture().complete() );
+
+    QDir captureDirectory( data->capturePath() );
+    const auto persistedSegments = captureDirectory.entryList(
+        { QStringLiteral( "segment_*.log" ) }, QDir::Files );
+    REQUIRE_FALSE( persistedSegments.isEmpty() );
+
+    klogg::livelog::LiveLogExportService service( data );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    job->waitForFinished();
+    REQUIRE( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+
+    data->clearCapture();
+    for ( const auto& segment : persistedSegments ) {
+        CHECK_FALSE( QFileInfo::exists( captureDirectory.filePath( segment ) ) );
+    }
+}
+
+TEST_CASE( "Async live save cancel and tail overflow preserve destination and old binding",
+           "[streaming][live-save-cutover][live-save-async]" )
+{
+    const bool cancel = GENERATE( false, true );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, LiveLogSaveAnsiMode::Strip ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier barrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &barrier ] { barrier.block(); } );
+    const auto job = service.start( newPath, LiveLogSaveAnsiMode::Strip, cancel ? 4096 : 8 );
+    REQUIRE( job != nullptr );
+    REQUIRE( barrier.waitUntilEntered() );
+    data->appendUtf8( QByteArrayLiteral( "concurrent-tail-is-larger-than-eight\n" ) );
+    if ( cancel ) {
+        job->cancel();
+    }
+    barrier.release();
+    job->waitForFinished();
+    CHECK( job->result() == ( cancel ? klogg::livelog::LiveLogExportResult::Cancelled
+                                     : klogg::livelog::LiveLogExportResult::TailOverflow ) );
+    CHECK( data->boundOutputFile() == oldPath );
+    data->appendUtf8( QByteArrayLiteral( "old-still-active\n" ) );
+    data->finishInput();
+
+    REQUIRE( sentinel.open( QIODevice::ReadOnly ) );
+    CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
+    QFile old( oldPath );
+    REQUIRE( old.open( QIODevice::ReadOnly ) );
+    CHECK( old.readAll() == QByteArrayLiteral(
+               "prefix\nconcurrent-tail-is-larger-than-eight\nold-still-active\n" ) );
+}
+
+TEST_CASE( "Live save validates the final tail before replacing the destination",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, LiveLogSaveAnsiMode::Strip ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier publicationBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    const auto job = service.start( newPath, LiveLogSaveAnsiMode::Strip, 8 );
+    REQUIRE( job != nullptr );
+    REQUIRE( publicationBarrier.waitUntilEnteredWithEvents() );
+
+    data->appendUtf8( QByteArrayLiteral( "tail-larger-than-eight\n" ) );
+    publicationBarrier.release();
+    job->waitForFinished();
+
+    CHECK( job->result() == klogg::livelog::LiveLogExportResult::TailOverflow );
+    CHECK( data->boundOutputFile() == oldPath );
+    REQUIRE( sentinel.open( QIODevice::ReadOnly ) );
+    CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
+}
+
+TEST_CASE( "Live save teardown excludes user input while pumping owner events",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    data->appendUtf8( QByteArrayLiteral( "snapshot\n" ) );
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier workerBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &workerBarrier ] { workerBarrier.block(); } );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( workerBarrier.waitUntilEntered() );
+
+    std::optional<QEventLoop::ProcessEventsFlags> observedFlags;
+    bool released = false;
+    klogg::livelog::LiveLogExportServiceTestAccess::setOwnerEventPump(
+        *job, [ & ]( QEventLoop::ProcessEventsFlags flags, int maximumTime ) {
+            observedFlags = flags;
+            if ( !std::exchange( released, true ) ) {
+                workerBarrier.release();
+            }
+            QCoreApplication::processEvents( flags, maximumTime );
+        } );
+    job->waitForFinished();
+
+    REQUIRE( observedFlags.has_value() );
+    CHECK( observedFlags->testFlag( QEventLoop::ExcludeUserInputEvents ) );
+}
+
+TEST_CASE( "Live save journal allocation failure is contained after capture commit",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    const auto candidate = data.beginOutputExport( LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( candidate.has_value() );
+    StreamingLogDataTimerTestAccess::beforeOutputExportJournal(
+        data, [] { throw std::bad_alloc{}; } );
+
+    CaptureStore::AppendResult appendResult;
+    CHECK_NOTHROW( appendResult = data.appendUtf8( QByteArrayLiteral( "committed-tail\n" ) ) );
+    CHECK( appendResult.committedLines == 1_lcount );
+    CHECK( data.getNbLine() == 1_lcount );
+    const auto tail = data.takeOutputExportTail( candidate->id );
+    REQUIRE( tail.failure.has_value() );
+    CHECK( tail.failure == StreamingLogData::OutputExportFailure::TailOverflow );
+    CHECK( tail.batches.empty() );
+}
+
+TEST_CASE( "Async live save cancellation wins the final publication decision",
+           "[streaming][live-save-cutover][live-save-async][live-save-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "new.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, LiveLogSaveAnsiMode::Strip ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+
+    QFile sentinel( newPath );
+    REQUIRE( sentinel.open( QIODevice::WriteOnly ) );
+    REQUIRE( sentinel.write( "sentinel" ) == 8 );
+    sentinel.close();
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier publicationDecision;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationDecision ] { publicationDecision.block(); } );
+    const auto job = service.start( newPath, LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( publicationDecision.waitUntilEnteredWithEvents() );
+
+    job->cancel();
+    publicationDecision.release();
+    job->waitForFinished();
+
+    CHECK( job->result() == klogg::livelog::LiveLogExportResult::Cancelled );
+    CHECK( data->boundOutputFile() == oldPath );
+    REQUIRE( sentinel.open( QIODevice::ReadOnly ) );
+    CHECK( sentinel.readAll() == QByteArrayLiteral( "sentinel" ) );
+}
+
+TEST_CASE( "Published live save never adopts a same-path replacement",
+           "[streaming][live-save-cutover][live-save-async]" )
+{
+    const auto mode = GENERATE( LiveLogSaveAnsiMode::Strip, LiveLogSaveAnsiMode::Preserve );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto oldPath = root.filePath( QStringLiteral( "old.log" ) );
+    const auto newPath = root.filePath( QStringLiteral( "published.log" ) );
+    REQUIRE( data->bindOutputFile( oldPath, mode ) );
+    data->appendUtf8( QByteArrayLiteral( "prefix\n" ) );
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier publicationBarrier;
+    bool replacementCreated = false;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    klogg::livelog::LiveLogExportServiceTestAccess::setAfterPublish(
+        service, [ & ] {
+            if ( !QFile::remove( newPath ) ) {
+                return;
+            }
+            QFile replacement( newPath );
+            replacementCreated = replacement.open( QIODevice::WriteOnly )
+                                 && replacement.write( "replacement-sentinel" ) == 20;
+        } );
+    const auto job = service.start( newPath, mode, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( publicationBarrier.waitUntilEnteredWithEvents() );
+    data->appendUtf8( QByteArrayLiteral( "after-publication\n" ) );
+    publicationBarrier.release();
+    job->waitForFinished();
+
+    if ( replacementCreated ) {
+        CHECK( job->result() == klogg::livelog::LiveLogExportResult::PublishedReopenFailed );
+        CHECK( data->boundOutputFile() == oldPath );
+        data->appendUtf8( QByteArrayLiteral( "old-remains-active\n" ) );
+        data->finishInput();
+
+        QFile replacement( newPath );
+        REQUIRE( replacement.open( QIODevice::ReadOnly ) );
+        CHECK( replacement.readAll() == QByteArrayLiteral( "replacement-sentinel" ) );
+        QFile old( oldPath );
+        REQUIRE( old.open( QIODevice::ReadOnly ) );
+        CHECK( old.readAll()
+               == QByteArrayLiteral( "prefix\nafter-publication\nold-remains-active\n" ) );
+    }
+    else {
+        // Windows may deny replacement while the verified handle is open. That
+        // is also safe: cutover succeeds only to the published file.
+        CHECK( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+        CHECK( data->boundOutputFile() == newPath );
+        data->appendUtf8( QByteArrayLiteral( "new-remains-active\n" ) );
+        data->finishInput();
+
+        QFile published( newPath );
+        REQUIRE( published.open( QIODevice::ReadOnly ) );
+        CHECK( published.readAll()
+               == QByteArrayLiteral( "prefix\nafter-publication\nnew-remains-active\n" ) );
+        QFile old( oldPath );
+        REQUIRE( old.open( QIODevice::ReadOnly ) );
+        CHECK( old.readAll() == QByteArrayLiteral( "prefix\nafter-publication\n" ) );
+    }
+}
+
+TEST_CASE( "Streaming limit changes invalidate caches and report persistence health",
+           "[streaming][storage-followup]" )
+{
+    qint64 now = 0;
+    std::optional<CaptureStore::PersistenceFailure> failure
+        = CaptureStore::PersistenceFailure::Write;
+    QTemporaryDir root;
+    StreamingLogData data( makeCaptureId(), root.path() );
+    StreamingLogDataTimerTestAccess::spillFault( data, now, failure );
+    int changes = 0;
+    bool healthy = true;
+    QObject::connect( &data, &StreamingLogData::capturePersistenceChanged, &data,
+                      [ & ]( bool value, CaptureStore::PersistenceFailure ) {
+                          ++changes;
+                          healthy = value;
+                      } );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 2;
+    data.setCaptureLimits( limits );
+    data.appendUtf8( "a\nb\nc\n" );
+    limits.memoryBudgetBytes = 1;
+    data.setCaptureLimits( limits );
+    CHECK( changes == 1 );
+    CHECK_FALSE( healthy );
+    data.retryPersistence();
+    CHECK( changes == 1 );
+    failure.reset();
+    now += 5000;
+    CHECK( data.retryPersistence().complete() );
+    CHECK( changes == 2 );
+    CHECK( healthy );
+    limits.maxTotalLines = 1;
+    data.setCaptureLimits( limits );
+    CHECK( data.getNbLine() == 1_lcount );
+    const auto raw = data.getLinesRaw( 0_lnum, 1_lcount );
+    CHECK( QByteArray( raw.buffer.data(), static_cast<int>( raw.buffer.size() ) ) == "c\n" );
 }

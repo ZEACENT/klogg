@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 
 #include "capturestore.h"
+#include "livelogsession.h"
 
 namespace {
 
@@ -72,6 +73,7 @@ bool AdbLogcatSessionData::isPersistedSourceType( const QString& sourceType )
 QJsonObject AdbLogcatSessionData::toJson() const
 {
     return QJsonObject{
+        { QStringLiteral( "integrity" ), klogg::livelog::serializeIntegritySummary( integrity ) },
         { QStringLiteral( "sourceType" ), persistedSourceType() },
         { QStringLiteral( "adbBackend" ), adbBackend == AdbTransportBackend::SmartSocket
                                               ? QStringLiteral( "smart_socket" )
@@ -139,5 +141,8 @@ AdbLogcatSessionData AdbLogcatSessionData::fromJson( const QString& json )
         = object.value( QStringLiteral( "captureMaxFileSize" ) ).toVariant().toLongLong();
     data.captureBackupCount
         = object.value( QStringLiteral( "captureBackupCount" ) ).toInt( 0 );
+    if ( !klogg::livelog::parseIntegritySummary( object.value( QStringLiteral( "integrity" ) ), data.integrity ) ) {
+        data.captureId.clear(); // The legacy API has no diagnostic channel: fail validation closed.
+    }
     return data;
 }

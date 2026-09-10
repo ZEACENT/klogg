@@ -34,6 +34,46 @@ using Generation = std::uint64_t;
 using Timestamp = std::chrono::milliseconds;
 
 enum class RunIntent : std::uint8_t { Stopped, Running };
+enum class StopDisposition : std::uint8_t { DiscardPending, SettleAccepted };
+
+// Host acceptance is not source completeness or disk durability.
+enum class DeliveryDisposition : std::uint8_t { Complete, Rejected, PartialKnown, PartialUnknown };
+struct CaptureDeliveryResult {
+    DeliveryDisposition disposition{ DeliveryDisposition::Complete };
+    std::uint64_t acceptedBytes{ 0 };
+    std::uint64_t committedBytes{ 0 };
+    std::uint64_t committedLines{ 0 };
+    std::optional<std::uint64_t> outputBytes{ 0u };
+    bool notificationFailed{ false };
+    std::optional<std::string> failureCode;
+};
+
+struct IntegrityEvent {
+    std::string code;
+    std::uint64_t bytes{ 0 };
+    bool operator==( const IntegrityEvent& other ) const
+    { return code == other.code && bytes == other.bytes; }
+};
+struct LiveIntegritySummary {
+    static constexpr unsigned SchemaVersion = 1;
+    static constexpr std::size_t MaxRecentEvents = 32;
+    std::uint64_t offeredBytes{ 0 };
+    std::uint64_t dequeuedBytes{ 0 };
+    std::uint64_t acceptedBytes{ 0 };
+    std::uint64_t committedBytes{ 0 };
+    std::uint64_t committedLines{ 0 };
+    std::uint64_t discardedBytes{ 0 };
+    std::uint64_t uncertainBytes{ 0 };
+    std::uint64_t outputBytes{ 0 };
+    std::uint64_t olderEvents{ 0 };
+    bool outputProgressUnknown{ false };
+    bool sourceCompletenessUnknown{ true };
+    bool gapPossible{ false };
+    bool replayPossible{ false };
+    std::vector<IntegrityEvent> recentEvents;
+    void record( const std::string& code, std::uint64_t bytes = 0 );
+    bool operator==( const LiveIntegritySummary& other ) const;
+};
 
 enum class InfrastructureStatus : std::uint8_t {
     Unknown,
@@ -126,6 +166,7 @@ struct SourceState {
     SourceStatus status{ SourceStatus::Stopped };
     std::optional<StopReason> stopReason{ StopReason::NeverStarted };
     std::optional<Generation> stoppingGeneration;
+    StopDisposition stoppingDisposition{ StopDisposition::SettleAccepted };
     std::optional<AwaitingUserReason> awaitingUserReason;
     std::optional<RetryState> retry;
     std::optional<LiveSourceError> failure;
@@ -137,6 +178,8 @@ struct LiveStateSnapshot {
     SourceState source;
     OutputBindingState outputBinding{ OutputBindingState::Healthy };
     std::optional<LiveSourceError> outputBindingError;
+    bool captureHealthy{ true };
+    std::optional<LiveSourceError> captureHealthError;
     Generation generation{ 0 };
     Timestamp now{ 0 };
     unsigned consecutiveFailures{ 0 };
@@ -145,6 +188,8 @@ struct LiveStateSnapshot {
     bool readArmed{ false };
     std::optional<Timestamp> streamingSince;
     std::optional<RetryTimer> retryTimer;
+    bool devicePresent{ false };
+    bool startAfterStop{ false };
 };
 
 struct StartRequested {
@@ -152,6 +197,7 @@ struct StartRequested {
 };
 struct StopRequested {
     Timestamp at{ 0 };
+    StopDisposition disposition{ StopDisposition::DiscardPending };
 };
 struct StopCompleted {
     Generation generation{ 0 };
@@ -217,6 +263,16 @@ struct RetryDeadlineReached {
     Generation generation{ 0 };
     Timestamp at{ 0 };
 };
+struct CaptureHealthChanged {
+    bool healthy{ true };
+    std::optional<LiveSourceError> error;
+    Timestamp at{ 0 };
+};
+struct CaptureFailed {
+    Generation generation{ 0 };
+    LiveSourceError error;
+    Timestamp at{ 0 };
+};
 struct OutputBindingChanged {
     OutputBindingState state{ OutputBindingState::Healthy };
     std::optional<LiveSourceError> error;
@@ -231,7 +287,7 @@ using LiveStateEvent
                    InfrastructureFailed, AvailabilityFailed, DeviceAvailable, DeviceAbsent,
                    UserActionRequired, ProtocolServiceReady, StreamHandleOpened, StreamReadArmed,
                    StreamBytesReceived, StreamStable, RetryRequested, RetryDeadlineReached,
-                   OutputBindingChanged, TimeAdvanced>;
+                   CaptureHealthChanged, CaptureFailed, OutputBindingChanged, TimeAdvanced>;
 
 enum class EffectKind : std::uint8_t {
     InvalidateGeneration,
@@ -248,11 +304,13 @@ struct LiveStateEffect {
     Generation generation{ 0 };
     Timestamp deadline{ 0 };
     std::size_t byteCount{ 0 };
+    StopDisposition stopDisposition{ StopDisposition::SettleAccepted };
 };
 
 struct LiveStateConfig {
     unsigned maxRetryAttempts{ 5 };
     Timestamp stabilityInterval{ std::chrono::seconds{ 10 } };
+    bool autoReconnectEnabled{ true };
 };
 
 struct LiveStateTransition {

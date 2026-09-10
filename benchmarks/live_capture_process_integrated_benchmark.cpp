@@ -24,6 +24,9 @@
 #include <QTemporaryDir>
 
 #include "capturestore.h"
+#include "persistentinfo.h"
+
+const bool PersistentInfo::ForcePortable = true;
 
 namespace benchmark = klogg::benchmarks::livecapture;
 

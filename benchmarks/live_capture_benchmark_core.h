@@ -192,6 +192,23 @@ struct FramedFixture {
     std::uint32_t fixtureCrc32{ 0u };
 };
 
+struct SequenceCrcLedger {
+    std::size_t recordCount{ 0u };
+    std::size_t payloadBytes{ 0u };
+    std::size_t framedBytes{ 0u };
+    std::uint32_t framedCrc32{ 0u };
+
+    bool operator==( const SequenceCrcLedger& other ) const noexcept
+    {
+        return recordCount == other.recordCount && payloadBytes == other.payloadBytes
+               && framedBytes == other.framedBytes && framedCrc32 == other.framedCrc32;
+    }
+    bool operator!=( const SequenceCrcLedger& other ) const noexcept
+    {
+        return !( *this == other );
+    }
+};
+
 FramedFixture makeFramedFixture( const FixturePlan& plan );
 
 struct SyntheticArmPlan {
@@ -200,6 +217,9 @@ struct SyntheticArmPlan {
     std::vector<std::size_t> fragmentSizes;
     std::filesystem::path captureRoot;
     std::filesystem::path producerExecutable;
+    // Contract-only final-stage verification. Keep false for before/after CLI
+    // comparability with immutable historical benchmark binaries.
+    bool verifyFinalLedgers{ false };
 };
 
 struct ArmObservation {
@@ -209,6 +229,19 @@ struct ArmObservation {
     std::uint32_t fixtureCrc32{ 0u };
     std::size_t committedRecords{ 0u };
     std::size_t committedPayloadBytes{ 0u };
+    // Contract-only independent reconstructions; aggregate benchmark JSON stays
+    // unchanged so elapsed before/after trials do not include these extra passes.
+    SequenceCrcLedger parserLedger;
+    SequenceCrcLedger captureLedger;
+    SequenceCrcLedger viewLedger;
+    SequenceCrcLedger searchLedger;
+    SequenceCrcLedger saveLedger;
+    std::uint64_t searchOperationStarts{ 0u };
+    std::uint64_t searchTerminalEvents{ 0u };
+    std::uint64_t qtHeartbeatEvents{ 0u };
+    std::uint64_t deliverySettlementsAccepted{ 0u };
+    std::uint64_t deliverySettlementsCompleted{ 0u };
+    std::uint64_t retiredDeliverySettlementsCompleted{ 0u };
     std::vector<SegmentTransition> segmentTransitions;
     LifecycleTimeline lifecycle;
     std::uint64_t lastCommittedRecordNanoseconds{ 0u };

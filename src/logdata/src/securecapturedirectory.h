@@ -19,6 +19,12 @@ class SecureCaptureDirectory {
         Error,
     };
 
+    enum class EnsureResult : std::uint8_t {
+        Ready,
+        NamespaceTransition,
+        Error,
+    };
+
     explicit SecureCaptureDirectory( QString path );
     ~SecureCaptureDirectory();
 
@@ -28,6 +34,7 @@ class SecureCaptureDirectory {
     SecureCaptureDirectory& operator=( SecureCaptureDirectory&& ) noexcept;
 
     bool ensureExists();
+    EnsureResult ensureExistsResult();
     bool bindExisting();
     bool isCurrentPath() const;
     bool isRemoved() const;

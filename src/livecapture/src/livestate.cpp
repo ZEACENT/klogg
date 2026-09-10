@@ -20,6 +20,8 @@
 #include "livestate.h"
 
 #include <algorithm>
+#include <tuple>
+#include <limits>
 
 namespace klogg::livecapture {
 namespace {
@@ -83,7 +85,12 @@ void resetSourceAttempt( LiveStateTransition& transition )
 void invalidateStreamAttempt( LiveStateTransition& transition )
 {
     auto& snapshot = transition.snapshot;
+    if ( snapshot.source.stoppingGeneration.has_value() ) {
+        return;
+    }
     const auto cancelledGeneration = snapshot.generation;
+    snapshot.source.stoppingGeneration = cancelledGeneration;
+    snapshot.source.stoppingDisposition = StopDisposition::SettleAccepted;
     ++snapshot.generation;
     transition.effects.push_back( LiveStateEffect{ EffectKind::InvalidateGeneration,
                                                    snapshot.generation, Timestamp{ 0 }, 0u } );
@@ -95,7 +102,6 @@ void enterSourceState( LiveStateSnapshot& snapshot, SourceStatus status )
 {
     snapshot.source.status = status;
     snapshot.source.stopReason.reset();
-    snapshot.source.stoppingGeneration.reset();
     snapshot.source.awaitingUserReason.reset();
     snapshot.source.retry.reset();
     snapshot.source.failure.reset();
@@ -128,11 +134,17 @@ void applyReadiness( LiveStateTransition& transition, Generation generation, Tim
 void apply( LiveStateTransition& transition, const StartRequested& event, const LiveStateConfig& )
 {
     auto& snapshot = transition.snapshot;
-    if ( snapshot.source.status == SourceStatus::Stopping ) {
+    if ( snapshot.source.stoppingGeneration.has_value() || hasActiveStreamAttempt( snapshot ) ) {
+        snapshot.startAfterStop = true;
+        snapshot.runIntent = RunIntent::Running;
+        invalidateStreamAttempt( transition );
+        resetSourceAttempt( transition );
+        enterSourceState( snapshot, SourceStatus::Stopping );
+        transition.accepted = true;
         return;
     }
 
-    const auto previousGeneration = snapshot.generation;
+    snapshot.startAfterStop = false;
 
     advanceNow( snapshot, event.at );
     snapshot.runIntent = RunIntent::Running;
@@ -148,10 +160,6 @@ void apply( LiveStateTransition& transition, const StartRequested& event, const 
     transition.effects.insert( transition.effects.begin(),
                                LiveStateEffect{ EffectKind::InvalidateGeneration,
                                                 snapshot.generation, Timestamp{ 0 }, 0u } );
-    if ( previousGeneration != 0u ) {
-        transition.effects.push_back(
-            LiveStateEffect{ EffectKind::CancelStream, previousGeneration, Timestamp{ 0 }, 0u } );
-    }
     // Every explicit run must reacquire availability observation and replay the
     // current shared snapshot, even when the infrastructure itself stayed ready.
     transition.effects.push_back( LiveStateEffect{ EffectKind::StartInfrastructure,
@@ -166,60 +174,113 @@ void apply( LiveStateTransition& transition, const StopRequested& event, const L
         return;
     }
 
-    const auto cancelledGeneration = snapshot.generation;
     advanceNow( snapshot, event.at );
     snapshot.runIntent = RunIntent::Stopped;
-    ++snapshot.generation;
+    snapshot.startAfterStop = false;
+    const auto existingStoppingGeneration = snapshot.source.stoppingGeneration;
+    const auto existingDisposition = snapshot.source.stoppingDisposition;
+    invalidateStreamAttempt( transition );
     snapshot.source.status = SourceStatus::Stopping;
     snapshot.source.stopReason = StopReason::User;
-    snapshot.source.stoppingGeneration = cancelledGeneration;
+    const auto effectiveDisposition
+        = existingStoppingGeneration.has_value()
+                  && existingDisposition == StopDisposition::DiscardPending
+              ? StopDisposition::DiscardPending
+              : event.disposition;
+    snapshot.source.stoppingDisposition = effectiveDisposition;
+    bool cancellationUpdated = false;
+    for ( auto& effect : transition.effects ) {
+        if ( effect.kind == EffectKind::CancelStream ) {
+            effect.stopDisposition = effectiveDisposition;
+            cancellationUpdated = true;
+        }
+    }
+    if ( existingStoppingGeneration.has_value() && !cancellationUpdated
+         && effectiveDisposition != existingDisposition ) {
+        LiveStateEffect cancellation{ EffectKind::CancelStream, *existingStoppingGeneration,
+                                      Timestamp{ 0 }, 0u };
+        cancellation.stopDisposition = effectiveDisposition;
+        transition.effects.push_back( cancellation );
+    }
     snapshot.source.awaitingUserReason.reset();
     snapshot.source.failure.reset();
     resetStreamReadiness( snapshot );
 
-    transition.effects.push_back( LiveStateEffect{ EffectKind::InvalidateGeneration,
-                                                   snapshot.generation, Timestamp{ 0 }, 0u } );
-    transition.effects.push_back(
-        LiveStateEffect{ EffectKind::CancelStream, cancelledGeneration, Timestamp{ 0 }, 0u } );
     clearRetry( transition );
     transition.accepted = true;
 }
 
-void apply( LiveStateTransition& transition, const StopCompleted& event, const LiveStateConfig& )
+void apply( LiveStateTransition& transition, const DeviceAvailable& event,
+            const LiveStateConfig& config );
+void apply( LiveStateTransition& transition, const RetryDeadlineReached& event,
+            const LiveStateConfig& config );
+
+void apply( LiveStateTransition& transition, const StopCompleted& event, const LiveStateConfig& config )
 {
     auto& snapshot = transition.snapshot;
-    if ( snapshot.runIntent != RunIntent::Stopped
-         || snapshot.source.status != SourceStatus::Stopping
-         || snapshot.source.stoppingGeneration != event.generation ) {
+    if ( snapshot.source.stoppingGeneration != event.generation ) {
         return;
     }
 
     advanceNow( snapshot, event.at );
-    enterSourceState( snapshot, SourceStatus::Stopped );
-    snapshot.source.stopReason = StopReason::User;
+    snapshot.source.stoppingGeneration.reset();
+    if ( snapshot.source.status == SourceStatus::Failed && snapshot.source.failure
+         && snapshot.source.failure->category == ErrorCategory::Capture ) {
+        snapshot.startAfterStop = false;
+        transition.accepted = true;
+        return;
+    }
+    if ( snapshot.startAfterStop ) {
+        apply( transition, StartRequested{ event.at }, config );
+    }
+    else if ( snapshot.runIntent == RunIntent::Stopped ) {
+        enterSourceState( snapshot, SourceStatus::Stopped );
+        snapshot.source.stopReason = StopReason::User;
+    }
+    else if ( snapshot.retryTimer.has_value() && snapshot.now >= snapshot.retryTimer->deadline ) {
+        apply( transition, RetryDeadlineReached{ snapshot.generation, snapshot.now }, config );
+    }
+    else if ( snapshot.devicePresent ) {
+        apply( transition, DeviceAvailable{ snapshot.generation, snapshot.now }, config );
+    }
     transition.accepted = true;
 }
 
+void closeRecoveryGate( LiveStateSnapshot& snapshot )
+{
+    enterSourceState( snapshot, SourceStatus::Failed );
+    snapshot.source.failure = LiveSourceError{
+        ErrorCategory::Stream, "automatic-recovery-disabled", ErrorScope::Stream,
+        RetryPolicy::Never, "The live stream was interrupted; reconnect explicitly to resume.", {} };
+}
+
 void apply( LiveStateTransition& transition, const InfrastructureChanged& event,
-            const LiveStateConfig& )
+            const LiveStateConfig& config )
 {
     auto& snapshot = transition.snapshot;
     const auto previousStatus = snapshot.infrastructure.status;
     advanceNow( snapshot, event.at );
     snapshot.infrastructure = InfrastructureState{ event.status, event.ownership };
 
-    if ( snapshot.runIntent == RunIntent::Running ) {
+    if ( snapshot.runIntent == RunIntent::Running
+         && snapshot.source.status != SourceStatus::Failed
+         && snapshot.source.status != SourceStatus::Stopping ) {
         if ( event.status == InfrastructureStatus::Ready ) {
             if ( snapshot.source.status == SourceStatus::WaitingForInfrastructure ) {
                 enterSourceState( snapshot, SourceStatus::WaitingForDevice );
             }
         }
         else {
-            if ( hasActiveStreamAttempt( snapshot ) ) {
+            const bool interrupted = hasActiveStreamAttempt( snapshot );
+            if ( interrupted ) {
                 invalidateStreamAttempt( transition );
             }
+            snapshot.devicePresent = false;
             resetSourceAttempt( transition );
             enterSourceState( snapshot, SourceStatus::WaitingForInfrastructure );
+            if ( interrupted && !config.autoReconnectEnabled ) {
+                closeRecoveryGate( snapshot );
+            }
         }
 
         if ( shouldStartInfrastructure( snapshot.infrastructure )
@@ -274,6 +335,11 @@ void apply( LiveStateTransition& transition, const DeviceAvailable& event, const
     }
 
     advanceNow( snapshot, event.at );
+    snapshot.devicePresent = true;
+    transition.accepted = true;
+    if ( snapshot.source.stoppingGeneration.has_value() ) {
+        return;
+    }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, SourceStatus::OpeningStream );
     transition.effects.push_back(
@@ -281,26 +347,33 @@ void apply( LiveStateTransition& transition, const DeviceAvailable& event, const
     transition.accepted = true;
 }
 
-void apply( LiveStateTransition& transition, const DeviceAbsent& event, const LiveStateConfig& )
+void apply( LiveStateTransition& transition, const DeviceAbsent& event, const LiveStateConfig& config )
 {
     auto& snapshot = transition.snapshot;
-    if ( !hasCurrentRunningGeneration( snapshot, event ) ) {
+    if ( !hasCurrentRunningGeneration( snapshot, event )
+         || snapshot.source.status == SourceStatus::Failed
+         || snapshot.source.status == SourceStatus::Stopping ) {
         return;
     }
 
     advanceNow( snapshot, event.at );
-    if ( hasActiveStreamAttempt( snapshot ) ) {
+    snapshot.devicePresent = false;
+    const bool interrupted = hasActiveStreamAttempt( snapshot );
+    if ( interrupted ) {
         invalidateStreamAttempt( transition );
     }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, snapshot.infrastructure.status == InfrastructureStatus::Ready
                                     ? SourceStatus::WaitingForDevice
                                     : SourceStatus::WaitingForInfrastructure );
+    if ( interrupted && !config.autoReconnectEnabled ) {
+        closeRecoveryGate( snapshot );
+    }
     transition.accepted = true;
 }
 
 void apply( LiveStateTransition& transition, const UserActionRequired& event,
-            const LiveStateConfig& )
+            const LiveStateConfig& config )
 {
     auto& snapshot = transition.snapshot;
     const auto activeStreamAttempt = hasActiveStreamAttempt( snapshot );
@@ -311,12 +384,14 @@ void apply( LiveStateTransition& transition, const UserActionRequired& event,
     }
 
     advanceNow( snapshot, event.at );
+    snapshot.devicePresent = false;
     if ( activeStreamAttempt ) {
         invalidateStreamAttempt( transition );
     }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, SourceStatus::AwaitingUser );
     snapshot.source.awaitingUserReason = event.reason;
+    if ( activeStreamAttempt && !config.autoReconnectEnabled ) { closeRecoveryGate( snapshot ); }
     transition.accepted = true;
 }
 
@@ -343,14 +418,18 @@ void apply( LiveStateTransition& transition, const StreamBytesReceived& event,
             const LiveStateConfig& )
 {
     const auto& snapshot = transition.snapshot;
-    if ( !hasCurrentGeneration( snapshot, event )
-         || ( snapshot.source.status != SourceStatus::OpeningStream
-              && snapshot.source.status != SourceStatus::Streaming ) ) {
+    const bool retiring = snapshot.source.stoppingGeneration == event.generation
+        && snapshot.source.stoppingDisposition == StopDisposition::SettleAccepted
+        && !( snapshot.source.failure && snapshot.source.failure->category == ErrorCategory::Capture );
+    const bool active = hasCurrentGeneration( snapshot, event )
+        && ( snapshot.source.status == SourceStatus::OpeningStream
+             || snapshot.source.status == SourceStatus::Streaming );
+    if ( !active && !retiring ) {
         return;
     }
 
     advanceNow( transition.snapshot, event.at );
-    transition.effects.push_back( LiveStateEffect{ EffectKind::AppendBytes, snapshot.generation,
+    transition.effects.push_back( LiveStateEffect{ EffectKind::AppendBytes, event.generation,
                                                    Timestamp{ 0 }, event.byteCount } );
     transition.accepted = true;
 }
@@ -406,6 +485,7 @@ void apply( LiveStateTransition& transition, const RetryDeadlineReached& event,
     auto& snapshot = transition.snapshot;
     if ( !hasCurrentGeneration( snapshot, event ) || !snapshot.retryTimer.has_value()
          || snapshot.source.status != SourceStatus::RetryWait
+         || snapshot.source.stoppingGeneration.has_value()
          || event.at < snapshot.retryTimer->deadline ) {
         return;
     }
@@ -415,6 +495,28 @@ void apply( LiveStateTransition& transition, const RetryDeadlineReached& event,
     enterSourceState( snapshot, SourceStatus::OpeningStream );
     transition.effects.push_back(
         LiveStateEffect{ EffectKind::OpenStream, snapshot.generation, Timestamp{ 0 }, 0u } );
+    transition.accepted = true;
+}
+
+void apply( LiveStateTransition& transition, const CaptureHealthChanged& event, const LiveStateConfig& )
+{
+    if ( event.healthy == event.error.has_value() ) { return; }
+    advanceNow( transition.snapshot, event.at );
+    transition.snapshot.captureHealthy = event.healthy;
+    transition.snapshot.captureHealthError = event.error;
+    transition.accepted = true;
+}
+
+void apply( LiveStateTransition& transition, const CaptureFailed& event, const LiveStateConfig& )
+{
+    auto& snapshot = transition.snapshot;
+    if ( event.generation != snapshot.generation
+         && event.generation != snapshot.source.stoppingGeneration ) { return; }
+    advanceNow( snapshot, event.at );
+    if ( hasActiveStreamAttempt( snapshot ) ) { invalidateStreamAttempt( transition ); }
+    resetSourceAttempt( transition );
+    enterSourceState( snapshot, SourceStatus::Failed );
+    snapshot.source.failure = event.error;
     transition.accepted = true;
 }
 
@@ -487,6 +589,30 @@ bool reconnectEnabled( SourceStatus status )
 }
 
 } // namespace
+
+void LiveIntegritySummary::record( const std::string& code, std::uint64_t bytes )
+{
+    if ( recentEvents.size() >= MaxRecentEvents ) {
+        const auto excess = recentEvents.size() - MaxRecentEvents + 1u;
+        olderEvents += std::min<std::uint64_t>( excess,
+            std::numeric_limits<std::uint64_t>::max() - olderEvents );
+        recentEvents.erase( recentEvents.begin(),
+                           recentEvents.begin() + static_cast<std::ptrdiff_t>( excess ) );
+    }
+    recentEvents.push_back( IntegrityEvent{ code.substr( 0, 96 ), bytes } );
+}
+
+bool LiveIntegritySummary::operator==( const LiveIntegritySummary& other ) const
+{
+    return std::tie( offeredBytes, dequeuedBytes, acceptedBytes, committedBytes, committedLines,
+                    discardedBytes, uncertainBytes, outputBytes, olderEvents, outputProgressUnknown,
+                    sourceCompletenessUnknown, gapPossible, replayPossible, recentEvents )
+        == std::tie( other.offeredBytes, other.dequeuedBytes, other.acceptedBytes,
+                     other.committedBytes, other.committedLines, other.discardedBytes,
+                     other.uncertainBytes, other.outputBytes, other.olderEvents,
+                     other.outputProgressUnknown, other.sourceCompletenessUnknown,
+                     other.gapPossible, other.replayPossible, other.recentEvents );
+}
 
 LiveStateSnapshot initialLiveState()
 {

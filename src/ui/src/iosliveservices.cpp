@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,17 @@ public:
             requested_.clear();
         }
 
+        requested_.erase(
+            std::remove_if( requested_.begin(), requested_.end(), [ &snapshot ]( const auto& value ) {
+                const auto current = std::find_if(
+                    snapshot.entries.cbegin(), snapshot.entries.cend(), [ &value ]( const auto& entry ) {
+                        return entry.endpoint == value.endpoint && entry.epoch == value.epoch
+                               && !entry.metadata.has_value() && !entry.error.has_value();
+                    } );
+                return current == snapshot.entries.cend();
+            } ),
+            requested_.end() );
+
         for ( const auto& entry : snapshot.entries ) {
             if ( entry.metadata.has_value() || entry.error.has_value() ) {
                 continue;
@@ -66,6 +78,12 @@ public:
         std::lock_guard<std::recursive_mutex> lock( mutex_ );
         requester_ = nullptr;
         requested_.clear();
+    }
+
+    std::size_t entryCountForTest()
+    {
+        std::lock_guard<std::recursive_mutex> lock( mutex_ );
+        return requested_.size();
     }
 
 private:
@@ -123,13 +141,27 @@ public:
         : owner_( owner )
         , catalogExecutor_( std::make_shared<BoundedSerialExecutor>(
               config.catalogShutdownDeadline ) )
+        , metadataExecutor_( std::make_shared<BoundedConcurrentExecutor>(
+              std::max<std::size_t>( 1u, config.metadataConcurrency ),
+              config.metadataShutdownDeadline ) )
     {
         std::string loadError;
         const auto api = loadIosNativeApiFromBundle( config.nativeStackRoot, &loadError );
         auto catalog = std::make_unique<IosDeviceCatalog>(
-            api, [ executor = catalogExecutor_ ]( IosCatalogTask task ) {
-                executor->post( std::move( task ) );
-            } );
+            api,
+            [ executor = catalogExecutor_ ]( IosCatalogTask task ) {
+                if ( !executor->post( std::move( task ) ) ) {
+                    throw std::runtime_error( "iOS catalog publication executor is stopped" );
+                }
+            },
+            IosCatalogMetadataExecutor{
+                [ executor = metadataExecutor_ ]( std::string key, IosCatalogTask task ) {
+                    return executor->submitLatest( std::move( key ), std::move( task ) );
+                },
+                [ executor = metadataExecutor_ ]( const std::string& key ) {
+                    return executor->cancelLatest( key );
+                },
+                [ executor = metadataExecutor_ ] { executor->clearPendingLatest(); } } );
         auto* const nativeCatalog = catalog.get();
         catalog_ = std::move( catalog );
         startMetadataObservation();
@@ -190,6 +222,11 @@ public:
         metadataObservation_.reset();
     }
 
+    std::size_t metadataObservationEntryCountForTest() const
+    {
+        return metadataObservation_ != nullptr ? metadataObservation_->entryCountForTest() : 0u;
+    }
+
     std::unique_ptr<LiveSourceTransport> create( const LiveSourceTransportConfig& config ) const
     {
         if ( config.sourceType != LiveLogSourceType::IosLogStream ) {
@@ -225,6 +262,12 @@ public:
                 "Select an iOS device endpoint before starting capture.",
                 "The native transport requires an explicit UDID and supported connection type."
             };
+            return nullptr;
+        }
+
+        if ( const auto optionError = klogg::livelog::validateIosNativeOptions( config );
+             optionError.has_value() ) {
+            lastConfigurationError_ = *optionError;
             return nullptr;
         }
 
@@ -271,6 +314,10 @@ public:
             nativeCatalog->stop();
         }
         workerFactory_.reset();
+        if ( metadataExecutor_ != nullptr ) {
+            metadataExecutor_->shutdownAsync();
+            metadataExecutor_.reset();
+        }
         if ( catalogExecutor_ != nullptr ) {
             catalogExecutor_->shutdownAsync();
             catalogExecutor_.reset();
@@ -279,6 +326,7 @@ public:
 
     IosLiveServices& owner_;
     std::shared_ptr<BoundedSerialExecutor> catalogExecutor_;
+    std::shared_ptr<BoundedConcurrentExecutor> metadataExecutor_;
     std::unique_ptr<IosCatalogSnapshotProvider> catalog_;
     std::shared_ptr<CatalogMetadataObservation> metadataObservation_;
     std::optional<IosCatalogSnapshotProvider::SubscriptionId> metadataSubscription_;
@@ -324,6 +372,11 @@ IosLiveServices::create( const LiveSourceTransportConfig& config ) const
 std::optional<LiveSourceError> IosLiveServices::lastConfigurationError() const
 {
     return impl_->lastConfigurationError_;
+}
+
+std::size_t IosLiveServices::metadataObservationEntryCountForTest() const
+{
+    return impl_->metadataObservationEntryCountForTest();
 }
 
 void IosLiveServices::shutdown()

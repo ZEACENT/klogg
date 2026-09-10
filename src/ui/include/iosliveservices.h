@@ -14,6 +14,7 @@
 #include <QObject>
 
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,7 +28,11 @@ namespace klogg::livecapture::ios {
 struct IosLiveServicesConfig {
     std::string nativeStackRoot;
     std::chrono::milliseconds catalogShutdownDeadline{ DefaultIosNativeShutdownDeadline };
+    std::size_t metadataConcurrency{ 4u };
+    std::chrono::milliseconds metadataShutdownDeadline{ DefaultIosNativeShutdownDeadline };
 };
+
+class IosLiveServicesTestAccess;
 
 class IosLiveServices final : public QObject, public LiveSourceTransportFactory {
     Q_OBJECT
@@ -52,8 +57,20 @@ public:
     void shutdown();
 
 private:
+    friend class IosLiveServicesTestAccess;
+
+    std::size_t metadataObservationEntryCountForTest() const;
+
     class Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+class IosLiveServicesTestAccess final {
+public:
+    static std::size_t metadataObservationEntryCount( const IosLiveServices& services )
+    {
+        return services.metadataObservationEntryCountForTest();
+    }
 };
 
 } // namespace klogg::livecapture::ios

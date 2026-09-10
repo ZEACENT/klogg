@@ -16,10 +16,11 @@
 #include <QTimeZone>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -36,6 +37,12 @@ namespace {
 
 constexpr const char* OsTraceService = "com.apple.os_trace_relay";
 constexpr const char* SyslogService = "com.apple.syslog_relay";
+constexpr std::size_t LegacySyslogInitialRecordBytes = 4096u;
+
+std::size_t legacySyslogInitialCapacity( std::size_t maximumRecordBytes )
+{
+    return std::min( maximumRecordBytes, LegacySyslogInitialRecordBytes ) + 1u;
+}
 
 ClassifiedIosNativeError localError( ErrorCategory category, const char* code, ErrorScope scope,
                                      RetryPolicy retry, const char* message, std::string detail,
@@ -122,7 +129,32 @@ qtDeviceTimeZoneResolver( const std::string& deviceIanaId )
     };
 }
 
+bool hasNonWhitespace( const std::string& value )
+{
+    return std::any_of( value.cbegin(), value.cend(), []( unsigned char byte ) {
+        return std::isspace( byte ) == 0;
+    } );
+}
+
 } // namespace
+
+std::optional<LiveSourceError> validateIosLogOptions( const IosLogOptions& options )
+{
+    if ( !hasNonWhitespace( options.level ) && options.categories.empty()
+         && !hasNonWhitespace( options.subsystem )
+         && options.outputFormat == IosLogOutputFormat::Default ) {
+        return std::nullopt;
+    }
+
+    return LiveSourceError{
+        ErrorCategory::Configuration,
+        "unsupported-ios-log-options",
+        ErrorScope::Stream,
+        RetryPolicy::Never,
+        "iOS level, category, subsystem, and JSON options are not supported by native capture.",
+        "The native os_trace and syslog relay adapters currently expose only unfiltered text output."
+    };
+}
 
 struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<State> {
     State( IosNativeApi nativeApi, IosNativeStreamExecutor streamExecutor,
@@ -201,13 +233,17 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
         }
     }
 
-    void publishBytesAvailable() const noexcept
+    void publishBytesAvailable() noexcept
     {
         try {
             if ( callbacks.bytesAvailable ) {
                 callbacks.bytesAvailable( config.generation );
             }
-        } catch ( ... ) { // NOLINT(bugprone-empty-catch)
+        } catch ( ... ) {
+            publishBoundaryFailure(
+                ErrorCategory::Backend, "ios-live-notification-failed", ErrorScope::Stream,
+                RetryPolicy::Backoff, "The iOS live-data notification could not be delivered.",
+                "The queue retained the accepted record, but its sole consumer wakeup threw." );
         }
     }
 
@@ -335,6 +371,7 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
 
     void enqueue( std::vector<std::uint8_t> bytes ) noexcept
     {
+        const auto byteCount = bytes.size();
         LiveDataEnqueueResult result = LiveDataEnqueueResult::Closed;
         try {
             // Native readers deliver callbacks serially off the GUI thread.
@@ -348,7 +385,13 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                                     "Unable to allocate queued iOS log bytes." );
             return;
         }
-        if ( result == LiveDataEnqueueResult::Backpressure ) {
+        if ( result == LiveDataEnqueueResult::Closed ) {
+            // Callback admission preceded stop, but queue admission did not. Keep
+            // this complete normalized record separate from accepted queue bytes.
+            rejectedBeforeEnqueueBytes.fetch_add( byteCount, std::memory_order_relaxed );
+            rejectedBeforeEnqueueChunks.fetch_add( 1u, std::memory_order_relaxed );
+        }
+        else if ( result == LiveDataEnqueueResult::Backpressure ) {
             // enqueueWait only rejects records that can never fit, not transient
             // pressure. Retrying this same record cannot restore progress.
             publishBoundaryFailure( ErrorCategory::Stream, "ios-live-record-too-large",
@@ -476,37 +519,33 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
             return;
         }
         try {
-            std::string completedRecord;
-            bool recordTooLarge = false;
-            {
-                std::lock_guard<std::mutex> lock( state->syslogMutex );
-                if ( byte != '\0' ) {
-                    if ( state->syslogRecord.size() >= state->config.maximumSyslogRecordBytes ) {
-                        state->syslogRecord.clear();
-                        recordTooLarge = true;
-                    }
-                    else {
-                        state->syslogRecord.push_back( byte );
-                    }
-                }
-                else {
-                    state->syslogRecord.push_back( '\n' );
-                    completedRecord = std::move( state->syslogRecord );
-                    state->syslogRecord.clear();
-                }
+            // The pinned syslog relay invokes this callback serially from its
+            // single receive worker. CallbackGuard still synchronizes State
+            // lifetime with stop/join; a second assembly mutex would only lock
+            // once per byte without protecting an additional writer.
+            if ( state->syslogRecord.capacity() == 0u ) {
+                state->syslogRecord.reserve(
+                    legacySyslogInitialCapacity( state->config.maximumSyslogRecordBytes ) );
             }
-            if ( recordTooLarge ) {
-                state->publishFailure( localError(
-                    ErrorCategory::Stream, "ios-syslog-record-too-large", ErrorScope::Stream,
-                    RetryPolicy::Backoff, "The iOS syslog relay returned an oversized record.",
-                    "An unterminated syslog record exceeded the configured byte limit." ) );
+            if ( byte != '\0' ) {
+                if ( state->syslogRecord.size() >= state->config.maximumSyslogRecordBytes ) {
+                    state->syslogRecord.clear();
+                    state->publishFailure( localError(
+                        ErrorCategory::Stream, "ios-syslog-record-too-large", ErrorScope::Stream,
+                        RetryPolicy::Backoff, "The iOS syslog relay returned an oversized record.",
+                        "An unterminated syslog record exceeded the configured byte limit." ) );
+                    return;
+                }
+                state->syslogRecord.push_back( static_cast<std::uint8_t>( byte ) );
                 return;
             }
-            if ( !completedRecord.empty() ) {
-                std::vector<std::uint8_t> completed( completedRecord.size() );
-                std::memcpy( completed.data(), completedRecord.data(), completed.size() );
-                state->enqueue( std::move( completed ) );
+
+            if ( state->syslogRecord.empty() ) {
+                return;
             }
+            state->syslogRecord.push_back( static_cast<std::uint8_t>( '\n' ) );
+            auto completedRecord = std::move( state->syslogRecord );
+            state->enqueue( std::move( completedRecord ) );
         } catch ( ... ) {
             state->publishBoundaryFailure(
                 ErrorCategory::Backend, "ios-syslog-callback-failed", ErrorScope::Stream,
@@ -560,6 +599,11 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                 ErrorCategory::Configuration, "ios-live-queue-invalid-capacity", ErrorScope::Stream,
                 RetryPolicy::Never, "The iOS live-data queue capacity must be positive.",
                 "Both byte and chunk limits must allow at least one complete log record." ) );
+            return;
+        }
+
+        if ( const auto error = validateIosLogOptions( config.logOptions ); error.has_value() ) {
+            publishFailure( ClassifiedIosNativeError{ *error, std::nullopt } );
             return;
         }
 
@@ -679,6 +723,11 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
                                         "The bundled native iOS ABI is incomplete.",
                                         "Required syslog relay symbols are missing." ) );
             return;
+        }
+        if ( !osTrace ) {
+            // Prime only the legacy single-reader assembler. Modern os_trace
+            // continues through its independent packet decoder and formatter.
+            syslogRecord.reserve( legacySyslogInitialCapacity( config.maximumSyslogRecordBytes ) );
         }
 
         if ( osTrace ) {
@@ -909,11 +958,12 @@ struct IosNativeStreamWorker::State final : public std::enable_shared_from_this<
     IosNativeSessionLease admissionLease;
     std::shared_ptr<State> cleanupRetention;
     LiveDataQueue queue;
+    std::atomic<std::size_t> rejectedBeforeEnqueueBytes{ 0u };
+    std::atomic<std::size_t> rejectedBeforeEnqueueChunks{ 0u };
 
     mutable std::mutex controlMutex;
     std::condition_variable callbacksChanged;
-    std::mutex syslogMutex;
-    std::string syslogRecord;
+    ByteBuffer syslogRecord;
     std::optional<OsTraceRecordFormatter> osTraceFormatter;
     NativeDeviceOwner device;
     NativeLockdownOwner lockdown;
@@ -1011,7 +1061,12 @@ std::size_t IosNativeStreamWorker::waitingProducerCount() const
 LiveDataStatistics IosNativeStreamWorker::statistics() const
 {
     if ( state_ != nullptr ) {
-        return state_->queue.statistics();
+        auto result = state_->queue.statistics();
+        result.rejectedBeforeEnqueueBytes
+            = state_->rejectedBeforeEnqueueBytes.load( std::memory_order_relaxed );
+        result.rejectedBeforeEnqueueChunks
+            = state_->rejectedBeforeEnqueueChunks.load( std::memory_order_relaxed );
+        return result;
     }
     return {};
 }

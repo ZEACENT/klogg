@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <QByteArray>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QtGlobal>
@@ -14,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <aclapi.h>
+#include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #else
@@ -66,6 +68,13 @@ public:
     HANDLE get() const
     {
         return handle_;
+    }
+
+    HANDLE release()
+    {
+        const auto handle = handle_;
+        handle_ = INVALID_HANDLE_VALUE;
+        return handle;
     }
 
     explicit operator bool() const
@@ -124,12 +133,40 @@ PACL ownerOnlyAcl( PSID owner, bool directory )
     return acl;
 }
 
+QString extendedNativePath( const QString& path )
+{
+    const auto nativePath = QDir::toNativeSeparators( path );
+    if ( nativePath.startsWith( QStringLiteral( "\\\\?\\" ) )
+         || nativePath.startsWith( QStringLiteral( "\\\\.\\" ) ) ) {
+        return nativePath;
+    }
+
+    const auto absolutePath = QDir::toNativeSeparators(
+        QFileInfo( path ).absoluteFilePath() );
+    if ( absolutePath.startsWith( QStringLiteral( "\\\\" ) ) ) {
+        return QStringLiteral( "\\\\?\\UNC\\" ) + absolutePath.mid( 2 );
+    }
+    return QStringLiteral( "\\\\?\\" ) + absolutePath;
+}
+
+std::optional<FileIdentity> fileIdentityForHandle( HANDLE handle )
+{
+    BY_HANDLE_FILE_INFORMATION info{};
+    if ( !GetFileInformationByHandle( handle, &info ) ) {
+        return std::nullopt;
+    }
+    const auto fileIndex = ( static_cast<std::uint64_t>( info.nFileIndexHigh ) << 32u )
+                           | static_cast<std::uint64_t>( info.nFileIndexLow );
+    return FileIdentity{ info.dwVolumeSerialNumber, fileIndex };
+}
+
 NativeHandle openObject( const QString& path, bool directory, DWORD access )
 {
     const DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT
                         | ( directory ? FILE_FLAG_BACKUP_SEMANTICS : 0 );
+    const auto nativePath = extendedNativePath( path );
     return NativeHandle( CreateFileW(
-        reinterpret_cast<LPCWSTR>( path.utf16() ), access,
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, flags,
         nullptr ) );
 }
@@ -275,13 +312,7 @@ std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
     if ( nativeHandle == -1 ) {
         return std::nullopt;
     }
-    BY_HANDLE_FILE_INFORMATION info{};
-    if ( !GetFileInformationByHandle( reinterpret_cast<HANDLE>( nativeHandle ), &info ) ) {
-        return std::nullopt;
-    }
-    const auto fileIndex = ( static_cast<std::uint64_t>( info.nFileIndexHigh ) << 32u )
-                           | static_cast<std::uint64_t>( info.nFileIndexLow );
-    return FileIdentity{ info.dwVolumeSerialNumber, fileIndex };
+    return fileIdentityForHandle( reinterpret_cast<HANDLE>( nativeHandle ) );
 #else
     struct stat info{};
     if ( ::fstat( file.handle(), &info ) != 0 ) {
@@ -289,6 +320,105 @@ std::optional<FileIdentity> fileIdentity( const QFileDevice& file )
     }
     return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
                          static_cast<std::uint64_t>( info.st_ino ) };
+#endif
+}
+
+std::optional<FileIdentity> fileIdentity( const QString& path )
+{
+#if defined( Q_OS_WIN )
+    const auto nativePath = extendedNativePath( path );
+    NativeHandle handle( CreateFileW(
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ) );
+    return handle ? fileIdentityForHandle( handle.get() ) : std::nullopt;
+#else
+    const auto encodedPath = QFile::encodeName( path );
+    struct stat info{};
+    if ( ::stat( encodedPath.constData(), &info ) != 0 ) {
+        return std::nullopt;
+    }
+    return FileIdentity{ static_cast<std::uint64_t>( info.st_dev ),
+                         static_cast<std::uint64_t>( info.st_ino ) };
+#endif
+}
+
+bool openFileSharedForReplacement( QFile& file, QIODevice::OpenMode mode )
+{
+#if defined( Q_OS_WIN )
+    if ( file.isOpen() || file.fileName().isEmpty() ) {
+        return false;
+    }
+
+    const bool read = mode.testFlag( QIODevice::ReadOnly );
+    const bool write = mode.testFlag( QIODevice::WriteOnly );
+    const bool newOnly = mode.testFlag( QIODevice::NewOnly );
+    const bool existingOnly = mode.testFlag( QIODevice::ExistingOnly );
+    if ( ( !read && !write ) || ( newOnly && existingOnly ) ) {
+        return false;
+    }
+
+    DWORD access = 0;
+    if ( read ) {
+        access |= GENERIC_READ;
+    }
+    if ( write ) {
+        access |= GENERIC_WRITE;
+    }
+
+    DWORD creation = OPEN_EXISTING;
+    if ( newOnly ) {
+        creation = CREATE_NEW;
+    }
+    else if ( existingOnly ) {
+        creation = mode.testFlag( QIODevice::Truncate ) ? TRUNCATE_EXISTING
+                                                        : OPEN_EXISTING;
+    }
+    else if ( write ) {
+        creation = mode.testFlag( QIODevice::Truncate ) ? CREATE_ALWAYS
+                                                        : OPEN_ALWAYS;
+    }
+
+    const auto nativePath = extendedNativePath( file.fileName() );
+    NativeHandle handle( CreateFileW(
+        reinterpret_cast<LPCWSTR>( nativePath.utf16() ), access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        creation, FILE_ATTRIBUTE_NORMAL, nullptr ) );
+    if ( !handle ) {
+        return false;
+    }
+
+    int descriptorFlags = _O_BINARY;
+    if ( read && write ) {
+        descriptorFlags |= _O_RDWR;
+    }
+    else if ( write ) {
+        descriptorFlags |= _O_WRONLY;
+    }
+    else {
+        descriptorFlags |= _O_RDONLY;
+    }
+    if ( mode.testFlag( QIODevice::Append ) ) {
+        descriptorFlags |= _O_APPEND;
+    }
+
+    const auto descriptor = _open_osfhandle(
+        reinterpret_cast<intptr_t>( handle.get() ), descriptorFlags );
+    if ( descriptor == -1 ) {
+        return false;
+    }
+    (void) handle.release();
+
+    const auto adoptedMode
+        = mode & ~( QIODevice::NewOnly | QIODevice::ExistingOnly
+                    | QIODevice::Truncate );
+    if ( file.open( descriptor, adoptedMode, QFileDevice::AutoCloseHandle ) ) {
+        return true;
+    }
+    _close( descriptor );
+    return false;
+#else
+    return file.open( mode );
 #endif
 }
 

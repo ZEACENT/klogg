@@ -121,6 +121,7 @@ public:
     explicit ShellV2FrameDecoder( std::size_t maxPayloadSize = std::size_t{ 16u } * 1024u * 1024u );
 
     DecoderFeedResult<ShellV2Frame> feed( const ByteVector& bytes );
+    ByteVector takeBufferedStdoutPrefix();
     void reset() noexcept;
 
 private:
@@ -165,6 +166,7 @@ struct LogcatCommandOptions {
 std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled );
 std::string normalizeLogcatStreamError( const std::string& diagnostic );
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options );
+ProtocolResult<std::string> buildClearLogcatService( const std::vector<LogBuffer>& buffers );
 std::string buildClearLogcatService();
 
 } // namespace klogg::livecapture::adb

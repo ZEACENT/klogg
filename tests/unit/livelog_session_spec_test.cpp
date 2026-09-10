@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -42,11 +43,13 @@
 #include <QtGlobal>
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
+#include <QTranslator>
 
 #include "livelogsession.h"
 #include "livestate.h"
@@ -63,6 +66,21 @@ using klogg::livelog::LiveLogSessionSpec;
 using klogg::livelog::ParseResult;
 using klogg::livelog::SourceKind;
 using IosOptions = klogg::livelog::IosOptions;
+
+class LiveLogMessageTranslator final : public QTranslator {
+public:
+    QString translate( const char* context, const char* sourceText,
+                       const char*, int ) const override
+    {
+        if ( QByteArray{ context } == QByteArrayLiteral( "klogg::livelog::messages" )
+             && QByteArray{ sourceText }
+                    == QByteArrayLiteral(
+                        "The saved live capture integrity metadata is invalid or unsupported." ) ) {
+            return QStringLiteral( "translated-invalid-live-integrity" );
+        }
+        return {};
+    }
+};
 
 // Fixed identifiers keep every assertion below deterministic (no generator,
 // no clock, no randomness anywhere in this file).
@@ -211,6 +229,74 @@ private:
 };
 
 } // namespace
+
+TEST_CASE( "Live integrity persists exact uint64 values and bounded historical events",
+           "[livelog-session-spec][w2-integrity-red]" )
+{
+    auto spec = makeAndroidSpec();
+    spec.integrity.acceptedBytes = std::numeric_limits<std::uint64_t>::max() - 2u;
+    spec.integrity.offeredBytes = std::numeric_limits<std::uint64_t>::max();
+    spec.integrity.dequeuedBytes = spec.integrity.offeredBytes;
+    spec.integrity.discardedBytes = 2u;
+    spec.integrity.gapPossible = true;
+    spec.integrity.replayPossible = true;
+    for ( unsigned i = 0; i < 100u; ++i ) { spec.integrity.record( "stream-retired", i ); }
+    CHECK( spec.integrity.recentEvents.size() == live::LiveIntegritySummary::MaxRecentEvents );
+    CHECK( spec.integrity.olderEvents == 68u );
+    const auto json = serializeSpec( spec );
+    const auto parsed = klogg::livelog::parsePersistedSpec( json );
+    REQUIRE( parsed.ok() );
+    CHECK( parsed.spec->integrity == spec.integrity );
+    const auto bridged = klogg::livelog::sessionSpecFromSessionData(
+        klogg::livelog::sessionDataFromSpec( spec ) );
+    CHECK( bridged.integrity == spec.integrity );
+    const auto runtime = klogg::livelog::sessionDataFromSpec( spec );
+    const auto legacyRoundtrip = AdbLogcatSessionData::fromJson(
+        QString::fromUtf8( QJsonDocument( runtime.toJson() ).toJson() ) );
+    CHECK( legacyRoundtrip.integrity == spec.integrity );
+    CHECK( json.contains( QStringLiteral( "18446744073709551613" ) ) );
+}
+
+TEST_CASE( "Malformed live integrity does not silently become a healthy history",
+           "[livelog-session-spec][w2-integrity-red]" )
+{
+    const auto bad = GENERATE( QStringLiteral( R"({"version":99})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":9007199254740993})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":"-1"})" ),
+        QStringLiteral( R"({"version":1,"acceptedBytes":"18446744073709551616"})" ) );
+    auto object = QJsonDocument::fromJson( serializeSpec( makeAndroidSpec() ).toUtf8() ).object();
+    object.insert( QStringLiteral( "integrity" ), QJsonDocument::fromJson( bad.toUtf8() ).object() );
+    const auto result = klogg::livelog::parsePersistedSpec( QString::fromUtf8( QJsonDocument( object ).toJson() ) );
+    CHECK_FALSE( result.ok() );
+    CHECK( result.hasFatalDiagnostic() );
+}
+
+TEST_CASE( "Invalid live integrity diagnostics use the live-log translation context",
+           "[livelog-session-spec][translation-red]" )
+{
+    auto object = QJsonDocument::fromJson( serializeSpec( makeAndroidSpec() ).toUtf8() ).object();
+    object.insert( QStringLiteral( "integrity" ),
+                   QJsonObject{ { QStringLiteral( "version" ), 99 } } );
+    int argumentCount = 1;
+    char applicationName[] = "livelog-session-spec-test";
+    char* arguments[] = { applicationName, nullptr };
+    std::unique_ptr<QCoreApplication> application;
+    if ( QCoreApplication::instance() == nullptr ) {
+        application = std::make_unique<QCoreApplication>( argumentCount, arguments );
+    }
+    LiveLogMessageTranslator translator;
+    QCoreApplication::installTranslator( &translator );
+    const auto result = klogg::livelog::parsePersistedSpec(
+        QString::fromUtf8( QJsonDocument( object ).toJson() ) );
+    QCoreApplication::removeTranslator( &translator );
+
+    const auto diagnostic = std::find_if(
+        result.diagnostics.cbegin(), result.diagnostics.cend(), []( const Diagnostic& candidate ) {
+            return candidate.code == QStringLiteral( "invalid-live-integrity" );
+        } );
+    REQUIRE( diagnostic != result.diagnostics.cend() );
+    CHECK( diagnostic->message == QStringLiteral( "translated-invalid-live-integrity" ) );
+}
 
 TEST_CASE( "Fresh Android session spec serializes typed fields without raw command data",
            "[livelog-session-spec]" )

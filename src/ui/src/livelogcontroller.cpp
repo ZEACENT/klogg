@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <exception>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +26,11 @@ namespace {
 namespace live = livecapture;
 namespace adb = livecapture::adb;
 namespace ios = livecapture::ios;
+
+void addCount( std::uint64_t& total, std::uint64_t increment )
+{
+    total += std::min( increment, std::numeric_limits<std::uint64_t>::max() - total );
+}
 
 class SteadyLiveLogClock final : public LiveLogClock {
 public:
@@ -170,6 +176,17 @@ std::vector<std::string> utf8Strings( const QStringList& values )
     return result;
 }
 
+ios::IosLogOptions iosLogOptions( const LiveSourceTransportConfig& config )
+{
+    ios::IosLogOptions options;
+    options.level = config.iosLevel.toUtf8().toStdString();
+    options.categories = utf8Strings( config.iosCategories );
+    options.subsystem = config.iosSubsystem.toUtf8().toStdString();
+    options.outputFormat = config.iosJsonOutput ? ios::IosLogOutputFormat::Json
+                                                : ios::IosLogOutputFormat::Default;
+    return options;
+}
+
 } // namespace
 
 class LiveLogController::ProductionRuntime final {
@@ -225,6 +242,7 @@ LiveLogController::LiveLogController( LiveLogSessionSpec spec, LiveLogController
     , scheduler_( &scheduler )
     , effects_( effects )
 {
+    config_.reducer.autoReconnectEnabled = spec_.capture.autoReconnectEnabled;
 }
 
 LiveLogController::LiveLogController( LiveLogSessionSpec spec, LiveLogControllerConfig config,
@@ -238,6 +256,7 @@ LiveLogController::LiveLogController( LiveLogSessionSpec spec, LiveLogController
     , scheduler_( ownedScheduler_.get() )
     , effects_( effects )
 {
+    config_.reducer.autoReconnectEnabled = spec_.capture.autoReconnectEnabled;
     productionRuntime_ = std::make_unique<ProductionRuntime>( *this );
 }
 
@@ -271,7 +290,15 @@ bool LiveLogControlPresentation::sameControlState( const LiveLogControlPresentat
     return status == other.status && disconnectEnabled == other.disconnectEnabled
            && reconnectEnabled == other.reconnectEnabled && retryAttempt == other.retryAttempt
            && awaitingUserReason == other.awaitingUserReason && failureMessage == other.failureMessage
-           && outputBinding == other.outputBinding && outputBindingError == other.outputBindingError;
+           && outputBinding == other.outputBinding && outputBindingError == other.outputBindingError
+           && captureHealthy == other.captureHealthy && captureHealthError == other.captureHealthError
+           && integrity.gapPossible == other.integrity.gapPossible
+           && integrity.replayPossible == other.integrity.replayPossible
+           && integrity.discardedBytes == other.integrity.discardedBytes
+           && integrity.uncertainBytes == other.integrity.uncertainBytes
+           && integrity.outputProgressUnknown == other.integrity.outputProgressUnknown
+           && integrity.olderEvents == other.integrity.olderEvents
+           && integrity.recentEvents == other.integrity.recentEvents;
 }
 
 LiveLogControlPresentation LiveLogController::controlPresentation() const
@@ -285,6 +312,12 @@ LiveLogControlPresentation LiveLogController::controlPresentation() const
     result.awaitingUserReason = projection.awaitingUserReason;
     result.failureMessage = projection.failureMessage;
     result.outputBinding = projection.outputBinding;
+    result.captureHealthy = snapshot_.captureHealthy;
+    result.integrity = spec_.integrity;
+    if ( snapshot_.captureHealthError ) {
+        result.captureHealthError = LiveLogControlPresentation::OutputError{
+            snapshot_.captureHealthError->code, snapshot_.captureHealthError->message };
+    }
     if ( snapshot_.outputBindingError.has_value() ) {
         result.outputBindingError = LiveLogControlPresentation::OutputError{
             snapshot_.outputBindingError->code, snapshot_.outputBindingError->message };
@@ -318,15 +351,29 @@ void LiveLogController::startRequested()
     dispatch( live::StartRequested{ clock_->now() } );
 }
 
-void LiveLogController::stopRequested()
+void LiveLogController::stopRequested( live::StopDisposition disposition )
 {
     spec_.runIntent = live::RunIntent::Stopped;
-    dispatch( live::StopRequested{ clock_->now() } );
+    dispatch( live::StopRequested{ clock_->now(), disposition } );
 }
 
-void LiveLogController::stopCompleted( live::Generation generation )
+void LiveLogController::stopCompleted( live::Generation generation, std::uint64_t discardedBytes )
 {
+    if ( snapshot_.source.stoppingGeneration != generation ) { return; }
+    addCount( spec_.integrity.offeredBytes, discardedBytes );
+    addCount( spec_.integrity.discardedBytes, discardedBytes );
+    if ( discardedBytes != 0u ) {
+        spec_.integrity.gapPossible = true;
+        spec_.integrity.record( "transport-tail-discarded", discardedBytes );
+    }
     dispatch( live::StopCompleted{ generation, clock_->now() } );
+}
+
+void LiveLogController::inputTerminated( live::Generation generation,
+                                        const live::CaptureDeliveryResult& result )
+{
+    if ( snapshot_.source.stoppingGeneration != generation && snapshot_.generation != generation ) { return; }
+    settleDelivery( generation, result, 0u );
 }
 
 void LiveLogController::reconnectRequested()
@@ -395,11 +442,26 @@ void LiveLogController::streamReadArmed( live::Generation generation )
     }
 }
 
-void LiveLogController::streamBytesReceived( live::Generation generation, const QByteArray& bytes )
+void LiveLogController::streamBytesReceived( live::Generation generation, const QByteArray& bytes,
+                                             DeliverySettledCallback settled )
 {
+    if ( generation != snapshot_.generation && generation != snapshot_.source.stoppingGeneration ) {
+        if ( settled ) { settled(); }
+        return;
+    }
+    addCount( spec_.integrity.offeredBytes, static_cast<std::uint64_t>( bytes.size() ) );
+    addCount( spec_.integrity.dequeuedBytes, static_cast<std::uint64_t>( bytes.size() ) );
     dispatch( live::StreamBytesReceived{ generation, static_cast<std::size_t>( bytes.size() ),
                                          clock_->now() },
-              &bytes );
+              &bytes, std::move( settled ) );
+}
+
+void LiveLogController::streamDeliveryFailed(
+    live::Generation generation, const live::CaptureDeliveryResult& result,
+    std::uint64_t offeredBytes )
+{
+    settleDelivery( generation, result, offeredBytes );
+    notifyPresentationChanged();
 }
 
 void LiveLogController::streamStable( live::Generation generation )
@@ -452,16 +514,28 @@ void LiveLogController::streamFailed( live::Generation generation, live::LiveSou
     dispatch( live::RetryRequested{ generation, std::move( error ), attempt, now + delay, now } );
 }
 
+void LiveLogController::captureHealthChanged( bool healthy, std::optional<live::LiveSourceError> error )
+{
+    if ( !healthy && snapshot_.captureHealthy ) {
+        spec_.integrity.record( error.has_value() && !error->code.empty()
+                                    ? error->code
+                                    : "capture-persistence-degraded" );
+    }
+    dispatch( live::CaptureHealthChanged{ healthy, std::move( error ), clock_->now() } );
+}
+
 void LiveLogController::outputBindingChanged( live::OutputBindingState state,
                                               std::optional<live::LiveSourceError> error )
 {
     dispatch( live::OutputBindingChanged{ state, std::move( error ), clock_->now() } );
 }
 
-void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByteArray* bytes )
+void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByteArray* bytes,
+                                  DeliverySettledCallback deliverySettled )
 {
-    pendingDispatches_.push_back( PendingDispatch{
-        event, bytes != nullptr ? std::optional<QByteArray>{ *bytes } : std::nullopt } );
+    pendingDispatches_.push_back(
+        PendingDispatch{ event, bytes != nullptr ? std::optional<QByteArray>{ *bytes } : std::nullopt,
+                         std::move( deliverySettled ) } );
     if ( std::exchange( dispatching_, true ) ) {
         return;
     }
@@ -473,6 +547,20 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
 
             auto transition = live::reduce( snapshot_, pending.event, config_.reducer );
             if ( !transition.accepted ) {
+                if ( pending.bytes ) {
+                    const auto discarded
+                        = static_cast<std::uint64_t>( pending.bytes->size() );
+                    addCount( spec_.integrity.discardedBytes, discarded );
+                    if ( discarded != 0u ) {
+                        spec_.integrity.gapPossible = true;
+                        spec_.integrity.record( "dispatch-rejected-discarded", discarded );
+                    }
+                    notifyPresentationChanged();
+                }
+                if ( pending.deliverySettled ) {
+                    try { pending.deliverySettled(); }
+                    catch ( ... ) { spec_.integrity.record( "delivery-settlement-observer-failed" ); }
+                }
                 continue;
             }
 
@@ -480,7 +568,27 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             const auto* pendingBytes
                 = pending.bytes.has_value() ? &pending.bytes.value() : nullptr;
             for ( const auto& effect : transition.effects ) {
-                execute( effect, pendingBytes );
+                if ( effect.kind != live::EffectKind::AppendBytes ) {
+                    execute( effect, pendingBytes );
+                    continue;
+                }
+                try {
+                    execute( effect, pendingBytes );
+                }
+                catch ( ... ) {
+                    // An unreported sink mutation has an unknown outcome. Retire
+                    // before already buffered data can be delivered; never replay.
+                    live::CaptureDeliveryResult unknown;
+                    unknown.disposition = live::DeliveryDisposition::PartialUnknown;
+                    unknown.outputBytes.reset();
+                    unknown.failureCode = "capture-outcome-unknown";
+                    settleDelivery( effect.generation, unknown,
+                                    static_cast<std::uint64_t>( effect.byteCount ) );
+                }
+            }
+            if ( pending.deliverySettled ) {
+                try { pending.deliverySettled(); }
+                catch ( ... ) { spec_.integrity.record( "delivery-settlement-observer-failed" ); }
             }
             notifyPresentationChanged();
         }
@@ -499,17 +607,26 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
         effects_.invalidateGeneration( effect.generation );
         break;
     case live::EffectKind::CancelStream:
-        effects_.cancelStream( effect.generation );
+        if ( openedGeneration_ == effect.generation ) {
+            openedGeneration_.reset();
+            spec_.integrity.gapPossible = true;
+            if ( spec_.sourceKind == SourceKind::AndroidLogcat ) { spec_.integrity.replayPossible = true; }
+            spec_.integrity.record( effect.stopDisposition == live::StopDisposition::SettleAccepted
+                                      ? "stream-retired" : "user-stopped" );
+        }
+        effects_.retireStream( effect.generation, effect.stopDisposition );
         break;
     case live::EffectKind::StartInfrastructure:
         effects_.startInfrastructure( effect.generation );
         break;
     case live::EffectKind::OpenStream:
+        openedGeneration_ = effect.generation;
         effects_.openStream( effect.generation, transportConfig() );
         break;
     case live::EffectKind::AppendBytes:
         if ( bytes != nullptr ) {
-            effects_.appendBytes( effect.generation, *bytes );
+            const auto result = effects_.acceptBytes( effect.generation, *bytes );
+            settleDelivery( effect.generation, result, static_cast<std::uint64_t>( bytes->size() ) );
         }
         break;
     case live::EffectKind::ArmRetryTimer: {
@@ -551,6 +668,34 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
     case live::EffectKind::CancelRetryTimer:
         cancelScheduledRetry();
         break;
+    }
+}
+
+void LiveLogController::settleDelivery( live::Generation generation,
+    const live::CaptureDeliveryResult& result, std::uint64_t offered )
+{
+    auto& integrity = spec_.integrity;
+    const auto accepted = std::min( offered, result.acceptedBytes );
+    addCount( integrity.acceptedBytes, accepted );
+    addCount( integrity.committedBytes, result.committedBytes );
+    addCount( integrity.committedLines, result.committedLines );
+    if ( result.outputBytes ) { addCount( integrity.outputBytes, *result.outputBytes ); }
+    else { integrity.outputProgressUnknown = true; }
+    const bool unknown = result.disposition == live::DeliveryDisposition::PartialUnknown;
+    addCount( unknown ? integrity.uncertainBytes : integrity.discardedBytes, offered - accepted );
+    if ( !result.failureCode && !result.notificationFailed
+         && result.disposition == live::DeliveryDisposition::Complete ) { return; }
+    integrity.gapPossible = integrity.gapPossible || offered != accepted || unknown;
+    const auto code = result.failureCode.value_or(
+        result.notificationFailed ? "capture-notification-failed" : "capture-input-rejected" );
+    integrity.record( code, offered - accepted );
+    auto failure = live::reduce( snapshot_, live::CaptureFailed{ generation,
+        live::LiveSourceError{ live::ErrorCategory::Capture, code, live::ErrorScope::Capture,
+            live::RetryPolicy::Never, "The live capture could not accept all input safely.", {} },
+        clock_->now() }, config_.reducer );
+    if ( failure.accepted ) {
+        snapshot_ = std::move( failure.snapshot );
+        for ( const auto& effect : failure.effects ) { execute( effect, nullptr ); }
     }
 }
 
@@ -627,7 +772,13 @@ void LiveLogController::notifyPresentationChanged()
     lastControlPresentation_ = current;
     const auto callback = presentationChangedCallback_;
     if ( callback ) {
-        callback( std::move( current ), change );
+        try { callback( std::move( current ), change ); }
+        catch ( ... ) {
+            // Notification is after state/capture publication, never a rollback.
+            // Preserve buffered dispatches and report the observer failure in metadata.
+            spec_.integrity.record( "control-observer-failed" );
+            lastControlPresentation_ = controlPresentation();
+        }
     }
 }
 
@@ -666,22 +817,28 @@ makeAdbSmartSocketTransportConfig( const LiveSourceTransportConfig& config )
     return result;
 }
 
+std::optional<livecapture::LiveSourceError>
+validateIosNativeOptions( const LiveSourceTransportConfig& config )
+{
+    if ( config.sourceType != LiveLogSourceType::IosLogStream ) {
+        return std::nullopt;
+    }
+    return ios::validateIosLogOptions( iosLogOptions( config ) );
+}
+
 std::optional<ios::IosNativeStreamConfig>
 makeIosNativeStreamConfig( const LiveSourceTransportConfig& config )
 {
     if ( config.sourceType != LiveLogSourceType::IosLogStream
-         || config.iosBackend != IosTransportBackend::Native ) {
+         || config.iosBackend != IosTransportBackend::Native
+         || validateIosNativeOptions( config ).has_value() ) {
         return std::nullopt;
     }
 
     ios::IosNativeStreamConfig result;
     result.endpoint = config.iosEndpoint;
     result.ansiOutputEnabled = config.ansiOutputEnabled;
-    result.logOptions.level = config.iosLevel.toUtf8().toStdString();
-    result.logOptions.categories = utf8Strings( config.iosCategories );
-    result.logOptions.subsystem = config.iosSubsystem.toUtf8().toStdString();
-    result.logOptions.outputFormat = config.iosJsonOutput ? ios::IosLogOutputFormat::Json
-                                                         : ios::IosLogOutputFormat::Default;
+    result.logOptions = iosLogOptions( config );
     return result;
 }
 

@@ -400,13 +400,17 @@ QString makeCaptureId()
 bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData,
                        unsigned long long lineCount )
 {
+    const auto reached = [ & ] {
+        const auto current = logData->getNbLine().get();
+        return lineCount == 0u ? current == 0u : current >= lineCount;
+    };
     QElapsedTimer deadline;
     deadline.start();
-    while ( logData->getNbLine().get() < lineCount && deadline.elapsed() < 5000 ) {
+    while ( !reached() && deadline.elapsed() < 5000 ) {
         QCoreApplication::processEvents();
         QTest::qWait( 50 );
     }
-    return logData->getNbLine().get() >= lineCount;
+    return reached();
 }
 
 bool waitForSourceState( const AdbLogcatSource& source, AdbLogcatSource::State state )
@@ -1743,6 +1747,23 @@ bool spyContainsState( const SafeQSignalSpy& spy, LiveSourceTransport::State tar
 }
 } // namespace
 
+TEST_CASE( "ProcessLiveSourceTransport reports stopped after a pending process is deleted" )
+{
+    DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
+                                          { 3000, 20 } );
+    SafeQSignalSpy stoppedSpy( &transport,
+                               SIGNAL( stopped( LiveSourceTransport::Generation, quint64 ) ) );
+    transport.startAsync();
+    REQUIRE( transport.hasPendingStart() );
+
+    transport.stopCurrent();
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+    QCoreApplication::processEvents();
+
+    REQUIRE( stoppedSpy.count() == 1 );
+    CHECK( stoppedSpy.at( 0 ).at( 1 ).toULongLong() == 0u );
+}
+
 TEST_CASE( "ProcessLiveSourceTransport starts grace only after QProcess started" )
 {
     DeferredStartTestTransport transport( DeferredStartTestTransport::Mode::LongRunning,
@@ -2060,6 +2081,68 @@ TEST_CASE( "Unavailable iOS native transport reports a source-neutral error" )
     CHECK( source.lastError().contains( QStringLiteral( "live log" ), Qt::CaseInsensitive ) );
 }
 
+TEST_CASE( "Sparse live capture persistence schedules only sealed segments",
+           "[livecapture][persistence][sparse-stream][review-red]" )
+{
+    class IdleTransport final : public LiveSourceTransport {
+    public:
+        void start( Generation ) override {}
+        void stop( Generation ) override {}
+        void clearRemoteAsync( Generation, ClearRequestId ) override {}
+        QString lastError() const override { return {}; }
+    };
+    class IdleFactory final : public LiveSourceTransportFactory {
+    public:
+        std::unique_ptr<LiveSourceTransport>
+        create( const LiveSourceTransportConfig& ) const override
+        {
+            return std::make_unique<IdleTransport>();
+        }
+    };
+
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+    const auto captureId = makeCaptureId();
+    auto logData = std::make_shared<StreamingLogData>( captureId,
+                                                       tempDir.path() );
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 8;
+    limits.memoryBudgetBytes = 64;
+    logData->setCaptureLimits( limits );
+    AdbLogcatSessionData sessionData;
+    sessionData.captureId = captureId;
+    sessionData.deviceSerial = QStringLiteral( "SERIAL" );
+    IdleFactory factory;
+    AdbLogcatSource source( sessionData, logData, factory );
+    LiveSourceTransportConfig config;
+    config.deviceId = sessionData.deviceSerial;
+    constexpr LiveSourceTransport::Generation generation = 41u;
+    source.openTransport( generation, config );
+    auto* timer = source.findChild<QTimer*>(
+        QStringLiteral( "liveCapturePersistenceRetry" ) );
+    REQUIRE( timer != nullptr );
+
+    REQUIRE( source.appendTransportBytes(
+                         generation, QByteArrayLiteral( "a\n" ) )
+                 .disposition
+             == klogg::livecapture::DeliveryDisposition::Complete );
+    CHECK_FALSE( timer->isActive() );
+    CHECK( logData->persistenceState().pendingSegments == 1 );
+    CHECK( logData->persistenceState().retryableSegments == 0 );
+
+    REQUIRE( source.appendTransportBytes(
+                         generation, QByteArrayLiteral( "bbbbbb\n" ) )
+                 .disposition
+             == klogg::livecapture::DeliveryDisposition::Complete );
+    CHECK( logData->persistenceState().retryableSegments == 1 );
+    REQUIRE( timer->isActive() );
+    timer->stop();
+    REQUIRE( QMetaObject::invokeMethod( timer, "timeout",
+                                        Qt::DirectConnection ) );
+    CHECK_FALSE( timer->isActive() );
+    CHECK( logData->persistenceState().complete() );
+}
+
 TEST_CASE( "Controller-owned manual reconnect never starts a source-local generation" )
 {
     class RecordingTransport final : public LiveSourceTransport {
@@ -2084,6 +2167,12 @@ TEST_CASE( "Controller-owned manual reconnect never starts a source-local genera
         void publishConnected( Generation generation )
         {
             Q_EMIT stateChanged( generation, State::Connected );
+        }
+
+        void finishStop( Generation generation )
+        {
+            REQUIRE( std::find( stops.cbegin(), stops.cend(), generation ) != stops.cend() );
+            Q_EMIT stateChanged( generation, State::Disconnected );
         }
 
         void finishClear()
@@ -2145,10 +2234,20 @@ TEST_CASE( "Controller-owned manual reconnect never starts a source-local genera
 
     int controllerStops = 0;
     controllerRestarts = 0;
-    source.setControllerCallbacks( {}, {}, {}, [ &controllerStops ] { ++controllerStops; },
-                                   [ &controllerRestarts ] { ++controllerRestarts; } );
+    source.setControllerCallbacks(
+        {}, {}, {},
+        [&] {
+            ++controllerStops;
+            source.cancelTransport( 41u );
+        },
+        [ &controllerRestarts ] { ++controllerRestarts; } );
     REQUIRE( source.clearAndRestart() );
     REQUIRE( controllerStops == 1 );
+    CHECK( factory.created->stops
+           == std::vector<LiveSourceTransport::Generation>{ 41u } );
+    CHECK_FALSE( factory.created->clearGeneration.has_value() );
+
+    factory.created->finishStop( 41u );
     REQUIRE( factory.created->clearGeneration.has_value() );
 
     REQUIRE( source.reconnectSource() );
@@ -2283,7 +2382,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     clearTimer.start();
     REQUIRE( source.clearAndRestart() );
     REQUIRE( clearTimer.elapsed() < 2000 );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
 
     source.disconnectSource();
     drainLiveSourceEvents( 200 );
@@ -2330,7 +2429,7 @@ TEST_CASE( "AdbLogcatSource clears connected ADB capture even when remote clear 
     REQUIRE( waitForLineCount( logData, 1 ) );
 
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE( source.lastError().contains( QStringLiteral( "device disconnected during clear" ) ) );
 
@@ -2390,7 +2489,7 @@ TEST_CASE( "AdbLogcatSource clears iOS log stream capture even when restart cann
     marker.close();
 
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( logData->getNbLine().get() == 0 );
+    REQUIRE( waitForLineCount( logData, 0 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
     REQUIRE_FALSE( source.lastError().isEmpty() );
 

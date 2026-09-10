@@ -1,16 +1,37 @@
 #!/usr/bin/env python3
-"""Deterministic contract helpers for live-capture benchmark orchestration.
+"""Run record-count bounded synthetic before/after benchmarks in ABBA order.
 
-The first implementation deliberately contains no device or process transport.  It
-validates benchmark inputs and results, and exposes dry-run/list-only CLI paths
-that cannot construct a transport.
+Both process and integrated arms exercise fixture bytes through the controller,
+StreamingLogData and CaptureStore. Integrated is NOT a device/socket/parser/UI
+acceptance arm. No duration, slow-sink, heartbeat or sustained-RSS seam exists in
+this synthetic CLI. Native-device orchestration remains unavailable (the separate
+C++ real-device CLI supports only 500-10000 ms samples, not lossless acceptance).
+
+Use --before /path/to/before-binary --after /path/to/after-binary --output-dir NEW.
+Process arms also require --before-producer and --after-producer naming the exact
+fixture executables embedded in those benchmark binaries. Command prefixes may
+include positional arguments; they are argv, never shell text. Results/error
+streams are bounded; destinations are never reused. ABBA balances before/after
+within each arm, not between arms. Executable and producer hashes identify the
+supplied files, not their source trees or remaining runtime dependencies.
+Timeout/cancellation kills the process group on POSIX; on Windows only the direct
+child is guaranteed reaped. Dry-run/list-only never launch a subprocess.
 """
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import pathlib
 import re
+import secrets
+import signal
+import statistics
+import struct
+import subprocess
+import threading
+import time
 import zlib
 
 
@@ -58,7 +79,7 @@ _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SAFE_METRIC_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _CRC32 = re.compile(r"^[0-9a-f]{8}$")
 
-AVAILABLE_BENCHMARKS = ("ios-usb-live-capture",)
+AVAILABLE_BENCHMARKS = ("ios-usb-live-capture", "synthetic-live-capture-comparison")
 
 
 class BenchmarkContractError(ValueError):
@@ -339,7 +360,7 @@ def validate_result(result):
         raise ResultSchemaError(
             f"result schema fields mismatch; missing={missing}, extra={extra}"
         )
-    if result.get("schema_version") != RESULT_SCHEMA_VERSION:
+    if type(result.get("schema_version")) is not int or result["schema_version"] != RESULT_SCHEMA_VERSION:
         raise ResultSchemaError(
             f"unsupported result schema version {result.get('schema_version')!r}"
         )
@@ -349,7 +370,7 @@ def validate_result(result):
         raise ResultSchemaError("benchmark must be a bounded identifier")
 
     status = result.get("status")
-    if status not in _RESULT_STATUSES:
+    if not isinstance(status, str) or status not in _RESULT_STATUSES:
         raise ResultSchemaError(f"invalid terminal status {status!r}")
 
     reason_code = result.get("reason_code")
@@ -441,6 +462,504 @@ def require_empty_cleanup_root(root):
         raise CleanupError("cleanup root must be empty")
 
 
+# These fields mirror serializeAggregateJson, not the separate real-device schema.
+_COUNTER_METRICS = (
+    "process_cpu_ns", "child_cpu_ns", "peak_rss_bytes",
+    "voluntary_context_switches", "involuntary_context_switches",
+    "process_tree_children_started", "maximum_live_children",
+    "queue_high_water_bytes", "queue_high_water_chunks",
+    "queue_backpressure_events", "queue_dropped_records",
+)
+_TIMELINE_METRICS = (
+    "lifecycle_start_ns", "lifecycle_ready_ns", "lifecycle_first_byte_ns",
+    "lifecycle_first_committed_record_ns", "lifecycle_last_committed_record_ns",
+    "lifecycle_stop_ns",
+)
+_TIMING_METRICS = (
+    "startup_ns", "first_byte_latency_ns", "first_commit_latency_ns",
+    "teardown_ns", "throughput_payload_bytes_per_second",
+)
+MAX_PROCESS_OUTPUT_BYTES = 64 * 1024  # Per stream, including retained error output.
+MAX_COMPARISON_TRIALS = 1000  # Per requested arm; every trial is accounted for.
+
+
+class ExecutionError(BenchmarkContractError):
+    def __init__(self, reason_code, message):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _fixture_metadata(records, segments, generation, trial):
+    """Hash the exact C++ CLI KLCB fixture incrementally, without keeping payloads."""
+    checksum = payload_bytes = 0
+    for segment in range(segments):
+        count = records // segments + (segment < records % segments)
+        for sequence in range(count):
+            payload = f"synthetic-segment-{segment}-record-{sequence}".encode("ascii")
+            header = struct.pack(
+                ">4sHHIQIIQII", b"KLCB", 1, 44, 44 + len(payload),
+                generation, trial, segment, sequence, len(payload), zlib.crc32(payload),
+            )
+            checksum = zlib.crc32(payload, zlib.crc32(header, checksum))
+            payload_bytes += len(payload)
+    return {"fixture_crc32": checksum, "committed_payload_bytes": payload_bytes}
+
+
+def validate_synthetic_result(data, *, arm, records, segments, generation, trial):
+    """Require exactly one complete, correctly bound synthetic arm result."""
+    if not data.endswith(b"\n"):
+        raise ResultSchemaError("missing or truncated result (newline required)")
+    try:
+        result = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        validate_result(result)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        # Do not copy raw output or untrusted field names into aggregate diagnostics.
+        raise ResultSchemaError("malformed benchmark JSON or result schema") from error
+    if result["status"] != "ok":
+        raise ResultSchemaError("benchmark reported a non-success terminal result")
+    if result["benchmark"] != f"synthetic-live-capture-{arm}":
+        raise ResultSchemaError("missing requested arm or benchmark identity mismatch")
+    metrics = result["metrics"]
+    expected = {
+        "arm_process": int(arm == "process"), "frame_version": 1,
+        "generation": generation, "trial": trial,
+        "committed_records": records, "segment_count": segments, "normal_stop": 1,
+        "correctness_fixture_crc_match": 1, "correctness_sequence_gap_count": 0,
+        "correctness_duplicate_count": 0, "correctness_crc_error_count": 0,
+        **_fixture_metadata(records, segments, generation, trial),
+    }
+    fields = set(expected) | set(_TIMELINE_METRICS) | set(_TIMING_METRICS)
+    for name in _COUNTER_METRICS:
+        fields.update((name + "_available", name + "_synthetic"))
+        if metrics.get(name + "_available") == 1:
+            fields.add(name)
+    if set(metrics) != fields:
+        raise ResultSchemaError("synthetic metric fields incomplete or inconsistent")
+    for value in metrics.values():
+        if type(value) is not int or not 0 <= value <= (1 << 64) - 1:
+            raise ResultSchemaError("synthetic metrics must be uint64 integers")
+    for name, value in expected.items():
+        if metrics[name] != value:
+            raise ResultSchemaError(f"synthetic {name} metadata mismatch")
+    for name in _COUNTER_METRICS:
+        if any(metrics[name + suffix] not in (0, 1)
+               for suffix in ("_available", "_synthetic")):
+            raise ResultSchemaError("invalid counter availability or provenance flag")
+    timeline = [metrics[name] for name in _TIMELINE_METRICS]
+    if timeline != sorted(timeline):
+        raise ResultSchemaError("non-monotonic benchmark lifecycle")
+    start, ready, first_byte, first_commit, last_commit, stop = timeline
+    derived = {
+        "startup_ns": ready - start, "first_byte_latency_ns": first_byte - ready,
+        "first_commit_latency_ns": first_commit - ready, "teardown_ns": stop - last_commit,
+    }
+    for name, value in derived.items():
+        if metrics[name] != value:
+            raise ResultSchemaError(f"inconsistent {name}")
+    interval = last_commit - first_byte
+    rate = expected["committed_payload_bytes"] * 1_000_000_000 // interval if interval else 0
+    # C++ computes with long double, which is double on some supported platforms.
+    # Allow its final integer rounding, not arbitrary self-reported throughput.
+    if abs(metrics["throughput_payload_bytes_per_second"] - rate) > (1 if interval else 0):
+        raise ResultSchemaError("inconsistent throughput_payload_bytes_per_second")
+    return result
+
+
+def _bounded_diagnostic(message):
+    text = " ".join(str(message).replace("\x00", " ").split())
+    return text.encode("utf-8", errors="replace")[:MAX_RESULT_MESSAGE_BYTES].decode(
+        "utf-8", errors="ignore"
+    ) or "benchmark execution failed"
+
+
+def _write_json(path, document):
+    # No replace/rename-overwrite, including when a child leaves an unexpected file.
+    with path.open("x", encoding="utf-8") as output:
+        json.dump(document, output, indent=2, sort_keys=True, allow_nan=False)
+        output.write("\n")
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_provenance(path, *, label, require_executable=False):
+    if path is None:
+        raise ConfigurationError(f"{label} path is required")
+    path = pathlib.Path(path)
+    if not path.is_absolute() or not path.is_file():
+        raise ConfigurationError(f"{label} must be an absolute regular file")
+    if require_executable and not os.access(path, os.X_OK):
+        raise ConfigurationError(f"{label} must be executable")
+    return {"path": str(path), "resolved_path": str(path.resolve()),
+            "sha256": _sha256_file(path), "size_bytes": path.stat().st_size}
+
+
+def _command_provenance(command):
+    if not isinstance(command, (list, tuple)) or not command:
+        raise ConfigurationError("before/after must be non-empty argv sequences")
+    if any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in command):
+        raise ConfigurationError("command arguments must be non-empty text without NUL")
+    executable = pathlib.Path(command[0])
+    if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ConfigurationError("benchmark executable must be an absolute executable file")
+    files = []
+    for arg in command:
+        path = pathlib.Path(arg)
+        if path.is_file():
+            if not path.is_absolute():
+                raise ConfigurationError("command file arguments must be absolute paths")
+            files.append(_file_provenance(path, label="command file"))
+    return {"argv_prefix": list(command), "files": files}
+
+
+def _process_fixture_producer_provenance(command_provenance, producer):
+    result = _file_provenance(
+        producer, label="process fixture producer", require_executable=True,
+    )
+    needles = {os.fsencode(result["path"]), os.fsencode(result["resolved_path"])}
+    embedded_in = []
+    for command_file in command_provenance["files"]:
+        if any(needle in pathlib.Path(command_file["path"]).read_bytes()
+               for needle in needles):
+            embedded_in.append(command_file["resolved_path"])
+    if not embedded_in:
+        raise ConfigurationError(
+            "process fixture producer path is not embedded in a command file"
+        )
+    result["embedded_path_verified"] = True
+    result["embedded_in"] = embedded_in
+    return result
+
+
+def _provenance_matches(provenance):
+    try:
+        current = _command_provenance(provenance["argv_prefix"])
+        if current != {key: provenance[key] for key in ("argv_prefix", "files")}:
+            return False
+        producer = provenance.get("process_fixture_producer")
+        if producer is not None:
+            current_producer = _process_fixture_producer_provenance(
+                current, pathlib.Path(producer["path"])
+            )
+            if current_producer != producer:
+                return False
+        return True
+    except (ConfigurationError, KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def _kill_process(process):
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        process.kill()
+    process.wait()
+
+
+def _run_process(argv, *, cwd, timeout_seconds, cancel_event):
+    """Bound both streams while waiting; never wait on a child with full pipes."""
+    started = time.monotonic_ns()
+    process = None
+    buffers = [bytearray(), bytearray()]
+    overflow = threading.Event()
+    read_failure = threading.Event()
+    readers = []
+    reason = None
+    message = "completed"
+
+    def drain(pipe, buffer):
+        try:
+            while True:
+                chunk = os.read(pipe.fileno(), 8192)
+                if not chunk:
+                    return
+                remaining = MAX_PROCESS_OUTPUT_BYTES - len(buffer)
+                buffer.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+                    return
+        except OSError:
+            read_failure.set()
+
+    try:
+        process = subprocess.Popen(
+            list(argv), shell=False, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd,
+            start_new_session=(os.name == "posix"),
+        )
+        for pipe, buffer in zip((process.stdout, process.stderr), buffers):
+            reader = threading.Thread(target=drain, args=(pipe, buffer), daemon=True)
+            reader.start()
+            readers.append(reader)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ExecutionError("cancelled", "benchmark comparison cancelled")
+            if overflow.is_set():
+                raise ExecutionError("output_limit", "benchmark output exceeded per-stream limit")
+            if read_failure.is_set():
+                raise ExecutionError("output_read_failed", "could not read benchmark output")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ExecutionError("timeout", "benchmark exceeded per-trial timeout")
+            try:
+                process.wait(timeout=min(remaining, 0.05))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except KeyboardInterrupt:
+        reason, message = "cancelled", "benchmark comparison interrupted"
+    except ExecutionError as error:
+        reason, message = error.reason_code, str(error)
+    except OSError:
+        reason, message = "launch_failed", "could not launch benchmark executable"
+    finally:
+        if process is not None:
+            # Also terminate inherited pipe holders in the POSIX process group.
+            _kill_process(process)
+            for reader in readers:
+                reader.join(timeout=1)
+            for pipe in (process.stdout, process.stderr):
+                pipe.close()
+    if reason is None:
+        if overflow.is_set():
+            reason, message = "output_limit", "benchmark output exceeded per-stream limit"
+        elif read_failure.is_set() or any(reader.is_alive() for reader in readers):
+            reason, message = "output_read_failed", "benchmark output stream did not close"
+        elif process.returncode != 0:
+            reason, message = "process_failed", f"benchmark exited with code {process.returncode}"
+    return {
+        "reason_code": reason, "message": message,
+        "returncode": process.returncode if process is not None else None,
+        "wall_elapsed_ns": time.monotonic_ns() - started,
+        "stdout": bytes(buffers[0]), "stderr": bytes(buffers[1]),
+    }
+
+
+def _persist_trial_outcome(directory, outcome):
+    # summary.json is the existing authoritative ledger if this exclusive write
+    # fails. Never replace an artifact or use an unreserved trial directory.
+    outcome["outcome_persisted"] = True
+    try:
+        _write_json(directory / "outcome.json", outcome)
+    except OSError:
+        outcome.update(status="cancelled" if outcome["status"] == "cancelled" else "failed",
+                       reason_code="artifact_error", message="could not persist trial outcome",
+                       result=None, outcome_persisted=False)
+    return outcome
+
+
+def _execute_trial(trial, *, root, provenance, records, segments, generation,
+                   timeout_seconds, cancel_event, skip_launch=False):
+    directory = root / trial["artifact_dir"]
+    reserved = False
+    outcome = {**trial, "status": "failed", "reason_code": None,
+               "message": "completed", "returncode": None, "wall_elapsed_ns": 0,
+               "result": None, "outcome_persisted": False}
+    try:
+        directory.mkdir(mode=0o700)
+        reserved = True
+        if skip_launch:
+            outcome.update(status="not_run", reason_code="cancelled",
+                           message="not launched after cancellation")
+        else:
+            working_directory = root / trial["working_dir"]
+            working_directory.mkdir(mode=0o700)
+            if not _provenance_matches(provenance):
+                raise ExecutionError("provenance_mismatch", "command files changed before trial")
+            execution = _run_process(trial["argv"], cwd=working_directory,
+                                     timeout_seconds=timeout_seconds, cancel_event=cancel_event)
+            outcome.update({key: execution[key] for key in (
+                "reason_code", "message", "returncode", "wall_elapsed_ns",
+            )})
+            for stream, filename in (("stdout", "stdout.jsonl"), ("stderr", "stderr.bin")):
+                with (directory / filename).open("xb") as output:
+                    output.write(execution[stream])
+            if execution["reason_code"]:
+                raise ExecutionError(execution["reason_code"], execution["message"])
+            if not _provenance_matches(provenance):
+                raise ExecutionError("provenance_mismatch", "command files changed during trial")
+            outcome["result"] = validate_synthetic_result(
+                execution["stdout"], arm=trial["arm"], records=records, segments=segments,
+                generation=generation, trial=trial["trial"],
+            )
+            outcome["status"] = "ok"
+    except ExecutionError as error:
+        outcome.update(reason_code=error.reason_code, message=str(error))
+        if error.reason_code == "cancelled":
+            outcome["status"] = "cancelled"
+    except ResultSchemaError as error:
+        outcome.update(reason_code="invalid_result", message=str(error))
+    except KeyboardInterrupt:
+        outcome.update(status="cancelled", reason_code="cancelled", message="comparison interrupted")
+    except (OSError, ConfigurationError):
+        outcome.update(reason_code="artifact_or_provenance_error",
+                       message="could not access trial artifacts or command files")
+    return _persist_trial_outcome(directory, outcome) if reserved else outcome
+
+
+def _statistics(values):
+    return {"values": values, "median": statistics.median(values) if values else None,
+            "min": min(values) if values else None, "max": max(values) if values else None}
+
+
+def _summarize_groups(trials, *, arms, comparison_valid):
+    groups = []
+    for arm in arms:
+        for variant in ("before", "after"):
+            rows = [r for r in trials if r["arm"] == arm and r["variant"] == variant]
+            group = {"arm": arm, "variant": variant, "expected_count": len(rows),
+                     "successful_count": sum(r["status"] == "ok" for r in rows),
+                     "trial_ids": [r["trial"] for r in rows], "metrics": None}
+            if comparison_valid:
+                metrics = {
+                    "wall_elapsed_ns": _statistics([r["wall_elapsed_ns"] for r in rows]),
+                    "lifecycle_elapsed_ns": _statistics([
+                        r["result"]["metrics"]["lifecycle_stop_ns"]
+                        - r["result"]["metrics"]["lifecycle_start_ns"] for r in rows
+                    ]),
+                }
+                for name in (*_TIMING_METRICS, *_COUNTER_METRICS):
+                    results = [r["result"]["metrics"] for r in rows]
+                    values = [r.get(name) for r in results]
+                    entry = _statistics(values if all(v is not None for v in values) else [])
+                    entry["values"] = values  # Preserve absent samples, never substitute zero.
+                    if name in _COUNTER_METRICS:
+                        entry["available"] = [r[name + "_available"] for r in results]
+                        entry["synthetic"] = [r[name + "_synthetic"] for r in results]
+                        if len(set(entry["synthetic"])) != 1:
+                            entry.update(median=None, min=None, max=None)
+                    metrics[name] = entry
+                group["metrics"] = metrics
+            groups.append(group)
+    return groups
+
+
+def run_comparison(*, before, after, output_dir, arms=("process", "integrated"),
+                   trial_count=4, records=16, segments=2, generation=None,
+                   timeout_seconds=120, cancel_event=None, before_producer=None,
+                   after_producer=None):
+    """Run ABBA per arm, settle every outcome, suppress statistics on any failure.
+
+    trial_count is the total number of before+after trials PER ARM, not repeats per
+    variant. A fresh generation defaults to a random uint64; trial IDs span arms.
+    A caller may supply a threading.Event for cooperative cancellation. Child cwd
+    is work/ under each trial, separate from runner metadata (not an OS sandbox).
+    plan.json stays immutable; summary.json records all terminal dispositions,
+    including outcome_persisted=False when a trial artifact could not be written.
+    Failure to persist the plan or final summary raises OSError, never success.
+    """
+    if type(trial_count) is not int or not 1 <= trial_count <= MAX_COMPARISON_TRIALS:
+        raise ConfigurationError("trial count must be an integer within comparison bound")
+    order = balanced_abba_order(("before", "after"), trial_count=trial_count)
+    if not isinstance(arms, (list, tuple)) or not arms or any(
+        arm not in ("process", "integrated") for arm in arms
+    ) or len(set(arms)) != len(arms):
+        raise ConfigurationError("request distinct process and/or integrated arms")
+    if type(records) is not int or not 1 <= records <= MAX_RECORD_COUNT:
+        raise ConfigurationError("records must be between 1 and 1000000")
+    if type(segments) is not int or not 1 <= segments <= records:
+        raise ConfigurationError("segments must be positive and cannot exceed records")
+    if generation is None:
+        generation = secrets.randbits(64)
+    if type(generation) is not int or not 0 <= generation < 1 << 64:
+        raise ConfigurationError("generation must be a uint64 integer")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not (
+        math.isfinite(timeout_seconds) and 0 < timeout_seconds <= 3600
+    ):
+        raise ConfigurationError("timeout must be finite and between 0 and 3600 seconds")
+    if output_dir is None:
+        raise ConfigurationError("an explicit new output directory is required")
+    try:
+        root = pathlib.Path(output_dir).absolute()
+        if root.exists() or root.is_symlink():
+            raise ConfigurationError("output directory already exists; prior artifacts are never overwritten")
+        provenance = {name: _command_provenance(command)
+                      for name, command in (("before", before), ("after", after))}
+        if "process" in arms:
+            for name, producer in (("before", before_producer),
+                                   ("after", after_producer)):
+                provenance[name]["process_fixture_producer"] = (
+                    _process_fixture_producer_provenance(provenance[name], producer)
+                )
+        root.mkdir(mode=0o700)  # Atomic reservation; no exist_ok and no recursive parent writes.
+    except (OSError, TypeError, ValueError) as error:
+        raise ConfigurationError(_bounded_diagnostic(error)) from error
+
+    trials = []
+    for arm in arms:
+        for variant in order:
+            trial = len(trials)
+            argv = [*provenance[variant]["argv_prefix"], "--arm", arm,
+                    "--records", str(records), "--segments", str(segments),
+                    "--generation", str(generation), "--trial", str(trial)]
+            trial_plan = {"trial": trial, "variant": variant, "arm": arm, "argv": argv,
+                          "artifact_dir": f"trial-{trial:04d}-{variant}-{arm}",
+                          "working_dir": f"trial-{trial:04d}-{variant}-{arm}/work",
+                          "status": "not_run"}
+            if arm == "process":
+                trial_plan["process_fixture_producer"] = provenance[variant][
+                    "process_fixture_producer"
+                ]
+            trials.append(trial_plan)
+    summary = {
+        "schema_version": 1, "benchmark": "synthetic-live-capture-comparison",
+        "evidence_scope": "supplied-executable synthetic comparison, not fixed-tree acceptance",
+        "coverage_origin": "current C++ CLI contract, not independent pipeline verification",
+        "measurement_notes": {
+            "trial_wall_elapsed_ns": "process launch through child/pipe cleanup; excludes fingerprinting and validation",
+            "comparison_wall_elapsed_ns": "trial loop including validation; excludes initial planning and fingerprinting",
+            "throughput_payload_bytes_per_second": "fixture payload bytes divided by first-byte to last-commit interval",
+            "peak_rss_bytes": "C++ reported process peak, not sustained or process-tree RSS; missing is not zero",
+        },
+        "status": "not_run", "comparison_valid": False, "provenance": provenance,
+        "performance_interpretation": {
+            "scope": "whole supplied executables",
+            "causal_attribution_available": False,
+            "elapsed_time_is_gate": False,
+            "policy": "retain every ordered trial and report observed trade-offs",
+        },
+        "records": records, "segments": segments, "generation": generation,
+        "comparison_axis": "before-after-within-each-arm", "arm_order": list(arms),
+        "forced_termination_note": "capture temp files may remain in the retained trial directory",
+        "trials_per_arm": trial_count, "requested_duration_ms": None,
+        "timeout_seconds": timeout_seconds,
+        "coverage": {"synthetic_fixture": True, "controller_streaming_capture": True,
+                     "real_device": False, "native_socket_parser": False,
+                     "ui_search_save": False, "slow_sink": False, "heartbeat": False,
+                     "sustained_rss": False, "device_losslessness": False,
+                     "source_tree_verified": False, "dependency_hashes_verified": False,
+                     "posix_process_group_cleanup": os.name == "posix"},
+        "trials": trials,
+    }
+    _write_json(root / "plan.json", summary)
+    started = time.monotonic_ns()
+    cancelled = False
+    for index, trial in enumerate(trials):
+        cancelled = cancelled or (cancel_event is not None and cancel_event.is_set())
+        trials[index] = _execute_trial(
+            trial, root=root, provenance=provenance[trial["variant"]],
+            records=records, segments=segments, generation=generation,
+            timeout_seconds=timeout_seconds, cancel_event=cancel_event,
+            skip_launch=cancelled,
+        )
+        cancelled = cancelled or trials[index]["status"] == "cancelled"
+    valid = all(r["status"] == "ok" for r in trials)
+    summary.update(status="cancelled" if cancelled else ("ok" if valid else "failed"),
+                   comparison_valid=valid, wall_elapsed_ns=time.monotonic_ns() - started,
+                   groups=_summarize_groups(trials, arms=arms, comparison_valid=valid))
+    _write_json(root / "summary.json", summary)
+    return summary
+
+
 class _ContractArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise ConfigurationError(f"argument error: {message}")
@@ -454,6 +973,19 @@ def _argument_parser():
     parser.add_argument("--enable-real-device", action="store_true")
     parser.add_argument("--udid")
     parser.add_argument("--native-stack-root", type=pathlib.Path)
+    parser.add_argument("--before", nargs="+", metavar="ARGV", help="before executable and positional prefix arguments")
+    parser.add_argument("--after", nargs="+", metavar="ARGV", help="after executable and positional prefix arguments")
+    parser.add_argument("--before-producer", type=pathlib.Path,
+                        help="absolute fixture producer embedded in the before process benchmark")
+    parser.add_argument("--after-producer", type=pathlib.Path,
+                        help="absolute fixture producer embedded in the after process benchmark")
+    parser.add_argument("--output-dir", type=pathlib.Path, help="required NEW directory; never overwrite")
+    parser.add_argument("--arm", choices=("process", "integrated", "both"), default="both")
+    parser.add_argument("--trials", type=int, default=4, help="total ABBA trials per arm, positive multiple of four")
+    parser.add_argument("--records", type=int, default=16)
+    parser.add_argument("--segments", type=int, default=2)
+    parser.add_argument("--generation", type=int, help="uint64 fixture identity; default fresh random value")
+    parser.add_argument("--timeout-seconds", type=float, default=120, help="per-process deadline, NOT capture duration")
     return parser
 
 
@@ -464,23 +996,23 @@ def _emit_result(output, result):
 
 def _configuration_failure(message):
     return build_result(
-        benchmark=AVAILABLE_BENCHMARKS[0],
+        benchmark="live-capture-orchestration",
         status="failed",
         reason_code="configuration_error",
-        message=message,
+        message=_bounded_diagnostic(message),
         metrics={},
     )
 
 
 def run_cli(argv=None, *, transport_factory=None, output=None):
-    """Run non-transport CLI modes; execution remains unavailable in Cycle 1."""
+    """Run synthetic comparisons; retain the never-construct-device transport seam."""
 
     if output is None:
         import sys
 
         output = sys.stdout
 
-    # Retain the explicit seam without constructing anything in this cycle.
+    # Real-device transport construction is intentionally not implemented here.
     _ = transport_factory
 
     try:
@@ -514,13 +1046,50 @@ def run_cli(argv=None, *, transport_factory=None, output=None):
             ),
         )
 
+    if args.before is not None or args.after is not None or args.output_dir is not None:
+        try:
+            if options is not None:
+                raise ConfigurationError("synthetic comparison cannot use real-device options")
+            summary = run_comparison(
+                before=args.before, after=args.after, output_dir=args.output_dir,
+                arms=("process", "integrated") if args.arm == "both" else (args.arm,),
+                trial_count=args.trials, records=args.records, segments=args.segments,
+                generation=args.generation, timeout_seconds=args.timeout_seconds,
+                before_producer=args.before_producer, after_producer=args.after_producer,
+            )
+        except ConfigurationError as error:
+            return _emit_result(output, _configuration_failure(str(error)))
+        except OSError:
+            return _emit_result(output, build_result(
+                benchmark="synthetic-live-capture-comparison", status="failed",
+                reason_code="artifact_error",
+                message="fatal artifact error; final summary was not persisted",
+                metrics={},
+            ))
+        except KeyboardInterrupt:
+            return _emit_result(output, build_result(
+                benchmark="synthetic-live-capture-comparison", status="failed",
+                reason_code="cancelled", message="benchmark comparison interrupted",
+                metrics={},
+            ))
+        ok = summary["comparison_valid"]
+        return _emit_result(output, build_result(
+            benchmark="synthetic-live-capture-comparison", status="ok" if ok else "failed",
+            reason_code=None if ok else ("cancelled" if summary["status"] == "cancelled" else "comparison_failed"),
+            message="synthetic comparison completed; see summary.json" if ok
+                    else "comparison incomplete or failed; see every trial outcome in summary.json",
+            metrics={"planned_trials": len(summary["trials"]),
+                     "successful_trials": sum(r["status"] == "ok" for r in summary["trials"]),
+                     "wall_elapsed_ns": summary["wall_elapsed_ns"]},
+        ))
+
     return _emit_result(
         output,
         build_result(
             benchmark=AVAILABLE_BENCHMARKS[0],
             status="not_run",
             reason_code="unavailable",
-            message="benchmark transport execution is not implemented",
+            message="real-device orchestration is unavailable; synthetic comparisons require --before, --after and --output-dir",
             metrics={},
         ),
     )

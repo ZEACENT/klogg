@@ -98,6 +98,7 @@ struct FakeNative {
     NativeSyslogRelayErrorCallback syslogErrorCallback{ nullptr };
     void* osTraceContext{ nullptr };
     void* syslogContext{ nullptr };
+    std::uint64_t syslogCallbackInvocations{ 0u };
     bool blockOsTraceReceive{ false };
     bool receiveEntered{ false };
     bool receiveInterrupted{ false };
@@ -328,6 +329,7 @@ struct FakeNative {
         }
         beginCallback();
         for ( const auto byte : bytes ) {
+            ++syslogCallbackInvocations;
             syslogCallback( byte, syslogContext );
         }
         finishCallback();
@@ -1463,7 +1465,7 @@ TEST_CASE( "os_trace rejects epochs the device time zone cannot represent",
 }
 
 TEST_CASE( "os_trace callback copies decodes formats and queues bytes without unwinding into C",
-           "[ios][native][stream][callback][ownership][format]" )
+           "[ios][native][stream][callback][ownership][format][notification]" )
 {
     FakeNative state;
     fake = &state;
@@ -1510,6 +1512,11 @@ TEST_CASE( "os_trace callback copies decodes formats and queues bytes without un
 
     observed.throwFromBytesAvailable = true;
     CHECK_NOTHROW( state.emitOsTrace( 2u, osTracePacket( "observer throws" ) ) );
+    REQUIRE( observed.errors.size() == 1u );
+    CHECK( observed.errors.front().second.error.code == "ios-live-notification-failed" );
+    CHECK( observed.errors.front().second.error.category == ErrorCategory::Backend );
+    CHECK( observed.errors.front().second.error.retryPolicy == RetryPolicy::Backoff );
+    CHECK( executor.pending() == 1u );
     CHECK_FALSE( state.callbackTeardownViolation() );
     worker.stop( 41u );
     executor.runAllOnWorker();
@@ -1644,6 +1651,58 @@ TEST_CASE(
     CHECK_FALSE( state.callbackTeardownViolation() );
 
     worker.stop( 51u );
+    executor.runAllOnWorker();
+}
+
+TEST_CASE( "legacy syslog ignores empty NUL-delimited records",
+           "[ios][native][stream][syslog][chunking][empty-record-red]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 509u, "8.4" ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    CHECK_NOTHROW( state.emitSyslog( "\0\0"s ) );
+    CHECK( observed.bytesAvailable.empty() );
+    CHECK_FALSE( worker.drain().has_value() );
+
+    worker.stop( 509u );
+    executor.runAllOnWorker();
+}
+
+TEST_CASE( "legacy syslog fake adapter delivers one callback per byte without assembly loss",
+           "[ios][native][stream][syslog][performance][operations]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( 510u, "8.4" ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    std::string record( 4096u, 'x' );
+    record.push_back( '\0' );
+    state.emitSyslog( record );
+
+    INFO( "fake syslog callback invocations=" << state.syslogCallbackInvocations );
+    CHECK( state.syslogCallbackInvocations == record.size() );
+    REQUIRE( observed.bytesAvailable == std::vector<Generation>{ 510u } );
+    const auto drained = worker.drain();
+    REQUIRE( drained.has_value() );
+    CHECK( drained->sourceChunks == 1u );
+    REQUIRE( drained->bytes.size() == record.size() );
+    CHECK( std::all_of( drained->bytes.cbegin(), drained->bytes.cend() - 1,
+                        []( std::uint8_t byte ) { return byte == static_cast<std::uint8_t>( 'x' ); } ) );
+    CHECK( drained->bytes.back() == static_cast<std::uint8_t>( '\n' ) );
+    CHECK_FALSE( state.callbackTeardownViolation() );
+
+    worker.stop( 510u );
     executor.runAllOnWorker();
 }
 
@@ -1834,7 +1893,7 @@ TEST_CASE( "native synchronous startup bursts drain before ready without losing 
 }
 
 TEST_CASE( "native terminal paths unblock full queues before cleanup or consumer drain",
-           "[ios][native][stream][queue][backpressure][cancellation]" )
+           "[ios][native][stream][queue][backpressure][cancellation][review-rejected-admission]" )
 {
     const bool duringStartup = GENERATE( false, true );
     const auto terminalPath = GENERATE( 0, 1, 2 ); // stop, shutdown, native failure
@@ -1899,8 +1958,14 @@ TEST_CASE( "native terminal paths unblock full queues before cleanup or consumer
     REQUIRE( retained.has_value() );
     CHECK( retained->bytes == std::vector<std::uint8_t>{ 'a', '\n' } );
     CHECK( retained->sourceChunks == 1u );
-    CHECK( worker.statistics().receivedChunks == 1u );
-    CHECK( worker.statistics().backpressuredChunks == 0u );
+    const auto statistics = worker.statistics();
+    CHECK( statistics.receivedBytes == 2u );
+    CHECK( statistics.receivedChunks == 1u );
+    CHECK( statistics.deliveredBytes == 2u );
+    CHECK( statistics.queuedBytes == 0u );
+    CHECK( statistics.backpressuredChunks == 0u );
+    CHECK( statistics.rejectedBeforeEnqueueBytes == 2u );
+    CHECK( statistics.rejectedBeforeEnqueueChunks == 1u );
     CHECK( observed.stopped == std::vector<Generation>{ 54u } );
     CHECK( observed.errors.size() == ( terminalPath == 2 ? 1u : 0u ) );
     CHECK( observed.ready.size() == ( duringStartup ? 0u : 1u ) );

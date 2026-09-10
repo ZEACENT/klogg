@@ -34,6 +34,7 @@ using klogg::livecapture::Generation;
 using klogg::livecapture::InfrastructureStatus;
 using klogg::livecapture::LiveSourceError;
 using klogg::livecapture::RetryPolicy;
+using klogg::livecapture::StopDisposition;
 using namespace klogg::livecapture::adb;
 
 class QtSocketFactory final : public AdbSmartSocketFactory {
@@ -246,6 +247,11 @@ public:
             return;
         }
 
+        if ( retiringGeneration_ || activeGeneration_ ) {
+            pendingStart_ = generation;
+            if ( activeGeneration_ ) { requestStop( *activeGeneration_, StopDisposition::SettleAccepted ); }
+            return;
+        }
         stopActiveRun();
         accumulatedStatistics_ = {};
         accumulatedStatistics_.generation = generation;
@@ -253,6 +259,7 @@ public:
         expectedManagerGeneration_ = 0;
         activeInfrastructureEpoch_ = 0;
         lastError_.clear();
+        lastStructuredError_.reset();
 
         const auto shared = sharedState_.lock();
         if ( shared == nullptr || shared->shuttingDown || shared->manager == nullptr ) {
@@ -282,18 +289,33 @@ public:
 
     void stop( Generation generation ) override
     {
-        if ( activeGeneration_ != generation ) {
-            return;
-        }
+        requestStop( generation, StopDisposition::DiscardPending );
+    }
 
+    void requestStop( Generation generation, StopDisposition disposition ) override
+    {
+        if ( activeGeneration_ != generation || retiringGeneration_ ) { return; }
         activeGeneration_.reset();
-        lease_.reset();
+        retiringGeneration_ = generation;
+        retiringDisposition_ = disposition;
         expectedManagerGeneration_ = 0;
         activeInfrastructureEpoch_ = 0;
         if ( transport_ != nullptr ) {
-            transport_->stop( generation );
+            transport_->requestStop( generation, disposition );
         }
+        else { completeStop( generation, 0u ); }
+    }
+
+    void completeStop( Generation generation, quint64 discarded )
+    {
+        if ( retiringGeneration_ != generation ) { return; }
+        retiringGeneration_.reset();
+        lease_.reset();
+        const auto successor = std::exchange( pendingStart_, std::nullopt );
+        QPointer<ManagedAdbSmartSocketTransport> guard( this );
         emitState( generation, State::Disconnected );
+        if ( guard ) { Q_EMIT stopped( generation, discarded ); }
+        if ( guard && successor && !activeGeneration_ && !retiringGeneration_ ) { start( *successor ); }
     }
 
     void clearRemoteAsync( Generation generation, ClearRequestId requestId ) override
@@ -309,6 +331,11 @@ public:
     QString lastError() const override
     {
         return lastError_;
+    }
+
+    std::optional<LiveSourceError> lastStructuredError() const override
+    {
+        return lastStructuredError_;
     }
 
     klogg::livecapture::LiveDataStatistics statistics() const override
@@ -339,20 +366,34 @@ private:
         }
         const auto generation = activeGeneration_.value();
 
+        if ( state_ == State::Error ) { return; }
         if ( snapshot.infrastructure.status == InfrastructureStatus::Ready ) {
-            if ( transport_ == nullptr
-                 || activeInfrastructureEpoch_ != snapshot.infrastructureEpoch ) {
+            if ( transport_ == nullptr ) {
                 startInfrastructureEpoch( snapshot.infrastructureEpoch );
+            }
+            else if ( activeInfrastructureEpoch_ != snapshot.infrastructureEpoch ) {
+                lastStructuredError_ = LiveSourceError{
+                    ErrorCategory::Infrastructure, "adb-infrastructure-replaced",
+                    ErrorScope::Infrastructure, RetryPolicy::WaitForInfrastructure,
+                    "Shared ADB infrastructure was replaced; the stream must be reopened.", {} };
+                fail( generation, diagnosticText( *lastStructuredError_ ) );
             }
             return;
         }
 
         if ( transport_ != nullptr ) {
-            retireTransport();
-            activeInfrastructureEpoch_ = 0;
+            // The outer controller owns recovery policy. Retain the real inner
+            // queue and callbacks until it requests retirement and receives stopped.
+            lastStructuredError_ = snapshot.error.value_or( LiveSourceError{
+                ErrorCategory::Infrastructure, "adb-infrastructure-unavailable",
+                ErrorScope::Infrastructure, RetryPolicy::WaitForInfrastructure,
+                "Shared ADB infrastructure became unavailable.", {} } );
+            fail( generation, diagnosticText( *lastStructuredError_ ) );
+            return;
         }
 
         if ( snapshot.error.has_value() && snapshot.error->retryPolicy == RetryPolicy::Never ) {
+            lastStructuredError_ = *snapshot.error;
             fail( generation, diagnosticText( *snapshot.error ) );
             return;
         }
@@ -371,7 +412,7 @@ private:
         }
         const auto generation = activeGeneration_.value();
 
-        retireTransport();
+        releaseStoppedTransport();
         activeInfrastructureEpoch_ = infrastructureEpoch;
         if ( shared->managedTransportFactory != nullptr ) {
             transport_ = shared->managedTransportFactory->create( config_ );
@@ -404,9 +445,13 @@ private:
 
     void connectTransport()
     {
+        QObject::connect( transport_.get(), &LiveSourceTransport::stopped, this,
+            [ this ]( Generation generation, quint64 discarded ) { completeStop( generation, discarded ); } );
         QObject::connect( transport_.get(), &LiveSourceTransport::bytesReceived, this,
                           [ this ]( Generation generation, const QByteArray& bytes ) {
-                              if ( activeGeneration_ == generation ) {
+                              if ( activeGeneration_ == generation
+                                   || ( retiringGeneration_ == generation
+                                        && retiringDisposition_ == StopDisposition::SettleAccepted ) ) {
                                   Q_EMIT bytesReceived( generation, bytes );
                               }
                           } );
@@ -419,6 +464,7 @@ private:
                               }
                               if ( state == State::Error ) {
                                   lastError_ = transport_->lastError();
+                                  lastStructuredError_ = transport_->lastStructuredError();
                               }
                               emitState( generation, state );
                           } );
@@ -432,7 +478,7 @@ private:
                           } );
     }
 
-    void retireTransport()
+    void releaseStoppedTransport()
     {
         if ( transport_ == nullptr ) {
             return;
@@ -440,13 +486,8 @@ private:
         klogg::livecapture::accumulateLiveDataStatistics( accumulatedStatistics_,
                                                           transport_->statistics() );
         QObject::disconnect( transport_.get(), nullptr, this, nullptr );
-        if ( activeGeneration_.has_value() ) {
-            transport_->stop( *activeGeneration_ );
-        }
-        // Infrastructure replacement is delivered synchronously from the manager.
-        // Keep the stopped QObject tree alive until this wrapper itself retires so
-        // Qt never destroys a socket/client subtree while its manager signal stack
-        // is still unwinding.
+        // Callers reach this only after stopped. Keep the completed QObject tree
+        // alive until the current manager/source signal stack has unwound.
         retiredTransports_.push_back( std::move( transport_ ) );
         if ( !retiredCleanupScheduled_ ) {
             retiredCleanupScheduled_ = true;
@@ -459,7 +500,7 @@ private:
 
     void stopActiveRun()
     {
-        retireTransport();
+        releaseStoppedTransport();
         lease_.reset();
         activeGeneration_.reset();
         expectedManagerGeneration_ = 0;
@@ -553,6 +594,10 @@ private:
     std::vector<std::unique_ptr<LiveSourceTransport>> retiredTransports_;
     klogg::livecapture::LiveDataStatistics accumulatedStatistics_;
     std::optional<Generation> activeGeneration_;
+    std::optional<Generation> retiringGeneration_;
+    std::optional<Generation> pendingStart_;
+    StopDisposition retiringDisposition_{ StopDisposition::DiscardPending };
+    std::optional<LiveSourceError> lastStructuredError_;
     std::optional<Generation> stateGeneration_;
     Generation expectedManagerGeneration_{ 0 };
     std::uint64_t activeInfrastructureEpoch_{ 0 };

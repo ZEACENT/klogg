@@ -10,7 +10,11 @@ stop.
 
 Type-1 control records may have an empty payload; type-2 activity records still
 require payload bytes. The new API is additive so existing consumers retain
-their ABI and behavior.
+their ABI and behavior. Reset the negotiated success result before allocating
+and starting the reader, so allocation/thread failures cannot report readiness.
+Release the negotiation reply on both acceptance and rejection; failed thread
+creation releases its unowned worker state while successful creation transfers
+that state to the worker.
 
 ---
 diff --git a/include/libimobiledevice/ostrace.h b/include/libimobiledevice/ostrace.h
@@ -66,7 +70,7 @@ index ddfa573..263cbaa 100644
   *      OSTRACE_E_INVALID_ARG when one or more parameters are
   *      invalid or OSTRACE_E_UNKNOWN_ERROR when an unspecified
 diff --git a/src/ostrace.c b/src/ostrace.c
-index 9fd8ea9..433f76a 100644
+index 9fd8ea9..cf61bc4 100644
 --- a/src/ostrace.c
 +++ b/src/ostrace.c
 @@ -35,6 +35,7 @@
@@ -149,7 +153,17 @@ index 9fd8ea9..433f76a 100644
  		return OSTRACE_E_INVALID_ARG;
  
  	ostrace_error_t res = OSTRACE_E_UNKNOWN_ERROR;
-@@ -358,11 +361,14 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
+@@ -350,5 +354,6 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
+ 	}
+ 	res = _ostrace_check_result(dict);
++	plist_free(dict);
+ 	if (res != OSTRACE_E_SUCCESS) {
+ 		return res;
+ 	}
+@@ -356,19 +361,39 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
+ 	/* start worker thread */
++	res = OSTRACE_E_UNKNOWN_ERROR;
+ 	struct ostrace_worker_thread *oswt = (struct ostrace_worker_thread*)malloc(sizeof(struct ostrace_worker_thread));
  	if (oswt) {
  		oswt->client = client;
  		oswt->cbfunc = callback;
@@ -160,11 +174,11 @@ index 9fd8ea9..433f76a 100644
  		if (thread_new(&client->worker, ostrace_worker, oswt) == 0) {
  			res = OSTRACE_E_SUCCESS;
 +		} else {
++			client->worker = THREAD_T_NULL;
 +			free(oswt);
  		}
  	}
  
-@@ -369,6 +375,21 @@ ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist
  	return res;
  }
  

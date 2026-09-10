@@ -97,6 +97,11 @@ LineNumber tailFirstLine( qint64 totalLines, LinesCount lineCount )
 CaptureStore::Limits sanitizeLimits( CaptureStore::Limits limits )
 {
     constexpr int kMaxRollingBackupCount = 100000;
+    limits.memoryBudgetBytes = qMax<qint64>( 1, limits.memoryBudgetBytes );
+    limits.segmentTargetBytes
+        = std::clamp<qint64>( limits.segmentTargetBytes, 1, std::numeric_limits<int>::max() );
+    limits.ingressBudgetBytes
+        = std::clamp<qint64>( limits.ingressBudgetBytes, 1, std::numeric_limits<int>::max() / 4 );
     limits.rollingBackupCount
         = std::clamp( limits.rollingBackupCount, 0, kMaxRollingBackupCount );
     return limits;
@@ -208,15 +213,16 @@ bool isProcessRunning( qint64 processId )
 }
 
 std::atomic<int> capturePathGateTimeoutMs{ 5000 };
+std::atomic<int> capturePathNamespaceTransitionsForTesting{ 0 };
 constexpr int CaptureRetryAttemptLimit = 8;
 constexpr auto CaptureRetryInitialDelay = std::chrono::milliseconds( 25 );
 constexpr auto CaptureRetryMaximumDelay = std::chrono::milliseconds( 400 );
 
-// activate() reports nullopt only while a competing cleanup is still tearing
-// down the previous generation (a permanently unusable capture path already
-// throws from acquire()). Retrying forever on a wedged teardown would hang the
-// streaming worker thread, so the retry is bounded and escalates to an
-// exception instead.
+// acquire() reports an empty state only for the exact Windows delete-pending
+// namespace transition, while activate() reports nullopt when a competing
+// cleanup retired the acquired generation. Permanently unusable paths still
+// throw. Retrying forever on a wedged teardown would hang the streaming worker
+// thread, so the retry is bounded and escalates to an exception instead.
 constexpr int CaptureActivationMaxAttempts = 100;
 constexpr auto CaptureActivationRetryDelay = std::chrono::milliseconds( 10 );
 
@@ -589,7 +595,9 @@ struct CaptureStore::CapturePathState
         }
     }
 
-    std::shared_ptr<SpilledSegmentFile> leaseFor( const QString& filePath );
+    std::shared_ptr<SpilledSegmentFile> leaseFor(
+        const QString& filePath, const QString& expectedIdentity = {} );
+    std::shared_ptr<SpilledSegmentFile> leaseForCreatedFile( const QString& filePath );
     void registerCreatedFile( const QString& filePath );
     void transferCreatedFile( const QString& oldPath, const QString& newPath );
     RetireResult tryRetireOwnedFile(
@@ -1181,13 +1189,33 @@ CaptureStore::CapturePathState::acquire( const QString& path, bool createIfMissi
     }
 #endif
 
+    if ( createIfMissing ) {
+        auto pendingTransition
+            = capturePathNamespaceTransitionsForTesting.load(
+                std::memory_order_acquire );
+        while ( pendingTransition > 0
+                && !capturePathNamespaceTransitionsForTesting
+                        .compare_exchange_weak(
+                            pendingTransition, pendingTransition - 1,
+                            std::memory_order_acq_rel,
+                            std::memory_order_acquire ) ) {
+        }
+        if ( pendingTransition > 0 ) {
+            return {};
+        }
+    }
+
     SecureCaptureDirectory directory( path );
-    const auto directoryReady = createIfMissing ? directory.ensureExists()
-                                                : directory.bindExisting();
-    if ( !directoryReady ) {
-        if ( createIfMissing ) {
+    if ( createIfMissing ) {
+        const auto ensureResult = directory.ensureExistsResult();
+        if ( ensureResult == SecureCaptureDirectory::EnsureResult::NamespaceTransition ) {
+            return {};
+        }
+        if ( ensureResult != SecureCaptureDirectory::EnsureResult::Ready ) {
             throw std::runtime_error( "Failed to bind capture directory" );
         }
+    }
+    else if ( !directory.bindExisting() ) {
         return {};
     }
     const auto registryKey = directory.identityKey();
@@ -1269,7 +1297,8 @@ void CaptureStore::CapturePathState::releaseTombstones(
 }
 
 std::shared_ptr<CaptureStore::SpilledSegmentFile>
-CaptureStore::CapturePathState::leaseFor( const QString& filePath )
+CaptureStore::CapturePathState::leaseFor(
+    const QString& filePath, const QString& expectedIdentity )
 {
     const auto fileName = directChildName( filePath );
     if ( fileName.isEmpty() ) {
@@ -1277,10 +1306,15 @@ CaptureStore::CapturePathState::leaseFor( const QString& filePath )
     }
 
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
-    const auto fileIdentity = directory_.fileIdentity( fileName );
-    if ( fileIdentity.isEmpty() ) {
+    const auto fileIdentity
+        = expectedIdentity.isEmpty() ? directory_.fileIdentity( fileName ) : expectedIdentity;
+    if ( fileIdentity.isEmpty()
+         || ( !expectedIdentity.isEmpty()
+              && !directory_.openReadFile( fileName, fileIdentity ) ) ) {
         return {};
     }
+    // The lease keeps the expected identity, not a fresh path lookup after the
+    // descriptor-bound check. Later reads/removal must still match that identity.
     const auto fileKey = trackedFileKey( fileName, fileIdentity );
     if ( const auto retained = fileLeases_.value( fileKey ).lock() ) {
         return retained;
@@ -1290,6 +1324,20 @@ CaptureStore::CapturePathState::leaseFor( const QString& filePath )
         fileName, fileIdentity, shared_from_this() );
     fileLeases_.insert( fileKey, spilledFile );
     return spilledFile;
+}
+
+std::shared_ptr<CaptureStore::SpilledSegmentFile>
+CaptureStore::CapturePathState::leaseForCreatedFile( const QString& filePath )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    const auto fileIdentity
+        = processFileOwnership_->ownedFiles.value( directChildName( filePath ) );
+    // An interrupted registration/transfer cannot recover ownership by adopting
+    // whatever currently occupies the path, even if its bytes/length match.
+    if ( fileIdentity.isEmpty() ) {
+        return {};
+    }
+    return leaseFor( filePath, fileIdentity );
 }
 
 void CaptureStore::CapturePathState::registerCreatedFile( const QString& filePath )
@@ -2034,6 +2082,12 @@ int CaptureStore::setCapturePathGateTimeoutForTesting( int timeoutMs )
                                               std::memory_order_acq_rel );
 }
 
+void CaptureStore::failNextCapturePathNamespaceTransitionForTesting()
+{
+    capturePathNamespaceTransitionsForTesting.fetch_add(
+        1, std::memory_order_release );
+}
+
 CaptureStore::MaintenanceOperationsForTesting
 CaptureStore::maintenanceOperationsForTesting() const
 {
@@ -2111,12 +2165,14 @@ bool CaptureStore::contendForCapturePathAfterGateForTesting(
 
 void CaptureStore::retireSpilledSegment( Segment& segment )
 {
-    if ( !segment.spilled || segment.filePath.isEmpty() ) {
+    if ( ( !segment.spilled && !segment.publicationPending ) || segment.filePath.isEmpty() ) {
         return;
     }
 
     if ( !segment.spilledFile ) {
-        segment.spilledFile = spilledFileLease( segment.filePath );
+        segment.spilledFile = segment.publicationPending
+                                  ? capturePathState_->leaseForCreatedFile( segment.filePath )
+                                  : spilledFileLease( segment.filePath );
     }
     if ( segment.spilledFile ) {
         segment.spilledFile->retire( capturePathActivationToken_ );
@@ -2180,6 +2236,11 @@ bool CaptureStore::loadFromDisk()
         reservedSegmentIds_.clear();
         fileSize_ = 0;
         memoryBytes_ = 0;
+        pendingPersistenceBytes_ = 0;
+        pendingPersistenceSegments_ = 0;
+        firstResidentSegment_ = 0;
+        persistenceFailure_.reset();
+        nextSpillRetryMs_.reset();
         totalLines_ = 0;
         maxLineLength_ = 0;
         lastModified_ = QDateTime{};
@@ -2235,97 +2296,204 @@ CaptureStore::AppendResult CaptureStore::appendUtf8( const QByteArray& data )
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     AppendResult appendResult;
     appendResult.firstLine = LineNumber( static_cast<LineNumber::UnderlyingType>( totalLines_ ) );
+    appendResult.pendingPartialBytes = partialLine_.size();
+    appendResult.outputFailure = outputFailure_;
     if ( data.isEmpty() ) {
+        appendResult.persistence = persistenceState();
+        return appendResult;
+    }
+    // Conservatively include caller ingress, normalized batch, combined partial
+    // and pending-tail copies. This is a payload admission bound, not an RSS bound.
+    const auto hardLimit
+        = limits_.memoryBudgetBytes
+                  > ( std::numeric_limits<qint64>::max() - limits_.ingressBudgetBytes ) / 2
+              ? std::numeric_limits<qint64>::max()
+              : 2 * limits_.memoryBudgetBytes + limits_.ingressBudgetBytes;
+    constexpr qint64 NormalizationPayloadCopies = 4;
+    const bool containerOverflow
+        = data.size() > std::numeric_limits<int>::max() - partialLine_.size();
+    const auto inflight = containerOverflow
+                              ? std::numeric_limits<qint64>::max()
+                              : NormalizationPayloadCopies
+                                    * ( static_cast<qint64>( data.size() ) + partialLine_.size() );
+    if ( containerOverflow || inflight > hardLimit || memoryBytes_ > hardLimit - inflight ) {
+        appendResult.disposition = AppendDisposition::RejectedUnchanged;
+        appendResult.failure = CaptureFailure::Capacity;
+        appendResult.persistence = persistenceState();
         return appendResult;
     }
 
-    appendResult.rawUtf8Lines.reserve( partialLine_.size() + data.size() );
-    appendResult.endOfLines.reserve( static_cast<size_t>( qMax<qsizetype>( 1, data.size() / 32 ) ) );
+    const auto originalPartialBytes = partialLine_.size();
+    klogg::vector<qint64> ingressEnds;
+    CaptureFailure phase = CaptureFailure::Allocation;
+    try {
+        appendResult.rawUtf8Lines.reserve( partialLine_.size() + data.size() );
+        appendResult.endOfLines.reserve(
+            static_cast<size_t>( qMax<qsizetype>( 1, data.size() / 32 ) ) );
 
-    const auto originalLineCount = totalLines_;
+        const auto processBuffer
+            = [ this, &appendResult, &ingressEnds ]( const QByteArray& buffer ) -> qsizetype {
+            qsizetype lineStart = 0;
+            const auto* const bufferData = buffer.constData();
+            const auto bufferSize = buffer.size();
+            klogg::vector<qint64> lineEnds;
+            lineEnds.reserve( static_cast<size_t>( qMax<qsizetype>( 1, bufferSize / 32 ) ) );
+            bool needsNormalization = false;
 
-    const auto processBuffer = [ &appendResult ]( const QByteArray& buffer ) -> qsizetype {
-        qsizetype lineStart = 0;
-        const auto* const bufferData = buffer.constData();
-        const auto bufferSize = buffer.size();
-        klogg::vector<qint64> lineEnds;
-        lineEnds.reserve( static_cast<size_t>( qMax<qsizetype>( 1, bufferSize / 32 ) ) );
-        bool needsNormalization = false;
+            while ( lineStart < bufferSize ) {
+                const auto remaining = bufferSize - lineStart;
+                const auto* newline = static_cast<const char*>(
+                    std::memchr( bufferData + lineStart, '\n', static_cast<size_t>( remaining ) ) );
+                if ( newline == nullptr ) {
+                    break;
+                }
 
-        while ( lineStart < bufferSize ) {
-            const auto remaining = bufferSize - lineStart;
-            const auto* newline = static_cast<const char*>(
-                std::memchr( bufferData + lineStart, '\n', static_cast<size_t>( remaining ) ) );
-            if ( newline == nullptr ) {
-                break;
+                auto lineLength = static_cast<qsizetype>( newline - ( bufferData + lineStart ) );
+                if ( lineLength > 0 && bufferData[ lineStart + lineLength - 1 ] == '\r' ) {
+                    needsNormalization = true;
+                }
+                lineEnds.push_back( static_cast<qint64>( newline - bufferData ) + 1 );
+                lineStart = static_cast<qsizetype>( newline - bufferData ) + 1;
             }
 
-            auto lineLength = static_cast<qsizetype>( newline - ( bufferData + lineStart ) );
-            if ( lineLength > 0 && bufferData[ lineStart + lineLength - 1 ] == '\r' ) {
-                needsNormalization = true;
+            if ( lineEnds.empty() ) {
+                return lineStart;
             }
-            lineEnds.push_back( static_cast<qint64>( newline - bufferData ) + 1 );
-            lineStart = static_cast<qsizetype>( newline - bufferData ) + 1;
-        }
 
-        if ( lineEnds.empty() ) {
-            return lineStart;
-        }
+            if ( !needsNormalization ) {
+                const auto outputStart = appendResult.rawUtf8Lines.size();
+                appendResult.rawUtf8Lines.append( bufferData,
+                                                  type_safe::narrow_cast<int>( lineStart ) );
+                for ( const auto lineEnd : lineEnds ) {
+                    appendResult.endOfLines.push_back( outputStart + lineEnd );
+                }
+                return lineStart;
+            }
 
-        if ( !needsNormalization ) {
-            const auto outputStart = appendResult.rawUtf8Lines.size();
-            appendResult.rawUtf8Lines.append( bufferData, type_safe::narrow_cast<int>( lineStart ) );
+            ingressEnds = lineEnds;
+            ingressBoundaryCopiesForTesting_ += ingressEnds.size();
+            qsizetype normalizedLineStart = 0;
             for ( const auto lineEnd : lineEnds ) {
-                appendResult.endOfLines.push_back( outputStart + lineEnd );
+                auto lineLength = static_cast<qsizetype>( lineEnd ) - normalizedLineStart - 1;
+                if ( lineLength > 0
+                     && bufferData[ normalizedLineStart + lineLength - 1 ] == '\r' ) {
+                    --lineLength;
+                }
+
+                appendResult.rawUtf8Lines.append( bufferData + normalizedLineStart,
+                                                  type_safe::narrow_cast<int>( lineLength ) );
+                appendResult.rawUtf8Lines.append( '\n' );
+                appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
+                normalizedLineStart = static_cast<qsizetype>( lineEnd );
             }
+
             return lineStart;
-        }
+        };
 
-        qsizetype normalizedLineStart = 0;
-        for ( const auto lineEnd : lineEnds ) {
-            auto lineLength = static_cast<qsizetype>( lineEnd ) - normalizedLineStart - 1;
-            if ( lineLength > 0 && bufferData[ normalizedLineStart + lineLength - 1 ] == '\r' ) {
-                --lineLength;
+        QByteArray pendingPartialLine;
+        if ( partialLine_.isEmpty() ) {
+            const auto consumed = processBuffer( data );
+            if ( consumed < data.size() ) {
+                pendingPartialLine = data.mid( type_safe::narrow_cast<int>( consumed ) );
             }
-
-            appendResult.rawUtf8Lines.append( bufferData + normalizedLineStart,
-                                               type_safe::narrow_cast<int>( lineLength ) );
-            appendResult.rawUtf8Lines.append( '\n' );
-            appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
-            normalizedLineStart = static_cast<qsizetype>( lineEnd );
+        }
+        else {
+            auto combinedData = partialLine_;
+            combinedData.append( data );
+            const auto consumed = processBuffer( combinedData );
+            if ( consumed < combinedData.size() ) {
+                pendingPartialLine = combinedData.mid( type_safe::narrow_cast<int>( consumed ) );
+            }
         }
 
-        return lineStart;
-    };
-
-    QByteArray pendingPartialLine;
-    if ( partialLine_.isEmpty() ) {
-        const auto consumed = processBuffer( data );
-        if ( consumed < data.size() ) {
-            pendingPartialLine = data.mid( type_safe::narrow_cast<int>( consumed ) );
-        }
-    } else {
-        auto combinedData = partialLine_;
-        combinedData.append( data );
-        const auto consumed = processBuffer( combinedData );
-        if ( consumed < combinedData.size() ) {
-            pendingPartialLine
-                = combinedData.mid( type_safe::narrow_cast<int>( consumed ) );
-        }
+        appendResult.lineCount = LinesCount(
+            static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
+        phase = CaptureFailure::Directory;
+        ensureSegmentIdsAvailable( appendResult, static_cast<qint64>( pendingPartialLine.size() ) );
+        persistBufferedSegmentsOnDestroy_ = true;
+        commitLines( appendResult );
+        partialLine_ = std::move( pendingPartialLine );
+        appendResult.acceptedBytes = data.size();
+    } catch ( const std::overflow_error& error ) {
+        LOG_WARNING << "Capture append rejected: " << error.what();
+        appendResult.failure = CaptureFailure::SegmentIds;
+    } catch ( const std::bad_alloc& error ) {
+        LOG_ERROR << "Capture append allocation failed: " << error.what();
+        appendResult.failure = CaptureFailure::Allocation;
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Capture append failed: " << error.what();
+        appendResult.failure = phase;
+    } catch ( ... ) {
+        LOG_ERROR << "Capture append failed with unknown exception";
+        appendResult.failure = CaptureFailure::Unexpected;
+        appendResult.disposition = AppendDisposition::PartialUnknown;
     }
-
-    appendResult.lineCount
-        = LinesCount( static_cast<LinesCount::UnderlyingType>( appendResult.endOfLines.size() ) );
-    ensureSegmentIdsAvailable( appendResult,
-                               static_cast<qint64>( pendingPartialLine.size() ) );
-
-    persistBufferedSegmentsOnDestroy_ = true;
-    partialLine_ = std::move( pendingPartialLine );
-    commitLines( appendResult );
+    if ( appendResult.failure ) {
+        const auto committed = static_cast<size_t>( appendResult.committedLines.get() );
+        if ( committed > 0 ) {
+            const auto committedIngressEnd = ingressEnds.empty()
+                                                ? appendResult.endOfLines[ committed - 1 ]
+                                                : ingressEnds[ committed - 1 ];
+            appendResult.acceptedBytes
+                = qMax<qint64>( 0, committedIngressEnd - originalPartialBytes );
+            partialLine_.clear();
+        }
+        if ( appendResult.disposition != AppendDisposition::PartialUnknown ) {
+            appendResult.disposition = committed > 0 ? AppendDisposition::PartialKnown
+                                                     : AppendDisposition::RejectedUnchanged;
+        }
+        appendResult.endOfLines.resize( committed );
+        appendResult.rawUtf8Lines.truncate(
+            committed == 0 ? 0 : type_safe::narrow_cast<int>( appendResult.endOfLines.back() ) );
+    }
+    appendResult.lineCount = appendResult.committedLines;
+    appendResult.pendingPartialBytes = partialLine_.size();
+    const auto outputBefore = outputWrittenBytes_;
+    appendResult.outputAttempted = appendResult.lineCount > 0_lcount && rollingOutput_.isValid();
+    try {
+        if ( appendResult.lineCount > 0_lcount ) {
+            lastModified_ = QDateTime::currentDateTime();
+            appendOutputBytes( appendResult.rawUtf8Lines,
+                               type_safe::narrow_cast<int>(
+                                   static_cast<qint64>( appendResult.lineCount.get() ) ) );
+        }
+        appendResult.outputBytes = outputWrittenBytes_ - outputBefore;
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Capture output exception after commit: " << error.what();
+        appendResult.outputBytes.reset();
+        outputFailure_ = OutputFailure::Write;
+    } catch ( ... ) {
+        LOG_ERROR << "Capture output unknown exception after commit";
+        appendResult.outputBytes.reset();
+        outputFailure_ = OutputFailure::Write;
+    }
+    if ( outputFailure_ && rollingOutput_.isValid() ) {
+        rollingOutput_.close();
+        rollingOutput_ = RollingFileManager();
+        boundOutputFile_.clear();
+    }
+    appendResult.outputFailure = outputFailure_;
+    try {
+        if ( beforeAppendMaintenanceForTesting_ ) {
+            beforeAppendMaintenanceForTesting_();
+        }
+        if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
+            enforceMemoryBudget();
+        }
+        if ( limits_.rollingMaxFileSize > 0 || limits_.maxTotalLines > 0 ) {
+            trimToLimits();
+        }
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Capture maintenance failed after commit: " << error.what();
+        appendResult.failure = CaptureFailure::Unexpected;
+        appendResult.disposition = AppendDisposition::PartialUnknown;
+    } catch ( ... ) {
+        LOG_ERROR << "Capture maintenance failed after commit with unknown exception";
+        appendResult.failure = CaptureFailure::Unexpected;
+        appendResult.disposition = AppendDisposition::PartialUnknown;
+    }
     appendResult.firstLine = tailFirstLine( totalLines_, appendResult.lineCount );
-    if ( totalLines_ != originalLineCount ) {
-        lastModified_ = QDateTime::currentDateTime();
-    }
+    appendResult.persistence = persistenceState();
     return appendResult;
 }
 
@@ -2335,27 +2503,71 @@ CaptureStore::AppendResult CaptureStore::finishInput()
     AppendResult appendResult;
     appendResult.firstLine = LineNumber( static_cast<LineNumber::UnderlyingType>( totalLines_ ) );
     if ( !partialLine_.isEmpty() ) {
-        auto lineBytes = partialLine_;
-        if ( lineBytes.endsWith( '\r' ) ) {
-            lineBytes.chop( 1 );
+        try {
+            auto lineBytes = partialLine_;
+            if ( lineBytes.endsWith( '\r' ) ) {
+                lineBytes.chop( 1 );
+            }
+            appendResult.rawUtf8Lines = lineBytes;
+            appendResult.rawUtf8Lines.append( '\n' );
+            appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
+            appendResult.finalRecordUnterminated = true;
+            ensureSegmentIdsAvailable( appendResult, 0 );
+            commitLines( appendResult );
+            partialLine_.clear();
+            lastModified_ = QDateTime::currentDateTime();
+        } catch ( const std::overflow_error& error ) {
+            LOG_WARNING << "Capture finalization rejected: " << error.what();
+            appendResult.failure = CaptureFailure::SegmentIds;
+        } catch ( const std::bad_alloc& error ) {
+            LOG_ERROR << "Capture finalization allocation failed: " << error.what();
+            appendResult.failure = CaptureFailure::Allocation;
+        } catch ( const std::exception& error ) {
+            LOG_ERROR << "Capture finalization failed: " << error.what();
+            appendResult.failure = CaptureFailure::Directory;
+        } catch ( ... ) {
+            LOG_ERROR << "Capture finalization failed with unknown exception";
+            appendResult.failure = CaptureFailure::Unexpected;
+            appendResult.disposition = AppendDisposition::PartialUnknown;
         }
-
-        // Reserve before any mutation.  In particular, exhausting the shared
-        // ID space leaves partialLine_ intact so a later limit change can retry.
-        AppendResult reservation;
-        reservation.rawUtf8Lines = lineBytes;
-        reservation.endOfLines.push_back( reservation.rawUtf8Lines.size() );
-        ensureSegmentIdsAvailable( reservation, 0 );
-
-        commitLine( lineBytes, false );
-        partialLine_.clear();
-        appendResult.rawUtf8Lines = std::move( reservation.rawUtf8Lines );
-        appendResult.rawUtf8Lines.append( '\n' );
-        appendResult.endOfLines.clear();
-        appendResult.endOfLines.push_back( appendResult.rawUtf8Lines.size() );
-        appendResult.lineCount = 1_lcount;
-        lastModified_ = QDateTime::currentDateTime();
+        if ( appendResult.failure && appendResult.committedLines == 0_lcount ) {
+            if ( appendResult.disposition != AppendDisposition::PartialUnknown ) {
+                appendResult.disposition = AppendDisposition::RejectedUnchanged;
+            }
+            appendResult.rawUtf8Lines.clear();
+            appendResult.endOfLines.clear();
+            appendResult.finalRecordUnterminated = false;
+        }
     }
+    appendResult.lineCount = appendResult.committedLines;
+    appendResult.pendingPartialBytes = partialLine_.size();
+    const auto outputBefore = outputWrittenBytes_;
+    appendResult.outputAttempted
+        = appendResult.committedLines > 0_lcount && rollingOutput_.isValid();
+    try {
+        if ( appendResult.committedLines > 0_lcount ) {
+            preserveTailDuringTrim_ = true;
+            appendOutputBytes( appendResult.rawUtf8Lines.left(
+                type_safe::narrow_cast<int>( appendResult.committedBytes ) ) );
+            outputNeedsSeparator_ = true;
+        }
+        appendResult.outputBytes = outputWrittenBytes_ - outputBefore;
+    } catch ( const std::exception& error ) {
+        LOG_ERROR << "Capture final output exception: " << error.what();
+        appendResult.outputBytes.reset();
+        outputFailure_ = OutputFailure::Write;
+    } catch ( ... ) {
+        LOG_ERROR << "Capture final output unknown exception";
+        appendResult.outputBytes.reset();
+        outputFailure_ = OutputFailure::Write;
+    }
+    preserveTailDuringTrim_ = false;
+    if ( outputFailure_ && rollingOutput_.isValid() ) {
+        rollingOutput_.close();
+        rollingOutput_ = RollingFileManager();
+        boundOutputFile_.clear();
+    }
+    enforceMemoryBudget();
     appendResult.firstLine = tailFirstLine( totalLines_, appendResult.lineCount );
 
     // Flush any pending output data
@@ -2370,6 +2582,8 @@ CaptureStore::AppendResult CaptureStore::finishInput()
         }
         resetOutputFlushCounters();
     }
+    appendResult.persistence = persistenceState();
+    appendResult.outputFailure = outputFailure_;
     return appendResult;
 }
 
@@ -2396,10 +2610,16 @@ void CaptureStore::clear()
     capturePathState_->retryRetiredFilesAndReleaseRegistry();
 
     partialLine_.clear();
+    persistenceFailure_.reset();
+    nextSpillRetryMs_.reset();
+    outputNeedsSeparator_ = false;
     auto retiredLeases = retireCaptureFiles();
     segments_.clear();
     fileSize_ = 0;
     memoryBytes_ = 0;
+    pendingPersistenceBytes_ = 0;
+    pendingPersistenceSegments_ = 0;
+    firstResidentSegment_ = 0;
     totalLines_ = 0;
     maxLineLength_ = 0;
     lastModified_ = QDateTime::currentDateTime();
@@ -2423,6 +2643,7 @@ void CaptureStore::clear()
 CaptureStore::TrimResult CaptureStore::trimToLimits()
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    ++trimChecksForTesting_;
     capturePathState_->retryRetiredFilesAndReleaseRegistry();
     std::vector<std::shared_ptr<SpilledSegmentFile>> retiredLeases;
     TrimResult result;
@@ -2472,15 +2693,18 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         }
 
         auto& front = segments_.front();
+        // A degraded spool must not use retention to hide its only RAM copy.
+        // Admission will stop at the hard payload envelope instead.
+        if ( persistenceFailure_ && !front.spilled ) {
+            break;
+        }
         const auto segmentLines = klogg::ssize( front.lineOffsets );
         const auto segmentBytes = front.byteSize;
 
-        // Track if we're removing the segment that held maxLineLength
-        for ( const auto len : front.lineLengths ) {
-            if ( len == maxLineLength_ ) {
-                removedMaxLine = true;
-            }
-        }
+        // Segment-local maxima make eviction independent of the number of lines
+        // in the segment. Recompute only across remaining segment summaries when
+        // the removed segment could have supplied the global maximum.
+        removedMaxLine = removedMaxLine || front.maxLineLength == maxLineLength_;
 
         // Remove the segment from the logical window immediately. A raw-line
         // reader may still hold a lease, in which case physical deletion waits
@@ -2491,6 +2715,13 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         }
 
         fileSize_ -= segmentBytes;
+        if ( !front.spilled && !front.lineOffsets.empty() ) {
+            pendingPersistenceBytes_ -= segmentBytes;
+            --pendingPersistenceSegments_;
+        }
+        if ( firstResidentSegment_ > 0 ) {
+            --firstResidentSegment_;
+        }
         if ( front.memoryData ) {
             memoryBytes_ -= front.memoryData->size();
         }
@@ -2511,13 +2742,12 @@ CaptureStore::TrimResult CaptureStore::trimToLimits()
         }
     }
 
-    // Only recompute maxLineLength if we removed the segment that held it
+    // Only recompute maxLineLength if we removed a segment that held it. This
+    // visits one integer per segment rather than every retained line.
     if ( removedMaxLine ) {
         maxLineLength_ = 0;
         for ( const auto& segment : segments_ ) {
-            for ( const auto len : segment.lineLengths ) {
-                maxLineLength_ = qMax( maxLineLength_, len );
-            }
+            maxLineLength_ = qMax( maxLineLength_, segment.maxLineLength );
         }
     }
 
@@ -2559,88 +2789,178 @@ bool CaptureStore::bindOutputFile( const QString& outputPath, bool preserveExist
 
     const auto outputDirectory = QFileInfo( outputPath ).absoluteDir();
     QDir().mkpath( outputDirectory.absolutePath() );
-    const auto failBinding = [ this ]( OutputFailure failure ) {
-        outputFailure_ = failure;
+    const auto previousOutputFailure = outputFailure_;
+    const auto hadCommittedBinding = !boundOutputFile_.isEmpty();
+    std::optional<klogg::platform::FileIdentity> suspendedIdentity;
+    bool published = false;
+    const auto failBinding = [ this, previousOutputFailure, hadCommittedBinding,
+                               &suspendedIdentity, &published ]( OutputFailure failure ) {
+        if ( suspendedIdentity.has_value() ) {
+            if ( !published
+                 && restoreOutputAfterFailedReplacement( *suspendedIdentity ) ) {
+                outputFailure_ = previousOutputFailure;
+            }
+            else {
+                // Successful publication consumed the old destination. Never
+                // reopen it, or leave its closed manager logically active.
+                abandonOutputAfterFailedReplacement(
+                    published ? failure : OutputFailure::Open );
+            }
+            return false;
+        }
+        // Candidate failure does not describe a separate, still-open committed
+        // output. Preserve that binding's health and handle without reopening.
+        outputFailure_ = hadCommittedBinding
+                             ? previousOutputFailure
+                             : std::optional<OutputFailure>{ failure };
         return false;
     };
     RollingFileManager candidateOutput( outputPath, limits_.rollingMaxFileSize,
                                         limits_.rollingBackupCount );
 
-    if ( preserveExisting ) {
-        if ( !candidateOutput.openExisting() ) {
-            const auto stagedResult = klogg::stagedoutput::publishSibling(
-                outputPath, [ this ]( QIODevice* output ) {
-                    return std::all_of(
-                        segments_.cbegin(), segments_.cend(),
-                        [ this, output ]( const auto& segment ) {
-                            return writeSegmentToDevice( segment, output );
-                        } );
-                } );
-            std::optional<klogg::platform::FileIdentity> publishedIdentity;
-            switch ( stagedResult.result ) {
-            case klogg::stagedoutput::Result::Published:
-                publishedIdentity = stagedResult.identity;
-                if ( !publishedIdentity.has_value() ) {
+    try {
+        if ( preserveExisting ) {
+            if ( !candidateOutput.openExisting() ) {
+                const auto stagedResult = klogg::stagedoutput::publishSibling(
+                    outputPath, [ this ]( QIODevice* output ) {
+                        return writeCaptureToDevice( output );
+                    } );
+                std::optional<klogg::platform::FileIdentity> publishedIdentity;
+                switch ( stagedResult.result ) {
+                case klogg::stagedoutput::Result::Published:
+                    publishedIdentity = stagedResult.identity;
+                    if ( !publishedIdentity.has_value() ) {
+                        return failBinding( OutputFailure::Open );
+                    }
+                    break;
+                case klogg::stagedoutput::Result::DestinationExists:
+                    break;
+                case klogg::stagedoutput::Result::WriteFailure:
+                    return failBinding( OutputFailure::Write );
+                case klogg::stagedoutput::Result::FlushFailure:
+                    return failBinding( OutputFailure::Flush );
+                case klogg::stagedoutput::Result::OpenFailure:
+                case klogg::stagedoutput::Result::PublishFailure:
                     return failBinding( OutputFailure::Open );
                 }
-                break;
-            case klogg::stagedoutput::Result::DestinationExists:
-                break;
-            case klogg::stagedoutput::Result::WriteFailure:
-                return failBinding( OutputFailure::Write );
-            case klogg::stagedoutput::Result::FlushFailure:
-                return failBinding( OutputFailure::Flush );
-            case klogg::stagedoutput::Result::OpenFailure:
-            case klogg::stagedoutput::Result::PublishFailure:
+                candidateOutput = RollingFileManager(
+                    outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
+                if ( !candidateOutput.openExisting( publishedIdentity ) ) {
+                    return failBinding( OutputFailure::Open );
+                }
+            }
+        }
+        else {
+            // Replay while the committed writer is still active. Suspend only
+            // its matching identity, immediately before atomic publication.
+            QSaveFile stagedOutput( outputPath );
+            if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
                 return failBinding( OutputFailure::Open );
             }
-            candidateOutput = RollingFileManager(
-                outputPath, limits_.rollingMaxFileSize, limits_.rollingBackupCount );
+            if ( !writeCaptureToDevice( &stagedOutput ) ) {
+                stagedOutput.cancelWriting();
+                return failBinding( OutputFailure::Write );
+            }
+            const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
+            if ( !publishedIdentity.has_value() ) {
+                stagedOutput.cancelWriting();
+                return failBinding( OutputFailure::Open );
+            }
+            if ( rollingOutput_.refersToPath( outputPath ) ) {
+                suspendedIdentity = suspendOutputForReplacement( outputPath );
+                if ( !suspendedIdentity.has_value() ) {
+                    stagedOutput.cancelWriting();
+                    abandonOutputAfterFailedReplacement( OutputFailure::Flush );
+                    return false;
+                }
+            }
+            if ( !stagedOutput.commit() ) {
+                return failBinding( OutputFailure::Flush );
+            }
+            published = true;
             if ( !candidateOutput.openExisting( publishedIdentity ) ) {
                 return failBinding( OutputFailure::Open );
             }
         }
+
+        // An exact append boundary requires readable EOF, even for a writable
+        // Restore destination. Guessing would either merge records or add a
+        // blank line, so an unreadable destination fails closed.
+        QFile tail( outputPath );
+        if ( !tail.open( QIODevice::ReadOnly ) ) {
+            return failBinding( OutputFailure::Open );
+        }
+        const bool needsSeparator
+            = tail.size() > 0 && ( !tail.seek( tail.size() - 1 ) || tail.read( 1 ) != "\n" );
+        rollingOutput_ = std::move( candidateOutput );
+        outputNeedsSeparator_ = needsSeparator;
+        boundOutputFile_ = outputPath;
+        outputFailure_.reset();
+        resetOutputFlushCounters();
+        return true;
     }
-    else {
-        // FreshSave publishes through QSaveFile after overwrite confirmation, so
-        // a replay or commit failure cannot expose a truncated public destination.
-        QSaveFile stagedOutput( outputPath );
-        if ( !stagedOutput.open( QIODevice::WriteOnly ) ) {
-            return failBinding( OutputFailure::Open );
-        }
-        for ( const auto& segment : segments_ ) {
-            if ( !writeSegmentToDevice( segment, &stagedOutput ) ) {
-                stagedOutput.cancelWriting();
-                return failBinding( OutputFailure::Write );
-            }
-        }
-        const auto publishedIdentity = klogg::platform::fileIdentity( stagedOutput );
-        if ( !publishedIdentity.has_value() ) {
-            stagedOutput.cancelWriting();
-            return failBinding( OutputFailure::Open );
-        }
-        if ( !stagedOutput.commit() ) {
-            return failBinding( OutputFailure::Flush );
-        }
-        if ( !candidateOutput.openExisting( publishedIdentity ) ) {
-            return failBinding( OutputFailure::Open );
-        }
+    catch ( ... ) {
+        return failBinding( published ? OutputFailure::Open : OutputFailure::Write );
+    }
+}
+
+bool CaptureStore::adoptPublishedOutputFile( RollingFileManager output,
+                                             const QString& outputPath,
+                                             bool needsSeparator )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( outputPath.isEmpty() || !output.refersToPath( outputPath ) || !output.flush() ) {
+        return false;
     }
 
-    // Commit only after the candidate is fully published and opened. Moving the
-    // manager transfers its live QFile handle, so failure leaves the previous
-    // output identity and flush counters untouched.
-    rollingOutput_ = std::move( candidateOutput );
+    rollingOutput_ = std::move( output );
+    outputNeedsSeparator_ = needsSeparator;
     boundOutputFile_ = outputPath;
     outputFailure_.reset();
     resetOutputFlushCounters();
     return true;
 }
 
+std::optional<klogg::platform::FileIdentity>
+CaptureStore::suspendOutputForReplacement( const QString& outputPath )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    const auto identity = rollingOutput_.suspendForReplacement( outputPath );
+    if ( identity.has_value() ) {
+        resetOutputFlushCounters();
+    }
+    return identity;
+}
+
+bool CaptureStore::restoreOutputAfterFailedReplacement(
+    const klogg::platform::FileIdentity& expectedIdentity )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    if ( !rollingOutput_.openExisting( expectedIdentity ) ) {
+        abandonOutputAfterFailedReplacement( OutputFailure::Open );
+        return false;
+    }
+    outputFailure_.reset();
+    resetOutputFlushCounters();
+    return true;
+}
+
+void CaptureStore::abandonOutputAfterFailedReplacement( OutputFailure failure )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    rollingOutput_.close();
+    rollingOutput_ = RollingFileManager();
+    boundOutputFile_.clear();
+    outputFailure_ = failure;
+    resetOutputFlushCounters();
+}
+
 void CaptureStore::setLimits( Limits limits )
 {
     const std::lock_guard<std::recursive_mutex> lock( mutex_ );
     limits_ = sanitizeLimits( std::move( limits ) );
+    persistPending( 8, true, true );
+    trimToLimits();
 }
 
 QString CaptureStore::boundOutputFile() const
@@ -2699,6 +3019,15 @@ void CaptureStore::deleteCaptureFiles()
     segments_.clear();
     fileSize_ = 0;
     memoryBytes_ = 0;
+    // A reused store starts an empty persistence queue, just as clear() and
+    // loadFromDisk() do. Retaining the old cursor skips the successor's first
+    // resident segments; old pending counts and backoff also belong to the
+    // deleted generation, not to subsequently accepted data.
+    pendingPersistenceBytes_ = 0;
+    pendingPersistenceSegments_ = 0;
+    firstResidentSegment_ = 0;
+    persistenceFailure_.reset();
+    nextSpillRetryMs_.reset();
     totalLines_ = 0;
     maxLineLength_ = 0;
     lastModified_ = QDateTime{};
@@ -3006,65 +3335,10 @@ CaptureStore::Stats CaptureStore::stats() const
     return Stats{ fileSize_, memoryBytes_, totalLines_, maxLineLength_, lastModified_ };
 }
 
-void CaptureStore::commitLine( const QByteArray& lineBytes, bool terminated )
-{
-    auto& segment = ensureActiveSegment();
-    if ( !segment.memoryData ) {
-        segment.memoryData = std::make_shared<QByteArray>();
-        reserveSegmentMemory( *segment.memoryData, limits_.segmentTargetBytes,
-                              limits_.memoryBudgetBytes );
-    }
-
-    const auto offset = segment.memoryData->size();
-    segment.memoryData->append( lineBytes );
-    if ( terminated ) {
-        segment.memoryData->append( '\n' );
-    }
-    segment.lineOffsets.push_back( offset );
-    segment.lineLengths.push_back( static_cast<int>( lineBytes.size() ) );
-    segment.byteSize = segment.memoryData->size();
-    segment.spilled = false;
-
-    fileSize_ += lineBytes.size() + ( terminated ? 1 : 0 );
-    memoryBytes_ += lineBytes.size() + ( terminated ? 1 : 0 );
-    totalLines_ += 1;
-    maxLineLength_ = qMax( maxLineLength_, static_cast<int>( lineBytes.size() ) );
-
-    // Complete every access through the segment reference before operations
-    // that can trim or grow segments_ and invalidate it. Keep the committed
-    // segment active while rolling output trims the capture window; rotating it
-    // first would make the just-committed line eligible for immediate removal.
-    segment.cumulativeEndLine += 1;
-
-    if ( rollingOutput_.isValid() ) {
-        preserveTailDuringTrim_ = true;
-        try {
-            appendOutputBytes( terminated ? lineBytes + '\n' : lineBytes );
-        } catch ( ... ) {
-            preserveTailDuringTrim_ = false;
-            throw;
-        }
-        preserveTailDuringTrim_ = false;
-    }
-
-    if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
-        enforceMemoryBudget();
-    }
-}
-
-void CaptureStore::commitLines( const AppendResult& appendResult )
+void CaptureStore::commitLines( AppendResult& appendResult )
 {
     if ( appendResult.endOfLines.empty() ) {
         return;
-    }
-
-    if ( rollingOutput_.isValid() ) {
-        if ( appendResult.endOfLines.size()
-             > static_cast<size_t>( std::numeric_limits<int>::max() ) ) {
-            throw std::runtime_error( "Too many output lines while committing capture batch" );
-        }
-        appendOutputBytes( appendResult.rawUtf8Lines,
-                           static_cast<int>( appendResult.endOfLines.size() ) );
     }
 
     size_t lineIndex = 0;
@@ -3072,7 +3346,13 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
     const auto lineCount = appendResult.endOfLines.size();
 
     while ( lineIndex < lineCount ) {
-        auto& segment = ensureActiveSegment();
+        if ( beforeSegmentMutationForTesting_ ) {
+            beforeSegmentMutationForTesting_();
+        }
+        const auto firstRecordBytes
+            = appendResult.endOfLines[ lineIndex ] - rawLineStart
+              - ( appendResult.finalRecordUnterminated && lineIndex + 1 == lineCount ? 1 : 0 );
+        auto& segment = ensureActiveSegment( firstRecordBytes );
         if ( !segment.memoryData ) {
             segment.memoryData = std::make_shared<QByteArray>();
             reserveSegmentMemory( *segment.memoryData, limits_.segmentTargetBytes,
@@ -3088,7 +3368,9 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
             const auto lineEnd = appendResult.endOfLines[ lineIndex ];
             const auto lineBytes = lineEnd - rawLineStart;
             if ( lineIndex > firstLineInSegment
-                 && segment.byteSize + segmentBytes + lineBytes > limits_.segmentTargetBytes ) {
+                 && ( segment.byteSize + segmentBytes + lineBytes > limits_.segmentTargetBytes
+                      || segmentBytes + lineBytes
+                             > segmentByteLimitForTesting_ - segment.byteSize ) ) {
                 break;
             }
 
@@ -3106,12 +3388,38 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
             }
         }
 
+        const bool startsPendingSegment = segment.lineOffsets.empty();
         const auto segmentOffset = segment.memoryData->size();
         if ( segmentBytes < 0 || segmentBytes > std::numeric_limits<int>::max() ) {
             throw std::runtime_error( "Invalid segment byte count while committing capture batch" );
         }
+        const bool sealsSegment = appendResult.finalRecordUnterminated && lineIndex == lineCount;
+        const auto storedBytes = segmentBytes - ( sealsSegment ? 1 : 0 );
+        // Every potentially allocating operation precedes payload/index publication.
+        // Grow the indexes geometrically: reserve(required) on every append makes
+        // single-line batches reallocate and copy the full history quadratically.
+        const auto requiredIndexEntries
+            = segment.lineOffsets.size() + lineIndex - firstLineInSegment;
+        const auto reserveIndex = [ this, requiredIndexEntries ]( auto& index ) {
+            if ( requiredIndexEntries <= index.capacity() ) {
+                return;
+            }
+            constexpr size_t InitialIndexCapacity = 8u;
+            const auto doubled = index.capacity() > std::numeric_limits<size_t>::max() / 2u
+                                     ? std::numeric_limits<size_t>::max()
+                                     : index.capacity() * 2u;
+            index.reserve( std::max( requiredIndexEntries,
+                                     std::max( InitialIndexCapacity, doubled ) ) );
+            ++commitIndexReservationsForTesting_;
+        };
+        reserveIndex( segment.lineOffsets );
+        reserveIndex( segment.lineLengths );
+        const auto requiredPayloadBytes = type_safe::narrow_cast<int>( segmentOffset + storedBytes );
+        if ( requiredPayloadBytes > segment.memoryData->capacity() ) {
+            segment.memoryData->reserve( requiredPayloadBytes );
+        }
         segment.memoryData->append( appendResult.rawUtf8Lines.constData() + segmentRawStart,
-                                    type_safe::narrow_cast<int>( segmentBytes ) );
+                                    type_safe::narrow_cast<int>( storedBytes ) );
 
         qint64 localRawStart = segmentRawStart;
         qint64 localOffset = segmentOffset;
@@ -3134,26 +3442,21 @@ void CaptureStore::commitLines( const AppendResult& appendResult )
         segment.spilled = false;
         segment.cumulativeEndLine += committedLines;
 
-        fileSize_ += segmentBytes;
-        memoryBytes_ += segmentBytes;
-        totalLines_ += committedLines;
-        maxLineLength_ = qMax( maxLineLength_, segmentMaxLineLength );
-
-        // Throttle spill operations to avoid frequent small spills under heavy load.
-        // Emergency spill if memory exceeds 2x budget.
-        if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
-            const auto now = QDateTime::currentMSecsSinceEpoch();
-            if ( memoryBytes_ > limits_.memoryBudgetBytes * 2
-                 || now - lastSpillTimeMs_ >= SpillThrottleMs ) {
-                lastSpillTimeMs_ = now;
-                enforceMemoryBudget();
-            }
+        segment.unterminated = sealsSegment;
+        pendingPersistenceBytes_ += storedBytes;
+        if ( startsPendingSegment ) {
+            ++pendingPersistenceSegments_;
         }
-    }
+        fileSize_ += storedBytes;
+        memoryBytes_ += storedBytes;
+        appendResult.committedBytes += storedBytes;
+        appendResult.committedLines
+            = appendResult.committedLines
+              + LinesCount( static_cast<LinesCount::UnderlyingType>( committedLines ) );
+        totalLines_ += committedLines;
+        segment.maxLineLength = qMax( segment.maxLineLength, segmentMaxLineLength );
+        maxLineLength_ = qMax( maxLineLength_, segment.maxLineLength );
 
-    // Trim oldest segments if total limits are exceeded
-    if ( limits_.rollingMaxFileSize > 0 || limits_.maxTotalLines > 0 ) {
-        trimToLimits();
     }
 }
 
@@ -3161,6 +3464,10 @@ CaptureStore::ActiveCapturePath CaptureStore::activateCapturePathState()
 {
     for ( int attempt = 0; attempt < CaptureActivationMaxAttempts; ++attempt ) {
         auto candidateState = CapturePathState::acquire( capturePath_ );
+        if ( !candidateState ) {
+            std::this_thread::sleep_for( CaptureActivationRetryDelay );
+            continue;
+        }
         auto activationResult = candidateState->activate();
         if ( activationResult ) {
             return { std::move( candidateState ),
@@ -3196,10 +3503,12 @@ void CaptureStore::ensureCaptureDir( bool startsReplacement )
     capturePathState_->ensureDirectory( startsReplacement );
 }
 
-bool CaptureStore::needsNewSegment() const
+bool CaptureStore::needsNewSegment( qint64 incomingBytes ) const
 {
     return segments_.empty() || segments_.back().byteSize >= limits_.segmentTargetBytes
-           || segments_.back().spilled || !segments_.back().memoryData;
+           || segments_.back().spilled || segments_.back().publicationPending
+           || segments_.back().unterminated || !segments_.back().memoryData
+           || segments_.back().byteSize > segmentByteLimitForTesting_ - incomingBytes;
 }
 
 void CaptureStore::ensureSegmentIdsAvailable( const AppendResult& appendResult,
@@ -3214,6 +3523,9 @@ void CaptureStore::ensureSegmentIdsAvailable( const AppendResult& appendResult,
     auto activeBytes = hasActiveSegment ? segments_.back().byteSize : qint64{ 0 };
 
     const auto consumeLine = [ & ]( qint64 lineBytes ) {
+        if ( hasActiveSegment && activeBytes > segmentByteLimitForTesting_ - lineBytes ) {
+            hasActiveSegment = false;
+        }
         if ( !hasActiveSegment ) {
             ++requiredIds;
             hasActiveSegment = true;
@@ -3229,7 +3541,9 @@ void CaptureStore::ensureSegmentIdsAvailable( const AppendResult& appendResult,
 
     qint64 previousLineEnd = 0;
     for ( const auto lineEnd : appendResult.endOfLines ) {
-        consumeLine( lineEnd - previousLineEnd );
+        const bool finalRecord
+            = appendResult.finalRecordUnterminated && lineEnd == appendResult.endOfLines.back();
+        consumeLine( lineEnd - previousLineEnd - ( finalRecord ? 1 : 0 ) );
         previousLineEnd = lineEnd;
     }
     if ( pendingPartialBytes > 0 ) {
@@ -3257,9 +3571,9 @@ qint64 CaptureStore::takeNextSegmentId()
     return segmentId;
 }
 
-CaptureStore::Segment& CaptureStore::ensureActiveSegment()
+CaptureStore::Segment& CaptureStore::ensureActiveSegment( qint64 incomingBytes )
 {
-    if ( needsNewSegment() ) {
+    if ( needsNewSegment( incomingBytes ) ) {
         // Starting a replacement generation cancels any delayed directory
         // removal from deleteCaptureFiles() before a pinned reader can finish.
         ensureCaptureDir();
@@ -3293,11 +3607,20 @@ void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
     }
 
     // Full rebuild -- used after loadFromDisk(), clear(), etc.
+    firstResidentSegment_ = segments_.size();
+    for ( size_t index = 0; index < segments_.size(); ++index ) {
+        if ( segments_[ index ].memoryData ) {
+            firstResidentSegment_ = index;
+            break;
+        }
+    }
     qint64 cumulative = 0;
     memoryBytes_ = 0;
+    maxLineLength_ = 0;
     for ( auto& segment : segments_ ) {
         cumulative += klogg::ssize( segment.lineOffsets );
         segment.cumulativeEndLine = cumulative;
+        maxLineLength_ = qMax( maxLineLength_, segment.maxLineLength );
         if ( segment.memoryData ) {
             memoryBytes_ += segment.memoryData->size();
         }
@@ -3306,17 +3629,8 @@ void CaptureStore::rebuildCumulativeLineCounts( bool onlyLast )
 
 void CaptureStore::enforceMemoryBudget()
 {
-    for ( auto& segment : segments_ ) {
-        if ( memoryBytes_ <= limits_.memoryBudgetBytes ) {
-            break;
-        }
-        if ( &segment == &segments_.back() && !needsNewSegment() ) {
-            break;
-        }
-        if ( segment.memoryData && spillSegmentToDisk( segment ) ) {
-            memoryBytes_ -= segment.memoryData->size();
-            segment.memoryData.reset();
-        }
+    if ( memoryBytes_ > limits_.memoryBudgetBytes ) {
+        persistPending( 8, false, true );
     }
 }
 
@@ -3338,19 +3652,26 @@ bool CaptureStore::scanSegment( Segment& segment )
     lastModified_ = file->fileTime( QFileDevice::FileModificationTime );
 
     qint64 offset = 0;
+    if ( segment.byteSize == 0 ) {
+        segment.lineOffsets.push_back( 0 );
+        segment.lineLengths.push_back( 0 );
+        segment.unterminated = true;
+    }
     while ( !file->atEnd() ) {
         const auto lineBytes = file->readLine();
         if ( lineBytes.isEmpty() ) {
             break;
         }
+        segment.unterminated = !lineBytes.endsWith( '\n' );
         auto lineLength = lineBytes.endsWith( '\n' ) ? lineBytes.size() - 1 : lineBytes.size();
         if ( lineLength > 0 && lineBytes[ lineLength - 1 ] == '\r' ) {
             --lineLength;
         }
         segment.lineOffsets.push_back( offset );
         segment.lineLengths.push_back( type_safe::narrow_cast<int>( lineLength ) );
+        segment.maxLineLength
+            = qMax( segment.maxLineLength, type_safe::narrow_cast<int>( lineLength ) );
         fileSize_ += lineBytes.size();
-        maxLineLength_ = qMax( maxLineLength_, type_safe::narrow_cast<int>( lineLength ) );
         offset += lineBytes.size();
     }
     totalLines_ += klogg::ssize( segment.lineOffsets );
@@ -3362,21 +3683,36 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     if ( segment.spilled || !segment.memoryData ) {
         return true;
     }
-    if ( segment.memoryData->isEmpty() ) {
+    if ( segment.lineOffsets.empty() ) {
         return true;
     }
 
+    ++spillAttemptsForTesting_;
+    bool hasInjectedFailure = false;
+    PersistenceFailure injectedFailure = PersistenceFailure::Directory;
+    if ( spillFailureForTesting_ ) {
+        const auto requestedFailure = spillFailureForTesting_();
+        if ( requestedFailure.has_value() ) {
+            hasInjectedFailure = true;
+            injectedFailure = *requestedFailure;
+        }
+    }
+    const auto injects = [ hasInjectedFailure, injectedFailure ]( PersistenceFailure failure ) {
+        return hasInjectedFailure && injectedFailure == failure;
+    };
     try {
         ensureCaptureDir();
     } catch ( const std::exception& error ) {
         LOG_WARNING << "Failed to prepare capture spill directory " << capturePath_ << ": "
                     << error.what();
+        persistenceFailure_ = PersistenceFailure::Directory;
         return false;
     }
     capturePathState_->retryRetiredFilesAndReleaseRegistry();
     CapturePathGate gate( capturePathState_->gatePath() );
     if ( !gate.lock() ) {
         LOG_WARNING << "Failed to acquire capture spill gate for " << capturePath_;
+        persistenceFailure_ = PersistenceFailure::Gate;
         return false;
     }
     const std::lock_guard<std::recursive_mutex> pathLock( capturePathState_->mutex_ );
@@ -3385,14 +3721,39 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     } catch ( const std::exception& error ) {
         LOG_WARNING << "Failed to validate capture spill directory " << capturePath_ << ": "
                     << error.what();
+        persistenceFailure_ = PersistenceFailure::Directory;
         return false;
     }
 
+    const auto finishPublication = [ & ] {
+        if ( afterSpillPublishForTesting_ ) {
+            afterSpillPublishForTesting_();
+        }
+        // Resume only the originally published identity. Re-registering the
+        // current path could adopt a replacement and discard the only RAM copy.
+        auto lease = capturePathState_->leaseForCreatedFile( segment.filePath );
+        if ( !lease ) {
+            persistenceFailure_ = PersistenceFailure::Publish;
+            return false;
+        }
+        segment.spilledFile = std::move( lease );
+        segment.spilled = true;
+        segment.publicationPending = false;
+        pendingPersistenceBytes_ -= segment.byteSize;
+        --pendingPersistenceSegments_;
+        return true;
+    };
+    if ( segment.publicationPending ) {
+        return finishPublication();
+    }
+
     QString temporaryPath;
-    auto temporaryFile
-        = capturePathState_->directory_.createTemporaryFile( temporaryPath );
+    auto temporaryFile = injects( PersistenceFailure::TemporaryCreate )
+                             ? std::unique_ptr<QFile>{}
+                             : capturePathState_->directory_.createTemporaryFile( temporaryPath );
     if ( !temporaryFile ) {
         LOG_WARNING << "Failed to create temporary capture segment in " << capturePath_;
+        persistenceFailure_ = PersistenceFailure::TemporaryCreate;
         return false;
     }
     capturePathState_->registerCreatedFile( temporaryPath );
@@ -3400,16 +3761,29 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
     const auto expectedBytes
         = static_cast<qint64>( segment.memoryData->size() );
     qint64 writtenBytes = 0;
-    if ( failNextSegmentWriteForTesting_ ) {
+    if ( failNextSegmentWriteForTesting_ || injects( PersistenceFailure::Write ) ) {
         failNextSegmentWriteForTesting_ = false;
         const auto partialBytes = qMax<qint64>( 0, expectedBytes - 1 );
         writtenBytes = temporaryFile->write( segment.memoryData->constData(), partialBytes );
-    } else {
-        writtenBytes = temporaryFile->write( *segment.memoryData );
+    }
+    else {
+        while ( writtenBytes < expectedBytes ) {
+            const auto written = temporaryFile->write(
+                segment.memoryData->constData() + writtenBytes, expectedBytes - writtenBytes );
+            if ( written <= 0 ) {
+                break;
+            }
+            writtenBytes += written;
+        }
     }
 
+    const auto flushed = temporaryFile->flush();
     const auto writeSucceeded
-        = writtenBytes == expectedBytes && temporaryFile->flush();
+        = writtenBytes == expectedBytes && flushed && !injects( PersistenceFailure::Flush );
+    if ( !writeSucceeded ) {
+        persistenceFailure_
+            = writtenBytes != expectedBytes ? PersistenceFailure::Write : PersistenceFailure::Flush;
+    }
     temporaryFile->close();
     temporaryFile.reset();
     if ( !writeSucceeded ) {
@@ -3422,10 +3796,14 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
         return false;
     }
 
+    int publishAttempts = 0;
     while ( true ) {
-        const auto publishResult = capturePathState_->directory_.publishTemporaryFile(
-            temporaryPath, directChildName( segment.filePath ) );
+        const auto publishResult = injects( PersistenceFailure::Publish ) || ++publishAttempts > 16
+                                       ? SecureCaptureDirectory::PublishResult::Error
+                                       : capturePathState_->directory_.publishTemporaryFile(
+                                             temporaryPath, directChildName( segment.filePath ) );
         if ( publishResult == SecureCaptureDirectory::PublishResult::Success ) {
+            segment.publicationPending = true;
             break;
         }
         if ( publishResult == SecureCaptureDirectory::PublishResult::AlreadyExists ) {
@@ -3436,6 +3814,7 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
             continue;
         }
 
+        persistenceFailure_ = PersistenceFailure::Publish;
         LOG_WARNING << "Failed to publish capture segment " << segment.filePath;
         capturePathState_->retireFile( temporaryPath );
         capturePathState_->retryRetiredFilesAndReleaseRegistryGateHeld();
@@ -3447,23 +3826,15 @@ bool CaptureStore::spillSegmentToDisk( Segment& segment )
 
     capturePathState_->transferCreatedFile(
         temporaryPath, directChildName( segment.filePath ) );
-    segment.spilledFile = spilledFileLease( segment.filePath );
-    if ( !segment.spilledFile ) {
-        capturePathState_->retireFile( segment.filePath );
-        capturePathState_->retryRetiredFilesAndReleaseRegistryGateHeld();
-        if ( capturePathState_->hasRetryableMaintenance() ) {
-            capturePathState_->scheduleRetry();
-        }
-        return false;
-    }
-    segment.spilled = true;
-    return true;
+    return finishPublication();
 }
 
 void CaptureStore::persistBufferedSegments()
 {
-    for ( auto& segment : segments_ ) {
-        spillSegmentToDisk( segment );
+    const auto result = persistPending( std::numeric_limits<int>::max(), true, false );
+    if ( !result.complete() ) {
+        LOG_ERROR << "Capture destruction left unpersisted bytes=" << result.pendingBytes
+                  << " partial=" << result.pendingPartialBytes;
     }
 }
 
@@ -3497,51 +3868,42 @@ QByteArray CaptureStore::readSegmentLine( const Segment& segment, int localLine 
     return file->read( lineLength );
 }
 
-bool CaptureStore::writeSegmentToDevice( const Segment& segment, QIODevice* device )
+bool CaptureStore::finalRecordUnterminated() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return !segments_.empty() && segments_.back().unterminated;
+}
+
+bool CaptureStore::writeCaptureToDevice( QIODevice* device )
 {
     if ( !device ) {
         return false;
     }
     if ( failNextOutputReplayWriteForTesting_ ) {
         failNextOutputReplayWriteForTesting_ = false;
-        static constexpr char PartialReplay[] = "partial";
-        device->write( PartialReplay, static_cast<qint64>( sizeof( PartialReplay ) - 1 ) );
+        device->write( "partial", 7 );
         return false;
     }
-
-    if ( segment.memoryData ) {
-        return device->write( *segment.memoryData ) == segment.memoryData->size();
-    }
-
-    std::unique_ptr<QFile> file;
-    if ( segment.spilledFile ) {
-        file = segment.spilledFile->openForRead();
-    } else {
-        file = std::make_unique<QFile>( segment.filePath );
-        if ( !file->open( QIODevice::ReadOnly ) ) {
-            file.reset();
-        }
-    }
-    if ( !file ) {
-        return false;
-    }
-
-    std::array<char, 64 * 1024> buffer{};
+    const auto saved = snapshot();
+    Snapshot::Cursor cursor;
     while ( true ) {
-        const auto bytesRead = file->read(
-            buffer.data(), type_safe::narrow_cast<qint64>( buffer.size() ) );
-        if ( bytesRead < 0 ) {
+        const auto chunk = saved.readChunk( cursor );
+        if ( chunk.readFailed ) {
             return false;
         }
-        if ( bytesRead == 0 ) {
-            break;
+        qint64 offset = 0;
+        while ( offset < chunk.bytes.size() ) {
+            const auto written
+                = device->write( chunk.bytes.constData() + offset, chunk.bytes.size() - offset );
+            if ( written <= 0 ) {
+                return false;
+            }
+            offset += written;
         }
-        if ( device->write( buffer.data(), bytesRead ) != bytesRead ) {
-            return false;
+        if ( chunk.complete ) {
+            return true;
         }
     }
-
-    return true;
 }
 
 void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
@@ -3550,7 +3912,19 @@ void CaptureStore::appendOutputBytes( const QByteArray& bytes, int lineCount )
         return;
     }
 
-    const auto written = rollingOutput_.write( bytes );
+    if ( outputNeedsSeparator_ && ( !bytes.isEmpty() || lineCount > 0 ) ) {
+        outputNeedsSeparator_ = false;
+        appendOutputBytes( QByteArrayLiteral( "\n" ), 0 );
+        if ( !rollingOutput_.isValid() ) {
+            return;
+        }
+    }
+    const auto written
+        = outputWriteForTesting_ ? outputWriteForTesting_( bytes ) : rollingOutput_.write( bytes );
+    outputWrittenBytes_ += qMax<qint64>( 0, written );
+    if ( written == bytes.size() && !bytes.isEmpty() ) {
+        outputNeedsSeparator_ = !bytes.endsWith( '\n' );
+    }
     if ( written != bytes.size() ) {
         LOG_WARNING << "Rolling output file write was incomplete, unbinding: " << boundOutputFile_;
         rollingOutput_.close();
@@ -3609,4 +3983,190 @@ void CaptureStore::trimToWindowSize()
     // acquires the (recursive) mutex — safe because the caller chain
     // (appendOutputBytes → commitLines → appendUtf8) already holds it.
     trimToLimits();
+}
+
+qint64 CaptureStore::spillNowMs() const
+{
+    if ( spillClockForTesting_ ) {
+        return spillClockForTesting_();
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch() )
+        .count();
+}
+
+CaptureStore::PersistenceResult CaptureStore::persistenceState() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    PersistenceResult result;
+    result.failure = persistenceFailure_;
+    if ( nextSpillRetryMs_ ) {
+        result.retryAfterMs = qMax<qint64>( 0, *nextSpillRetryMs_ - spillNowMs() );
+    }
+    result.pendingPartialBytes = partialLine_.size();
+    result.pendingBytes = pendingPersistenceBytes_;
+    result.pendingSegments = pendingPersistenceSegments_;
+    result.retryableSegments = pendingPersistenceSegments_;
+    const auto hasMutableResidentTail
+        = !segments_.empty() && segments_.back().memoryData
+          && !needsNewSegment();
+    if ( hasMutableResidentTail && !persistenceFailure_.has_value()
+         && result.retryableSegments > 0 ) {
+        --result.retryableSegments;
+    }
+    return result;
+}
+
+CaptureStore::PersistenceResult CaptureStore::persistPending( int maxSegments, bool force,
+                                                              bool toBudget )
+{
+    const auto now = spillNowMs();
+    if ( !force && nextSpillRetryMs_ && now < *nextSpillRetryMs_ ) {
+        return persistenceState();
+    }
+    auto remaining = qMax( 0, maxSegments );
+    bool attempted = false;
+    bool failed = false;
+    while ( firstResidentSegment_ < segments_.size() ) {
+        if ( remaining <= 0 || ( toBudget && memoryBytes_ <= limits_.memoryBudgetBytes ) ) {
+            break;
+        }
+        const auto isMutableTail
+            = firstResidentSegment_ + 1u == segments_.size()
+              && !needsNewSegment();
+        if ( isMutableTail && !force && !toBudget
+             && !persistenceFailure_.has_value() ) {
+            // Quiet-time retry persists sealed work, not the appendable tail.
+            // Spilling that tail after every sparse append would create one
+            // capture file per chunk. Memory pressure and close persistence
+            // still force it, and a failed pressure spill remains retryable.
+            break;
+        }
+        ++persistenceVisitsForTesting_;
+        auto& segment = segments_[ firstResidentSegment_ ];
+        if ( !segment.memoryData ) {
+            ++firstResidentSegment_;
+            continue;
+        }
+        if ( !segment.spilled ) {
+            --remaining;
+            attempted = true;
+            try {
+                failed = !spillSegmentToDisk( segment );
+            } catch ( const std::exception& error ) {
+                LOG_ERROR << "Capture persistence exception: " << error.what();
+                persistenceFailure_ = PersistenceFailure::Unexpected;
+                failed = true;
+            } catch ( ... ) {
+                LOG_ERROR << "Capture persistence unknown exception";
+                persistenceFailure_ = PersistenceFailure::Unexpected;
+                failed = true;
+            }
+            if ( failed ) {
+                nextSpillRetryMs_ = now + SpillThrottleMs;
+                break; // Never hammer the same failed storage path in a batch.
+            }
+        }
+        memoryBytes_ -= segment.memoryData->size();
+        segment.memoryData.reset();
+        ++firstResidentSegment_;
+    }
+    if ( attempted && !failed ) {
+        persistenceFailure_.reset();
+        nextSpillRetryMs_.reset();
+    }
+    return persistenceState();
+}
+
+CaptureStore::PersistenceResult CaptureStore::persistCapture( int maxSegments )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return persistPending( maxSegments, true, false );
+}
+
+CaptureStore::PersistenceResult CaptureStore::retryPersistence( int maxSegments )
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    return persistPending( maxSegments, false, false );
+}
+
+CaptureStore::Snapshot CaptureStore::snapshot() const
+{
+    const std::lock_guard<std::recursive_mutex> lock( mutex_ );
+    Snapshot result;
+    result.parts_.reserve( segments_.size() );
+    for ( const auto& segment : segments_ ) {
+        if ( segment.lineOffsets.empty() ) {
+            continue;
+        }
+        Snapshot::Part part;
+        part.bytes = segment.byteSize;
+        part.unterminated = segment.unterminated;
+        if ( segment.memoryData ) {
+            // Copy the QByteArray value, not its mutable shared_ptr owner.
+            // Qt COW pins immutable payload; future appends detach under mutex_.
+            part.memory = *segment.memoryData;
+        }
+        else {
+            part.file = segment.spilledFile;
+        }
+        result.parts_.push_back( std::move( part ) );
+    }
+    return result;
+}
+
+CaptureStore::Snapshot::Chunk CaptureStore::Snapshot::readChunk( Cursor& cursor,
+                                                                 int maxBytes ) const
+{
+    Chunk result;
+    if ( maxBytes <= 0 || cursor.part > parts_.size() || cursor.offset < 0 ) {
+        result.readFailed = true;
+        return result;
+    }
+    maxBytes = qMin( maxBytes, 64 * 1024 );
+    result.bytes.reserve( maxBytes );
+    while ( cursor.part < parts_.size() && result.bytes.size() < maxBytes ) {
+        if ( cursor.separatorPending ) {
+            result.bytes.append( '\n' );
+            cursor.separatorPending = false;
+            if ( result.bytes.size() == maxBytes ) {
+                break;
+            }
+        }
+        const auto& part = parts_[ cursor.part ];
+        const auto count
+            = qMin<qint64>( maxBytes - result.bytes.size(), part.bytes - cursor.offset );
+        if ( count < 0 ) {
+            result.readFailed = true;
+            return result;
+        }
+        if ( count > 0 ) {
+            QByteArray bytes;
+            if ( part.file ) {
+                const auto file = part.file->openForRead();
+                if ( !file || !file->seek( cursor.offset ) ) {
+                    result.readFailed = true;
+                    return result;
+                }
+                bytes = file->read( count );
+            }
+            else {
+                bytes = part.memory.mid( type_safe::narrow_cast<int>( cursor.offset ),
+                                         type_safe::narrow_cast<int>( count ) );
+            }
+            if ( bytes.size() != count ) {
+                result.readFailed = true;
+                return result;
+            }
+            result.bytes.append( bytes );
+            cursor.offset += count;
+        }
+        if ( cursor.offset == part.bytes ) {
+            ++cursor.part;
+            cursor.offset = 0;
+            cursor.separatorPending = part.unterminated && cursor.part < parts_.size();
+        }
+    }
+    result.complete = cursor.part == parts_.size();
+    return result;
 }

@@ -29,11 +29,13 @@
 #include <QProcess>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QVector>
 
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -44,6 +46,7 @@
 #include "adbprotocol.h"
 #include "adbserversupervisor.h"
 #include "adbsmartsocketclient.h"
+#include "adb_smart_socket_test_support.h"
 #include "adbsmartsockettransport.h"
 #include "livedataqueue.h"
 #include "livesourcetransport.h"
@@ -280,16 +283,18 @@ public:
     struct Entry {
         DeadlineToken token{ 0 };
         AdbSmartSocketDeadlineKind kind{ AdbSmartSocketDeadlineKind::Connect };
+        int timeoutMs{ 0 };
         QPointer<QObject> context;
         std::function<void()> callback;
         bool active{ true };
     };
 
-    DeadlineToken armDeadline( AdbSmartSocketDeadlineKind kind, int, QObject* context,
+    DeadlineToken armDeadline( AdbSmartSocketDeadlineKind kind, int timeoutMs, QObject* context,
                                std::function<void()> callback ) override
     {
         const auto token = ++nextToken_;
-        entries_.push_back( Entry{ token, kind, context, std::move( callback ), true } );
+        entries_.push_back(
+            Entry{ token, kind, timeoutMs, context, std::move( callback ), true } );
         return token;
     }
 
@@ -307,6 +312,41 @@ public:
         return std::any_of( entries_.begin(), entries_.end(), [ kind ]( const Entry& entry ) {
             return entry.active && entry.kind == kind && entry.context;
         } );
+    }
+
+    DeadlineToken activeToken( AdbSmartSocketDeadlineKind kind ) const
+    {
+        const auto found
+            = std::find_if( entries_.cbegin(), entries_.cend(), [ kind ]( const Entry& entry ) {
+                  return entry.active && entry.kind == kind && entry.context;
+              } );
+        REQUIRE( found != entries_.cend() );
+        return found->token;
+    }
+
+    bool isActive( DeadlineToken token ) const
+    {
+        const auto found = std::find_if(
+            entries_.cbegin(), entries_.cend(),
+            [ token ]( const Entry& entry ) { return entry.token == token; } );
+        REQUIRE( found != entries_.cend() );
+        return found->active && found->context;
+    }
+
+    int timeoutMs( DeadlineToken token ) const
+    {
+        const auto found = std::find_if(
+            entries_.cbegin(), entries_.cend(),
+            [ token ]( const Entry& entry ) { return entry.token == token; } );
+        REQUIRE( found != entries_.cend() );
+        return found->timeoutMs;
+    }
+
+    void fireLastEvenIfCancelled()
+    {
+        REQUIRE_FALSE( entries_.empty() );
+        const auto callback = entries_.back().callback;
+        callback();
     }
 
     void fire( AdbSmartSocketDeadlineKind kind )
@@ -840,6 +880,13 @@ TEST_CASE( "ADB smart-socket FAIL EOF and timeout failures map to one terminal t
             transport, probe, StreamGeneration,
             { QStringLiteral( "selected ADB device" ), QStringLiteral( "features" ),
               QStringLiteral( "timed out" ) } );
+        REQUIRE( transport.lastStructuredError().has_value() );
+        CHECK( transport.lastStructuredError()->code == "adb-read-timeout" );
+        CHECK( transport.lastStructuredError()->category
+               == klogg::livecapture::ErrorCategory::Stream );
+        CHECK( transport.lastStructuredError()->retryPolicy
+               == klogg::livecapture::RetryPolicy::Backoff );
+        CHECK_FALSE( transport.lastStructuredError()->nativeDetail.empty() );
     }
 }
 
@@ -889,7 +936,7 @@ TEST_CASE( "ADB smart-socket fails safely when the server is replaced after feat
 
 TEST_CASE( "ADB smart-socket transport rejects selected devices without shell_v2 actionably and "
            "without modifying the environment",
-           "[livecapture][adb][transport][features][compatibility]" )
+           "[livecapture][adb][transport][features][compatibility][w2-adb-typing-red]" )
 {
     const auto originalPath = qgetenv( "PATH" );
     const auto originalServerSocket = qgetenv( "ADB_SERVER_SOCKET" );
@@ -916,6 +963,9 @@ TEST_CASE( "ADB smart-socket transport rejects selected devices without shell_v2
     requireSingleTerminalError(
         transport, probe, StreamGeneration,
         { QStringLiteral( "shell_v2" ), QStringLiteral( "selected ADB device" ) } );
+    REQUIRE( transport.lastStructuredError().has_value() );
+    CHECK( transport.lastStructuredError()->retryPolicy == klogg::livecapture::RetryPolicy::Never );
+    CHECK( transport.lastStructuredError()->code == "adb-shell-v2-unsupported" );
     CHECK( server.connectionCount() == 1 );
     CHECK( server.requestCount() == 2 );
     CHECK( transport.findChildren<QProcess*>().empty() );
@@ -971,6 +1021,64 @@ TEST_CASE( "ADB smart-socket stop cancels stream clients and queued data before 
 
     transport.stop( StreamGeneration );
     CHECK( probe.stateCount( LiveSourceTransport::State::Disconnected ) == 1 );
+}
+
+TEST_CASE( "ADB smart-socket settlement survives synchronous destruction by its tail observer",
+           "[livecapture][adb][transport][stop][settlement][lifetime]" )
+{
+    FakeAdbServer server(
+        []( QTcpSocket& socket, int connectionIndex, int requestIndex, const QByteArray& request ) {
+            handleSuccessfulStartupRequest( socket, connectionIndex, requestIndex, request );
+        } );
+    TrackingSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto transport = std::make_unique<AdbSmartSocketTransport>(
+        transportConfig( server.port() ), socketFactory, deadlines );
+    QPointer<AdbSmartSocketTransport> guard( transport.get() );
+    int stopped = 0;
+    bool connected = false;
+    QObject::connect( transport.get(), &LiveSourceTransport::stateChanged,
+                      [&]( Generation, LiveSourceTransport::State state ) {
+                          connected = state == LiveSourceTransport::State::Connected;
+                      } );
+    QObject::connect( transport.get(), &LiveSourceTransport::stopped,
+                      [&]( Generation, quint64 ) { ++stopped; } );
+    QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& ) { transport.reset(); } );
+
+    transport->start( StreamGeneration );
+    REQUIRE( pumpEventsUntil( [&] { return guard && connected; } ) );
+    const auto clients = guard->findChildren<AdbSmartSocketClient*>();
+    REQUIRE_FALSE( clients.empty() );
+    QEventLoop stdoutLoop;
+    QTimer timeout;
+    timeout.setSingleShot( true );
+    timeout.setTimerType( Qt::PreciseTimer );
+    bool stdoutQueued = false;
+    QObject::connect( &timeout, &QTimer::timeout, &stdoutLoop, &QEventLoop::quit );
+    for ( auto* client : clients ) {
+        QObject::connect(
+            client, &AdbSmartSocketClient::shellStdoutReceived, &stdoutLoop,
+            [&]( Generation generation, AdbSmartSocketClient::OperationId, const QByteArray& ) {
+                if ( generation == StreamGeneration ) {
+                    stdoutQueued = true;
+                    stdoutLoop.quit();
+                }
+            } );
+    }
+
+    FakeAdbServer::send( *server.socketAt( 1 ),
+                         shellV2Frame( 1u, QByteArrayLiteral( "settlement-tail\n" ) ) );
+    timeout.start( EventPumpTimeoutMs );
+    stdoutLoop.exec();
+    REQUIRE( stdoutQueued );
+    REQUIRE( guard );
+    transport->requestStop( StreamGeneration,
+                            klogg::livecapture::StopDisposition::SettleAccepted );
+    REQUIRE( guard.isNull() );
+    processDeferredDeletes();
+
+    CHECK( stopped == 0 );
 }
 
 TEST_CASE( "ADB smart-socket reconnect uses new clients and fresh shell decoders",
@@ -1499,41 +1607,301 @@ TEST_CASE( "ADB smart-socket preserves a failed generation diagnostic across ree
 }
 
 TEST_CASE(
-    "ADB smart-socket queue backpressure is an explicit terminal failure with exact counters",
-    "[livecapture][adb][transport][queue][backpressure][statistics]" )
+    "ADB smart-socket queue capacity pauses and resumes buffered frames without another readyRead",
+    "[livecapture][adb][transport][queue][backpressure][resume][statistics][w3-red]" )
 {
-    FakeAdbServer server(
-        []( QTcpSocket& socket, int connectionIndex, int requestIndex, const QByteArray& request ) {
-            handleSuccessfulStartupRequest( socket, connectionIndex, requestIndex, request );
-        } );
-    TrackingSocketFactory socketFactory;
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
     ManualDeadlineScheduler deadlines;
-    AdbSmartSocketTransport transport(
-        transportConfig( server.port(), LiveDataQueueLimits{ 4u, 1u } ), socketFactory, deadlines );
+    auto config = transportConfig( 5037u, LiveDataQueueLimits{ 4u, 1u } );
+    AdbSmartSocketTransport transport( std::move( config ), socketFactory, deadlines );
     TransportProbe probe( transport );
 
     transport.start( StreamGeneration );
-    REQUIRE( pumpEventsUntil(
-        [ &probe ] { return probe.stateCount( LiveSourceTransport::State::Connected ) == 1; } ) );
+    REQUIRE( socketFactory.socketCount() == 1 );
+    auto* const featureSocket = socketFactory.socketAt( 0 );
+    REQUIRE( featureSocket != nullptr );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                 + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+    featureSocket->closePeer();
 
-    FakeAdbServer::send( *server.socketAt( 1 ),
-                         shellV2Frame( 1u, QByteArrayLiteral( "abcd" ) )
-                             + shellV2Frame( 1u, QByteArrayLiteral( "x" ) ) );
-    REQUIRE( pumpEventsUntil( [ &probe ] { return probe.errors.size() == 1u; } ) );
+    REQUIRE( socketFactory.socketCount() == 2 );
+    auto* const streamSocket = socketFactory.socketAt( 1 );
+    REQUIRE( streamSocket != nullptr );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    REQUIRE( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
 
-    requireSingleTerminalError( transport, probe, StreamGeneration,
-                                { QStringLiteral( "queue" ), QStringLiteral( "backpressure" ) } );
+    streamSocket->pushIncoming( shellV2Frame( 1u, QByteArrayLiteral( "abcd" ) )
+                                + shellV2Frame( 1u, QByteArrayLiteral( "x" ) ) );
+
+    REQUIRE( pumpEventsUntil( [&probe] {
+        return probe.receivedBytes() == QByteArrayLiteral( "abcdx" );
+    } ) );
+    CHECK( probe.errors.empty() );
+    CHECK( probe.stateCount( LiveSourceTransport::State::Error ) == 0 );
+    CHECK( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
+
     const auto statistics = transport.statistics();
     CHECK( statistics.generation == StreamGeneration );
     CHECK( statistics.receivedBytes == 5u );
     CHECK( statistics.receivedChunks == 2u );
+    CHECK( statistics.deliveredBytes == 5u );
+    CHECK( statistics.deliveredChunks == 2u );
+    CHECK( statistics.queuedBytes == 0u );
+    CHECK( statistics.queuedChunks == 0u );
     CHECK( statistics.backpressuredBytes == 1u );
     CHECK( statistics.backpressuredChunks == 1u );
     CHECK( statistics.highWaterQueuedBytes == 4u );
     CHECK( statistics.highWaterQueuedChunks == 1u );
-    CHECK( statistics.receivedBytes
-           == statistics.deliveredBytes + statistics.queuedBytes + statistics.backpressuredBytes );
-    CHECK( statistics.receivedChunks
-           == statistics.deliveredChunks + statistics.queuedChunks
-                  + statistics.backpressuredChunks );
+}
+
+TEST_CASE( "ADB smart-socket stop accounts for a frame deferred by the production turn budget",
+           "[livecapture][adb][transport][stop][budget][settlement][review-red]" )
+{
+    const auto exercise = []( klogg::livecapture::StopDisposition disposition ) {
+        constexpr int frameCount = 257;
+        klogg::test::DeterministicAdbSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketTransportConfig config;
+        config.deviceSerial = QString::fromLatin1( StreamSerial );
+        AdbSmartSocketTransport transport( std::move( config ), socketFactory, deadlines );
+        TransportProbe probe( transport );
+        std::optional<quint64> stoppedDiscarded;
+        QObject::connect( &transport, &LiveSourceTransport::stopped,
+                          [&]( Generation generation, quint64 discarded ) {
+                              CHECK( generation == StreamGeneration );
+                              stoppedDiscarded = discarded;
+                          } );
+
+        transport.start( StreamGeneration );
+        auto* const featureSocket = socketFactory.socketAt( 0 );
+        REQUIRE( featureSocket != nullptr );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                     + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+        featureSocket->closePeer();
+        auto* const streamSocket = socketFactory.socketAt( 1 );
+        REQUIRE( streamSocket != nullptr );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        REQUIRE( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
+
+        QByteArray burst;
+        for ( int index = 0; index < frameCount; ++index ) {
+            burst.append( shellV2Frame( 1u, QByteArray( 1, 'x' ) ) );
+        }
+        streamSocket->pushIncoming( burst );
+        transport.requestStop( StreamGeneration, disposition );
+
+        REQUIRE( stoppedDiscarded.has_value() );
+        if ( disposition == klogg::livecapture::StopDisposition::SettleAccepted ) {
+            CHECK( *stoppedDiscarded == 0u );
+            CHECK( probe.receivedBytes() == QByteArray( frameCount, 'x' ) );
+        }
+        else {
+            CHECK( *stoppedDiscarded == static_cast<quint64>( frameCount ) );
+            CHECK( probe.received.empty() );
+        }
+    };
+
+    exercise( klogg::livecapture::StopDisposition::DiscardPending );
+    exercise( klogg::livecapture::StopDisposition::SettleAccepted );
+}
+
+TEST_CASE( "ADB smart-socket stop settles the received prefix of an incomplete stdout frame",
+           "[livecapture][adb][transport][stop][partial-frame][settlement][review-red]" )
+{
+    const auto exercise = []( klogg::livecapture::StopDisposition disposition ) {
+        klogg::test::DeterministicAdbSocketFactory socketFactory;
+        ManualDeadlineScheduler deadlines;
+        AdbSmartSocketTransportConfig config;
+        config.deviceSerial = QString::fromLatin1( StreamSerial );
+        AdbSmartSocketTransport transport( std::move( config ), socketFactory,
+                                           deadlines );
+        TransportProbe probe( transport );
+        std::optional<quint64> stoppedDiscarded;
+        QObject::connect( &transport, &LiveSourceTransport::stopped,
+                          [&]( Generation generation, quint64 discarded ) {
+                              CHECK( generation == StreamGeneration );
+                              stoppedDiscarded = discarded;
+                          } );
+
+        transport.start( StreamGeneration );
+        auto* const featureSocket = socketFactory.socketAt( 0 );
+        REQUIRE( featureSocket != nullptr );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                     + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+        featureSocket->closePeer();
+        auto* const streamSocket = socketFactory.socketAt( 1 );
+        REQUIRE( streamSocket != nullptr );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+        REQUIRE( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
+
+        const auto payload = QByteArrayLiteral( "complete-line\npartial-tail" );
+        const auto receivedPrefix = payload.left( payload.size() - 5 );
+        streamSocket->pushIncoming(
+            shellV2Frame( 1u, payload ).left( 5 + receivedPrefix.size() ) );
+        CHECK( probe.received.empty() );
+        transport.requestStop( StreamGeneration, disposition );
+
+        REQUIRE( stoppedDiscarded.has_value() );
+        if ( disposition == klogg::livecapture::StopDisposition::SettleAccepted ) {
+            CHECK( *stoppedDiscarded == 0u );
+            CHECK( probe.receivedBytes() == receivedPrefix );
+        }
+        else {
+            CHECK( *stoppedDiscarded
+                   == static_cast<quint64>( receivedPrefix.size() ) );
+            CHECK( probe.received.empty() );
+        }
+    };
+
+    exercise( klogg::livecapture::StopDisposition::DiscardPending );
+    exercise( klogg::livecapture::StopDisposition::SettleAccepted );
+}
+
+TEST_CASE( "ADB smart-socket terminal settlement survives synchronous transport destruction",
+           "[livecapture][adb][transport][terminal][lifetime][review-red]" )
+{
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto transport = std::make_unique<AdbSmartSocketTransport>(
+        transportConfig( 5037u ), socketFactory, deadlines );
+    QPointer<AdbSmartSocketTransport> guard( transport.get() );
+    int deliveries = 0;
+    QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& ) {
+                          ++deliveries;
+                          transport.reset();
+                      } );
+
+    transport->start( StreamGeneration );
+    auto* const featureSocket = socketFactory.socketAt( 0 );
+    REQUIRE( featureSocket != nullptr );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                 + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+    featureSocket->closePeer();
+    auto* const streamSocket = socketFactory.socketAt( 1 );
+    REQUIRE( streamSocket != nullptr );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+
+    CHECK_NOTHROW( streamSocket->pushIncoming(
+        shellV2Frame( 1u, QByteArrayLiteral( "final-tail" ) )
+        + shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 7 ) ) ) ) );
+    CHECK( guard.isNull() );
+    CHECK( deliveries == 1 );
+}
+
+TEST_CASE( "ADB smart-socket settles capacity-paused stdout before a coalesced shell exit",
+           "[livecapture][adb][transport][queue][resume][terminal-order][w3-red]" )
+{
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto config = transportConfig( 5037u, LiveDataQueueLimits{ 4u, 1u } );
+    AdbSmartSocketTransport transport( std::move( config ), socketFactory, deadlines );
+    TransportProbe probe( transport );
+    std::vector<QString> order;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&order]( Generation, const QByteArray& bytes ) {
+                          order.push_back( QStringLiteral( "bytes:%1" )
+                                               .arg( QString::fromLatin1( bytes ) ) );
+                      } );
+    QObject::connect( &transport, &LiveSourceTransport::errorOccurred,
+                      [&order]( Generation, const QString& ) {
+                          order.push_back( QStringLiteral( "error" ) );
+                      } );
+
+    transport.start( StreamGeneration );
+    auto* const featureSocket = socketFactory.socketAt( 0 );
+    REQUIRE( featureSocket != nullptr );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                 + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+    featureSocket->closePeer();
+    auto* const streamSocket = socketFactory.socketAt( 1 );
+    REQUIRE( streamSocket != nullptr );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    streamSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    REQUIRE( probe.stateCount( LiveSourceTransport::State::Connected ) == 1 );
+
+    streamSocket->pushIncoming(
+        shellV2Frame( 1u, QByteArrayLiteral( "abcd" ) )
+        + shellV2Frame( 1u, QByteArrayLiteral( "x" ) )
+        + shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 7 ) ) ) );
+
+    REQUIRE( pumpEventsUntil( [&probe] { return probe.errors.size() == 1u; } ) );
+    CHECK( probe.receivedBytes() == QByteArrayLiteral( "abcdx" ) );
+    REQUIRE( order.size() == 3u );
+    CHECK( order.at( 0 ) == QStringLiteral( "bytes:abcd" ) );
+    CHECK( order.at( 1 ) == QStringLiteral( "bytes:x" ) );
+    CHECK( order.at( 2 ) == QStringLiteral( "error" ) );
+}
+
+TEST_CASE( "ADB smart-socket Clear keeps selected buffers and one post-ACK operation deadline",
+           "[livecapture][adb][transport][clear][deadline][buffers][stale][w3-clear-red]" )
+{
+    constexpr Generation generation = 410u;
+    constexpr LiveSourceTransport::ClearRequestId requestId = 610u;
+
+    klogg::test::DeterministicAdbSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto config = transportConfig( 5037u );
+    config.logcatOptions.buffers = { LogBuffer::Main, LogBuffer::Crash };
+    const auto expectedTimeoutMs = config.clientConfig.readTimeoutMs;
+    AdbSmartSocketTransport transport( std::move( config ), socketFactory, deadlines );
+    TransportProbe probe( transport );
+
+    transport.clearRemoteAsync( generation, requestId );
+    REQUIRE( socketFactory.socketCount() == 1 );
+    auto* const featureSocket = socketFactory.socketAt( 0 );
+    REQUIRE( featureSocket != nullptr );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    featureSocket->pushIncoming( QByteArrayLiteral( "OKAY" )
+                                 + hostReplyFrame( QByteArrayLiteral( "cmd,shell_v2" ) ) );
+    featureSocket->closePeer();
+
+    REQUIRE( socketFactory.socketCount() == 2 );
+    auto* const clearSocket = socketFactory.socketAt( 1 );
+    REQUIRE( clearSocket != nullptr );
+    clearSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+    CHECK( clearSocket->writtenBytes().contains(
+        QByteArrayLiteral( "shell,v2,raw:logcat -b main -b crash -c" ) ) );
+    clearSocket->pushIncoming( QByteArrayLiteral( "OKAY" ) );
+
+    REQUIRE( deadlines.hasActive( AdbSmartSocketDeadlineKind::Read ) );
+    const auto completionDeadline = deadlines.activeToken( AdbSmartSocketDeadlineKind::Read );
+    CHECK( deadlines.timeoutMs( completionDeadline ) == expectedTimeoutMs );
+
+    SECTION( "deadline failure is correlated once and a late exit is stale" )
+    {
+        deadlines.fire( AdbSmartSocketDeadlineKind::Read );
+        REQUIRE( probe.clears.size() == 1u );
+        CHECK( probe.clears.front().generation == generation );
+        CHECK( probe.clears.front().requestId == requestId );
+        CHECK_FALSE( probe.clears.front().succeeded );
+        CHECK( probe.clears.front().error.contains( QStringLiteral( "timed out" ),
+                                                    Qt::CaseInsensitive ) );
+
+        clearSocket->pushIncoming(
+            shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 0 ) ) ) );
+        QCoreApplication::processEvents( QEventLoop::AllEvents );
+        CHECK( probe.clears.size() == 1u );
+    }
+
+    SECTION( "successful exit cancels the deadline and its stale callback" )
+    {
+        clearSocket->pushIncoming(
+            shellV2Frame( 3u, QByteArray( 1, static_cast<char>( 0 ) ) ) );
+        REQUIRE( probe.clears.size() == 1u );
+        CHECK( probe.clears.front().succeeded );
+        CHECK_FALSE( deadlines.isActive( completionDeadline ) );
+
+        deadlines.fireLastEvenIfCancelled();
+        CHECK( probe.clears.size() == 1u );
+    }
 }

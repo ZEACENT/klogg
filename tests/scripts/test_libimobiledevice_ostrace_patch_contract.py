@@ -210,15 +210,31 @@ def validate_typed_record_patch(patch: str) -> None:
         if re.search(rf"ostrace_error_t\s+{wrapper}\s*\(", source_effective) is None:
             raise AssertionError(f"typed-record patch must preserve old wrapper {wrapper}")
 
-    failed_thread_cleanup = re.search(
-        r"if\s*\(\s*thread_new\([^)]*\)\s*==\s*0\s*\)\s*\{.*?\}"
-        r"\s*else\s*\{\s*free\(\s*oswt\s*\)\s*;\s*\}",
-        source_effective,
-        re.DOTALL,
+    # Hunk-level shape check only: omitted context can contain an early return
+    # or disable this tail. This is NOT proof of executable startup control flow.
+    # test_libimobiledevice_ostrace_startup.py compiles the fully applied pinned
+    # source and tests reachability (including early-return/dead-code mutants).
+    # Comments/literals cannot satisfy these local statement-shape requirements.
+    startup = re.sub(r"\s+", "", source_effective)
+    negotiation = re.escape(
+        "res=_ostrace_check_result(dict);plist_free(dict);"
+        "if(res!=OSTRACE_E_SUCCESS){returnres;}"
+        "res=OSTRACE_E_UNKNOWN_ERROR;"
+        "structostrace_worker_thread*oswt="
+        "(structostrace_worker_thread*)malloc(sizeof(structostrace_worker_thread));"
+        "if(oswt){"
     )
-    if failed_thread_cleanup is None:
+    assignments = r"(?:oswt->(?:client|cbfunc|record_cbfunc|terminal_callback|user_data)=[a-z_]+;)*"
+    thread_start = re.escape(
+        "if(thread_new(&client->worker,ostrace_worker,oswt)==0){res=OSTRACE_E_SUCCESS;}else{"
+    )
+    reset = re.escape("client->worker=THREAD_T_NULL;")
+    cleanup = rf"(?:{reset}free\(oswt\);|free\(oswt\);{reset})"
+    completion = re.escape("}}returnres;")
+    if re.search(negotiation + assignments + thread_start + cleanup + completion, startup) is None:
         raise AssertionError(
-            "typed-record activity startup must free worker state when thread creation fails"
+            "typed-record activity startup must release the reply, reset negotiated success before "
+            "allocation, and free worker state without success when thread creation fails"
         )
 
     dispatch = re.search(
@@ -274,13 +290,24 @@ diff --git a/src/ostrace.c b/src/ostrace.c
  ostrace_error_t ostrace_start_activity(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, void* user_data)
  ostrace_error_t ostrace_start_activity_with_error(ostrace_client_t client, plist_t options, ostrace_activity_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
 +ostrace_error_t ostrace_start_activity_with_record_type_and_error(ostrace_client_t client, plist_t options, ostrace_record_cb_t callback, ostrace_terminal_cb_t terminal_callback, void* user_data)
++res = _ostrace_check_result(dict);
++plist_free(dict);
++if (res != OSTRACE_E_SUCCESS) {
++    return res;
++}
++res = OSTRACE_E_UNKNOWN_ERROR;
++struct ostrace_worker_thread *oswt = (struct ostrace_worker_thread*)malloc(sizeof(struct ostrace_worker_thread));
++if (oswt) {
 +oswt->record_cbfunc = callback;
 +oswt->terminal_callback = terminal_callback;
 +if (thread_new(&client->worker, ostrace_worker, oswt) == 0) {
 +    res = OSTRACE_E_SUCCESS;
 +} else {
++    client->worker = THREAD_T_NULL;
 +    free(oswt);
 +}
++}
++return res;
 +void* buf = NULL;
 +received = 0;
 +if (rlen > 0) {
@@ -530,10 +557,87 @@ class LibimobiledeviceOsTracePatchContractTest(unittest.TestCase):
 
     def test_typed_record_patch_validator_rejects_worker_state_leak_on_thread_failure(self):
         leaking = TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
-            "+} else {\n+    free(oswt);\n+}\n", "+}\n", 1
+            "+    free(oswt);\n", "", 1
         )
         with self.assertRaisesRegex(AssertionError, "thread creation fails"):
             validate_typed_record_patch(leaking)
+
+    def test_startup_validator_rejects_exact_negotiated_success_escape(self):
+        bad = TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+            "+res = OSTRACE_E_UNKNOWN_ERROR;\n", "", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "startup"):
+            validate_typed_record_patch(bad)
+
+    def test_startup_validator_rejects_wrong_scope_near_misses(self):
+        for bad in (
+            TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+                "+res = OSTRACE_E_UNKNOWN_ERROR;\n", "", 1
+            ).replace("+    free(oswt);", "+    res = OSTRACE_E_UNKNOWN_ERROR;\n+    free(oswt);"),
+            TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+                "+    free(oswt);", "+    free(oswt);\n+    res = OSTRACE_E_SUCCESS;"
+            ),
+            TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+                "+return res;\n+void* buf", "+return OSTRACE_E_SUCCESS;\n+void* buf"
+            ),
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(AssertionError, "startup|thread creation fails"):
+                    validate_typed_record_patch(bad)
+
+    def test_startup_validator_ignores_comment_and_string_resets(self):
+        for spoof in (
+            "+/* res = OSTRACE_E_UNKNOWN_ERROR; */\n",
+            '+const char *spoof = "res = OSTRACE_E_UNKNOWN_ERROR;";\n',
+        ):
+            bad = TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+                "+res = OSTRACE_E_UNKNOWN_ERROR;\n", spoof, 1
+            )
+            with self.subTest(spoof=spoof):
+                with self.assertRaisesRegex(AssertionError, "startup"):
+                    validate_typed_record_patch(bad)
+
+    def test_startup_validator_fails_closed_on_incomplete_lifecycle(self):
+        for before, after in (
+            ("+}\n+}\n+return res;", "+}\n+return res;"),
+            ("+res = OSTRACE_E_UNKNOWN_ERROR;", "+/* unterminated reset comment"),
+            ("+plist_free(dict);\n", ""),
+        ):
+            with self.subTest(before=before):
+                with self.assertRaises(AssertionError):
+                    validate_typed_record_patch(TYPED_RECORD_STRUCTURAL_FIXTURE.replace(before, after, 1))
+
+    def test_startup_validator_accepts_adjacent_valid_thread_cleanup(self):
+        adjacent = TYPED_RECORD_STRUCTURAL_FIXTURE.replace(
+            "+    client->worker = THREAD_T_NULL;\n+    free(oswt);",
+            "+    free(oswt);\n+    client->worker = THREAD_T_NULL;"
+        )
+        validate_typed_record_patch(adjacent)
+
+    def test_startup_validator_rejects_failed_thread_output_without_reset(self):
+        real = required_text(TYPED_RECORD_PATCH)
+        for replacement in (
+            "",
+            "+ /* client->worker = THREAD_T_NULL; */\n",
+            '+ const char *spoof = "client->worker = THREAD_T_NULL;";\n',
+            "+ client->worker == THREAD_T_NULL;\n",
+            "+ client->worker = THREAD_T_NULL\n",
+        ):
+            with self.subTest(replacement=replacement):
+                bad = re.sub(
+                    r"^\+\s*client->worker = THREAD_T_NULL;\n", replacement,
+                    real, flags=re.MULTILINE,
+                )
+                self.assertNotEqual(real, bad)
+                with self.assertRaisesRegex(AssertionError, "startup"):
+                    validate_typed_record_patch(bad)
+
+    def test_startup_validator_rejects_real_tree_reset_mutation(self):
+        real = required_text(TYPED_RECORD_PATCH)
+        # Before the fix the real patch already contains this exact incident.
+        bad = re.sub(r"^\+\s*res = OSTRACE_E_UNKNOWN_ERROR;\n(?=[ +]\s*struct ostrace_worker_thread \*oswt)", "", real, flags=re.MULTILINE)
+        with self.assertRaisesRegex(AssertionError, "startup"):
+            validate_typed_record_patch(bad)
 
     def test_typed_record_patch_validator_rejects_an_untyped_near_miss(self):
         near_miss = TYPED_RECORD_STRUCTURAL_FIXTURE.replace(

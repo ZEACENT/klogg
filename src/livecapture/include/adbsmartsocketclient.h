@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "adbprotocol.h"
@@ -39,6 +40,10 @@ class QTcpSocket;
 namespace klogg::livecapture::adb {
 
 using DeadlineToken = std::uint64_t;
+
+inline constexpr qint64 DefaultAdbSmartSocketReadTurnBytes = qint64{ 256 } * 1024;
+inline constexpr std::size_t DefaultAdbSmartSocketReadTurnFrames = 256u;
+inline constexpr qint64 DefaultAdbSmartSocketReadBufferBytes = qint64{ 256 } * 1024;
 
 enum class AdbSmartSocketDeadlineKind : std::uint8_t { Connect, Write, Read };
 
@@ -64,6 +69,9 @@ struct AdbSmartSocketClientConfig {
     quint16 serverPort{ 5037 };
     qint64 maxReadChunkBytes{ qint64{ 64 } * 1024 };
     qint64 maxWriteChunkBytes{ qint64{ 64 } * 1024 };
+    qint64 maxReadBytesPerTurn{ DefaultAdbSmartSocketReadTurnBytes };
+    std::size_t maxFramesPerTurn{ DefaultAdbSmartSocketReadTurnFrames };
+    qint64 maxSocketReadBufferBytes{ DefaultAdbSmartSocketReadBufferBytes };
     std::size_t maxHostReplyBytes{ 0xffffu };
     std::size_t maxShellFrameBytes{ std::size_t{ 16u } * 1024u * 1024u };
     int connectTimeoutMs{ 5000 };
@@ -78,7 +86,8 @@ enum class AdbSmartSocketErrorCode : std::uint8_t {
     UnexpectedEof,
     ConnectTimeout,
     WriteTimeout,
-    ReadTimeout
+    ReadTimeout,
+    OperationTimeout
 };
 
 class AdbSmartSocketClient final : public QObject {
@@ -102,7 +111,11 @@ public:
                                       const TransportSelection& transport,
                                       TransportHostService service );
     void startShellService( Generation generation, OperationId operationId,
-                            const TransportSelection& transport, const std::string& service );
+                            const TransportSelection& transport, const std::string& service,
+                            std::optional<int> completionTimeoutMs = std::nullopt );
+    void pauseShellOutput( Generation generation, OperationId operationId );
+    void resumeShellOutput( Generation generation, OperationId operationId );
+    QByteArray takePendingShellStdout( Generation generation, OperationId operationId );
     void cancelGeneration( Generation generation );
 
 Q_SIGNALS:

@@ -533,6 +533,20 @@ DecoderFeedResult<ShellV2Frame> ShellV2FrameDecoder::feed( const ByteVector& byt
     return result;
 }
 
+ByteVector ShellV2FrameDecoder::takeBufferedStdoutPrefix()
+{
+    ByteVector stdoutPrefix;
+    if ( buffer_.size() > ShellV2HeaderSize ) {
+        const auto channel = shellChannel( buffer_.front() );
+        if ( channel == ShellV2Channel::Stdout ) {
+            stdoutPrefix = copyRange( buffer_, ShellV2HeaderSize,
+                                      buffer_.size() );
+        }
+    }
+    reset();
+    return stdoutPrefix;
+}
+
 void ShellV2FrameDecoder::reset() noexcept
 {
     buffer_.clear();
@@ -701,9 +715,31 @@ ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& opti
     return ProtocolResult<std::string>{ std::move( service ), std::nullopt };
 }
 
+ProtocolResult<std::string> buildClearLogcatService( const std::vector<LogBuffer>& buffers )
+{
+    std::string service{ "shell,v2,raw:logcat" };
+    for ( const auto buffer : buffers ) {
+        const auto bufferName = logBufferName( buffer );
+        if ( !bufferName.has_value() ) {
+            return commandError( ProtocolErrorCode::InvalidCommandOption,
+                                 "ADB logcat clear options contain an unknown log buffer." );
+        }
+        if ( !appendBounded( service, " -b " ) || !appendBounded( service, *bufferName ) ) {
+            return commandError( ProtocolErrorCode::PayloadTooLarge,
+                                 "ADB logcat clear service exceeds the smart-socket payload limit." );
+        }
+    }
+    if ( !appendBounded( service, " -c" ) ) {
+        return commandError( ProtocolErrorCode::PayloadTooLarge,
+                             "ADB logcat clear service exceeds the smart-socket payload limit." );
+    }
+    return ProtocolResult<std::string>{ std::move( service ), std::nullopt };
+}
+
 std::string buildClearLogcatService()
 {
-    return "shell,v2,raw:logcat -c";
+    const auto service = buildClearLogcatService( {} );
+    return service.value.value_or( std::string{} );
 }
 
 } // namespace klogg::livecapture::adb

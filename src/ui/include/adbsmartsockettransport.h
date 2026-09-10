@@ -56,6 +56,8 @@ public:
 
     void start( Generation generation ) override;
     void stop( Generation generation ) override;
+    void requestStop( Generation generation, StopDisposition disposition ) override;
+    std::optional<LiveSourceError> lastStructuredError() const override;
     void clearRemoteAsync( Generation generation, ClearRequestId requestId ) override;
     QString lastError() const override;
     LiveDataStatistics statistics() const override;

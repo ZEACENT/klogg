@@ -21,6 +21,8 @@
 
 #include <QAbstractSocket>
 #include <QHash>
+#include <QMetaObject>
+#include <QPointer>
 #include <QTcpSocket>
 #include <QTimer>
 
@@ -202,7 +204,8 @@ public:
     }
 
     void startShellService( Generation generation, OperationId operationId,
-                            const TransportSelection& transport, const std::string& service )
+                            const TransportSelection& transport, const std::string& service,
+                            std::optional<int> completionTimeoutMs )
     {
         if ( service.rfind( "shell,v2,", 0u ) != 0u || service.find( '\0' ) != std::string::npos ) {
             emitRequestError(
@@ -214,7 +217,49 @@ public:
 
         startTransportOperation(
             generation, operationId, transport,
-            ProtocolResult<std::string>{ service, std::nullopt }, OperationKind::Shell );
+            ProtocolResult<std::string>{ service, std::nullopt }, OperationKind::Shell,
+            completionTimeoutMs );
+    }
+
+    void pauseShellOutput( Generation generation, OperationId operationId )
+    {
+        if ( phase_ == Phase::ShellFrames && generation_ == generation
+             && operationId_ == operationId ) {
+            shellOutputPaused_ = true;
+        }
+    }
+
+    void resumeShellOutput( Generation generation, OperationId operationId )
+    {
+        if ( phase_ != Phase::ShellFrames || generation_ != generation
+             || operationId_ != operationId || !shellOutputPaused_ ) {
+            return;
+        }
+        shellOutputPaused_ = false;
+        scheduleReadContinuation();
+    }
+
+    QByteArray takePendingShellStdout( Generation generation, OperationId operationId )
+    {
+        if ( phase_ != Phase::ShellFrames || generation_ != generation
+             || operationId_ != operationId ) {
+            return {};
+        }
+
+        QByteArray stdoutBytes;
+        if ( pendingShellFrames_ ) {
+            const auto& pending = *pendingShellFrames_;
+            for ( auto index = pending.nextFrame; index < pending.frames.size(); ++index ) {
+                const auto& frame = pending.frames.at( index );
+                if ( frame.channel == ShellV2Channel::Stdout ) {
+                    stdoutBytes.append( byteArrayFromBytes( frame.payload ) );
+                }
+            }
+            pendingShellFrames_.reset();
+        }
+        stdoutBytes.append( byteArrayFromBytes(
+            shellDecoder_.takeBufferedStdoutPrefix() ) );
+        return stdoutBytes;
     }
 
     void cancelGeneration( Generation generation )
@@ -239,9 +284,28 @@ private:
         ShellFrames
     };
 
+    struct ReadTurnBudget {
+        qint64 bytesRemaining{ 0 };
+        std::size_t framesRemaining{ 0u };
+    };
+
+    struct PendingHostFrames {
+        std::vector<ByteVector> frames;
+        std::size_t nextFrame{ 0u };
+        std::optional<ProtocolError> error;
+    };
+
+    struct PendingShellFrames {
+        std::vector<ShellV2Frame> frames;
+        std::size_t nextFrame{ 0u };
+        std::optional<ProtocolError> error;
+        std::size_t bufferedByteCount{ 0u };
+    };
+
     void startTransportOperation( Generation generation, OperationId operationId,
                                   const TransportSelection& transport,
-                                  ProtocolResult<std::string> builtService, OperationKind kind )
+                                  ProtocolResult<std::string> builtService, OperationKind kind,
+                                  std::optional<int> completionTimeoutMs = std::nullopt )
     {
         const auto transportService = buildTransportService( transport );
         if ( transportService.error.has_value() ) {
@@ -280,7 +344,7 @@ private:
             return;
         }
 
-        if ( !beginOperation( generation, operationId, kind ) ) {
+        if ( !beginOperation( generation, operationId, kind, completionTimeoutMs ) ) {
             return;
         }
         firstRequest_ = byteArrayFromBytes( *encodedTransport.value );
@@ -321,7 +385,8 @@ private:
         connectSocket();
     }
 
-    bool beginOperation( Generation generation, OperationId operationId, OperationKind kind )
+    bool beginOperation( Generation generation, OperationId operationId, OperationKind kind,
+                         std::optional<int> completionTimeoutMs = std::nullopt )
     {
         if ( phase_ != Phase::Idle ) {
             emitRequestError(
@@ -331,11 +396,14 @@ private:
         }
         if ( config_.serverPort == 0u || config_.serverAddress.isNull()
              || !config_.serverAddress.isLoopback() || config_.maxReadChunkBytes <= 0
-             || config_.maxWriteChunkBytes <= 0 || config_.maxShellFrameBytes == 0u
+             || config_.maxWriteChunkBytes <= 0 || config_.maxReadBytesPerTurn <= 0
+             || config_.maxFramesPerTurn == 0u || config_.maxSocketReadBufferBytes <= 0
+             || config_.maxShellFrameBytes == 0u
              || config_.maxShellFrameBytes
                     > static_cast<std::size_t>( std::numeric_limits<int>::max() )
              || config_.connectTimeoutMs < 0 || config_.writeTimeoutMs < 0
-             || config_.readTimeoutMs < 0 ) {
+             || config_.readTimeoutMs < 0
+             || ( completionTimeoutMs.has_value() && *completionTimeoutMs < 0 ) ) {
             emitRequestError( generation, operationId, AdbSmartSocketErrorCode::Protocol,
                               QStringLiteral( "ADB smart-socket configuration requires a valid "
                                               "loopback endpoint and positive I/O bounds." ) );
@@ -346,13 +414,25 @@ private:
         generation_ = generation;
         operationId_ = operationId;
         operationKind_ = kind;
+        shellCompletionTimeoutMs_ = completionTimeoutMs;
         phase_ = Phase::Connecting;
         nextReadPhase_ = Phase::Idle;
         firstRequest_.clear();
         serviceRequest_.clear();
         pendingHostReply_.clear();
+        pendingHostFrames_.reset();
+        pendingShellFrames_.reset();
         writeBuffer_.clear();
         writeOffset_ = 0;
+        continuationScheduled_ = false;
+        // A terminal callback may synchronously begin a successor while the old
+        // read turn is still unwinding. Preserve that reentrancy guard; a nested
+        // readyRead will request one correlated continuation for the new serial.
+        readTurnRequested_ = false;
+        shellOutputPaused_ = false;
+        socketClosurePending_ = false;
+        socketClosureError_ = QAbstractSocket::UnknownSocketError;
+        socketClosureDiagnostic_.clear();
         statusDecoder_ = SmartSocketStatusDecoder( config_.maxHostReplyBytes );
         hostReplyDecoder_ = LengthPrefixedHostReplyDecoder( config_.maxHostReplyBytes );
         shellDecoder_ = ShellV2FrameDecoder( config_.maxShellFrameBytes );
@@ -367,6 +447,7 @@ private:
                   QStringLiteral( "Unable to create an ADB smart-socket connection." ) );
             return;
         }
+        socket_->setReadBufferSize( config_.maxSocketReadBufferBytes );
 
         const auto serial = operationSerial_;
         auto* const operationSocket = socket_;
@@ -500,7 +581,124 @@ private:
         armReadDeadline();
     }
 
-    void consumeAvailableBytes()
+    bool hasPendingFrames() const noexcept
+    {
+        return ( pendingHostFrames_.has_value()
+                 && pendingHostFrames_->nextFrame < pendingHostFrames_->frames.size() )
+               || ( pendingShellFrames_.has_value()
+                    && pendingShellFrames_->nextFrame < pendingShellFrames_->frames.size() );
+    }
+
+    bool deliverPendingHostFrames( ReadTurnBudget& budget )
+    {
+        if ( !pendingHostFrames_.has_value() ) {
+            return true;
+        }
+        if ( phase_ != Phase::HostReply || operationKind_ != OperationKind::StreamingHost ) {
+            pendingHostFrames_.reset();
+            return true;
+        }
+
+        auto& pending = *pendingHostFrames_;
+        while ( pending.nextFrame < pending.frames.size() && budget.framesRemaining != 0u ) {
+            const auto frame = byteArrayFromBytes( pending.frames.at( pending.nextFrame ) );
+            ++pending.nextFrame;
+            --budget.framesRemaining;
+            const auto serial = operationSerial_;
+            const QPointer<AdbSmartSocketClient> guard( &client_ );
+            Q_EMIT client_.hostReplyReceived( generation_, operationId_, frame );
+            if ( guard.isNull() ) {
+                return false;
+            }
+            // A direct callback can synchronously replace the active operation.
+            // cppcheck-suppress knownConditionTrueFalse
+            if ( serial != operationSerial_ || phase_ != Phase::HostReply ) {
+                return false;
+            }
+        }
+
+        if ( pending.nextFrame != pending.frames.size() ) {
+            return true;
+        }
+        const auto error = std::move( pending.error );
+        pendingHostFrames_.reset();
+        if ( error.has_value() ) {
+            fail( AdbSmartSocketErrorCode::Protocol, protocolDiagnostic( *error ) );
+            return false;
+        }
+        return true;
+    }
+
+    bool deliverPendingShellFrames( ReadTurnBudget& budget )
+    {
+        if ( !pendingShellFrames_.has_value() ) {
+            return true;
+        }
+        if ( phase_ != Phase::ShellFrames ) {
+            pendingShellFrames_.reset();
+            return true;
+        }
+
+        auto& pending = *pendingShellFrames_;
+        while ( pending.nextFrame < pending.frames.size() && budget.framesRemaining != 0u
+                && !shellOutputPaused_ ) {
+            const auto frameIndex = pending.nextFrame;
+            const auto& frame = pending.frames.at( frameIndex );
+            const auto payload = byteArrayFromBytes( frame.payload );
+            ++pending.nextFrame;
+            --budget.framesRemaining;
+            const auto serial = operationSerial_;
+            const QPointer<AdbSmartSocketClient> guard( &client_ );
+            switch ( frame.channel ) {
+            case ShellV2Channel::Stdout:
+                Q_EMIT client_.shellStdoutReceived( generation_, operationId_, payload );
+                break;
+            case ShellV2Channel::Stderr:
+                Q_EMIT client_.shellStderrReceived( generation_, operationId_, payload );
+                break;
+            case ShellV2Channel::Exit: {
+                if ( pending.error.has_value() || frameIndex + 1u != pending.frames.size()
+                     || pending.bufferedByteCount != 0u ) {
+                    fail( AdbSmartSocketErrorCode::Protocol,
+                          QStringLiteral( "ADB shell-v2 exit frame was followed by trailing "
+                                          "protocol data." ) );
+                    return false;
+                }
+                const auto generation = generation_;
+                const auto operationId = operationId_;
+                const auto exitCode = frame.payload.front();
+                finishSuccess();
+                Q_EMIT client_.shellExited( generation, operationId, exitCode );
+                return false;
+            }
+            case ShellV2Channel::Stdin:
+            case ShellV2Channel::CloseStdin:
+            case ShellV2Channel::WindowSizeChange:
+                fail( AdbSmartSocketErrorCode::Protocol,
+                      QStringLiteral( "ADB shell-v2 returned an invalid server channel." ) );
+                return false;
+            }
+            if ( guard.isNull() ) {
+                return false;
+            }
+            if ( serial != operationSerial_ || phase_ != Phase::ShellFrames ) {
+                return false;
+            }
+        }
+
+        if ( pending.nextFrame != pending.frames.size() ) {
+            return true;
+        }
+        const auto error = std::move( pending.error );
+        pendingShellFrames_.reset();
+        if ( error.has_value() ) {
+            fail( AdbSmartSocketErrorCode::Protocol, protocolDiagnostic( *error ) );
+            return false;
+        }
+        return true;
+    }
+
+    void runReadTurn( ReadTurnBudget& budget )
     {
         if ( socket_ == nullptr ) {
             return;
@@ -519,22 +717,98 @@ private:
             }
         }
 
-        while ( phase_ != Phase::Idle && socket_->bytesAvailable() > 0 ) {
+        if ( !deliverPendingHostFrames( budget ) || !deliverPendingShellFrames( budget )
+             || phase_ == Phase::Idle || shellOutputPaused_ || hasPendingFrames()
+             || budget.framesRemaining == 0u ) {
+            return;
+        }
+
+        while ( phase_ != Phase::Idle && !shellOutputPaused_ && budget.framesRemaining != 0u
+                && budget.bytesRemaining != 0 && socket_->bytesAvailable() > 0 ) {
             const auto readSize
                 = std::min( { socket_->bytesAvailable(), config_.maxReadChunkBytes,
+                              budget.bytesRemaining,
                               static_cast<qint64>( std::numeric_limits<int>::max() ) } );
             QByteArray chunk;
             chunk.resize( static_cast<int>( readSize ) );
             const auto bytesRead = socketFactory_->readSocket( *socket_, chunk.data(), readSize );
-            if ( bytesRead <= 0 ) {
+            if ( bytesRead < 0 || bytesRead > readSize ) {
+                fail( AdbSmartSocketErrorCode::Connection,
+                      QStringLiteral( "ADB smart-socket read failed." ) );
+                return;
+            }
+            if ( bytesRead == 0 ) {
                 break;
             }
+            budget.bytesRemaining -= bytesRead;
             chunk.resize( static_cast<int>( bytesRead ) );
-            processInput( bytesFromByteArray( chunk ) );
+            const QPointer<AdbSmartSocketClient> guard( &client_ );
+            processInput( bytesFromByteArray( chunk ), budget );
+            if ( guard.isNull() ) {
+                return;
+            }
+            if ( phase_ == Phase::Idle || shellOutputPaused_ || hasPendingFrames()
+                 || budget.framesRemaining == 0u ) {
+                return;
+            }
         }
     }
 
-    void processInput( ByteVector bytes )
+    void scheduleReadContinuation()
+    {
+        if ( continuationScheduled_ || phase_ == Phase::Idle || shellOutputPaused_ ) {
+            return;
+        }
+        continuationScheduled_ = true;
+        const auto serial = operationSerial_;
+        const auto queued = QMetaObject::invokeMethod(
+            &client_,
+            [ this, serial ] {
+                if ( serial != operationSerial_ || phase_ == Phase::Idle ) {
+                    return;
+                }
+                continuationScheduled_ = false;
+                consumeAvailableBytes();
+            },
+            Qt::QueuedConnection );
+        if ( !queued && serial == operationSerial_ && phase_ != Phase::Idle ) {
+            continuationScheduled_ = false;
+            fail( AdbSmartSocketErrorCode::Connection,
+                  QStringLiteral( "Unable to schedule continued ADB smart-socket reads." ) );
+        }
+    }
+
+    void consumeAvailableBytes()
+    {
+        if ( socket_ == nullptr || phase_ == Phase::Idle ) {
+            return;
+        }
+        if ( readTurnActive_ ) {
+            readTurnRequested_ = true;
+            return;
+        }
+
+        readTurnActive_ = true;
+        ReadTurnBudget budget{ config_.maxReadBytesPerTurn, config_.maxFramesPerTurn };
+        const QPointer<AdbSmartSocketClient> guard( &client_ );
+        runReadTurn( budget );
+        if ( guard.isNull() ) {
+            return;
+        }
+        readTurnActive_ = false;
+        if ( phase_ == Phase::Idle ) {
+            return;
+        }
+
+        const auto requestedAgain = std::exchange( readTurnRequested_, false );
+        const auto socketHasBytes = socket_ != nullptr && socket_->bytesAvailable() > 0;
+        if ( !shellOutputPaused_ && ( requestedAgain || hasPendingFrames() || socketHasBytes ) ) {
+            scheduleReadContinuation();
+        }
+        tryCompleteSocketClosure();
+    }
+
+    void processInput( ByteVector bytes, ReadTurnBudget& budget )
     {
         while ( phase_ != Phase::Idle && !bytes.empty() ) {
             switch ( phase_ ) {
@@ -583,20 +857,30 @@ private:
                 statusDecoder_.reset();
                 cancelDeadline();
                 phase_ = Phase::ShellFrames;
-                {
-                    const auto serial = operationSerial_;
-                    Q_EMIT client_.shellServiceStarted( generation_, operationId_ );
-                    // A direct signal handler can cancel or replace this operation.
-                    // cppcheck-suppress knownConditionTrueFalse
-                    if ( serial != operationSerial_ || phase_ != Phase::ShellFrames ) {
+                if ( shellCompletionTimeoutMs_.has_value() ) {
+                    armDeadline( AdbSmartSocketDeadlineKind::Read, *shellCompletionTimeoutMs_,
+                                 AdbSmartSocketErrorCode::OperationTimeout,
+                                 QStringLiteral( "ADB shell operation timed out before exit." ) );
+                    if ( phase_ != Phase::ShellFrames ) {
                         return;
                     }
+                }
+                const auto serial = operationSerial_;
+                const QPointer<AdbSmartSocketClient> guard( &client_ );
+                Q_EMIT client_.shellServiceStarted( generation_, operationId_ );
+                if ( guard.isNull() ) {
+                    return;
+                }
+                // A direct signal handler can cancel or replace this operation.
+                // cppcheck-suppress knownConditionTrueFalse
+                if ( serial != operationSerial_ || phase_ != Phase::ShellFrames ) {
+                    return;
                 }
                 continue;
             }
             case Phase::HostReply: {
                 auto result = hostReplyDecoder_.feed( bytes );
-                if ( result.error.has_value() ) {
+                if ( result.error.has_value() && result.frames.empty() ) {
                     fail( AdbSmartSocketErrorCode::Protocol, protocolDiagnostic( *result.error ) );
                     return;
                 }
@@ -604,24 +888,16 @@ private:
                     return;
                 }
 
-                const auto generation = generation_;
-                const auto operationId = operationId_;
                 if ( operationKind_ == OperationKind::StreamingHost ) {
                     cancelDeadline();
-                    const auto serial = operationSerial_;
-                    for ( const auto& frame : result.frames ) {
-                        Q_EMIT client_.hostReplyReceived( generation, operationId,
-                                                          byteArrayFromBytes( frame ) );
-                        // A direct signal handler can cancel or replace this operation.
-                        // cppcheck-suppress knownConditionTrueFalse
-                        if ( serial != operationSerial_ || phase_ != Phase::HostReply ) {
-                            return;
-                        }
-                    }
+                    pendingHostFrames_ = PendingHostFrames{ std::move( result.frames ), 0u,
+                                                            std::move( result.error ) };
+                    static_cast<void>( deliverPendingHostFrames( budget ) );
                     return;
                 }
 
-                if ( result.frames.size() != 1u || result.bufferedByteCount != 0u ) {
+                if ( result.frames.size() != 1u || result.bufferedByteCount != 0u
+                     || result.error.has_value() ) {
                     fail( AdbSmartSocketErrorCode::Protocol,
                           QStringLiteral( "ADB one-shot host service returned trailing data." ) );
                     return;
@@ -638,50 +914,17 @@ private:
                 return;
             case Phase::ShellFrames: {
                 auto result = shellDecoder_.feed( bytes );
-                const auto serial = operationSerial_;
-                for ( std::size_t index = 0; index < result.frames.size(); ++index ) {
-                    const auto& frame = result.frames.at( index );
-                    const auto payload = byteArrayFromBytes( frame.payload );
-                    switch ( frame.channel ) {
-                    case ShellV2Channel::Stdout:
-                        Q_EMIT client_.shellStdoutReceived( generation_, operationId_, payload );
-                        break;
-                    case ShellV2Channel::Stderr:
-                        Q_EMIT client_.shellStderrReceived( generation_, operationId_, payload );
-                        break;
-                    case ShellV2Channel::Exit: {
-                        if ( result.error.has_value() || index + 1u != result.frames.size()
-                             || result.bufferedByteCount != 0u ) {
-                            fail(
-                                AdbSmartSocketErrorCode::Protocol,
-                                QStringLiteral( "ADB shell-v2 exit frame was followed by trailing "
-                                                "protocol data." ) );
-                            return;
-                        }
-
-                        const auto generation = generation_;
-                        const auto operationId = operationId_;
-                        const auto exitCode = frame.payload.front();
-                        finishSuccess();
-                        Q_EMIT client_.shellExited( generation, operationId, exitCode );
-                        return;
+                if ( result.frames.empty() ) {
+                    if ( result.error.has_value() ) {
+                        fail( AdbSmartSocketErrorCode::Protocol,
+                              protocolDiagnostic( *result.error ) );
                     }
-                    case ShellV2Channel::Stdin:
-                    case ShellV2Channel::CloseStdin:
-                    case ShellV2Channel::WindowSizeChange:
-                        fail(
-                            AdbSmartSocketErrorCode::Protocol,
-                            QStringLiteral( "ADB shell-v2 returned an invalid server channel." ) );
-                        return;
-                    }
-                    if ( serial != operationSerial_ || phase_ != Phase::ShellFrames ) {
-                        return;
-                    }
+                    return;
                 }
-
-                if ( result.error.has_value() ) {
-                    fail( AdbSmartSocketErrorCode::Protocol, protocolDiagnostic( *result.error ) );
-                }
+                pendingShellFrames_ = PendingShellFrames{ std::move( result.frames ), 0u,
+                                                          std::move( result.error ),
+                                                          result.bufferedByteCount };
+                static_cast<void>( deliverPendingShellFrames( budget ) );
                 return;
             }
             case Phase::Idle:
@@ -700,26 +943,39 @@ private:
         if ( phase_ == Phase::Idle ) {
             return;
         }
-
+        socketClosurePending_ = true;
+        socketClosureError_
+            = socket_ != nullptr ? socket_->error() : QAbstractSocket::UnknownSocketError;
+        socketClosureDiagnostic_ = socket_ != nullptr ? socket_->errorString() : QString{};
+        const QPointer<AdbSmartSocketClient> guard( &client_ );
         consumeAvailableBytes();
-        if ( phase_ == Phase::Idle ) {
+        if ( guard.isNull() ) {
             return;
         }
+        tryCompleteSocketClosure();
+    }
+
+    void tryCompleteSocketClosure()
+    {
+        if ( !socketClosurePending_ || phase_ == Phase::Idle || readTurnActive_
+             || shellOutputPaused_ || hasPendingFrames()
+             || ( socket_ != nullptr && socket_->bytesAvailable() > 0 ) ) {
+            return;
+        }
+        socketClosurePending_ = false;
 
         if ( phase_ == Phase::Connecting ) {
             fail( AdbSmartSocketErrorCode::Connection,
                   QStringLiteral( "Unable to connect to the ADB smart-socket endpoint: %1" )
-                      .arg( socket_ != nullptr ? socket_->errorString() : QString{} ) );
+                      .arg( socketClosureDiagnostic_ ) );
             return;
         }
 
-        const auto socketError
-            = socket_ != nullptr ? socket_->error() : QAbstractSocket::UnknownSocketError;
-        if ( socketError != QAbstractSocket::UnknownSocketError
-             && socketError != QAbstractSocket::RemoteHostClosedError ) {
+        if ( socketClosureError_ != QAbstractSocket::UnknownSocketError
+             && socketClosureError_ != QAbstractSocket::RemoteHostClosedError ) {
             fail( AdbSmartSocketErrorCode::Connection,
                   QStringLiteral( "ADB smart-socket connection failed: %1" )
-                      .arg( socket_ != nullptr ? socket_->errorString() : QString{} ) );
+                      .arg( socketClosureDiagnostic_ ) );
             return;
         }
 
@@ -801,11 +1057,19 @@ private:
     {
         ++operationSerial_;
         phase_ = Phase::Idle;
+        shellCompletionTimeoutMs_.reset();
         cancelDeadline();
         writeBuffer_.clear();
         firstRequest_.clear();
         serviceRequest_.clear();
         pendingHostReply_.clear();
+        pendingHostFrames_.reset();
+        pendingShellFrames_.reset();
+        continuationScheduled_ = false;
+        readTurnRequested_ = false;
+        shellOutputPaused_ = false;
+        socketClosurePending_ = false;
+        socketClosureDiagnostic_.clear();
         statusDecoder_.reset();
         hostReplyDecoder_.reset();
         shellDecoder_.reset();
@@ -820,6 +1084,12 @@ private:
             else {
                 retiredSocket->disconnectFromHost();
             }
+            // The socket is parented to the client, and completion may be
+            // emitted while the client (or an observer) deletes it from inside
+            // a socket signal. Releasing the parent here keeps the emitting
+            // sender alive until the queued deletion runs instead of letting
+            // ~QObject destroy the socket mid-emission.
+            retiredSocket->setParent( nullptr );
             retiredSocket->deleteLater();
         }
     }
@@ -836,6 +1106,7 @@ private:
     Generation generation_{ 0 };
     OperationId operationId_{ 0 };
     OperationKind operationKind_{ OperationKind::OneShotHost };
+    std::optional<int> shellCompletionTimeoutMs_;
     Phase phase_{ Phase::Idle };
     Phase nextReadPhase_{ Phase::Idle };
     std::uint64_t operationSerial_{ 0 };
@@ -847,6 +1118,15 @@ private:
     QByteArray pendingHostReply_;
     QByteArray writeBuffer_;
     qint64 writeOffset_{ 0 };
+    std::optional<PendingHostFrames> pendingHostFrames_;
+    std::optional<PendingShellFrames> pendingShellFrames_;
+    QAbstractSocket::SocketError socketClosureError_{ QAbstractSocket::UnknownSocketError };
+    QString socketClosureDiagnostic_;
+    bool continuationScheduled_{ false };
+    bool readTurnActive_{ false };
+    bool readTurnRequested_{ false };
+    bool shellOutputPaused_{ false };
+    bool socketClosurePending_{ false };
 
     SmartSocketStatusDecoder statusDecoder_;
     LengthPrefixedHostReplyDecoder hostReplyDecoder_;
@@ -889,9 +1169,26 @@ void AdbSmartSocketClient::requestTransportHostService( Generation generation,
 
 void AdbSmartSocketClient::startShellService( Generation generation, OperationId operationId,
                                               const TransportSelection& transport,
-                                              const std::string& service )
+                                              const std::string& service,
+                                              std::optional<int> completionTimeoutMs )
 {
-    impl_->startShellService( generation, operationId, transport, service );
+    impl_->startShellService( generation, operationId, transport, service, completionTimeoutMs );
+}
+
+void AdbSmartSocketClient::pauseShellOutput( Generation generation, OperationId operationId )
+{
+    impl_->pauseShellOutput( generation, operationId );
+}
+
+void AdbSmartSocketClient::resumeShellOutput( Generation generation, OperationId operationId )
+{
+    impl_->resumeShellOutput( generation, operationId );
+}
+
+QByteArray AdbSmartSocketClient::takePendingShellStdout( Generation generation,
+                                                         OperationId operationId )
+{
+    return impl_->takePendingShellStdout( generation, operationId );
 }
 
 void AdbSmartSocketClient::cancelGeneration( Generation generation )

@@ -1121,6 +1121,165 @@ def shell_commands(text: str) -> list[str]:
     return commands
 
 
+def literal_shell_invocations(script: str) -> list[list[str]]:
+    """Extract literal simple commands, including executable $() substitutions.
+
+    Keep quoting/escaping until command boundaries and reserved words have been
+    classified. This is a lexical policy check, not an evaluator: expansions are
+    opaque argument data, except for command substitutions which execute shell.
+    """
+    invocations: list[list[str]] = []
+    index = 0
+
+    def scan(nested: bool = False) -> None:
+        nonlocal index
+        arguments: list[str] = []
+        case_states: list[str] = []
+
+        def finish() -> None:
+            if arguments:
+                invocations.append(arguments.copy())
+                arguments.clear()
+
+        while index < len(script):
+            char = script[index]
+            if char in " \t\r":
+                index += 1
+                continue
+            if char == "#":
+                newline = script.find("\n", index)
+                index = len(script) if newline < 0 else newline
+                continue
+            if char in ";&|\n()":
+                if case_states and case_states[-1] == "pattern":
+                    if char == ")":
+                        case_states[-1] = "body"
+                    index += 1
+                    continue
+                finish()
+                if case_states and script.startswith((";;", ";&"), index):
+                    case_states[-1] = "pattern"
+                    index += 3 if script.startswith(";;&", index) else 2
+                    continue
+                index += 1
+                if char == ")":
+                    if not nested:
+                        raise ValueError("unmatched shell parenthesis")
+                    return
+                if char == "(":
+                    scan(nested=True)
+                continue
+
+            start = index
+            word: list[str] = []
+            quote: str | None = None
+            literal = True
+            while index < len(script):
+                char = script[index]
+                if quote is None and (char.isspace() or char in ";&|()"):
+                    break
+                if char == "\\" and quote != "'":
+                    literal = False
+                    index += 1
+                    if index == len(script):
+                        raise ValueError("trailing shell escape")
+                    escaped = script[index]
+                    if escaped != "\n":
+                        if quote == '"' and escaped not in '$`"\\':
+                            word.append("\\")
+                        word.append(escaped)
+                    index += 1
+                    continue
+                if char in "'\"" and (quote is None or quote == char):
+                    literal = False
+                    quote = char if quote is None else None
+                    index += 1
+                    continue
+                if quote != "'" and script.startswith("$(", index):
+                    literal = False
+                    index += 2
+                    scan(nested=True)
+                    # Never turn dynamically generated text into a literal
+                    # command name, reserved word or flag.
+                    word.append("${command-substitution}")
+                    continue
+                word.append(char)
+                index += 1
+            if quote is not None:
+                raise ValueError("unterminated shell quote")
+            value = "".join(word)
+            if not value and script[start:index] == "\\\n":
+                continue
+            if case_states and case_states[-1] == "header":
+                if literal and value == "in":
+                    case_states[-1] = "pattern"
+                continue
+            if case_states and literal and value == "esac" and not arguments:
+                case_states.pop()
+                continue
+            if case_states and case_states[-1] == "pattern":
+                continue
+            if not arguments:
+                if literal and value == "case":
+                    case_states.append("header")
+                    continue
+                if literal and value in ("if", "then", "elif", "else", "while", "until", "do", "!", "{", "}"):
+                    continue
+                if re.match(r"[A-Za-z_]\w*=", script[start:index]):
+                    continue
+            arguments.append(value)
+        if nested or case_states:
+            raise ValueError("unterminated shell compound command")
+        finish()
+
+    scan()
+    return invocations
+
+
+def github_api_has_incompatible_flags(arguments: list[str]) -> bool:
+    """Apply gh's option boundaries after shell syntax has been classified."""
+    flags: list[str] = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument == "--":
+            break
+        if argument in ("-f", "--raw-field", "-F", "--field", "-H", "--header",
+                        "--hostname", "--input", "-X", "--method", "--cache", "-p", "--preview"):
+            skip_value = True
+            continue
+        flags.append(argument)
+    return "--slurp" in flags and any(
+        flag in ("--jq", "--template", "-q", "-t")
+        or flag.startswith(("--jq=", "--template=", "-q", "-t"))
+        for flag in flags
+    )
+
+
+def github_api_flag_issues(text: str) -> list[str]:
+    """Check actual shell invocations, not comments or quoted example text."""
+    message = "gh api --slurp cannot be combined with --jq/--template; filter the captured pages with external jq"
+    for block in workflow_run_blocks(text):
+        try:
+            invocations = literal_shell_invocations(block)
+        except ValueError:
+            if re.search(r"\b(?:gh\s+api|gh_api_retry)\b", block) and "--slurp" in block:
+                return [message + " (malformed command)"]
+            continue
+        for tokens in invocations:
+            if tokens[0] == "gh_api_retry":
+                arguments = tokens[1:]
+            elif tokens[:2] == ["gh", "api"]:
+                arguments = tokens[2:]
+            else:
+                continue
+            if github_api_has_incompatible_flags(arguments):
+                return [message]
+    return []
+
+
 def shell_tokens(command: str) -> list[str]:
     try:
         return shlex.split(command)
@@ -1974,7 +2133,7 @@ def static_analysis_workflow_issues(text: str) -> list[str]:
         marker in text
         for marker in (
             "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}",
-            "cancel-in-progress: ${{ github.event_name != 'schedule' }}",
+            "cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
             'if [ "$KLOGG_ANALYSIS_MODE" = "full-report" ]; then',
             'pull_request) base_sha="$PR_BASE_SHA"',
             'push) base_sha="$PUSH_BASE_SHA"',
@@ -2202,6 +2361,98 @@ def workflow_mapping_block(
 
 def workflow_trigger_mapping(text: str) -> dict[str, tuple[str, list[str]]] | None:
     return workflow_mapping_block(text.splitlines(), "on", 0)
+
+
+WORKFLOW_EVENTS = frozenset(
+    "branch_protection_rule check_run check_suite create delete deployment deployment_status "
+    "discussion discussion_comment fork gollum issue_comment issues label merge_group milestone "
+    "page_build public pull_request pull_request_review pull_request_review_comment "
+    "pull_request_target push registry_package release repository_dispatch schedule status "
+    "watch workflow_call workflow_dispatch workflow_run".split()
+)
+
+
+def workflow_schedule_issues(text: str) -> list[str]:
+    """Forbid timers across every workflow, with bounded fail-closed parsing.
+
+    Reuse the repository mapping/list helpers. Simple quoted keys and event
+    scalar/lists are supported; aliases, flow mappings and unknown structures
+    require an explicit parser review, never silently grant a timer bypass.
+    Only the root on mapping is examined, not inputs/jobs/scalar text.
+    """
+    malformed = ["workflow on triggers are malformed or unsupported; cannot rule out schedule"]
+    lines = text.splitlines()
+    # An unrecognized root key can be an alternate spelling of a second `on`
+    # (escaped YAML keys, aliases, documents). Do not ignore that ambiguity.
+    root_keys: set[str] = set()
+    for line in lines:
+        if not strip_yaml_comment(line) or line[0].isspace():
+            continue
+        entry = re.match(r"^(?:([a-z_-]+)|'([a-z_-]+)'|\"([a-z_-]+)\"):(?=\s|$)", line)
+        if entry is None:
+            return malformed
+        key = next(group for group in entry.groups() if group is not None)
+        if key in root_keys or key not in {"name", "run-name", "on", "permissions", "env", "defaults", "concurrency", "jobs"}:
+            return malformed
+        root_keys.add(key)
+    starts = [index for index, line in enumerate(lines)
+              if re.match(r"^(?:on|'on'|\"on\"):\s*", line)]
+    if len(starts) != 1:
+        return malformed
+    start = starts[0]
+    end = next((index for index in range(start + 1, len(lines))
+                if strip_yaml_comment(lines[index]) and not lines[index][0].isspace()), len(lines))
+    block = [line for line in lines[start:end] if strip_yaml_comment(line)]
+    if any("\t" in line[:len(line) - len(line.lstrip())] for line in block):
+        return malformed
+    value = strip_yaml_comment(block[0].split(":", 1)[1]).strip()
+    event_scalar = r"(?:[a-z_]+|'[a-z_]+'|\"[a-z_]+\")"
+    events: set[str]
+    if value:
+        if len(block) != 1:
+            return malformed
+        if re.fullmatch(event_scalar, value):
+            events = {scalar(value)}
+        elif re.fullmatch(rf"\[\s*{event_scalar}(?:\s*,\s*{event_scalar})*\s*\]", value):
+            events = parse_inline_yaml_list(value) or set()
+            if len(events) != len(value[1:-1].split(",")):
+                return malformed
+        else:
+            return malformed
+    elif len(block) > 1 and block[1].lstrip().startswith("-"):
+        indent = len(block[1]) - len(block[1].lstrip())
+        events = set()
+        for line in block[1:]:
+            if len(line) - len(line.lstrip()) != indent:
+                return malformed
+            item = re.fullmatch(rf"\s*-\s+({event_scalar})\s*", strip_yaml_comment(line))
+            if item is None or scalar(item.group(1)) in events:
+                return malformed
+            events.add(scalar(item.group(1)))
+    else:
+        # Validate direct trigger headers before using the more permissive
+        # existing mapping helper (which also parses step list entries).
+        if len(block) < 2:
+            return malformed
+        indent = len(block[1]) - len(block[1].lstrip())
+        for line in block[1:]:
+            if len(line) - len(line.lstrip()) == indent and not re.match(rf"\s*{event_scalar}:(?=\s|$)", line):
+                return malformed
+        # Normalize only simple paired quoted keys, not scalar contents.
+        normalized = [re.sub(r"^(\s*)(['\"])([a-z_]+)\2:", r"\1\3:", line) for line in block]
+        mapping = workflow_mapping_block(normalized, "on", 0)
+        if mapping is None:
+            return malformed
+        if any(len(line) - len(line.lstrip()) < indent for line in block[1:]):
+            return malformed
+        events = set(mapping)
+        if "schedule" not in events and any(value not in ("", "{}", "null", "~") for value, _ in mapping.values()):
+            return malformed
+    if not events or not events <= WORKFLOW_EVENTS:
+        return malformed
+    if "schedule" in events:
+        return ["workflow on.schedule triggers are forbidden; use workflow_dispatch instead"]
+    return []
 
 
 def shell_case_labels(run_text: str, selector: str) -> set[str] | None:
@@ -2717,7 +2968,15 @@ def check_repo(root: Path) -> list[str]:
     issues: list[str] = []
     workflows = root / ".github" / "workflows"
     for path in ci_manifests(root):
-        issues.extend(check_checkout_blocks(path.relative_to(root), path.read_text()))
+        text = path.read_text()
+        issues.extend(check_checkout_blocks(path.relative_to(root), text))
+        issues.extend(f"{path.relative_to(root)}: {issue}" for issue in github_api_flag_issues(text))
+        if path.parent == workflows:
+            issues.extend(f"{path.relative_to(root)}: {issue}" for issue in workflow_schedule_issues(text))
+    for path in sorted((root / "scripts").glob("*.sh")):
+        # Reuse the same run-block shell scanner for sibling release helpers.
+        shell_block = "steps:\n  - run: |\n" + "\n".join("      " + line for line in path.read_text().splitlines())
+        issues.extend(f"{path.relative_to(root)}: {issue}" for issue in github_api_flag_issues(shell_block))
 
     for path in sorted((root / "tests" / "sanitizers").glob("*_suppressions.txt")):
         text = path.read_text()

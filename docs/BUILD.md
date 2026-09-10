@@ -355,3 +355,39 @@ cd <path_to_klogg_repository_clone>
 cd build_root
 ctest --build-config RelWithDebInfo --verbose
 ```
+
+### macOS first-party ThreadSanitizer: live-save guard
+
+Changes to asynchronous live-save ownership need a ThreadSanitizer run before
+push; passing normal tests or ASan/UBSan does not cover thread synchronization.
+Use a separate build directory, with the same Qt version and architecture as the
+CI leg when reproducing a CI report:
+
+```bash
+cmake -S . -B build_root_macos_tsan_followup -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DENABLE_SANITIZER_THREAD=ON -DKLOGG_USE_LTO=OFF \
+  -DKLOGG_USE_SENTRY=OFF \
+  -DQt6_DIR="$(brew --prefix qt@6)/lib/cmake/Qt6"
+cmake --build build_root_macos_tsan_followup \
+  --target klogg_tests klogg_itests -j 8
+
+TSAN_OPTIONS=halt_on_error=1 \
+  build_root_macos_tsan_followup/output/klogg_tests \
+  -platform offscreen --warn NoTests '[live-save-async]'
+TSAN_OPTIONS=halt_on_error=1 \
+  build_root_macos_tsan_followup/output/klogg_itests \
+  -platform offscreen --warn NoTests '[live-save-filename],[live-save-cutover]'
+```
+
+Rebuild first and retain `--warn NoTests`: a stale executable with no matching
+test otherwise exits successfully without exercising the regression. These
+focused tests are an early guard, not a substitute for the complete sanitizer
+CTest run after building all targets.
+
+macOS first-party TSan uses uninstrumented Qt. Queued callable publication and
+blocking-call ordering may not be visible to TSan. Live-save owner-thread calls
+therefore use a C++ synchronized request mailbox and per-call completion, with a
+named Qt slot carrying only the wakeup. Do not suppress the whole export service or treat
+a sanitizer abort as a timing flake. Linux's instrumented-Qt TSan configuration
+is separate and requires its pinned Qt runtime.

@@ -17,7 +17,9 @@
 #include <QString>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -77,6 +79,14 @@ struct ScriptedSessionState {
     int shutdownCalls{ 0 };
     bool destroyed{ false };
     bool throwFromDrain{ false };
+    bool throwFromStatistics{ false };
+    std::optional<int> throwOnDrainCall;
+    std::optional<int> throwOnStatisticsCall;
+    int drainCalls{ 0 };
+    mutable int statisticsCalls{ 0 };
+    std::size_t rejectedBeforeEnqueueBytes{ 0u };
+    std::size_t rejectedBeforeEnqueueChunks{ 0u };
+    std::function<void()> afterDrain;
 };
 
 class ScriptedSession final : public IosNativeStreamSession {
@@ -111,15 +121,30 @@ public:
 
     std::optional<LiveDataBatch> drain() override
     {
-        if ( state_->throwFromDrain ) {
+        ++state_->drainCalls;
+        if ( state_->throwFromDrain
+             || state_->throwOnDrainCall == state_->drainCalls ) {
             throw std::runtime_error( "scripted drain failure" );
         }
-        return state_->queue.drain();
+        auto batch = state_->queue.drain();
+        if ( state_->afterDrain ) {
+            auto callback = std::exchange( state_->afterDrain, {} );
+            callback();
+        }
+        return batch;
     }
 
     LiveDataStatistics statistics() const override
     {
-        return state_->queue.statistics();
+        ++state_->statisticsCalls;
+        if ( state_->throwFromStatistics
+             || state_->throwOnStatisticsCall == state_->statisticsCalls ) {
+            throw std::runtime_error( "scripted statistics failure" );
+        }
+        auto result = state_->queue.statistics();
+        result.rejectedBeforeEnqueueBytes = state_->rejectedBeforeEnqueueBytes;
+        result.rejectedBeforeEnqueueChunks = state_->rejectedBeforeEnqueueChunks;
+        return result;
     }
 
 private:
@@ -207,6 +232,394 @@ IosNativeStreamConfig nativeConfig()
 }
 
 } // namespace
+
+TEST_CASE( "Direct native iOS transport rejects every unsupported filter and JSON option",
+           "[ios][native][transport][options][validation][w3-ios-options-red]" )
+{
+    struct UnsupportedOption {
+        const char* name;
+        std::function<void( IosNativeStreamConfig& )> apply;
+    };
+    const std::array cases{
+        UnsupportedOption{ "level", []( IosNativeStreamConfig& config ) {
+                              config.logOptions.level = "debug";
+                          } },
+        UnsupportedOption{ "category", []( IosNativeStreamConfig& config ) {
+                              config.logOptions.categories = { "network" };
+                          } },
+        UnsupportedOption{ "subsystem", []( IosNativeStreamConfig& config ) {
+                              config.logOptions.subsystem = "com.example.app";
+                          } },
+        UnsupportedOption{ "JSON", []( IosNativeStreamConfig& config ) {
+                              config.logOptions.outputFormat = IosLogOutputFormat::Json;
+                          } },
+    };
+
+    for ( const auto& value : cases ) {
+        DYNAMIC_SECTION( value.name )
+        {
+            ScriptedWorkerFactory factory;
+            auto config = nativeConfig();
+            value.apply( config );
+            IosNativeTransport transport( factory, std::move( config ) );
+            std::vector<LiveSourceTransport::State> states;
+            QObject::connect( &transport, &LiveSourceTransport::stateChanged,
+                              [&states]( Generation, LiveSourceTransport::State state ) {
+                                  states.push_back( state );
+                              } );
+
+            transport.start( 700u );
+
+            CHECK( factory.sessions.empty() );
+            REQUIRE( transport.lastStructuredError().has_value() );
+            CHECK( transport.lastStructuredError()->code == "unsupported-ios-log-options" );
+            CHECK( transport.lastStructuredError()->category == ErrorCategory::Configuration );
+            CHECK( transport.lastStructuredError()->retryPolicy == RetryPolicy::Never );
+            REQUIRE_FALSE( states.empty() );
+            CHECK( states.back() == LiveSourceTransport::State::Error );
+        }
+    }
+}
+
+TEST_CASE( "Native queue notification retries one rejected queued dispatch without polling",
+           "[ios][native][transport][queue][notification][w3-notification-red]" )
+{
+    ScriptedWorkerFactory factory;
+    int dispatchAttempts = 0;
+    IosNativeTransport::QueuedDispatcher dispatcher
+        = [&dispatchAttempts]( QObject& context, IosNativeTransport::QueuedTask task ) {
+              ++dispatchAttempts;
+              if ( dispatchAttempts == 1 ) {
+                  return false;
+              }
+              return QMetaObject::invokeMethod(
+                  &context, [ task = std::move( task ) ]() mutable { task(); },
+                  Qt::QueuedConnection );
+          };
+    IosNativeTransport transport( factory, nativeConfig(), std::move( dispatcher ) );
+    QByteArray received;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&received]( Generation, const QByteArray& bytes ) { received += bytes; } );
+
+    transport.start( 699u );
+    factory.publishBytes( 0u, "sole-wakeup\n" );
+    drainQtEvents();
+
+    CHECK( dispatchAttempts == 2 );
+    CHECK( received == QByteArrayLiteral( "sole-wakeup\n" ) );
+    CHECK_FALSE( transport.lastStructuredError().has_value() );
+}
+
+TEST_CASE( "Native queue notification falls back after a bounded dispatcher rejection",
+           "[ios][native][transport][queue][notification][fallback][w3-notification-red]" )
+{
+    ScriptedWorkerFactory factory;
+    int dispatchAttempts = 0;
+    IosNativeTransport::QueuedDispatcher dispatcher
+        = [&dispatchAttempts]( QObject&, IosNativeTransport::QueuedTask ) {
+              ++dispatchAttempts;
+              return false;
+          };
+    IosNativeTransport transport( factory, nativeConfig(), std::move( dispatcher ) );
+    QByteArray received;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&received]( Generation, const QByteArray& bytes ) { received += bytes; } );
+
+    transport.start( 698u );
+    factory.publishBytes( 0u, "fallback-wakeup\n" );
+    drainQtEvents();
+
+    CHECK( dispatchAttempts == 2 );
+    CHECK( received == QByteArrayLiteral( "fallback-wakeup\n" ) );
+    CHECK_FALSE( transport.lastStructuredError().has_value() );
+}
+
+TEST_CASE( "Native automatic retirement settles accepted tail in bounded deliveries before stopped",
+           "[ios][native][transport][w2-tail-red]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits.maxQueuedBytes = 512u * 1024u;
+    IosNativeTransport transport( factory, config );
+    std::size_t delivered = 0;
+    std::size_t maximumDelivery = 0;
+    unsigned stopped = 0;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+        [&]( auto, const QByteArray& bytes ) {
+            delivered += static_cast<std::size_t>( bytes.size() );
+            maximumDelivery = std::max( maximumDelivery, static_cast<std::size_t>( bytes.size() ) );
+        } );
+    QObject::connect( &transport, &LiveSourceTransport::stopped,
+        [&]( auto, auto discarded ) {
+            CHECK( delivered == 256u * 1024u );
+            CHECK( discarded == 0u );
+            ++stopped;
+        } );
+    transport.start( 704u );
+    factory.publishBytes( 0u, std::string( 256u * 1024u, 'x' ), false );
+    transport.requestStop( 704u, klogg::livecapture::StopDisposition::SettleAccepted );
+    CHECK( stopped == 0u );
+    factory.publishStopped( 0u );
+    for ( unsigned turn = 0; turn < 10u; ++turn ) { drainQtEvents(); }
+    CHECK( stopped == 1u );
+    CHECK( delivered == 256u * 1024u );
+    CHECK( maximumDelivery <= 64u * 1024u );
+}
+
+TEST_CASE( "Native retirement counts final pre-enqueue rejections exactly once",
+           "[ios][native][transport][stop][statistics][review-rejected-admission]" )
+{
+    // Explicit settlement, explicit discard, and native automatic failure all
+    // retire through the same final gap ledger, independently of accepted bytes.
+    const auto stopPath = GENERATE( 0, 1, 2 );
+    CAPTURE( stopPath );
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    constexpr std::size_t acceptedBytes = 192u * 1024u;
+    constexpr std::size_t rejectedBytes = 2u;
+    constexpr Generation generation = 708u;
+    config.queueLimits.maxQueuedBytes = acceptedBytes;
+    IosNativeTransport transport( factory, config );
+    std::size_t delivered = 0u;
+    std::vector<std::pair<Generation, quint64>> settlements;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) {
+                          delivered += static_cast<std::size_t>( bytes.size() );
+                      } );
+    QObject::connect( &transport, &LiveSourceTransport::stopped,
+                      [&]( Generation value, quint64 discarded ) {
+                          settlements.emplace_back( value, discarded );
+                      } );
+
+    transport.start( generation );
+    const auto session = factory.latest();
+    const auto callbacks = session->callbacks;
+    factory.publishBytes( 0u, std::string( acceptedBytes, 'a' ), false );
+    CHECK( transport.statistics().rejectedBeforeEnqueueBytes == 0u );
+    if ( stopPath == 2 ) {
+        factory.publishFailure( 0u, disconnectError() );
+    }
+    else {
+        transport.requestStop( generation,
+                               stopPath == 0
+                                   ? klogg::livecapture::StopDisposition::SettleAccepted
+                                   : klogg::livecapture::StopDisposition::DiscardPending );
+    }
+    CHECK( settlements.empty() );
+    // The blocked callback only returns after stop closes its queue. These
+    // counters become final at native stopped, not at the earlier stop request.
+    session->rejectedBeforeEnqueueBytes = rejectedBytes;
+    session->rejectedBeforeEnqueueChunks = 1u;
+    factory.publishStopped( 0u );
+    for ( unsigned turn = 0u; turn < 8u; ++turn ) { drainQtEvents(); }
+
+    const auto discardedAcceptedBytes = stopPath == 1 ? acceptedBytes : 0u;
+    REQUIRE( settlements.size() == 1u );
+    CHECK( settlements.front().first == generation );
+    CHECK( settlements.front().second
+           == static_cast<quint64>( discardedAcceptedBytes + rejectedBytes ) );
+    CHECK( delivered == acceptedBytes - discardedAcceptedBytes );
+    CHECK( delivered + settlements.front().second == acceptedBytes + rejectedBytes );
+    CHECK( session->destroyed );
+    const auto statisticsCalls = session->statisticsCalls;
+    callbacks.stopped( generation );
+    callbacks.bytesAvailable( generation );
+    drainQtEvents();
+    CHECK( settlements.size() == 1u );
+    CHECK( session->statisticsCalls == statisticsCalls );
+
+    // A new one-shot session must not inherit the previous generation's gap.
+    transport.start( generation + 1u );
+    transport.requestStop( generation + 1u,
+                           klogg::livecapture::StopDisposition::SettleAccepted );
+    factory.publishStopped( 1u );
+    drainQtEvents();
+    REQUIRE( settlements.size() == 2u );
+    CHECK( settlements.back().first == generation + 1u );
+    CHECK( settlements.back().second == 0u );
+}
+
+TEST_CASE( "Native retiring drain can be cancelled fairly after one bounded delivery",
+           "[ios][native][transport][retire][drain][cancel][fairness][w3-ios-lifecycle]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits.maxQueuedBytes = 512u * 1024u;
+    IosNativeTransport transport( factory, config );
+    constexpr Generation generation = 707u;
+    constexpr std::size_t acceptedBytes = 192u * 1024u;
+    constexpr std::size_t firstTurnBytes = 64u * 1024u;
+    std::size_t delivered = 0u;
+    unsigned deliveries = 0u;
+    quint64 discarded = 0u;
+    unsigned stopped = 0u;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) {
+                          delivered += static_cast<std::size_t>( bytes.size() );
+                          ++deliveries;
+                          if ( deliveries == 1u ) {
+                              transport.requestStop(
+                                  generation,
+                                  klogg::livecapture::StopDisposition::DiscardPending );
+                          }
+                      } );
+    QObject::connect( &transport, &LiveSourceTransport::stopped,
+                      [&]( Generation, quint64 value ) {
+                          ++stopped;
+                          discarded = value;
+                      } );
+
+    transport.start( generation );
+    factory.publishBytes( 0u, std::string( acceptedBytes, 'r' ), false );
+    transport.requestStop( generation,
+                           klogg::livecapture::StopDisposition::SettleAccepted );
+    factory.publishStopped( 0u );
+    drainQtEvents();
+
+    CHECK( deliveries == 1u );
+    CHECK( delivered == firstTurnBytes );
+    CHECK( stopped == 1u );
+    CHECK( discarded == static_cast<quint64>( acceptedBytes - firstTurnBytes ) );
+}
+
+TEST_CASE( "Native retiring continuation failures still settle exactly once",
+           "[ios][native][transport][w2-settlement-red]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits.maxQueuedBytes = 512u * 1024u;
+    IosNativeTransport transport( factory, config );
+    QByteArray delivered;
+    unsigned stopped = 0;
+    quint64 discarded = 0u;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) { delivered += bytes; } );
+    QObject::connect( &transport, &LiveSourceTransport::stopped,
+                      [&]( Generation, quint64 value ) {
+                          ++stopped;
+                          discarded = value;
+                      } );
+
+    constexpr Generation generation = 706u;
+    transport.start( generation );
+    const auto session = factory.latest();
+    const auto callbacks = session->callbacks;
+
+    SECTION( "scheduled drain throws with a known accepted tail" )
+    {
+        const auto deliveredPrefix = std::string( 64u * 1024u, 'p' );
+        const auto unsettledTail = std::string( 23u, 'u' );
+        session->afterDrain = [&] { factory.publishBytes( 0u, unsettledTail, false ); };
+        session->throwOnDrainCall = 2;
+        factory.publishBytes( 0u, deliveredPrefix, false );
+
+        transport.requestStop( generation,
+                               klogg::livecapture::StopDisposition::SettleAccepted );
+        factory.publishStopped( 0u );
+        CHECK_NOTHROW( drainQtEvents() );
+
+        CHECK( stopped == 1u );
+        CHECK( delivered == QByteArray::fromStdString( deliveredPrefix ) );
+        CHECK( discarded == static_cast<quint64>( unsettledTail.size() ) );
+    }
+
+    SECTION( "scheduled settlement statistics throws after the whole accepted tail" )
+    {
+        const auto accepted = std::string( 128u * 1024u, 's' );
+        session->throwFromStatistics = true;
+        factory.publishBytes( 0u, accepted, false );
+
+        transport.requestStop( generation,
+                               klogg::livecapture::StopDisposition::SettleAccepted );
+        factory.publishStopped( 0u );
+        CHECK_NOTHROW( drainQtEvents() );
+
+        CHECK( stopped == 1u );
+        CHECK( delivered == QByteArray::fromStdString( accepted ) );
+        CHECK( discarded == 0u );
+        REQUIRE( transport.lastStructuredError().has_value() );
+        CHECK( transport.lastStructuredError()->nativeDetail
+               == "The final native queue statistics were unavailable during retirement." );
+    }
+
+    REQUIRE( transport.lastStructuredError().has_value() );
+    CHECK( transport.lastStructuredError()->category == ErrorCategory::Capture );
+    CHECK( transport.lastStructuredError()->retryPolicy == RetryPolicy::Never );
+    CHECK( session->destroyed );
+
+    const auto drainCalls = session->drainCalls;
+    const auto statisticsCalls = session->statisticsCalls;
+    callbacks.bytesAvailable( generation );
+    callbacks.stopped( generation );
+    drainQtEvents();
+    CHECK( stopped == 1u );
+    CHECK( session->drainCalls == drainCalls );
+    CHECK( session->statisticsCalls == statisticsCalls );
+}
+
+TEST_CASE( "Native drain preserves the sole refill wakeup while a sliced batch is pending",
+           "[ios][native][transport][queue][w2-wakeup-red]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits.maxQueuedBytes = 512u * 1024u;
+    IosNativeTransport transport( factory, config );
+    QByteArray received;
+    QObject::connect( &transport, &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) { received += bytes; } );
+
+    transport.start( 705u );
+    REQUIRE( factory.sessions.size() == 1u );
+    const auto oldBytes = std::string( 192u * 1024u, 'o' );
+    factory.latest()->afterDrain = [&] { factory.publishBytes( 0u, "new\n" ); };
+    factory.publishBytes( 0u, oldBytes );
+
+    for ( int turn = 0; turn < 8; ++turn ) { drainQtEvents(); }
+
+    CHECK( received.size() == static_cast<int>( oldBytes.size() + 4u ) );
+    CHECK( received.left( static_cast<int>( oldBytes.size() ) )
+           == QByteArray::fromStdString( oldBytes ) );
+    CHECK( received.endsWith( QByteArrayLiteral( "new\n" ) ) );
+    CHECK( factory.latest()->queue.statistics().queuedBytes == 0u );
+}
+
+TEST_CASE( "Native stop waits for worker admission release before publishing disconnection",
+           "[ios][native][transport][w2-native-red]" )
+{
+    ScriptedWorkerFactory factory;
+    IosNativeTransport transport( factory, nativeConfig() );
+    unsigned disconnected = 0;
+    QObject::connect( &transport, &LiveSourceTransport::stateChanged,
+        [&]( auto, auto state ) {
+            if ( state == LiveSourceTransport::State::Disconnected ) { ++disconnected; }
+        } );
+    transport.start( 701u );
+    transport.stop( 701u );
+    drainQtEvents();
+    CHECK( disconnected == 0u );
+    CHECK_FALSE( factory.sessions.front()->destroyed );
+    transport.start( 702u );
+    CHECK( factory.sessions.size() == 1u );
+    factory.publishStopped( 0u );
+    drainQtEvents();
+    CHECK( disconnected == 1u );
+    CHECK( factory.sessions.front()->destroyed );
+    CHECK( factory.sessions.size() == 2u );
+}
+
+TEST_CASE( "Native drain exceptions preserve a useful terminal capture diagnostic",
+           "[ios][native][transport][w2-native-red]" )
+{
+    ScriptedWorkerFactory factory;
+    IosNativeTransport transport( factory, nativeConfig() );
+    transport.start( 703u );
+    factory.latest()->throwFromDrain = true;
+    factory.publishBytes( 0u, "accepted-tail\n" );
+    CHECK_NOTHROW( drainQtEvents() );
+    REQUIRE( transport.lastStructuredError().has_value() );
+    CHECK( transport.lastStructuredError()->category == ErrorCategory::Capture );
+    CHECK( transport.lastStructuredError()->retryPolicy == RetryPolicy::Never );
+}
 
 TEST_CASE( "iOS native transport is Connecting until service handle and read are ready",
            "[ios][native][transport][readiness][idle]" )
@@ -524,6 +937,44 @@ TEST_CASE( "iOS native transport retires a terminal session without erasing Erro
     CHECK( transport.lastStructuredError().has_value() );
 }
 
+TEST_CASE( "iOS native transport settles a multi-turn accepted tail before terminal Error",
+           "[ios][native][transport][terminal][tail][lifetime][review-red]" )
+{
+    ScriptedWorkerFactory factory;
+    auto config = nativeConfig();
+    config.queueLimits.maxQueuedBytes = 256u * 1024u;
+    auto transport = std::make_unique<IosNativeTransport>( factory, config );
+    QPointer<IosNativeTransport> guard( transport.get() );
+    constexpr Generation generation = 119u;
+    const auto accepted = std::string( 128u * 1024u, 't' );
+    std::size_t delivered = 0u;
+    std::vector<QString> order;
+    QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                      [&]( Generation, const QByteArray& bytes ) {
+                          delivered += static_cast<std::size_t>( bytes.size() );
+                          order.push_back( QStringLiteral( "bytes" ) );
+                      } );
+    QObject::connect( transport.get(), &LiveSourceTransport::stateChanged,
+                      [&]( Generation, LiveSourceTransport::State state ) {
+                          if ( state == LiveSourceTransport::State::Error ) {
+                              order.push_back( QStringLiteral( "error" ) );
+                              transport.reset();
+                          }
+                      } );
+
+    transport->start( generation );
+    factory.publishBytes( 0u, accepted, false );
+    factory.publishFailure( 0u, disconnectError( "failure after accepted tail" ) );
+    drainQtEvents();
+
+    CHECK( guard.isNull() );
+    CHECK( delivered == accepted.size() );
+    REQUIRE( order.size() == 3u );
+    CHECK( order.at( 0 ) == QStringLiteral( "bytes" ) );
+    CHECK( order.at( 1 ) == QStringLiteral( "bytes" ) );
+    CHECK( order.at( 2 ) == QStringLiteral( "error" ) );
+}
+
 TEST_CASE( "iOS native transport survives synchronous destruction from terminal error handlers",
            "[ios][native][transport][reentrant][destroy][error]" )
 {
@@ -544,6 +995,73 @@ TEST_CASE( "iOS native transport survives synchronous destruction from terminal 
     CHECK( guard.isNull() );
     CHECK( factory.sessions.front()->shutdownCalls == 1 );
     CHECK( factory.sessions.front()->destroyed );
+}
+
+TEST_CASE( "iOS native delivery callbacks survive synchronous transport destruction",
+           "[ios][native][transport][drain][lifetime][reentrant]" )
+{
+    SECTION( "active scheduled continuation" )
+    {
+        ScriptedWorkerFactory factory;
+        auto config = nativeConfig();
+        config.queueLimits.maxQueuedBytes = 256u * 1024u;
+        auto transport = std::make_unique<IosNativeTransport>( factory, config );
+        QPointer<IosNativeTransport> guard( transport.get() );
+        int deliveries = 0;
+        QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                          [&]( Generation, const QByteArray& ) {
+                              if ( ++deliveries == 2 ) { transport.reset(); }
+                          } );
+        transport->start( 121u );
+        factory.publishBytes( 0u, std::string( 128u * 1024u, 'a' ) );
+
+        CHECK_NOTHROW( drainQtEvents() );
+        CHECK( guard.isNull() );
+        CHECK( deliveries == 2 );
+    }
+
+    SECTION( "retiring scheduled continuation" )
+    {
+        ScriptedWorkerFactory factory;
+        auto config = nativeConfig();
+        config.queueLimits.maxQueuedBytes = 256u * 1024u;
+        auto transport = std::make_unique<IosNativeTransport>( factory, config );
+        QPointer<IosNativeTransport> guard( transport.get() );
+        int deliveries = 0;
+        QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                          [&]( Generation, const QByteArray& ) {
+                              if ( ++deliveries == 2 ) { transport.reset(); }
+                          } );
+        transport->start( 122u );
+        factory.publishBytes( 0u, std::string( 128u * 1024u, 'r' ), false );
+        transport->requestStop( 122u, klogg::livecapture::StopDisposition::SettleAccepted );
+        factory.publishStopped( 0u );
+
+        CHECK_NOTHROW( drainQtEvents() );
+        CHECK( guard.isNull() );
+        CHECK( deliveries == 2 );
+    }
+
+    SECTION( "post-stopped direct delivery" )
+    {
+        ScriptedWorkerFactory factory;
+        auto transport = std::make_unique<IosNativeTransport>( factory, nativeConfig() );
+        QPointer<IosNativeTransport> guard( transport.get() );
+        int deliveries = 0;
+        QObject::connect( transport.get(), &LiveSourceTransport::bytesReceived,
+                          [&]( Generation, const QByteArray& ) {
+                              ++deliveries;
+                              transport.reset();
+                          } );
+        transport->start( 123u );
+        factory.publishBytes( 0u, "retiring-tail\n", false );
+        transport->requestStop( 123u, klogg::livecapture::StopDisposition::SettleAccepted );
+        factory.publishStopped( 0u );
+
+        CHECK_NOTHROW( drainQtEvents() );
+        CHECK( guard.isNull() );
+        CHECK( deliveries == 1 );
+    }
 }
 
 TEST_CASE( "iOS native transport rejects every callback from retired generations",
@@ -570,6 +1088,9 @@ TEST_CASE( "iOS native transport rejects every callback from retired generations
     transport.start( 201u );
     const auto retiredCallbacks = factory.sessions.at( 0 )->callbacks;
     transport.start( 202u );
+    REQUIRE( factory.sessions.size() == 1u );
+    factory.publishStopped( 0u );
+    drainQtEvents();
     REQUIRE( factory.sessions.size() == 2u );
     transport.stop( 201u );
     CHECK( factory.sessions.at( 1 )->stopCalls == 0 );
@@ -615,6 +1136,8 @@ TEST_CASE( "iOS native transport stop is idempotent returns promptly and retires
 
     CHECK( stopElapsedMs < 100 );
     CHECK( factory.sessions.at( 0 )->stopCalls == 1 );
+    factory.publishStopped( 0u );
+    drainQtEvents();
     CHECK(
         std::count( states.cbegin(), states.cend(),
                     std::make_pair( Generation{ 301u }, LiveSourceTransport::State::Disconnected ) )
@@ -639,6 +1162,9 @@ TEST_CASE( "iOS native transport reconnects after device loss with a fresh corre
     CHECK( transport.lastStructuredError()->retryPolicy == RetryPolicy::WaitForDevice );
 
     transport.start( 402u );
+    REQUIRE( factory.sessions.size() == 1u );
+    factory.publishStopped( 0u );
+    drainQtEvents();
     REQUIRE( factory.sessions.size() == 2u );
     factory.publishReady( 1u );
     drainQtEvents();

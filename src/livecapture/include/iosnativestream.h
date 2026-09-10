@@ -42,6 +42,8 @@ struct IosLogOptions {
     IosLogOutputFormat outputFormat{ IosLogOutputFormat::Default };
 };
 
+std::optional<LiveSourceError> validateIosLogOptions( const IosLogOptions& options );
+
 inline constexpr std::chrono::milliseconds DefaultIosNativeShutdownDeadline{ 750 };
 inline constexpr std::size_t DefaultIosNativeConcurrentSessionLimit{ 8u };
 

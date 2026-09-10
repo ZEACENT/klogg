@@ -373,8 +373,9 @@ TEST_CASE( "retry timer exists exactly while the source is in RetryWait",
     REQUIRE( retry.snapshot.retryTimer->deadline == at( 5000 ) );
     REQUIRE( hasEffect( retry, EffectKind::ArmRetryTimer ) );
 
+    const auto settled = dispatch( retry.snapshot, StopCompleted{ opening.generation, at( 1200 ) } );
     const auto deadline
-        = dispatch( retry.snapshot, RetryDeadlineReached{ retry.snapshot.generation, at( 5000 ) } );
+        = dispatch( settled.snapshot, RetryDeadlineReached{ retry.snapshot.generation, at( 5000 ) } );
     REQUIRE( deadline.snapshot.source.status == SourceStatus::OpeningStream );
     REQUIRE_FALSE( deadline.snapshot.retryTimer.has_value() );
     REQUIRE( hasEffect( deadline, EffectKind::CancelRetryTimer ) );
@@ -516,8 +517,10 @@ TEST_CASE( "manual reconnect after retry exhaustion starts with a fresh retry bu
     REQUIRE( exhausted.source.status == SourceStatus::Failed );
     REQUIRE( exhausted.consecutiveFailures == defaultConfig.maxRetryAttempts );
 
-    const auto restarted = dispatch( exhausted, StartRequested{ at( 2000 ) } );
-
+    const auto requested = dispatch( exhausted, StartRequested{ at( 2000 ) } );
+    REQUIRE( requested.accepted );
+    REQUIRE( requested.snapshot.source.status == SourceStatus::Stopping );
+    const auto restarted = dispatch( requested.snapshot, StopCompleted{ opening.generation, at( 2100 ) } );
     REQUIRE( restarted.accepted );
     CHECK( restarted.snapshot.consecutiveFailures == 0u );
 }
@@ -612,8 +615,9 @@ TEST_CASE( "retrying starts a new stream generation and rejects callbacks from t
     REQUIRE( outputUpdate.accepted );
     REQUIRE( outputUpdate.snapshot.outputBinding == OutputBindingState::Degraded );
 
+    const auto settled = dispatch( retry.snapshot, StopCompleted{ opening.generation, at( 1200 ) } );
     const auto deadline
-        = dispatch( retry.snapshot, RetryDeadlineReached{ retry.snapshot.generation, at( 5000 ) } );
+        = dispatch( settled.snapshot, RetryDeadlineReached{ retry.snapshot.generation, at( 5000 ) } );
     REQUIRE( deadline.snapshot.source.status == SourceStatus::OpeningStream );
 
     const auto staleReady
@@ -645,7 +649,8 @@ TEST_CASE( "stop is idempotent until the cancelled generation completes",
     const auto prematureRestart = dispatch( stopped.snapshot, StartRequested{ at( 205 ) } );
     const auto duplicateStop = dispatch( stopped.snapshot, StopRequested{ at( 210 ) } );
 
-    REQUIRE_FALSE( prematureRestart.accepted );
+    REQUIRE( prematureRestart.accepted );
+    REQUIRE( prematureRestart.snapshot.startAfterStop );
     REQUIRE( prematureRestart.snapshot.source.status == SourceStatus::Stopping );
     REQUIRE( prematureRestart.effects.empty() );
     REQUIRE_FALSE( duplicateStop.accepted );
@@ -659,6 +664,28 @@ TEST_CASE( "stop is idempotent until the cancelled generation completes",
     REQUIRE( completed.snapshot.source.stopReason == StopReason::User );
     REQUIRE_FALSE( completed.snapshot.source.stoppingGeneration.has_value() );
     REQUIRE( projectLiveState( completed.snapshot ).status == PresentationStatus::Stopped );
+}
+
+TEST_CASE( "discard request upgrades an existing settling retirement",
+           "[livecapture][state][generation][stop-disposition-red]" )
+{
+    const auto streaming = streamingState();
+    const auto settling = dispatch(
+        streaming, StopRequested{ at( 200 ), StopDisposition::SettleAccepted } );
+    const auto restart = dispatch( settling.snapshot, StartRequested{ at( 205 ) } );
+    REQUIRE( restart.accepted );
+    REQUIRE( restart.snapshot.runIntent == RunIntent::Running );
+    REQUIRE( restart.snapshot.source.stoppingGeneration == streaming.generation );
+
+    const auto discard = dispatch(
+        restart.snapshot, StopRequested{ at( 210 ), StopDisposition::DiscardPending } );
+
+    REQUIRE( discard.accepted );
+    CHECK( discard.snapshot.source.stoppingDisposition == StopDisposition::DiscardPending );
+    REQUIRE( discard.effects.size() == 1u );
+    CHECK( discard.effects.front().kind == EffectKind::CancelStream );
+    CHECK( discard.effects.front().generation == streaming.generation );
+    CHECK( discard.effects.front().stopDisposition == StopDisposition::DiscardPending );
 }
 
 TEST_CASE( "accepted events cannot move the reducer clock backwards", "[livecapture][state][time]" )

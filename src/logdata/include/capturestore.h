@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,14 +32,19 @@ class CaptureStore {
     struct SpilledSegmentFile;
 
     friend class CaptureStoreTestAccess;
+    friend struct StreamingLogDataTimerTestAccess;
+    friend struct LiveSourceStreamingLogDataTestAccess;
 
-  public:
+public:
     struct Limits {
         qint64 segmentTargetBytes = 1024 * 1024;
         qint64 memoryBudgetBytes = 256 * 1024 * 1024;
         qint64 rollingMaxFileSize = 0; // 0 = unlimited
         int rollingBackupCount = 0;
         qint64 maxTotalLines = 0; // 0 = unlimited
+        // In-flight normalization allowance, in addition to 2x resident target.
+        // Payload only: indexes, caches, allocator overhead and RSS are separate.
+        qint64 ingressBudgetBytes = 16LL * 1024 * 1024;
     };
 
     struct Segment {
@@ -48,9 +54,12 @@ class CaptureStore {
         qint64 cumulativeEndLine = 0;
         klogg::vector<qint64> lineOffsets;
         klogg::vector<int> lineLengths;
+        int maxLineLength = 0;
         std::shared_ptr<QByteArray> memoryData;
         std::shared_ptr<SpilledSegmentFile> spilledFile;
         bool spilled = false;
+        bool publicationPending = false; // Published file awaits identity lease, never replay it.
+        bool unterminated = false;       // A finalized record seals its segment.
     };
 
     struct Stats {
@@ -61,14 +70,103 @@ class CaptureStore {
         QDateTime lastModified;
     };
 
-    struct AppendResult {
-        LineNumber firstLine = 0_lnum;
-        LinesCount lineCount = 0_lcount;
-        QByteArray rawUtf8Lines;
-        klogg::vector<qint64> endOfLines;
+    // Fixed record sequence: COW pins resident payload, leases pin disk files.
+    // Metadata is O(segments), not O(lines); history payload is never read eagerly.
+    // Export orchestration should hold one snapshot at a time and release it on cancel.
+    class Snapshot {
+        friend class CaptureStore;
+        struct Part {
+            QByteArray memory;
+            std::shared_ptr<SpilledSegmentFile> file;
+            qint64 bytes = 0;
+            bool unterminated = false;
+        };
+        std::vector<Part> parts_;
+
+    public:
+        struct Cursor {
+            size_t part = 0;
+            qint64 offset = 0;
+            bool separatorPending = false;
+        };
+        struct Chunk {
+            QByteArray bytes;
+            bool complete = false;
+            bool readFailed = false;
+        };
+        // Caller owns the cursor. No store locks or mutable capture state needed.
+        // maxBytes is clamped to 64 KiB. Bytes include separators BETWEEN sealed
+        // records, never a synthetic newline at final EOF. readFailed is terminal.
+        Chunk readChunk( Cursor& cursor, int maxBytes = 64 * 1024 ) const;
+    };
+    Snapshot snapshot() const;
+
+    // PartialKnown permits only the unaccepted suffix to be retried. PartialUnknown
+    // carries a confirmed lower-bound prefix; NEVER replay the whole input batch.
+    enum class AppendDisposition : std::uint8_t {
+        Complete,
+        RejectedUnchanged,
+        PartialKnown,
+        PartialUnknown
+    };
+    enum class CaptureFailure : std::uint8_t {
+        Capacity,
+        SegmentIds,
+        Directory,
+        Allocation,
+        Unexpected
+    };
+    enum class PersistenceFailure : std::uint8_t {
+        Directory,
+        Gate,
+        TemporaryCreate,
+        Write,
+        Flush,
+        Publish,
+        Unexpected
+    };
+    struct PersistenceResult {
+        qint64 pendingBytes = 0;
+        qint64 pendingSegments = 0;
+        // Sealed segments, plus any resident segment whose failed spill needs retry.
+        qint64 retryableSegments = 0;
+        qint64 pendingPartialBytes = 0;
+        std::optional<PersistenceFailure> failure;
+        // Remaining monotonic backoff, for a caller-owned precise timer/scheduler.
+        std::optional<qint64> retryAfterMs;
+        bool complete() const
+        {
+            return pendingSegments == 0 && pendingPartialBytes == 0 && !failure;
+        }
     };
 
     enum class OutputFailure : std::uint8_t { Open, Write, Flush };
+
+    struct AppendResult {
+        AppendDisposition disposition = AppendDisposition::Complete;
+        std::optional<CaptureFailure> failure;
+        // Ingress prefix from THIS call, not normalized bytes or prior partial.
+        qint64 acceptedBytes = 0;
+        // Normalized bytes actually published to capture; may include an earlier
+        // call's partial. Excludes the synthetic cache LF on a finalized record.
+        qint64 committedBytes = 0;
+        bool finalRecordUnterminated = false;
+        LinesCount committedLines = 0_lcount;
+        qint64 pendingPartialBytes = 0;
+        bool outputAttempted = false;
+        bool notificationFailed = false; // Observer/cache error AFTER capture commit.
+        std::optional<OutputFailure> outputFailure;
+        // Actual written prefix (including a resumed separator), not durability.
+        // nullopt means output progress is unknown, not zero and not rollback.
+        std::optional<qint64> outputBytes = qint64{ 0 };
+        PersistenceResult persistence;
+        LineNumber firstLine = 0_lnum;
+        LinesCount lineCount = 0_lcount; // Alias of committedLines, NOT retained count.
+        // Complete confirmed batch, independent of retention. The final record
+        // has a synthetic LF for search/cache; finalRecordUnterminated marks it.
+        QByteArray rawUtf8Lines;
+        klogg::vector<qint64> endOfLines;
+    };
 
     explicit CaptureStore( QString captureId, QString rootPath = {} );
     CaptureStore( QString captureId, QString rootPath, Limits limits );
@@ -90,7 +188,13 @@ class CaptureStore {
     bool loadFromDisk();
     AppendResult appendUtf8( const QByteArray& data );
     AppendResult finishInput();
-    void flush();
+    void flush(); // Bound output only; does not persist capture segments.
+    // Explicit user retry bypasses backoff; bounded work, may return pending.
+    // Does NOT finalize partial input: call finishInput and inspect its outcome first.
+    PersistenceResult persistCapture( int maxSegments = 32 );
+    // Automatic continuation honors backoff. Neither API promises fsync durability.
+    PersistenceResult retryPersistence( int maxSegments = 8 );
+    PersistenceResult persistenceState() const;
     void clear();
 
     struct TrimResult {
@@ -104,6 +208,16 @@ class CaptureStore {
     // opened append-only and the current capture is NOT replayed into it, so
     // previously streamed content already on disk is kept (session restore).
     bool bindOutputFile( const QString& outputPath, bool preserveExisting = false );
+    bool adoptPublishedOutputFile( RollingFileManager output, const QString& outputPath,
+                                   bool needsSeparator );
+    // The caller must exclude appends throughout suspension and publication.
+    // Restore only after a failed commit; a published replacement has consumed
+    // the old binding and a failed cutover must abandon it instead.
+    std::optional<klogg::platform::FileIdentity>
+    suspendOutputForReplacement( const QString& outputPath );
+    bool restoreOutputAfterFailedReplacement(
+        const klogg::platform::FileIdentity& expectedIdentity );
+    void abandonOutputAfterFailedReplacement( OutputFailure failure );
     void setLimits( Limits limits );
     QString boundOutputFile() const;
     bool outputRefersToPath( const QString& path ) const;
@@ -120,6 +234,7 @@ class CaptureStore {
                     const QRegularExpression& prefilterPattern ) const;
     LineLength lineLength( LineNumber line ) const;
     LinesCount lineCount() const;
+    bool finalRecordUnterminated() const;
     LineLength maxLineLength() const;
     Stats stats() const;
 
@@ -170,6 +285,7 @@ class CaptureStore {
     bool holdCapturePathGateForTesting( std::function<void()> gateAcquired,
                                         std::function<void()> waitForRelease );
     static int setCapturePathGateTimeoutForTesting( int timeoutMs );
+    static void failNextCapturePathNamespaceTransitionForTesting();
     // Operation counts stay outside business Stats and are scoped to one path state.
     struct MaintenanceOperationsForTesting {
         std::uint64_t markerScans = 0;
@@ -186,8 +302,7 @@ class CaptureStore {
     bool hasCapturePathCoordinationOwnershipForTesting() const;
     QString capturePathActiveMarkerPathForTesting() const;
     QString capturePathIdentity() const;
-    void commitLine( const QByteArray& lineBytes, bool terminated );
-    void commitLines( const AppendResult& appendResult );
+    void commitLines( AppendResult& appendResult );
     struct ActiveCapturePath {
         std::shared_ptr<CapturePathState> state;
         QByteArray activationToken;
@@ -199,18 +314,20 @@ class CaptureStore {
     // wedged teardown cannot hang the streaming worker thread.
     ActiveCapturePath activateCapturePathState();
     void ensureCaptureDir( bool startsReplacement = true );
-    bool needsNewSegment() const;
+    bool needsNewSegment( qint64 incomingBytes = 0 ) const;
     void ensureSegmentIdsAvailable( const AppendResult& appendResult,
                                     qint64 pendingPartialBytes );
-    Segment& ensureActiveSegment();
+    Segment& ensureActiveSegment( qint64 incomingBytes );
     void rebuildCumulativeLineCounts( bool onlyLast = false );
     void enforceMemoryBudget();
     bool spillSegmentToDisk( Segment& segment );
     void persistBufferedSegments();
+    PersistenceResult persistPending( int maxSegments, bool force, bool toBudget );
+    qint64 spillNowMs() const;
     bool scanSegment( Segment& segment );
     qint64 takeNextSegmentId();
     QByteArray readSegmentLine( const Segment& segment, int localLine ) const;
-    bool writeSegmentToDevice( const Segment& segment, QIODevice* device );
+    bool writeCaptureToDevice( QIODevice* device );
     void appendOutputBytes( const QByteArray& bytes, int lineCount = 1 );
     void flushOutputIfNeeded();
     void resetOutputFlushCounters();
@@ -233,6 +350,9 @@ class CaptureStore {
     QByteArray partialLine_;
     qint64 fileSize_ = 0;
     qint64 memoryBytes_ = 0;
+    qint64 pendingPersistenceBytes_ = 0;
+    qint64 pendingPersistenceSegments_ = 0;
+    size_t firstResidentSegment_ = 0;
     qint64 totalLines_ = 0;
     int maxLineLength_ = 0;
     std::deque<qint64> reservedSegmentIds_;
@@ -245,16 +365,32 @@ class CaptureStore {
     mutable std::recursive_mutex mutex_;
 
     std::optional<OutputFailure> outputFailure_;
+    bool outputNeedsSeparator_ = false;
+    qint64 outputWrittenBytes_ = 0;
+    std::function<qint64( const QByteArray& )> outputWriteForTesting_;
     qint64 unflushedOutputBytes_ = 0;
     int unflushedOutputLines_ = 0;
     mutable std::function<void()> beforeRawSnapshotCopyCallbackForTesting_;
     mutable std::function<void()> beforeSpilledSegmentReadCallbackForTesting_;
     std::function<void()> afterCaptureFilesRetiredCallbackForTesting_;
+    std::function<void()> beforeSegmentMutationForTesting_;
+    std::function<void()> afterSpillPublishForTesting_;
+    std::function<void()> beforeAppendMaintenanceForTesting_;
+    qint64 segmentByteLimitForTesting_ = std::numeric_limits<int>::max();
+    std::function<qint64()> spillClockForTesting_;
+    std::function<std::optional<PersistenceFailure>()> spillFailureForTesting_;
+    std::uint64_t spillAttemptsForTesting_ = 0;
+    mutable std::uint64_t persistenceVisitsForTesting_ = 0;
+    mutable std::uint64_t maxLineLengthLineVisitsForTesting_ = 0;
+    std::uint64_t commitIndexReservationsForTesting_ = 0;
+    std::uint64_t trimChecksForTesting_ = 0;
+    std::uint64_t ingressBoundaryCopiesForTesting_ = 0;
+    std::optional<PersistenceFailure> persistenceFailure_;
     TrimResult lastTrimResult_;
 
     // Spill throttling: avoid frequent small spills
     static constexpr int SpillThrottleMs = 5000;
-    qint64 lastSpillTimeMs_ = 0;
+    std::optional<qint64> nextSpillRetryMs_;
 };
 
 #endif
