@@ -184,10 +184,14 @@ AdbInfrastructureManagerConfig managerConfig( const AdbLiveServicesConfig& confi
     result.server.readinessProbeInterval = config.readinessProbeInterval;
     result.server.startupTimeout = config.startupTimeout;
     result.server.healthProbeInterval = config.healthProbeInterval;
+    result.server.startupCapabilityProbeInterval = config.startupCapabilityProbeInterval;
     result.server.reconnectBackoff = config.serverReconnectBackoff;
-    if ( !isValidPackagedHelper( config.applicationDirPath, helperPath ) ) {
-        result.server.configurationError = missingHelperError( helperPath );
-    }
+    const auto applicationDirPath = config.applicationDirPath;
+    result.server.startupCapabilityCheck = [ applicationDirPath, helperPath ] {
+        return isValidPackagedHelper( applicationDirPath, helperPath )
+                   ? std::optional<LiveSourceError>{}
+                   : std::optional<LiveSourceError>{ missingHelperError( helperPath ) };
+    };
     result.tracker.reconnectBackoff = config.trackerReconnectBackoff;
     return result;
 }

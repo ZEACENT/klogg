@@ -317,9 +317,14 @@ TEST_CASE( "generation-tagged callbacks accept current work and reject stale wor
     auto state = streamingState();
     const auto currentGeneration = state.generation;
 
+    const auto empty = dispatch( state, StreamBytesReceived{ currentGeneration, 0u, at( 90 ) } );
+    REQUIRE( empty.accepted );
+    REQUIRE_FALSE( empty.snapshot.payloadReceived );
+
     const auto current
-        = dispatch( state, StreamBytesReceived{ currentGeneration, 128u, at( 100 ) } );
+        = dispatch( empty.snapshot, StreamBytesReceived{ currentGeneration, 128u, at( 100 ) } );
     REQUIRE( current.accepted );
+    REQUIRE( current.snapshot.payloadReceived );
     REQUIRE( hasEffect( current, EffectKind::AppendBytes ) );
     REQUIRE( current.effects.back().generation == currentGeneration );
     REQUIRE( current.effects.back().byteCount == 128u );
@@ -431,6 +436,12 @@ TEST_CASE( "device absence waits for discovery without restarting shared infrast
     REQUIRE( absent.snapshot.infrastructure.ownership == InfrastructureOwnership::ExternalShared );
     REQUIRE_FALSE( hasEffect( absent, EffectKind::StartInfrastructure ) );
     REQUIRE_FALSE( absent.snapshot.retryTimer.has_value() );
+    REQUIRE_FALSE( absent.snapshot.payloadReceived );
+
+    const auto retiringPayload = dispatch(
+        absent.snapshot, StreamBytesReceived{ streaming.generation, 64u, at( 110 ) } );
+    REQUIRE( retiringPayload.accepted );
+    REQUIRE( retiringPayload.snapshot.payloadReceived );
 }
 
 TEST_CASE( "output degradation remains orthogonal to Streaming", "[livecapture][state][output]" )

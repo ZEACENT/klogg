@@ -49,6 +49,7 @@ using klogg::livecapture::ErrorScope;
 using klogg::livecapture::Generation;
 using klogg::livecapture::InfrastructureOwnership;
 using klogg::livecapture::InfrastructureStatus;
+using klogg::livecapture::LiveSourceError;
 using klogg::livecapture::RetryPolicy;
 using namespace klogg::livecapture::adb;
 using DomainAdbDeviceInfo = klogg::livecapture::adb::AdbDeviceInfo;
@@ -560,10 +561,10 @@ struct ManagerHarness {
     AdbInfrastructureManager manager;
     ManagerSnapshotRecorder snapshots;
 
-    ManagerHarness()
+    explicit ManagerHarness( AdbInfrastructureManagerConfig config = managerConfig() )
         : client( clientConfig( server.port() ), socketFactory, deadlines )
         , clientOperations( client )
-        , manager( managerConfig(),
+        , manager( std::move( config ),
                    AdbInfrastructureManagerDependencies{ probe, launcher, startupLock, keyStore,
                                                          supervisorScheduler, client,
                                                          trackerScheduler } )
@@ -1030,6 +1031,9 @@ TEST_CASE( "manager forwards explicit ADB key consent without process or PATH di
 
     harness.manager.grantKeyGenerationConsent( true );
 
+    CHECK( harness.keyStore.generationCount == 0 );
+    REQUIRE( harness.probe.requests.size() == 3u );
+    harness.probe.completeAbsent( 2 );
     CHECK( harness.keyStore.generationCount == 1 );
     REQUIRE( harness.launcher.requests.size() == 1u );
     CHECK( harness.launcher.requests.front().request.executable
@@ -1062,6 +1066,61 @@ TEST_CASE( "idle lease reacquisition retries a transient terminal supervisor fai
     CHECK( harness.manager.snapshot().generation == firstGeneration + 1u );
     CHECK( harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
     REQUIRE( harness.probe.requests.size() == 2u );
+    CHECK( harness.probe.requests.back().active );
+}
+
+TEST_CASE( "idle unavailable manager suspends passive startup capability polling",
+           "[livecapture][adb][manager][lease][startup-capability]" )
+{
+    auto config = managerConfig();
+    config.server.startupCapabilityCheck = [] {
+        return std::optional<LiveSourceError>{ LiveSourceError{
+            ErrorCategory::Configuration, "adb-packaged-helper-missing",
+            ErrorScope::Infrastructure, RetryPolicy::Never,
+            "The packaged ADB helper is unavailable.",
+            "The packaged ADB helper is missing." } };
+    };
+    ManagerHarness harness( std::move( config ) );
+    auto firstLease = harness.manager.acquireLease();
+    const auto firstGeneration = harness.manager.snapshot().generation;
+    harness.probe.completeAbsent( 0 );
+    REQUIRE( harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+
+    firstLease.reset();
+    REQUIRE( drainEventsUntil( [ &harness ] {
+        return harness.supervisorScheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u;
+    } ) );
+
+    CHECK( harness.manager.activeLeaseCount() == 0u );
+    const auto probeCount = harness.probe.requests.size();
+    CHECK( harness.launcher.requests.empty() );
+
+    auto replacementLease = harness.manager.acquireLease();
+    CHECK( harness.manager.snapshot().generation == firstGeneration + 1u );
+    REQUIRE( harness.probe.requests.size() == probeCount + 1u );
+    CHECK( harness.probe.requests.back().active );
+}
+
+TEST_CASE( "idle ready manager suspends when its observed server later disappears",
+           "[livecapture][adb][manager][lease][health]" )
+{
+    ManagerHarness harness;
+    auto lease = harness.acquireAndReachReady();
+    const auto firstGeneration = harness.manager.snapshot().generation;
+    lease.reset();
+    REQUIRE( harness.manager.activeLeaseCount() == 0u );
+
+    harness.supervisorScheduler.fire( AdbServerScheduleKind::HealthProbe );
+    harness.probe.completeAbsent( 1 );
+    REQUIRE( drainEventsUntil( [ &harness ] {
+        return harness.supervisorScheduler.activeCount( AdbServerScheduleKind::ReconnectBackoff )
+               == 0u;
+    } ) );
+    CHECK( harness.launcher.requests.empty() );
+
+    auto replacementLease = harness.manager.acquireLease();
+    CHECK( harness.manager.snapshot().generation == firstGeneration + 1u );
+    REQUIRE( harness.probe.requests.size() == 3u );
     CHECK( harness.probe.requests.back().active );
 }
 
@@ -1285,7 +1344,7 @@ TEST_CASE( "manager projects recoverable supervisor errors to infrastructure wai
     CHECK( result.error->retryPolicy == RetryPolicy::WaitForInfrastructure );
 }
 
-TEST_CASE( "non-retryable manager configuration errors remain non-retryable in discovery",
+TEST_CASE( "startup capability errors remain recoverable through infrastructure discovery",
            "[livecapture][adb][manager][error][configuration]" )
 {
     TrackDevicesServer server;
@@ -1299,19 +1358,27 @@ TEST_CASE( "non-retryable manager configuration errors remain non-retryable in d
     ManualServerScheduler supervisorScheduler;
     ManualServerScheduler trackerScheduler;
     auto config = managerConfig();
-    config.server.packagedServerPath = QStringLiteral( "relative/adb" );
+    config.server.startupCapabilityCheck = [] {
+        return std::optional<LiveSourceError>{ LiveSourceError{
+            ErrorCategory::Configuration, "adb-packaged-helper-missing",
+            ErrorScope::Infrastructure, RetryPolicy::Never,
+            "The packaged ADB helper is unavailable.",
+            "The packaged ADB helper is missing." } };
+    };
     AdbInfrastructureManager manager(
         std::move( config ),
         AdbInfrastructureManagerDependencies{ probe, launcher, startupLock, keyStore,
                                               supervisorScheduler, client, trackerScheduler } );
 
     auto lease = manager.acquireLease();
+    REQUIRE( probe.requests.size() == 1u );
+    probe.completeAbsent( 0 );
     REQUIRE( manager.snapshot().error.has_value() );
-    CHECK( manager.snapshot().error->category == ErrorCategory::Configuration );
-    CHECK( manager.snapshot().error->retryPolicy == RetryPolicy::Never );
+    CHECK( manager.snapshot().error->category == ErrorCategory::Infrastructure );
+    CHECK( manager.snapshot().error->retryPolicy == RetryPolicy::WaitForInfrastructure );
 
     const auto result = mapTrackedAdbInfrastructureSnapshot( 78u, manager.snapshot() );
     REQUIRE( result.error.has_value() );
-    CHECK( result.error->category == ErrorCategory::Configuration );
-    CHECK( result.error->retryPolicy == RetryPolicy::Never );
+    CHECK( result.error->category == ErrorCategory::Infrastructure );
+    CHECK( result.error->retryPolicy == RetryPolicy::WaitForInfrastructure );
 }

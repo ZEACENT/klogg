@@ -11,6 +11,8 @@
 
 #include "adbinfrastructuremanager.h"
 
+#include <QMetaObject>
+
 #include <algorithm>
 #include <utility>
 
@@ -207,11 +209,46 @@ private:
                || state.error->retryPolicy == RetryPolicy::Backoff;
     }
 
+    void scheduleIdleSuspension()
+    {
+        if ( idleSuspensionQueued_ || activeLeaseCount_ != 0u || !started_
+             || snapshot_.infrastructure.status == InfrastructureStatus::Ready ) {
+            return;
+        }
+
+        idleSuspensionQueued_ = true;
+        const std::weak_ptr<CallbackGate> weakGate = callbackGate_;
+        QMetaObject::invokeMethod(
+            &manager_,
+            [ weakGate ] {
+                const auto gate = weakGate.lock();
+                if ( gate == nullptr || gate->owner == nullptr ) {
+                    return;
+                }
+                gate->owner->idleSuspensionQueued_ = false;
+                gate->owner->suspendIfIdleAndUnavailable();
+            },
+            Qt::QueuedConnection );
+    }
+
+    void suspendIfIdleAndUnavailable()
+    {
+        if ( activeLeaseCount_ != 0u || !started_
+             || snapshot_.infrastructure.status == InfrastructureStatus::Ready ) {
+            return;
+        }
+
+        started_ = false;
+        tracker_.stop();
+        supervisor_.stop( snapshot_.generation );
+    }
+
     void releaseLease()
     {
         if ( activeLeaseCount_ > 0u ) {
             --activeLeaseCount_;
         }
+        scheduleIdleSuspension();
     }
 
     void supervisorChanged( Generation generation, std::uint64_t epoch,
@@ -249,6 +286,7 @@ private:
         else {
             tracker_.stop();
         }
+        scheduleIdleSuspension();
         if ( changed ) {
             Q_EMIT manager_.snapshotChanged( snapshot_ );
         }
@@ -277,6 +315,7 @@ private:
     Generation nextGeneration_{ 0 };
     std::size_t activeLeaseCount_{ 0 };
     bool started_{ false };
+    bool idleSuspensionQueued_{ false };
     bool shuttingDown_{ false };
 };
 

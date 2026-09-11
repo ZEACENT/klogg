@@ -25,6 +25,7 @@ enum class ProbePurpose : std::uint8_t {
     Initial,
     UnderStartupLock,
     LockContended,
+    ConsentRecheck,
     StartupReadiness,
     Health,
     Reconnect
@@ -97,15 +98,7 @@ public:
         ++runSerial_;
         resetRunState( generation );
 
-        if ( config_.configurationError.has_value() ) {
-            running_ = false;
-            const auto& error = *config_.configurationError;
-            fail( AdbServerSupervisorStatus::InvalidConfiguration, error.code, error.message,
-                  error.nativeDetail, error.retryPolicy, error.category );
-            return;
-        }
-
-        const auto validationError = validateConfiguration();
+        const auto validationError = validateProbeConfiguration();
         if ( !validationError.empty() ) {
             running_ = false;
             fail( AdbServerSupervisorStatus::InvalidConfiguration, "invalid-configuration",
@@ -147,16 +140,7 @@ public:
              || snapshot_.status != AdbServerSupervisorStatus::AwaitingKeyGenerationConsent ) {
             return;
         }
-        const auto generated = keyStore_.generateStandardKey();
-        if ( !generated.generated ) {
-            failStartup(
-                "key-generation-failed", "Unable to prepare the standard ADB key.",
-                diagnosticOr( generated.diagnostic, "Unable to prepare the standard ADB key." ),
-                false );
-            return;
-        }
-
-        launchPackagedServer();
+        beginProbe( ProbePurpose::ConsentRecheck );
     }
 
     const AdbServerSupervisorSnapshot& snapshot() const noexcept
@@ -186,29 +170,91 @@ private:
         bool terminal{ false };
     };
 
-    std::string validateConfiguration() const
+    std::string validateProbeConfiguration() const
     {
         if ( config_.endpoint.address != QHostAddress::LocalHost
              || config_.endpoint.port != 5037u ) {
             return "ADB server supervision requires the standard 127.0.0.1:5037 endpoint.";
         }
-        if ( config_.packagedServerPath.isEmpty()
-             || !QDir::isAbsolutePath( config_.packagedServerPath ) ) {
-            return "ADB server supervision requires an explicit absolute packaged executable path.";
-        }
-        if ( config_.lockPath.isEmpty() || !QDir::isAbsolutePath( config_.lockPath ) ) {
-            return "ADB server supervision requires an explicit per-user lock path.";
-        }
         if ( config_.minimumProtocolVersion == 0u ) {
             return "ADB server supervision requires a minimum protocol version.";
         }
-        if ( config_.readinessProbeInterval.count() < 0 || config_.startupTimeout.count() <= 0
-             || config_.healthProbeInterval.count() <= 0 || config_.reconnectBackoff.empty()
+        if ( config_.healthProbeInterval.count() <= 0 || config_.reconnectBackoff.empty()
              || std::any_of( config_.reconnectBackoff.begin(), config_.reconnectBackoff.end(),
                              []( const auto delay ) { return delay.count() < 0; } ) ) {
-            return "ADB server supervision requires valid monotonic scheduling intervals.";
+            return "ADB server supervision requires valid probe scheduling intervals.";
         }
         return {};
+    }
+
+    std::optional<LiveSourceError> startupConfigurationError() const
+    {
+        if ( config_.packagedServerPath.isEmpty()
+             || !QDir::isAbsolutePath( config_.packagedServerPath ) ) {
+            return makeSupervisorError(
+                ErrorCategory::Configuration, "invalid-configuration",
+                "Invalid ADB server startup configuration.",
+                "ADB server startup requires an explicit absolute packaged executable path.",
+                RetryPolicy::Never );
+        }
+        if ( config_.lockPath.isEmpty() || !QDir::isAbsolutePath( config_.lockPath ) ) {
+            return makeSupervisorError(
+                ErrorCategory::Configuration, "invalid-configuration",
+                "Invalid ADB server startup configuration.",
+                "ADB server startup requires an explicit per-user lock path.", RetryPolicy::Never );
+        }
+        if ( config_.readinessProbeInterval.count() < 0 || config_.startupTimeout.count() <= 0
+             || config_.startupCapabilityProbeInterval.count() <= 0 ) {
+            return makeSupervisorError(
+                ErrorCategory::Configuration, "invalid-configuration",
+                "Invalid ADB server startup configuration.",
+                "ADB server startup requires valid monotonic scheduling intervals.",
+                RetryPolicy::Never );
+        }
+        return std::nullopt;
+    }
+
+    bool waitForExternalServerIfStartupUnavailable()
+    {
+        const auto runSerial = runSerial_;
+        const auto generation = snapshot_.generation;
+        const auto epoch = snapshot_.epoch;
+        if ( const auto error = startupConfigurationError(); error.has_value() ) {
+            releaseStartupLock();
+            fail( AdbServerSupervisorStatus::InvalidConfiguration, error->code, error->message,
+                  error->nativeDetail, error->retryPolicy, error->category );
+            return true;
+        }
+
+        std::optional<LiveSourceError> error;
+        if ( config_.startupCapabilityCheck ) {
+            const auto capabilityCheck = config_.startupCapabilityCheck;
+            const std::weak_ptr<CallbackGate> weakGate = callbackGate_;
+            error = capabilityCheck();
+            const auto gate = weakGate.lock();
+            if ( gate == nullptr || gate->owner != this ) {
+                return true;
+            }
+        }
+        if ( !running_ || runSerial != runSerial_ || generation != snapshot_.generation
+             || epoch != snapshot_.epoch ) {
+            return true;
+        }
+        if ( !error.has_value() ) {
+            snapshot_.error.reset();
+            return false;
+        }
+        releaseStartupLock();
+        if ( !fail( AdbServerSupervisorStatus::RetryWait, error->code, error->message,
+                    error->nativeDetail, RetryPolicy::Backoff, error->category ) ) {
+            return true;
+        }
+        if ( running_ && runSerial == runSerial_ && generation == snapshot_.generation
+             && epoch == snapshot_.epoch
+             && snapshot_.status == AdbServerSupervisorStatus::RetryWait ) {
+            scheduleStartupCapabilityRetry();
+        }
+        return true;
     }
 
     void resetRunState( Generation generation )
@@ -349,6 +395,7 @@ private:
             case ProbePurpose::Initial:
             case ProbePurpose::UnderStartupLock:
             case ProbePurpose::LockContended:
+            case ProbePurpose::ConsentRecheck:
                 publishReady( std::move( result ), InfrastructureOwnership::ExternalShared );
                 return;
             case ProbePurpose::StartupReadiness:
@@ -371,7 +418,9 @@ private:
         switch ( purpose ) {
         case ProbePurpose::Initial:
             if ( result.state == AdbServerProbeState::Absent ) {
-                acquireStartupLock();
+                if ( !waitForExternalServerIfStartupUnavailable() ) {
+                    acquireStartupLock();
+                }
             }
             else {
                 fail( AdbServerSupervisorStatus::Failed, "probe-failed",
@@ -382,7 +431,9 @@ private:
             return;
         case ProbePurpose::UnderStartupLock:
             if ( result.state == AdbServerProbeState::Absent ) {
-                inspectStandardKey();
+                if ( !waitForExternalServerIfStartupUnavailable() ) {
+                    inspectStandardKey();
+                }
             }
             else {
                 failStartup(
@@ -394,10 +445,26 @@ private:
             return;
         case ProbePurpose::LockContended:
             if ( result.state == AdbServerProbeState::Absent ) {
-                acquireStartupLock();
+                if ( !waitForExternalServerIfStartupUnavailable() ) {
+                    acquireStartupLock();
+                }
             }
             else {
                 scheduleLockRetry();
+            }
+            return;
+        case ProbePurpose::ConsentRecheck:
+            if ( result.state == AdbServerProbeState::Absent ) {
+                if ( !waitForExternalServerIfStartupUnavailable() ) {
+                    generateStandardKeyAndLaunch();
+                }
+            }
+            else {
+                failStartup(
+                    "post-consent-probe-failed", "Unable to verify the ADB endpoint.",
+                    diagnosticOr( result.diagnostic,
+                                  "Unable to verify the ADB endpoint after key consent." ),
+                    false );
             }
             return;
         case ProbePurpose::StartupReadiness:
@@ -409,6 +476,12 @@ private:
             loseReadyServer( result );
             return;
         case ProbePurpose::Reconnect:
+            if ( result.state == AdbServerProbeState::Absent ) {
+                if ( !waitForExternalServerIfStartupUnavailable() ) {
+                    acquireStartupLock();
+                }
+                return;
+            }
             snapshot_.error = makeInfrastructureError(
                 "server-unavailable", "The ADB server remains unavailable.",
                 diagnosticOr( result.diagnostic, "ADB server remains unavailable." ),
@@ -584,6 +657,20 @@ private:
                   []( Impl& self ) { self.beginProbe( ProbePurpose::LockContended ); } );
     }
 
+    void generateStandardKeyAndLaunch()
+    {
+        const auto generated = keyStore_.generateStandardKey();
+        if ( !generated.generated ) {
+            failStartup(
+                "key-generation-failed", "Unable to prepare the standard ADB key.",
+                diagnosticOr( generated.diagnostic, "Unable to prepare the standard ADB key." ),
+                false );
+            return;
+        }
+
+        launchPackagedServer();
+    }
+
     void inspectStandardKey()
     {
         const auto inspection = keyStore_.inspectStandardKey();
@@ -593,6 +680,10 @@ private:
             launchPackagedServer();
             return;
         case AdbServerStandardKeyState::Absent:
+            if ( snapshot_.keyConsent == AdbServerKeyConsentState::Granted ) {
+                generateStandardKeyAndLaunch();
+                return;
+            }
             snapshot_.status = AdbServerSupervisorStatus::AwaitingKeyGenerationConsent;
             snapshot_.infrastructure
                 = InfrastructureState{ InfrastructureStatus::Connecting, std::nullopt };
@@ -756,6 +847,7 @@ private:
         snapshot_.serverIdentity = std::move( result.serverIdentity );
         snapshot_.protocolVersion = result.protocolVersion;
         snapshot_.error.reset();
+        snapshot_.keyConsent = AdbServerKeyConsentState::NotRequired;
         startupRetryAttempt_ = 0u;
         reconnectAttempt_ = 0u;
         if ( ownership == InfrastructureOwnership::AppShared ) {
@@ -804,6 +896,12 @@ private:
         }
     }
 
+    void scheduleStartupCapabilityRetry()
+    {
+        schedule( AdbServerScheduleKind::StartupRetry, config_.startupCapabilityProbeInterval,
+                  []( Impl& self ) { self.beginProbe( ProbePurpose::Initial ); } );
+    }
+
     void scheduleStartupRetry( RetryPolicy retryPolicy )
     {
         auto delay = std::chrono::milliseconds{ 0 };
@@ -832,7 +930,7 @@ private:
                   []( Impl& self ) { self.beginProbe( ProbePurpose::Reconnect ); } );
     }
 
-    void fail( AdbServerSupervisorStatus status, std::string code, std::string message,
+    bool fail( AdbServerSupervisorStatus status, std::string code, std::string message,
                std::string nativeDetail, RetryPolicy retryPolicy,
                ErrorCategory category = ErrorCategory::Infrastructure )
     {
@@ -844,10 +942,20 @@ private:
         const auto runSerial = runSerial_;
         const auto generation = snapshot_.generation;
         const auto epoch = snapshot_.epoch;
+        const std::weak_ptr<CallbackGate> weakGate = callbackGate_;
         publishState();
+        auto gate = weakGate.lock();
+        if ( gate == nullptr || gate->owner != this ) {
+            return false;
+        }
         if ( runSerial == runSerial_ && snapshot_.generation == generation
              && snapshot_.epoch == epoch && snapshot_.error.has_value() ) {
-            Q_EMIT supervisor_.errorOccurred( generation, epoch, *snapshot_.error );
+            const auto error = *snapshot_.error;
+            Q_EMIT supervisor_.errorOccurred( generation, epoch, error );
+            gate = weakGate.lock();
+            if ( gate == nullptr || gate->owner != this ) {
+                return false;
+            }
         }
         if ( running_ && runSerial == runSerial_ && snapshot_.generation == generation
              && snapshot_.epoch == epoch && snapshot_.status == AdbServerSupervisorStatus::Failed
@@ -856,6 +964,7 @@ private:
                   || snapshot_.error->retryPolicy == RetryPolicy::Backoff ) ) {
             scheduleStartupRetry( snapshot_.error->retryPolicy );
         }
+        return true;
     }
 
     void failStartup( std::string code, std::string message, std::string nativeDetail,

@@ -80,9 +80,10 @@ void resetSourceAttempt( LiveStateTransition& transition )
 {
     clearRetry( transition );
     resetStreamReadiness( transition.snapshot );
+    transition.snapshot.payloadReceived = false;
 }
 
-void invalidateStreamAttempt( LiveStateTransition& transition )
+void invalidateStreamAttempt( LiveStateTransition& transition, bool interrupted )
 {
     auto& snapshot = transition.snapshot;
     if ( snapshot.source.stoppingGeneration.has_value() ) {
@@ -91,6 +92,7 @@ void invalidateStreamAttempt( LiveStateTransition& transition )
     const auto cancelledGeneration = snapshot.generation;
     snapshot.source.stoppingGeneration = cancelledGeneration;
     snapshot.source.stoppingDisposition = StopDisposition::SettleAccepted;
+    snapshot.retiringAttemptInterrupted = interrupted;
     ++snapshot.generation;
     transition.effects.push_back( LiveStateEffect{ EffectKind::InvalidateGeneration,
                                                    snapshot.generation, Timestamp{ 0 }, 0u } );
@@ -135,11 +137,13 @@ void apply( LiveStateTransition& transition, const StartRequested& event, const 
 {
     auto& snapshot = transition.snapshot;
     if ( snapshot.source.stoppingGeneration.has_value() || hasActiveStreamAttempt( snapshot ) ) {
+        const auto stoppingReason = snapshot.source.stopReason;
         snapshot.startAfterStop = true;
         snapshot.runIntent = RunIntent::Running;
-        invalidateStreamAttempt( transition );
+        invalidateStreamAttempt( transition, false );
         resetSourceAttempt( transition );
         enterSourceState( snapshot, SourceStatus::Stopping );
+        snapshot.source.stopReason = stoppingReason;
         transition.accepted = true;
         return;
     }
@@ -179,7 +183,7 @@ void apply( LiveStateTransition& transition, const StopRequested& event, const L
     snapshot.startAfterStop = false;
     const auto existingStoppingGeneration = snapshot.source.stoppingGeneration;
     const auto existingDisposition = snapshot.source.stoppingDisposition;
-    invalidateStreamAttempt( transition );
+    invalidateStreamAttempt( transition, false );
     snapshot.source.status = SourceStatus::Stopping;
     snapshot.source.stopReason = StopReason::User;
     const auto effectiveDisposition
@@ -224,6 +228,7 @@ void apply( LiveStateTransition& transition, const StopCompleted& event, const L
 
     advanceNow( snapshot, event.at );
     snapshot.source.stoppingGeneration.reset();
+    snapshot.retiringAttemptInterrupted = false;
     if ( snapshot.source.status == SourceStatus::Failed && snapshot.source.failure
          && snapshot.source.failure->category == ErrorCategory::Capture ) {
         snapshot.startAfterStop = false;
@@ -273,7 +278,7 @@ void apply( LiveStateTransition& transition, const InfrastructureChanged& event,
         else {
             const bool interrupted = hasActiveStreamAttempt( snapshot );
             if ( interrupted ) {
-                invalidateStreamAttempt( transition );
+                invalidateStreamAttempt( transition, true );
             }
             snapshot.devicePresent = false;
             resetSourceAttempt( transition );
@@ -360,7 +365,7 @@ void apply( LiveStateTransition& transition, const DeviceAbsent& event, const Li
     snapshot.devicePresent = false;
     const bool interrupted = hasActiveStreamAttempt( snapshot );
     if ( interrupted ) {
-        invalidateStreamAttempt( transition );
+        invalidateStreamAttempt( transition, true );
     }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, snapshot.infrastructure.status == InfrastructureStatus::Ready
@@ -386,7 +391,7 @@ void apply( LiveStateTransition& transition, const UserActionRequired& event,
     advanceNow( snapshot, event.at );
     snapshot.devicePresent = false;
     if ( activeStreamAttempt ) {
-        invalidateStreamAttempt( transition );
+        invalidateStreamAttempt( transition, true );
     }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, SourceStatus::AwaitingUser );
@@ -429,6 +434,9 @@ void apply( LiveStateTransition& transition, const StreamBytesReceived& event,
     }
 
     advanceNow( transition.snapshot, event.at );
+    if ( event.byteCount != 0u ) {
+        transition.snapshot.payloadReceived = true;
+    }
     transition.effects.push_back( LiveStateEffect{ EffectKind::AppendBytes, event.generation,
                                                    Timestamp{ 0 }, event.byteCount } );
     transition.accepted = true;
@@ -459,7 +467,7 @@ void apply( LiveStateTransition& transition, const RetryRequested& event,
     }
 
     advanceNow( snapshot, event.at );
-    invalidateStreamAttempt( transition );
+    invalidateStreamAttempt( transition, true );
     resetSourceAttempt( transition );
     snapshot.consecutiveFailures = std::max( snapshot.consecutiveFailures, event.attempt );
 
@@ -513,7 +521,7 @@ void apply( LiveStateTransition& transition, const CaptureFailed& event, const L
     if ( event.generation != snapshot.generation
          && event.generation != snapshot.source.stoppingGeneration ) { return; }
     advanceNow( snapshot, event.at );
-    if ( hasActiveStreamAttempt( snapshot ) ) { invalidateStreamAttempt( transition ); }
+    if ( hasActiveStreamAttempt( snapshot ) ) { invalidateStreamAttempt( transition, true ); }
     resetSourceAttempt( transition );
     enterSourceState( snapshot, SourceStatus::Failed );
     snapshot.source.failure = event.error;
