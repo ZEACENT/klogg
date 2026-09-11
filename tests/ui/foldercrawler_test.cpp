@@ -125,6 +125,15 @@ bool waitFor( const std::function<bool()>& predicate, int timeoutMs = 5000 )
     return true;
 }
 
+void selectResultRowAndWaitForFile( FolderCrawlerWidget& widget, LineNumber row,
+                                    const QString& expectedPath )
+{
+    triggerAndWaitForCompletion(
+        &widget, &FolderCrawlerWidget::mainViewFileChanged,
+        [ &widget, row ] { widget.selectResultRow( row ); },
+        [ &widget, &expectedPath ] { return widget.currentMainFilePath() == expectedPath; } );
+}
+
 // RAII save/restore of the global Configuration fields the folder ctor reads,
 // so a test can force deterministic non-default values without leaking state
 // into sibling tests (which assert e.g. a default plain-text/regex pattern).
@@ -318,8 +327,7 @@ TEST_CASE( "FolderCrawlerWidget plain click on a result row repaints the selecti
     // Open a.log up front so the later real click takes the synchronous same-file
     // branch of openFileInMainView (file cached): no async load, and the open
     // path touches mainView_ only, never repainting the filtered view.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const view = widget.filteredView();
@@ -439,10 +447,7 @@ TEST_CASE( "FolderCrawlerWidget selecting a result opens the source file", "[fol
     // Visible rows: [header(0), match(1)].
     REQUIRE( widget.folderResults()->lineKind( 1_lnum ) == LineKind::Data );
 
-    widget.selectResultRow( 1_lnum ); // opens a.log at the matched line
-
-    REQUIRE( waitFor( [ & ]() { return !widget.currentMainFilePath().isEmpty(); } ) );
-    REQUIRE( widget.currentMainFilePath() == a );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // opens a.log at the matched line
     // Settle after the load completes before teardown (CLAUDE.md
     // close-after-load pattern): the indexer worker may still be unwinding
     // after the main-thread completion signal fires.
@@ -486,9 +491,7 @@ TEST_CASE( "FolderCrawlerWidget main view search range spans the opened file",
 
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum ); // opens a.log (3 lines) in the main view
-
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // opens a.log in the main view
     QTest::qWait( 200 ); // settle: setDataSource runs in the loadingFinished queue
 
     // The whole 3-line file is in range -> body text is not grayed.
@@ -521,17 +524,15 @@ TEST_CASE( "FolderCrawlerWidget main view line map refreshes on demand after a d
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // Open A then B (both async-indexed and cached), settling so maps rebuild.
-    widget.selectResultRow( 1_lnum ); // a.log match -> row 1
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // a.log match -> row 1
     QTest::qWait( 200 );
-    widget.selectResultRow( 3_lnum ); // b.log match -> row 3
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, 3_lnum, b ); // b.log match -> row 3
     QTest::qWait( 200 );
 
     // Cached re-select of A: setDataSource runs synchronously and leaves the map
     // stale/empty (no paint is processed before selectResultRow returns).
     widget.selectResultRow( 1_lnum );
-    REQUIRE( widget.currentMainFilePath() == a );
+    REQUIRE( widget.currentMainFilePath() == a ); // lint-allow: platform-fragile -- cached sync
     REQUIRE_FALSE( widget.mainView()->isLineMapCurrent() );
 
     // The on-demand refresh the mouse handlers use rebuilds the map synchronously.
@@ -561,8 +562,7 @@ TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged m
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum ); // open a.log
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // open a.log
     QTest::qWait( 200 );
 
     auto* const mainView = widget.mainView();
@@ -579,8 +579,7 @@ TEST_CASE( "FolderCrawlerWidget main view caches the line map across unchanged m
 
     // Swapping the underlying file changes the map's inputs (data ptr + line
     // count), so the cache must invalidate and the next refresh must rebuild.
-    widget.selectResultRow( 3_lnum ); // open b.log
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, 3_lnum, b ); // open b.log
     QTest::qWait( 200 );
 
     mainView->ensureLineMapFresh();
@@ -624,8 +623,7 @@ TEST_CASE( "FolderCrawlerWidget toolbar status never leaks the opened file path"
 
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum ); // async load of a.log
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // async load of a.log
     QTest::qWait( 200 );
     // No "Opening <path>" leak while/after loading the file.
     REQUIRE_FALSE( widget.statusText().startsWith( QStringLiteral( "Opening" ) ) );
@@ -650,8 +648,7 @@ TEST_CASE( "FolderCrawlerWidget exposes main-view file info for the status bar",
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
     // Visible rows: [H0(a), D1(a match), H2(b), D3(b match)].
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     const auto infoA = widget.currentMainViewInfo();
@@ -661,8 +658,7 @@ TEST_CASE( "FolderCrawlerWidget exposes main-view file info for the status bar",
     REQUIRE( infoA->size > 0 );
     REQUIRE_FALSE( infoA->encodingText.isEmpty() );
 
-    widget.selectResultRow( 3_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, 3_lnum, b );
     QTest::qWait( 200 );
     const auto infoB = widget.currentMainViewInfo();
     REQUIRE( infoB.has_value() );
@@ -688,8 +684,7 @@ TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps",
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // Open A (match at localLine 0).
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     // Mark line 1 in the current (A) file. markMainViewLine is the programmatic
@@ -723,14 +718,12 @@ TEST_CASE( "FolderCrawlerWidget main-view marks are per-file and survive swaps",
         FAIL( "matchRowForFile: no matching result row found for the requested file" );
         return 0_lnum; // unreachable; FAIL aborts the test case
     };
-    widget.selectResultRow( matchRowForFile( b ) ); // b.log match
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, matchRowForFile( b ), b ); // b.log match
     QTest::qWait( 200 );
     REQUIRE_FALSE( widget.isMainViewLineMarked( 1_lnum ) );
 
     // ...and must reappear when A is reopened (cached swap).
-    widget.selectResultRow( matchRowForFile( a ) ); // a.log match
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, matchRowForFile( a ), a ); // a.log match
     QTest::qWait( 200 );
     REQUIRE( widget.isMainViewLineMarked( 1_lnum ) );
 }
@@ -766,8 +759,7 @@ TEST_CASE( "FolderCrawlerWidget marks survive a filter change and show under Mar
 
     // Open a.log and mark line 3 (ERROR beta): a mark that matches filter1 but
     // NOT the upcoming filter2 (alpha).
-    widget.selectResultRow( 1_lnum ); // ERROR alpha -> opens a.log
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // ERROR alpha -> opens a.log
     QTest::qWait( 200 );
     widget.markMainViewLine( 3_lnum );
     REQUIRE( widget.isLineMarkedInFile( a, 3_lnum ) );
@@ -845,8 +837,9 @@ TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line tex
     REQUIRE( widget.folderResults()->getNbLine() == 2_lcount ); // header + 1 match
 
     // Click the result row -> main view opens a.log at the matched line.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
+    // mainViewFileChanged is the semantic completion boundary; retain the
+    // documented grace period only for the index worker's final unwind.
     QTest::qWait( 200 );
 
     // Mark the matched line AND the following (non-matching) line with M.
@@ -872,7 +865,6 @@ TEST_CASE( "FolderCrawlerWidget a marked non-match row shows its source line tex
 
     // Same guarantee under the "Marks" visibility filter: header + both marks.
     widget.setResultsVisibility( FolderSearchResults::Visibility::Marks );
-    QTest::qWait( 50 );
     REQUIRE( widget.folderResults()->getNbLine() == 3_lcount ); // header + 2 mark rows
     const auto srcUnderMarks = widget.folderResults()->sourceForLine( 2_lnum );
     REQUIRE( srcUnderMarks.localLine == 4_lnum );
@@ -903,8 +895,7 @@ TEST_CASE( "FolderCrawlerWidget a marked grep-context line stays visible under M
     REQUIRE( widget.folderResults()->getNbLine() == 4_lcount );
 
     // Open a.log and mark line 2 (a context line).
-    widget.selectResultRow( 1_lnum ); // HIT -> opens a.log
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // HIT -> opens a.log
     QTest::qWait( 200 );
     widget.markMainViewLine( 2_lnum );
     REQUIRE( widget.isLineMarkedInFile( a, 2_lnum ) );
@@ -1054,7 +1045,7 @@ TEST_CASE( "FolderCrawlerWidget coalesces synchronous selections for one pending
 
     SECTION( "same pending file keeps its LogData and completes once at the newest match" )
     {
-        QSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+        SafeQSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
 
         // No event-loop turn between these calls: A is still uncached and pending
         // for both selections.
@@ -1070,7 +1061,8 @@ TEST_CASE( "FolderCrawlerWidget coalesces synchronous selections for one pending
         REQUIRE_FALSE( secondPending.owner_before( firstPending ) );
         REQUIRE( Access::pendingJumpLine( &widget ) == secondALine );
 
-        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+        REQUIRE( completionSpy.safeWait( kAsyncCompletionTimeoutMs ) );
+        REQUIRE( widget.currentMainFilePath() == a );
         QTest::qWait( 200 ); // deterministic close-after-load settle
 
         // One shared pending index completes once, and consumes the second jump.
@@ -1083,7 +1075,7 @@ TEST_CASE( "FolderCrawlerWidget coalesces synchronous selections for one pending
 
     SECTION( "a different pending file still replaces the in-flight LogData" )
     {
-        QSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+        SafeQSignalSpy completionSpy( &widget, &FolderCrawlerWidget::mainViewFileChanged );
 
         widget.selectResultRow( aRows[ 0 ] );
         const auto pendingA = Access::pendingMainData( &widget );
@@ -1099,7 +1091,8 @@ TEST_CASE( "FolderCrawlerWidget coalesces synchronous selections for one pending
         REQUIRE( ( pendingA.owner_before( pendingB ) || pendingB.owner_before( pendingA ) ) );
         REQUIRE( Access::pendingJumpLine( &widget ) == bLine );
 
-        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+        REQUIRE( completionSpy.safeWait( kAsyncCompletionTimeoutMs ) );
+        REQUIRE( widget.currentMainFilePath() == b );
         QTest::qWait( 200 );
         REQUIRE( completionSpy.count() == 1 );
         const auto selected
@@ -1121,14 +1114,13 @@ TEST_CASE( "FolderCrawlerWidget reselecting the same file reuses it without relo
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum ); // first select -> async load + swap
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // first select -> async load + swap
     QTest::qWait( 200 );
 
-    // Selecting another row in the SAME file must keep the same file loaded.
+    // Selecting another row in the SAME file is a synchronous jump and must keep
+    // the already-loaded file current without waiting for another open.
     widget.selectResultRow( 2_lnum );
-    QTest::qWait( 100 );
-    REQUIRE( widget.currentMainFilePath() == a );
+    REQUIRE( widget.currentMainFilePath() == a ); // lint-allow: platform-fragile -- same file
 }
 
 TEST_CASE( "FolderCrawlerWidget collapse-all and expand-all change visible rows", "[folder]" )
@@ -1263,8 +1255,7 @@ TEST_CASE( "FolderCrawlerWidget forwards search pattern to main view for opened-
                                           /*boolean=*/false, /*plainText=*/true ) );
 
     // Open a result row -> async load + setDataSource swap of mainView_.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 ); // settle per CLAUDE.md
 
     // POST-open wiring: the pattern survived the setDataSource swap (re-applied
@@ -1374,8 +1365,7 @@ TEST_CASE( "FolderCrawlerWidget overview reflects the opened file and swaps on r
     };
 
     // --- Open file A (async first load) ---
-    widget.selectResultRow( 1_lnum ); // a's first match (localLine 0)
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // a's first match (localLine 0)
     QTest::qWait( 200 ); // settle per CLAUDE.md
 
     // refreshOverview must have shown the overview widget alongside the viewport.
@@ -1388,16 +1378,14 @@ TEST_CASE( "FolderCrawlerWidget overview reflects the opened file and swaps on r
     REQUIRE( widget.overview()->getMarkLines()->empty() );
 
     // --- Open file B (different match set -> cached/async swap repoints) ---
-    widget.selectResultRow( 4_lnum ); // b's first match (localLine 0)
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, 4_lnum, b ); // b's first match (localLine 0)
     QTest::qWait( 200 ); // settle
 
     // The overview must now reflect b.log's matches (3): the repoint happened.
     REQUIRE( overviewMatchCount( widget ) == 3 );
 
     // --- Switch back to A (now served from the cache) -> overview repoints again.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
     REQUIRE( overviewMatchCount( widget ) == 2 );
 }
@@ -1419,8 +1407,7 @@ TEST_CASE( "FolderCrawlerWidget overview click emits lineClicked for jump parity
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     const auto firstVisibleBefore = widget.mainView()->getTopLine();
@@ -1701,8 +1688,7 @@ TEST_CASE( "FolderCrawlerWidget setEncoding applies to the opened file", "[folde
 
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return !widget.currentMainFilePath().isEmpty(); } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
 
     // File opened -> applies (re-displays the opened file); must not throw for
     // both an explicit MIB and the detected encoding.
@@ -1811,8 +1797,7 @@ TEST_CASE( "FolderCrawlerWidget filtered-view M shortcut marks the selected resu
                  .testFlag( AbstractLogData::LineTypeFlags::Mark ) );
 
     // The mark is shared with the main view: open a.log and line 0 is marked.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
     REQUIRE( widget.isMainViewLineMarked( 0_lnum ) );
 
@@ -1840,8 +1825,7 @@ TEST_CASE( "FolderCrawlerWidget main-view map rebuilds paint-free on an unrealiz
     widget.setFolder( dir.path(), QStringList{ a } );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum ); // opens a.log -> setDataSource clears the map
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // opens a.log -> setDataSource clears the map
     QTest::qWait( 200 );
 
     // No paint was ever delivered, so the map is empty and hit-testing fails.
@@ -1872,8 +1856,7 @@ TEST_CASE( "FolderCrawlerWidget announces the main-view line position when a res
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     QSignalSpy spy( widget.mainView(), &LogMainView::newSelection );
-    widget.selectResultRow( 1_lnum ); // opens a.log at the match line (localLine 1)
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a ); // opens a.log at the match line (localLine 1)
     QTest::qWait( 200 ); // settle: setDataSource + announce run in the loadingFinished queue
 
     REQUIRE( spy.count() >= 1 );
@@ -1916,13 +1899,11 @@ TEST_CASE( "FolderCrawlerWidget main view shows each opened file's detected enco
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // Rows: [H0(utf8), D1(utf8 match), H2(utf16), D3(utf16 match)].
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == utf8; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, utf8 );
     QTest::qWait( 200 );
     REQUIRE( widget.currentMainViewInfo()->encodingText.toLower().contains( "utf-8" ) );
 
-    widget.selectResultRow( 3_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == utf16File; } ) );
+    selectResultRowAndWaitForFile( widget, 3_lnum, utf16File );
     QTest::qWait( 200 );
     REQUIRE( widget.currentMainViewInfo()->encodingText.toLower().contains( "utf-16" ) );
 }
@@ -2380,8 +2361,7 @@ TEST_CASE( "FolderCrawlerWidget shared view-signal wiring", "[folder][wiring]" )
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const mainView = widget.mainView();
@@ -2638,8 +2618,7 @@ TEST_CASE( "FolderCrawlerWidget mirrors a portion selection into the main view",
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     // Row 1 = a.log local line 1 ("ERROR alpha"). Single-file parity: the main
@@ -2691,8 +2670,7 @@ TEST_CASE( "FolderCrawlerWidget highlights the hovered result line in the minima
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const overviewWidget = widget.mainView()->findChild<OverviewWidget*>();
@@ -2810,8 +2788,7 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     QTest::qWait( 100 );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const overview = widget.overviewModel();
@@ -2846,16 +2823,14 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     // Rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma.
     // Mark a non-match line in b, then switch between the files: the minimap
     // ticks must track the file currently shown in the main view.
-    widget.selectResultRow( 4_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+    selectResultRowAndWaitForFile( widget, 4_lnum, b );
     QTest::qWait( 100 );
     widget.markMainViewLine( 1_lnum ); // b.log:1 is "line1", not a match
     QTest::qWait( 50 );
     overview->updateView( 100 );
     REQUIRE( !overview->getMarkLines()->empty() );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 100 );
     overview->updateView( 100 );
     // a.log has no marks anymore (unmarked above) -> no stale ticks from b.
@@ -2882,8 +2857,7 @@ TEST_CASE( "FolderCrawlerWidget marks survive a view-context round-trip",
     QTest::qWait( 100 );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     // Mark a main-view line in a.log and a results row from b.log
@@ -2935,8 +2909,7 @@ TEST_CASE( "FolderCrawlerWidget restores marks into a moved folder",
     QTest::qWait( 100 );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
     widget.markMainViewLine( 1_lnum );
     QTest::qWait( 20 );
@@ -3149,8 +3122,7 @@ TEST_CASE( "FolderCrawlerWidget row-encoding override dies with the cached file"
 
     // Open a.log (row 1 = its match): the row decodes with the detected
     // UTF-16 codec at baseline.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; }, 15000 ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 100 );
     REQUIRE( widget.folderResults()->getLineString( 1_lnum )
                  == QStringLiteral( "ERROR x" ) );
@@ -3168,8 +3140,7 @@ TEST_CASE( "FolderCrawlerWidget row-encoding override dies with the cached file"
     for ( int i = 0; i < 9; ++i ) {
         const auto row = LineNumber( static_cast<LineNumber::UnderlyingType>( 3 + i * 2 ) );
         const auto path = files.at( i + 1 );
-        widget.selectResultRow( row );
-        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == path; }, 15000 ) );
+        selectResultRowAndWaitForFile( widget, row, path );
     }
     QTest::qWait( 100 );
 
@@ -3237,8 +3208,7 @@ TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )
     QTest::qWait( 100 );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     SECTION( "focusSearchEdit focuses the search input" )
@@ -3319,8 +3289,7 @@ TEST_CASE( "FolderCrawlerWidget document-level actions", "[folder][actions]" )
 
         // Rows: 0 = header(a), 1 = ERROR alpha, 2 = ERROR beta, 3 = header(b),
         // 4 = ERROR gamma. Selecting a b.log row swaps the main-view file.
-        widget.selectResultRow( 4_lnum );
-        REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == b; } ) );
+        selectResultRowAndWaitForFile( widget, 4_lnum, b );
         QTest::qWait( 100 );
         REQUIRE_FALSE( widget.encodingMib().has_value() );
     }
@@ -3577,8 +3546,7 @@ TEST_CASE( "FolderCrawlerWidget registers the crawler widget shortcut family",
     QTest::qWait( 100 );
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const mainView = widget.mainView();
@@ -3874,8 +3842,7 @@ TEST_CASE( "FolderCrawlerWidget color labels apply to the selection in every vie
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
     // Open a.log in the main view and select the "ERROR" portion of line 1.
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const mainView = widget.mainView();
@@ -4098,8 +4065,7 @@ TEST_CASE( "FolderCrawlerWidget jumpToTop dispatch tops the main view only", "[f
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     // The on-demand index + layout are async: wait until the 200-line file is
     // actually scrollable, then settle so the worker thread unwinds.
     REQUIRE( waitFor(
@@ -4131,8 +4097,7 @@ TEST_CASE( "FolderCrawlerWidget followSet dispatch toggles follow on the main vi
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     auto* const document = static_cast<AbstractCrawlerWidget*>( &widget );
@@ -4163,8 +4128,7 @@ TEST_CASE( "FolderCrawlerWidget re-emits the main view's followModeChanged", "[f
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     QTest::qWait( 200 );
 
     bool fired = false;
@@ -4207,8 +4171,7 @@ TEST_CASE( "FolderCrawlerWidget follow tracks the tail when the file grows", "[f
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     REQUIRE( waitFor(
         [ & ]() { return widget.mainView()->verticalScrollBar()->maximum() > 0; } ) );
     QTest::qWait( 200 );
@@ -4315,8 +4278,7 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
 
     // Open A first (uncached -> async path): after completion A is cached,
     // bound, and -- before the fix -- still carrying its stale pending lambda.
-    widget.selectResultRow( matchRowForFile( a ) );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, matchRowForFile( a ), a );
     QTest::qWait( 200 );
     auto* cachedAData = const_cast<AbstractLogData*>(
         AbstractLogView::access_by<FolderViewTestAccess>::logData( widget.mainView() ) );
@@ -4346,7 +4308,9 @@ TEST_CASE( "FolderCrawlerWidget a cached file's re-index cannot hijack a pending
     QElapsedTimer openBudget;
     openBudget.start();
     while ( widget.currentMainFilePath() != b && openBudget.elapsed() < 30000 ) {
-        QTest::qWait( 100 );
+        // The wait paces deliberate overlapping A re-index notifications; it is
+        // not the completion boundary for B's open.
+        QTest::qWait( 100 ); // lint-allow: platform-fragile
         appendLine( a );
         REQUIRE( notifyChanged( cachedAData, a ) );
     }
@@ -4452,8 +4416,7 @@ TEST_CASE( "FolderCrawlerWidget canceling a pending open keeps the displayed fil
     // ISO 8859-1 (Latin-1): the ASCII fixture decodes fine under it, and it
     // differs from the detected UTF-8 so the override is a real state change.
     constexpr int latin1Mib = 4;
-    widget.selectResultRow( matchRowForFile( a ) );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, matchRowForFile( a ), a );
     QTest::qWait( 200 ); // settle per CLAUDE.md
     widget.setEncoding( latin1Mib );
     REQUIRE( widget.encodingMib().has_value() );
@@ -4466,7 +4429,7 @@ TEST_CASE( "FolderCrawlerWidget canceling a pending open keeps the displayed fil
     // cancel-a-pending-open sequence from the bug report, made deterministic.
     widget.selectResultRow( matchRowForFile( b ) );
     widget.selectResultRow( matchRowForFile( a ) );
-    REQUIRE( widget.currentMainFilePath() == a );
+    REQUIRE( widget.currentMainFilePath() == a ); // lint-allow: platform-fragile -- same file
 
     // The displayed file never changed, so its override must still be pinned.
     // RED: the reset at the start of B's open already wiped it (nullopt).
@@ -4476,7 +4439,7 @@ TEST_CASE( "FolderCrawlerWidget canceling a pending open keeps the displayed fil
     // Settle so any late/queued side effects of the canceled open land, then
     // re-assert: the override must survive the full unwind of the cancel, not
     // just the synchronous fast path.
-    QTest::qWait( 200 );
+    QTest::qWait( 200 ); // lint-allow: platform-fragile -- documented cancel unwind
     REQUIRE( widget.currentMainFilePath() == a );
     REQUIRE( widget.encodingMib().has_value() );
     REQUIRE( *widget.encodingMib() == latin1Mib );
@@ -4505,8 +4468,7 @@ TEST_CASE( "FolderCrawlerWidget follow growth refreshes the overview line count"
     widget.searchFor( "ERROR" );
     REQUIRE( waitFor( [ & ]() { return !widget.isSearchActive(); } ) );
 
-    widget.selectResultRow( 1_lnum );
-    REQUIRE( waitFor( [ & ]() { return widget.currentMainFilePath() == a; } ) );
+    selectResultRowAndWaitForFile( widget, 1_lnum, a );
     REQUIRE( waitFor(
         [ & ]() { return widget.mainView()->verticalScrollBar()->maximum() > 0; } ) );
     QTest::qWait( 200 ); // settle per CLAUDE.md

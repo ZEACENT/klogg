@@ -170,7 +170,30 @@ should reach state X eventually", `waitUiState` (or any equivalent
 poll-with-deadline helper) is the right tool; a fixed `QTest::qWait`
 is not.
 
-### 8.5 Why these four rules and not more
+### 8.5 Observe semantic completion; time is only a failure bound
+
+```cpp
+// AVOID -- selecting starts an uncached asynchronous LogData index. A five-
+// second predicate budget passed in one TSan run and expired in the next even
+// though both runs tested the same source tree.
+widget.selectResultRow( row );
+REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == path; } ) );
+QTest::qWait( 200 );
+
+// PREFER -- use the shared arm/action/ready protocol. It returns as soon as
+// completion arrives; 30 s is only a deadlock bound. The ready predicate also
+// handles the same-current-file synchronous branch, which emits no change signal.
+triggerAndWaitForCompletion(
+    &widget, &FolderCrawlerWidget::mainViewFileChanged,
+    [ & ] { widget.selectResultRow( row ); },
+    [ & ] { return widget.currentMainFilePath() == path; } );
+```
+
+Elapsed wall-clock time is never evidence that asynchronous work completed. Use the narrowest real synchronization boundary: a main-thread completion signal, an explicit queued recorder for worker-thread signals, a condition variable/future, or an eventual-state predicate when the API has no completion event. Arm the observer before starting the operation so synchronous and cache-hit completion cannot be missed.
+
+A timer or fixed delay remains valid only when time is itself the behavior under test (debounce, retry/backoff, quiet-period negative assertion), as an outer deadlock bound that does not drive the success path, or as a documented grace/unwind period **after** a real completion condition has already been observed. `scripts/lint_platform_fragile.py` enforces the known `FolderCrawlerWidget::selectResultRow` / `mainViewFileChanged` mapping that escaped in master run 34597411626.
+
+### 8.6 Why these rules and not more
 
 Every rule in this section is the *direct generalisation* of a specific past klogg bug:
 
@@ -178,9 +201,10 @@ Every rule in this section is the *direct generalisation* of a specific past klo
 - §8.2 generalises PR #12's `runSearch()` helper drain-and-reread bug.
 - §8.3 generalises PR #12's `StreamingScriptTransport.connectTransport()` Windows flake.
 - §8.4 generalises PR #12's third-round `mainwindow_test.cpp:280` Tab-group-chip flake on the slow Ubuntu 20.04 runner.
+- §8.5 generalises master run 34597411626, where a deliberately large folder file exceeded a generic five-second polling budget under Linux TSan.
 
-When the next platform-specific failure shows up, add a §8.6+ rule grounded in the actual incident. Do not pre-emptively add abstract anti-patterns -- the value of this section is that each rule has a paid-for receipt.
+When the next platform-specific failure shows up, add another rule grounded in the actual incident. Do not pre-emptively add abstract anti-patterns -- the value of this section is that each rule has a paid-for receipt.
 
 ---
 
-_Last updated: 2026-04-25_
+_Last updated: 2026-09-11_

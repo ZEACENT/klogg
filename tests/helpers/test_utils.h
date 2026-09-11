@@ -152,6 +152,21 @@ class SafeQSignalSpy {
     std::unique_ptr<QSignalSpy> spy_;
 };
 
+inline constexpr int kAsyncCompletionTimeoutMs = 30000;
+
+template <typename Sender, typename Signal, typename Trigger, typename Ready>
+inline void triggerAndWaitForCompletion( Sender* sender, Signal signal, Trigger&& trigger,
+                                         Ready&& ready,
+                                         int timeoutMs = kAsyncCompletionTimeoutMs )
+{
+    SafeQSignalSpy completion( sender, signal );
+    trigger();
+    if ( !ready() ) {
+        REQUIRE( completion.safeWait( timeoutMs ) );
+    }
+    REQUIRE( ready() );
+}
+
 inline void configureProductLikeRegexpEngine( Configuration& config )
 {
 #ifdef KLOGG_HAS_VECTORSCAN

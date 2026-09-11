@@ -1,3 +1,4 @@
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -30,6 +31,273 @@ class QtryVerifyMacroPatternTest(unittest.TestCase):
         )["regex"]
         self.assertIsNone(pattern.search("waitForQtCondition( ready );"))
         self.assertIsNone(pattern.search("QTRY_COMPARE( actual, expected );"))
+
+
+class KnownCompletionEventPollingTest(unittest.TestCase):
+    def check(self, text, name="tests/ui/foldercrawler_test.cpp"):
+        return lint._check_known_completion_event_polling(text, Path(name))
+
+    def test_folder_file_open_predicate_polling_is_flagged(self):
+        text = """\
+TEST_CASE( "large async open", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 4)
+
+    def test_folder_file_open_fixed_wait_is_flagged(self):
+        text = """\
+TEST_CASE( "large async open", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 4)
+
+    def test_pointer_wait_ui_state_and_statement_predicates_are_flagged(self):
+        pointer = """\
+TEST_CASE( "pointer async open", "[folder]" )
+{
+    widget->selectResultRow( 1_lnum );
+    REQUIRE( waitUiState( [ & ] { return widget->currentMainFilePath() == a; } ) );
+}
+"""
+        self.assertEqual(len(self.check(pointer)), 1)
+        filtered_view = """\
+TEST_CASE( "filtered result async open", "[folder]" )
+{
+    folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
+    REQUIRE( waitUiState( [ & ] { return folderWidget->currentMainFilePath() == a; } ) );
+}
+"""
+        self.assertEqual(len(self.check(filtered_view)), 1)
+        statement = """\
+TEST_CASE( "prepared async open", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { prepare(); return widget.currentMainFilePath() == a; } ) );
+}
+"""
+        self.assertEqual(len(self.check(statement)), 1)
+
+    def test_direct_path_assertion_without_completion_is_flagged(self):
+        text = """\
+TEST_CASE( "uncached async open", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_unrelated_wait_does_not_become_path_polling(self):
+        text = """\
+TEST_CASE( "separate wait", "[folder]" )
+{
+    SafeQSignalSpy completed{ &widget, &FolderCrawlerWidget::mainViewFileChanged };
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { return layoutReady; } ) );
+    REQUIRE( completed.safeWait( 30000 ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_semantic_signal_wait_and_post_completion_grace_are_allowed(self):
+        text = """\
+TEST_CASE( "large async open", "[folder]" )
+{
+    SafeQSignalSpy completed( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( completed.safeWait( 30000 ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+        brace_initialized = text.replace(
+            "completed( &widget, &FolderCrawlerWidget::mainViewFileChanged )",
+            "completed{ &widget, &FolderCrawlerWidget::mainViewFileChanged }",
+        )
+        self.assertEqual(self.check(brace_initialized), [])
+
+    def test_wrong_or_unasserted_completion_spy_does_not_allow_grace_wait(self):
+        wrong_sender = """\
+TEST_CASE( "wrong sender", "[folder]" )
+{
+    SafeQSignalSpy completed( &otherWidget, &FolderCrawlerWidget::mainViewFileChanged );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( completed.safeWait( 30000 ) );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(len(self.check(wrong_sender)), 1)
+        unasserted = """\
+TEST_CASE( "unasserted completion", "[folder]" )
+{
+    SafeQSignalSpy completed( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+    widget.selectResultRow( 1_lnum );
+    completed.safeWait( 30000 );
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(len(self.check(unasserted)), 1)
+
+    def test_synchronous_same_file_assertion_is_allowed(self):
+        text = """\
+TEST_CASE( "same file jump", "[folder]" )
+{
+    REQUIRE( widget.currentMainFilePath() == a );
+    widget.selectResultRow( 2_lnum );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_catch_case_boundaries_and_long_sequences_are_handled(self):
+        separate_cases = """\
+SCENARIO( "first", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+}
+SCENARIO( "second", "[folder]" )
+{
+    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );
+}
+"""
+        self.assertEqual(self.check(separate_cases), [])
+        long_gap = (
+            'TEST_CASE( "long", "[folder]" )\n{\n'
+            "    widget.selectResultRow( 1_lnum );\n"
+            + "    doUnrelatedWork();\n" * 150
+            + "    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );\n}\n"
+        )
+        self.assertEqual(len(self.check(long_gap)), 1)
+
+    def test_deadlock_timer_and_unrelated_waits_are_allowed(self):
+        text = """\
+TEST_CASE( "bounded event loop", "[async]" )
+{
+    QEventLoop loop;
+    QTimer timeout;
+    QObject::connect( &timeout, &QTimer::timeout, &loop, &QEventLoop::quit );
+    QObject::connect( data, &LogData::loadingFinished, &loop, &QEventLoop::quit );
+    timeout.start( 30000 );
+    loop.exec();
+    REQUIRE( waitFor( [ & ] { return unrelatedState; } ) );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_comments_strings_non_tests_and_incomplete_sequences_are_allowed(self):
+        comments_and_strings = """\
+// widget.selectResultRow( 1_lnum );
+// REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );
+const auto example = R"cpp(widget.selectResultRow( 1_lnum );
+QTest::qWait( 200 );
+REQUIRE( widget.currentMainFilePath() == a );)cpp";
+"""
+        self.assertEqual(self.check(comments_and_strings), [])
+        self.assertEqual(
+            self.check(
+                "widget.selectResultRow( 1_lnum );\n"
+                "REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );\n",
+                name="src/ui/example.cpp",
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.check("widget.selectResultRow( 1_lnum );\nQTest::qWait( 200 );\n"),
+            [],
+        )
+
+    def test_malformed_polling_sequence_fails_closed(self):
+        text = """\
+TEST_CASE( "malformed async open", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } );
+}
+"""
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_allow_marker_suppresses_intentional_sequence(self):
+        text = """\
+TEST_CASE( "intentional timing", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    QTest::qWait( 200 ); // lint-allow: platform-fragile
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_does_not_hide_a_later_completion_wait(self):
+        text = """\
+TEST_CASE( "mixed timing", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    QTest::qWait( 20 ); // lint-allow: platform-fragile -- input pacing
+    QTest::qWait( 200 );
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+    def test_allow_marker_inside_a_literal_does_not_suppress(self):
+        polling = """\
+TEST_CASE( "string spoof", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) ); const auto marker = "lint-allow: platform-fragile";
+}
+"""
+        self.assertEqual(len(self.check(polling)), 1)
+        fixed_wait = """\
+TEST_CASE( "raw string spoof", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    QTest::qWait( 200 ); const auto marker = R"(lint-allow: platform-fragile)";
+    REQUIRE( widget.currentMainFilePath() == a );
+}
+"""
+        self.assertEqual(len(self.check(fixed_wait)), 1)
+
+    def test_current_tree_is_clean_and_real_incident_mutation_is_rejected(self):
+        path = REPO_ROOT / "tests" / "ui" / "foldercrawler_test.cpp"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(self.check(text, name=str(path)), [])
+        corrected_call = re.compile(
+            r"(?m)^(?P<indent>\s*)selectResultRowAndWaitForFile\(\s*"
+            r"widget\s*,\s*1_lnum\s*,\s*a\s*\);(?:\s*//[^\n]*)?$"
+        )
+
+        def restore_escaped_poll(match):
+            indent = match.group("indent")
+            return (
+                f"{indent}widget.selectResultRow( 1_lnum );\n"
+                f"{indent}REQUIRE( waitFor( [ & ]() {{ return "
+                "widget.currentMainFilePath() == a; } ) );\n"
+                f"{indent}QTest::qWait( 200 );"
+            )
+
+        mutated, replacements = corrected_call.subn(restore_escaped_poll, text, count=1)
+        self.assertEqual(replacements, 1)
+        self.assertGreaterEqual(len(self.check(mutated, name=str(path))), 1)
 
 
 class QtSplitBehaviorCompatibilityPatternTest(unittest.TestCase):
