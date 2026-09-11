@@ -162,7 +162,6 @@ struct IntegrityFlag {
     bool Integrity::* member;
 };
 constexpr IntegrityFlag IntegrityFlags[]{
-    { "sourceCompletenessUnknown", &Integrity::sourceCompletenessUnknown },
     { "gapPossible", &Integrity::gapPossible }, { "replayPossible", &Integrity::replayPossible },
     { "outputProgressUnknown", &Integrity::outputProgressUnknown }
 };
@@ -202,11 +201,18 @@ bool parseExactCount( const QJsonValue& value, std::uint64_t& count )
 
 bool parseIntegrity( const QJsonValue& value, Integrity& result )
 {
-    if ( value.isUndefined() ) { return true; } // Historical sessions remain explicitly unknown.
+    // Missing metadata means no persisted host-side integrity evidence. It does
+    // not certify or deny completeness of records supplied by the source.
+    if ( value.isUndefined() ) { return true; }
     if ( !value.isObject() ) { return false; }
     const auto object = value.toObject();
     const auto version = object.value( QStringLiteral( "version" ) );
     if ( !version.isDouble() || version.toDouble() != Integrity::SchemaVersion ) { return false; }
+    const auto legacySourceCompleteness
+        = object.value( QStringLiteral( "sourceCompletenessUnknown" ) );
+    if ( !legacySourceCompleteness.isUndefined() && !legacySourceCompleteness.isBool() ) {
+        return false;
+    }
     for ( const auto& field : IntegrityCounters ) {
         const auto count = object.value( QLatin1String( field.key ) );
         if ( !count.isUndefined() && !parseExactCount( count, result.*field.member ) ) { return false; }
@@ -217,7 +223,6 @@ bool parseIntegrity( const QJsonValue& value, Integrity& result )
         if ( !flag.isBool() ) { return false; }
         result.*field.member = flag.toBool();
     }
-    if ( !result.sourceCompletenessUnknown ) { return false; }
     const auto events = object.value( QStringLiteral( "recentEvents" ) );
     if ( !events.isUndefined() && !events.isArray() ) { return false; }
     // Reject oversized untrusted metadata rather than allocating an unbounded event history.

@@ -645,6 +645,21 @@ bool waitForMissingFile( const QString& filePath, int timeoutMs = 5000 )
     return !QFileInfo::exists( filePath );
 }
 
+bool waitForMaintenanceRetryIdle( const CaptureStore& store, int timeoutMs = 15000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( deadline.elapsed() < timeoutMs ) {
+        const auto retry = CaptureStoreTestAccess::maintenanceRetry( store );
+        if ( retry.requested == retry.completed && !retry.scheduled ) {
+            return true;
+        }
+        std::this_thread::yield();
+    }
+    const auto retry = CaptureStoreTestAccess::maintenanceRetry( store );
+    return retry.requested == retry.completed && !retry.scheduled;
+}
+
 bool waitForFlag( const std::atomic<bool>& flag, int timeoutMs = 5000 )
 {
     QElapsedTimer deadline;
@@ -952,14 +967,7 @@ TEST_CASE( "CaptureStore pending gate epochs survive the background handoff wind
     const auto duringHandoff = CaptureStoreTestAccess::maintenanceRetry( store );
     handoff->release.store( true, std::memory_order_release );
 
-    bool settled = false;
-    QElapsedTimer waitForRetry;
-    waitForRetry.start();
-    while ( !settled && waitForRetry.elapsed() < 15000 ) {
-        const auto retry = CaptureStoreTestAccess::maintenanceRetry( store );
-        settled = retry.requested == retry.completed && !retry.scheduled;
-        std::this_thread::yield();
-    }
+    const auto settled = waitForMaintenanceRetryIdle( store );
     CaptureStoreTestAccess::setCapturePathGateTimeout( previousTimeout );
     // All holder threads have joined and the background hook has been released
     // before any assertion; its captured state is shared even on test failure.
@@ -4183,7 +4191,8 @@ TEST_CASE( "CaptureStore buildRawLines reads from spilled disk segments" )
     REQUIRE( midDecoded[ 2 ] == QStringLiteral( "eee" ) );
 }
 
-TEST_CASE( "CaptureStore publishes spilled segments only after a complete write" )
+TEST_CASE( "CaptureStore publishes spilled segments only after a complete write",
+           "[capturestore][maintenance-lifecycle][windows-race]" )
 {
     CaptureStore::Limits limits;
     limits.segmentTargetBytes = 8;
@@ -4208,6 +4217,10 @@ TEST_CASE( "CaptureStore publishes spilled segments only after a complete write"
         REQUIRE( abandonedTemporaryFiles.size() == 1 );
         REQUIRE( waitForMissingFile( QDir( capturePath ).filePath(
             abandonedTemporaryFiles.front() ) ) );
+        // File disappearance is not the maintenance transaction boundary: the
+        // retry worker may still own the cross-process gate on Windows. Wait for
+        // its published lifecycle state before starting another spill.
+        REQUIRE( waitForMaintenanceRetryIdle( store ) );
 
         REQUIRE( CaptureStoreTestAccess::spillFirstSegment( store ) );
         REQUIRE( segmentFiles( capturePath ).size() == 1 );

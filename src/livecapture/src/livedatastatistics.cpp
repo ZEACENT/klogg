@@ -68,6 +68,9 @@ void accumulateLiveDataStatistics( LiveDataStatistics& total,
     addSaturating( total.deliveredChunks, increment.deliveredChunks );
     addSaturating( total.backpressuredBytes, increment.backpressuredBytes );
     addSaturating( total.backpressuredChunks, increment.backpressuredChunks );
+    addSaturating( total.rejectedBeforeEnqueueBytes, increment.rejectedBeforeEnqueueBytes );
+    addSaturating( total.rejectedBeforeEnqueueChunks, increment.rejectedBeforeEnqueueChunks );
+    addSaturating( total.incompleteSourceRecordBytes, increment.incompleteSourceRecordBytes );
     total.highWaterQueuedBytes
         = std::max( total.highWaterQueuedBytes, increment.highWaterQueuedBytes );
     total.highWaterQueuedChunks

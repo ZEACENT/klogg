@@ -240,7 +240,9 @@ TEST_CASE( "Live integrity persists exact uint64 values and bounded historical e
     spec.integrity.discardedBytes = 2u;
     spec.integrity.gapPossible = true;
     spec.integrity.replayPossible = true;
-    for ( unsigned i = 0; i < 100u; ++i ) { spec.integrity.record( "stream-retired", i ); }
+    for ( unsigned i = 0; i < 100u; ++i ) {
+        spec.integrity.record( "transport-tail-discarded", i );
+    }
     CHECK( spec.integrity.recentEvents.size() == live::LiveIntegritySummary::MaxRecentEvents );
     CHECK( spec.integrity.olderEvents == 68u );
     const auto json = serializeSpec( spec );
@@ -257,13 +259,36 @@ TEST_CASE( "Live integrity persists exact uint64 values and bounded historical e
     CHECK( json.contains( QStringLiteral( "18446744073709551613" ) ) );
 }
 
+TEST_CASE( "Live integrity persists evidence without source completeness capability state",
+           "[livelog-session-spec][live-integrity-policy-red]" )
+{
+    const auto legacyCompleteness = GENERATE( false, true );
+    auto object = objectFrom( serialized( makeAndroidSpec() ) );
+    auto integrity = object.value( QStringLiteral( "integrity" ) ).toObject();
+
+    CHECK_FALSE( integrity.contains( QStringLiteral( "sourceCompletenessUnknown" ) ) );
+
+    integrity.insert( QStringLiteral( "sourceCompletenessUnknown" ), legacyCompleteness );
+    object.insert( QStringLiteral( "integrity" ), integrity );
+    const auto parsed = parseSpec(
+        QString::fromUtf8( QJsonDocument( object ).toJson( QJsonDocument::Compact ) ) );
+    REQUIRE( parsed.ok() );
+    REQUIRE( parsed.spec.has_value() );
+
+    const auto normalized = objectFrom( serialized( *parsed.spec ) )
+                                .value( QStringLiteral( "integrity" ) )
+                                .toObject();
+    CHECK_FALSE( normalized.contains( QStringLiteral( "sourceCompletenessUnknown" ) ) );
+}
+
 TEST_CASE( "Malformed live integrity does not silently become a healthy history",
            "[livelog-session-spec][w2-integrity-red]" )
 {
     const auto bad = GENERATE( QStringLiteral( R"({"version":99})" ),
         QStringLiteral( R"({"version":1,"acceptedBytes":9007199254740993})" ),
         QStringLiteral( R"({"version":1,"acceptedBytes":"-1"})" ),
-        QStringLiteral( R"({"version":1,"acceptedBytes":"18446744073709551616"})" ) );
+        QStringLiteral( R"({"version":1,"acceptedBytes":"18446744073709551616"})" ),
+        QStringLiteral( R"({"version":1,"sourceCompletenessUnknown":"unknown"})" ) );
     auto object = QJsonDocument::fromJson( serializeSpec( makeAndroidSpec() ).toUtf8() ).object();
     object.insert( QStringLiteral( "integrity" ), QJsonDocument::fromJson( bad.toUtf8() ).object() );
     const auto result = klogg::livelog::parsePersistedSpec( QString::fromUtf8( QJsonDocument( object ).toJson() ) );

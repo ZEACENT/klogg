@@ -461,7 +461,6 @@ void LiveLogController::streamDeliveryFailed(
     std::uint64_t offeredBytes )
 {
     settleDelivery( generation, result, offeredBytes );
-    notifyPresentationChanged();
 }
 
 void LiveLogController::streamStable( live::Generation generation )
@@ -536,6 +535,11 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
     pendingDispatches_.push_back(
         PendingDispatch{ event, bytes != nullptr ? std::optional<QByteArray>{ *bytes } : std::nullopt,
                          std::move( deliverySettled ) } );
+    drainPendingDispatches();
+}
+
+void LiveLogController::drainPendingDispatches()
+{
     if ( std::exchange( dispatching_, true ) ) {
         return;
     }
@@ -564,7 +568,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
                 continue;
             }
 
-            snapshot_ = std::move( transition.snapshot );
+            commitAcceptedSnapshot( std::move( transition.snapshot ) );
             const auto* pendingBytes
                 = pending.bytes.has_value() ? &pending.bytes.value() : nullptr;
             for ( const auto& effect : transition.effects ) {
@@ -600,6 +604,48 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
     dispatching_ = false;
 }
 
+void LiveLogController::commitAcceptedSnapshot( live::LiveStateSnapshot snapshot )
+{
+    const auto previousSnapshot = snapshot_;
+    snapshot_ = std::move( snapshot );
+    observeIntegrityTransition( previousSnapshot );
+}
+
+void LiveLogController::observeIntegrityTransition(
+    const live::LiveStateSnapshot& previousSnapshot )
+{
+    const bool connectedStreamInterrupted
+        = previousSnapshot.source.status == live::SourceStatus::Streaming
+          && snapshot_.source.status != live::SourceStatus::Streaming
+          && snapshot_.runIntent == live::RunIntent::Running;
+    if ( connectedStreamInterrupted ) {
+        if ( !spec_.integrity.gapPossible ) {
+            spec_.integrity.gapPossible = true;
+            spec_.integrity.record( "connected-stream-interrupted" );
+        }
+        if ( spec_.sourceKind == SourceKind::AndroidLogcat
+             && !spec_.integrity.replayPossible ) {
+            replayRiskPending_ = true;
+        }
+    }
+
+    if ( snapshot_.runIntent == live::RunIntent::Stopped ) {
+        replayRiskPending_ = false;
+        return;
+    }
+
+    const bool replacementConnected
+        = previousSnapshot.source.status != live::SourceStatus::Streaming
+          && snapshot_.source.status == live::SourceStatus::Streaming;
+    if ( replacementConnected && replayRiskPending_ ) {
+        replayRiskPending_ = false;
+        if ( !spec_.integrity.replayPossible ) {
+            spec_.integrity.replayPossible = true;
+            spec_.integrity.record( "source-replay-possible" );
+        }
+    }
+}
+
 void LiveLogController::execute( const live::LiveStateEffect& effect, const QByteArray* bytes )
 {
     switch ( effect.kind ) {
@@ -607,20 +653,12 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
         effects_.invalidateGeneration( effect.generation );
         break;
     case live::EffectKind::CancelStream:
-        if ( openedGeneration_ == effect.generation ) {
-            openedGeneration_.reset();
-            spec_.integrity.gapPossible = true;
-            if ( spec_.sourceKind == SourceKind::AndroidLogcat ) { spec_.integrity.replayPossible = true; }
-            spec_.integrity.record( effect.stopDisposition == live::StopDisposition::SettleAccepted
-                                      ? "stream-retired" : "user-stopped" );
-        }
         effects_.retireStream( effect.generation, effect.stopDisposition );
         break;
     case live::EffectKind::StartInfrastructure:
         effects_.startInfrastructure( effect.generation );
         break;
     case live::EffectKind::OpenStream:
-        openedGeneration_ = effect.generation;
         effects_.openStream( effect.generation, transportConfig() );
         break;
     case live::EffectKind::AppendBytes:
@@ -674,6 +712,28 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
 void LiveLogController::settleDelivery( live::Generation generation,
     const live::CaptureDeliveryResult& result, std::uint64_t offered )
 {
+    if ( dispatching_ ) {
+        settleDeliveryNow( generation, result, offered );
+        return;
+    }
+
+    dispatching_ = true;
+    try {
+        settleDeliveryNow( generation, result, offered );
+    } catch ( ... ) {
+        pendingDispatches_.clear();
+        dispatching_ = false;
+        throw;
+    }
+    dispatching_ = false;
+    drainPendingDispatches();
+    notifyPresentationChanged();
+}
+
+void LiveLogController::settleDeliveryNow( live::Generation generation,
+                                           const live::CaptureDeliveryResult& result,
+                                           std::uint64_t offered )
+{
     auto& integrity = spec_.integrity;
     const auto accepted = std::min( offered, result.acceptedBytes );
     addCount( integrity.acceptedBytes, accepted );
@@ -694,7 +754,7 @@ void LiveLogController::settleDelivery( live::Generation generation,
             live::RetryPolicy::Never, "The live capture could not accept all input safely.", {} },
         clock_->now() }, config_.reducer );
     if ( failure.accepted ) {
-        snapshot_ = std::move( failure.snapshot );
+        commitAcceptedSnapshot( std::move( failure.snapshot ) );
         for ( const auto& effect : failure.effects ) { execute( effect, nullptr ); }
     }
 }

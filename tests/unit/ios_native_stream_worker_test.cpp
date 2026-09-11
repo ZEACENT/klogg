@@ -1654,6 +1654,44 @@ TEST_CASE(
     executor.runAllOnWorker();
 }
 
+TEST_CASE( "legacy syslog stop accounts an unterminated callback tail exactly once",
+           "[ios][native][stream][syslog][stop][partial][accounting][p0-red]" )
+{
+    FakeNative state;
+    fake = &state;
+    ManualExecutor executor;
+    ObservedCallbacks observed;
+    constexpr Generation generation = 508u;
+    const std::string partialRecord = "unterminated legacy bytes";
+    IosNativeStreamWorker worker( makeApi(), executor.executor(), config( generation, "8.4" ),
+                                  observed.callbacks() );
+    REQUIRE( worker.start() );
+    executor.runAllOnWorker();
+
+    state.emitSyslog( partialRecord );
+    state.waitUntilCallbackExited();
+    REQUIRE( observed.bytesAvailable.empty() );
+    REQUIRE_FALSE( worker.drain().has_value() );
+
+    worker.stop( generation );
+    executor.runAllOnWorker();
+    const auto terminalStatistics = worker.statistics();
+    CHECK( terminalStatistics.incompleteSourceRecordBytes == partialRecord.size() );
+    CHECK( terminalStatistics.rejectedBeforeEnqueueBytes == 0u );
+    CHECK( terminalStatistics.rejectedBeforeEnqueueChunks == 0u );
+    CHECK( terminalStatistics.receivedBytes == 0u );
+    CHECK( terminalStatistics.receivedChunks == 0u );
+    CHECK( observed.stopped == std::vector<Generation>{ generation } );
+
+    worker.stop( generation );
+    executor.runAllOnWorker();
+    const auto repeatedStopStatistics = worker.statistics();
+    CHECK( repeatedStopStatistics.incompleteSourceRecordBytes == partialRecord.size() );
+    CHECK( repeatedStopStatistics.rejectedBeforeEnqueueBytes == 0u );
+    CHECK( repeatedStopStatistics.rejectedBeforeEnqueueChunks == 0u );
+    CHECK( observed.stopped == std::vector<Generation>{ generation } );
+}
+
 TEST_CASE( "legacy syslog ignores empty NUL-delimited records",
            "[ios][native][stream][syslog][chunking][empty-record-red]" )
 {
@@ -1725,6 +1763,11 @@ TEST_CASE( "legacy syslog rejects an unterminated record at the configured bound
     CHECK_FALSE( worker.drain().has_value() );
     worker.stop( 511u );
     executor.runAllOnWorker();
+    CHECK( worker.statistics().incompleteSourceRecordBytes == 5u );
+
+    worker.stop( 511u );
+    executor.runAllOnWorker();
+    CHECK( worker.statistics().incompleteSourceRecordBytes == 5u );
 }
 
 TEST_CASE( "legacy syslog terminal errors use syslog relay ABI codes",

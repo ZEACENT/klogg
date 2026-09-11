@@ -490,7 +490,9 @@ void AdbLogcatSource::invalidateTransportGeneration( Generation generation )
 
 void AdbLogcatSource::setStoppedCallback( StoppedCallback callback )
 {
-    stoppedCallback_ = std::move( callback );
+    stoppedCallback_ = callback
+                           ? std::make_shared<StoppedCallback>( std::move( callback ) )
+                           : std::shared_ptr<StoppedCallback>{};
 }
 
 void AdbLogcatSource::cancelTransport(
@@ -502,7 +504,11 @@ void AdbLogcatSource::cancelTransport(
     }
     if ( retiringGeneration_ != generation ) {
         // Startup may have no transport at all: this owner has nothing to release.
-        if ( !retiringGeneration_ && stoppedCallback_ ) { stoppedCallback_( generation, 0u ); }
+        const auto callback = stoppedCallback_;
+        if ( !retiringGeneration_ && callback ) {
+            try { ( *callback )( generation, 0u ); }
+            catch ( ... ) { LOG_ERROR << "Failed to acknowledge an empty live source stop"; }
+        }
         return;
     }
     const auto effectiveDisposition
@@ -634,7 +640,9 @@ klogg::livecapture::CaptureDeliveryResult AdbLogcatSource::mapCaptureOutcome(
 
 void AdbLogcatSource::setFinalizedCallback( FinalizedCallback callback )
 {
-    finalizedCallback_ = std::move( callback );
+    finalizedCallback_ = callback
+                             ? std::make_shared<FinalizedCallback>( std::move( callback ) )
+                             : std::shared_ptr<FinalizedCallback>{};
 }
 
 void AdbLogcatSource::setDeliveryFailedCallback(
@@ -683,31 +691,73 @@ void AdbLogcatSource::completeRetirementIfSettled( Generation generation )
         = state_ == State::Error
           && retiringDisposition_ == klogg::livecapture::StopDisposition::SettleAccepted;
     const QPointer<AdbLogcatSource> guard( this );
+    // Callback registration changes apply to future retirements. Snapshot both
+    // observers before finalization can emit any external signal so this generation
+    // cannot be lost or delivered to a replacement observer through reentrancy.
+    const auto finalizedCallback = finalizedCallback_;
+    const auto stoppedCallback = stoppedCallback_;
+
     // Only real producer completion plus settlement of every registered delivery
-    // seals partial input. Arbitrary stale callbacks cannot register after stopped.
-    finalizeInput( generation );
+    // seals partial input. Production or observer failure must not own or strand
+    // retirement.
+    std::optional<klogg::livecapture::CaptureDeliveryResult> finalization;
+    try { finalization = finalizeInput(); }
+    catch ( ... ) { LOG_ERROR << "Failed to finalize live source input"; }
+    if ( !guard ) {
+        return;
+    }
+    if ( finalization && finalizedCallback ) {
+        try { ( *finalizedCallback )( generation, *finalization ); }
+        catch ( ... ) { LOG_ERROR << "Failed to report live source finalization"; }
+    }
     if ( !guard ) { return; }
 
+    // Shared observer handles make callback capture non-throwing. Clear the source-
+    // owned retirement barrier before notifications so every surviving source is
+    // reusable even when an observer throws or requests another lifecycle action.
     guard->retiringGeneration_.reset();
     guard->stopRequested_ = false;
     guard->deliverySettlement_.reset();
-    const auto callback = guard->stoppedCallback_;
     const bool clear = std::exchange( guard->clearAfterStop_, false );
     const bool restart = std::exchange( guard->restartAfterStop_, false );
-    if ( !preserveTerminalError ) { guard->setState( State::Disconnected ); }
+    if ( !preserveTerminalError ) {
+        try { guard->setState( State::Disconnected ); }
+        catch ( ... ) { LOG_ERROR << "Failed to report disconnected live source state"; }
+    }
     if ( !guard ) { return; }
-    if ( callback ) { callback( generation, discarded ); }
+
+    if ( stoppedCallback ) {
+        try { ( *stoppedCallback )( generation, discarded ); }
+        catch ( ... ) { LOG_ERROR << "Failed to acknowledge live source stop"; }
+    }
     if ( !guard ) { return; }
-    if ( clear ) { guard->performClear( restart ); }
+
+    if ( clear ) {
+        try { guard->performClear( restart ); }
+        catch ( ... ) { LOG_ERROR << "Failed to continue live source clear after retirement"; }
+    }
     else if ( restart ) {
-        if ( guard->controllerRestart_ ) { guard->controllerRestart_(); }
-        else { guard->connectSource(); }
+        if ( guard->controllerRestart_ ) {
+            ControlCallback restartCallback;
+            try { restartCallback = guard->controllerRestart_; }
+            catch ( ... ) {
+                LOG_ERROR << "Failed to retain live source restart continuation";
+            }
+            if ( restartCallback ) {
+                try { restartCallback(); }
+                catch ( ... ) { LOG_ERROR << "Failed to continue live source restart"; }
+            }
+        }
+        else {
+            try { guard->connectSource(); }
+            catch ( ... ) { LOG_ERROR << "Failed to continue live source restart"; }
+        }
     }
 }
 
-void AdbLogcatSource::finalizeInput( Generation generation )
+std::optional<klogg::livecapture::CaptureDeliveryResult> AdbLogcatSource::finalizeInput()
 {
-    if ( !logData_ ) { return; }
+    if ( !logData_ ) { return std::nullopt; }
     klogg::livecapture::CaptureDeliveryResult result;
     try { result = mapCaptureOutcome( logData_->finishInput() ); }
     catch ( ... ) {
@@ -716,7 +766,7 @@ void AdbLogcatSource::finalizeInput( Generation generation )
         result.failureCode = "capture-finalization-unknown";
     }
     schedulePersistenceRetry();
-    if ( finalizedCallback_ ) { finalizedCallback_( generation, result ); }
+    return result;
 }
 
 bool AdbLogcatSource::isInputTerminated() const

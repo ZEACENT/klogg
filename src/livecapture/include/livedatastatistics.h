@@ -38,6 +38,8 @@ struct LiveDataStatistics {
     // Complete source records rejected before queue admission, not queued or delivered bytes.
     std::size_t rejectedBeforeEnqueueBytes{ 0 };
     std::size_t rejectedBeforeEnqueueChunks{ 0 };
+    // Terminal bytes from incomplete source records that could never be enqueued.
+    std::size_t incompleteSourceRecordBytes{ 0 };
     std::size_t highWaterQueuedBytes{ 0 };
     std::size_t highWaterQueuedChunks{ 0 };
 };

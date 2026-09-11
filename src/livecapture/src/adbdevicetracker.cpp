@@ -57,32 +57,22 @@ TrackedDevicesParseResult parseTrackedDevices( const QByteArray& payload )
     result.devices.reserve( static_cast<std::size_t>( lines.size() ) );
 
     for ( decltype( lines.size() ) index = 0; index < lines.size(); ++index ) {
-        auto line = lines.at( index ).trimmed();
+        const auto line = lines.at( index ).simplified();
         if ( line.isEmpty() ) {
             continue;
         }
 
         const auto lineNumber = index + 1;
-        const auto separator = line.indexOf( '\t' );
-        if ( separator <= 0 ) {
+        const auto parts = line.split( ' ' );
+        if ( parts.size() < 2 ) {
             result.diagnostic
                 = QStringLiteral( "Malformed ADB track-devices snapshot line %1: expected a "
-                                  "serial and state separated by a tab." )
+                                  "serial and state separated by whitespace." )
                       .arg( lineNumber );
             return result;
         }
 
-        const auto serial = line.left( separator ).trimmed();
-        const auto details = line.mid( separator + 1 ).simplified();
-        const auto parts = details.split( ' ' );
-        if ( serial.isEmpty() || parts.isEmpty() || parts.front().isEmpty() ) {
-            result.diagnostic
-                = QStringLiteral( "Malformed ADB track-devices snapshot line %1: serial or state "
-                                  "is empty." )
-                      .arg( lineNumber );
-            return result;
-        }
-
+        const auto& serial = parts.front();
         const auto serialBytes = serial.toStdString();
         if ( std::any_of( result.devices.begin(), result.devices.end(),
                           [ &serialBytes ]( const auto& device ) {
@@ -97,9 +87,9 @@ TrackedDevicesParseResult parseTrackedDevices( const QByteArray& payload )
 
         AdbDeviceInfo device;
         device.serial = serialBytes;
-        device.stateText = parts.front().toStdString();
-        device.state = stateFromText( parts.front() );
-        for ( decltype( parts.size() ) partIndex = 1; partIndex < parts.size(); ++partIndex ) {
+        device.stateText = parts.at( 1 ).toStdString();
+        device.state = stateFromText( parts.at( 1 ) );
+        for ( decltype( parts.size() ) partIndex = 2; partIndex < parts.size(); ++partIndex ) {
             const auto& part = parts.at( partIndex );
             if ( part.startsWith( QStringLiteral( "product:" ) ) ) {
                 device.product = part.mid( 8 ).replace( '_', ' ' ).toStdString();

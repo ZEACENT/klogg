@@ -643,6 +643,109 @@ jobs:
             },
         )
 
+    def test_windows_test_diagnostics_contract_resolves_shared_steps(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(MODULE.windows_test_diagnostics_issues(workflow), [])
+
+    def test_windows_test_diagnostics_contract_rejects_broken_failure_path(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutations = {
+            "conditional test continuation": (
+                "        continue-on-error: true\n\n"
+                "      - name: Collect Windows diagnostics on test failure\n",
+                "        continue-on-error: ${{ matrix.config.os == 'windows-2022' }}\n\n"
+                "      - name: Collect Windows diagnostics on test failure\n",
+            ),
+            "disabled test step": (
+                "        id: run-tests\n"
+                "        # Keep the job alive",
+                "        id: run-tests\n"
+                "        if: false\n"
+                "        # Keep the job alive",
+            ),
+            "normal collection status guard": (
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
+                "        continue-on-error: true\n"
+                "        shell: pwsh\n",
+                "        if: ${{ steps.run-tests.outcome == 'failure' }}\n"
+                "        continue-on-error: true\n"
+                "        shell: pwsh\n",
+            ),
+            "normal upload status guard": (
+                "      - name: Upload Windows diagnostics artifact\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n",
+                "      - name: Upload Windows diagnostics artifact\n"
+                "        if: ${{ steps.run-tests.outcome == 'failure' }}\n",
+            ),
+            "normal collector contents": (
+                '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+                '          $dumpDir = Join-Path $workspace "build_root\\missing_dumps"\n',
+            ),
+            "normal upload action": (
+                "      - name: Upload Windows diagnostics artifact\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
+                "        uses: actions/upload-artifact@",
+                "      - name: Upload Windows diagnostics artifact\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
+                "        uses: example/not-an-upload@",
+            ),
+            "normal upload path": (
+                "          path: '${{ github.workspace }}\\build_root\\diagnostics\\**\\*'\n",
+                "          path: '${{ github.workspace }}\\build_root\\missing\\**\\*'\n",
+            ),
+            "asan collection continuation": (
+                "      - name: Collect Windows ASan diagnostics\n"
+                "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n"
+                "        continue-on-error: true\n",
+                "      - name: Collect Windows ASan diagnostics\n"
+                "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n",
+            ),
+            "final failure status guard": (
+                "      - name: Fail when tests fail\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n",
+                "      - name: Fail when tests fail\n"
+                "        if: ${{ steps.run-tests.outcome == 'failure' }}\n",
+            ),
+            "strict final failure": (
+                "      - name: Fail when tests fail\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
+                "        shell: sh\n"
+                "        run: exit 1\n",
+                "      - name: Fail when tests fail\n"
+                "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
+                "        continue-on-error: true\n"
+                "        shell: sh\n"
+                "        run: exit 1\n",
+            ),
+        }
+        for label, (old, new) in mutations.items():
+            with self.subTest(label=label):
+                mutated = workflow.replace(old, new, 1)
+                self.assertNotEqual(mutated, workflow)
+                self.assertTrue(MODULE.windows_test_diagnostics_issues(mutated))
+
+    def test_windows_test_diagnostics_contract_checks_each_alias(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "    steps: *windows_steps\n\n  WindowsAsan:",
+            "    steps: []\n\n  WindowsAsan:",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.windows_test_diagnostics_issues(mutated)
+        self.assertTrue(any("WindowsX86" in issue for issue in issues))
+
+    def test_windows_test_diagnostics_contract_ignores_unrelated_steps(self):
+        workflow = """\
+jobs:
+  Other:
+    steps: &other_steps
+      - uses: ./.github/actions/agent-run-tests
+  OtherAlias:
+    steps: *other_steps
+"""
+        self.assertEqual(MODULE.windows_test_diagnostics_issues(workflow), [])
+
     def test_unknown_or_spoofed_steps_aliases_fail_closed(self):
         unknown = """\
 jobs:

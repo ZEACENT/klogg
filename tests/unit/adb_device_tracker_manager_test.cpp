@@ -55,6 +55,7 @@ using DomainAdbDeviceInfo = klogg::livecapture::adb::AdbDeviceInfo;
 using DomainAdbDeviceState = klogg::livecapture::adb::AdbDeviceState;
 
 constexpr std::uint32_t SupportedProtocolVersion = 0x29u;
+constexpr auto AdbLongSerialFieldWidth = 22;
 constexpr auto FirstServerIdentity = "adb-server:first";
 constexpr auto ReplacementServerIdentity = "adb-server:replacement";
 
@@ -609,19 +610,27 @@ void requireKnownDevices( const AdbInfrastructureManager& manager,
     }
 }
 
+QByteArray trackDevicesLongRecord( const QByteArray& serial, const QByteArray& details )
+{
+    return serial.leftJustified( AdbLongSerialFieldWidth, ' ' ) + ' ' + details + '\n';
+}
+
 QByteArray firstDeviceSnapshot()
 {
-    return QByteArrayLiteral(
-        "online-1\tdevice product:foo model:Pixel_9 device:tokay transport_id:1\n"
-        "locked-2\tunauthorized usb:1-2 transport_id:2\n"
-        "sleeping-3\toffline transport_id:3\n" );
+    return trackDevicesLongRecord(
+               QByteArrayLiteral( "online-1" ),
+               QByteArrayLiteral( "device product:foo model:Pixel_9 device:tokay transport_id:1" ) )
+           + trackDevicesLongRecord( QByteArrayLiteral( "locked-2" ),
+                                     QByteArrayLiteral( "unauthorized usb:1-2 transport_id:2" ) )
+           + trackDevicesLongRecord( QByteArrayLiteral( "sleeping-3" ),
+                                     QByteArrayLiteral( "offline transport_id:3" ) );
 }
 
 } // namespace
 
 TEST_CASE( "shared ADB tracker starts only after infrastructure readiness and publishes typed "
            "track-devices snapshots",
-           "[livecapture][adb][tracker][manager][snapshot]" )
+           "[livecapture][adb][tracker][manager][snapshot][parse][long-text]" )
 {
     ManagerHarness harness;
     auto lease = harness.manager.acquireLease();
@@ -637,17 +646,23 @@ TEST_CASE( "shared ADB tracker starts only after infrastructure readiness and pu
     REQUIRE( drainEventsUntil( [ &harness ] { return harness.server.requestCount() == 1; } ) );
     REQUIRE( harness.server.requestAt( 0 ) == QByteArrayLiteral( "host:track-devices-l" ) );
     harness.server.sendTrackAccepted( 0, firstDeviceSnapshot() );
-    REQUIRE( drainEventsUntil(
-        [ &harness ] { return harness.manager.snapshot().devices.devices.size() == 3u; } ) );
+    REQUIRE( drainEventsUntil( [ &harness ] {
+        const auto snapshot = harness.manager.snapshot();
+        return snapshot.devices.devices.size() == 3u || snapshot.error.has_value();
+    } ) );
 
     const auto snapshot = harness.manager.snapshot();
+    const auto diagnostic
+        = snapshot.error.has_value() ? snapshot.error->nativeDetail : std::string{};
+    INFO( diagnostic );
+    REQUIRE_FALSE( snapshot.error.has_value() );
+    REQUIRE( snapshot.devices.devices.size() == 3u );
     CHECK( snapshot.generation == managerGeneration );
     CHECK( snapshot.infrastructureEpoch > 0u );
     CHECK( snapshot.devices.generation == managerGeneration );
     CHECK( snapshot.devices.infrastructureEpoch == snapshot.infrastructureEpoch );
     CHECK( snapshot.devices.requestGeneration > 0u );
     CHECK( snapshot.infrastructure.status == InfrastructureStatus::Ready );
-    CHECK_FALSE( snapshot.error.has_value() );
 
     const auto& online = deviceWithSerial( snapshot.devices.devices, "online-1" );
     CHECK( online.state == DomainAdbDeviceState::Online );
@@ -664,6 +679,36 @@ TEST_CASE( "shared ADB tracker starts only after infrastructure readiness and pu
     const auto& offline = deviceWithSerial( snapshot.devices.devices, "sleeping-3" );
     CHECK( offline.state == DomainAdbDeviceState::Offline );
     CHECK( offline.stateText == "offline" );
+}
+
+TEST_CASE( "track-devices-l parsing treats the serial field width as a minimum",
+           "[livecapture][adb][tracker][parse][long-text]" )
+{
+    ManagerHarness harness;
+    auto lease = harness.acquireAndReachReady();
+    const auto serial = QByteArrayLiteral( "serial-longer-than-twenty-two" );
+
+    harness.server.sendTrackAccepted(
+        0, trackDevicesLongRecord( serial,
+                                   QByteArrayLiteral( "device model:Pixel_10 transport_id:17" ) ) );
+    REQUIRE( drainEventsUntil( [ &harness ] {
+        const auto snapshot = harness.manager.snapshot();
+        return snapshot.devices.devices.size() == 1u || snapshot.error.has_value();
+    } ) );
+
+    const auto snapshot = harness.manager.snapshot();
+    const auto diagnostic
+        = snapshot.error.has_value() ? snapshot.error->nativeDetail : std::string{};
+    INFO( diagnostic );
+    REQUIRE_FALSE( snapshot.error.has_value() );
+    REQUIRE( snapshot.devices.devices.size() == 1u );
+    const auto& device = snapshot.devices.devices.front();
+    CHECK( device.serial == serial.toStdString() );
+    CHECK( device.state == DomainAdbDeviceState::Online );
+    CHECK( device.stateText == "device" );
+    CHECK( device.model == "Pixel 10" );
+    REQUIRE( device.transportId.has_value() );
+    CHECK( *device.transportId == 17u );
 }
 
 TEST_CASE( "unchanged ADB snapshots coalesce while detach and attach transitions publish",
@@ -687,8 +732,11 @@ TEST_CASE( "unchanged ADB snapshots coalesce while detach and attach transitions
     CHECK( harness.snapshots.snapshots.size() == eventCountAfterInitial );
     CHECK( harness.manager.snapshot().devices.requestGeneration == requestGeneration );
 
-    const auto detached = QByteArrayLiteral( "online-1\tdevice model:Pixel_9 transport_id:1\n"
-                                             "sleeping-3\toffline transport_id:3\n" );
+    const auto detached
+        = trackDevicesLongRecord( QByteArrayLiteral( "online-1" ),
+                                  QByteArrayLiteral( "device model:Pixel_9 transport_id:1" ) )
+          + trackDevicesLongRecord( QByteArrayLiteral( "sleeping-3" ),
+                                    QByteArrayLiteral( "offline transport_id:3" ) );
     harness.server.sendSnapshot( 0, detached );
     REQUIRE( drainEventsUntil(
         [ &harness ] { return harness.manager.snapshot().devices.devices.size() == 2u; } ) );
@@ -710,9 +758,13 @@ TEST_CASE( "latest tracked snapshot feeds discovery coordinator and selects an o
     ManagerHarness harness;
     auto lease = harness.acquireAndReachReady();
     harness.server.sendTrackAccepted(
-        0, QByteArrayLiteral( "offline-first\toffline transport_id:1\n"
-                              "locked-second\tunauthorized transport_id:2\n"
-                              "online-third\tdevice model:Pixel_8 transport_id:3\n" ) );
+        0, trackDevicesLongRecord( QByteArrayLiteral( "offline-first" ),
+                                   QByteArrayLiteral( "offline transport_id:1" ) )
+               + trackDevicesLongRecord( QByteArrayLiteral( "locked-second" ),
+                                         QByteArrayLiteral( "unauthorized transport_id:2" ) )
+               + trackDevicesLongRecord(
+                   QByteArrayLiteral( "online-third" ),
+                   QByteArrayLiteral( "device model:Pixel_8 transport_id:3" ) ) );
     REQUIRE( drainEventsUntil(
         [ &harness ] { return harness.manager.snapshot().devices.devices.size() == 3u; } ) );
 
@@ -732,7 +784,10 @@ TEST_CASE( "latest tracked snapshot feeds discovery coordinator and selects an o
     REQUIRE_FALSE( coordinator.currentError().has_value() );
 
     harness.server.sendSnapshot(
-        0, QByteArrayLiteral( "offline-only\toffline\nlocked-only\tunauthorized\n" ) );
+        0, trackDevicesLongRecord( QByteArrayLiteral( "offline-only" ),
+                                   QByteArrayLiteral( "offline" ) )
+               + trackDevicesLongRecord( QByteArrayLiteral( "locked-only" ),
+                                         QByteArrayLiteral( "unauthorized" ) ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
         return harness.manager.snapshot().devices.devices.size() == 2u
                && harness.manager.snapshot().devices.devices.front().serial == "offline-only";
@@ -767,7 +822,8 @@ TEST_CASE( "track FAIL and EOF use bounded injected reconnect without withdrawin
 
     Q_EMIT harness.client.hostReplyReceived(
         firstOperation.generation, firstOperation.operationId,
-        QByteArrayLiteral( "stale-device\tdevice transport_id:99\n" ) );
+        trackDevicesLongRecord( QByteArrayLiteral( "stale-device" ),
+                                QByteArrayLiteral( "device transport_id:99" ) ) );
     requireKnownDevices( harness.manager, { "online-1", "locked-2", "sleeping-3" } );
 
     harness.server.sendFailure( 1, QByteArrayLiteral( "track service replaced" ) );
@@ -795,7 +851,8 @@ TEST_CASE( "track FAIL and EOF use bounded injected reconnect without withdrawin
     harness.trackerScheduler.fire( AdbServerScheduleKind::ReconnectBackoff );
     REQUIRE( drainEventsUntil( [ &harness ] { return harness.server.requestCount() == 3; } ) );
     harness.server.sendTrackAccepted(
-        2, QByteArrayLiteral( "replacement-device\tdevice model:Pixel_10 transport_id:7\n" ) );
+        2, trackDevicesLongRecord( QByteArrayLiteral( "replacement-device" ),
+                                   QByteArrayLiteral( "device model:Pixel_10 transport_id:7" ) ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
         const auto snapshot = harness.manager.snapshot();
         const auto& devices = snapshot.devices.devices;
@@ -813,7 +870,9 @@ TEST_CASE( "malformed authoritative track snapshots retain known devices and rec
         [ &harness ] { return harness.manager.snapshot().devices.devices.size() == 3u; } ) );
 
     harness.server.sendSnapshot(
-        0, QByteArrayLiteral( "online-1\tdevice transport_id:1\nmissing-tab-separator\n" ) );
+        0, trackDevicesLongRecord( QByteArrayLiteral( "online-1" ),
+                                   QByteArrayLiteral( "device transport_id:1" ) )
+               + QByteArrayLiteral( "missing-whitespace-separator\n" ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
         return harness.trackerScheduler.activeCount( AdbServerScheduleKind::ReconnectBackoff )
                == 1u;
@@ -824,7 +883,9 @@ TEST_CASE( "malformed authoritative track snapshots retain known devices and rec
     CHECK( harness.manager.snapshot().error->code == "adb-track-protocol" );
     CHECK( harness.manager.snapshot().error->scope == ErrorScope::Service );
     CHECK( harness.manager.snapshot().error->retryPolicy == RetryPolicy::Backoff );
-    CHECK( harness.manager.snapshot().error->nativeDetail.find( "line 2" ) != std::string::npos );
+    CHECK( harness.manager.snapshot().error->nativeDetail
+           == "Malformed ADB track-devices snapshot line 2: expected a serial and state separated "
+              "by whitespace." );
 }
 
 TEST_CASE( "server replacement advances infrastructure epoch and ignores stale tracker callbacks",
@@ -852,11 +913,13 @@ TEST_CASE( "server replacement advances infrastructure epoch and ignores stale t
 
     Q_EMIT harness.client.hostReplyReceived(
         firstOperation.generation, firstOperation.operationId,
-        QByteArrayLiteral( "stale-after-replacement\tdevice transport_id:88\n" ) );
+        trackDevicesLongRecord( QByteArrayLiteral( "stale-after-replacement" ),
+                                QByteArrayLiteral( "device transport_id:88" ) ) );
     requireKnownDevices( harness.manager, { "online-1", "locked-2", "sleeping-3" } );
 
     harness.server.sendTrackAccepted(
-        1, QByteArrayLiteral( "current-after-replacement\tdevice transport_id:9\n" ) );
+        1, trackDevicesLongRecord( QByteArrayLiteral( "current-after-replacement" ),
+                                   QByteArrayLiteral( "device transport_id:9" ) ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
         const auto snapshot = harness.manager.snapshot();
         const auto& devices = snapshot.devices.devices;
@@ -901,7 +964,8 @@ TEST_CASE( "supervisor loss cancels tracking and publishes a structured infrastr
     Q_EMIT harness.client.hostReplyReceived(
         harness.clientOperations.operations.front().generation,
         harness.clientOperations.operations.front().operationId,
-        QByteArrayLiteral( "stale-after-loss\tdevice transport_id:5\n" ) );
+        trackDevicesLongRecord( QByteArrayLiteral( "stale-after-loss" ),
+                                QByteArrayLiteral( "device transport_id:5" ) ) );
     requireKnownDevices( harness.manager, { "online-1", "locked-2", "sleeping-3" } );
     CHECK( harness.clientOperations.operations.size() == operationCount );
 }
@@ -1100,7 +1164,8 @@ TEST_CASE(
 
     REQUIRE( drainEventsUntil( [ &harness ] { return harness.server.requestCount() == 2; } ) );
     harness.server.sendTrackAccepted(
-        1, QByteArrayLiteral( "replacement-online\tdevice transport_id:12\n" ) );
+        1, trackDevicesLongRecord( QByteArrayLiteral( "replacement-online" ),
+                                   QByteArrayLiteral( "device transport_id:12" ) ) );
     REQUIRE( drainEventsUntil( [ &harness ] {
         const auto selected = harness.manager.defaultOnlineDevice();
         return selected.has_value() && selected->serial == "replacement-online";

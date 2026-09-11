@@ -127,9 +127,9 @@ private:
     klogg::livecapture::StopDisposition retiringDisposition_{
         klogg::livecapture::StopDisposition::DiscardPending };
     bool stopRequested_{ false };
-    StoppedCallback stoppedCallback_;
-    FinalizedCallback finalizedCallback_;
-    void finalizeInput( Generation generation );
+    std::shared_ptr<StoppedCallback> stoppedCallback_;
+    std::shared_ptr<FinalizedCallback> finalizedCallback_;
+    std::optional<klogg::livecapture::CaptureDeliveryResult> finalizeInput();
     void beginDeliveryGeneration( Generation generation );
     void settleOfferedDelivery( Generation generation, DeliverySequence sequence );
     void completeRetirementIfSettled( Generation generation );
