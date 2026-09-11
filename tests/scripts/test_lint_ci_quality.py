@@ -681,6 +681,10 @@ jobs:
                 '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
                 '          $dumpDir = Join-Path $workspace "build_root\\missing_dumps"\n',
             ),
+            "commented normal collector contents": (
+                '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+                '          # $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+            ),
             "normal upload action": (
                 "      - name: Upload Windows diagnostics artifact\n"
                 "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
@@ -699,6 +703,10 @@ jobs:
                 "        continue-on-error: true\n",
                 "      - name: Collect Windows ASan diagnostics\n"
                 "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n",
+            ),
+            "comment-spoofed asan collector contents": (
+                '          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {\n',
+                '          foreach ($name in @("klogg_vectorscan_tests.exe", "missing.pdb")) { # klogg_vectorscan_tests.pdb\n',
             ),
             "final failure status guard": (
                 "      - name: Fail when tests fail\n"

@@ -215,6 +215,15 @@ def strip_yaml_comment(value: str) -> str:
     return value.strip()
 
 
+def active_script_content(value: str) -> str:
+    active_lines = []
+    for line in value.splitlines():
+        active = strip_yaml_comment(line)
+        if active:
+            active_lines.append(active)
+    return "\n".join(active_lines)
+
+
 def scalar(value: str) -> str:
     value = strip_yaml_comment(value).strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
@@ -249,12 +258,7 @@ def workflow_run_blocks(text: str) -> list[str]:
             continue
         indent = len(entry.group("indent"))
         value = yaml_value(lines, index, entry.group("value"), indent)
-        active_lines = []
-        for run_line in value.splitlines():
-            active = strip_yaml_comment(run_line)
-            if active:
-                active_lines.append(active)
-        blocks.append("\n".join(active_lines))
+        blocks.append(active_script_content(value))
     return blocks
 
 
@@ -726,7 +730,7 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
             fields = fields_by_label[label]
             if fields.get("continue-on-error") != "true":
                 issues.append(f"CI build job {job} step {label} must be best-effort")
-            run = fields.get("run", "")
+            run = active_script_content(fields.get("run", ""))
             if fields.get("shell") != "pwsh" or any(
                 marker not in run for marker in required_markers
             ):
