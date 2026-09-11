@@ -2143,10 +2143,11 @@ jobs:
         id: run-tests
         # Keep the job alive only long enough to collect diagnostics; the final
         # outcome gate below still fails the job when this step fails.
-        continue-on-error: ${{ matrix.config.os == 'windows-2022' }}
+        continue-on-error: true
 
       - name: Collect Windows diagnostics on test failure
-        if: ${{ steps.run-tests.outcome == 'failure' }}
+        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
+        continue-on-error: true
         shell: pwsh
         run: |
           $workspace = $env:GITHUB_WORKSPACE
@@ -2179,7 +2180,7 @@ jobs:
             Format-List | Out-File -FilePath (Join-Path $diagRoot "eventlog_system.txt") -Width 300
 
       - name: Upload Windows diagnostics artifact
-        if: ${{ steps.run-tests.outcome == 'failure' }}
+        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           # Use label (defined on every config, including the asan leg which
@@ -2190,7 +2191,8 @@ jobs:
           if-no-files-found: warn
 
       - name: Collect Windows ASan diagnostics
-        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        continue-on-error: true
         shell: pwsh
         run: |
           $workspace = $env:GITHUB_WORKSPACE
@@ -2211,7 +2213,7 @@ jobs:
           }
 
       - name: Upload Windows ASan diagnostics artifact
-        if: ${{ matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
+        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows-x64-asan-diagnostics
@@ -2219,7 +2221,7 @@ jobs:
           if-no-files-found: error
 
       - name: Fail when tests fail
-        if: ${{ steps.run-tests.outcome == 'failure' }}
+        if: ${{ always() && steps.run-tests.outcome == 'failure' }}
         shell: sh
         run: exit 1
 

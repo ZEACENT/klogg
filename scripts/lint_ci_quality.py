@@ -603,6 +603,151 @@ def workflow_job_steps(
     return direct_steps
 
 
+WINDOWS_TEST_JOBS = ("WindowsPackages", "WindowsX86", "WindowsAsan")
+WINDOWS_TEST_FAILURE_CONDITION = "${{ always() && steps.run-tests.outcome == 'failure' }}"
+WINDOWS_ASAN_FAILURE_CONDITION = (
+    "${{ always() && matrix.config.sanitizer == 'address' && "
+    "steps.run-tests.outcome == 'failure' }}"
+)
+WINDOWS_DIAGNOSTIC_RUN_MARKERS = {
+    "Collect Windows diagnostics on test failure": (
+        "build_root\\Testing\\Temporary",
+        "build_root\\crash_dumps",
+        "klogg_itests.pdb",
+        "eventlog_application.txt",
+    ),
+    "Collect Windows ASan diagnostics": (
+        "build_root\\asan_diagnostics",
+        "klogg_vectorscan_tests.pdb",
+    ),
+}
+WINDOWS_DIAGNOSTIC_UPLOADS = {
+    "Upload Windows diagnostics artifact": {
+        "name": "windows-${{ matrix.config.label }}-test-diagnostics",
+        "path": "${{ github.workspace }}\\build_root\\diagnostics\\**\\*",
+        "if-no-files-found": "warn",
+    },
+    "Upload Windows ASan diagnostics artifact": {
+        "name": "windows-x64-asan-diagnostics",
+        "path": "${{ github.workspace }}\\build_root\\asan_diagnostics\\**\\*",
+        "if-no-files-found": "error",
+    },
+}
+
+
+def windows_test_diagnostics_issues(text: str) -> list[str]:
+    """Validate the fail-closed Windows test diagnostics sequence."""
+    issues: list[str] = []
+    steps_by_job = workflow_job_steps(text)
+    expected = (
+        ("run-tests", "uses", "./.github/actions/agent-run-tests"),
+        (
+            "Collect Windows diagnostics on test failure",
+            "name",
+            "Collect Windows diagnostics on test failure",
+        ),
+        (
+            "Upload Windows diagnostics artifact",
+            "name",
+            "Upload Windows diagnostics artifact",
+        ),
+        (
+            "Collect Windows ASan diagnostics",
+            "name",
+            "Collect Windows ASan diagnostics",
+        ),
+        (
+            "Upload Windows ASan diagnostics artifact",
+            "name",
+            "Upload Windows ASan diagnostics artifact",
+        ),
+        ("Fail when tests fail", "name", "Fail when tests fail"),
+    )
+
+    for job in WINDOWS_TEST_JOBS:
+        if job not in steps_by_job:
+            continue
+        parsed = [workflow_step_fields(step) for step in steps_by_job[job]]
+        selected: list[
+            tuple[int, dict[str, str], dict[str, dict[str, str]]]
+        ] = []
+        for label, key, value in expected:
+            matches = [
+                (index, fields, children)
+                for index, (fields, children) in enumerate(parsed)
+                if fields.get(key) == value
+                and (label != "run-tests" or fields.get("id") == "run-tests")
+            ]
+            if len(matches) != 1:
+                issues.append(
+                    f"CI build job {job} must define exactly one Windows test diagnostics step {label}"
+                )
+                continue
+            selected.append(matches[0])
+        if len(selected) != len(expected):
+            continue
+        if [index for index, _, _ in selected] != sorted(
+            index for index, _, _ in selected
+        ):
+            issues.append(f"CI build job {job} Windows test diagnostics steps are out of order")
+
+        fields_by_label = {
+            label: fields for (label, _, _), (_, fields, _) in zip(expected, selected)
+        }
+        children_by_label = {
+            label: children for (label, _, _), (_, _, children) in zip(expected, selected)
+        }
+        run_tests = fields_by_label["run-tests"]
+        if run_tests.get("continue-on-error") != "true":
+            issues.append(
+                f"CI build job {job} run-tests must continue on error so diagnostics can run"
+            )
+        if "if" in run_tests:
+            issues.append(f"CI build job {job} run-tests must execute unconditionally")
+
+        for label in (
+            "Collect Windows diagnostics on test failure",
+            "Upload Windows diagnostics artifact",
+            "Fail when tests fail",
+        ):
+            if fields_by_label[label].get("if") != WINDOWS_TEST_FAILURE_CONDITION:
+                issues.append(
+                    f"CI build job {job} step {label} must use {WINDOWS_TEST_FAILURE_CONDITION}"
+                )
+        for label in (
+            "Collect Windows ASan diagnostics",
+            "Upload Windows ASan diagnostics artifact",
+        ):
+            if fields_by_label[label].get("if") != WINDOWS_ASAN_FAILURE_CONDITION:
+                issues.append(
+                    f"CI build job {job} step {label} must use {WINDOWS_ASAN_FAILURE_CONDITION}"
+                )
+        for label, required_markers in WINDOWS_DIAGNOSTIC_RUN_MARKERS.items():
+            fields = fields_by_label[label]
+            if fields.get("continue-on-error") != "true":
+                issues.append(f"CI build job {job} step {label} must be best-effort")
+            run = fields.get("run", "")
+            if fields.get("shell") != "pwsh" or any(
+                marker not in run for marker in required_markers
+            ):
+                issues.append(f"CI build job {job} step {label} must collect diagnostics")
+        for label, expected_with in WINDOWS_DIAGNOSTIC_UPLOADS.items():
+            if not fields_by_label[label].get("uses", "").startswith(
+                "actions/upload-artifact@"
+            ) or children_by_label[label].get("with") != expected_with:
+                issues.append(f"CI build job {job} step {label} must upload diagnostics")
+        failure = fields_by_label["Fail when tests fail"]
+        if (
+            failure.get("shell") != "sh"
+            or failure.get("run") != "exit 1"
+            or failure.get("continue-on-error") not in {None, "false"}
+        ):
+            issues.append(
+                f"CI build job {job} must explicitly fail after collecting test diagnostics"
+            )
+    return issues
+
+
 def workflow_artifact_records(
     text: str,
 ) -> dict[str, list[tuple[str, str, str | None]]]:
@@ -772,6 +917,7 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     try:
         artifact_records = workflow_artifact_records(text)
         artifacts = workflow_artifact_actions(text)
+        issues.extend(windows_test_diagnostics_issues(text))
     except ValueError as error:
         issues.append(str(error))
         return issues

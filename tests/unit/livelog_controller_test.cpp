@@ -368,10 +368,16 @@ TEST_CASE( "Stop completion cannot hide a terminal capture finalization failure"
     const auto generation = controller.snapshot().generation;
     controller.streamBytesReceived( generation, QByteArrayLiteral( "partial" ) );
     controller.stopRequested( live::StopDisposition::SettleAccepted );
+    unsigned notifications = 0u;
+    controller.setPresentationChangedCallback( [ & ]( auto presentation, auto ) {
+        ++notifications;
+        CHECK( presentation.status == live::PresentationStatus::Failed );
+    } );
     live::CaptureDeliveryResult failure;
     failure.disposition = live::DeliveryDisposition::Rejected;
     failure.failureCode = "capture-directory";
     controller.inputTerminated( generation, failure );
+    CHECK( notifications == 1u );
     controller.stopCompleted( generation );
     REQUIRE( controller.snapshot().source.failure.has_value() );
     CHECK( controller.snapshot().source.status == live::SourceStatus::Failed );
@@ -587,6 +593,47 @@ TEST_CASE( "Automatic retirement waits for the stop barrier and reports real rec
     controller.streamReadArmed( replacementGeneration );
     REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
     CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "Capture failure interruption reports source-specific reconnect integrity",
+           "[livelog-controller][capture][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    live::CaptureDeliveryResult outcome;
+    outcome.disposition = live::DeliveryDisposition::Complete;
+    outcome.acceptedBytes = 5u;
+    outcome.notificationFailed = true;
+    effects.reportedResult = outcome;
+
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "lost\n" ) );
+
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Failed );
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+
+    controller.stopCompleted( retiredGeneration );
+    controller.reconnectRequested();
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+    const auto hasReplayEvent
+        = std::any_of( controller.spec().integrity.recentEvents.cbegin(),
+                       controller.spec().integrity.recentEvents.cend(),
+                       []( const auto& event ) { return event.code == "source-replay-possible"; } );
+    CHECK( hasReplayEvent == !useIos );
 }
 
 TEST_CASE( "Append exceptions are terminal and do not escape or replay buffered deliveries",

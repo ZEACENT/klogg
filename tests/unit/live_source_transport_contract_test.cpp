@@ -539,6 +539,104 @@ TEST_CASE( "Source retirement contains finalization callback exceptions and rema
     CHECK( transport->startGenerations.size() == 2u );
 }
 
+TEST_CASE( "Source retirement preserves its stopped observer across finalization reentrancy",
+           "[livecapture][transport][finalization][reentrant][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    unsigned originalStopped = 0u;
+    unsigned replacementStopped = 0u;
+    std::vector<std::pair<Generation, std::uint64_t>> acknowledgements;
+    std::optional<Generation> firstGeneration;
+    source.setControllerCallbacks(
+        [ & ]( Generation generation, const QByteArray& bytes, auto settled ) {
+            (void)source.appendTransportBytes( generation, bytes );
+            settled();
+        },
+        {}, {} );
+    source.setStoppedCallback( [ & ]( Generation generation, std::uint64_t discarded ) {
+        ++originalStopped;
+        acknowledgements.emplace_back( generation, discarded );
+    } );
+    source.setFinalizedCallback( [ & ]( Generation generation, const auto& ) {
+        if ( firstGeneration == generation ) {
+            source.setStoppedCallback( [ & ]( Generation nextGeneration, std::uint64_t discarded ) {
+                ++replacementStopped;
+                acknowledgements.emplace_back( nextGeneration, discarded );
+            } );
+        }
+    } );
+
+    REQUIRE( source.connectSource() );
+    auto* const transport = factory.lastTransport;
+    REQUIRE( transport != nullptr );
+    firstGeneration = transport->startGenerations.back();
+    transport->publishBytes( *firstGeneration, QByteArrayLiteral( "first\n" ) );
+    transport->deferStop = true;
+    source.cancelTransport( *firstGeneration, klogg::livecapture::StopDisposition::SettleAccepted );
+    transport->publishStopped( *firstGeneration, 7u );
+
+    REQUIRE( acknowledgements.size() == 1u );
+    CHECK( acknowledgements.front() == std::make_pair( *firstGeneration, std::uint64_t{ 7u } ) );
+    CHECK( originalStopped == 1u );
+    CHECK( replacementStopped == 0u );
+    CHECK( source.isInputTerminated() );
+
+    REQUIRE( source.connectSource() );
+    const auto secondGeneration = transport->startGenerations.back();
+    REQUIRE( secondGeneration != *firstGeneration );
+    source.cancelTransport( secondGeneration, klogg::livecapture::StopDisposition::SettleAccepted );
+    transport->publishStopped( secondGeneration, 3u );
+
+    REQUIRE( acknowledgements.size() == 2u );
+    CHECK( acknowledgements.back() == std::make_pair( secondGeneration, std::uint64_t{ 3u } ) );
+    CHECK( originalStopped == 1u );
+    CHECK( replacementStopped == 1u );
+}
+
+TEST_CASE( "Retained retirement callback is harmless after observer destruction",
+           "[livecapture][transport][finalization][lifetime][review-red]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    auto observer = std::make_shared<unsigned>( 0u );
+    const std::weak_ptr<unsigned> weakObserver = observer;
+    unsigned callbackAttempts = 0u;
+    unsigned liveObserverCalls = 0u;
+    source.setStoppedCallback(
+        [ weakObserver, &callbackAttempts, &liveObserverCalls ]( Generation, std::uint64_t ) {
+            ++callbackAttempts;
+            if ( const auto locked = weakObserver.lock() ) {
+                ++*locked;
+                ++liveObserverCalls;
+            }
+        } );
+    source.setFinalizedCallback( [ & ]( Generation, const auto& ) {
+        observer.reset();
+        source.setStoppedCallback( {} );
+    } );
+
+    REQUIRE( source.connectSource() );
+    auto* const transport = factory.lastTransport;
+    REQUIRE( transport != nullptr );
+    const auto generation = transport->startGenerations.back();
+    transport->deferStop = true;
+    source.cancelTransport( generation, klogg::livecapture::StopDisposition::SettleAccepted );
+    transport->publishStopped( generation );
+
+    CHECK( weakObserver.expired() );
+    CHECK( callbackAttempts == 1u );
+    CHECK( liveObserverCalls == 0u );
+    CHECK( source.isInputTerminated() );
+    REQUIRE( source.connectSource() );
+}
+
 TEST_CASE( "Controller callback exceptions report unknown delivery before settlement",
            "[livecapture][transport][controller][review-red]" )
 {

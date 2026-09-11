@@ -691,15 +691,21 @@ void AdbLogcatSource::completeRetirementIfSettled( Generation generation )
         = state_ == State::Error
           && retiringDisposition_ == klogg::livecapture::StopDisposition::SettleAccepted;
     const QPointer<AdbLogcatSource> guard( this );
+    // Callback registration changes apply to future retirements. Snapshot both
+    // observers before finalization can emit any external signal so this generation
+    // cannot be lost or delivered to a replacement observer through reentrancy.
+    const auto finalizedCallback = finalizedCallback_;
+    const auto stoppedCallback = stoppedCallback_;
 
     // Only real producer completion plus settlement of every registered delivery
-    // seals partial input. Produce the capture result before entering any external
-    // observer; production or observer failure must not own or strand retirement.
+    // seals partial input. Production or observer failure must not own or strand
+    // retirement.
     std::optional<klogg::livecapture::CaptureDeliveryResult> finalization;
     try { finalization = finalizeInput(); }
     catch ( ... ) { LOG_ERROR << "Failed to finalize live source input"; }
-    if ( !guard ) { return; }
-    const auto finalizedCallback = guard->finalizedCallback_;
+    if ( !guard ) {
+        return;
+    }
     if ( finalization && finalizedCallback ) {
         try { ( *finalizedCallback )( generation, *finalization ); }
         catch ( ... ) { LOG_ERROR << "Failed to report live source finalization"; }
@@ -709,7 +715,6 @@ void AdbLogcatSource::completeRetirementIfSettled( Generation generation )
     // Shared observer handles make callback capture non-throwing. Clear the source-
     // owned retirement barrier before notifications so every surviving source is
     // reusable even when an observer throws or requests another lifecycle action.
-    const auto stoppedCallback = guard->stoppedCallback_;
     guard->retiringGeneration_.reset();
     guard->stopRequested_ = false;
     guard->deliverySettlement_.reset();

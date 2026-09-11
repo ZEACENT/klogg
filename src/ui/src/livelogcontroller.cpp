@@ -461,7 +461,6 @@ void LiveLogController::streamDeliveryFailed(
     std::uint64_t offeredBytes )
 {
     settleDelivery( generation, result, offeredBytes );
-    notifyPresentationChanged();
 }
 
 void LiveLogController::streamStable( live::Generation generation )
@@ -536,6 +535,11 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
     pendingDispatches_.push_back(
         PendingDispatch{ event, bytes != nullptr ? std::optional<QByteArray>{ *bytes } : std::nullopt,
                          std::move( deliverySettled ) } );
+    drainPendingDispatches();
+}
+
+void LiveLogController::drainPendingDispatches()
+{
     if ( std::exchange( dispatching_, true ) ) {
         return;
     }
@@ -545,7 +549,6 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
             auto pending = std::move( pendingDispatches_.front() );
             pendingDispatches_.pop_front();
 
-            const auto previousSnapshot = snapshot_;
             auto transition = live::reduce( snapshot_, pending.event, config_.reducer );
             if ( !transition.accepted ) {
                 if ( pending.bytes ) {
@@ -565,8 +568,7 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
                 continue;
             }
 
-            snapshot_ = std::move( transition.snapshot );
-            observeIntegrityTransition( previousSnapshot );
+            commitAcceptedSnapshot( std::move( transition.snapshot ) );
             const auto* pendingBytes
                 = pending.bytes.has_value() ? &pending.bytes.value() : nullptr;
             for ( const auto& effect : transition.effects ) {
@@ -600,6 +602,13 @@ void LiveLogController::dispatch( const live::LiveStateEvent& event, const QByte
         throw;
     }
     dispatching_ = false;
+}
+
+void LiveLogController::commitAcceptedSnapshot( live::LiveStateSnapshot snapshot )
+{
+    const auto previousSnapshot = snapshot_;
+    snapshot_ = std::move( snapshot );
+    observeIntegrityTransition( previousSnapshot );
 }
 
 void LiveLogController::observeIntegrityTransition(
@@ -703,6 +712,28 @@ void LiveLogController::execute( const live::LiveStateEffect& effect, const QByt
 void LiveLogController::settleDelivery( live::Generation generation,
     const live::CaptureDeliveryResult& result, std::uint64_t offered )
 {
+    if ( dispatching_ ) {
+        settleDeliveryNow( generation, result, offered );
+        return;
+    }
+
+    dispatching_ = true;
+    try {
+        settleDeliveryNow( generation, result, offered );
+    } catch ( ... ) {
+        pendingDispatches_.clear();
+        dispatching_ = false;
+        throw;
+    }
+    dispatching_ = false;
+    drainPendingDispatches();
+    notifyPresentationChanged();
+}
+
+void LiveLogController::settleDeliveryNow( live::Generation generation,
+                                           const live::CaptureDeliveryResult& result,
+                                           std::uint64_t offered )
+{
     auto& integrity = spec_.integrity;
     const auto accepted = std::min( offered, result.acceptedBytes );
     addCount( integrity.acceptedBytes, accepted );
@@ -723,7 +754,7 @@ void LiveLogController::settleDelivery( live::Generation generation,
             live::RetryPolicy::Never, "The live capture could not accept all input safely.", {} },
         clock_->now() }, config_.reducer );
     if ( failure.accepted ) {
-        snapshot_ = std::move( failure.snapshot );
+        commitAcceptedSnapshot( std::move( failure.snapshot ) );
         for ( const auto& effect : failure.effects ) { execute( effect, nullptr ); }
     }
 }

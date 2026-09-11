@@ -93,7 +93,8 @@ klogg::livecapture::LiveSourceError outputBindingError( CaptureOutputError error
              {} };
 }
 
-class SessionLiveLogEffects final : public klogg::livelog::LiveLogControllerEffects {
+class SessionLiveLogEffects final : public klogg::livelog::LiveLogControllerEffects,
+                                    public std::enable_shared_from_this<SessionLiveLogEffects> {
 public:
     SessionLiveLogEffects(
         std::shared_ptr<AdbLogcatSource> source, klogg::livelog::LiveLogSessionSpec spec,
@@ -117,20 +118,34 @@ public:
         source_->setDeliveryFailedCallback( {} );
     }
 
-    void attach( klogg::livelog::LiveLogController& controller )
+    void attach( const std::shared_ptr<klogg::livelog::LiveLogController>& controller )
     {
-        controller_ = &controller;
-        source_->setFinalizedCallback( [ this ]( auto generation, const auto& result ) {
-            controller_->inputTerminated( generation, result );
-        } );
+        controller_ = controller.get();
+        const auto weakEffects = weak_from_this();
+        const std::weak_ptr<klogg::livelog::LiveLogController> weakController = controller;
+        source_->setFinalizedCallback(
+            [ weakEffects, weakController ]( auto generation, const auto& result ) {
+                const auto effects = weakEffects.lock();
+                const auto activeController = weakController.lock();
+                if ( !effects || !activeController ) {
+                    return;
+                }
+                activeController->inputTerminated( generation, result );
+            } );
         source_->setDeliveryFailedCallback(
             [ this ]( auto generation, const auto& result, std::uint64_t offeredBytes ) {
                 controller_->streamDeliveryFailed( generation, result,
                                                    offeredBytes );
             } );
-        source_->setStoppedCallback( [ this ]( auto generation, auto discarded ) {
-            controller_->stopCompleted( generation, discarded );
-        } );
+        source_->setStoppedCallback(
+            [ weakEffects, weakController ]( auto generation, auto discarded ) {
+                const auto effects = weakEffects.lock();
+                const auto activeController = weakController.lock();
+                if ( !effects || !activeController ) {
+                    return;
+                }
+                activeController->stopCompleted( generation, discarded );
+            } );
         persistenceConnection_ = QObject::connect(
             source_.get(), &AdbLogcatSource::capturePersistenceChanged, source_.get(),
             [ this ]( bool healthy, CaptureStore::PersistenceFailure error ) {
@@ -888,7 +903,7 @@ ViewInterface* Session::openAdbAlways( const AdbLogcatSessionData& sessionData,
         adbSource, liveSpec, adbInfrastructure_, iosCatalog_ );
     auto liveController = std::make_shared<klogg::livelog::LiveLogController>(
         liveSpec, controllerConfigFor( liveSpec ), *liveEffects );
-    liveEffects->attach( *liveController );
+    liveEffects->attach( liveController );
     const auto restoredOutputError = logData->captureOutputError();
     if ( restoredOutputError.has_value() ) {
         liveController->outputBindingChanged( klogg::livecapture::OutputBindingState::Degraded,

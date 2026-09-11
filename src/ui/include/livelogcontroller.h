@@ -172,10 +172,15 @@ private:
 
     void dispatch( const livecapture::LiveStateEvent& event, const QByteArray* bytes = nullptr,
                    DeliverySettledCallback deliverySettled = {} );
+    void drainPendingDispatches();
     void execute( const livecapture::LiveStateEffect& effect, const QByteArray* bytes );
+    void commitAcceptedSnapshot( livecapture::LiveStateSnapshot snapshot );
     void observeIntegrityTransition( const livecapture::LiveStateSnapshot& previousSnapshot );
     void settleDelivery( livecapture::Generation generation,
                          const livecapture::CaptureDeliveryResult& result, std::uint64_t offered );
+    void settleDeliveryNow( livecapture::Generation generation,
+                            const livecapture::CaptureDeliveryResult& result,
+                            std::uint64_t offered );
     livecapture::Timestamp retryDelay( unsigned attempt ) const;
     LiveSourceTransportConfig transportConfig() const;
     void cancelScheduledRetry();
