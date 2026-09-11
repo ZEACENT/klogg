@@ -123,19 +123,48 @@ if(KLOGG_ENABLE_IOS_NATIVE_STACK)
       libusbmuxd-2.0.dylib
       libimobiledevice-1.0.dylib
   )
+  set(_klogg_ios_native_direct_aliases
+      libcrypto.dylib
+      libssl.dylib
+      libcurl.dylib
+      libtatsu.dylib
+  )
   add_library(klogg_ios_native_stack INTERFACE)
+  set(_klogg_ios_native_runtime_dylibs)
   foreach(_klogg_ios_dylib IN LISTS _klogg_ios_native_dylibs)
-    if(NOT EXISTS "${_klogg_ios_native_libdir}/${_klogg_ios_dylib}")
+    set(_klogg_ios_dylib_path "${_klogg_ios_native_libdir}/${_klogg_ios_dylib}")
+    if(NOT EXISTS "${_klogg_ios_dylib_path}")
       message(FATAL_ERROR "Required iOS native dylib is missing: ${_klogg_ios_dylib}")
     endif()
+    get_filename_component(_klogg_ios_dylib_real_path "${_klogg_ios_dylib_path}" REALPATH)
+    list(APPEND _klogg_ios_native_runtime_dylibs
+         "${_klogg_ios_dylib_path}" "${_klogg_ios_dylib_real_path}")
     string(MAKE_C_IDENTIFIER "${_klogg_ios_dylib}" _klogg_ios_target)
     add_library("klogg_ios_${_klogg_ios_target}" SHARED IMPORTED GLOBAL)
     set_target_properties(
       "klogg_ios_${_klogg_ios_target}"
-      PROPERTIES IMPORTED_LOCATION "${_klogg_ios_native_libdir}/${_klogg_ios_dylib}"
+      PROPERTIES IMPORTED_LOCATION "${_klogg_ios_dylib_path}"
     )
     target_link_libraries(klogg_ios_native_stack INTERFACE "klogg_ios_${_klogg_ios_target}")
   endforeach()
+  foreach(_klogg_ios_alias IN LISTS _klogg_ios_native_direct_aliases)
+    set(_klogg_ios_alias_path "${_klogg_ios_native_libdir}/${_klogg_ios_alias}")
+    if(NOT IS_SYMLINK "${_klogg_ios_alias_path}")
+      message(FATAL_ERROR "Required iOS native direct alias is missing: ${_klogg_ios_alias}")
+    endif()
+    get_filename_component(_klogg_ios_alias_real_path "${_klogg_ios_alias_path}" REALPATH)
+    list(FIND _klogg_ios_native_runtime_dylibs "${_klogg_ios_alias_real_path}"
+         _klogg_ios_alias_target_index)
+    if(_klogg_ios_alias_target_index EQUAL -1)
+      message(FATAL_ERROR "iOS native direct alias escapes the verified closure: ${_klogg_ios_alias}")
+    endif()
+    list(APPEND _klogg_ios_native_runtime_dylibs "${_klogg_ios_alias_path}")
+  endforeach()
+  list(REMOVE_DUPLICATES _klogg_ios_native_runtime_dylibs)
+  set_property(
+    TARGET klogg_ios_native_stack
+    PROPERTY KLOGG_IOS_NATIVE_RUNTIME_DYLIBS "${_klogg_ios_native_runtime_dylibs}"
+  )
   target_include_directories(
     klogg_ios_native_stack INTERFACE "${KLOGG_IOS_NATIVE_STACK_ROOT}/include"
   )

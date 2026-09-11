@@ -171,11 +171,48 @@ elseif(APPLE)
       KLOGG_QT_BUILD_RPATH "${${KLOGG_QT_PACKAGE_DIR_VARIABLE}}/../.." ABSOLUTE
     )
     set_target_properties(klogg PROPERTIES KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}")
-    target_link_options(
-      klogg PRIVATE
-      "LINKER:-rpath,@executable_path/../Frameworks"
-      "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
-    )
+    foreach(target IN ITEMS klogg klogg_portable)
+      target_link_options(
+        ${target} PRIVATE
+        "LINKER:-rpath,@executable_path/../Frameworks"
+        "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
+      )
+    endforeach()
+
+    function(klogg_stage_ios_native_stack target)
+      get_target_property(bundle_name ${target} OUTPUT_NAME)
+      if(NOT bundle_name)
+        set(bundle_name "${target}")
+      endif()
+      get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+      if(is_multi_config)
+        set(bundle_root "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
+      else()
+        set(bundle_root "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+      endif()
+      set(bundle_stack "${bundle_root}/${bundle_name}.app/Contents/Frameworks/ios-native")
+      set(bundle_lib "${bundle_stack}/lib")
+      get_target_property(
+        native_dylibs klogg_ios_native_stack KLOGG_IOS_NATIVE_RUNTIME_DYLIBS
+      )
+      if(NOT native_dylibs)
+        message(FATAL_ERROR "The verified iOS runtime closure is empty")
+      endif()
+      set(stage_target "${target}_ios_native_stack_stage")
+      add_custom_target(
+        ${stage_target}
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${bundle_stack}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${bundle_lib}"
+        COMMAND /bin/cp -a ${native_dylibs} "${bundle_lib}"
+        COMMENT "Staging the verified private iOS runtime closure for ${target}"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+      )
+      add_dependencies(${target} ${stage_target})
+    endfunction()
+
+    klogg_stage_ios_native_stack(klogg)
+    klogg_stage_ios_native_stack(klogg_portable)
   endif()
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)
