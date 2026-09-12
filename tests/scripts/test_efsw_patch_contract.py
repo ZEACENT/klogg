@@ -89,7 +89,7 @@ class EfswPatchContractTest(unittest.TestCase):
             "c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677",
             "08283124ae155e995254ef3282fb41882c7599f30b79346764b71ec0815789ee",
             "04357c577d094b3ea8760c3635c776789fb671c1bff010c66a43f479f442eefd",
-            "bd842a94bd5ba6ba87cc475bcd0881f5d53ab6e9b45cd964bc3d4c2ea7f1298a",
+            "505337c394bf0b6ed954a62a865e6814eccab821e4fd22bba5ecbbdd3fb57e8d",
         ):
             self.assertIn(digest, text)
         inotify_patch_call = text.index("fix_efsw_inotify_watcher_uaf.patch")

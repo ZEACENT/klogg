@@ -40,16 +40,27 @@ include(TranslationUtils)
 add_app_translations_resource(KLOGG_I18N_RES ${QM_FILES})
 add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN zh_TW)
 
-set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h
-                 ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc 
-                 ${KLOGG_I18N_RES}
-                 ${KLOGG_QT_TRANSLATION_RES})
+set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h)
+
+add_library(
+  klogg_common_resources OBJECT
+  ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc
+  ${KLOGG_I18N_RES}
+  ${KLOGG_QT_TRANSLATION_RES}
+)
+add_library(
+  klogg_documentation_resources OBJECT
+  ${DOCUMENTATION_RESOURCE}
+)
+foreach(target IN ITEMS klogg_common_resources klogg_documentation_resources)
+  set_target_properties(${target} PROPERTIES AUTORCC ON)
+  target_link_libraries(${target} PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+endforeach()
 
 set(KLOGG_UI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/messagereceiver.h
     ${CMAKE_CURRENT_SOURCE_DIR}/kloggapp.h
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
-    ${DOCUMENTATION_RESOURCE}
     ${ICON_FILE}
     ${COPYING_FILE}
     ${NOTICE_FILE}
@@ -64,9 +75,20 @@ set(MAIN_LIBS
     kdsingleapp
 )
 
-add_executable(klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
-add_executable(klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
-add_executable(klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES})
+add_executable(
+  klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+  $<TARGET_OBJECTS:klogg_documentation_resources>
+)
+add_executable(
+  klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+  $<TARGET_OBJECTS:klogg_documentation_resources>
+)
+add_executable(
+  klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+)
 
 add_dependencies(klogg klogg_adb_helper)
 add_dependencies(klogg_portable klogg_adb_helper)

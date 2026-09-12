@@ -372,10 +372,11 @@ if(KLOGG_USE_VECTORSCAN)
     ${vectorscan_SOURCE_DIR}
     d29730e1cb9daaa66bda63426cdce83505d2c809
     04357c577d094b3ea8760c3635c776789fb671c1bff010c66a43f479f442eefd
-    bd842a94bd5ba6ba87cc475bcd0881f5d53ab6e9b45cd964bc3d4c2ea7f1298a
+    505337c394bf0b6ed954a62a865e6814eccab821e4fd22bba5ecbbdd3fb57e8d
     ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_warning_flags.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_msvc_aligned_free.patch
     ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_null_history_ubsan.patch
+    ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_vectorscan_xcode_ragel_targets.patch
   )
 
   # Set vectorscan build options before processing its cmake files
