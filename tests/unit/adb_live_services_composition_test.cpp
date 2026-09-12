@@ -125,6 +125,18 @@ public:
                                                              {} } );
     }
 
+    void completeIncompatible( std::size_t index )
+    {
+        REQUIRE( index < requests.size() );
+        REQUIRE( requests.at( index ).active );
+        requests.at( index ).active = false;
+        requests.at( index ).callback( AdbServerProbeResult{ AdbServerProbeState::Ready,
+                                                             SupportedProtocolVersion - 1u,
+                                                             { "shell_v2" },
+                                                             "adb-server:incompatible",
+                                                             {} } );
+    }
+
     void completeAbsent( std::size_t index )
     {
         REQUIRE( index < requests.size() );
@@ -290,6 +302,14 @@ public:
                 entry.active = false;
             }
         }
+    }
+
+    std::size_t activeCount( AdbServerScheduleKind kind ) const
+    {
+        return static_cast<std::size_t>(
+            std::count_if( entries.cbegin(), entries.cend(), [ kind ]( const Entry& entry ) {
+                return entry.active && entry.kind == kind;
+            } ) );
     }
 
     void fire( AdbServerScheduleKind kind )
@@ -516,12 +536,14 @@ void requireRejectedPackagedHelper( const QString& applicationDir, const QString
     CHECK_FALSE( services.isPackagedHelperAvailable() );
 
     auto lease = services.trackedDeviceProvider().acquireLease();
+    REQUIRE( dependencies.probe.requests.size() == 1u );
+    dependencies.probe.completeAbsent( 0 );
     const auto& snapshot = services.manager().snapshot();
     REQUIRE( snapshot.error.has_value() );
-    CHECK( snapshot.error->category == ErrorCategory::Configuration );
+    CHECK( snapshot.error->category == ErrorCategory::Infrastructure );
     CHECK( snapshot.error->code == "adb-packaged-helper-missing" );
-    CHECK( snapshot.error->retryPolicy == RetryPolicy::Never );
-    CHECK( dependencies.probe.requests.empty() );
+    CHECK( snapshot.error->retryPolicy == RetryPolicy::WaitForInfrastructure );
+    CHECK( dependencies.startupLock.requests.empty() );
     CHECK( dependencies.launcher.requests.empty() );
 }
 
@@ -734,8 +756,8 @@ TEST_CASE( "packaged ADB helper validation rejects non-files non-executables and
     }
 }
 
-TEST_CASE( "missing packaged ADB helper is a structured non-retryable configuration failure",
-           "[livecapture][adb][composition][configuration]" )
+TEST_CASE( "missing packaged helper still permits external ADB server adoption",
+           "[livecapture][adb][composition][configuration][external]" )
 {
     QTemporaryDir root;
     REQUIRE( root.isValid() );
@@ -748,16 +770,75 @@ TEST_CASE( "missing packaged ADB helper is a structured non-retryable configurat
     AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ), dependencies.refs() );
     auto lease = services.trackedDeviceProvider().acquireLease();
 
+    REQUIRE( dependencies.probe.requests.size() == 1u );
+    dependencies.probe.completeReady( 0 );
+
+    const auto& snapshot = services.manager().snapshot();
+    CHECK( snapshot.infrastructure.status == InfrastructureStatus::Ready );
+    REQUIRE( snapshot.infrastructure.ownership.has_value() );
+    CHECK( *snapshot.infrastructure.ownership
+           == klogg::livecapture::InfrastructureOwnership::ExternalShared );
+    CHECK_FALSE( snapshot.error.has_value() );
+    CHECK( dependencies.startupLock.requests.empty() );
+    CHECK( dependencies.launcher.requests.empty() );
+}
+
+TEST_CASE( "a packaged helper restored after startup can launch without reconstructing services",
+           "[livecapture][adb][composition][configuration][retry]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto applicationDir = root.filePath( QStringLiteral( "package/bin" ) );
+    const auto runtimeDir = root.filePath( QStringLiteral( "user/runtime" ) );
+    REQUIRE( QDir().mkpath( applicationDir ) );
+    REQUIRE( QDir().mkpath( runtimeDir ) );
+
+    ServicesDependencies dependencies;
+    AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ), dependencies.refs() );
+    auto lease = services.trackedDeviceProvider().acquireLease();
+    REQUIRE( dependencies.probe.requests.size() == 1u );
+    dependencies.probe.completeAbsent( 0 );
+    REQUIRE( dependencies.supervisorScheduler.activeCount(
+                 AdbServerScheduleKind::StartupRetry )
+             == 1u );
+
+    createPackagedHelper( applicationDir );
+    dependencies.supervisorScheduler.fire( AdbServerScheduleKind::StartupRetry );
+    REQUIRE( dependencies.probe.requests.size() == 2u );
+    dependencies.probe.completeAbsent( 1 );
+
+    CHECK( services.isPackagedHelperAvailable() );
+    CHECK( dependencies.startupLock.requests.size() == 1u );
+    CHECK( dependencies.launcher.requests.empty() );
+}
+
+TEST_CASE( "missing packaged ADB helper remains a recoverable infrastructure wait",
+           "[livecapture][adb][composition][configuration]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    const auto applicationDir = root.filePath( QStringLiteral( "package/bin" ) );
+    const auto runtimeDir = root.filePath( QStringLiteral( "user/runtime" ) );
+    REQUIRE( QDir().mkpath( applicationDir ) );
+    REQUIRE( QDir().mkpath( runtimeDir ) );
+
+    ServicesDependencies dependencies;
+    AdbLiveServices services( servicesConfig( applicationDir, runtimeDir ), dependencies.refs() );
+    auto lease = services.trackedDeviceProvider().acquireLease();
+    REQUIRE( dependencies.probe.requests.size() == 1u );
+    dependencies.probe.completeAbsent( 0 );
+
     const auto& snapshot = services.manager().snapshot();
     REQUIRE( snapshot.error.has_value() );
-    CHECK( snapshot.error->category == ErrorCategory::Configuration );
+    CHECK( snapshot.error->category == ErrorCategory::Infrastructure );
     CHECK( snapshot.error->scope == ErrorScope::Infrastructure );
-    CHECK( snapshot.error->retryPolicy == RetryPolicy::Never );
+    CHECK( snapshot.error->retryPolicy == RetryPolicy::WaitForInfrastructure );
     CHECK( snapshot.error->code == "adb-packaged-helper-missing" );
     CHECK( snapshot.error->nativeDetail.find(
                AdbLiveServices::packagedHelperPath( applicationDir ).toStdString() )
            != std::string::npos );
-    CHECK( dependencies.probe.requests.empty() );
+    CHECK( dependencies.probe.requests.size() == 1u );
+    CHECK( dependencies.startupLock.requests.empty() );
     CHECK( dependencies.launcher.requests.empty() );
 
     auto transport = services.create( smartSocketConfig( QStringLiteral( "restored-device" ) ) );
@@ -768,10 +849,11 @@ TEST_CASE( "missing packaged ADB helper is a structured non-retryable configurat
                           errors.emplace_back( generation, error );
                       } );
     transport->start( 91u );
-    REQUIRE( errors.size() == 1u );
-    CHECK( errors.front().first == 91u );
-    CHECK(
-        errors.front().second.contains( AdbLiveServices::packagedHelperPath( applicationDir ) ) );
+    CHECK( errors.empty() );
+    CHECK( services.manager().activeLeaseCount() == 2u );
+    CHECK( dependencies.supervisorScheduler.activeCount(
+               AdbServerScheduleKind::StartupRetry )
+           == 1u );
 }
 
 TEST_CASE( "one explicit application root shares manager tracker provider and transport leases",
@@ -1084,6 +1166,8 @@ TEST_CASE( "managed transport suppresses a terminal diagnostic made stale by Err
                       } );
 
     transport->start( 85u );
+    REQUIRE( dependencies.probe.requests.size() == 1u );
+    dependencies.probe.completeIncompatible( 0 );
 
     CHECK( errors.empty() );
     CHECK( services.manager().activeLeaseCount() == 0u );
@@ -1292,6 +1376,9 @@ TEST_CASE( "key consent is forwarded once and answers are generation and epoch c
     CHECK( dependencies.launcher.requests.empty() );
 
     services.answerKeyGenerationConsent( prompt.first, prompt.second, true );
+    CHECK( dependencies.keyStore.generationCount == 0 );
+    REQUIRE( dependencies.probe.requests.size() == 3u );
+    dependencies.probe.completeAbsent( 2 );
     CHECK( dependencies.keyStore.generationCount == 1 );
     REQUIRE( dependencies.launcher.requests.size() == 1u );
     CHECK( dependencies.launcher.requests.front().request.executable
@@ -1332,6 +1419,9 @@ TEST_CASE( "synchronous consent UI callback is safe and existing keys are never 
         dependencies.probe.completeAbsent( 1 );
 
         CHECK( promptCount == 1 );
+        CHECK( dependencies.keyStore.generationCount == 0 );
+        REQUIRE( dependencies.probe.requests.size() == 3u );
+        dependencies.probe.completeAbsent( 2 );
         CHECK( dependencies.keyStore.generationCount == 1 );
         CHECK( dependencies.launcher.requests.size() == 1u );
     }

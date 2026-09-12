@@ -1,0 +1,45 @@
+diff --git a/cmake/ragel.cmake b/cmake/ragel.cmake
+--- a/cmake/ragel.cmake
++++ b/cmake/ragel.cmake
+@@ -10,6 +10,5 @@ function(ragelmaker src_rl)
+         COMMAND ${RAGEL} ${CMAKE_CURRENT_SOURCE_DIR}/${src_rl} -o ${rl_out} -G0
+         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src_rl}
+         )
+-    add_custom_target(ragel_${src_file} DEPENDS ${rl_out})
+     set_source_files_properties(${rl_out} PROPERTIES GENERATED TRUE)
+ endfunction(ragelmaker)
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1162,7 +1162,3 @@ if (BUILD_SHARED_LIBS)
+ endif()
+-
+-if (BUILD_STATIC_LIBS)
+-    add_dependencies(hs ragel_Parser)
+-endif ()
+
+ if (BUILD_STATIC_LIBS)
+@@ -1189,4 +1185,3 @@ if (BUILD_SHARED_LIBS)
+     add_library(hs_shared SHARED ${hs_shared_SRCS} hs.def)
+
+-    add_dependencies(hs_shared ragel_Parser)
+     set_target_properties(hs_shared PROPERTIES
+diff --git a/util/CMakeLists.txt b/util/CMakeLists.txt
+--- a/util/CMakeLists.txt
++++ b/util/CMakeLists.txt
+@@ -22,6 +22,5 @@ set(expressionutil_SRCS
+     ExpressionParser.cpp
+     )
+ add_library(expressionutil STATIC ${expressionutil_SRCS})
+-add_dependencies(expressionutil ragel_ExpressionParser)
+
+ SET(corpusomatic_SRCS
+diff --git a/tools/hscollider/CMakeLists.txt b/tools/hscollider/CMakeLists.txt
+--- a/tools/hscollider/CMakeLists.txt
++++ b/tools/hscollider/CMakeLists.txt
+@@ -64,5 +64,4 @@ set_source_files_properties(${hscollider_SOURCES} PROPERTIES
+     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
+ add_executable(hscollider ${hscollider_SOURCES})
+-add_dependencies(hscollider ragel_ColliderCorporaParser)
+
+ if (BUILD_CHIMERA)

@@ -106,6 +106,16 @@ AdbServerSupervisorConfig supervisorConfig()
     return config;
 }
 
+LiveSourceError missingPackagedServerError()
+{
+    return LiveSourceError{ klogg::livecapture::ErrorCategory::Configuration,
+                            "adb-packaged-helper-missing",
+                            klogg::livecapture::ErrorScope::Infrastructure,
+                            klogg::livecapture::RetryPolicy::Never,
+                            "The packaged ADB helper is unavailable.",
+                            "The packaged ADB helper is missing." };
+}
+
 class ManualProbe final : public AdbServerProbe {
 public:
     struct Request {
@@ -707,9 +717,8 @@ QByteArray readFile( const QString& path )
 
 } // namespace
 
-TEST_CASE(
-    "ADB server supervisor rejects invalid endpoint or executable configuration before probing",
-    "[livecapture][adb][supervisor][validation]" )
+TEST_CASE( "ADB server supervisor validates probe and startup configuration at their boundaries",
+           "[livecapture][adb][supervisor][validation]" )
 {
     const std::vector<AdbServerEndpoint> invalidEndpoints{
         { QHostAddress( QStringLiteral( "192.0.2.10" ) ), 5037 },
@@ -737,19 +746,215 @@ TEST_CASE(
         }
     }
 
-    SECTION( "packaged server must be an explicit absolute path" )
+    SECTION( "packaged server is validated only when the endpoint is absent" )
     {
         auto config = supervisorConfig();
         config.packagedServerPath = QStringLiteral( "adb" );
         SupervisorHarness harness( config );
 
         harness.supervisor.start( FirstGeneration );
+        REQUIRE( harness.probe.requests.size() == 1u );
+        harness.probe.complete( 0, absentProbe() );
 
         CHECK( harness.supervisor.snapshot().status
                == AdbServerSupervisorStatus::InvalidConfiguration );
-        CHECK( harness.probe.requests.empty() );
+        CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
+        CHECK( harness.startupLock.requests.empty() );
         requireNoEnvironmentChangingWork( harness );
     }
+}
+
+TEST_CASE( "packaged startup failure does not block probing and adopting an external server",
+           "[livecapture][adb][supervisor][external][startup-capability]" )
+{
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    REQUIRE( harness.probe.requests.size() == 1u );
+    CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Probing );
+
+    harness.probe.complete( 0, readyProbe() );
+
+    const auto& ready = harness.supervisor.snapshot();
+    CHECK( ready.status == AdbServerSupervisorStatus::Ready );
+    REQUIRE( ready.infrastructure.ownership.has_value() );
+    CHECK( *ready.infrastructure.ownership == InfrastructureOwnership::ExternalShared );
+    CHECK_FALSE( ready.error.has_value() );
+    requireNoEnvironmentChangingWork( harness );
+}
+
+TEST_CASE( "packaged startup failure is reported only after the standard endpoint is absent",
+           "[livecapture][adb][supervisor][startup-capability]" )
+{
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    REQUIRE( harness.probe.requests.size() == 1u );
+    harness.probe.complete( 0, absentProbe() );
+
+    const auto& waiting = harness.supervisor.snapshot();
+    CHECK( waiting.status == AdbServerSupervisorStatus::RetryWait );
+    REQUIRE( waiting.error.has_value() );
+    CHECK( waiting.error->code == "adb-packaged-helper-missing" );
+    CHECK( waiting.error->retryPolicy == klogg::livecapture::RetryPolicy::Backoff );
+    CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+    CHECK( harness.scheduler.lastDelay( AdbServerScheduleKind::StartupRetry ) == 2s );
+    CHECK( harness.startupLock.requests.empty() );
+    requireNoEnvironmentChangingWork( harness );
+}
+
+TEST_CASE( "packaged startup failure keeps probing until an external server appears",
+           "[livecapture][adb][supervisor][external][startup-capability][retry]" )
+{
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, absentProbe() );
+    REQUIRE( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+
+    harness.scheduler.fire( AdbServerScheduleKind::StartupRetry );
+    REQUIRE( harness.probe.requests.size() == 2u );
+    harness.probe.complete( 1, readyProbe() );
+
+    const auto& ready = harness.supervisor.snapshot();
+    CHECK( ready.status == AdbServerSupervisorStatus::Ready );
+    REQUIRE( ready.infrastructure.ownership.has_value() );
+    CHECK( *ready.infrastructure.ownership == InfrastructureOwnership::ExternalShared );
+    CHECK_FALSE( ready.error.has_value() );
+    requireNoEnvironmentChangingWork( harness );
+}
+
+TEST_CASE( "restored startup capability clears its stale diagnostic before lock acquisition",
+           "[livecapture][adb][supervisor][startup-capability][recovery]" )
+{
+    auto config = supervisorConfig();
+    bool helperAvailable = false;
+    config.startupCapabilityCheck = [ & ] {
+        return helperAvailable ? std::optional<LiveSourceError>{}
+                               : std::optional<LiveSourceError>{ missingPackagedServerError() };
+    };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, absentProbe() );
+    REQUIRE( harness.supervisor.snapshot().error.has_value() );
+
+    helperAvailable = true;
+    harness.scheduler.fire( AdbServerScheduleKind::StartupRetry );
+    harness.probe.complete( 1, absentProbe() );
+
+    CHECK( harness.supervisor.snapshot().status
+           == AdbServerSupervisorStatus::WaitingForStartupLock );
+    CHECK_FALSE( harness.supervisor.snapshot().error.has_value() );
+    REQUIRE( harness.startupLock.requests.size() == 1u );
+}
+
+TEST_CASE( "reentrant startup capability check cannot overwrite a replacement run",
+           "[livecapture][adb][supervisor][startup-capability][reentrant]" )
+{
+    auto config = supervisorConfig();
+    AdbServerSupervisor* supervisor = nullptr;
+    bool restarted = false;
+    config.startupCapabilityCheck = [ & ] {
+        if ( !restarted ) {
+            restarted = true;
+            supervisor->stop( FirstGeneration );
+            supervisor->start( SecondGeneration );
+        }
+        return std::optional<LiveSourceError>{ missingPackagedServerError() };
+    };
+    SupervisorHarness harness( config );
+    supervisor = &harness.supervisor;
+
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, absentProbe() );
+
+    CHECK( harness.supervisor.snapshot().generation == SecondGeneration );
+    CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Probing );
+    CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
+    REQUIRE( harness.probe.requests.size() == 2u );
+    harness.probe.complete( 1, readyProbe( ReplacementIdentity ) );
+    CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Ready );
+}
+
+TEST_CASE( "capability failure notification may destroy the supervisor without scheduling stale work",
+           "[livecapture][adb][supervisor][startup-capability][lifetime]" )
+{
+    ManualProbe probe;
+    ManualLauncher launcher;
+    ManualStartupLock startupLock;
+    FakeAdbKeyStore keyStore;
+    ManualScheduler scheduler;
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    auto supervisor = std::make_unique<AdbServerSupervisor>(
+        config, probe, launcher, startupLock, keyStore, scheduler );
+    QObject::connect(
+        supervisor.get(), &AdbServerSupervisor::stateChanged,
+        [ &supervisor ]( Generation, std::uint64_t,
+                        const AdbServerSupervisorSnapshot& snapshot ) {
+            if ( snapshot.status == AdbServerSupervisorStatus::RetryWait ) {
+                supervisor.reset();
+            }
+        } );
+
+    supervisor->start( FirstGeneration );
+    probe.complete( 0, absentProbe() );
+
+    CHECK_FALSE( supervisor );
+    CHECK( scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
+}
+
+TEST_CASE( "lost external server reports unavailable packaged startup capability",
+           "[livecapture][adb][supervisor][external][startup-capability][reconnect]" )
+{
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, readyProbe() );
+    REQUIRE( harness.scheduler.activeCount( AdbServerScheduleKind::HealthProbe ) == 1u );
+    harness.scheduler.fire( AdbServerScheduleKind::HealthProbe );
+    harness.probe.complete( 1, absentProbe( "external server stopped" ) );
+    REQUIRE( harness.scheduler.activeCount( AdbServerScheduleKind::ReconnectBackoff ) == 1u );
+
+    harness.scheduler.fire( AdbServerScheduleKind::ReconnectBackoff );
+    REQUIRE( harness.probe.requests.size() == 3u );
+    harness.probe.complete( 2, absentProbe() );
+
+    const auto& waiting = harness.supervisor.snapshot();
+    CHECK( waiting.status == AdbServerSupervisorStatus::RetryWait );
+    REQUIRE( waiting.error.has_value() );
+    CHECK( waiting.error->code == "adb-packaged-helper-missing" );
+    CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+    CHECK( harness.startupLock.requests.empty() );
+}
+
+TEST_CASE( "incompatible external server is diagnosed before packaged startup capability",
+           "[livecapture][adb][supervisor][external][startup-capability]" )
+{
+    auto config = supervisorConfig();
+    config.startupCapabilityCheck = [] { return missingPackagedServerError(); };
+    SupervisorHarness harness( config );
+
+    harness.supervisor.start( FirstGeneration );
+    REQUIRE( harness.probe.requests.size() == 1u );
+    harness.probe.complete(
+        0, readyProbe( FirstIdentity, SupportedAdbProtocolVersion - 1u, { "shell_v2" } ) );
+
+    const auto& incompatible = harness.supervisor.snapshot();
+    CHECK( incompatible.status == AdbServerSupervisorStatus::Incompatible );
+    REQUIRE( incompatible.error.has_value() );
+    CHECK( incompatible.error->code == "incompatible-server" );
+    CHECK( harness.startupLock.requests.empty() );
+    requireNoEnvironmentChangingWork( harness );
 }
 
 TEST_CASE( "compatible server already on the standard endpoint is adopted as external shared",
@@ -813,6 +1018,9 @@ TEST_CASE( "absent server uses one per-user lock re-probe consent and the exact 
     harness.supervisor.grantKeyGenerationConsent( FirstGeneration, true );
 
     CHECK( harness.supervisor.snapshot().keyConsent == AdbServerKeyConsentState::Granted );
+    CHECK( harness.keyStore.generationCount == 0 );
+    REQUIRE( harness.probe.requests.size() == 3u );
+    harness.probe.complete( 2, absentProbe( "still absent after consent" ) );
     CHECK( harness.keyStore.generationCount == 1 );
     REQUIRE( harness.launcher.launches.size() == 1 );
     const auto& request = harness.launcher.launches.front().request;
@@ -827,11 +1035,11 @@ TEST_CASE( "absent server uses one per-user lock re-probe consent and the exact 
     CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Starting );
     CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupTimeout ) == 1 );
     CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::ReadinessProbe ) == 1 );
-    CHECK( harness.probe.requests.size() == 2 );
+    CHECK( harness.probe.requests.size() == 3 );
 
     harness.scheduler.fire( AdbServerScheduleKind::ReadinessProbe );
-    REQUIRE( harness.probe.requests.size() == 3 );
-    harness.probe.complete( 2, readyProbe() );
+    REQUIRE( harness.probe.requests.size() == 4 );
+    harness.probe.complete( 3, readyProbe() );
 
     const auto ready = harness.supervisor.snapshot();
     CHECK( ready.generation == FirstGeneration );
@@ -885,6 +1093,77 @@ TEST_CASE( "missing standard adb key requires an explicit decision and denial ne
 
     CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::Failed );
     CHECK( harness.supervisor.snapshot().keyConsent == AdbServerKeyConsentState::Denied );
+    CHECK( harness.keyStore.generationCount == 0 );
+    CHECK( harness.launcher.launches.empty() );
+    CHECK( harness.startupLock.wasReleased( 0 ) );
+}
+
+TEST_CASE( "startup capability is revalidated before consent changes the environment",
+           "[livecapture][adb][supervisor][startup-capability][keys][consent]" )
+{
+    auto config = supervisorConfig();
+    bool helperAvailable = true;
+    config.startupCapabilityCheck = [ & ] {
+        return helperAvailable ? std::optional<LiveSourceError>{}
+                               : std::optional<LiveSourceError>{ missingPackagedServerError() };
+    };
+    SupervisorHarness harness( config );
+    harness.keyStore.inspection.state = AdbServerStandardKeyState::Absent;
+
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, absentProbe() );
+    harness.startupLock.complete( 0, true );
+    harness.probe.complete( 1, absentProbe() );
+    REQUIRE( harness.supervisor.snapshot().status
+             == AdbServerSupervisorStatus::AwaitingKeyGenerationConsent );
+
+    helperAvailable = false;
+    harness.supervisor.grantKeyGenerationConsent( FirstGeneration, true );
+    REQUIRE( harness.probe.requests.size() == 3u );
+    harness.probe.complete( 2, absentProbe() );
+
+    CHECK( harness.supervisor.snapshot().status == AdbServerSupervisorStatus::RetryWait );
+    REQUIRE( harness.supervisor.snapshot().error.has_value() );
+    CHECK( harness.supervisor.snapshot().error->code == "adb-packaged-helper-missing" );
+    CHECK( harness.keyStore.generationCount == 0 );
+    CHECK( harness.launcher.launches.empty() );
+    CHECK( harness.startupLock.wasReleased( 0 ) );
+    CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 1u );
+
+    helperAvailable = true;
+    harness.scheduler.fire( AdbServerScheduleKind::StartupRetry );
+    harness.probe.complete( 3, absentProbe() );
+    harness.startupLock.complete( 1, true );
+    harness.probe.complete( 4, absentProbe() );
+
+    CHECK( harness.events.consentRequests.size() == 1u );
+    CHECK( harness.keyStore.generationCount == 1 );
+    CHECK( harness.launcher.launches.size() == 1u );
+}
+
+TEST_CASE( "consent completion re-probes and adopts a newly started external server",
+           "[livecapture][adb][supervisor][race][keys][consent]" )
+{
+    SupervisorHarness harness;
+    harness.keyStore.inspection.state = AdbServerStandardKeyState::Absent;
+    harness.supervisor.start( FirstGeneration );
+    harness.probe.complete( 0, absentProbe() );
+    harness.startupLock.complete( 0, true );
+    harness.probe.complete( 1, absentProbe() );
+    REQUIRE( harness.supervisor.snapshot().status
+             == AdbServerSupervisorStatus::AwaitingKeyGenerationConsent );
+
+    harness.supervisor.grantKeyGenerationConsent( FirstGeneration, true );
+
+    CHECK( harness.keyStore.generationCount == 0 );
+    CHECK( harness.launcher.launches.empty() );
+    REQUIRE( harness.probe.requests.size() == 3u );
+    harness.probe.complete( 2, readyProbe( ReplacementIdentity ) );
+
+    REQUIRE( harness.supervisor.snapshot().infrastructure.ownership.has_value() );
+    CHECK( *harness.supervisor.snapshot().infrastructure.ownership
+           == InfrastructureOwnership::ExternalShared );
+    CHECK( harness.supervisor.snapshot().keyConsent == AdbServerKeyConsentState::NotRequired );
     CHECK( harness.keyStore.generationCount == 0 );
     CHECK( harness.launcher.launches.empty() );
     CHECK( harness.startupLock.wasReleased( 0 ) );
@@ -1076,6 +1355,26 @@ TEST_CASE( "launch failure and readiness timeout preserve actionable diagnostics
         CHECK( harness.launcher.wasCleaned( 0 ) );
         CHECK( harness.startupLock.wasReleased( 0 ) );
     }
+}
+
+TEST_CASE( "repeated packaged launch failures advance the configured startup backoff",
+           "[livecapture][adb][supervisor][startup][backoff]" )
+{
+    SupervisorHarness harness;
+    harness.reachLaunch();
+    harness.launcher.emitResult(
+        0, AdbServerLaunchResult{ AdbServerLaunchState::Failed, false, "first failure" } );
+    CHECK( harness.scheduler.lastDelay( AdbServerScheduleKind::StartupRetry ) == 10ms );
+
+    harness.scheduler.fire( AdbServerScheduleKind::StartupRetry );
+    harness.probe.complete( 2, absentProbe() );
+    harness.startupLock.complete( 1, true );
+    harness.probe.complete( 3, absentProbe() );
+    REQUIRE( harness.launcher.launches.size() == 2u );
+    harness.launcher.emitResult(
+        1, AdbServerLaunchResult{ AdbServerLaunchState::Failed, false, "second failure" } );
+
+    CHECK( harness.scheduler.lastDelay( AdbServerScheduleKind::StartupRetry ) == 20ms );
 }
 
 TEST_CASE( "synchronous owned launch failure is cleaned after the launcher returns its token",
@@ -1654,7 +1953,11 @@ TEST_CASE( "invalid supervisor configuration uses configuration error taxonomy",
     SupervisorHarness harness( config );
 
     harness.supervisor.start( FirstGeneration );
+    REQUIRE( harness.probe.requests.size() == 1u );
+    harness.probe.complete( 0, absentProbe() );
 
+    CHECK( harness.supervisor.snapshot().status
+           == AdbServerSupervisorStatus::InvalidConfiguration );
     REQUIRE( harness.supervisor.snapshot().error.has_value() );
     CHECK( harness.supervisor.snapshot().error->category
            == klogg::livecapture::ErrorCategory::Configuration );
@@ -1662,6 +1965,7 @@ TEST_CASE( "invalid supervisor configuration uses configuration error taxonomy",
            == klogg::livecapture::ErrorScope::Infrastructure );
     CHECK( harness.supervisor.snapshot().error->retryPolicy
            == klogg::livecapture::RetryPolicy::Never );
+    CHECK( harness.scheduler.activeCount( AdbServerScheduleKind::StartupRetry ) == 0u );
 }
 
 TEST_CASE( "startup lock never steals an old lease from a live process",

@@ -13,6 +13,7 @@
 #include "foldercrawlerwidget.h"
 #include "loadingstatus.h"
 #include "logdata.h"
+#include "test_utils.h"
 
 namespace {
 
@@ -57,22 +58,25 @@ TEST_CASE( "FolderCrawlerWidget retries a same-file selection queued behind a fa
     const auto secondLine = widget.folderResults()->sourceForLine( 2_lnum ).localLine;
     REQUIRE( secondLine == 8_lnum );
 
-    widget.selectResultRow( 1_lnum );
-    auto pending = widget.pendingMainDataForTest();
-    REQUIRE( pending != nullptr );
-    const std::weak_ptr<LogData> abandonedPending = pending;
+    std::weak_ptr<LogData> abandonedPending;
+    triggerAndWaitForCompletion(
+        &widget, &FolderCrawlerWidget::mainViewFileChanged,
+        [ & ] {
+            widget.selectResultRow( 1_lnum );
+            auto pending = widget.pendingMainDataForTest();
+            REQUIRE( pending != nullptr );
+            abandonedPending = pending;
 
-    // Queue failure before the second click, but do not process the event loop.
-    // The new click must survive cleanup of the terminal pending load.
-    REQUIRE( QMetaObject::invokeMethod(
-        pending.get(), "loadingFinished", Qt::QueuedConnection,
-        Q_ARG( LoadingStatus, LoadingStatus::Interrupted ) ) );
-    pending->interruptLoading();
-    widget.selectResultRow( 2_lnum );
-    pending.reset();
-
-    REQUIRE( waitFor( [ &widget, &path ] { return widget.currentMainFilePath() == path; } ) );
-    QTest::qWait( 200 );
+            // Queue failure before the second click, but do not process the event loop.
+            // The new click must survive cleanup of the terminal pending load.
+            REQUIRE( QMetaObject::invokeMethod(
+                pending.get(), "loadingFinished", Qt::QueuedConnection,
+                Q_ARG( LoadingStatus, LoadingStatus::Interrupted ) ) );
+            pending->interruptLoading();
+            widget.selectResultRow( 2_lnum );
+        },
+        [ & ] { return widget.currentMainFilePath() == path; } );
+    QTest::qWait( 200 ); // documented post-completion worker-unwind grace
     REQUIRE( abandonedPending.expired() );
     REQUIRE( widget.currentMainViewLine() == secondLine );
 }

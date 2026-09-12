@@ -546,6 +546,44 @@ TEST_CASE( "An unconnected stream attempt does not manufacture an integrity gap"
     CHECK_FALSE( controller.spec().integrity.replayPossible );
 }
 
+TEST_CASE( "A connected stream that fails before payload does not manufacture an integrity gap",
+           "[livelog-controller][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.streamBytesReceived( generation, QByteArray{} );
+    controller.streamFailed( generation, retryableStreamError() );
+
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "An opening stream that delivered payload records an integrity gap on failure",
+           "[livelog-controller][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToOpening( controller, clock );
+    const auto generation = controller.snapshot().generation;
+    controller.streamBytesReceived( generation, QByteArrayLiteral( "early\n" ) );
+    controller.streamFailed( generation, retryableStreamError() );
+
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
 TEST_CASE( "A clean intentional stop does not manufacture an integrity gap",
            "[livelog-controller][live-integrity-policy-red]" )
 {
@@ -563,7 +601,7 @@ TEST_CASE( "A clean intentional stop does not manufacture an integrity gap",
     CHECK_FALSE( controller.spec().integrity.replayPossible );
 }
 
-TEST_CASE( "Automatic retirement waits for the stop barrier and reports real reconnect semantics",
+TEST_CASE( "Zero-payload retirement waits for the stop barrier without inventing a gap",
            "[livelog-controller][w2-control-red][live-integrity-policy-red]" )
 {
     const auto useIos = GENERATE( false, true );
@@ -575,8 +613,9 @@ TEST_CASE( "Automatic retirement waits for the stop barrier and reports real rec
                                            clock, scheduler, effects };
     armToStreaming( controller, clock );
     const auto retiredGeneration = controller.snapshot().generation;
+    controller.streamBytesReceived( retiredGeneration, QByteArray{} );
     controller.deviceAbsent( retiredGeneration );
-    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
     CHECK_FALSE( controller.spec().integrity.replayPossible );
     REQUIRE( controller.snapshot().generation != retiredGeneration );
     const auto replacementGeneration = controller.snapshot().generation;
@@ -592,6 +631,212 @@ TEST_CASE( "Automatic retirement waits for the stop barrier and reports real rec
     controller.streamHandleOpened( replacementGeneration );
     controller.streamReadArmed( replacementGeneration );
     REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "Retiring payload turns a zero-payload interruption into a real integrity gap",
+           "[livelog-controller][w2-control-red][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.deviceAbsent( retiredGeneration );
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "queued-tail\n" ) );
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.stopCompleted( retiredGeneration );
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "User stop after retirement does not hide a payload-producing interruption",
+           "[livelog-controller][live-integrity-policy-red][retirement]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.deviceAbsent( retiredGeneration );
+    controller.stopRequested( live::StopDisposition::SettleAccepted );
+    controller.startRequested();
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "queued-tail\n" ) );
+
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+
+    controller.stopCompleted( retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "Explicit reconnect after payload does not manufacture an interruption gap",
+           "[livelog-controller][live-integrity-policy-red][reconnect]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    controller.streamBytesReceived( controller.snapshot().generation,
+                                    QByteArrayLiteral( "captured\n" ) );
+
+    controller.reconnectRequested();
+
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "Automatic interruption retains replay risk across a stop-start barrier",
+           "[livelog-controller][live-integrity-policy-red][restart]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "captured\n" ) );
+    controller.deviceAbsent( retiredGeneration );
+    REQUIRE( controller.spec().integrity.gapPossible );
+
+    controller.stopRequested( live::StopDisposition::SettleAccepted );
+    controller.startRequested();
+    controller.stopCompleted( retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "Intentional stop-start tail does not manufacture an interruption gap",
+           "[livelog-controller][live-integrity-policy-red][restart]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.stopRequested( live::StopDisposition::SettleAccepted );
+    controller.startRequested();
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "settled-tail\n" ) );
+
+    CHECK_FALSE( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+}
+
+TEST_CASE( "Payload-producing retirement preserves source-specific reconnect integrity",
+           "[livelog-controller][w2-control-red][live-integrity-policy-red]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "captured\n" ) );
+    controller.deviceAbsent( retiredGeneration );
+    CHECK( controller.spec().integrity.gapPossible );
+    CHECK_FALSE( controller.spec().integrity.replayPossible );
+    REQUIRE( controller.snapshot().generation != retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.stopCompleted( retiredGeneration );
+    CHECK( effects.count( RecordingEffects::Kind::OpenStream ) == 2u );
+
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::Streaming );
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "Replacement payload publishes Android replay risk before readiness completes",
+           "[livelog-controller][live-integrity-policy-red][opening]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.streamBytesReceived( retiredGeneration, QByteArrayLiteral( "captured\n" ) );
+    controller.deviceAbsent( retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.stopCompleted( retiredGeneration );
+    REQUIRE( controller.snapshot().source.status == live::SourceStatus::OpeningStream );
+
+    controller.streamBytesReceived( replacementGeneration, QByteArrayLiteral( "possible-replay\n" ) );
+
+    CHECK( controller.spec().integrity.replayPossible == !useIos );
+}
+
+TEST_CASE( "Discarded retiring payload arms Android replay risk for the replacement",
+           "[livelog-controller][live-integrity-policy-red][retirement]" )
+{
+    const auto useIos = GENERATE( false, true );
+    CAPTURE( useIos );
+    ManualClock clock;
+    ManualScheduler scheduler;
+    RecordingEffects effects;
+    livelog::LiveLogController controller{ useIos ? iosSpec() : androidSpec(), controllerConfig(),
+                                           clock, scheduler, effects };
+    armToStreaming( controller, clock );
+    const auto retiredGeneration = controller.snapshot().generation;
+    controller.deviceAbsent( retiredGeneration );
+    const auto replacementGeneration = controller.snapshot().generation;
+    controller.deviceAvailable( replacementGeneration );
+    controller.stopCompleted( retiredGeneration, 7u );
+    controller.protocolServiceReady( replacementGeneration );
+    controller.streamHandleOpened( replacementGeneration );
+    controller.streamReadArmed( replacementGeneration );
+
+    CHECK( controller.spec().integrity.gapPossible );
     CHECK( controller.spec().integrity.replayPossible == !useIos );
 }
 

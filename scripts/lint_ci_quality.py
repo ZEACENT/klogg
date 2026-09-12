@@ -215,6 +215,87 @@ def strip_yaml_comment(value: str) -> str:
     return value.strip()
 
 
+def strip_powershell_comments(value: str) -> str:
+    """Blank PowerShell comments while preserving active code and layout.
+
+    Unlike ``strip_yaml_comment``, which only recognizes ``#`` preceded by
+    whitespace, PowerShell starts a comment at any unquoted ``#`` (for example
+    ``Write-Output ok;# disabled``) and at ``<#`` .. ``#>`` blocks. Required
+    markers must never be validated against text that still contains those
+    comment forms. Quotes, here-strings, and newlines are preserved so active
+    code keeps its line layout for downstream line-based parsing.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(value)
+    quote: str | None = None
+    while index < length:
+        char = value[index]
+        pair = value[index : index + 2]
+        if quote is None and pair == "<#":
+            end = value.find("#>", index + 2)
+            if end == -1:
+                end = length - 2
+            out.extend(
+                "\n" if ch == "\n" else " " for ch in value[index : end + 2]
+            )
+            index = end + 2
+            continue
+        if (
+            quote is None
+            and pair in ("@'", '@"')
+            and value[index + 2 : index + 3] == "\n"
+        ):
+            terminator = "\n" + pair[1] + "@"
+            end = value.find(terminator, index + 3)
+            if end == -1:
+                out.append(value[index:])
+                index = length
+                continue
+            end += len(terminator)
+            out.append(value[index:end])
+            index = end
+            continue
+        if quote is None and char == "#":
+            line_end = value.find("\n", index)
+            if line_end == -1:
+                line_end = length
+            out.append(" " * (line_end - index))
+            index = line_end
+            continue
+        if quote is None and char in "'\"":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if quote is not None:
+            if quote == "'" and value[index : index + 2] == "''":
+                out.append("''")
+                index += 2
+                continue
+            if quote == '"' and char == "`":
+                out.append(value[index : index + 2])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            out.append(char)
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def active_script_content(value: str) -> str:
+    active_lines = []
+    for line in value.splitlines():
+        active = strip_yaml_comment(line)
+        if active:
+            active_lines.append(active)
+    return "\n".join(active_lines)
+
+
 def scalar(value: str) -> str:
     value = strip_yaml_comment(value).strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
@@ -249,12 +330,7 @@ def workflow_run_blocks(text: str) -> list[str]:
             continue
         indent = len(entry.group("indent"))
         value = yaml_value(lines, index, entry.group("value"), indent)
-        active_lines = []
-        for run_line in value.splitlines():
-            active = strip_yaml_comment(run_line)
-            if active:
-                active_lines.append(active)
-        blocks.append("\n".join(active_lines))
+        blocks.append(active_script_content(value))
     return blocks
 
 
@@ -726,7 +802,13 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
             fields = fields_by_label[label]
             if fields.get("continue-on-error") != "true":
                 issues.append(f"CI build job {job} step {label} must be best-effort")
-            run = fields.get("run", "")
+            # Strip PowerShell comments first: strip_yaml_comment only
+            # removes "#" preceded by whitespace, so markers survive inside
+            # ";# ..." comments and "<# ... #>" blocks and would satisfy the
+            # check although the collector never runs that code.
+            run = active_script_content(
+                strip_powershell_comments(fields.get("run", ""))
+            )
             if fields.get("shell") != "pwsh" or any(
                 marker not in run for marker in required_markers
             ):

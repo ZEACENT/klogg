@@ -37,6 +37,7 @@ struct AdbLiveServicesConfig {
     std::chrono::milliseconds readinessProbeInterval{ 100 };
     std::chrono::milliseconds startupTimeout{ 5000 };
     std::chrono::milliseconds healthProbeInterval{ 1000 };
+    std::chrono::milliseconds startupCapabilityProbeInterval{ 2000 };
     std::vector<std::chrono::milliseconds> serverReconnectBackoff{ std::chrono::milliseconds{
         250 } };
     std::vector<std::chrono::milliseconds> trackerReconnectBackoff{ std::chrono::milliseconds{

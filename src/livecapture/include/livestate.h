@@ -185,6 +185,8 @@ struct LiveStateSnapshot {
     bool protocolServiceReady{ false };
     bool streamHandlePresent{ false };
     bool readArmed{ false };
+    bool payloadReceived{ false };
+    bool retiringAttemptInterrupted{ false };
     std::optional<Timestamp> streamingSince;
     std::optional<RetryTimer> retryTimer;
     bool devicePresent{ false };

@@ -145,10 +145,11 @@ struct AdbServerSupervisorConfig {
     std::chrono::milliseconds readinessProbeInterval{ 100 };
     std::chrono::milliseconds startupTimeout{ 5000 };
     std::chrono::milliseconds healthProbeInterval{ 1000 };
+    std::chrono::milliseconds startupCapabilityProbeInterval{ 2000 };
     std::vector<std::chrono::milliseconds> reconnectBackoff{ std::chrono::milliseconds{ 250 } };
-    // Optional app-layer preflight failure (for example, a missing packaged
-    // helper). The lower layer surfaces it without knowing package layout.
-    std::optional<LiveSourceError> configurationError;
+    // Optional app-layer launch-capability check (for example, packaged helper
+    // validation). It is evaluated only after a probe proves the endpoint absent.
+    std::function<std::optional<LiveSourceError>()> startupCapabilityCheck;
 };
 
 enum class AdbServerSupervisorStatus : std::uint8_t {

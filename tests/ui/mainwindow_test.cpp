@@ -2815,9 +2815,14 @@ SCENARIO( "Folder tab receives the polymorphic MainWindow dispatch", "[ui][folde
         REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
 
         const auto expectedPath = QDir( tempDirPath ).absoluteFilePath( "a.log" );
-        runInUiThread( [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
-        REQUIRE(
-            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } ) );
+        triggerAndWaitForCompletion(
+            folderWidget, &FolderCrawlerWidget::mainViewFileChanged,
+            [ & ] {
+                runInUiThread(
+                    [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
+            },
+            [ & ] { return folderWidget->currentMainFilePath() == expectedPath; } );
+        QTest::qWait( 200 ); // documented post-completion worker-unwind grace
 
         THEN( "the clipboard holds the main-view file path" )
         {
@@ -2904,10 +2909,14 @@ SCENARIO( "Folder tab go-to-top and follow actions apply to the main view file",
         // is a data row; selecting it in the results view opens its file in
         // the main view (newSelection -> onResultSelected, the same path
         // FolderCrawlerWidget::selectResultRow drives).
-        runInUiThread(
-            [ folderWidget ] { folderWidget->filteredView()->selectAndDisplayLine( 2_lnum ); } );
-        REQUIRE(
-            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        triggerAndWaitForCompletion(
+            folderWidget, &FolderCrawlerWidget::mainViewFileChanged,
+            [ & ] {
+                runInUiThread( [ folderWidget ] {
+                    folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
+                } );
+            },
+            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } );
         // The on-demand index + layout of the main-view file are async: wait
         // until the 200-line file is actually scrollable, then settle so the
         // worker thread unwinds before the views are driven further.
@@ -3087,10 +3096,14 @@ SCENARIO( "Folder tab info line shows the main-view file path for a long nested 
 
         // Row 0 is the group header, row 2 a data row: selecting it opens the
         // file in the main view (newSelection -> onResultSelected).
-        runInUiThread(
-            [ folderWidget ] { folderWidget->filteredView()->selectAndDisplayLine( 2_lnum ); } );
-        REQUIRE(
-            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        triggerAndWaitForCompletion(
+            folderWidget, &FolderCrawlerWidget::mainViewFileChanged,
+            [ & ] {
+                runInUiThread( [ folderWidget ] {
+                    folderWidget->filteredView()->selectAndDisplayLine( 2_lnum );
+                } );
+            },
+            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } );
         // The main-view index completes async; mainViewFileChanged (fired at
         // its completion) is what re-runs updateInfoLine, so settle the event
         // loop before asserting the label.
@@ -3194,9 +3207,13 @@ TEST_CASE( "Background folder tab must not change the current tab's follow state
         // first data row.
         runInUiThread( [ folderWidget ] { folderWidget->searchFor( QStringLiteral( "ERROR" ) ); } );
         REQUIRE( waitUiState( [ & ] { return !folderWidget->isSearchActive(); } ) );
-        runInUiThread( [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
-        REQUIRE(
-            waitUiState( [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } ) );
+        triggerAndWaitForCompletion(
+            folderWidget, &FolderCrawlerWidget::mainViewFileChanged,
+            [ & ] {
+                runInUiThread(
+                    [ folderWidget ] { folderWidget->selectResultRow( 1_lnum ); } );
+            },
+            [ & ] { return folderWidget->currentMainFilePath() == logFilePath; } );
         // The on-demand index + layout of the main-view file are async; wait
         // until it is scrollable, then settle so the worker thread unwinds.
         REQUIRE( waitUiState(

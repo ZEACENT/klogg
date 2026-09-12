@@ -40,16 +40,27 @@ include(TranslationUtils)
 add_app_translations_resource(KLOGG_I18N_RES ${QM_FILES})
 add_qt_translations_resource(KLOGG_QT_TRANSLATION_RES zh_CN zh_TW)
 
-set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h
-                 ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc 
-                 ${KLOGG_I18N_RES}
-                 ${KLOGG_QT_TRANSLATION_RES})
+set(MAIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cli.h)
+
+add_library(
+  klogg_common_resources OBJECT
+  ${CMAKE_CURRENT_SOURCE_DIR}/klogg.qrc
+  ${KLOGG_I18N_RES}
+  ${KLOGG_QT_TRANSLATION_RES}
+)
+add_library(
+  klogg_documentation_resources OBJECT
+  ${DOCUMENTATION_RESOURCE}
+)
+foreach(target IN ITEMS klogg_common_resources klogg_documentation_resources)
+  set_target_properties(${target} PROPERTIES AUTORCC ON)
+  target_link_libraries(${target} PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+endforeach()
 
 set(KLOGG_UI_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/messagereceiver.h
     ${CMAKE_CURRENT_SOURCE_DIR}/kloggapp.h
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
-    ${DOCUMENTATION_RESOURCE}
     ${ICON_FILE}
     ${COPYING_FILE}
     ${NOTICE_FILE}
@@ -64,9 +75,20 @@ set(MAIN_LIBS
     kdsingleapp
 )
 
-add_executable(klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
-add_executable(klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES})
-add_executable(klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES})
+add_executable(
+  klogg ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+  $<TARGET_OBJECTS:klogg_documentation_resources>
+)
+add_executable(
+  klogg_portable ${OS_BUNDLE} ${MAIN_SOURCES} ${KLOGG_UI_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+  $<TARGET_OBJECTS:klogg_documentation_resources>
+)
+add_executable(
+  klogg_grep ${MAIN_SOURCES} ${KLOGG_GREP_SOURCES}
+  $<TARGET_OBJECTS:klogg_common_resources>
+)
 
 add_dependencies(klogg klogg_adb_helper)
 add_dependencies(klogg_portable klogg_adb_helper)
@@ -171,11 +193,48 @@ elseif(APPLE)
       KLOGG_QT_BUILD_RPATH "${${KLOGG_QT_PACKAGE_DIR_VARIABLE}}/../.." ABSOLUTE
     )
     set_target_properties(klogg PROPERTIES KLOGG_QT_BUILD_RPATH "${KLOGG_QT_BUILD_RPATH}")
-    target_link_options(
-      klogg PRIVATE
-      "LINKER:-rpath,@executable_path/../Frameworks"
-      "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
-    )
+    foreach(target IN ITEMS klogg klogg_portable)
+      target_link_options(
+        ${target} PRIVATE
+        "LINKER:-rpath,@executable_path/../Frameworks"
+        "LINKER:-rpath,@executable_path/../Frameworks/ios-native/lib"
+      )
+    endforeach()
+
+    function(klogg_stage_ios_native_stack target)
+      get_target_property(bundle_name ${target} OUTPUT_NAME)
+      if(NOT bundle_name)
+        set(bundle_name "${target}")
+      endif()
+      get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+      if(is_multi_config)
+        set(bundle_root "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
+      else()
+        set(bundle_root "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+      endif()
+      set(bundle_stack "${bundle_root}/${bundle_name}.app/Contents/Frameworks/ios-native")
+      set(bundle_lib "${bundle_stack}/lib")
+      get_target_property(
+        native_dylibs klogg_ios_native_stack KLOGG_IOS_NATIVE_RUNTIME_DYLIBS
+      )
+      if(NOT native_dylibs)
+        message(FATAL_ERROR "The verified iOS runtime closure is empty")
+      endif()
+      set(stage_target "${target}_ios_native_stack_stage")
+      add_custom_target(
+        ${stage_target}
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${bundle_stack}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${bundle_lib}"
+        COMMAND /bin/cp -a ${native_dylibs} "${bundle_lib}"
+        COMMENT "Staging the verified private iOS runtime closure for ${target}"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+      )
+      add_dependencies(${target} ${stage_target})
+    endfunction()
+
+    klogg_stage_ios_native_stack(klogg)
+    klogg_stage_ios_native_stack(klogg_portable)
   endif()
   set_source_files_properties(${ICON_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${NOTICE_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION SharedSupport)

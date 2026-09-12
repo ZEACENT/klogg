@@ -365,6 +365,10 @@ void LiveLogController::stopCompleted( live::Generation generation, std::uint64_
     if ( discardedBytes != 0u ) {
         spec_.integrity.gapPossible = true;
         spec_.integrity.record( "transport-tail-discarded", discardedBytes );
+        if ( spec_.sourceKind == SourceKind::AndroidLogcat
+             && snapshot_.retiringAttemptInterrupted ) {
+            replayRiskPending_ = true;
+        }
     }
     dispatch( live::StopCompleted{ generation, clock_->now() } );
 }
@@ -614,11 +618,20 @@ void LiveLogController::commitAcceptedSnapshot( live::LiveStateSnapshot snapshot
 void LiveLogController::observeIntegrityTransition(
     const live::LiveStateSnapshot& previousSnapshot )
 {
-    const bool connectedStreamInterrupted
-        = previousSnapshot.source.status == live::SourceStatus::Streaming
-          && snapshot_.source.status != live::SourceStatus::Streaming
-          && snapshot_.runIntent == live::RunIntent::Running;
-    if ( connectedStreamInterrupted ) {
+    const bool previousAttemptActive
+        = previousSnapshot.source.status == live::SourceStatus::OpeningStream
+          || previousSnapshot.source.status == live::SourceStatus::Streaming;
+    const bool currentAttemptActive
+        = snapshot_.source.status == live::SourceStatus::OpeningStream
+          || snapshot_.source.status == live::SourceStatus::Streaming;
+    const bool payloadStreamInterrupted
+        = previousAttemptActive && !currentAttemptActive
+          && snapshot_.retiringAttemptInterrupted && previousSnapshot.payloadReceived;
+    const bool retiringPayloadObserved
+        = !previousSnapshot.payloadReceived && snapshot_.payloadReceived
+          && snapshot_.source.stoppingGeneration.has_value()
+          && snapshot_.retiringAttemptInterrupted;
+    if ( payloadStreamInterrupted || retiringPayloadObserved ) {
         if ( !spec_.integrity.gapPossible ) {
             spec_.integrity.gapPossible = true;
             spec_.integrity.record( "connected-stream-interrupted" );
@@ -630,14 +643,20 @@ void LiveLogController::observeIntegrityTransition(
     }
 
     if ( snapshot_.runIntent == live::RunIntent::Stopped ) {
-        replayRiskPending_ = false;
+        if ( !snapshot_.source.stoppingGeneration.has_value()
+             || !snapshot_.retiringAttemptInterrupted ) {
+            replayRiskPending_ = false;
+        }
         return;
     }
 
     const bool replacementConnected
         = previousSnapshot.source.status != live::SourceStatus::Streaming
           && snapshot_.source.status == live::SourceStatus::Streaming;
-    if ( replacementConnected && replayRiskPending_ ) {
+    const bool replacementPayloadObserved
+        = !previousSnapshot.payloadReceived && snapshot_.payloadReceived
+          && currentAttemptActive;
+    if ( ( replacementConnected || replacementPayloadObserved ) && replayRiskPending_ ) {
         replayRiskPending_ = false;
         if ( !spec_.integrity.replayPossible ) {
             spec_.integrity.replayPossible = true;

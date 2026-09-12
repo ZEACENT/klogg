@@ -681,6 +681,18 @@ jobs:
                 '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
                 '          $dumpDir = Join-Path $workspace "build_root\\missing_dumps"\n',
             ),
+            "commented normal collector contents": (
+                '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+                '          # $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+            ),
+            "semicolon-comment-spoofed collector contents": (
+                '          $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+                '          Write-Output ok;# $dumpDir = Join-Path $workspace "build_root\\crash_dumps"\n',
+            ),
+            "block-comment-spoofed asan collector contents": (
+                '          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {\n',
+                '          <# foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) { #>\n',
+            ),
             "normal upload action": (
                 "      - name: Upload Windows diagnostics artifact\n"
                 "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
@@ -699,6 +711,10 @@ jobs:
                 "        continue-on-error: true\n",
                 "      - name: Collect Windows ASan diagnostics\n"
                 "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n",
+            ),
+            "comment-spoofed asan collector contents": (
+                '          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {\n',
+                '          foreach ($name in @("klogg_vectorscan_tests.exe", "missing.pdb")) { # klogg_vectorscan_tests.pdb\n',
             ),
             "final failure status guard": (
                 "      - name: Fail when tests fail\n"
@@ -734,6 +750,27 @@ jobs:
         self.assertNotEqual(mutated, workflow)
         issues = MODULE.windows_test_diagnostics_issues(mutated)
         self.assertTrue(any("WindowsX86" in issue for issue in issues))
+
+    def test_powershell_comment_stripper_preserves_active_code(self):
+        script = (
+            '$dumpDir = Join-Path $workspace "build_root\\crash_dumps" # note\n'
+            "<#\n"
+            "klogg_vectorscan_tests.pdb\n"
+            "#>\n"
+            "$outputRoot = 'build_root\\asan_diagnostics'\n"
+            "Write-Output ok;# $dumpDir = Join-Path $workspace \"build_root\\crash_dumps\"\n"
+        )
+        active = MODULE.active_script_content(
+            MODULE.strip_powershell_comments(script)
+        )
+        # The quoted marker survives exactly once; the spoofed copy inside
+        # the ";# ..." comment and the marker inside the block comment do not.
+        self.assertEqual(active.count("build_root\\crash_dumps"), 1)
+        self.assertIn("'build_root\\asan_diagnostics'", active)
+        self.assertNotIn("klogg_vectorscan_tests.pdb", active)
+        heredoc = "@'\nklogg_itests.pdb # not a comment\n'@\nCopy-Item here\n"
+        still = MODULE.strip_powershell_comments(heredoc)
+        self.assertIn("klogg_itests.pdb # not a comment", still)
 
     def test_windows_test_diagnostics_contract_ignores_unrelated_steps(self):
         workflow = """\

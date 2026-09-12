@@ -1316,6 +1316,44 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
         self.assertIn("DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
         self.assertIn("DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}", root_cmake)
 
+    def test_enabled_raw_apps_stage_the_private_ios_runtime_closure(self):
+        app_cmake = required_text(APP_CMAKE)
+        native_block = app_cmake.split("if(KLOGG_ENABLE_IOS_NATIVE_STACK)", 1)[
+            1
+        ].split("\n  endif()", 1)[0]
+        third_party_cmake = required_text(THIRD_PARTY_CMAKE)
+        self.assertIn("KLOGG_IOS_NATIVE_RUNTIME_DYLIBS", third_party_cmake)
+        for direct_alias in (
+            "libcrypto.dylib",
+            "libssl.dylib",
+            "libcurl.dylib",
+            "libtatsu.dylib",
+        ):
+            self.assertIn(direct_alias, third_party_cmake)
+        self.assertIn("get_target_property(", native_block)
+        self.assertIn("native_dylibs klogg_ios_native_stack", native_block)
+        self.assertIn("KLOGG_IOS_NATIVE_RUNTIME_DYLIBS", native_block)
+        self.assertNotIn("file(GLOB native_dylibs", native_block)
+        self.assertIn("function(klogg_stage_ios_native_stack", native_block)
+        self.assertIn("${CMAKE_RUNTIME_OUTPUT_DIRECTORY}", native_block)
+        self.assertIn("GENERATOR_IS_MULTI_CONFIG", native_block)
+        self.assertIn("$<CONFIG>", native_block)
+        self.assertIn("Frameworks/ios-native/lib", native_block)
+        self.assertIn("${KLOGG_IOS_NATIVE_STACK_ROOT}/lib", third_party_cmake)
+        self.assertIn("add_custom_target", native_block)
+        self.assertIn("COMMAND /bin/cp -a", native_block)
+        self.assertIn("COMMAND_EXPAND_LISTS", native_block)
+        self.assertIn("add_dependencies(${target}", native_block)
+        self.assertNotIn("POST_BUILD", native_block)
+        self.assertNotIn("copy_directory", native_block)
+        self.assertIn("klogg_stage_ios_native_stack(klogg)", native_block)
+        self.assertIn("klogg_stage_ios_native_stack(klogg_portable)", native_block)
+        self.assertNotIn(
+            'copy_directory "${KLOGG_IOS_NATIVE_STACK_ROOT}/lib" '
+            '"$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Frameworks"',
+            native_block,
+        )
+
     def test_ios_native_homebrew_bootstrap_cleans_aws_formula_and_tap_before_install(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
         producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]

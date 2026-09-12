@@ -295,9 +295,10 @@ PATTERNS: list[dict] = [
         "name": "qtry-verify-macro",
         "regex": re.compile(r"\bQTRY_VERIFY[A-Z0-9_]*\s*\("),
         "fix": (
-            "Use a QElapsedTimer/QTest::qWait polling helper instead of QTRY_VERIFY. "
             "Qt 6.9's retry macros pass chrono duration reps through int timeout "
-            "internals, which GCC 13 rejects under -Werror=conversion."
+            "internals, which GCC 13 rejects under -Werror=conversion. Prefer a "
+            "semantic completion signal armed before the operation; when no such "
+            "signal exists, use a state-predicate helper with a deadline."
         ),
     },
 ]
@@ -1350,6 +1351,227 @@ def _check_writable_reopen_of_live_qlockfile(
     return findings
 
 
+_FOLDER_RESULT_SELECTION_RE = re.compile(
+    r"\b(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*(?:"
+    r"selectResultRow\s*\([^;]*\)"
+    r"|filteredView\s*\(\s*\)\s*->\s*selectAndDisplayLine\s*\([^;]*\)"
+    r")\s*;"
+)
+_FOLDER_WAIT_CALL_RE = re.compile(r"\b(?:waitFor|waitUiState)\s*\(")
+_FOLDER_PATH_RECEIVER_RE = re.compile(
+    r"\b(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*currentMainFilePath\s*\("
+)
+_FOLDER_FIXED_WAIT_RE = re.compile(r"\bQTest\s*::\s*qWait\s*\(\s*(?!0\s*\))[^)]*\)")
+_FOLDER_ASSERTION_START_RE = re.compile(r"\b(?:CHECK|REQUIRE)\s*\(")
+
+
+def _folder_path_assertions(text: str) -> list[tuple[int, int, str, str]]:
+    """Return (start, end, receiver, key) for CHECK/REQUIRE equality
+    assertions whose operands include a receiver's ``currentMainFilePath()``.
+
+    Scans balanced assertion bodies instead of matching one operand shape, so
+    literals, calls, member expressions, and reversed comparisons are all
+    detected. The key is the whitespace-normalized body so repeated
+    assertions deduplicate.
+    """
+    assertions: list[tuple[int, int, str, str]] = []
+    for match in _FOLDER_ASSERTION_START_RE.finditer(text):
+        open_pos = match.end() - 1
+        close_pos = _balanced_close(text, open_pos)
+        if close_pos is None:
+            continue
+        body = text[open_pos + 1 : close_pos]
+        receiver_matches = list(_FOLDER_PATH_RECEIVER_RE.finditer(body))
+        if not receiver_matches or "==" not in body:
+            continue
+        receiver = receiver_matches[0].group("receiver")
+        key = " ".join(body.split())
+        assertions.append((match.start(), close_pos + 1, receiver, key))
+    return assertions
+_FOLDER_COMPLETION_SPY_RE = re.compile(
+    r"\bSafeQSignalSpy\s+(?P<name>[A-Za-z_]\w*)\s*[({]\s*&?"
+    r"(?P<receiver>[A-Za-z_]\w*)\s*,\s*&\s*FolderCrawlerWidget\s*::\s*"
+    r"mainViewFileChanged\b",
+    re.DOTALL,
+)
+
+
+def _folder_path_polls(segment: str, receiver: str) -> list[re.Match[str]]:
+    """Return waits whose own balanced call body polls the selected widget path."""
+    polls: list[re.Match[str]] = []
+    for wait_call in _FOLDER_WAIT_CALL_RE.finditer(segment):
+        open_pos = wait_call.end() - 1
+        close_pos = _balanced_close(segment, open_pos)
+        call_body = segment[open_pos + 1 : close_pos if close_pos is not None else len(segment)]
+        if any(
+            match.group("receiver") == receiver
+            for match in _FOLDER_PATH_RECEIVER_RE.finditer(call_body)
+        ):
+            polls.append(wait_call)
+    return polls
+
+
+def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[int, str]]:
+    """Require FolderCrawlerWidget file opens to wait on their completion signal.
+
+    Master run 34597411626 exposed a five-second polling flake while a deliberately
+    large folder result was still being indexed under TSan. The widget already
+    publishes ``mainViewFileChanged`` after the successful data swap, so elapsed
+    time or polling ``currentMainFilePath`` is not a valid completion boundary.
+    """
+    if (
+        "tests" not in path.parts
+        or path.suffix not in (".cpp", ".cc")
+        or ("selectResultRow" not in text and "selectAndDisplayLine" not in text)
+    ):
+        return []
+
+    comment_free = _strip_cpp_comments(text)
+    code = _strip_cpp_literals(comment_free)
+    allow_lines = _cpp_allow_marker_lines(text)
+    case_starts = list(_CATCH_CASE_RE.finditer(code))
+    findings: list[tuple[int, str]] = []
+
+    for case_index, case_start in enumerate(case_starts):
+        case_end = (
+            case_starts[case_index + 1].start()
+            if case_index + 1 < len(case_starts)
+            else len(code)
+        )
+        case = code[case_start.start() : case_end]
+        selections = list(_FOLDER_RESULT_SELECTION_RE.finditer(case))
+        for selection_index, selection in enumerate(selections):
+            selection_receiver = selection.group("receiver")
+            # End the segment at the next selection of the same receiver:
+            # another widget's selection must not truncate this receiver's
+            # wait cycle, or `a.select(); b.select(); waitFor(a...)` hides
+            # the wait from receiver a's segment.
+            segment_end = next(
+                (
+                    later.start()
+                    for later in selections[selection_index + 1 :]
+                    if later.group("receiver") == selection_receiver
+                ),
+                len(case),
+            )
+            segment = case[selection.end() : segment_end]
+            completion_spies = [
+                match.group("name")
+                for match in _FOLDER_COMPLETION_SPY_RE.finditer(
+                    case[: selection.start()]
+                )
+                if match.group("receiver") == selection_receiver
+            ]
+
+            def completion_observed_before(offset: int) -> bool:
+                before_boundary = segment[:offset]
+                return any(
+                    re.search(
+                        rf"\b(?:CHECK|REQUIRE)\s*\(\s*{re.escape(spy)}\s*\.\s*"
+                        r"safeWait\s*\(",
+                        before_boundary,
+                    )
+                    for spy in completion_spies
+                )
+
+            polling = next(iter(_folder_path_polls(segment, selection_receiver)), None)
+            if polling is not None:
+                # A poll after the completion signal was already observed is
+                # post-completion grace, not completion evidence.
+                if not completion_observed_before(polling.start()):
+                    absolute = case_start.start() + selection.end() + polling.start()
+                    line_num = code.count("\n", 0, absolute) + 1
+                    if line_num not in allow_lines:
+                        findings.append(
+                            (
+                                line_num,
+                                "Do not poll currentMainFilePath() to infer completion of a "
+                                "folder result selection. Arm SafeQSignalSpy on the same "
+                                "FolderCrawlerWidget's mainViewFileChanged signal before "
+                                "selecting, use safeWait(timeout) only as a deadlock bound, "
+                                "then assert the resulting path. (Master TSan run "
+                                "34597411626.)",
+                            )
+                        )
+                continue
+
+            fixed_wait_violation = False
+            for fixed_wait in _FOLDER_FIXED_WAIT_RE.finditer(segment):
+                remainder = segment[fixed_wait.end() :]
+                has_path_assertion = any(
+                    receiver == selection_receiver
+                    for _, _, receiver, _ in _folder_path_assertions(remainder)
+                )
+                if not has_path_assertion:
+                    continue
+                if completion_observed_before(fixed_wait.start()):
+                    continue
+                absolute = case_start.start() + selection.end() + fixed_wait.start()
+                line_num = code.count("\n", 0, absolute) + 1
+                if line_num in allow_lines:
+                    continue
+                findings.append(
+                    (
+                        line_num,
+                        "Do not use QTest::qWait() as evidence that selectResultRow() "
+                        "completed. Arm SafeQSignalSpy on the same widget's "
+                        "mainViewFileChanged signal before the selection and REQUIRE "
+                        "safeWait(timeout) as the outer failure bound.",
+                    )
+                )
+                fixed_wait_violation = True
+                break
+            if fixed_wait_violation:
+                continue
+
+            prior_path_assertions = {
+                key
+                for _, _, receiver, key in _folder_path_assertions(
+                    case[: selection.start()]
+                )
+                if receiver == selection_receiver
+            }
+            for assertion_start, _, assertion_receiver, assertion_key in (
+                _folder_path_assertions(segment)
+            ):
+                if assertion_receiver != selection_receiver:
+                    continue
+                if completion_observed_before(assertion_start):
+                    continue
+                if assertion_key in prior_path_assertions:
+                    continue
+                has_allowed_wait = any(
+                    code.count(
+                        "\n",
+                        0,
+                        case_start.start() + selection.end() + fixed_wait.start(),
+                    )
+                    + 1
+                    in allow_lines
+                    for fixed_wait in _FOLDER_FIXED_WAIT_RE.finditer(
+                        segment[:assertion_start]
+                    )
+                )
+                if has_allowed_wait:
+                    continue
+                absolute = case_start.start() + selection.end() + assertion_start
+                line_num = code.count("\n", 0, absolute) + 1
+                if line_num in allow_lines:
+                    continue
+                findings.append(
+                    (
+                        line_num,
+                        "Do not assert currentMainFilePath() immediately after a folder "
+                        "result selection unless the same path was already current. Arm "
+                        "SafeQSignalSpy on mainViewFileChanged before selecting and "
+                        "REQUIRE safeWait(timeout) before asserting the new path.",
+                    )
+                )
+                break
+
+    return findings
+
+
 _FOLDER_ENGINE_QSIGNALSPY_RE = re.compile(
     r"\bQSignalSpy\b[^;]*\bFolderSearchEngine::", re.DOTALL
 )
@@ -1568,17 +1790,33 @@ def _simple_literal_value(expression: str) -> str | None:
     return None if match is None else match.group("value")
 
 
-def _native_assertion_allow_lines(text: str) -> set[int]:
+def _cpp_allow_marker_lines(text: str) -> set[int]:
     """Find allow markers in actual comments, never in string/raw-string spoof."""
     literal_free = _strip_cpp_literals(text)
-    marker_re = re.compile(
-        r"//[^\n]*" + re.escape(ALLOW_MARKER) + r"|/\*.*?" + re.escape(ALLOW_MARKER) + r".*?\*/",
-        re.DOTALL,
-    )
-    return {
-        literal_free.count("\n", 0, match.start()) + 1
-        for match in marker_re.finditer(literal_free)
-    }
+    marker_lines: set[int] = set()
+    index = 0
+    while index < len(literal_free) - 1:
+        token = literal_free[index : index + 2]
+        if token == "//":
+            comment_end = literal_free.find("\n", index + 2)
+            if comment_end < 0:
+                comment_end = len(literal_free)
+        elif token == "/*":
+            close = literal_free.find("*/", index + 2)
+            comment_end = len(literal_free) if close < 0 else close + 2
+        else:
+            index += 1
+            continue
+
+        comment = literal_free[index:comment_end]
+        marker_offset = comment.find(ALLOW_MARKER)
+        while marker_offset >= 0:
+            marker_lines.add(
+                literal_free.count("\n", 0, index + marker_offset) + 1
+            )
+            marker_offset = comment.find(ALLOW_MARKER, marker_offset + len(ALLOW_MARKER))
+        index = comment_end
+    return marker_lines
 
 
 def _check_native_presentation_test_assertion(
@@ -1590,7 +1828,7 @@ def _check_native_presentation_test_assertion(
 
     comment_free = _strip_cpp_comments(text)
     code = _strip_cpp_literals(comment_free)
-    allow_lines = _native_assertion_allow_lines(text)
+    allow_lines = _cpp_allow_marker_lines(text)
     findings: list[tuple[int, str]] = []
     for assertion in _ASSERTION_RE.finditer(code):
         open_pos = assertion.end() - 1
@@ -1674,6 +1912,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "writable-reopen-of-live-qlockfile",
         "check": _check_writable_reopen_of_live_qlockfile,
+    },
+    {
+        "name": "known-completion-event-polling",
+        "check": _check_known_completion_event_polling,
     },
     {
         "name": "folder-engine-qsignalspy",
