@@ -1362,11 +1362,32 @@ _FOLDER_PATH_RECEIVER_RE = re.compile(
     r"\b(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*currentMainFilePath\s*\("
 )
 _FOLDER_FIXED_WAIT_RE = re.compile(r"\bQTest\s*::\s*qWait\s*\(\s*(?!0\s*\))[^)]*\)")
-_FOLDER_PATH_ASSERTION_RE = re.compile(
-    r"\b(?:CHECK|REQUIRE)\s*\(\s*(?P<receiver>[A-Za-z_]\w*)\s*"
-    r"(?:\.|->)\s*currentMainFilePath\s*\(\s*\)\s*==\s*"
-    r"(?P<expected>[A-Za-z_]\w*)\s*\)"
-)
+_FOLDER_ASSERTION_START_RE = re.compile(r"\b(?:CHECK|REQUIRE)\s*\(")
+
+
+def _folder_path_assertions(text: str) -> list[tuple[int, int, str, str]]:
+    """Return (start, end, receiver, key) for CHECK/REQUIRE equality
+    assertions whose operands include a receiver's ``currentMainFilePath()``.
+
+    Scans balanced assertion bodies instead of matching one operand shape, so
+    literals, calls, member expressions, and reversed comparisons are all
+    detected. The key is the whitespace-normalized body so repeated
+    assertions deduplicate.
+    """
+    assertions: list[tuple[int, int, str, str]] = []
+    for match in _FOLDER_ASSERTION_START_RE.finditer(text):
+        open_pos = match.end() - 1
+        close_pos = _balanced_close(text, open_pos)
+        if close_pos is None:
+            continue
+        body = text[open_pos + 1 : close_pos]
+        receiver_matches = list(_FOLDER_PATH_RECEIVER_RE.finditer(body))
+        if not receiver_matches or "==" not in body:
+            continue
+        receiver = receiver_matches[0].group("receiver")
+        key = " ".join(body.split())
+        assertions.append((match.start(), close_pos + 1, receiver, key))
+    return assertions
 _FOLDER_COMPLETION_SPY_RE = re.compile(
     r"\bSafeQSignalSpy\s+(?P<name>[A-Za-z_]\w*)\s*[({]\s*&?"
     r"(?P<receiver>[A-Za-z_]\w*)\s*,\s*&\s*FolderCrawlerWidget\s*::\s*"
@@ -1421,10 +1442,17 @@ def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[i
         selections = list(_FOLDER_RESULT_SELECTION_RE.finditer(case))
         for selection_index, selection in enumerate(selections):
             selection_receiver = selection.group("receiver")
-            segment_end = (
-                selections[selection_index + 1].start()
-                if selection_index + 1 < len(selections)
-                else len(case)
+            # End the segment at the next selection of the same receiver:
+            # another widget's selection must not truncate this receiver's
+            # wait cycle, or `a.select(); b.select(); waitFor(a...)` hides
+            # the wait from receiver a's segment.
+            segment_end = next(
+                (
+                    later.start()
+                    for later in selections[selection_index + 1 :]
+                    if later.group("receiver") == selection_receiver
+                ),
+                len(case),
             )
             segment = case[selection.end() : segment_end]
             completion_spies = [
@@ -1434,24 +1462,6 @@ def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[i
                 )
                 if match.group("receiver") == selection_receiver
             ]
-
-            polling = next(iter(_folder_path_polls(segment, selection_receiver)), None)
-            if polling is not None:
-                absolute = case_start.start() + selection.end() + polling.start()
-                line_num = code.count("\n", 0, absolute) + 1
-                if line_num not in allow_lines:
-                    findings.append(
-                        (
-                            line_num,
-                            "Do not poll currentMainFilePath() to infer completion of a "
-                            "folder result selection. Arm SafeQSignalSpy on the same "
-                            "FolderCrawlerWidget's mainViewFileChanged signal before "
-                            "selecting, use safeWait(timeout) only as a deadlock bound, "
-                            "then assert the resulting path. (Master TSan run "
-                            "34597411626.)",
-                        )
-                    )
-                continue
 
             def completion_observed_before(offset: int) -> bool:
                 before_boundary = segment[:offset]
@@ -1464,12 +1474,33 @@ def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[i
                     for spy in completion_spies
                 )
 
+            polling = next(iter(_folder_path_polls(segment, selection_receiver)), None)
+            if polling is not None:
+                # A poll after the completion signal was already observed is
+                # post-completion grace, not completion evidence.
+                if not completion_observed_before(polling.start()):
+                    absolute = case_start.start() + selection.end() + polling.start()
+                    line_num = code.count("\n", 0, absolute) + 1
+                    if line_num not in allow_lines:
+                        findings.append(
+                            (
+                                line_num,
+                                "Do not poll currentMainFilePath() to infer completion of a "
+                                "folder result selection. Arm SafeQSignalSpy on the same "
+                                "FolderCrawlerWidget's mainViewFileChanged signal before "
+                                "selecting, use safeWait(timeout) only as a deadlock bound, "
+                                "then assert the resulting path. (Master TSan run "
+                                "34597411626.)",
+                            )
+                        )
+                continue
+
             fixed_wait_violation = False
             for fixed_wait in _FOLDER_FIXED_WAIT_RE.finditer(segment):
                 remainder = segment[fixed_wait.end() :]
                 has_path_assertion = any(
-                    match.group("receiver") == selection_receiver
-                    for match in _FOLDER_PATH_ASSERTION_RE.finditer(remainder)
+                    receiver == selection_receiver
+                    for _, _, receiver, _ in _folder_path_assertions(remainder)
                 )
                 if not has_path_assertion:
                     continue
@@ -1494,18 +1525,20 @@ def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[i
                 continue
 
             prior_path_assertions = {
-                match.group("expected")
-                for match in _FOLDER_PATH_ASSERTION_RE.finditer(
+                key
+                for _, _, receiver, key in _folder_path_assertions(
                     case[: selection.start()]
                 )
-                if match.group("receiver") == selection_receiver
+                if receiver == selection_receiver
             }
-            for path_assertion in _FOLDER_PATH_ASSERTION_RE.finditer(segment):
-                if path_assertion.group("receiver") != selection_receiver:
+            for assertion_start, _, assertion_receiver, assertion_key in (
+                _folder_path_assertions(segment)
+            ):
+                if assertion_receiver != selection_receiver:
                     continue
-                if completion_observed_before(path_assertion.start()):
+                if completion_observed_before(assertion_start):
                     continue
-                if path_assertion.group("expected") in prior_path_assertions:
+                if assertion_key in prior_path_assertions:
                     continue
                 has_allowed_wait = any(
                     code.count(
@@ -1516,12 +1549,12 @@ def _check_known_completion_event_polling(text: str, path: Path) -> list[tuple[i
                     + 1
                     in allow_lines
                     for fixed_wait in _FOLDER_FIXED_WAIT_RE.finditer(
-                        segment[: path_assertion.start()]
+                        segment[:assertion_start]
                     )
                 )
                 if has_allowed_wait:
                     continue
-                absolute = case_start.start() + selection.end() + path_assertion.start()
+                absolute = case_start.start() + selection.end() + assertion_start
                 line_num = code.count("\n", 0, absolute) + 1
                 if line_num in allow_lines:
                     continue

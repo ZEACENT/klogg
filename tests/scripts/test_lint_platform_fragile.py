@@ -98,6 +98,57 @@ TEST_CASE( "uncached async open", "[folder]" )
 """
         self.assertEqual(len(self.check(text)), 1)
 
+    def test_path_assertion_operand_shapes_are_all_flagged(self):
+        literal = """\
+TEST_CASE( "literal path", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( widget.currentMainFilePath() == "some/path" );
+}
+"""
+        reversed_order = """\
+TEST_CASE( "reversed path", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( expectedPath == widget.currentMainFilePath() );
+}
+"""
+        call_operand = """\
+TEST_CASE( "call operand", "[folder]" )
+{
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( widget.currentMainFilePath() == dir.filePath( "a.log" ) );
+}
+"""
+        self.assertEqual(len(self.check(literal)), 1)
+        self.assertEqual(len(self.check(reversed_order)), 1)
+        self.assertEqual(len(self.check(call_operand)), 1)
+
+    def test_cross_receiver_selection_does_not_hide_the_wait(self):
+        text = """\
+TEST_CASE( "two widgets", "[folder]" )
+{
+    a.selectResultRow( 1_lnum );
+    b.selectResultRow( 1_lnum );
+    REQUIRE( waitFor( [ & ] { return a.currentMainFilePath() == pathA; } ) );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+    def test_poll_after_observed_completion_is_allowed(self):
+        text = """\
+TEST_CASE( "grace poll", "[folder]" )
+{
+    SafeQSignalSpy completed( &widget, &FolderCrawlerWidget::mainViewFileChanged );
+    widget.selectResultRow( 1_lnum );
+    REQUIRE( completed.safeWait( 30000 ) );
+    REQUIRE( waitFor( [ & ] { return widget.currentMainFilePath() == a; } ) );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
     def test_unrelated_wait_does_not_become_path_polling(self):
         text = """\
 TEST_CASE( "separate wait", "[folder]" )
