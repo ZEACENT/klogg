@@ -236,7 +236,15 @@ private:
                 return true;
             }
         }
+        // The capability callback above may reenter the supervisor and retire
+        // this run, advancing the run serial, generation, or epoch after the
+        // snapshot taken at the top. cppcheck's value flow cannot see that
+        // reentrancy and concludes the revalidation below is constant
+        // (Static analysis run 34675223936); keep the guard that closed the
+        // ASan heap-use-after-free.
+        // cppcheck-suppress knownConditionTrueFalse
         if ( !running_ || runSerial != runSerial_ || generation != snapshot_.generation
+             // cppcheck-suppress knownConditionTrueFalse
              || epoch != snapshot_.epoch ) {
             return true;
         }
