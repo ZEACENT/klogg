@@ -1146,6 +1146,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->replaceCurrentSearch( pattern );
     }
 
+    void reload()
+    {
+        crawler->reload();
+    }
+
+    void notifyFileTruncated()
+    {
+        crawler->fileChangedHandler( MonitoredFileStatus::Truncated );
+    }
+
     void setUseRegexp( bool enabled )
     {
         crawler->searchToolbar_->setUseRegexp( enabled );
@@ -1175,6 +1185,11 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     QString searchStatusText() const
     {
         return crawler->searchInfoLine_->text();
+    }
+
+    void clearSearchStatusText()
+    {
+        crawler->searchInfoLine_->setText( {} );
     }
 
     bool stopButtonHidden() const
@@ -3939,6 +3954,47 @@ TEST_CASE( "CrawlerWidget replacement retires superseded search status",
 
     visitor.replaceSearch( replacement );
 
+    CHECK( visitor.stopButtonHidden() );
+    CHECK_FALSE( visitor.searchGaugeVisible() );
+    CHECK( visitor.pendingSearchLines() == 0 );
+}
+
+TEST_CASE( "Reload and truncation retire abandoned search presentation",
+           "[ui][search-generation][presentation][regression]" )
+{
+    QTemporaryFile file{ "crawler_abandoned_search_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    const bool useReload = GENERATE( false, true );
+    const bool clearStatusText = GENERATE( false, true );
+    CAPTURE( useReload, clearStatusText );
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    const auto generation = source->currentSearchGeneration();
+    visitor.deliverSearchResults( source, 7_lcount, 0_lnum, false, generation );
+    visitor.setSearchInProgress( true );
+    visitor.deliverSearchStatus( source, 7_lcount, 50, 0_lnum, generation );
+    if ( clearStatusText ) {
+        visitor.clearSearchStatusText();
+    }
+    REQUIRE( visitor.presentedMatchCount() == 7_lcount );
+    REQUIRE_FALSE( visitor.stopButtonHidden() );
+    REQUIRE( visitor.searchGaugeVisible() );
+    REQUIRE( visitor.pendingSearchLines() > 0 );
+
+    if ( useReload ) {
+        visitor.reload();
+    }
+    else {
+        visitor.notifyFileTruncated();
+    }
+
+    CHECK( visitor.presentedMatchCount() == 0_lcount );
     CHECK( visitor.stopButtonHidden() );
     CHECK_FALSE( visitor.searchGaugeVisible() );
     CHECK( visitor.pendingSearchLines() == 0 );

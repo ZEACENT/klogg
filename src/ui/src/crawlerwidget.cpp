@@ -302,13 +302,11 @@ void CrawlerWidget::reload()
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
     presentationSelectionRestorePending_ = false;
-    if ( searchPendingLines_ != 0 ) {
-        searchPendingLines_ = 0;
-        Q_EMIT searchPendingLinesChanged();
-    }
     searchState_.resetState();
+    retireSearchStatusPresentation();
     constexpr auto DropCache = true;
     logFilteredData_->clearSearch( DropCache );
+    nbMatches_ = 0_lcount;
     lastPublishedMatchCount_ = 0_lcount;
     logFilteredData_->clearMarks();
     if ( presentationActive_ ) {
@@ -1074,25 +1072,22 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
         logFilteredData_->clearMarks();
         searchUpdateThrottleTimer_.stop();
         searchUpdatePending_ = false;
-        if ( searchPendingLines_ != 0 ) {
-            searchPendingLines_ = 0;
-            Q_EMIT searchPendingLinesChanged();
+        retireSearchStatusPresentation();
+
+        // Truncation invalidates line-indexed search results regardless of the
+        // current status text or whether the first progress update was shown.
+        constexpr auto DropCache = true;
+        logFilteredData_->clearSearch( DropCache );
+        lastPublishedMatchCount_ = 0_lcount;
+        if ( presentationActive_ ) {
+            filteredView_->updateData();
+            nbMatches_ = 0_lcount;
         }
-        if ( !searchInfoLine_->text().isEmpty() ) {
-            // Invalidate the search
-            constexpr auto DropCache = true;
-            logFilteredData_->clearSearch( DropCache );
-            lastPublishedMatchCount_ = 0_lcount;
-            if ( presentationActive_ ) {
-                filteredView_->updateData();
-                nbMatches_ = 0_lcount;
-            }
-            else {
-                queuePresentationRefresh( false );
-            }
-            searchState_.truncateFile();
-            printSearchInfoMessage();
+        else {
+            queuePresentationRefresh( false );
         }
+        searchState_.truncateFile();
+        printSearchInfoMessage();
     }
 }
 
