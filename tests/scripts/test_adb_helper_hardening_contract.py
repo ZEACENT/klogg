@@ -508,24 +508,29 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
         lock_path.write_text(json.dumps(lock), encoding="utf-8")
         return repository, archive_root, lock_path, lock
 
-    def build_legal_assets(self, repository, archive_root, lock, output):
+    def build_legal_assets(
+        self, repository, archive_root, lock, output, package_support_output=None
+    ):
+        command = [
+            sys.executable,
+            str(LEGAL_SCRIPT),
+            "--lock",
+            str(lock),
+            "--archive-root",
+            str(archive_root),
+            "--repository-root",
+            str(repository),
+            "--version",
+            "26.08.27",
+            "--base-url",
+            "https://github.com/ZEACENT/klogg",
+            "--output",
+            str(output),
+        ]
+        if package_support_output is not None:
+            command.extend(("--package-support-output", str(package_support_output)))
         return subprocess.run(
-            [
-                sys.executable,
-                str(LEGAL_SCRIPT),
-                "--lock",
-                str(lock),
-                "--archive-root",
-                str(archive_root),
-                "--repository-root",
-                str(repository),
-                "--version",
-                "26.08.27",
-                "--base-url",
-                "https://github.com/ZEACENT/klogg",
-                "--output",
-                str(output),
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=10,
@@ -577,6 +582,84 @@ class AdbHelperSourceHardeningContractTest(unittest.TestCase):
             "scripts/smoke_adb_helper.py",
         }
         self.assertEqual(required_build_material - members, set())
+
+    def test_legal_assets_materialize_only_locked_package_support_projection(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        release_output = self.root / "release"
+        support_output = self.root / "package-support"
+
+        result = self.build_legal_assets(
+            repository,
+            archive_root,
+            lock_path,
+            release_output,
+            support_output,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        expected_support = {
+            name
+            for asset in lock["release_assets"]
+            if asset["distribution"]["package_required"] is True
+            for name in (asset["file_name"], asset["sha256_file"])
+        }
+        self.assertEqual(
+            {path.name for path in support_output.iterdir()}, expected_support
+        )
+        self.assertEqual(
+            {path.name for path in release_output.iterdir()},
+            {
+                name
+                for asset in lock["release_assets"]
+                for name in (asset["file_name"], asset["sha256_file"])
+            }
+            | {"adb-helper-release-assets.json"},
+        )
+        source_archive = next(
+            asset
+            for asset in lock["release_assets"]
+            if asset["kind"] == "source-archive"
+        )
+        self.assertFalse((support_output / source_archive["file_name"]).exists())
+        self.assertFalse((support_output / source_archive["sha256_file"]).exists())
+        for name in expected_support:
+            self.assertEqual(
+                (support_output / name).read_bytes(),
+                (release_output / name).read_bytes(),
+            )
+
+    def test_legal_assets_reject_nested_release_asset_paths_before_receipt_generation(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        lock["release_assets"][1]["file_name"] = "legal/adb-helper-licenses.tar.gz"
+        lock["release_assets"][1]["sha256_file"] = (
+            "legal/adb-helper-licenses.tar.gz.sha256"
+        )
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+        result = self.build_legal_assets(
+            repository,
+            archive_root,
+            lock_path,
+            self.root / "release-nested-path",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("flat file name", (result.stdout + result.stderr).lower())
+
+    def test_legal_assets_reject_non_boolean_distribution_metadata(self):
+        repository, archive_root, lock_path, lock = self.make_legal_fixture()
+        lock["release_assets"][1]["distribution"]["package_required"] = "true"
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+        result = self.build_legal_assets(
+            repository,
+            archive_root,
+            lock_path,
+            self.root / "release-invalid-distribution",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("distribution", (result.stdout + result.stderr).lower())
 
     def test_legal_assets_do_not_claim_canonical_archives_are_raw_upstream_downloads(self):
         repository, archive_root, lock_path, lock = self.make_legal_fixture()

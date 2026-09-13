@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
+import os
 import pathlib
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -11,6 +17,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "adb_helper_cycle8_release_contract.json
 LOCK = ROOT / "packaging" / "adb" / "adb-helper.lock.json"
 BUILD_SCRIPT = ROOT / "scripts" / "build_adb_helper.py"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_adb_helper_artifact.py"
+PREFETCH_SCRIPT = ROOT / "scripts" / "prefetch_adb_helper_sources.py"
 SUPERBUILD = ROOT / "packaging" / "adb" / "superbuild" / "CMakeLists.txt"
 WINDOWS_PATCHES = ROOT / "packaging" / "adb" / "patches"
 BUILD_ACTION = ROOT / ".github" / "actions" / "build-adb-helper" / "action.yml"
@@ -19,6 +26,19 @@ WIN_PACKAGE = ROOT / ".github" / "actions" / "agent-package-win" / "action.yml"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yml"
 GIT_ATTRIBUTES = ROOT / ".gitattributes"
+CI_LINT = ROOT / "scripts" / "lint_ci_quality.py"
+ADB_CACHE_KEY = (
+    "adb-helper-sources-v2-${{ hashFiles('packaging/adb/adb-helper.lock.json', "
+    "'scripts/prefetch_adb_helper_sources.py') }}"
+)
+ADB_CACHE_KEY_REFERENCE = "${{ steps.adb-cache-key.outputs.key }}"
+ADB_CACHE_FALLBACK = "adb-helper-sources-v1-"
+ADB_CACHE_MAX_BYTES = "536870912"
+
+_CI_SPEC = importlib.util.spec_from_file_location("lint_ci_quality", CI_LINT)
+assert _CI_SPEC is not None and _CI_SPEC.loader is not None
+CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
+_CI_SPEC.loader.exec_module(CI_MODULE)
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -64,6 +84,118 @@ def version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(component) for component in value.split("."))
 
 
+def adb_cache_contract(workflow: str) -> tuple[list[str], str | None]:
+    issues: list[str] = []
+    blocks = CI_MODULE.workflow_job_blocks(workflow)
+    job_block = blocks.get("PrefetchAdbHelperSources", [])
+    job_env = CI_MODULE.workflow_mapping_block(job_block, "env", 4)
+    configured_env = (
+        {key: value for key, (value, _) in job_env.items()}
+        if job_env is not None
+        else {}
+    )
+    if configured_env.get("KLOGG_ADB_SOURCE_CACHE_MAX_BYTES") != ADB_CACHE_MAX_BYTES:
+        issues.append("ADB source cache job must define the named byte limit")
+
+    jobs = CI_MODULE.workflow_job_steps(workflow)
+    steps = jobs.get("PrefetchAdbHelperSources", [])
+    parsed = [CI_MODULE.workflow_step_fields(step) for step in steps]
+    key_indexes = [
+        index
+        for index, (fields, _) in enumerate(parsed)
+        if fields.get("id") == "adb-cache-key"
+    ]
+    restore_indexes = [
+        index
+        for index, (fields, _) in enumerate(parsed)
+        if fields.get("uses", "").startswith("actions/cache/restore@")
+    ]
+    save_indexes = [
+        index
+        for index, (fields, _) in enumerate(parsed)
+        if fields.get("uses", "").startswith("actions/cache/save@")
+    ]
+    upload_indexes = [
+        index
+        for index, (fields, _) in enumerate(parsed)
+        if fields.get("uses", "").startswith("actions/upload-artifact@")
+    ]
+    prefetch_indexes = [
+        index
+        for index, (fields, _) in enumerate(parsed)
+        if "python3 scripts/prefetch_adb_helper_sources.py" in fields.get("run", "")
+    ]
+    if not all(
+        len(indexes) == 1
+        for indexes in (
+            key_indexes,
+            restore_indexes,
+            save_indexes,
+            upload_indexes,
+            prefetch_indexes,
+        )
+    ):
+        issues.append("ADB source cache steps must be unique and structurally present")
+        return issues, None
+
+    key_index = key_indexes[0]
+    restore_index = restore_indexes[0]
+    save_index = save_indexes[0]
+    upload_index = upload_indexes[0]
+    prefetch_index = prefetch_indexes[0]
+    key_fields, _ = parsed[key_index]
+    restore_fields, restore_children = parsed[restore_index]
+    prefetch_fields, prefetch_children = parsed[prefetch_index]
+    save_fields, save_children = parsed[save_index]
+    restore_with = restore_children.get("with", {})
+    prefetch_env = prefetch_children.get("env", {})
+    save_with = save_children.get("with", {})
+
+    key_script = CI_MODULE.active_script_content(key_fields.get("run", ""))
+    if ADB_CACHE_KEY not in key_script or "github.run_id" in key_script:
+        issues.append("ADB source cache key step must define the exact v2 key")
+    if restore_with.get("key") != ADB_CACHE_KEY_REFERENCE:
+        issues.append("ADB source cache restore must reuse the named v2 key")
+    if restore_with.get("restore-keys") != ADB_CACHE_FALLBACK:
+        issues.append("ADB source cache restore must use only the controlled v1 fallback")
+    if save_with.get("key") != ADB_CACHE_KEY_REFERENCE:
+        issues.append("ADB source cache save must reuse the named v2 key")
+    if (
+        prefetch_env.get("KLOGG_ADB_SOURCE_CACHE_EXACT_KEY")
+        != ADB_CACHE_KEY_REFERENCE
+    ):
+        issues.append("ADB source cache verification must reuse the named v2 key")
+    prefetch_script = CI_MODULE.active_script_content(prefetch_fields.get("run", ""))
+    if not all(
+        marker in prefetch_script
+        for marker in (
+            '"$KLOGG_ADB_SOURCE_CACHE_MATCHED_KEY" == "$KLOGG_ADB_SOURCE_CACHE_EXACT_KEY"',
+            "The exact ADB source cache failed verification",
+            "exit 1",
+        )
+    ):
+        issues.append("an invalid exact ADB source cache must fail closed")
+    if prefetch_script.count(
+        '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
+    ) != 2:
+        issues.append("ADB source cache prefetch must enforce the named byte limit")
+    if "github.run_id" in "\n".join(
+        str(value) for value in (*restore_with.values(), *save_with.values())
+    ):
+        issues.append("ADB source cache keys must not use github.run_id")
+    save_condition = save_fields.get("if", "")
+    if (
+        "github.event_name == 'push'" not in save_condition
+        or "steps.cache-adb-sources.outputs.cache-hit != 'true'" not in save_condition
+    ):
+        issues.append("ADB source cache save must be push-only after an exact miss")
+    if not (key_index < restore_index < prefetch_index < save_index < upload_index):
+        issues.append("ADB source cache validation must precede save and upload")
+    if "gh cache delete" in CI_MODULE.active_script_content(workflow):
+        issues.append("ADB source cache fallback must not delete GitHub caches")
+    return issues, prefetch_script
+
+
 class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -76,34 +208,96 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         cls.superbuild = read_text(SUPERBUILD)
         cls.verify_script = read_text(VERIFY_SCRIPT)
 
-    def test_ci_reuses_only_the_exact_locked_adb_source_closure(self):
-        prefetch = section(
-            self.ci_build,
-            "  PrefetchAdbHelperSources:\n",
-            "  BuildAdbHelperLegalAssets:\n",
-        )
-        active = active_lines(prefetch)
-        exact_key = (
-            "adb-helper-sources-v1-${{ hashFiles("
-            "'packaging/adb/adb-helper.lock.json', "
-            "'scripts/prefetch_adb_helper_sources.py') }}"
-        )
-        self.assertIn("actions/cache/restore@", active)
-        self.assertIn("actions/cache/save@", active)
-        self.assertIn(exact_key, active)
-        self.assertNotIn("restore-keys:", active)
-        self.assertRegex(
-            active,
-            r"if:.*github\.event_name == 'push'.*cache-adb-sources\.outputs\.cache-hit != 'true'",
-        )
-        self.assertGreater(
-            active.index("python3 scripts/prefetch_adb_helper_sources.py"),
-            active.index("actions/cache/restore@"),
-        )
-        self.assertGreater(
-            active.index("actions/upload-artifact@"),
-            active.index("python3 scripts/prefetch_adb_helper_sources.py"),
-        )
+    def test_ci_reuses_the_exact_v2_adb_cache_with_one_controlled_v1_fallback(self):
+        issues, guard_script = adb_cache_contract(self.ci_build)
+        self.assertEqual(issues, [], "\n".join(issues))
+        self.assertIsNotNone(guard_script)
+
+    def test_adb_cache_contract_rejects_key_fallback_spoof_and_guard_mutations(self):
+        size_option = '--max-cache-bytes "$KLOGG_ADB_SOURCE_CACHE_MAX_BYTES"'
+        mutations = {
+            "missing fallback": self.ci_build.replace(
+                f"          restore-keys: {ADB_CACHE_FALLBACK}\n", "", 1
+            ),
+            "overbroad fallback": self.ci_build.replace(
+                ADB_CACHE_FALLBACK, "adb-helper-sources-", 1
+            ),
+            "run-id key": self.ci_build.replace(
+                ADB_CACHE_KEY, ADB_CACHE_KEY + "-${{ github.run_id }}", 1
+            ),
+            "missing named limit": self.ci_build.replace(
+                f"      KLOGG_ADB_SOURCE_CACHE_MAX_BYTES: {ADB_CACHE_MAX_BYTES}\n",
+                "",
+                1,
+            ),
+            "missing size enforcement": self.ci_build.replace(size_option, "", 1),
+            "comment spoof": self.ci_build.replace(
+                size_option, "# " + size_option, 1
+            ),
+            "invalid exact cache fallback": self.ci_build.replace(
+                "The exact ADB source cache failed verification",
+                "The restored ADB source cache failed verification",
+                1,
+            ),
+        }
+        for label, workflow in mutations.items():
+            with self.subTest(label=label):
+                issues, _ = adb_cache_contract(workflow)
+                self.assertNotEqual(issues, [], label)
+
+    def test_adb_cache_actual_size_guard_accepts_small_and_rejects_oversized_or_symlinked_closures(self):
+        issues, prefetch_script = adb_cache_contract(self.ci_build)
+        self.assertEqual(issues, [], "\n".join(issues))
+        self.assertIsNotNone(prefetch_script)
+        payload = b"1234"
+        lock = {
+            "sources": [
+                {
+                    "id": "archive",
+                    "archive_file": "archive.tar.gz",
+                    "archive_url": "https://example.invalid/archive.tar.gz",
+                    "archive_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as parent:
+            root = pathlib.Path(parent)
+            lock_path = root / "lock.json"
+            cache = root / "cache"
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            cache.mkdir()
+            (cache / "archive.tar.gz").write_bytes(payload)
+
+            def validate(maximum: int):
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(PREFETCH_SCRIPT),
+                        "--lock",
+                        str(lock_path),
+                        "--download-root",
+                        str(cache),
+                        "--offline",
+                        "--max-cache-bytes",
+                        str(maximum),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            accepted = validate(4096)
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+            oversized = validate(4)
+            self.assertNotEqual(oversized.returncode, 0)
+            self.assertIn("exceeds", oversized.stdout + oversized.stderr)
+
+            manifest = cache / "adb-helper-prefetch-manifest.json"
+            manifest.unlink(missing_ok=True)
+            os.symlink("archive.tar.gz", cache / "archive-link.tar.gz")
+            symlinked = validate(4096)
+            self.assertNotEqual(symlinked.returncode, 0)
+            self.assertIn("unlocked entry", symlinked.stdout + symlinked.stderr)
 
     def test_fixture_distinguishes_buildability_from_native_device_qualification(self):
         classes = self.fixture.get("validation_classes")
@@ -379,7 +573,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         usb = target.get("usb", {})
         mac_arm_entry = section(
             self.ci_build,
-            "artifacts_id: macos-arm-qt6",
+            "KLOGG_ARTIFACTS_ID: macos-arm-qt6",
             "    runs-on:",
         )
 
@@ -399,7 +593,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         )
         self.assertEqual(set(usb.get("frameworks", [])), set(expected["required_frameworks"]))
         self.assertTrue(set(expected["forbidden_imports"]).issubset(usb.get("forbidden_imports", [])))
-        self.assertIn("adb_target: macos-arm64", mac_arm_entry)
+        self.assertIn("KLOGG_ADB_HELPER_TARGET: macos-arm64", mac_arm_entry)
         self.assertIn(
             f"-DKLOGG_OSX_DEPLOYMENT_TARGET={expected['deployment_target']}",
             mac_arm_entry,
@@ -461,13 +655,9 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         windows_matrix = section(
             self.ci_build, "  WindowsX86:\n", "  WindowsAsan:\n"
         )
-        x86_entry = section(
-            windows_matrix,
-            "artifacts_id: windows-x86-qt5",
-            "    runs-on:",
-        )
-        matching_helper = re.search(r"^\s*adb_target:\s*windows-x86\s*$", x86_entry, re.MULTILINE)
-        fail_closed = re.search(r"^\s*package:\s*false\s*$", x86_entry, re.MULTILINE)
+        x86_entry = windows_matrix
+        matching_helper = re.search(r"^\s*KLOGG_ADB_HELPER_TARGET:\s*windows-x86\s*$", x86_entry, re.MULTILINE)
+        fail_closed = re.search(r"^\s*KLOGG_PACKAGE_ENABLED:\s*false\s*$", x86_entry, re.MULTILINE)
         self.assertTrue(
             matching_helper or fail_closed,
             "Windows x86 packaging must be disabled or declare a matching windows-x86 helper",
@@ -530,13 +720,22 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
         self.assertEqual(failures, [], "\n".join(failures))
 
     def test_cross_job_helper_consumers_verify_checksum_envelope_and_attestation(self):
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
+        helper_job = section(self.ci_build, "  BuildAdbLinuxX64:\n", "  LinuxPackages:\n")
         linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
         mac_job = section(self.ci_build, "  MacPackages:\n", "  MacSanitizers:\n")
         windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
 
         self.assertIn("actions/attest-build-provenance", helper_job)
-        self.assertIn("adb-helper-${{ matrix.target }}.tar.gz", helper_job)
+        self.assertNotIn("${{ matrix.target }}", helper_job)
+        self.assertTrue(
+            "adb-helper-linux-x86_64.tar.gz" in helper_job
+            or (
+                "KLOGG_ADB_HELPER_TARGET: linux-x86_64" in helper_job
+                and "adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}.tar.gz"
+                in helper_job
+            ),
+            "the direct Linux helper archive must be bound by a literal or explicit job env",
+        )
         self.assertIn("tar -czf", helper_job)
         self.assertIn("cygpath -u", helper_job)
         for label, job in (
@@ -606,7 +805,7 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
                     rf"^https://mirror\.msys2\.org/{repository}/.+\.pkg\.tar\.zst$",
                 )
                 self.assertIs(package.get("build_input"), False)
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
+        helper_job = section(self.ci_build, "  BuildAdbLinuxX64:\n", "  LinuxPackages:\n")
         windows_setup = section(
             helper_job,
             "Prepare pinned MinGW compiler for the MSYS2 source patch series",
@@ -625,9 +824,10 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
 
     def test_source_build_artifacts_are_disconnected_hashed_attested_and_target_bound(self):
         expected = self.fixture["artifact_envelope"]
-        helper_job = section(self.ci_build, "  BuildAdbHelpers:\n", "  LinuxPackages:\n")
+        helper_job = section(self.ci_build, "  BuildAdbLinuxX64:\n", "  LinuxPackages:\n")
         linux_job = section(self.ci_build, "  LinuxPackages:\n", "  PrefetchIosNativeSources:\n")
-        mac_job = section(self.ci_build, "  MacPackages:\n", "  MacSanitizers:\n")
+        mac_job = section(self.ci_build, "  MacPackages:\n", "  MacArmPackages:\n")
+        mac_arm_job = section(self.ci_build, "  MacArmPackages:\n", "  MacSanitizers:\n")
         windows_job = section(self.ci_build, "  WindowsPackages:\n", "  WindowsX86:\n")
         combined_build = "\n".join((helper_job, self.build_action, self.superbuild))
         failures = []
@@ -657,19 +857,59 @@ class AdbHelperCycle8ReleaseContractTest(unittest.TestCase):
             r"(?:attest-build-provenance|cosign|SHA256SUMS\.sig)", helper_job, re.IGNORECASE
         ):
             failures.append("helper artifact has no signature or build attestation")
-        if "name: adb-helper-${{ matrix.target }}" not in helper_job:
-            failures.append("helper artifact name is not target-bound")
+        if "${{ matrix.target }}" in helper_job:
+            failures.append("direct helper jobs retain a dangling matrix target")
+        if not (
+            "name: adb-helper-linux-x86_64" in helper_job
+            or (
+                "KLOGG_ADB_HELPER_TARGET: linux-x86_64" in helper_job
+                and "name: adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}"
+                in helper_job
+            )
+        ):
+            failures.append("helper artifact name is not bound to the direct Linux target")
         if "--expected-target \"${{ inputs.target }}\"" not in self.build_action:
-            failures.append("helper verification receipt is not bound to the matrix target")
+            failures.append("helper verification receipt is not bound to the explicit target input")
 
-        package_bindings = {
-            "linux-x86_64": (linux_job, "adb-helper-linux-x86_64"),
-            "macos-matrix": (mac_job, "adb-helper-${{ matrix.config.adb_target }}"),
-            "windows-matrix": (windows_job, "adb-helper-${{ matrix.config.adb_target }}"),
-        }
-        for label, (job, artifact_name) in package_bindings.items():
-            if artifact_name not in job:
+        linux_binding = (
+            "adb-helper-linux-x86_64" in linux_job
+            or (
+                "adb_target: linux-x86_64" in linux_job
+                and "adb-helper-${{ matrix.config.adb_target }}" in linux_job
+            )
+        )
+        if not linux_binding:
+            failures.append("linux-x86_64 package leg does not consume its exact helper artifact")
+
+        shared_mac_env_binding = (
+            "adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}" in mac_job
+        )
+        for label, job, target in (
+            ("macos-x86_64", mac_job, "macos-x86_64"),
+            ("macos-arm64", mac_arm_job, "macos-arm64"),
+        ):
+            if not (
+                f"adb-helper-{target}" in job
+                or (
+                    f"KLOGG_ADB_HELPER_TARGET: {target}" in job
+                    and shared_mac_env_binding
+                )
+            ):
                 failures.append(f"{label} package leg does not consume its exact helper artifact")
+            if "matrix.config.adb_target" in job:
+                failures.append(f"{label} package leg retains a dangling matrix target")
+
+        windows_binding = (
+            "adb-helper-windows-x86_64" in windows_job
+            or (
+                "KLOGG_ADB_HELPER_TARGET: windows-x86_64" in windows_job
+                and "adb-helper-${{ env.KLOGG_ADB_HELPER_TARGET }}" in windows_job
+            )
+        )
+        if not windows_binding:
+            failures.append("windows-x86_64 package leg does not consume its exact helper artifact")
+        if "matrix.config.adb_target" in windows_job:
+            failures.append("windows-x86_64 package leg retains a dangling matrix target")
 
         self.assertEqual(failures, [], "\n".join(failures))
 

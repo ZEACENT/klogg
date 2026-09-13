@@ -59,18 +59,19 @@ IOS_ARCHIVE_ROOT = "${{ github.workspace }}/ios-native-sources"
 IOS_STARTUP_COMMAND = (
     'python3 "${{ github.workspace }}/tests/scripts/test_libimobiledevice_ostrace_startup.py"'
 )
-IOS_NATIVE_JOBS = {
-    "BuildIosNativeStacks": "x86_64",
-    "BuildIosNativeArm64": "arm64",
-}
+IOS_NATIVE_JOBS = (
+    "BuildIosNativeX64",
+    "BuildIosNativeArm64",
+)
 
 
 def ios_startup_ci_issues(text: str) -> list[str]:
     """Require the small, unconditional C gate in both native source consumers.
 
     Deliberately accept only the existing job condition and shared-step shape:
-    unknown conditions must not silently narrow event/matrix coverage. Shell
-    bodies are checked as complete commands, not script-name substring matches.
+    unknown conditions must not silently narrow event coverage. Concrete-leg
+    identity is enforced by the workflow-shape contract, not duplicated here.
+    Shell bodies are checked as complete commands, not script-name substrings.
     """
     triggers = CI_MODULE.workflow_trigger_mapping(text)
     jobs = CI_MODULE.workflow_mapping_block(text.splitlines(), "jobs", 0)
@@ -79,7 +80,7 @@ def ios_startup_ci_issues(text: str) -> list[str]:
     if not {"pull_request", "push", "workflow_dispatch"} <= triggers.keys():
         return ["missing native CI event coverage"]
     issues = []
-    for name, architecture in IOS_NATIVE_JOBS.items():
+    for name in IOS_NATIVE_JOBS:
         job = jobs.get(name, (None, []))[1]
         direct = CI_MODULE.workflow_mapping_block(job, name, 2)
         if direct is None:
@@ -89,16 +90,14 @@ def ios_startup_ci_issues(text: str) -> list[str]:
             direct.get("if", (None,))[0]
             != "!contains(github.event.head_commit.message, '[skip ci]')"
             or "continue-on-error" in direct
-            or CI_MODULE.workflow_job_matrix_values(job).get("architecture")
-            != {architecture}
         ):
-            issues.append(f"{name}: native event/matrix gate changed")
+            issues.append(f"{name}: native event gate changed")
         steps_value = direct.get("steps", (None,))[0]
         if name == "BuildIosNativeArm64":
             if steps_value != "*ios_native_steps":
                 issues.append(f"{name}: must inherit the checked native steps")
                 continue
-            job = jobs.get("BuildIosNativeStacks", (None, []))[1]
+            job = jobs.get("BuildIosNativeX64", (None, []))[1]
         elif steps_value != "&ios_native_steps":
             issues.append(f"{name}: missing native steps anchor")
         steps = CI_MODULE.workflow_step_blocks(job)
@@ -283,21 +282,20 @@ class IosStartupCiContractTest(unittest.TestCase):
         return (
             "on:\n  pull_request:\n  push:\n  workflow_dispatch:\n"
             "jobs:\n"
-            "  BuildIosNativeStacks:\n"
+            "  BuildIosNativeX64:\n"
             "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            "          - architecture: x86_64\n"
+            "    runs-on: macos-15-intel\n"
             "    steps: &ios_native_steps\n"
             + (self.download + self.startup if steps is None else steps)
             + "  BuildIosNativeArm64:\n"
             "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n"
-            "    strategy:\n      matrix:\n        include:\n"
-            "          - architecture: arm64\n"
+            "    runs-on: macos-15\n"
             "    steps: *ios_native_steps\n"
         )
 
     def test_real_workflow_requires_actual_c_after_download_on_both_native_legs(self):
-        self.assertEqual(ios_startup_ci_issues(required_text(CI_BUILD_WORKFLOW)), [])
+        workflow = required_text(CI_BUILD_WORKFLOW)
+        self.assertEqual(ios_startup_ci_issues(workflow), [])
 
     def test_exact_good_and_adjacent_non_native_jobs_are_valid(self):
         self.assertEqual(ios_startup_ci_issues(self.fixture()), [])
@@ -345,8 +343,12 @@ class IosStartupCiContractTest(unittest.TestCase):
             "malformed-jobs": good.replace("jobs:", "jobs: ["),
             "unknown-alias": good.replace("*ios_native_steps", "*missing"),
             "unknown-condition": good.replace("!contains(github.event.head_commit.message, '[skip ci]')", "fromJSON(inputs.native)"),
-            "job-soft-failure": good.replace("    strategy:", "    continue-on-error: true\n    strategy:", 1),
-            "duplicate-job": good + "  BuildIosNativeStacks:\n    steps: []\n",
+            "job-soft-failure": good.replace(
+                "    runs-on: macos-15-intel\n",
+                "    continue-on-error: true\n    runs-on: macos-15-intel\n",
+                1,
+            ),
+            "duplicate-job": good + "  BuildIosNativeX64:\n    steps: []\n",
         }
         for name, text in mutations.items():
             with self.subTest(mutation=name):
@@ -354,9 +356,13 @@ class IosStartupCiContractTest(unittest.TestCase):
 
     def test_real_tree_mutations_cannot_move_gate_to_an_unrelated_job(self):
         original = required_text(CI_BUILD_WORKFLOW)
+        # Project the pending stable id in memory so this mutation test exercises
+        # gate placement during RED instead of stopping at an unrelated KeyError.
         # Explicit fixture insertion also makes this mutation test useful in RED,
         # before the production step exists. Never change the on-disk workflow.
-        block = CI_MODULE.workflow_job_blocks(original)["BuildIosNativeStacks"]
+        blocks = CI_MODULE.workflow_job_blocks(original)
+        self.assertIn("BuildIosNativeX64", blocks)
+        block = blocks["BuildIosNativeX64"]
         steps = CI_MODULE.workflow_step_blocks(block)
         native_step = next((step for step in steps if
                             CI_MODULE.workflow_step_fields(step)[0].get("name") == IOS_STARTUP_STEP), None)
@@ -1356,10 +1362,18 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
 
     def test_ios_native_homebrew_bootstrap_cleans_aws_formula_and_tap_before_install(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
-        producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]
-        install_step = producer.split(
-            "      - name: Install iOS native source-build tools\n", 1
-        )[1].split("\n      - uses: actions/download-artifact@", 1)[0]
+        jobs = CI_MODULE.workflow_job_steps(workflow)
+        self.assertIn("BuildIosNativeX64", jobs)
+        install_steps = [
+            fields
+            for step in jobs["BuildIosNativeX64"]
+            for fields, _ in [CI_MODULE.workflow_step_fields(step)]
+            if fields.get("name") == "Install iOS native source-build tools"
+        ]
+        self.assertEqual(len(install_steps), 1)
+        install_step = CI_MODULE.active_script_content(
+            install_steps[0].get("run", "")
+        )
         uninstall = "brew uninstall --ignore-dependencies aws-sam-cli"
         untap = "brew untap aws/tap"
         install = "brew install autoconf automake libtool pkg-config cmake ninja"
@@ -1394,8 +1408,15 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
 
     def test_ci_produces_both_thin_stacks_and_mac_consumes_the_bound_artifact(self):
         workflow = required_text(CI_BUILD_WORKFLOW)
+        blocks = CI_MODULE.workflow_job_blocks(workflow)
+        self.assertTrue(
+            {"BuildIosNativeX64", "BuildIosNativeArm64"} <= set(blocks),
+            sorted(blocks),
+        )
+        needs = CI_MODULE.workflow_job_needs(workflow)
+        self.assertIn("BuildIosNativeX64", needs.get("MacPackages", set()))
+        self.assertIn("BuildIosNativeArm64", needs.get("MacArmPackages", set()))
         for token in (
-            "BuildIosNativeStacks:",
             "prefetch_ios_native_sources.py",
             "build_ios_native_stack.py",
             "build_ios_native_legal_assets.py",
@@ -1412,16 +1433,61 @@ for name in ("../victim", "..\\\\victim", "/tmp/victim", "patches/../../victim")
             "FETCHCONTENT_FULLY_DISCONNECTED=ON",
         ):
             self.assertIn(token, workflow)
-        self.assertRegex(
-            workflow,
-            r"MacPackages:\s+needs:\s*\[[^\]]*BuildIosNativeStacks",
-        )
-        self.assertRegex(workflow, r"download-artifact@[^\r\n]+[\s\S]+name:\s+ios-native-\$\{\{")
-        self.assertIn("${{ matrix.artifact }}.tar.gz", workflow)
+        for job, runner, architecture, artifact in (
+            (
+                "BuildIosNativeX64",
+                "macos-15-intel",
+                "x86_64",
+                "ios-native-x86_64",
+            ),
+            ("BuildIosNativeArm64", "macos-15", "arm64", "ios-native-arm64"),
+        ):
+            with self.subTest(job=job):
+                job_block = blocks[job]
+                block = CI_MODULE.active_script_content("\n".join(job_block))
+                self.assertEqual(
+                    CI_MODULE.workflow_job_direct_value(job_block, "runs-on"), runner
+                )
+                environment = CI_MODULE.workflow_mapping_block(job_block, "env", 4)
+                self.assertIsNotNone(environment)
+                assert environment is not None
+                self.assertEqual(environment["KLOGG_IOS_ARCHITECTURE"][0], architecture)
+                self.assertEqual(environment["KLOGG_IOS_ARTIFACT"][0], artifact)
+                self.assertIn(artifact, block)
+                self.assertNotRegex(
+                    block, r"\$\{\{[^}]*\bmatrix\.artifact\b"
+                )
+                self.assertNotIn("matrix.architecture", block)
+        artifact_records = CI_MODULE.workflow_artifact_records(workflow)
+        for job, artifact in (
+            ("MacPackages", "ios-native-x86_64"),
+            ("MacArmPackages", "ios-native-arm64"),
+        ):
+            with self.subTest(consumer=job):
+                block = CI_MODULE.active_script_content("\n".join(blocks[job]))
+                self.assertIn(artifact, block)
+                self.assertNotRegex(
+                    block,
+                    r"matrix\.config\.(?:ios_native_artifact|arch)\b",
+                )
+                downloads = {
+                    (name, condition)
+                    for kind, name, condition in artifact_records.get(job, [])
+                    if kind == "downloads"
+                }
+                self.assertTrue(
+                    (artifact, None) in downloads
+                    or (
+                        "${{ env.KLOGG_IOS_NATIVE_ARTIFACT }}",
+                        "${{ env.klogg_package_enabled == 'true' }}",
+                    )
+                    in downloads,
+                    downloads,
+                )
         self.assertIn("tar -czf", workflow)
         self.assertIn("tar -xzf", workflow)
         self.assertIn("prefetch_artifacts/ios-native-archive", workflow)
-        producer = workflow.split("  BuildIosNativeStacks:", 1)[1].split("\n  MacPackages:", 1)[0]
+        producer = "\n".join(blocks["BuildIosNativeX64"])
         for marker in (
             "id: upload_ios_stack",
             "continue-on-error: true",

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
-import pathlib
 import os
+import pathlib
+import re
 import subprocess
-import textwrap
-from unittest import mock
 import tempfile
+import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).parents[2]
@@ -253,6 +254,541 @@ jobs:
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(f"KLOGG_ANALYSIS_MODE={expected}", output.read_text())
+
+
+class WorkflowShapeOptimizationPolicyTest(unittest.TestCase):
+    STATIC_SINGLETON_MESSAGE = "static matrix must fan out to at least two jobs"
+    COMPOSITE_MATRIX_MESSAGE = "local composite actions must not reference matrix.*"
+    EXPLICIT_NAME_MESSAGE = "CI Build jobs must define explicit name values"
+    GATE_NAME_MESSAGE = 'CI Build job ci-gate must set name: "ci-gate"'
+
+    def manifest_issues(self, text: str, path: str = ".github/workflows/ci-build.yml"):
+        return MODULE.check_checkout_blocks(pathlib.Path(path), text)
+
+    def assert_issue_present(self, message: str, issues: list[str]) -> None:
+        self.assertTrue(any(message in issue for issue in issues), issues)
+
+    def assert_issue_absent(self, message: str, issues: list[str]) -> None:
+        self.assertFalse(any(message in issue for issue in issues), issues)
+
+    def test_static_singleton_matrix_rule_accepts_only_real_or_dynamic_fanout(self):
+        accepted = {
+            "two include rows": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+""",
+            "cartesian fanout": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        qt: [5, 6]
+    runs-on: ${{ matrix.os }}
+""",
+            "dynamic matrix": """\
+jobs:
+  Plan:
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+  Build:
+    needs: Plan
+    strategy:
+      matrix: ${{ fromJSON(needs.Plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+""",
+            "near miss outside strategy": """\
+jobs:
+  Build:
+    env:
+      matrix: one
+    steps:
+      - run: printf '%s\\n' 'strategy: matrix: include: one'
+""",
+            "comment and string spoofs": """\
+jobs:
+  Build:
+    # strategy:
+    #   matrix: {os: [ubuntu-24.04]}
+    steps:
+      - run: |
+          printf '%s\\n' 'matrix: [only-one]'
+          # matrix: [only-one]
+""",
+        }
+        for label, workflow in accepted.items():
+            with self.subTest(accepted=label):
+                issues = self.manifest_issues(workflow)
+                self.assert_issue_absent(self.STATIC_SINGLETON_MESSAGE, issues)
+
+        rejected = {
+            "single include row": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+""",
+            "single axis value": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+""",
+            "quoted comma singleton": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        args: ["--define=a,b"]
+    runs-on: ubuntu-24.04
+""",
+            "exclude collapses fanout": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        exclude:
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+""",
+        }
+        for label, workflow in rejected.items():
+            with self.subTest(rejected=label):
+                issues = self.manifest_issues(workflow)
+                self.assert_issue_present(self.STATIC_SINGLETON_MESSAGE, issues)
+
+    def test_static_matrix_rule_fails_closed_on_malformed_or_ambiguous_yaml(self):
+        malformed = {
+            "unterminated flow list": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04
+""",
+            "duplicate matrix": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+      matrix:
+        os: [ubuntu-24.04]
+""",
+            "malformed include row": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+           runner: ubuntu-24.04
+""",
+            "flow singleton matrix": """\
+jobs:
+  Build:
+    strategy:
+      matrix: {os: [ubuntu-24.04]}
+    runs-on: ${{ matrix.os }}
+""",
+            "flow singleton include": """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        include: [{os: ubuntu-24.04}]
+    runs-on: ${{ matrix.os }}
+""",
+        }
+        for label, workflow in malformed.items():
+            with self.subTest(malformed=label):
+                issues = self.manifest_issues(workflow)
+                self.assertTrue(
+                    any(
+                        "matrix" in issue
+                        and ("malformed" in issue or "unsupported" in issue)
+                        for issue in issues
+                    ),
+                    issues,
+                )
+
+    def test_static_matrix_rule_fails_closed_before_large_exclusion_expansion(self):
+        axes = "\n".join(
+            f"        axis{index}: [{', '.join(str(value) for value in range(10))}]"
+            for index in range(5)
+        )
+        workflow = (
+            "jobs:\n"
+            "  Build:\n"
+            "    name: Build\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            f"{axes}\n"
+            "        exclude:\n"
+            "          - axis0: 0\n"
+        )
+        issues = self.manifest_issues(workflow)
+        self.assertTrue(
+            any("matrix is malformed or unsupported" in issue for issue in issues),
+            issues,
+        )
+
+    def test_static_matrix_rule_catches_a_real_tree_mutation(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "  SaveVersion:\n",
+            "  SaveVersion:\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - runner: ubuntu-24.04\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = self.manifest_issues(mutated, ".github/workflows/ci-build.yml")
+        self.assertTrue(
+            any(
+                self.STATIC_SINGLETON_MESSAGE in issue and "SaveVersion" in issue
+                for issue in issues
+            ),
+            issues,
+        )
+
+    def test_local_composite_actions_reject_active_matrix_context_only(self):
+        good = """\
+name: Explicit inputs
+inputs:
+  compiler:
+    required: true
+runs:
+  using: composite
+  steps:
+    # ${{ matrix.config.cc }} is documented here but is not evaluated.
+    - shell: bash
+      env:
+        CC: ${{ inputs.compiler }}
+      run: printf '%s\\n' "$CC" 'matrix.config.cc'
+"""
+        issues = self.manifest_issues(good, ".github/actions/example/action.yml")
+        self.assert_issue_absent(self.COMPOSITE_MATRIX_MESSAGE, issues)
+
+        bad_cases = {
+            "step-if": good.replace(
+                "    - shell: bash\n",
+                "    - if: ${{ matrix.config.enabled }}\n      shell: bash\n",
+                1,
+            ),
+            "step-env": good.replace(
+                "        CC: ${{ inputs.compiler }}",
+                "        CC: ${{ matrix.config.cc }}",
+                1,
+            ),
+            "step-run": good.replace(
+                "      run: printf '%s\\n' \"$CC\" 'matrix.config.cc'",
+                "      run: echo ${{ matrix.config.label }}",
+                1,
+            ),
+            "input-default": good.replace(
+                "    required: true\n",
+                "    required: false\n    default: '${{ matrix.target }}'\n",
+                1,
+            ),
+            "anchored-value": good.replace(
+                "        CC: ${{ inputs.compiler }}",
+                "        CC: &matrix_value '${{ matrix.config.cc }}'\n"
+                "        CXX: *matrix_value",
+                1,
+            ),
+        }
+        for location, bad in bad_cases.items():
+            with self.subTest(location=location):
+                self.assertNotEqual(bad, good)
+                issues = self.manifest_issues(
+                    bad, ".github/actions/example/action.yml"
+                )
+                self.assert_issue_present(self.COMPOSITE_MATRIX_MESSAGE, issues)
+
+    def test_real_local_composite_actions_are_matrix_context_free(self):
+        offenders = {}
+        for path in MODULE.ci_manifests(ROOT):
+            if path.parent == ROOT / ".github/workflows":
+                continue
+            active = "\n".join(
+                value
+                for line in path.read_text().splitlines()
+                if (value := MODULE.strip_yaml_comment(line))
+            )
+            references = sorted(
+                set(
+                    re.findall(
+                        r"\$\{\{[^}]*\bmatrix\.[A-Za-z0-9_.-]+",
+                        active,
+                    )
+                )
+            )
+            if references:
+                offenders[str(path.relative_to(ROOT))] = references
+        self.assertEqual(offenders, {})
+
+    def test_shared_build_actions_expose_configuration_as_explicit_inputs(self):
+        validation_steps = {
+            "agent-setup": "Validate setup inputs",
+            "prepare-workspace-env": "Validate build configuration inputs",
+            "docker-build": "Validate build container suffix",
+            "docker-run-tests": "Validate test container suffix",
+            "docker-package": "Validate package inputs",
+            "agent-package-mac": "Validate macOS package inputs",
+        }
+        expected_inputs = {
+            "agent-setup": {"qt-version", "qt-arch", "qt-modules", "qt-archives"},
+            "prepare-workspace-env": {
+                "arch",
+                "package-tag",
+                "cmake-options",
+                "qt-version",
+                "build-root",
+            },
+            "docker-build": {"container-suffix"},
+            "docker-run-tests": {"container-suffix"},
+            "docker-package": {
+                "os",
+                "container-suffix",
+                "cpack-generator",
+                "package-suffix",
+                "artifact-id",
+                "check-container",
+                "check-command",
+            },
+            "agent-package-mac": {"adb-target"},
+        }
+        for action, required_inputs in expected_inputs.items():
+            with self.subTest(action=action):
+                path = ROOT / ".github" / "actions" / action / "action.yml"
+                mapping = MODULE.workflow_mapping_block(
+                    path.read_text().splitlines(), "inputs", 0
+                )
+                self.assertIsNotNone(mapping, f"{action} must define explicit inputs")
+                assert mapping is not None
+                self.assertTrue(required_inputs.issubset(mapping), mapping)
+                active = "\n".join(
+                    value
+                    for line in path.read_text().splitlines()
+                    if (value := MODULE.strip_yaml_comment(line))
+                )
+                for input_name in required_inputs:
+                    self.assertIn(f"inputs.{input_name}", active)
+                self.assertIn(f"name: {validation_steps[action]}", active)
+
+    def test_ci_build_name_policy_rejects_missing_or_spoofed_names(self):
+        good = """\
+name: CI Build
+jobs:
+  Build:
+    name: Linux build
+    runs-on: ubuntu-24.04
+  ci-gate:
+    name: ci-gate
+    needs: [Build]
+    runs-on: ubuntu-24.04
+"""
+        good_issues = self.manifest_issues(good)
+        self.assert_issue_absent(self.EXPLICIT_NAME_MESSAGE, good_issues)
+        self.assert_issue_absent(self.GATE_NAME_MESSAGE, good_issues)
+
+        missing = good.replace("    name: Linux build\n", "", 1)
+        self.assert_issue_present(
+            self.EXPLICIT_NAME_MESSAGE, self.manifest_issues(missing)
+        )
+        comment_spoof = missing.replace(
+            "  Build:\n", "  Build:\n    # name: Linux build\n", 1
+        )
+        self.assert_issue_present(
+            self.EXPLICIT_NAME_MESSAGE, self.manifest_issues(comment_spoof)
+        )
+        string_spoof = missing.replace(
+            "    runs-on: ubuntu-24.04\n",
+            "    env:\n      NOTE: 'name: Linux build'\n"
+            "    runs-on: ubuntu-24.04\n",
+            1,
+        )
+        self.assert_issue_present(
+            self.EXPLICIT_NAME_MESSAGE, self.manifest_issues(string_spoof)
+        )
+        nested_step_spoof = missing.replace(
+            "    runs-on: ubuntu-24.04\n",
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n      - name: Linux build\n        run: true\n",
+            1,
+        )
+        self.assert_issue_present(
+            self.EXPLICIT_NAME_MESSAGE, self.manifest_issues(nested_step_spoof)
+        )
+        renamed_gate = good.replace("    name: ci-gate\n", "    name: CI gate\n", 1)
+        self.assert_issue_present(
+            self.GATE_NAME_MESSAGE, self.manifest_issues(renamed_gate)
+        )
+        blank_name = good.replace("    name: Linux build\n", "    name:\n", 1)
+        self.assert_issue_present(
+            self.EXPLICIT_NAME_MESSAGE, self.manifest_issues(blank_name)
+        )
+        duplicate_name = good.replace(
+            "    name: Linux build\n",
+            "    name: Linux build\n    name: Spoofed build\n",
+            1,
+        )
+        duplicate_issues = self.manifest_issues(duplicate_name)
+        self.assertTrue(
+            any(self.EXPLICIT_NAME_MESSAGE in issue for issue in duplicate_issues)
+            or any(
+                "name" in issue
+                and ("malformed" in issue or "unsupported" in issue)
+                for issue in duplicate_issues
+            ),
+            duplicate_issues,
+        )
+        duplicate_gate = good.replace(
+            "    name: ci-gate\n",
+            "    name: ci-gate\n    name: Renamed gate\n",
+            1,
+        )
+        duplicate_gate_issues = self.manifest_issues(duplicate_gate)
+        self.assertTrue(
+            any(self.GATE_NAME_MESSAGE in issue for issue in duplicate_gate_issues)
+            or any(
+                "name" in issue
+                and ("malformed" in issue or "unsupported" in issue)
+                for issue in duplicate_gate_issues
+            ),
+            duplicate_gate_issues,
+        )
+
+    def test_real_ci_build_jobs_have_explicit_names_and_stable_gate_name(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        missing_names = [
+            job
+            for job, block in blocks.items()
+            if not MODULE.workflow_job_direct_value(block, "name")
+        ]
+        self.assertEqual(missing_names, [])
+        self.assertEqual(
+            MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
+            "ci-gate",
+        )
+
+    def test_real_ci_build_static_matrices_are_reserved_for_true_fanout(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        matrix_jobs = {
+            job
+            for job, block in blocks.items()
+            if MODULE.workflow_job_matrix_values(block)
+        }
+        self.assertEqual(
+            matrix_jobs,
+            {"LinuxPackages", "LinuxSanitizers", "MacSanitizers"},
+        )
+        dangling_matrix_context = {
+            job: sorted(
+                set(
+                    re.findall(
+                        r"\$\{\{[^}]*\bmatrix\.[A-Za-z0-9_.-]+",
+                        MODULE.active_script_content("\n".join(block)),
+                    )
+                )
+            )
+            for job, block in blocks.items()
+            if job not in matrix_jobs
+            and re.search(
+                r"\$\{\{[^}]*\bmatrix\.",
+                MODULE.active_script_content("\n".join(block)),
+            )
+        }
+        self.assertEqual(dangling_matrix_context, {})
+
+    def test_target_ci_build_ids_names_dag_and_leg_partition_are_explicit(self):
+        workflow = (ROOT / ".github/workflows/ci-build.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        needs = MODULE.workflow_job_needs(workflow)
+
+        self.assertTrue("BuildAdbLinuxX64" in blocks, sorted(blocks))
+        self.assertTrue("BuildAdbHelpers" not in blocks, sorted(blocks))
+        self.assertTrue("BuildIosNativeX64" in blocks, sorted(blocks))
+        self.assertTrue("BuildIosNativeStacks" not in blocks, sorted(blocks))
+
+        missing_names = [
+            job
+            for job, block in blocks.items()
+            if not MODULE.workflow_job_direct_value(block, "name")
+        ]
+        self.assertEqual(missing_names, [])
+        self.assertEqual(
+            MODULE.workflow_job_direct_value(blocks["ci-gate"], "name"),
+            "ci-gate",
+        )
+
+        expected_needs = {
+            "ReleaseQualificationPreflight": set(),
+            "SaveVersion": set(),
+            "PrefetchCpmCache": set(),
+            "PrefetchBoost": set(),
+            "PrefetchOpenSsl": set(),
+            "PrefetchLinuxDeployQt": set(),
+            "PrefetchCmakeInstaller": set(),
+            "PrefetchWindowsTools": set(),
+            "PrefetchAdbHelperSources": set(),
+            "BuildAdbHelperLegalAssets": {"SaveVersion", "PrefetchAdbHelperSources"},
+            "BuildAdbLinuxX64": {"BuildAdbHelperLegalAssets"},
+            "BuildAdbLinuxArm64": {"BuildAdbHelperLegalAssets"},
+            "BuildAdbWindowsX64": {"BuildAdbHelperLegalAssets"},
+            "BuildAdbMacX64": {"BuildAdbHelperLegalAssets"},
+            "BuildAdbMacArm64": {"BuildAdbHelperLegalAssets"},
+            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "PrefetchCmakeInstaller", "BuildAdbLinuxX64"},
+            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchCmakeInstaller"},
+            "LinuxTsan": {"SaveVersion", "PrefetchCpmCache"},
+            "PrefetchIosNativeSources": set(),
+            "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
+            "BuildIosNativeArm64": {"SaveVersion", "PrefetchIosNativeSources"},
+            "MacPackages": {"ReleaseQualificationPreflight", "SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64"},
+            "MacArmPackages": {"ReleaseQualificationPreflight", "SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacArm64", "BuildIosNativeArm64"},
+            "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost"},
+            "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "BuildAdbWindowsX64"},
+            "WindowsX86": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchOpenSsl", "PrefetchWindowsTools"},
+            "WindowsAsan": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools"},
+            "ci-gate": {"BuildAdbLinuxArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
+            "DispatchContinuous": {"ci-gate"},
+        }
+        self.assertEqual(needs, expected_needs)
+
+        true_fanout = {
+            "LinuxPackages": {"ubuntu-20.04-appimage", "ubuntu-22.04-deb", "ubuntu-24.04-deb", "ubuntu-26.04-deb"},
+            "LinuxSanitizers": {"ubuntu-22.04-asan-lsan", "ubuntu-22.04-ubsan"},
+            "MacSanitizers": {"intel-qt6-asan-ubsan", "intel-qt6-first-party-tsan"},
+        }
+        matrix_jobs = {
+            job
+            for job, block in blocks.items()
+            if MODULE.workflow_job_matrix_values(block)
+        }
+        self.assertEqual(matrix_jobs, set(true_fanout))
+        for job, labels in true_fanout.items():
+            with self.subTest(job=job):
+                self.assertEqual(
+                    MODULE.workflow_job_matrix_values(blocks[job]).get("label"),
+                    labels,
+                )
 
 
 class CiQualityLintTest(unittest.TestCase):
@@ -543,12 +1079,12 @@ jobs:
             },
         }
         mobile_jobs = {
-            "BuildAdbHelpers",
+            "BuildAdbLinuxX64",
             "BuildAdbLinuxArm64",
             "BuildAdbWindowsX64",
             "BuildAdbMacX64",
             "BuildAdbMacArm64",
-            "BuildIosNativeStacks",
+            "BuildIosNativeX64",
             "BuildIosNativeArm64",
         }
         for job, expected_needs in expected_package_free.items():
@@ -564,7 +1100,7 @@ jobs:
                 "PrefetchCpmCache",
                 "PrefetchLinuxDeployQt",
                 "PrefetchCmakeInstaller",
-                "BuildAdbHelpers",
+                "BuildAdbLinuxX64",
             },
             "MacPackages": {
                 "ReleaseQualificationPreflight",
@@ -572,7 +1108,7 @@ jobs:
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "BuildAdbMacX64",
-                "BuildIosNativeStacks",
+                "BuildIosNativeX64",
             },
             "MacArmPackages": {
                 "ReleaseQualificationPreflight",
@@ -614,6 +1150,34 @@ jobs:
             },
         )
 
+    def test_ci_build_package_steps_fail_closed_when_package_flag_is_missing(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        issues = MODULE.ci_build_workflow_issues(workflow)
+        self.assertFalse(
+            any("package enablement must fail closed" in issue for issue in issues),
+            issues,
+        )
+        mutated = workflow.replace(
+            "env.KLOGG_PACKAGE_ENABLED == 'true'",
+            "env.KLOGG_PACKAGE_ENABLED != 'false'",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertTrue(
+            any(
+                "package enablement must fail closed" in issue
+                for issue in MODULE.ci_build_workflow_issues(mutated)
+            )
+        )
+        missing = workflow.replace("      KLOGG_PACKAGE_ENABLED: false\n", "", 1)
+        self.assertNotEqual(missing, workflow)
+        self.assertTrue(
+            any(
+                "must explicitly set KLOGG_PACKAGE_ENABLED" in issue
+                for issue in MODULE.ci_build_workflow_issues(missing)
+            )
+        )
+
     def test_artifact_parser_resolves_anchored_platform_steps(self):
         workflow = f"""\
 jobs:
@@ -649,6 +1213,13 @@ jobs:
 
     def test_windows_test_diagnostics_contract_rejects_broken_failure_path(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        asan_condition = (
+            "${{ always() && env.KLOGG_SANITIZER == 'address' && "
+            "steps.run-tests.outcome == 'failure' }}"
+            if "env.KLOGG_SANITIZER == 'address'" in workflow
+            else "${{ always() && matrix.config.sanitizer == 'address' && "
+            "steps.run-tests.outcome == 'failure' }}"
+        )
         mutations = {
             "conditional test continuation": (
                 "        continue-on-error: true\n\n"
@@ -707,10 +1278,10 @@ jobs:
             ),
             "asan collection continuation": (
                 "      - name: Collect Windows ASan diagnostics\n"
-                "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n"
+                f"        if: {asan_condition}\n"
                 "        continue-on-error: true\n",
                 "      - name: Collect Windows ASan diagnostics\n"
-                "        if: ${{ always() && matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure' }}\n",
+                f"        if: {asan_condition}\n",
             ),
             "comment-spoofed asan collector contents": (
                 '          foreach ($name in @("klogg_vectorscan_tests.exe", "klogg_vectorscan_tests.pdb")) {\n',
@@ -725,12 +1296,12 @@ jobs:
             "strict final failure": (
                 "      - name: Fail when tests fail\n"
                 "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
-                "        shell: sh\n"
+                "        shell: bash\n"
                 "        run: exit 1\n",
                 "      - name: Fail when tests fail\n"
                 "        if: ${{ always() && steps.run-tests.outcome == 'failure' }}\n"
                 "        continue-on-error: true\n"
-                "        shell: sh\n"
+                "        shell: bash\n"
                 "        run: exit 1\n",
             ),
         }
@@ -839,14 +1410,54 @@ jobs:
     def test_ci_build_rejects_missing_dynamic_native_artifact_ancestry(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         mutated = workflow.replace(
-            "PrefetchCmakeInstaller, BuildAdbHelpers",
+            "PrefetchCmakeInstaller, BuildAdbLinuxX64",
             "PrefetchCmakeInstaller, BuildAdbHelperLegalAssets",
             1,
         )
         self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
         self.assertIn(
-            "CI native artifact producer BuildAdbHelpers must be an ancestor of LinuxPackages",
-            MODULE.ci_build_workflow_issues(mutated),
+            "CI native artifact producer BuildAdbLinuxX64 must be an ancestor of LinuxPackages",
+            issues,
+        )
+
+    def test_ci_build_rejects_full_adb_release_closure_consumers(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        mutated = workflow.replace(
+            "          name: adb-helper-package-support\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            "          name: adb-helper-legal-assets\n"
+            "          path: ${{ runner.temp }}/adb-helper-package-support\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        issues = MODULE.ci_build_workflow_issues(mutated)
+        self.assertIn(
+            "CI job BuildAdbLinuxX64 must not download artifact adb-helper-legal-assets",
+            issues,
+        )
+        self.assertIn(
+            "CI job BuildAdbLinuxX64 must download artifact adb-helper-package-support",
+            issues,
+        )
+
+    def test_ci_build_rejects_broad_adb_release_closure_upload_conditions(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        trusted = (
+            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
+            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') }}"
+        )
+        mutated = workflow.replace(
+            f"        if: {trusted}\n",
+            "        if: ${{ github.event_name != 'pull_request' }}\n",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow)
+        self.assertIn(
+            "CI artifact step BuildAdbHelperLegalAssets uploads adb-helper-legal-assets "
+            "must use condition",
+            "\n".join(MODULE.ci_build_workflow_issues(mutated)),
         )
 
     def test_ci_build_rejects_a_missing_direct_artifact_dependency(self):
@@ -999,6 +1610,30 @@ jobs:
         self.assertEqual(
             MODULE.workflow_artifact_actions(workflow),
             {"Producer": {"uploads": set(), "downloads": set()}},
+        )
+
+    def test_artifact_static_false_filter_never_inverts_negated_conditions(self):
+        true_values = {"klogg_package_enabled": {"true"}}
+        false_values = {"klogg_package_enabled": {"false"}}
+        self.assertTrue(
+            MODULE.artifact_condition_is_statically_false(
+                "${{ env.KLOGG_PACKAGE_ENABLED == 'false' }}", true_values
+            )
+        )
+        self.assertTrue(
+            MODULE.artifact_condition_is_statically_false(
+                "${{ env.KLOGG_PACKAGE_ENABLED != 'false' }}", false_values
+            )
+        )
+        self.assertFalse(
+            MODULE.artifact_condition_is_statically_false(
+                "${{ !(env.KLOGG_PACKAGE_ENABLED == 'false') }}", true_values
+            )
+        )
+        self.assertFalse(
+            MODULE.artifact_condition_is_statically_false(
+                "${{ !(env.KLOGG_PACKAGE_ENABLED != 'false') }}", false_values
+            )
         )
 
     def test_ci_build_rejects_artifact_conditions_outside_supported_triggers(self):
@@ -1343,8 +1978,8 @@ jobs:
         self.assertEqual(MODULE.ci_build_workflow_issues(workflow), [])
         post_gate_message = "CI post-gate job DispatchContinuous must directly need only ci-gate"
         wrong_need = workflow.replace(
-            "  DispatchContinuous:\n    needs: [ci-gate]",
-            "  DispatchContinuous:\n    needs: [LinuxPackages]",
+            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [ci-gate]",
+            "  DispatchContinuous:\n    name: \"Dispatch Continuous publisher\"\n    needs: [LinuxPackages]",
             1,
         )
         self.assertIn(post_gate_message, MODULE.ci_build_workflow_issues(wrong_need))
@@ -1434,11 +2069,11 @@ jobs:
         message = "package-free CI legs must not depend on mobile artifact producers"
         good = """\
 jobs:
-  BuildAdbHelpers:
+  BuildAdbLinuxX64:
     steps:
       - run: build-mobile-helper
   LinuxPackages:
-    needs: [BuildAdbHelpers]
+    needs: [BuildAdbLinuxX64]
     strategy:
       matrix:
         config:
@@ -1456,16 +2091,16 @@ jobs:
 
         bad = good.replace(
             "  LinuxSanitizers:\n",
-            "  LinuxSanitizers:\n    needs: [BuildAdbHelpers]\n",
+            "  LinuxSanitizers:\n    needs: [BuildAdbLinuxX64]\n",
             1,
         )
         self.assertNotEqual(bad, good)
         self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
 
         comment_spoof = bad.replace(
-            "    needs: [BuildAdbHelpers]\n",
-            "    # package-free legs do not need BuildAdbHelpers\n"
-            "    needs: [BuildAdbHelpers]\n",
+            "    needs: [BuildAdbLinuxX64]\n",
+            "    # package-free legs do not need BuildAdbLinuxX64\n"
+            "    needs: [BuildAdbLinuxX64]\n",
             1,
         )
         self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
@@ -1489,20 +2124,20 @@ jobs:
     steps:
       - uses: docker/build-push-action@0123456789012345678901234567890123456789
         with:
-          cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=min,scope=klogg-linux' || '' }}
+          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=min,scope=klogg-linux' || '' }}
 """
         self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
         folded = good.replace(
-            "          cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=min,scope=klogg-linux' || '' }}",
-            "          cache-to: >-\n            ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=min,scope=klogg-linux' || '' }}",
+            "          cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=min,scope=klogg-linux' || '' }}",
+            "          cache-to: >-\n            ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=min,scope=klogg-linux' || '' }}",
             1,
         )
         self.assertNotEqual(folded, good)
         self.assertNotIn(message, MODULE.ci_build_workflow_issues(folded))
 
         bad = good.replace(
-            "github.event_name == 'push' && matrix.config.cache_write",
-            "(github.event_name == 'push' || github.event_name == 'pull_request') && matrix.config.cache_write",
+            "github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true'",
+            "(github.event_name == 'push' || github.event_name == 'pull_request') && env.KLOGG_CACHE_WRITE == 'true'",
             1,
         )
         self.assertNotEqual(bad, good)

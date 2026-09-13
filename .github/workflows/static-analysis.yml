@@ -59,20 +59,13 @@ jobs:
     # manual full report-only audit gets enough cold-cache headroom without
     # forcing master pushes through the same whole-tree workload.
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          # agent-setup reads matrix.config.* to install Qt/Boost/CPM cache,
-          # mirroring the Coverage workflow's native gcc-13 leg.
-          - arch: x64
-            qt_version: 6.9.3
-            qt_arch: linux_gcc_64
-            qt_modules: qt5compat
-            qt_archives: qtbase icu qtsvg qttools qttranslations
     env:
       KLOGG_WORKSPACE: ${{ github.workspace }}
       KLOGG_BUILD_ROOT: build_root
+      KLOGG_QT_VERSION: 6.9.3
+      KLOGG_QT_ARCH: linux_gcc_64
+      KLOGG_QT_MODULES: qt5compat
+      KLOGG_QT_ARCHIVES: qtbase icu qtsvg qttools qttranslations
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -143,6 +136,11 @@ jobs:
           echo "CXX=g++-13" >> $GITHUB_ENV
 
       - uses: ./.github/actions/agent-setup
+        with:
+          qt-version: ${{ env.KLOGG_QT_VERSION }}
+          qt-arch: ${{ env.KLOGG_QT_ARCH }}
+          qt-modules: ${{ env.KLOGG_QT_MODULES }}
+          qt-archives: ${{ env.KLOGG_QT_ARCHIVES }}
 
       - name: Configure (generate compile_commands.json)
         shell: bash

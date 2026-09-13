@@ -1,8 +1,18 @@
 name: "Build and test in container"
 description: "Generate the build files, build the code and run the tests"
+inputs:
+  container-suffix:
+    description: Suffix of the prepared CI container image
+    required: true
 runs:
   using: "composite"
   steps:
+    - name: Validate build container suffix
+      shell: sh
+      run: >-
+        python3 scripts/validate_ci_container_suffix.py
+        --suffix "${{ inputs.container-suffix }}"
+
     - name: configure
       shell: sh
       run: |
@@ -18,7 +28,7 @@ runs:
             --env TSAN_OPTIONS \
             --env KLOGG_CMAKE_OPTS="$KLOGG_CMAKE_OPTS" \
             -v "$KLOGG_WORKSPACE":/usr/local \
-            ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} \
+            ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} \
             /bin/bash -lc \
             "rm -rf /usr/local/$KLOGG_BUILD_ROOT && mkdir -p /usr/local/$KLOGG_BUILD_ROOT && cmake -B /usr/local/$KLOGG_BUILD_ROOT $KLOGG_CMAKE_OPTS -DCPM_SOURCE_CACHE=/usr/local/cpm_cache /usr/local"; then
             exit 0
@@ -43,6 +53,6 @@ runs:
           --env LSAN_OPTIONS \
           --env TSAN_OPTIONS \
           -v "$KLOGG_WORKSPACE":/usr/local \
-          ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }} \
+          ${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ inputs.container-suffix }} \
           /bin/bash -c \
           "cmake --build /usr/local/$KLOGG_BUILD_ROOT --target ci_build"

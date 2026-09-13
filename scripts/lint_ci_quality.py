@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import math
 import re
 import shlex
@@ -78,12 +79,12 @@ CI_BUILD_REQUIRED_JOBS = {
     "PrefetchAdbHelperSources",
     "PrefetchIosNativeSources",
     "BuildAdbHelperLegalAssets",
-    "BuildAdbHelpers",
+    "BuildAdbLinuxX64",
     "BuildAdbLinuxArm64",
     "BuildAdbWindowsX64",
     "BuildAdbMacX64",
     "BuildAdbMacArm64",
-    "BuildIosNativeStacks",
+    "BuildIosNativeX64",
     "BuildIosNativeArm64",
     "LinuxPackages",
     "LinuxSanitizers",
@@ -99,6 +100,18 @@ CI_BUILD_REQUIRED_JOBS = {
 }
 
 CI_BUILD_POST_GATE_JOBS = {"DispatchContinuous"}
+
+CI_BUILD_PACKAGE_ENABLEMENT = {
+    "LinuxPackages": "true",
+    "LinuxSanitizers": "false",
+    "LinuxTsan": "false",
+    "MacPackages": "true",
+    "MacArmPackages": "true",
+    "MacSanitizers": "false",
+    "WindowsPackages": "true",
+    "WindowsX86": "false",
+    "WindowsAsan": "false",
+}
 
 CI_BUILD_ROOT_JOBS = {
     "SaveVersion",
@@ -121,6 +134,7 @@ CI_BUILD_ARTIFACT_PRODUCERS = {
     "cmake-installer": "PrefetchCmakeInstaller",
     "msys2-tools": "PrefetchWindowsTools",
     "adb-helper-source-cache": "PrefetchAdbHelperSources",
+    "adb-helper-package-support": "BuildAdbHelperLegalAssets",
     "adb-helper-legal-assets": "BuildAdbHelperLegalAssets",
     "ios-native-source-cache": "PrefetchIosNativeSources",
     "ios-native-source-assets": "BuildIosNativeArm64",
@@ -152,14 +166,14 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
     "msys2-tools": {"WindowsPackages", "WindowsX86", "WindowsAsan"},
     "adb-helper-source-cache": {
         "BuildAdbHelperLegalAssets",
-        "BuildAdbHelpers",
+        "BuildAdbLinuxX64",
         "BuildAdbLinuxArm64",
         "BuildAdbWindowsX64",
         "BuildAdbMacX64",
         "BuildAdbMacArm64",
     },
-    "adb-helper-legal-assets": {
-        "BuildAdbHelpers",
+    "adb-helper-package-support": {
+        "BuildAdbLinuxX64",
         "BuildAdbLinuxArm64",
         "BuildAdbWindowsX64",
         "BuildAdbMacX64",
@@ -169,12 +183,13 @@ CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS = {
         "MacArmPackages",
         "WindowsPackages",
     },
-    "ios-native-source-cache": {"BuildIosNativeStacks", "BuildIosNativeArm64"},
+    "adb-helper-legal-assets": set(),
+    "ios-native-source-cache": {"BuildIosNativeX64", "BuildIosNativeArm64"},
 }
 
 CI_BUILD_REQUIRED_MOBILE_ANCESTORS = {
-    "LinuxPackages": {"BuildAdbHelpers"},
-    "MacPackages": {"BuildAdbMacX64", "BuildIosNativeStacks"},
+    "LinuxPackages": {"BuildAdbLinuxX64"},
+    "MacPackages": {"BuildAdbMacX64", "BuildIosNativeX64"},
     "MacArmPackages": {"BuildAdbMacArm64", "BuildIosNativeArm64"},
     "WindowsPackages": {"BuildAdbWindowsX64"},
 }
@@ -182,23 +197,25 @@ CI_BUILD_REQUIRED_MOBILE_ANCESTORS = {
 
 CI_BUILD_ARTIFACT_CONDITIONS = {
     ("BuildIosNativeArm64", "uploads", "ios-native-source-assets"):
-        "${{ matrix.architecture == 'arm64' }}",
+        "${{ env.klogg_ios_architecture == 'arm64' }}",
     ("LinuxPackages", "downloads", "linuxdeployqt"):
-        "${{ matrix.config.os == 'ubuntu_appimage' }}",
+        "${{ env.klogg_config_os == 'ubuntu_appimage' }}",
     ("LinuxPackages", "downloads", "cmake-installer"):
-        "${{ matrix.config.sanitizer != 'thread' }}",
+        "${{ env.klogg_sanitizer != 'thread' }}",
     ("LinuxSanitizers", "downloads", "cmake-installer"):
-        "${{ matrix.config.sanitizer != 'thread' }}",
-    ("LinuxPackages", "downloads", "adb-helper-legal-assets"):
-        "${{ matrix.config.package != false }}",
-    ("MacPackages", "downloads", "adb-helper-legal-assets"):
-        "${{ matrix.config.package != false }}",
-    ("MacArmPackages", "downloads", "adb-helper-legal-assets"):
-        "${{ matrix.config.package != false }}",
+        "${{ env.klogg_sanitizer != 'thread' }}",
+    ("BuildAdbHelperLegalAssets", "uploads", "adb-helper-legal-assets"):
+        "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.qualification-mode == 'release') }}",
+    ("LinuxPackages", "downloads", "adb-helper-package-support"):
+        "${{ env.klogg_package_enabled == 'true' }}",
+    ("MacPackages", "downloads", "adb-helper-package-support"):
+        "${{ env.klogg_package_enabled == 'true' }}",
+    ("MacArmPackages", "downloads", "adb-helper-package-support"):
+        "${{ env.klogg_package_enabled == 'true' }}",
     ("WindowsX86", "downloads", "openssl-archive"):
-        "${{ startswith(matrix.config.qt_version, '5') }}",
-    ("WindowsPackages", "downloads", "adb-helper-legal-assets"):
-        "${{ matrix.config.package != false }}",
+        "${{ startswith(env.klogg_qt_version, '5') }}",
+    ("WindowsPackages", "downloads", "adb-helper-package-support"):
+        "${{ env.klogg_package_enabled == 'true' }}",
 }
 
 
@@ -372,14 +389,53 @@ def workflow_job_blocks(text: str) -> dict[str, list[str]]:
     return blocks
 
 
-def parse_inline_yaml_list(value: str) -> set[str] | None:
+def split_inline_yaml_sequence(value: str) -> list[str] | None:
     candidate = scalar(value)
     if not candidate.startswith("[") or not candidate.endswith("]"):
         return None
     inner = candidate[1:-1].strip()
     if not inner:
-        return set()
-    return {scalar(item.strip()) for item in inner.split(",") if item.strip()}
+        return []
+
+    values: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in inner:
+        if quote is not None:
+            current.append(char)
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+        elif char in "[]{}":
+            return None
+        elif char == ",":
+            item = "".join(current).strip()
+            if not item:
+                return None
+            values.append(scalar(item))
+            current = []
+        else:
+            current.append(char)
+    if quote is not None or escaped:
+        return None
+    item = "".join(current).strip()
+    if not item:
+        return None
+    values.append(scalar(item))
+    return values if all(values) else None
+
+
+def parse_inline_yaml_list(value: str) -> set[str] | None:
+    values = split_inline_yaml_sequence(value)
+    return None if values is None else set(values)
 
 
 def workflow_job_needs(text: str) -> dict[str, set[str]]:
@@ -602,22 +658,71 @@ def workflow_job_matrix_values(block: list[str]) -> dict[str, set[str]]:
     return values
 
 
-def workflow_job_is_package_free(block: list[str]) -> bool:
-    return workflow_job_matrix_values(block).get("package") == {"false"}
+def workflow_job_condition_values(block: list[str]) -> dict[str, set[str]]:
+    values = {
+        key.lower(): configured
+        for key, configured in workflow_job_matrix_values(block).items()
+    }
+    if not block:
+        return values
+    header = KEY_VALUE_RE.match(block[0])
+    if header is None:
+        return values
+    job_indent = len(header.group("indent"))
+    env_index: int | None = None
+    env_indent = 0
+    for index, line in enumerate(block[1:], start=1):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "env"
+            and len(entry.group("indent")) == job_indent + 2
+        ):
+            env_index = index
+            env_indent = len(entry.group("indent"))
+            break
+    if env_index is None:
+        return values
+    for line in block[env_index + 1 :]:
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= env_indent:
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if entry is None or indent != env_indent + 2:
+            continue
+        key = entry.group("key").lower()
+        value = scalar(entry.group("value")).lower()
+        forwarded = re.fullmatch(
+            r"\$\{\{\s*matrix\.(?:config\.)?([\w-]+)\s*}}", value
+        )
+        if forwarded is not None:
+            source = values.get(forwarded.group(1).lower())
+            if source is not None:
+                values[key] = source
+        elif not value.startswith("${{"):
+            values[key] = {value}
+    return values
 
 
 def artifact_condition_is_statically_false(
-    condition: str | None, matrix_values: dict[str, set[str]]
+    condition: str | None, condition_values: dict[str, set[str]]
 ) -> bool:
-    if condition is None or "||" in condition:
+    if (
+        condition is None
+        or "||" in condition
+        or re.search(r"(?<![=!])!(?!=)", condition)
+    ):
         return False
 
     equality = re.compile(
-        r"matrix\.(?:config\.)?(?P<key>[\w-]+)\s*(?P<operator>==|!=)\s*"
-        r"(?P<value>'[^']*'|\"[^\"]*\"|true|false)"
+        r"(?:matrix\.(?:config\.)?|env\.)(?P<key>[\w-]+)\s*"
+        r"(?P<operator>==|!=)\s*(?P<value>'[^']*'|\"[^\"]*\"|true|false)"
     )
     for match in equality.finditer(condition):
-        values = matrix_values.get(match.group("key"))
+        values = condition_values.get(match.group("key").lower())
         if not values:
             continue
         expected = scalar(match.group("value")).lower()
@@ -631,11 +736,11 @@ def artifact_condition_is_statically_false(
             return True
 
     startswith = re.compile(
-        r"startswith\(matrix\.(?:config\.)?(?P<key>[\w-]+),\s*"
+        r"startswith\((?:matrix\.(?:config\.)?|env\.)(?P<key>[\w-]+),\s*"
         r"(?P<prefix>'[^']*'|\"[^\"]*\")\)"
     )
     for match in startswith.finditer(condition):
-        values = matrix_values.get(match.group("key"))
+        values = condition_values.get(match.group("key").lower())
         prefix = scalar(match.group("prefix")).lower()
         if values and all(not value.startswith(prefix) for value in values):
             return True
@@ -682,7 +787,7 @@ def workflow_job_steps(
 WINDOWS_TEST_JOBS = ("WindowsPackages", "WindowsX86", "WindowsAsan")
 WINDOWS_TEST_FAILURE_CONDITION = "${{ always() && steps.run-tests.outcome == 'failure' }}"
 WINDOWS_ASAN_FAILURE_CONDITION = (
-    "${{ always() && matrix.config.sanitizer == 'address' && "
+    "${{ always() && env.KLOGG_SANITIZER == 'address' && "
     "steps.run-tests.outcome == 'failure' }}"
 )
 WINDOWS_DIAGNOSTIC_RUN_MARKERS = {
@@ -699,7 +804,7 @@ WINDOWS_DIAGNOSTIC_RUN_MARKERS = {
 }
 WINDOWS_DIAGNOSTIC_UPLOADS = {
     "Upload Windows diagnostics artifact": {
-        "name": "windows-${{ matrix.config.label }}-test-diagnostics",
+        "name": "windows-${{ env.KLOGG_LABEL }}-test-diagnostics",
         "path": "${{ github.workspace }}\\build_root\\diagnostics\\**\\*",
         "if-no-files-found": "warn",
     },
@@ -820,7 +925,7 @@ def windows_test_diagnostics_issues(text: str) -> list[str]:
                 issues.append(f"CI build job {job} step {label} must upload diagnostics")
         failure = fields_by_label["Fail when tests fail"]
         if (
-            failure.get("shell") != "sh"
+            failure.get("shell") != "bash"
             or failure.get("run") != "exit 1"
             or failure.get("continue-on-error") not in {None, "false"}
         ):
@@ -837,7 +942,7 @@ def workflow_artifact_records(
     job_blocks = workflow_job_blocks(text)
     for job, steps in workflow_job_steps(text).items():
         job_records: list[tuple[str, str, str | None]] = []
-        matrix_values = workflow_job_matrix_values(job_blocks.get(job, []))
+        condition_values = workflow_job_condition_values(job_blocks.get(job, []))
         for step in steps:
             item = LIST_ITEM_RE.match(step[0])
             if item is None:
@@ -876,7 +981,7 @@ def workflow_artifact_records(
                 continue
             if continue_on_error not in {None, "false"}:
                 continue
-            if artifact_condition_is_statically_false(condition, matrix_values):
+            if artifact_condition_is_statically_false(condition, condition_values):
                 continue
             if action.startswith("actions/upload-artifact@"):
                 job_records.append(("uploads", artifact_name, condition))
@@ -906,6 +1011,12 @@ def workflow_artifact_actions(text: str) -> dict[str, dict[str, set[str]]]:
 
 def ci_build_workflow_issues(text: str) -> list[str]:
     issues: list[str] = []
+    active = active_script_content(text)
+    if (
+        "env.KLOGG_PACKAGE_ENABLED != 'false'" in active
+        or '"${{ env.KLOGG_PACKAGE_ENABLED }}" != "false"' in active
+    ):
+        issues.append("CI package enablement must fail closed on missing configuration")
     trigger_prefix = text.split("jobs:", 1)[0]
     push_section = trigger_prefix.partition("  push:")[2].partition("  pull_request:")[0]
     if any(
@@ -939,6 +1050,16 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         return issues
 
     job_blocks = workflow_job_blocks(text)
+    for job, expected in CI_BUILD_PACKAGE_ENABLEMENT.items():
+        if job not in job_blocks:
+            continue
+        configured = workflow_job_condition_values(job_blocks[job]).get(
+            "klogg_package_enabled"
+        )
+        if configured != {expected}:
+            issues.append(
+                f"CI job {job} must explicitly set KLOGG_PACKAGE_ENABLED to {expected}"
+            )
     for consumer, producers in CI_BUILD_REQUIRED_MOBILE_ANCESTORS.items():
         if consumer not in needs:
             continue
@@ -1028,6 +1149,13 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         for consumer in consumers:
             if artifact not in artifacts.get(consumer, {}).get("downloads", set()):
                 issues.append(f"CI job {consumer} must download artifact {artifact}")
+    for consumer, job_actions in artifacts.items():
+        for artifact in job_actions["downloads"]:
+            allowed_consumers = CI_BUILD_REQUIRED_ARTIFACT_CONSUMERS.get(artifact)
+            if allowed_consumers is not None and consumer not in allowed_consumers:
+                issues.append(
+                    f"CI job {consumer} must not download artifact {artifact}"
+                )
 
     expected_steps = {
         (producer, "uploads", artifact)
@@ -1168,16 +1296,23 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     if not cache_to_values:
         issues.append("BuildKit cache exports must run only on default-branch pushes")
     elif any(
-        not value.startswith(
-            "${{ github.event_name == 'push' && matrix.config.cache_write && "
+        re.match(
+            r"^\$\{\{ github\.event_name == 'push' && "
+            r"(?:env\.KLOGG_CACHE_WRITE == 'true'|matrix\.config\.cache_write) && ",
+            value,
         )
+        is None
         or not value.endswith(" || '' }}")
         or value.count("github.event_name") != 1
         or "pull_request" in value
         for value in cache_to_values
     ):
         issues.append("BuildKit cache exports must run only on default-branch pushes")
-    if any("matrix.config.cache_write" not in value for value in cache_to_values):
+    if any(
+        "env.KLOGG_CACHE_WRITE" not in value
+        and "matrix.config.cache_write" not in value
+        for value in cache_to_values
+    ):
         issues.append("shared BuildKit scopes must have one designated exporter")
 
     has_release_dispatch_input = all(
@@ -1274,18 +1409,13 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         for job in needs
         if job.startswith("BuildAdb") or job.startswith("BuildIos")
     }
-    package_free_with_mobile = False
-    for job, block in job_blocks.items():
-        block_active = "\n".join(
-            active for line in block if (active := strip_yaml_comment(line))
-        )
-        if "package: false" not in block_active:
-            continue
-        ancestors = workflow_job_ancestors(needs, job) if job in needs else set()
-        if ancestors & mobile_jobs:
-            package_free_with_mobile = True
-            break
-    if package_free_with_mobile:
+    package_free_jobs = {
+        job for job, enabled in CI_BUILD_PACKAGE_ENABLEMENT.items() if enabled == "false"
+    }
+    if any(
+        workflow_job_ancestors(needs, job) & mobile_jobs
+        for job in package_free_jobs & set(needs)
+    ):
         issues.append("package-free CI legs must not depend on mobile artifact producers")
 
     if any(
@@ -1719,8 +1849,249 @@ def checkout_steps(text: str) -> list[tuple[int, str, str | None]]:
     return checkouts
 
 
-def check_checkout_blocks(path: Path, text: str) -> list[str]:
+def _flow_list_values(value: str) -> list[str] | None:
+    return split_inline_yaml_sequence(value)
+
+
+def _matrix_mapping_rows(
+    block: list[str], start: int, parent_indent: int
+) -> tuple[list[dict[str, str]], str | None]:
+    rows: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in block[start:]:
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= parent_indent:
+            break
+        item = LIST_ITEM_RE.match(line)
+        if indent == parent_indent + 2 and item is not None:
+            current = {}
+            rows.append(current)
+            remainder = line[item.end() :]
+            if remainder.strip():
+                entry = KEY_VALUE_RE.match(" " * (parent_indent + 4) + remainder)
+                if entry is None:
+                    return [], "matrix is malformed or unsupported"
+                current[entry.group("key")] = scalar(entry.group("value"))
+            continue
+        entry = KEY_VALUE_RE.match(line)
+        if indent == parent_indent + 4 and entry is not None and current is not None:
+            key = entry.group("key")
+            value = scalar(entry.group("value"))
+            if key in current:
+                return [], "matrix is malformed or unsupported"
+            current[key] = value
+            continue
+        return [], "matrix is malformed or unsupported"
+    if any(not row for row in rows):
+        return [], "matrix is malformed or unsupported"
+    return rows, None
+
+
+MAX_STATIC_MATRIX_EXCLUSION_CHECKS = 4096
+
+
+def static_matrix_cardinality(block: list[str]) -> tuple[int | None, str | None]:
+    """Return static expansion count, None for no/dynamic matrix, and parse errors."""
+    if not block:
+        return None, None
+    header = KEY_VALUE_RE.match(block[0])
+    if header is None:
+        return None, "matrix is malformed or unsupported"
+    job_indent = len(header.group("indent"))
+    strategy_entries: list[int] = []
+    for index, line in enumerate(block[1:], start=1):
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "strategy"
+            and len(entry.group("indent")) == job_indent + 2
+        ):
+            strategy_entries.append(index)
+    if not strategy_entries:
+        return None, None
+    if len(strategy_entries) != 1:
+        return None, "matrix is malformed or unsupported"
+
+    strategy_index = strategy_entries[0]
+    matrix_entries: list[int] = []
+    for index in range(strategy_index + 1, len(block)):
+        line = block[index]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= job_indent + 2:
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if (
+            entry is not None
+            and entry.group("key") == "matrix"
+            and indent == job_indent + 4
+        ):
+            matrix_entries.append(index)
+    if not matrix_entries:
+        return None, None
+    if len(matrix_entries) != 1:
+        return None, "matrix is malformed or unsupported"
+
+    matrix_index = matrix_entries[0]
+    matrix_entry = KEY_VALUE_RE.match(block[matrix_index])
+    assert matrix_entry is not None
+    matrix_indent = len(matrix_entry.group("indent"))
+    matrix_value = scalar(matrix_entry.group("value"))
+    if matrix_value:
+        if re.fullmatch(r"\$\{\{\s*fromJSON\(.+\)\s*}}", matrix_value, re.IGNORECASE):
+            return None, None
+        return None, "matrix is malformed or unsupported"
+
+    axes: dict[str, list[str] | list[dict[str, str]]] = {}
+    axis_offsets: dict[str, tuple[int, int]] = {}
+    end = len(block)
+    for index in range(matrix_index + 1, len(block)):
+        line = block[index]
+        active = strip_yaml_comment(line)
+        if not active:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= matrix_indent:
+            end = index
+            break
+        entry = KEY_VALUE_RE.match(line)
+        if indent == matrix_indent + 2 and entry is not None:
+            key = entry.group("key")
+            if key in axis_offsets:
+                return None, "matrix is malformed or unsupported"
+            axis_offsets[key] = (index, indent)
+
+    if not axis_offsets:
+        return None, "matrix is malformed or unsupported"
+    ordered = sorted(axis_offsets.items(), key=lambda item: item[1][0])
+    for position, (key, (index, indent)) in enumerate(ordered):
+        axis_end = ordered[position + 1][1][0] if position + 1 < len(ordered) else end
+        entry = KEY_VALUE_RE.match(block[index])
+        assert entry is not None
+        value = scalar(entry.group("value"))
+        if value:
+            parsed = _flow_list_values(value)
+            if parsed is None:
+                return None, "matrix is malformed or unsupported"
+            axes[key] = parsed
+            continue
+        rows, error = _matrix_mapping_rows(block[:axis_end], index + 1, indent)
+        if error is not None or not rows:
+            return None, error or "matrix is malformed or unsupported"
+        if all(set(row) == {"value"} for row in rows):
+            axes[key] = [row["value"] for row in rows]
+        else:
+            axes[key] = rows
+
+    include = axes.pop("include", [])
+    exclude = axes.pop("exclude", [])
+    if include and not isinstance(include[0], dict):
+        return None, "matrix is malformed or unsupported"
+    if exclude and not isinstance(exclude[0], dict):
+        return None, "matrix is malformed or unsupported"
+
+    if include and axes:
+        # GitHub applies include rows to the original Cartesian product when
+        # possible and creates new rows otherwise. A partial YAML evaluator
+        # cannot safely infer that merge without implementing the full schema.
+        return None, "matrix is malformed or unsupported"
+    if not axes:
+        if exclude:
+            return None, "matrix is malformed or unsupported"
+        return len(include), None
+
+    axis_items = list(axes.items())
+    combination_count = math.prod(len(values) for _, values in axis_items)
+    if not exclude:
+        return combination_count, None
+    if combination_count > MAX_STATIC_MATRIX_EXCLUSION_CHECKS:
+        return None, "matrix is malformed or unsupported"
+
+    active_count = 0
+    for values in itertools.product(*(values for _, values in axis_items)):
+        combination = {
+            key: repr(sorted(value.items())) if isinstance(value, dict) else value
+            for (key, _), value in zip(axis_items, values)
+        }
+        if any(
+            all(combination.get(key) == value for key, value in excluded.items())
+            for excluded in exclude
+        ):
+            continue
+        active_count += 1
+        if active_count >= 2:
+            return active_count, None
+    return active_count, None
+
+
+def workflow_shape_issues(path: Path, text: str) -> list[str]:
     issues: list[str] = []
+    path_text = path.as_posix()
+    if "/actions/" in f"/{path_text}" and re.search(
+        r"^\s*using:\s*['\"]?composite['\"]?\s*$", text, re.MULTILINE
+    ):
+        active = "\n".join(
+            value for line in text.splitlines() if (value := strip_yaml_comment(line))
+        )
+        if re.search(r"\$\{\{[^}]*\bmatrix\.[A-Za-z0-9_.-]+", active):
+            issues.append("local composite actions must not reference matrix.*")
+
+    if "/workflows/" in f"/{path_text}":
+        for job, block in workflow_job_blocks(text).items():
+            cardinality, error = static_matrix_cardinality(block)
+            if error is not None:
+                issues.append(f"workflow job {job} {error}")
+            elif cardinality is not None and cardinality < 2:
+                issues.append(
+                    f"workflow job {job} static matrix must fan out to at least two jobs"
+                )
+
+    if path_text.endswith(".github/workflows/ci-build.yml"):
+        blocks = workflow_job_blocks(text)
+        missing: list[str] = []
+        for job, block in blocks.items():
+            header = KEY_VALUE_RE.match(block[0])
+            if header is None:
+                missing.append(job)
+                continue
+            expected_indent = len(header.group("indent")) + 2
+            names = [
+                scalar(entry.group("value"))
+                for line in block[1:]
+                if (entry := KEY_VALUE_RE.match(line)) is not None
+                and entry.group("key") == "name"
+                and len(entry.group("indent")) == expected_indent
+            ]
+            if len(names) != 1 or not names[0]:
+                missing.append(job)
+        if missing:
+            issues.append(
+                "CI Build jobs must define explicit name values: "
+                + ", ".join(sorted(missing))
+            )
+        gate = blocks.get("ci-gate")
+        if gate is not None:
+            header = KEY_VALUE_RE.match(gate[0])
+            expected_indent = len(header.group("indent")) + 2 if header is not None else -1
+            gate_names = [
+                scalar(entry.group("value"))
+                for line in gate[1:]
+                if (entry := KEY_VALUE_RE.match(line)) is not None
+                and entry.group("key") == "name"
+                and len(entry.group("indent")) == expected_indent
+            ]
+            if gate_names != ["ci-gate"]:
+                issues.append('CI Build job ci-gate must set name: "ci-gate"')
+    return issues
+
+
+def check_checkout_blocks(path: Path, text: str) -> list[str]:
+    issues: list[str] = workflow_shape_issues(path, text)
     for line, uses, credentials in checkout_steps(text):
         if CHECKOUT_SHA_RE.fullmatch(uses) is None:
             issues.append(f"{path}:{line}: actions/checkout must use a reviewed 40-char SHA")

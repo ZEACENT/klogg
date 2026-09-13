@@ -429,8 +429,8 @@ publish_component(
         build = required_text(CI_BUILD)
         stable = required_text(CI_RELEASE)
         promoter = required_text(ROOT / "scripts" / "promote_release_publication.py")
-        adb_producer = section(build, "  PrefetchAdbHelperSources:", "  BuildAdbHelpers:")
-        ios_producer = section(build, "  BuildIosNativeStacks:", "  MacPackages:")
+        adb_producer = section(build, "  PrefetchAdbHelperSources:", "  BuildAdbLinuxX64:")
+        ios_producer = section(build, "  BuildIosNativeX64:", "  MacPackages:")
         for producer in (adb_producer, ios_producer):
             self.assertRegex(producer, r"needs:\s*\[[^\]]*SaveVersion")
             self.assertIn("--version", producer)
