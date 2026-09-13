@@ -39,12 +39,14 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 
 #if defined( Q_OS_UNIX )
 #include <dirent.h>
 #include <sys/resource.h>
 #endif
 
+#include "configuration.h"
 #include "crawlerwidget.h"
 #include "filewatcher.h"
 #include "session.h"
@@ -110,6 +112,68 @@ bool countOpenFileDescriptors( std::size_t& openFileDescriptors, std::string& er
 
     return true;
 }
+
+class ScopedNativeFileWatch {
+public:
+    ScopedNativeFileWatch()
+        : configuration_{ Configuration::get() }
+        , nativeEnabled_{ configuration_.nativeFileWatchEnabled() }
+        , pollingEnabled_{ configuration_.pollingEnabled() }
+    {
+        configuration_.setNativeFileWatchEnabled( true );
+        configuration_.setPollingEnabled( false );
+    }
+
+    ~ScopedNativeFileWatch()
+    {
+        configuration_.setNativeFileWatchEnabled( nativeEnabled_ );
+        configuration_.setPollingEnabled( pollingEnabled_ );
+        if ( auto* watcher = FileWatcher::existingInstanceForTest(); watcher != nullptr ) {
+            watcher->updateConfiguration();
+            (void)watcher->waitForIdleForTest( WatcherIdleTimeoutMs );
+        }
+    }
+
+    ScopedNativeFileWatch( const ScopedNativeFileWatch& ) = delete;
+    ScopedNativeFileWatch& operator=( const ScopedNativeFileWatch& ) = delete;
+
+private:
+    Configuration& configuration_;
+    bool nativeEnabled_;
+    bool pollingEnabled_;
+};
+
+class ScopedFileWatchRegistration {
+public:
+    ScopedFileWatchRegistration( FileWatcher& watcher, QString path )
+        : watcher_{ watcher }
+        , path_{ std::move( path ) }
+    {
+        watcher_.addFile( path_ );
+    }
+
+    ~ScopedFileWatchRegistration()
+    {
+        (void)remove();
+    }
+
+    ScopedFileWatchRegistration( const ScopedFileWatchRegistration& ) = delete;
+    ScopedFileWatchRegistration& operator=( const ScopedFileWatchRegistration& ) = delete;
+
+    bool remove()
+    {
+        if ( active_ ) {
+            watcher_.removeFile( path_ );
+            active_ = false;
+        }
+        return watcher_.waitForIdleForTest( WatcherIdleTimeoutMs );
+    }
+
+private:
+    FileWatcher& watcher_;
+    QString path_;
+    bool active_ = true;
+};
 
 class ScopedNoFileLimit {
 public:
@@ -262,7 +326,58 @@ TEST_CASE( "A teardown drain timeout fails the integration-test process",
         childStderr.contains( "A teardown drain timeout fails the integration-test process" ) );
 }
 
-TEST_CASE( "File-backed UI lifecycles release native watcher resources",
+#if defined( Q_OS_MAC )
+TEST_CASE( "Native FileWatcher teardown closes kqueue descriptors",
+           "[.filewatcher-lifecycle][ui][filewatcher][lifecycle][resource-limit]" )
+{
+    ScopedNativeFileWatch nativeFileWatch;
+    QTemporaryDir fixtureRoot;
+    REQUIRE( fixtureRoot.isValid() );
+
+    constexpr int DirectoryFileCount = 8;
+    for ( int fileIndex = 0; fileIndex < DirectoryFileCount; ++fileIndex ) {
+        QFile file{ QDir{ fixtureRoot.path() }.filePath(
+            QStringLiteral( "fixture-%1.log" ).arg( fileIndex ) ) };
+        REQUIRE( file.open( QIODevice::WriteOnly | QIODevice::Truncate ) );
+        REQUIRE( file.write( "native watcher descriptor regression\n" ) > 0 );
+    }
+
+    const auto sourcePath
+        = QDir{ fixtureRoot.path() }.filePath( QStringLiteral( "fixture-0.log" ) );
+    auto& watcher = FileWatcher::getFileWatcher();
+    REQUIRE( watcher.waitForIdleForTest( WatcherIdleTimeoutMs ) );
+
+    std::size_t baselineDescriptors = 0;
+    std::string descriptorError;
+    REQUIRE( countOpenFileDescriptors( baselineDescriptors, descriptorError ) );
+    INFO( descriptorError );
+    const auto baselineFileCount = watcher.watchedFileCountForTest();
+    const auto baselineDirectoryCount = watcher.watchedDirectoryCountForTest();
+
+    ScopedFileWatchRegistration registration{ watcher, sourcePath };
+    REQUIRE( watcher.waitForIdleForTest( WatcherIdleTimeoutMs ) );
+    REQUIRE( watcher.watchedFileCountForTest() == baselineFileCount + 1 );
+    REQUIRE( watcher.watchedDirectoryCountForTest() == baselineDirectoryCount + 1 );
+
+    std::size_t activeDescriptors = 0;
+    REQUIRE( countOpenFileDescriptors( activeDescriptors, descriptorError ) );
+    INFO( "File descriptors before native watch="
+          << baselineDescriptors << ", while active=" << activeDescriptors );
+    REQUIRE( activeDescriptors > baselineDescriptors );
+
+    REQUIRE( registration.remove() );
+    REQUIRE( watcher.watchedFileCountForTest() == baselineFileCount );
+    REQUIRE( watcher.watchedDirectoryCountForTest() == baselineDirectoryCount );
+
+    std::size_t finalDescriptors = 0;
+    REQUIRE( countOpenFileDescriptors( finalDescriptors, descriptorError ) );
+    INFO( "File descriptors before native watch="
+          << baselineDescriptors << ", after removal=" << finalDescriptors );
+    REQUIRE( finalDescriptors == baselineDescriptors );
+}
+#endif
+
+TEST_CASE( "File-backed UI lifecycles release watcher registrations",
            "[.filewatcher-lifecycle][ui][filewatcher][lifecycle][resource-limit]" )
 {
     QTemporaryDir fixtureRoot;

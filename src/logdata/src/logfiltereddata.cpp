@@ -844,12 +844,13 @@ LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
 
         // Match the no-context mapping semantics: select the last visible row at
         // or before the source line, clamped to the first/last visible row.
-        auto it = std::upper_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum );
-        if ( it != contextLinesList_.begin() ) {
-            --it;
+        auto contextLineIt
+            = std::upper_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum );
+        if ( contextLineIt != contextLinesList_.begin() ) {
+            --contextLineIt;
         }
-        const auto distance = std::distance( contextLinesList_.begin(), it );
-        return LineNumber( static_cast<LineNumber::UnderlyingType>( distance ) );
+        const auto distance = std::distance( contextLinesList_.begin(), contextLineIt );
+        return LineNumber{ static_cast<LineNumber::UnderlyingType>( distance ) };
     }
     
     // No context lines: use original logic
