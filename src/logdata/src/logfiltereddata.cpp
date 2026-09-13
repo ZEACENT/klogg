@@ -63,6 +63,26 @@ namespace {
 constexpr int kSearchStatusPresentationIntervalMs = 100;
 }
 
+namespace {
+
+uint64_t countBitmapValuesInHalfOpenRange( const SearchResultArray& values,
+                                           LineNumber first, LineNumber end )
+{
+    if ( end <= first ) {
+        return 0;
+    }
+
+    // CRoaring rank is inclusive: rank(x) counts values <= x. Convert the
+    // half-open range [first, end) without constructing a temporary bitmap.
+    const auto countThroughEnd = values.rank( end.get() - 1 );
+    const auto countBeforeFirst
+        = first == 0_lnum ? uint64_t{ 0 } : values.rank( first.get() - 1 );
+    Q_ASSERT( countThroughEnd >= countBeforeFirst );
+    return countThroughEnd - countBeforeFirst;
+}
+
+} // namespace
+
 // Usual constructor: just copy the data, the search is started by runSearch()
 LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     : AbstractLogData()
@@ -268,6 +288,39 @@ LinesCount LogFilteredData::getNbMatches() const
 LinesCount LogFilteredData::getNbMarks() const
 {
     return LinesCount( marks_.cardinality() );
+}
+
+LogFilteredData::LineTypeRangeCounts
+LogFilteredData::countLineTypesInRange( LineNumber first, LineNumber end ) const
+{
+    if ( end <= first ) {
+        return { 0_lcount, 0_lcount };
+    }
+
+    const bool matchesVisible = visibility_.testFlag( VisibilityFlags::Matches );
+    const bool marksVisible = visibility_.testFlag( VisibilityFlags::Marks );
+    if ( !matchesVisible && !marksVisible ) {
+        return { 0_lcount, 0_lcount };
+    }
+
+    const auto matchCount = matchesVisible
+                                ? countBitmapValuesInHalfOpenRange( matching_lines_, first, end )
+                                : uint64_t{ 0 };
+    if ( !marksVisible ) {
+        return { LinesCount( matchCount ), 0_lcount };
+    }
+
+    if ( !matchesVisible ) {
+        return { 0_lcount,
+                 LinesCount( countBitmapValuesInHalfOpenRange( marks_, first, end ) ) };
+    }
+
+    // |matches union marks| - |matches| is exactly the mark-only cardinality,
+    // so match precedence needs no intersection bitmap or per-line lookup.
+    const auto unionCount
+        = countBitmapValuesInHalfOpenRange( marks_and_matches_, first, end );
+    Q_ASSERT( unionCount >= matchCount );
+    return { LinesCount( matchCount ), LinesCount( unionCount - matchCount ) };
 }
 
 LogFilteredData::LineType LogFilteredData::lineTypeByIndex( LineNumber index ) const

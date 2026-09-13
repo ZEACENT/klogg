@@ -22,6 +22,8 @@
 
 #include "streaminglogdata.h"
 
+class QTimer;
+
 namespace klogg::livelog {
 
 enum class LiveLogExportResult : std::uint8_t {
@@ -59,6 +61,8 @@ Q_SIGNALS:
 
 private Q_SLOTS:
     void executeOwnerCalls();
+    void scheduleProgressDelivery();
+    void deliverProgress();
 
 private:
     friend class LiveLogExportService;
@@ -71,6 +75,8 @@ private:
                       std::function<void()> afterPublish );
     void start();
     void run();
+    void recordProgress( qint64 bytesWritten );
+    bool progressIsSuppressed() const;
     void complete( LiveLogExportResult result );
     void cancelCandidate();
     bool invokeOnDataThread( const std::function<void()>& operation );
@@ -92,6 +98,11 @@ private:
     std::function<void()> afterPublish_;
     std::function<void( QEventLoop::ProcessEventsFlags, int )> ownerEventPumpForTesting_;
     std::atomic<PublicationDecision> publicationDecision_{ PublicationDecision::Writing };
+    std::atomic<qint64> latestProgressBytes_{ 0 };
+    std::atomic<bool> progressDispatchPending_{ false };
+    std::atomic<bool> progressTerminal_{ false };
+    qint64 deliveredProgressBytes_ = 0;
+    QTimer* progressTimer_ = nullptr;
     struct OwnerCall;
     std::mutex ownerCallsMutex_;
     std::deque<std::shared_ptr<OwnerCall>> ownerCalls_;

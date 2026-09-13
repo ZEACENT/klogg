@@ -196,6 +196,99 @@ TestFilteredDataHandle makeTestFilteredData( LogData& logData )
     return TestFilteredDataHandle{ logData.getNewFilteredData() };
 }
 
+void requireOverviewRangeCounts( const LogFilteredData& filteredData, LineNumber first,
+                                 LineNumber end, LinesCount expectedMatches,
+                                 LinesCount expectedMarks )
+{
+    const auto counts = filteredData.countLineTypesInRange( first, end );
+    REQUIRE( counts.matches == expectedMatches );
+    REQUIRE( counts.marks == expectedMarks );
+}
+
+TEST_CASE( "Overview range counts classify only visible matches and marks",
+           "[logdata][overview][range-counts]" )
+{
+    LogDataLoader logDataLoader;
+    auto filteredData = makeTestFilteredData( logDataLoader.log_data );
+
+    auto& config = Configuration::get();
+    config.setSearchThreadPoolSize( 0 );
+    config.setUseParallelSearch( false );
+
+    SafeQSignalSpy searchProgressSpy{ filteredData.get(),
+                                      &LogFilteredData::searchProgressed };
+    runSearch( filteredData.get(),
+               "this is line (000000|000009|000019|000499)$",
+               searchProgressSpy );
+    REQUIRE( filteredData->getNbMatches() == 4_lcount );
+
+    // Line 5 is mark-only. Lines 0, 9, and 499 overlap matches. The remaining
+    // source lines are plain, including both sides of every tested boundary.
+    filteredData->addMark( 0_lnum );
+    filteredData->addMark( 5_lnum );
+    filteredData->addMark( 9_lnum );
+    filteredData->addMark( 499_lnum );
+
+    filteredData->setVisibility( VisibilityFlags::Matches | VisibilityFlags::Marks );
+    requireOverviewRangeCounts( *filteredData, 19_lnum, 20_lnum, 1_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 5_lnum, 6_lnum, 0_lcount,
+                                1_lcount );
+    requireOverviewRangeCounts( *filteredData, 9_lnum, 10_lnum, 1_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 1_lnum, 5_lnum, 0_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 1_lnum, 1_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 499_lnum, 500_lnum,
+                                1_lcount, 0_lcount );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                4_lcount, 1_lcount );
+    requireOverviewRangeCounts( *filteredData, 499_lnum, maxValue<LineNumber>(),
+                                1_lcount, 0_lcount );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 0_lnum, 0_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 9_lnum, 9_lnum, 0_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 500_lnum, 500_lnum,
+                                0_lcount, 0_lcount );
+    requireOverviewRangeCounts( *filteredData, maxValue<LineNumber>(), 0_lnum,
+                                0_lcount, 0_lcount );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 10_lnum, 2_lcount,
+                                1_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::Matches );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                4_lcount, 0_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::Marks );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                0_lcount, 4_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::None );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                0_lcount, 0_lcount );
+
+    filteredData->setAllLinesVisible( true );
+    filteredData->setVisibility( VisibilityFlags::Matches | VisibilityFlags::Marks );
+    requireOverviewRangeCounts( *filteredData, 1_lnum, 5_lnum, 0_lcount,
+                                0_lcount );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                4_lcount, 1_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::Matches );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                4_lcount, 0_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::Marks );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                0_lcount, 4_lcount );
+
+    filteredData->setVisibility( VisibilityFlags::None );
+    requireOverviewRangeCounts( *filteredData, 0_lnum, 500_lnum,
+                                0_lcount, 0_lcount );
+}
+
 SCENARIO( "marks in filtered log data", "[logdata]" )
 {
     LogDataLoader logDataLoader;

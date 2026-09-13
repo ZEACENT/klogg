@@ -17,16 +17,30 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-// Unit tests for the Overview's folder-mode explicit match-line path
-// (setMatchLines + the else-if branch in recalculatesLines). This path is a
-// pure else-branch guarded by logFilteredData_==nullptr, so it never touches the
-// single-file LogFilteredData path.
+// Unit tests for Overview aggregation across folder, single-file, and live
+// sources, including exact pixel mapping and bounded work for dense results.
 
 #include <catch2/catch.hpp>
 
-#include "linetypes.h"
-#include "overview.h"
+#include <QDir>
+#include <QElapsedTimer>
+#include <QTemporaryDir>
+#include <QTemporaryFile>
+#include <QUuid>
 
+#include "configuration.h"
+#include "linetypes.h"
+#include "logdata.h"
+#include "logfiltereddata.h"
+#include "overview.h"
+#include "searchablelogdata.h"
+#include "streaminglogdata.h"
+#include "test_utils.h"
+
+#include <algorithm>
+#include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 TEST_CASE( "Overview folder-mode setMatchLines maps lines to y positions",
@@ -123,4 +137,374 @@ TEST_CASE( "Overview folder-mode with empty file or empty list draws nothing",
     o.setMatchLines( {} );
     o.updateView( 200 );
     REQUIRE( o.getMatchLines()->empty() );
+}
+
+TEST_CASE( "Folder overview preserves independent matches and marks with sparse pixels",
+           "[overview][folder][aggregation]" )
+{
+    Overview overview;
+    overview.updateData( 4_lcount );
+    overview.setMatchLines( { 0_lnum, 3_lnum } );
+    overview.setMarkLines( { 1_lnum, 3_lnum } );
+    overview.updateView( 10 );
+
+    const auto* matches = overview.getMatchLines();
+    REQUIRE( matches->size() == 2 );
+    REQUIRE( matches->at( 0 ).position() == 0 );
+    REQUIRE( matches->at( 1 ).position() == 7 );
+    const auto* marks = overview.getMarkLines();
+    REQUIRE( marks->size() == 2 );
+    REQUIRE( marks->at( 0 ).position() == 2 );
+    REQUIRE( marks->at( 1 ).position() == 7 );
+    REQUIRE( overview.lastAggregationWorkCountForTest() == 4 );
+
+    overview.updateView( 0 );
+    REQUIRE( overview.getMatchLines()->empty() );
+    REQUIRE( overview.getMarkLines()->empty() );
+    REQUIRE( overview.lastAggregationWorkCountForTest() == 0 );
+}
+
+TEST_CASE( "Overview aggregation maps maximum line counts without overflow",
+           "[overview][folder][aggregation][boundaries]" )
+{
+    const auto lineCount = maxValue<LinesCount>();
+    Overview overview;
+    overview.updateData( lineCount );
+    overview.setMatchLines(
+        { 0_lnum, LineNumber( lineCount.get() / 2 ), LineNumber( lineCount.get() - 1 ) } );
+    overview.updateView( 3 );
+
+    const auto* matches = overview.getMatchLines();
+    REQUIRE( matches->size() == 3 );
+    for ( int position = 0; position < 3; ++position ) {
+        REQUIRE( matches->at( static_cast<std::size_t>( position ) ).position()
+                 == position );
+        REQUIRE( matches->at( static_cast<std::size_t>( position ) ).weight() == 0 );
+    }
+    REQUIRE( overview.lastAggregationWorkCountForTest() == 3 );
+}
+
+TEST_CASE( "Dense folder results use viewport-bounded overview aggregation",
+           "[overview][folder][aggregation][dense]" )
+{
+    constexpr int LineCount = 20000;
+    constexpr unsigned Height = 37;
+    std::vector<LineNumber> matchingLines;
+    matchingLines.reserve( LineCount );
+    for ( int line = 0; line < LineCount; ++line ) {
+        matchingLines.emplace_back( LineNumber( static_cast<uint64_t>( line ) ) );
+    }
+
+    Overview overview;
+    overview.updateData( LinesCount( LineCount ) );
+    overview.setMatchLines( matchingLines );
+    overview.updateView( Height );
+
+    const auto* matches = overview.getMatchLines();
+    REQUIRE( matches->size() == Height );
+    for ( unsigned position = 0; position < Height; ++position ) {
+        REQUIRE( matches->at( position ).position() == static_cast<int>( position ) );
+        REQUIRE( matches->at( position ).weight()
+                 == Overview::WeightedLine::WEIGHT_STEPS - 1 );
+    }
+    REQUIRE( overview.lastAggregationWorkCountForTest() == Height );
+}
+
+namespace {
+
+QByteArray makeOverviewLog( int lineCount, const std::vector<int>& matchingLines )
+{
+    QByteArray data;
+    data.reserve( lineCount * 12 );
+    for ( int line = 0; line < lineCount; ++line ) {
+        data.append( std::binary_search( matchingLines.cbegin(), matchingLines.cend(), line )
+                         ? "MATCH "
+                         : "plain " );
+        data.append( QByteArray::number( line ) );
+        data.append( '\n' );
+    }
+    return data;
+}
+
+std::optional<LinesCount>
+waitForOverviewSearch( SafeQSignalSpy& searchProgressSpy,
+                       LogFilteredData::SearchGeneration expectedGeneration,
+                       int timeoutMs = 10000 )
+{
+    QElapsedTimer timer;
+    timer.start();
+    int consumedSignals = 0;
+    while ( true ) {
+        while ( consumedSignals < searchProgressSpy.count() ) {
+            const auto args = searchProgressSpy.at( consumedSignals++ );
+            if ( args.size() >= 4 && args.at( 1 ).toInt() == 100
+                 && args.at( 3 ).toULongLong() == expectedGeneration ) {
+                return args.at( 0 ).value<LinesCount>();
+            }
+        }
+
+        const auto remaining = timeoutMs - static_cast<int>( timer.elapsed() );
+        if ( remaining <= 0 ) {
+            return std::nullopt;
+        }
+        searchProgressSpy.wait( qMin( 100, remaining ) );
+    }
+}
+
+class OverviewSearchConfigGuard {
+  public:
+    OverviewSearchConfigGuard()
+        : config_( Configuration::get() )
+        , previousThreadPoolSize_( config_.searchThreadPoolSize() )
+        , previousParallelSearch_( config_.useParallelSearch() )
+        , previousResultsCache_( config_.useSearchResultsCache() )
+        , previousRegexpEngine_( config_.regexpEngine() )
+    {
+        config_.setSearchThreadPoolSize( 0 );
+        config_.setUseParallelSearch( false );
+        config_.setUseSearchResultsCache( false );
+        configureProductLikeRegexpEngine( config_ );
+    }
+
+    ~OverviewSearchConfigGuard()
+    {
+        config_.setSearchThreadPoolSize( previousThreadPoolSize_ );
+        config_.setUseParallelSearch( previousParallelSearch_ );
+        config_.setUseSearchResultsCache( previousResultsCache_ );
+        config_.setRegexpEnging( previousRegexpEngine_ );
+    }
+
+    OverviewSearchConfigGuard( const OverviewSearchConfigGuard& ) = delete;
+    OverviewSearchConfigGuard& operator=( const OverviewSearchConfigGuard& ) = delete;
+
+  private:
+    Configuration& config_;
+    int previousThreadPoolSize_;
+    bool previousParallelSearch_;
+    bool previousResultsCache_;
+    RegexpEngine previousRegexpEngine_;
+};
+
+class OverviewFilteredDataFixture {
+  public:
+    OverviewFilteredDataFixture( QByteArray contents, bool liveSource )
+        : file_( QDir( temporaryDirectory_.path() )
+                     .filePath( QStringLiteral( "overview_XXXXXX.log" ) ) )
+    {
+        REQUIRE( temporaryDirectory_.isValid() );
+
+        if ( liveSource ) {
+            auto source = std::make_unique<StreamingLogData>(
+                QUuid::createUuid().toString( QUuid::WithoutBraces ),
+                temporaryDirectory_.path() );
+            SafeQSignalSpy readySpy{ source.get(),
+                                     &StreamingLogData::loadingFinished };
+            REQUIRE( readySpy.safeWait() );
+            readySpy.clear();
+            if ( !contents.isEmpty() ) {
+                source->appendUtf8( contents );
+                REQUIRE( readySpy.safeWait() );
+            }
+            sourceData_ = std::move( source );
+        }
+        else {
+            REQUIRE( file_.open() );
+            REQUIRE( file_.write( contents ) == contents.size() );
+            REQUIRE( file_.flush() );
+
+            auto source = std::make_unique<LogData>();
+            SafeQSignalSpy readySpy{ source.get(), &LogData::loadingFinished };
+            source->attachFile( file_.fileName() );
+            REQUIRE( readySpy.safeWait() );
+            sourceData_ = std::move( source );
+        }
+
+        filteredData_ = sourceData_->getNewFilteredData();
+        REQUIRE( filteredData_ != nullptr );
+    }
+
+    LogFilteredData& filteredData() { return *filteredData_; }
+    LinesCount lineCount() const { return sourceData_->getNbLine(); }
+
+    void search( LinesCount expectedMatches )
+    {
+        SafeQSignalSpy searchProgressSpy{ filteredData_.get(),
+                                          &LogFilteredData::searchProgressed };
+        filteredData_->runSearch( RegularExpressionPattern( QStringLiteral( "MATCH" ) ) );
+        const auto terminalResult = waitForOverviewSearch(
+            searchProgressSpy, filteredData_->currentSearchGeneration() );
+        REQUIRE( terminalResult.has_value() );
+        REQUIRE( *terminalResult == expectedMatches );
+    }
+
+  private:
+    OverviewSearchConfigGuard searchConfigGuard_;
+    QTemporaryDir temporaryDirectory_;
+    QTemporaryFile file_;
+    std::unique_ptr<SearchableLogData> sourceData_;
+    std::unique_ptr<LogFilteredData> filteredData_;
+};
+
+void requireWeightedLines(
+    const klogg::vector<Overview::WeightedLine>* actual,
+    const std::vector<std::pair<int, int>>& expectedPositionAndWeight )
+{
+    REQUIRE( actual != nullptr );
+    REQUIRE( actual->size() == expectedPositionAndWeight.size() );
+    for ( std::size_t index = 0; index < expectedPositionAndWeight.size(); ++index ) {
+        REQUIRE( actual->at( index ).position()
+                 == expectedPositionAndWeight.at( index ).first );
+        REQUIRE( actual->at( index ).weight()
+                 == expectedPositionAndWeight.at( index ).second );
+    }
+}
+
+} // namespace
+
+TEST_CASE( "Overview LogFilteredData path maps exact pixels, applies precedence, and caps weights",
+           "[overview][single-file][aggregation]" )
+{
+    const std::vector<int> matchingLines{ 0, 1, 2, 3, 5, 7, 19 };
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 20, matchingLines ), false );
+    fixture.search( 7_lcount );
+
+    auto& filteredData = fixture.filteredData();
+    filteredData.addMark( 4_lnum );
+    filteredData.addMark( 5_lnum ); // Match takes precedence over this mark.
+    filteredData.addMark( 6_lnum );
+    filteredData.addMark( 8_lnum );
+    filteredData.addMark( 18_lnum );
+
+    Overview overview;
+    overview.setFilteredData( &filteredData );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 4 );
+
+    requireWeightedLines( overview.getMatchLines(), { { 0, 2 }, { 1, 1 }, { 3, 0 } } );
+    requireWeightedLines( overview.getMarkLines(), { { 0, 0 }, { 1, 1 }, { 3, 0 } } );
+}
+
+TEST_CASE( "Overview LogFilteredData path leaves gaps when pixels outnumber source lines",
+           "[overview][single-file][aggregation]" )
+{
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 4, { 0, 3 } ), false );
+    fixture.search( 2_lcount );
+    fixture.filteredData().addMark( 1_lnum );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 10 );
+
+    requireWeightedLines( overview.getMatchLines(), { { 0, 0 }, { 7, 0 } } );
+    requireWeightedLines( overview.getMarkLines(), { { 2, 0 } } );
+    REQUIRE( overview.lastAggregationWorkCountForTest() == fixture.lineCount().get() );
+}
+
+TEST_CASE( "Overview skips aggregation when matches and marks are hidden",
+           "[overview][single-file][aggregation][empty]" )
+{
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 100, { 0 } ), false );
+    fixture.search( 1_lcount );
+    fixture.filteredData().addMark( 1_lnum );
+    fixture.filteredData().setVisibility( LogFilteredData::VisibilityFlags::None );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 40 );
+
+    REQUIRE( overview.getMatchLines()->empty() );
+    REQUIRE( overview.getMarkLines()->empty() );
+    REQUIRE( overview.lastAggregationWorkCountForTest() == 0 );
+}
+
+TEST_CASE( "Overview LogFilteredData path draws nothing at zero height",
+           "[overview][single-file][aggregation]" )
+{
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 4, { 0, 3 } ), false );
+    fixture.search( 2_lcount );
+    fixture.filteredData().addMark( 1_lnum );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 0 );
+
+    REQUIRE( overview.getMatchLines()->empty() );
+    REQUIRE( overview.getMarkLines()->empty() );
+}
+
+TEST_CASE( "Overview LogFilteredData path draws nothing for an empty source",
+           "[overview][single-file][aggregation]" )
+{
+    OverviewFilteredDataFixture fixture( {}, false );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 20 );
+
+    REQUIRE( overview.getMatchLines()->empty() );
+    REQUIRE( overview.getMarkLines()->empty() );
+}
+
+TEST_CASE( "Overview does not turn all-lines-visible plain lines into marks",
+           "[overview][single-file][aggregation][all-lines-visible]" )
+{
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 6, { 2 } ), false );
+    fixture.search( 1_lcount );
+    fixture.filteredData().setAllLinesVisible( true );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 3 );
+
+    requireWeightedLines( overview.getMatchLines(), { { 1, 0 } } );
+    REQUIRE( overview.getMarkLines()->empty() );
+}
+
+TEST_CASE( "Live LogFilteredData uses the same overview aggregation path",
+           "[overview][live][aggregation]" )
+{
+    OverviewFilteredDataFixture fixture( makeOverviewLog( 10, { 0, 9 } ), true );
+    fixture.search( 2_lcount );
+    fixture.filteredData().addMark( 4_lnum );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( 5 );
+
+    requireWeightedLines( overview.getMatchLines(), { { 0, 0 }, { 4, 0 } } );
+    requireWeightedLines( overview.getMarkLines(), { { 2, 0 } } );
+}
+
+TEST_CASE( "Dense LogFilteredData results fill each overview pixel with capped weight",
+           "[overview][single-file][aggregation][dense]" )
+{
+    constexpr int LineCount = 20000;
+    constexpr unsigned Height = 37;
+    OverviewFilteredDataFixture fixture( QByteArrayLiteral( "MATCH\n" ).repeated( LineCount ),
+                                         false );
+    fixture.search( LinesCount( LineCount ) );
+
+    Overview overview;
+    overview.setFilteredData( &fixture.filteredData() );
+    overview.updateData( fixture.lineCount() );
+    overview.updateView( Height );
+
+    const auto* matches = overview.getMatchLines();
+    REQUIRE( matches->size() == Height );
+    for ( unsigned position = 0; position < Height; ++position ) {
+        REQUIRE( matches->at( position ).position() == static_cast<int>( position ) );
+        REQUIRE( matches->at( position ).weight() == Overview::WeightedLine::WEIGHT_STEPS - 1 );
+    }
+    REQUIRE( overview.getMarkLines()->empty() );
+
+    // Test-only instrumentation counts aggregation work units, not wall time.
+    // A 20,000-result input must issue one bounded range aggregation per output
+    // pixel rather than visiting every result through iterateOverLines().
+    REQUIRE( overview.lastAggregationWorkCountForTest() == Height );
 }

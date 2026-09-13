@@ -264,6 +264,11 @@ struct CrawlerWidget::access_by<LivePresentationCrawlerAccess> {
         return crawler->logFilteredData_->getNbMatches();
     }
 
+    static LogFilteredData* filteredData( CrawlerWidget* crawler )
+    {
+        return crawler->logFilteredData_.get();
+    }
+
     static QString mainText( CrawlerWidget* crawler )
     {
         crawler->logMainView_->selectAll();
@@ -321,6 +326,33 @@ struct CrawlerWidget::access_by<LivePresentationCrawlerAccess> {
              + Access::forceRefreshCount( crawler->logMainView_ )
              + Access::updateDataCount( crawler->filteredView_ )
              + Access::forceRefreshCount( crawler->filteredView_ );
+    }
+
+    static void startAutoRefreshSearch( CrawlerWidget* crawler, const QString& pattern )
+    {
+        crawler->searchToolbar_->setAutoRefresh( true );
+        crawler->searchToolbar_->searchLineEdit()->setEditText( pattern );
+        crawler->searchToolbar_->searchButton()->click();
+    }
+
+    static bool searchFinished( CrawlerWidget* crawler )
+    {
+        return crawler->searchToolbar_->stopButton()->isHidden();
+    }
+
+    static bool searchDispatchPending( CrawlerWidget* crawler )
+    {
+        return crawler->searchUpdateThrottleTimer_.isActive()
+               && crawler->searchUpdatePending_;
+    }
+
+    static void deliverSearchDispatch( CrawlerWidget* crawler )
+    {
+        REQUIRE( searchDispatchPending( crawler ) );
+        const auto timerId = crawler->searchUpdateThrottleTimer_.timerId();
+        REQUIRE( timerId >= 0 );
+        QTimerEvent event{ timerId };
+        QCoreApplication::sendEvent( &crawler->searchUpdateThrottleTimer_, &event );
     }
 };
 
@@ -2135,19 +2167,51 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             const auto selectedPath = exerciseLiveSaveDialog(
                 *mainWindow, crawler, expectedSuggestion, savedPath );
             REQUIRE( selectedPath == savedPath );
+            auto* exportService = appSession->getLiveLogExportService( crawler );
+            REQUIRE( exportService != nullptr );
             MainWindowLiveSaveTestAccess::start(
                 *mainWindow, crawler, selectedPath,
                 LiveLogSaveAnsiMode::Preserve );
-            REQUIRE( waitUiState( [ & ] {
-                const auto active
-                    = appSession->getLiveLogExportService( crawler )->activeJob();
-                return active != nullptr && active->isFinished();
-            } ) );
-            REQUIRE( appSession->getLiveLogExportService( crawler )
-                         ->activeJob()
-                         ->result()
-                     == klogg::livelog::LiveLogExportResult::Succeeded );
+
+            auto* progress = mainWindow->findChild<QProgressDialog*>(
+                QStringLiteral( "liveLogExportProgress" ) );
+            REQUIRE( progress != nullptr );
+            QPointer<QProgressDialog> progressGuard{ progress };
+            SafeQSignalSpy progressDestroyed{ progress, &QObject::destroyed };
+            const auto job = exportService->activeJob();
+            REQUIRE( job != nullptr );
+            QObject completionContext;
+            std::optional<klogg::livelog::LiveLogExportResult> completion;
+            bool bindingWasVisibleAtCompletion = false;
+            bool progressWasClosedAtCompletion = false;
+            job->onFinished(
+                &completionContext,
+                [ & ]( klogg::livelog::LiveLogExportResult result ) {
+                    completion = result;
+                    bindingWasVisibleAtCompletion = source->hasActiveOutputBinding(
+                        savedPath, LiveLogSaveAnsiMode::Preserve );
+                    progressWasClosedAtCompletion
+                        = progressGuard.isNull() || !progressGuard->isVisible();
+                } );
+
+            REQUIRE( waitUiState( [ & ] { return completion.has_value(); } ) );
+            REQUIRE( *completion == klogg::livelog::LiveLogExportResult::Succeeded );
+            REQUIRE( job->isFinished() );
+            CHECK( bindingWasVisibleAtCompletion );
+            CHECK( progressWasClosedAtCompletion );
             REQUIRE( source->sessionData().boundOutputFile == savedPath );
+
+            if ( !progressGuard.isNull() ) {
+                QCoreApplication::sendPostedEvents( progressGuard, QEvent::DeferredDelete );
+            }
+            if ( !progressGuard.isNull() ) {
+                REQUIRE( progressDestroyed.safeWait( 500 ) );
+            }
+            REQUIRE( progressGuard.isNull() );
+            CHECK( mainWindow->findChild<QProgressDialog*>(
+                       QStringLiteral( "liveLogExportProgress" ) )
+                   == nullptr );
+
             CHECK( appSession->getAssociatedPath( crawler ) == savedPath );
             CHECK( info->text().startsWith( QDir::toNativeSeparators( savedPath ) ) );
             CHECK( QDir::toNativeSeparators( appSession->getAssociatedPath( crawler ) )
@@ -2316,6 +2380,176 @@ TEST_CASE( "Presentation activity follows tab visibility rather than window focu
 {
     const auto background = GENERATE( false, true );
     exerciseLivePresentation( false, background, 15 );
+}
+
+TEST_CASE( "Concurrent Android and iOS filtered bound-output presentation baseline",
+           "[ui][session][live-presentation-measure]" )
+{
+    if ( !qEnvironmentVariableIsSet( "KLOGG_MEASURE_LIVE_PRESENTATION" ) ) {
+        return;
+    }
+
+    namespace live = klogg::livecapture;
+    using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+    constexpr int SourceCount = 4;
+    constexpr int BatchCount = 64;
+    constexpr int ExpectedMatchesPerSource = BatchCount / 2;
+
+    MenuLiveSourceTransportFactory factory;
+    QTemporaryDir outputs;
+    REQUIRE( outputs.isValid() );
+    auto appSession = std::make_shared<Session>( factory );
+    auto& sessionInfo = SessionInfo::getSynced();
+    SessionInfoRestoreGuard restoreGuard{ sessionInfo };
+    const auto windowId = QStringLiteral( "live-baseline-%1" )
+                              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    sessionInfo.add( windowId );
+    std::vector<SessionInfo::OpenFile> files;
+    for ( int sourceIndex = 0; sourceIndex < SourceCount; ++sourceIndex ) {
+        AdbLogcatSessionData data;
+        data.deviceSerial = QStringLiteral( "baseline-device-%1" ).arg( sourceIndex );
+        data.deviceDescription = QStringLiteral( "Baseline device %1" ).arg( sourceIndex );
+        data.captureId = QUuid::createUuid().toString( QUuid::WithoutBraces );
+        data.sourceType = sourceIndex == SourceCount - 1
+                            ? LiveLogSourceType::IosLogStream
+                            : LiveLogSourceType::AdbLogcat;
+        data.autoReconnectEnabled = true;
+        files.emplace_back(
+            data.documentId(), 0, QString{}, data.persistedSourceType(), data.displayName(),
+            klogg::livelog::serializeSpec(
+                klogg::livelog::sessionSpecFromSessionData( data ) ) );
+    }
+    sessionInfo.setOpenFiles( windowId, files );
+    sessionInfo.setCurrentFileIndex( windowId, 0 );
+    sessionInfo.save();
+
+    WindowSession windowSession{ appSession, windowId, 0 };
+    auto mainWindow = std::make_unique<MainWindow>( windowSession );
+    mainWindow->resize( 900, 600 );
+    mainWindow->show();
+    mainWindow->reloadSession();
+    auto* tabs = mainWindow->findChild<TabbedCrawlerWidget*>();
+    REQUIRE( tabs != nullptr );
+    REQUIRE( tabs->count() == SourceCount );
+
+    std::vector<CrawlerWidget*> crawlers;
+    std::vector<StreamingLogData*> data;
+    std::vector<AdbLogcatSource*> sources;
+    std::vector<klogg::livelog::LiveLogController*> controllers;
+    crawlers.reserve( SourceCount );
+    data.reserve( SourceCount );
+    sources.reserve( SourceCount );
+    controllers.reserve( SourceCount );
+    for ( int sourceIndex = 0; sourceIndex < SourceCount; ++sourceIndex ) {
+        auto* crawler = qobject_cast<CrawlerWidget*>( tabs->widget( sourceIndex ) );
+        REQUIRE( crawler != nullptr );
+        crawlers.push_back( crawler );
+        data.push_back( Access::data( crawler ) );
+        sources.push_back( appSession->getAdbLogcatSource( crawler ) );
+        controllers.push_back( appSession->getLiveLogController( crawler ) );
+        REQUIRE( data.back() != nullptr );
+        REQUIRE( sources.back() != nullptr );
+        REQUIRE( controllers.back() != nullptr );
+    }
+    REQUIRE( waitUiState( [ & ] {
+        return std::all_of( crawlers.cbegin(), crawlers.cend(),
+                            []( const auto* crawler ) { return crawler->isFirstLoadDone(); } );
+    } ) );
+
+    std::vector<QString> outputPaths;
+    std::vector<QByteArray> expectedOutput( SourceCount );
+    std::vector<std::unique_ptr<SafeQSignalSpy>> initialSearchSpies;
+    outputPaths.reserve( SourceCount );
+    initialSearchSpies.reserve( SourceCount );
+    for ( int sourceIndex = 0; sourceIndex < SourceCount; ++sourceIndex ) {
+        REQUIRE( sources[ static_cast<size_t>( sourceIndex ) ]->reconnectSource() );
+        REQUIRE( factory.created.size() == static_cast<size_t>( sourceIndex + 1 ) );
+        factory.created.back()->publishConnected();
+        REQUIRE( controllers[ static_cast<size_t>( sourceIndex ) ]->snapshot().source.status
+                 == live::SourceStatus::Streaming );
+        outputPaths.push_back(
+            outputs.filePath( QStringLiteral( "source-%1.log" ).arg( sourceIndex ) ) );
+        REQUIRE( sources[ static_cast<size_t>( sourceIndex ) ]->bindOutputFile(
+            outputPaths.back(), LiveLogSaveAnsiMode::Strip ) );
+        initialSearchSpies.emplace_back( std::make_unique<SafeQSignalSpy>(
+            Access::filteredData( crawlers[ static_cast<size_t>( sourceIndex ) ] ),
+            &LogFilteredData::searchProgressed ) );
+        Access::startAutoRefreshSearch(
+            crawlers[ static_cast<size_t>( sourceIndex ) ], QStringLiteral( "MATCH" ) );
+    }
+    REQUIRE( waitUiState( [ & ] {
+        return std::all_of(
+            initialSearchSpies.cbegin(), initialSearchSpies.cend(),
+            []( const auto& spy ) {
+                for ( int signal = 0; signal < spy->count(); ++signal ) {
+                    if ( spy->at( signal ).at( 1 ).toInt() == 100 ) {
+                        return true;
+                    }
+                }
+                return false;
+            } );
+    } ) );
+    REQUIRE( std::all_of( crawlers.cbegin(), crawlers.cend(),
+                          []( auto* crawler ) { return Access::searchFinished( crawler ); } ) );
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const auto cpuStart = std::clock();
+    for ( int batch = 0; batch < BatchCount; ++batch ) {
+        for ( int sourceIndex = 0; sourceIndex < SourceCount; ++sourceIndex ) {
+            const auto line = QStringLiteral( "%1 source=%2 batch=%3 payload=live-baseline\n" )
+                                  .arg( batch % 2 == 0 ? QStringLiteral( "MATCH" )
+                                                      : QStringLiteral( "MISS" ) )
+                                  .arg( sourceIndex )
+                                  .arg( batch )
+                                  .toUtf8();
+            expectedOutput[ static_cast<size_t>( sourceIndex ) ].append( line );
+            factory.created[ static_cast<size_t>( sourceIndex ) ]->publishBytes( line );
+        }
+    }
+    for ( auto* stream : data ) {
+        REQUIRE( StreamingLogDataTimerTestAccess::pending( *stream ) );
+        StreamingLogDataTimerTestAccess::deliver( *stream );
+    }
+    for ( auto* crawler : crawlers ) {
+        if ( Access::searchDispatchPending( crawler ) ) {
+            Access::deliverSearchDispatch( crawler );
+        }
+    }
+    REQUIRE( waitUiState( [ & ] {
+        return std::all_of( crawlers.cbegin(), crawlers.cend(), []( auto* crawler ) {
+            return Access::matches( crawler ).get() == ExpectedMatchesPerSource
+                   && Access::searchFinished( crawler );
+        } );
+    } ) );
+    const auto cpuTicks = std::clock() - cpuStart;
+    const auto elapsedNs = elapsed.nsecsElapsed();
+
+    for ( int sourceIndex = 0; sourceIndex < SourceCount; ++sourceIndex ) {
+        const auto index = static_cast<size_t>( sourceIndex );
+        REQUIRE( data[ index ]->getNbLine().get() == BatchCount );
+        REQUIRE( Access::matches( crawlers[ index ] ).get() == ExpectedMatchesPerSource );
+        QFile output{ outputPaths[ index ] };
+        REQUIRE( output.open( QIODevice::ReadOnly ) );
+        REQUIRE( output.readAll() == expectedOutput[ index ] );
+        REQUIRE( sources[ index ]->hasActiveOutputBinding(
+            outputPaths[ index ], LiveLogSaveAnsiMode::Strip ) );
+        REQUIRE( controllers[ index ]->snapshot().source.status
+                 == live::SourceStatus::Streaming );
+    }
+
+    std::fprintf(
+        stderr,
+        "LIVE_CONCURRENT_BASELINE android=3 ios=1 batches_per_source=%d "
+        "matches_per_source=%d filtered=1 output=bound correctness=passed "
+        "cpu_ticks=%lld clocks_per_sec=%lld elapsed_ns=%lld\n",
+        BatchCount, ExpectedMatchesPerSource, static_cast<long long>( cpuTicks ),
+        static_cast<long long>( CLOCKS_PER_SEC ), static_cast<long long>( elapsedNs ) );
+
+    for ( auto* controller : controllers ) {
+        controller->stopRequested();
+    }
+    mainWindow->close();
 }
 
 TEST_CASE( "Live countdown boundaries route only current info and tab switches read current time",

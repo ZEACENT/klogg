@@ -27,6 +27,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTime>
+#include <QTimer>
 #include <QTimerEvent>
 #include <QTemporaryDir>
 #include <QThread>
@@ -39,6 +40,7 @@
 #include <new>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include "capturestore.h"
 #include "configuration.h"
@@ -139,6 +141,22 @@ struct LiveLogExportServiceTestAccess {
         std::function<void( QEventLoop::ProcessEventsFlags, int )> callback )
     {
         job.ownerEventPumpForTesting_ = std::move( callback );
+    }
+
+    static bool hasPendingOwnerCall( LiveLogExportJob& job )
+    {
+        const std::lock_guard<std::mutex> lock( job.ownerCallsMutex_ );
+        return !job.ownerCalls_.empty();
+    }
+
+    static QTimer* progressTimer( LiveLogExportJob& job )
+    {
+        return job.progressTimer_;
+    }
+
+    static void recordProgress( LiveLogExportJob& job, qint64 bytesWritten )
+    {
+        job.recordProgress( bytesWritten );
     }
 };
 } // namespace klogg::livelog
@@ -550,13 +568,15 @@ TEST_CASE( "Rolling coalesced delivery exposes the replacement to filtered searc
     REQUIRE( truncations == 1 );
     REQUIRE( restarts == 0 );
     REQUIRE( StreamingLogDataTimerTestAccess::pending( data ) );
-    // Measure restart's generation advance separately from any invalidation advance.
+    // The replacement must invalidate every prior generation. The exact delta is
+    // an implementation detail because runSearch also interrupts its predecessor.
     const auto generationBeforeRestart = filtered->currentSearchGeneration();
     StreamingLogDataTimerTestAccess::deliver( data );
     REQUIRE( restarts == 1 );
-    REQUIRE( filtered->currentSearchGeneration() == generationBeforeRestart + 1 );
+    const auto replacementGeneration = filtered->currentSearchGeneration();
+    REQUIRE( replacementGeneration > generationBeforeRestart );
     const auto replacementResult
-        = waitForTerminalResult( searchProgressSpy, filtered->currentSearchGeneration() );
+        = waitForTerminalResult( searchProgressSpy, replacementGeneration );
     REQUIRE( replacementResult.has_value() );
     REQUIRE( replacementResult->get() == 1 );
     CHECK( filtered->searchPerformanceCounters().operationStarts == previousOperations + 1 );
@@ -1975,6 +1995,30 @@ TEST_CASE( "Streaming clear resets finalized output separators", "[streaming][st
     CHECK( file.readAll() == "b\n" );
 }
 
+template <typename Predicate>
+bool waitForSemanticStateWithoutEvents( Predicate&& predicate, int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+        std::this_thread::yield();
+    }
+    return predicate();
+}
+
+template <typename Predicate>
+bool waitForSemanticStateWithMetaCalls( QObject* receiver, Predicate&& predicate,
+                                        int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+        QCoreApplication::sendPostedEvents( receiver, QEvent::MetaCall );
+        std::this_thread::yield();
+    }
+    return predicate();
+}
+
 class ExportBarrier {
 public:
     ~ExportBarrier()
@@ -2012,6 +2056,12 @@ public:
         return false;
     }
 
+    bool entered()
+    {
+        const std::lock_guard<std::mutex> lock( mutex_ );
+        return entered_;
+    }
+
     void release()
     {
         const std::lock_guard<std::mutex> lock( mutex_ );
@@ -2025,6 +2075,173 @@ private:
     bool entered_ = false;
     bool released_ = false;
 };
+
+QByteArray makeProgressBurstSnapshot()
+{
+    constexpr int ProgressReportCount = 8192;
+    return QByteArrayLiteral( "p\n" ).repeated( ProgressReportCount );
+}
+
+TEST_CASE( "Live export progress coalesces a write burst into one coarse timer delivery",
+           "[streaming][live-save-progress]" )
+{
+    constexpr int ProgressIntervalMs = 33;
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto snapshot = makeProgressBurstSnapshot();
+    data->appendUtf8( snapshot );
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier snapshotBarrier;
+    ExportBarrier publicationBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &snapshotBarrier ] { snapshotBarrier.block(); } );
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( snapshotBarrier.waitUntilEntered() );
+
+    std::mutex progressMutex;
+    std::vector<qint64> progress;
+    QObject::connect(
+        job.get(), &klogg::livelog::LiveLogExportJob::progressChanged, job.get(),
+        [ &progressMutex, &progress ]( qint64 bytes ) {
+            const std::lock_guard<std::mutex> lock( progressMutex );
+            progress.push_back( bytes );
+        },
+        Qt::DirectConnection );
+    const auto progressValues = [ & ] {
+        const std::lock_guard<std::mutex> lock( progressMutex );
+        return progress;
+    };
+
+    snapshotBarrier.release();
+    REQUIRE( waitForSemanticStateWithoutEvents( [ & ] {
+        return klogg::livelog::LiveLogExportServiceTestAccess::hasPendingOwnerCall( *job );
+    } ) );
+    CHECK( progressValues().size() == 0u );
+
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        job.get(), [ &publicationBarrier ] { return publicationBarrier.entered(); } ) );
+    auto* const timer
+        = klogg::livelog::LiveLogExportServiceTestAccess::progressTimer( *job );
+    REQUIRE( timer != nullptr );
+    REQUIRE( timer->isActive() );
+    CHECK( timer->parent() == job.get() );
+    CHECK( timer->thread() == job->thread() );
+    CHECK( timer->isSingleShot() );
+    CHECK( timer->interval() == ProgressIntervalMs );
+    CHECK( timer->timerType() == Qt::CoarseTimer );
+
+    const auto timerId = timer->timerId();
+    REQUIRE( timerId >= 0 );
+    QTimerEvent delivery{ timerId };
+    QCoreApplication::sendEvent( timer, &delivery );
+    REQUIRE( progressValues().size() == 1u );
+    CHECK( progressValues().front() == snapshot.size() );
+
+    REQUIRE( QMetaObject::invokeMethod( job.get(), "deliverProgress",
+                                        Qt::DirectConnection ) );
+    CHECK( progressValues().size() == 1u );
+
+    const qint64 secondProgress = static_cast<qint64>( snapshot.size() ) + 1;
+    std::thread reporter( [ & ] {
+        klogg::livelog::LiveLogExportServiceTestAccess::recordProgress(
+            *job, secondProgress );
+    } );
+    reporter.join();
+    CHECK( progressValues().size() == 1u );
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        job.get(), [ timer ] { return timer->isActive(); } ) );
+    const auto secondTimerId = timer->timerId();
+    REQUIRE( secondTimerId >= 0 );
+    QTimerEvent secondDelivery{ secondTimerId };
+    QCoreApplication::sendEvent( timer, &secondDelivery );
+    REQUIRE( progressValues().size() == 2u );
+    CHECK( progressValues().back() == secondProgress );
+
+    publicationBarrier.release();
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        job.get(), [ &job ] { return job->isFinished(); } ) );
+    CHECK( job->result() == klogg::livelog::LiveLogExportResult::Succeeded );
+}
+
+TEST_CASE( "Live export completion and cancellation suppress pending late progress",
+           "[streaming][live-save-progress]" )
+{
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( cancel );
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    const auto snapshot = makeProgressBurstSnapshot();
+    data->appendUtf8( snapshot );
+
+    klogg::livelog::LiveLogExportService service( data );
+    ExportBarrier snapshotBarrier;
+    ExportBarrier publicationBarrier;
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforeSnapshotWrite(
+        service, [ &snapshotBarrier ] { snapshotBarrier.block(); } );
+    klogg::livelog::LiveLogExportServiceTestAccess::setBeforePublication(
+        service, [ &publicationBarrier ] { publicationBarrier.block(); } );
+    const auto job = service.start( root.filePath( QStringLiteral( "saved.log" ) ),
+                                    LiveLogSaveAnsiMode::Strip, 4096 );
+    REQUIRE( job != nullptr );
+    REQUIRE( snapshotBarrier.waitUntilEntered() );
+
+    std::mutex progressMutex;
+    int progressCount = 0;
+    QObject::connect(
+        job.get(), &klogg::livelog::LiveLogExportJob::progressChanged, job.get(),
+        [ &progressMutex, &progressCount ]( qint64 ) {
+            const std::lock_guard<std::mutex> lock( progressMutex );
+            ++progressCount;
+        },
+        Qt::DirectConnection );
+    const auto observedProgress = [ & ] {
+        const std::lock_guard<std::mutex> lock( progressMutex );
+        return progressCount;
+    };
+
+    snapshotBarrier.release();
+    REQUIRE( waitForSemanticStateWithoutEvents( [ & ] {
+        return klogg::livelog::LiveLogExportServiceTestAccess::hasPendingOwnerCall( *job );
+    } ) );
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        job.get(), [ &publicationBarrier ] { return publicationBarrier.entered(); } ) );
+    auto* const timer
+        = klogg::livelog::LiveLogExportServiceTestAccess::progressTimer( *job );
+    REQUIRE( timer != nullptr );
+    REQUIRE( timer->isActive() );
+    const auto pendingTimerId = timer->timerId();
+
+    QObject completionContext;
+    std::optional<klogg::livelog::LiveLogExportResult> completion;
+    job->onFinished( &completionContext, [ &completion ]( auto result ) {
+        completion = result;
+    } );
+    if ( cancel ) {
+        job->cancel();
+    }
+    publicationBarrier.release();
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        job.get(), [ &job ] { return job->isFinished(); } ) );
+    REQUIRE( waitForSemanticStateWithMetaCalls(
+        &completionContext, [ &completion ] { return completion.has_value(); } ) );
+    CHECK( *completion == ( cancel ? klogg::livelog::LiveLogExportResult::Cancelled
+                                   : klogg::livelog::LiveLogExportResult::Succeeded ) );
+
+    REQUIRE( timer->isActive() );
+    REQUIRE( timer->timerId() == pendingTimerId );
+    const auto progressBeforeLateCycle = observedProgress();
+    QTimerEvent lateDelivery{ pendingTimerId };
+    QCoreApplication::sendEvent( timer, &lateDelivery );
+    CHECK( observedProgress() == progressBeforeLateCycle );
+    CHECK( observedProgress() == 0 );
+}
 
 TEST_CASE( "Streaming output export fixes a snapshot boundary before retaining its concurrent tail",
            "[streaming][live-save-cutover][live-save-red]" )

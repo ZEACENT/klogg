@@ -109,6 +109,16 @@ class LogFilteredData : public AbstractLogData {
     // Returns the number of marks (independently of the visibility)
     LinesCount getNbMarks() const;
 
+    // Counts the visible overview categories in the half-open source-line range
+    // [first, end). A line that is both matched and marked is counted as a
+    // match when matches are visible; marks retain it when matches are hidden.
+    // Plain lines mirrored by allLinesVisible are never counted.
+    struct LineTypeRangeCounts {
+        const LinesCount matches;
+        const LinesCount marks;
+    };
+    LineTypeRangeCounts countLineTypesInRange( LineNumber first, LineNumber end ) const;
+
     LineType lineTypeByIndex( LineNumber index ) const;
     LineType lineTypeByLine( LineNumber lineNumber ) const;
 
