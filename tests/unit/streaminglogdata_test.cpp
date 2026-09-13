@@ -2514,3 +2514,45 @@ TEST_CASE( "Streaming limit changes invalidate caches and report persistence hea
     const auto raw = data.getLinesRaw( 0_lnum, 1_lcount );
     CHECK( QByteArray( raw.buffer.data(), static_cast<int>( raw.buffer.size() ) ) == "c\n" );
 }
+
+TEST_CASE( "Streaming model and truncation are authoritative before presentation delivery",
+           "[streaming][refresh-throttling][visibility][presentation]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    StreamingLogData data( makeCaptureId(), root.path() );
+    if ( StreamingLogDataTimerTestAccess::pending( data ) ) {
+        StreamingLogDataTimerTestAccess::deliver( data );
+    }
+    SafeQSignalSpy loading{ &data, &StreamingLogData::loadingFinished };
+    SafeQSignalSpy truncated{ &data, &StreamingLogData::fileChanged };
+
+    CaptureStore::Limits segmentedLimits;
+    segmentedLimits.segmentTargetBytes = 1;
+    data.setCaptureLimits( segmentedLimits );
+    data.appendUtf8( QByteArrayLiteral( "first\nsecond\n" ) );
+    REQUIRE( data.getNbLine() == 2_lcount );
+    REQUIRE( StreamingLogDataTimerTestAccess::pending( data ) );
+    CHECK( loading.count() == 0 );
+    truncated.clear();
+
+    CaptureStore::Limits limits;
+    limits.segmentTargetBytes = 1;
+    limits.maxTotalLines = 1;
+    data.setCaptureLimits( limits );
+    REQUIRE( data.getNbLine() == 1_lcount );
+    REQUIRE( truncated.count() == 1 );
+    CHECK( truncated.at( 0 ).at( 0 ).value<MonitoredFileStatus>()
+           == MonitoredFileStatus::Truncated );
+    CHECK( data.getLineString( 0_lnum ) == QStringLiteral( "second" ) );
+    CHECK( loading.count() == 0 );
+
+    data.appendUtf8( QByteArrayLiteral( "latest\n" ) );
+    REQUIRE( data.getNbLine() == 1_lcount );
+    CHECK( data.getLineString( 0_lnum ) == QStringLiteral( "latest" ) );
+    CHECK( loading.count() == 0 );
+
+    StreamingLogDataTimerTestAccess::deliver( data );
+    CHECK( loading.count() == 1 );
+    CHECK( data.getLineString( 0_lnum ) == QStringLiteral( "latest" ) );
+}

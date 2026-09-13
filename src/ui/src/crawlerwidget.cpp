@@ -87,7 +87,6 @@
 
 // Throttle intervals (ms) for coalescing search updates during live streaming.
 static constexpr int kSearchThrottleActiveMs = 250;
-static constexpr int kSearchThrottleInactiveMs = 1000;
 
 // Palette for error signaling (yellow background)
 const QPalette CrawlerWidget::ErrorPalette( Qt::darkYellow );
@@ -302,6 +301,7 @@ void CrawlerWidget::reload()
 {
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
+    presentationSelectionRestorePending_ = false;
     if ( searchPendingLines_ != 0 ) {
         searchPendingLines_ = 0;
         Q_EMIT searchPendingLinesChanged();
@@ -310,7 +310,12 @@ void CrawlerWidget::reload()
     constexpr auto DropCache = true;
     logFilteredData_->clearSearch( DropCache );
     logFilteredData_->clearMarks();
-    filteredView_->updateData();
+    if ( presentationActive_ ) {
+        filteredView_->updateData();
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
     printSearchInfoMessage();
 
     logData_->reload();
@@ -324,8 +329,115 @@ void CrawlerWidget::setEncoding( std::optional<int> mib )
 {
     encodingMib_ = std::move( mib );
     updateEncoding();
+    if ( presentationActive_ ) {
+        update();
+    }
+}
 
+void CrawlerWidget::setPresentationActive( bool active )
+{
+    if ( presentationActive_ == active ) {
+        return;
+    }
+
+    presentationActive_ = active;
+    if ( !presentationActive_ ) {
+        searchUpdateThrottleTimer_.stop();
+        if ( searchUpdatePending_ ) {
+            const bool dispatchPending = searchState_.isAutorefreshAllowed();
+            searchUpdatePending_ = false;
+            if ( dispatchPending ) {
+                logFilteredData_->updateSearch( searchStartLine_, pendingSearchEndLine_ );
+                queuePresentationRefresh( false );
+            }
+        }
+        presentationCatchUpQueued_ = false;
+        return;
+    }
+
+    if ( presentationDirty_ || searchUpdatePending_ || presentationSearchCatchUpPending_ ) {
+        queuePresentationRefresh( searchUpdatePending_ || presentationSearchCatchUpPending_ );
+    }
+}
+
+void CrawlerWidget::queuePresentationRefresh( bool searchCatchUp )
+{
+    presentationDirty_ = true;
+    presentationSearchCatchUpPending_ = presentationSearchCatchUpPending_ || searchCatchUp;
+    if ( !presentationActive_ || presentationCatchUpQueued_ ) {
+        return;
+    }
+
+    presentationCatchUpQueued_ = true;
+    QTimer::singleShot( 0, this, [ this ] {
+        if ( !presentationCatchUpQueued_ ) {
+            return;
+        }
+        QTimer::singleShot( 0, this, [ this ] { deliverPresentationCatchUp(); } );
+    } );
+}
+
+void CrawlerWidget::deliverPresentationCatchUp()
+{
+    if ( !presentationCatchUpQueued_ ) {
+        return;
+    }
+    presentationCatchUpQueued_ = false;
+    if ( !presentationActive_ ) {
+        return;
+    }
+
+    if ( presentationDirty_ ) {
+        presentationDirty_ = !refreshAuthoritativePresentation();
+    }
+    startPendingSearchCatchUp();
+}
+
+bool CrawlerWidget::refreshAuthoritativePresentation()
+{
+    if ( logData_ == nullptr || logFilteredData_ == nullptr || logMainView_ == nullptr
+         || filteredView_ == nullptr ) {
+        return false;
+    }
+
+    nbMatches_ = logFilteredData_->getNbMatches();
+    if ( presentationSearchPatternPending_ ) {
+        logMainView_->setSearchPattern( currentSearchPattern_ );
+        filteredView_->setSearchPattern( currentSearchPattern_ );
+        presentationSearchPatternPending_ = false;
+    }
+    logMainView_->updateData( searchStartLine_, searchEndLine_ );
+    filteredView_->updateData( searchStartLine_, searchEndLine_ );
+    if ( presentationSelectionRestorePending_ && !isFollowEnabled() ) {
+        const auto currentLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
+        filteredView_->selectAndDisplayLine( currentLineIndex );
+    }
+    presentationSelectionRestorePending_ = false;
+    overview_.updateData( logData_->getNbLine() );
     update();
+    if ( presentationFocusPending_ ) {
+        logMainView_->setFocus();
+        presentationFocusPending_ = false;
+    }
+    ++presentationRefreshCountForTest_;
+    ++overviewUpdateCountForTest_;
+    ++bulletRefreshCountForTest_;
+    return true;
+}
+
+void CrawlerWidget::startPendingSearchCatchUp()
+{
+    if ( !presentationActive_ || !searchUpdatePending_
+         || !searchState_.isAutorefreshAllowed() ) {
+        presentationSearchCatchUpPending_ = false;
+        return;
+    }
+
+    presentationSearchCatchUpPending_ = false;
+    if ( !searchUpdateThrottleTimer_.isActive() ) {
+        searchUpdateThrottleTimer_.start( kSearchThrottleActiveMs );
+        ++searchCatchUpCountForTest_;
+    }
 }
 
 void CrawlerWidget::focusSearchEdit()
@@ -453,9 +565,7 @@ void CrawlerWidget::startNewSearch()
         tabbedFilteredView_->setTabsClosable( true );
         tabbedFilteredView_->setCurrentIndex( index );
 
-        connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-                 &CrawlerWidget::updateFilteredView,
-                 static_cast<Qt::ConnectionType>( Qt::QueuedConnection | Qt::UniqueConnection ) );
+        connectSearchPublication( logFilteredData_.get() );
 
         logMainView_->useNewFiltering( logFilteredData_.get() );
 
@@ -483,10 +593,8 @@ void CrawlerWidget::stopSearch()
 {
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
-    if ( searchPendingLines_ != 0 ) {
-        searchPendingLines_ = 0;
-        Q_EMIT searchPendingLinesChanged();
-    }
+    presentationSelectionRestorePending_ = false;
+    retireSearchStatusPresentation();
     logFilteredData_->interruptSearch();
     searchState_.stopSearch();
     printSearchInfoMessage();
@@ -529,116 +637,118 @@ void CrawlerWidget::editSearchHistory()
     updateSearchCombo();
 }
 
-// When receiving the 'newDataAvailable' signal from LogFilteredData
-void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
-                                        LineNumber initialPosition,
+void CrawlerWidget::connectSearchPublication( LogFilteredData* source )
+{
+    connect( source, &LogFilteredData::searchProgressed, this,
+             [ this, source ]( LinesCount nbMatches, int progress, LineNumber initialPosition,
+                              quint64 generation ) {
+                 updateSearchStatus( source, nbMatches, progress, initialPosition, generation );
+             },
+             Qt::QueuedConnection );
+    connect( source, &LogFilteredData::searchResultsChanged, this,
+             [ this, source ]( LinesCount nbMatches, LineNumber initialPosition, bool terminal,
+                              quint64 generation ) {
+                 updateFilteredResults( source, nbMatches, initialPosition, terminal, generation );
+             },
+             Qt::QueuedConnection );
+}
+
+bool CrawlerWidget::acceptsSearchPublication( const LogFilteredData* source,
+                                               quint64 generation ) const
+{
+    if ( source == nullptr || source != logFilteredData_.get() ) {
+        return false;
+    }
+    return !klogg::isStaleSearchGeneration( generation,
+                                            logFilteredData_->currentSearchGeneration() );
+}
+
+void CrawlerWidget::retireSearchStatusPresentation()
+{
+    if ( searchPendingLines_ != 0 ) {
+        searchPendingLines_ = 0;
+        Q_EMIT searchPendingLinesChanged();
+    }
+    searchInfoLine_->hideGauge();
+    searchToolbar_->setSearchInProgress( false );
+}
+
+void CrawlerWidget::updateSearchStatus( LogFilteredData* source, LinesCount nbMatches,
+                                        int progress, LineNumber initialPosition,
                                         quint64 generation )
 {
-    if ( logFilteredData_ ) {
-        const auto activeGeneration = logFilteredData_->currentSearchGeneration();
-        if ( klogg::isStaleSearchGeneration( generation, activeGeneration ) ) {
-            // Stale signal from a search that has since been replaced.  Without
-            // this gate, queued metacalls from the previous SearchOperation can
-            // land in updateFilteredView() after replaceCurrentSearch() has
-            // started a new search, corrupting match counts and progress UI.
-            LOG_DEBUG << "updateFilteredView dropping stale signal: gen " << generation
-                      << " != active " << activeGeneration;
-            return;
-        }
+    Q_UNUSED( initialPosition )
+    if ( !acceptsSearchPublication( source, generation ) ) {
+        return;
     }
-
-    LOG_DEBUG << "updateFilteredView received.";
 
     searchInfoLine_->show();
-
     if ( progress == 100 ) {
-        // Reset pending lines when search completes
-        if ( searchPendingLines_ != 0 ) {
-            searchPendingLines_ = 0;
-            Q_EMIT searchPendingLinesChanged();
-        }
-
-        // Searching done - apply context lines if mode is active
-        if ( contextLinesMode_ > 0 && contextLinesSpinBox_->value() > 0 ) {
-            applyContextLines();
-        }
-
+        retireSearchStatusPresentation();
         printSearchInfoMessage( nbMatches );
-        searchInfoLine_->hideGauge();
-        // De-activate the stop button
-        searchToolbar_->setSearchInProgress( false );
-    }
-    else {
-        // Search in progress
-        // We ignore 0% and 100% to avoid a flash when the search is very short
-        if ( progress > 0 ) {
-            // Some languages translate the plural the same as the singular, so use the full string
-
-            // For live sources / growing files, show remaining lines instead of
-            // percentage since the percentage becomes misleading when the file
-            // keeps growing.  progress is already relative to the current
-            // search window, so remaining = totalLines * (100 - progress) / 100.
-            const auto totalLines = logData_->getNbLine();
-            const auto remaining = totalLines.get()
-                                 * static_cast<LinesCount::UnderlyingType>( 100 - progress ) / 100;
-
-            // Update pending lines for status bar display
-            const auto newPending = static_cast<qint64>( remaining );
-            if ( newPending != searchPendingLines_ ) {
-                searchPendingLines_ = newPending;
-                Q_EMIT searchPendingLinesChanged();
-            }
-
-            QString progressText;
-            if ( logData_->isLiveSource() && remaining > 0 ) {
-                progressText = tr( "Search in progress — %1 lines pending..." )
-                                   .arg( QString::number( remaining ) );
-            }
-            else {
-                progressText
-                    = tr( "Search in progress (%1 %)..." ).arg( QString::number( progress ) );
-            }
-
-            searchInfoLine_->setText(
-                progressText
-                + ( nbMatches.get() > 1 ? tr( " %1 matches found so far." )
-                                              .arg( QString::number( nbMatches.get() ) )
-                                        : tr( " %1 match found so far." )
-                                              .arg( QString::number( nbMatches.get() ) ) ) );
-
-            searchInfoLine_->displayGauge( progress );
-        }
+        return;
     }
 
-    // If more (or less, e.g. come back to 0) matches have been found
-    if ( nbMatches != nbMatches_ ) {
-        nbMatches_ = nbMatches;
-
-        // Recompute the content of the filtered window.
-        filteredView_->updateData();
-
-        // Update the match overview
-        overview_.updateData( logData_->getNbLine() );
-
-        // New data found icon
-        if ( initialPosition > 0_lnum ) {
-            changeDataStatus( DataStatus::NEW_FILTERED_DATA );
-        }
-
-        // Also update the top window for the coloured bullets.
-        update();
+    if ( progress <= 0 ) {
+        return;
     }
 
-    // Try to restore the filtered window selection close to where it was
-    // only for full searches to avoid disconnecting follow mode!
-    if ( ( progress == 100 ) && ( initialPosition == searchStartLine_ )
-         && ( !isFollowEnabled() ) ) {
-        const auto currenLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
-        LOG_DEBUG << "updateFilteredView: restoring selection: "
-                  << " absolute line number (0based) " << currentLineNumber_ << " index "
-                  << currenLineIndex;
-        filteredView_->selectAndDisplayLine( currenLineIndex );
-        filteredView_->setSearchLimits( searchStartLine_, searchEndLine_ );
+    const auto totalLines = logData_->getNbLine();
+    const auto remaining = totalLines.get()
+                         * static_cast<LinesCount::UnderlyingType>( 100 - progress ) / 100;
+    const auto newPending = static_cast<qint64>( remaining );
+    if ( newPending != searchPendingLines_ ) {
+        searchPendingLines_ = newPending;
+        Q_EMIT searchPendingLinesChanged();
+    }
+
+    const auto progressText
+        = logData_->isLiveSource() && remaining > 0
+              ? tr( "Search in progress — %1 lines pending..." ).arg( QString::number( remaining ) )
+              : tr( "Search in progress (%1 %)..." ).arg( QString::number( progress ) );
+    searchInfoLine_->setText(
+        progressText
+        + ( nbMatches.get() > 1
+                ? tr( " %1 matches found so far." ).arg( QString::number( nbMatches.get() ) )
+                : tr( " %1 match found so far." ).arg( QString::number( nbMatches.get() ) ) ) );
+    searchInfoLine_->displayGauge( progress );
+}
+
+void CrawlerWidget::updateFilteredResults( LogFilteredData* source, LinesCount nbMatches,
+                                           LineNumber initialPosition, bool terminal,
+                                           quint64 generation )
+{
+    if ( !acceptsSearchPublication( source, generation ) ) {
+        return;
+    }
+
+    if ( terminal && contextLinesMode_ > 0 && contextLinesSpinBox_->value() > 0 ) {
+        updateContextLinesModel();
+    }
+    if ( initialPosition > 0_lnum ) {
+        changeDataStatus( DataStatus::NEW_FILTERED_DATA );
+    }
+    const bool restoreSelection
+        = terminal && initialPosition == searchStartLine_ && !isFollowEnabled();
+
+    if ( !presentationActive_ ) {
+        presentationSelectionRestorePending_
+            = presentationSelectionRestorePending_ || restoreSelection;
+        queuePresentationRefresh( false );
+        return;
+    }
+
+    nbMatches_ = nbMatches;
+    filteredView_->updateData( searchStartLine_, searchEndLine_ );
+    overview_.updateData( logData_->getNbLine() );
+    ++overviewUpdateCountForTest_;
+
+    update();
+    ++bulletRefreshCountForTest_;
+
+    if ( restoreSelection ) {
+        const auto currentLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
+        filteredView_->selectAndDisplayLine( currentLineIndex );
     }
 }
 
@@ -671,15 +781,15 @@ void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
         }
     }
 
-    // Recompute the content of both window.
-    filteredView_->updateData();
-    logMainView_->updateData();
-
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
-
-    // Also update the top window for the coloured bullets.
-    update();
+    if ( presentationActive_ ) {
+        filteredView_->updateData();
+        logMainView_->updateData();
+        overview_.updateData( logData_->getNbLine() );
+        update();
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
 }
 
 void CrawlerWidget::markLinesFromFiltered( const klogg::vector<LineNumber>& lines )
@@ -711,15 +821,15 @@ void CrawlerWidget::deleteMarkLinesFromMain( const klogg::vector<LineNumber>& li
         }
     }
 
-    // Recompute the content of both window.
-    filteredView_->updateData();
-    logMainView_->updateData();
-
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
-
-    // Also update the top window for the coloured bullets.
-    update();
+    if ( presentationActive_ ) {
+        filteredView_->updateData();
+        logMainView_->updateData();
+        overview_.updateData( logData_->getNbLine() );
+        update();
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
 }
 
 void CrawlerWidget::deleteMarkLinesFromFiltered( const klogg::vector<LineNumber>& lines )
@@ -808,7 +918,12 @@ void CrawlerWidget::applyEmptyFilterBehavior()
     logFilteredData_->setAllLinesVisible( emptyFilterPolicy
                                           == klogg::EmptyFilterPolicy::MirrorAllLines );
     if ( searchToolbar_->currentSearchText().isEmpty() ) {
-        filteredView_->updateData();
+        if ( presentationActive_ ) {
+            filteredView_->updateData();
+        }
+        else {
+            queuePresentationRefresh( false );
+        }
     }
 }
 
@@ -836,13 +951,15 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 {
     LOG_INFO << "file loading finished, status " << static_cast<int>( status );
 
-    // We need to refresh the main window because the view lines on the
-    // overview have probably changed.
-    overview_.updateData( logData_->getNbLine() );
-
-    // FIXME, handle topLine
-    // logMainView_->updateData( logData_, topLine );
-    logMainView_->updateData();
+    // The model remains authoritative while hidden, but expensive view work is
+    // deferred until this tab becomes presentable again.
+    if ( presentationActive_ ) {
+        overview_.updateData( logData_->getNbLine() );
+        logMainView_->updateData();
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
     applyEmptyFilterBehavior();
 
     // Shall we Forbid starting a search when loading in progress?
@@ -865,10 +982,13 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
             // operationsMutex_ inside LogFilteredDataWorker::updateSearch().
             pendingSearchEndLine_ = searchEndLine_;
             searchUpdatePending_ = true;
-            if ( !searchUpdateThrottleTimer_.isActive() ) {
-                searchUpdateThrottleTimer_.start(
-                    window()->isActiveWindow() ? kSearchThrottleActiveMs
-                                               : kSearchThrottleInactiveMs );
+            if ( presentationActive_ && !searchUpdateThrottleTimer_.isActive() ) {
+                searchUpdateThrottleTimer_.start( kSearchThrottleActiveMs );
+            }
+            else if ( !presentationActive_ ) {
+                searchUpdatePending_ = false;
+                logFilteredData_->updateSearch( searchStartLine_, pendingSearchEndLine_ );
+                queuePresentationRefresh( false );
             }
         }
         else {
@@ -877,8 +997,13 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
             // a previous search is still running.
             pendingSearchEndLine_ = searchEndLine_;
             searchUpdatePending_ = true;
-            if ( !searchUpdateThrottleTimer_.isActive() ) {
+            if ( presentationActive_ && !searchUpdateThrottleTimer_.isActive() ) {
                 searchUpdateThrottleTimer_.start( kSearchThrottleActiveMs );
+            }
+            else if ( !presentationActive_ ) {
+                searchUpdatePending_ = false;
+                logFilteredData_->updateSearch( searchStartLine_, pendingSearchEndLine_ );
+                queuePresentationRefresh( false );
             }
         }
     }
@@ -886,7 +1011,15 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
     // Set the encoding for the views
     updateEncoding();
 
-    clearSearchLimits();
+    searchStartLine_ = 0_lnum;
+    searchEndLine_ = LineNumber( logData_->getNbLine().get() );
+    if ( presentationActive_ ) {
+        logMainView_->setSearchLimits( searchStartLine_, searchEndLine_ );
+        filteredView_->setSearchLimits( searchStartLine_, searchEndLine_ );
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
 
     // Also change the data available icon
     if ( firstLoadDone_ ) {
@@ -896,7 +1029,13 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
         for ( const auto& m : savedMarkedLines_ ) {
             logFilteredData_->addMark( m );
         }
-        logMainView_->setFocus();
+        if ( presentationActive_ ) {
+            logMainView_->setFocus();
+        }
+        else {
+            presentationFocusPending_ = true;
+            queuePresentationRefresh( false );
+        }
     }
 
     loadingInProgress_ = false;
@@ -910,6 +1049,10 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
 
 void CrawlerWidget::fireThrottledSearchUpdate()
 {
+    if ( !presentationActive_ ) {
+        queuePresentationRefresh( true );
+        return;
+    }
     if ( !searchUpdatePending_ || !searchState_.isAutorefreshAllowed() ) {
         searchUpdatePending_ = false;
         return;
@@ -936,10 +1079,15 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
             // Invalidate the search
             constexpr auto DropCache = true;
             logFilteredData_->clearSearch( DropCache );
-            filteredView_->updateData();
+            if ( presentationActive_ ) {
+                filteredView_->updateData();
+                nbMatches_ = 0_lcount;
+            }
+            else {
+                queuePresentationRefresh( false );
+            }
             searchState_.truncateFile();
             printSearchInfoMessage();
-            nbMatches_ = 0_lcount;
         }
     }
 }
@@ -999,8 +1147,13 @@ void CrawlerWidget::changeFilteredViewVisibility( int index )
     QStandardItem* item = visibilityModel_->item( index );
     auto visibility = item->data().value<FilteredView::Visibility>();
 
-    filteredView_->setVisibility( visibility );
+    if ( !presentationActive_ ) {
+        logFilteredData_->setVisibility( visibility );
+        queuePresentationRefresh( false );
+        return;
+    }
 
+    filteredView_->setVisibility( visibility );
     if ( logFilteredData_->getNbLine() > 0_lcount ) {
         const auto lineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( lineIndex );
@@ -1331,9 +1484,7 @@ void CrawlerWidget::setup()
     connect( tabbedFilteredView_, &QTabWidget::tabCloseRequested, this,
              &CrawlerWidget::closeFilteredView );
 
-    connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
-             &CrawlerWidget::updateFilteredView,
-             static_cast<Qt::ConnectionType>( Qt::QueuedConnection | Qt::UniqueConnection ) );
+    connectSearchPublication( logFilteredData_.get() );
 
     // Throttle timer for search updates during live streaming
     searchUpdateThrottleTimer_.setSingleShot( true );
@@ -1368,6 +1519,8 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
 {
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
+    presentationSelectionRestorePending_ = false;
+    retireSearchStatusPresentation();
     logFilteredData_->interruptSearch();
     if ( tabIndex >= 0 ) {
         auto* tabFilteredView
@@ -1501,6 +1654,8 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     LOG_INFO << "replacing current search with " << searchText;
     searchUpdateThrottleTimer_.stop();
     searchUpdatePending_ = false;
+    presentationSelectionRestorePending_ = false;
+    retireSearchStatusPresentation();
 
     // Advance the generation counter BEFORE interrupting.  Every code path
     // out of this function abandons the prior search results (clearSearch()
@@ -1512,12 +1667,14 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     // counter again, which is harmless -- only equality matters for the
     // staleness gate.  The bump must NOT live inside interruptSearch():
     // CrawlerWidget::stopSearch also calls interruptSearch() and depends
-    // on the final progress signal reaching updateFilteredView() to run
-    // the Stop-button UI cleanup.
+    // on the final status signal reaching updateSearchStatus() to run the
+    // Stop-button UI cleanup.
     logFilteredData_->bumpSearchGeneration();
     logFilteredData_->interruptSearch();
 
-    nbMatches_ = 0_lcount;
+    if ( presentationActive_ ) {
+        nbMatches_ = 0_lcount;
+    }
 
     // Switch to "Marks and matches" view when in "Marks" view
     using VisibilityFlags = LogFilteredData::VisibilityFlags;
@@ -1533,10 +1690,13 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
          == klogg::EmptyFilterPolicy::MirrorAllLines ) {
         logFilteredData_->setAllLinesVisible( true );
     }
-    filteredView_->updateData();
-
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
+    if ( presentationActive_ ) {
+        filteredView_->updateData();
+        overview_.updateData( logData_->getNbLine() );
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
 
     if ( !searchText.isEmpty() ) {
 
@@ -1555,13 +1715,26 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
             // Accept auto-refresh of the search
             searchState_.startSearch();
             searchInfoLine_->hide();
-            logMainView_->setSearchPattern( regexpPattern );
-            filteredView_->setSearchPattern( regexpPattern );
+            currentSearchPattern_ = regexpPattern;
+            if ( presentationActive_ ) {
+                presentationSearchPatternPending_ = false;
+                logMainView_->setSearchPattern( currentSearchPattern_ );
+                filteredView_->setSearchPattern( currentSearchPattern_ );
+            }
+            else {
+                presentationSearchPatternPending_ = true;
+                queuePresentationRefresh( false );
+            }
         }
         else {
             // The regexp is wrong
             logFilteredData_->clearSearch();
-            filteredView_->updateData();
+            if ( presentationActive_ ) {
+                filteredView_->updateData();
+            }
+            else {
+                queuePresentationRefresh( false );
+            }
             searchState_.resetState();
 
             // Inform the user
@@ -1578,11 +1751,29 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
             searchInfoLine_->setText( errorMessage );
             searchInfoLine_->show();
 
-            logMainView_->setSearchPattern( {} );
-            filteredView_->setSearchPattern( {} );
+            currentSearchPattern_ = {};
+            if ( presentationActive_ ) {
+                presentationSearchPatternPending_ = false;
+                logMainView_->setSearchPattern( currentSearchPattern_ );
+                filteredView_->setSearchPattern( currentSearchPattern_ );
+            }
+            else {
+                presentationSearchPatternPending_ = true;
+                queuePresentationRefresh( false );
+            }
         }
     }
     else {
+        currentSearchPattern_ = {};
+        if ( presentationActive_ ) {
+            presentationSearchPatternPending_ = false;
+            logMainView_->setSearchPattern( currentSearchPattern_ );
+            filteredView_->setSearchPattern( currentSearchPattern_ );
+        }
+        else {
+            presentationSearchPatternPending_ = true;
+            queuePresentationRefresh( false );
+        }
         searchState_.resetState();
         printSearchInfoMessage();
     }
@@ -1660,12 +1851,35 @@ void CrawlerWidget::updateEncoding()
     QString encodingPrefix = encodingMib_ ? tr( "Displayed as %1" ) : tr( "Detected as %1" );
     encodingText_ = encodingPrefix.arg( textCodec->name().constData() );
 
-    logData_->interruptLoading();
+    const auto encodingName = textCodec->name();
+    const auto usesEncoding = [ &encodingName ]( const AbstractLogData* data ) {
+        const auto* const current = data != nullptr ? data->getDisplayEncoding() : nullptr;
+        return current != nullptr
+            && current->name().compare( encodingName, Qt::CaseInsensitive ) == 0;
+    };
 
-    logData_->setDisplayEncoding( textCodec->name().constData() );
-    logMainView_->forceRefresh();
-    logFilteredData_->setDisplayEncoding( textCodec->name().constData() );
-    filteredView_->forceRefresh();
+    const bool sourceEncodingChanged = !usesEncoding( logData_.get() );
+    const bool filteredEncodingChanged = !usesEncoding( logFilteredData_.get() );
+    if ( !sourceEncodingChanged && !filteredEncodingChanged ) {
+        return;
+    }
+
+    if ( sourceEncodingChanged ) {
+        // Repeated live append notifications normally retain the same decoder;
+        // interrupt loading only for a real encoding transition.
+        logData_->interruptLoading();
+        logData_->setDisplayEncoding( encodingName.constData() );
+    }
+    if ( filteredEncodingChanged ) {
+        logFilteredData_->setDisplayEncoding( encodingName.constData() );
+    }
+    if ( presentationActive_ ) {
+        logMainView_->forceRefresh();
+        filteredView_->forceRefresh();
+    }
+    else {
+        queuePresentationRefresh( false );
+    }
 }
 
 // Change the respective size of the two views
@@ -1873,7 +2087,12 @@ void CrawlerWidget::contextLinesModeChanged( int index )
     else {
         // If value is 0, clear context lines
         logFilteredData_->setContextLines( 0, 0 );
-        filteredView_->updateData();
+        if ( presentationActive_ ) {
+            filteredView_->updateData();
+        }
+        else {
+            queuePresentationRefresh( false );
+        }
     }
 }
 
@@ -1888,7 +2107,35 @@ void CrawlerWidget::contextLinesValueChanged( int value )
         logFilteredData_->setContextLines( 0, 0 );
         // Note: We intentionally don't reset contextLinesMode_ here when value becomes 0,
         // so that the user's selection (-A/-B/-C) persists for future value changes.
-        filteredView_->updateData();
+        if ( presentationActive_ ) {
+            filteredView_->updateData();
+        }
+        else {
+            queuePresentationRefresh( false );
+        }
+    }
+}
+
+void CrawlerWidget::updateContextLinesModel()
+{
+    if ( !logFilteredData_ ) {
+        return;
+    }
+
+    const int count = contextLinesSpinBox_->value();
+    switch ( contextLinesMode_ ) {
+        case 1:
+            logFilteredData_->setContextLines( count, 0 );
+            break;
+        case 2:
+            logFilteredData_->setContextLines( 0, count );
+            break;
+        case 3:
+            logFilteredData_->setContextLines( count, count );
+            break;
+        default:
+            logFilteredData_->setContextLines( 0, 0 );
+            break;
     }
 }
 
@@ -1897,26 +2144,12 @@ void CrawlerWidget::applyContextLines()
     if ( !logFilteredData_ || contextLinesMode_ == 0 || contextLinesSpinBox_->value() == 0 ) {
         return;
     }
-    
-    const int n = contextLinesSpinBox_->value();
-    
-    // Apply context lines based on mode: 1 = before (-B), 2 = after (-A), 3 = both (-C)
-    switch ( contextLinesMode_ ) {
-        case 1: // -B
-            logFilteredData_->setContextLines( n, 0 );
-            break;
-        case 2: // -A
-            logFilteredData_->setContextLines( 0, n );
-            break;
-        case 3: // -C
-            logFilteredData_->setContextLines( n, n );
-            break;
-        default:
-            logFilteredData_->setContextLines( 0, 0 );
-            return;
+
+    updateContextLinesModel();
+    if ( presentationActive_ ) {
+        filteredView_->updateData();
     }
-    
-    // Use updateData() instead of update() for better performance
-    // This triggers a full refresh but is more efficient than multiple updates
-    filteredView_->updateData();
+    else {
+        queuePresentationRefresh( false );
+    }
 }

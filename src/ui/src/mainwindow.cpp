@@ -404,6 +404,8 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
              [ this ]( int index ) { this->closeTab( index, ActionInitiator::User ); } );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
+             &MainWindow::syncCrawlerPresentationActivity );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsReordered, this,
              &MainWindow::scheduleSessionPersistence );
 
@@ -544,6 +546,7 @@ void MainWindow::reloadSession()
 
     updateOpenedFilesMenu();
     suspendSessionPersistence_ = false;
+    syncCrawlerPresentationActivity();
     scheduleSessionPersistence();
 }
 
@@ -2732,9 +2735,24 @@ void MainWindow::showLiveCloseFailureDialog(
     }
 }
 
+void MainWindow::syncCrawlerPresentationActivity()
+{
+    const bool windowCanPresent
+        = isVisible() && !windowState().testFlag( Qt::WindowMinimized );
+    const int currentIndex = mainTabWidget_.currentIndex();
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        auto* const crawler
+            = dynamic_cast<AbstractCrawlerWidget*>( mainTabWidget_.widget( index ) );
+        if ( crawler != nullptr ) {
+            crawler->setPresentationActive( windowCanPresent && index == currentIndex );
+        }
+    }
+}
+
 void MainWindow::currentTabChanged( int index )
 {
     LOG_DEBUG << "currentTabChanged";
+    syncCrawlerPresentationActivity();
 
     if ( index >= 0 ) {
         auto* widget = mainTabWidget_.widget( index );
@@ -3113,6 +3131,9 @@ void MainWindow::changeEvent( QEvent* event )
     }
 
     QMainWindow::changeEvent( event );
+    if ( event->type() == QEvent::WindowStateChange ) {
+        syncCrawlerPresentationActivity();
+    }
 }
 
 // Accepts the drag event if it looks like a filename
@@ -3192,7 +3213,11 @@ bool MainWindow::event( QEvent* event )
         }
     }
 
-    return QMainWindow::event( event );
+    const bool handled = QMainWindow::event( event );
+    if ( event->type() == QEvent::Show || event->type() == QEvent::Hide ) {
+        syncCrawlerPresentationActivity();
+    }
+    return handled;
 }
 
 //

@@ -1826,6 +1826,8 @@ void AbstractLogView::updateData()
 {
     LOG_DEBUG << "AbstractLogView::updateData";
 
+    ++updateDataCountForTest_;
+    presentedLineCountForTest_ = logData_->getNbLine().get();
     const auto lastLineNumber = LineNumber( logData_->getNbLine().get() );
 
     // Check the top Line is within range
@@ -1860,6 +1862,13 @@ void AbstractLogView::updateData()
     }
 
     forceRefresh();
+}
+
+void AbstractLogView::updateData( LineNumber searchStart, LineNumber searchEnd )
+{
+    searchStart_ = searchStart;
+    searchEnd_ = searchEnd;
+    updateData();
 }
 
 void AbstractLogView::updateFont( const QFont& font )
@@ -2072,6 +2081,7 @@ void AbstractLogView::setQuickFindPattern( const QuickFindPattern* qfp )
 
 void AbstractLogView::forceRefresh()
 {
+    ++forceRefreshCountForTest_;
     // Invalidate our cache
     textAreaCache_.invalid_ = true;
     // Invalidate cached column count - forceRefresh may trigger leftMarginPx_ recalculation

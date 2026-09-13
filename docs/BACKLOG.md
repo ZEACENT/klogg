@@ -14,32 +14,30 @@
 **Scenario:**
 `CrawlerWidget::replaceCurrentSearch()` needs to discard stale `searchProgressed`
 signals from an interrupted search before starting a new one. The current approach
-temporarily disconnects and reconnects the
-`LogFilteredData::searchProgressed` / `CrawlerWidget::updateFilteredView` slot.
+historically disconnected and reconnected the
+`LogFilteredData::searchProgressed` consumer (now split into result publication and status handling).
 
 **Problem:**
 With `Qt::QueuedConnection`, `disconnect()` does not remove already-posted
-`QMetaCallEvent`s from the receiver's event queue — they will still be delivered
-after reconnect. Currently the window between disconnect and reconnect is very
-small (a few synchronous calls in `replaceCurrentSearch()`), so the practical
-impact is negligible. However, the pattern is fragile and could become a real bug
-if the window widens in future refactors.
+`QMetaCallEvent`s from the receiver's event queue. The former disconnect/reconnect
+workaround could therefore deliver a superseded search after a replacement had
+already become active.
 
-**Code context:**
-- Signal: `LogFilteredData::searchProgressed(LinesCount, int, LineNumber)` — `src/logdata/include/logfiltereddata.h:149`
-- Emit sites (6+): `src/logdata/src/logfiltereddata.cpp` (lines 164, 634, 646, 666), `src/logdata/src/logfiltereddataworker.cpp` (lines 319, 456, 485, 623, 708)
-- Disconnect/reconnect: `src/ui/src/crawlerwidget.cpp` (lines 1830–1831, 1904–1905)
-- Slot: `CrawlerWidget::updateFilteredView()` — `src/ui/src/crawlerwidget.cpp:630`
-
-**Proposed fix:**
-1. Add a monotonic `uint64_t` generation counter to `LogFilteredData`, incremented by `runSearch()` / `updateSearch()`
-2. Extend `searchProgressed` signal to carry the generation ID
-3. In `CrawlerWidget::updateFilteredView()`, ignore signals where `generation != activeSearchGeneration_`
-4. Remove the disconnect/reconnect calls in `replaceCurrentSearch()`
+**Implemented design:**
+- `LogFilteredData::searchResultsChanged(LinesCount, LineNumber, bool, quint64)`
+  publishes result presentation independently from
+  `searchProgressed(LinesCount, int, LineNumber, quint64)` status updates.
+- A complete logical search advances the worker generation; incremental
+  `updateSearch()` operations retain that generation.
+- `CrawlerWidget::updateFilteredResults()` and `updateSearchStatus()` first reject
+  publications from any non-current `LogFilteredData`, then require an exact
+  generation match.
+- `replaceCurrentSearch()` advances the generation before interruption instead of
+  disconnecting and reconnecting signal consumers.
 
 **Trade-offs:**
-Cross-cutting change touching signal signature, all emit sites, and all connected slots.
-Should be done in a dedicated PR with thorough regression testing.
+The cross-cutting signal contract requires every result and status consumer to
+retain both source-identity and generation checks.
 
 **Resolution:**
 Implemented in branch `docs/backlog-generation-id`.  The wire type for the

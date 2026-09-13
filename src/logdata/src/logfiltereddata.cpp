@@ -42,10 +42,8 @@
 
 #include "log.h"
 
-#include <KDSignalThrottler.h>
 #include <QCoreApplication>
 #include <QString>
-#include <QTimer>
 
 #include <algorithm>
 #include <cassert>
@@ -60,7 +58,10 @@
 
 #include "configuration.h"
 #include "readablesize.h"
-#include "synchronization.h"
+
+namespace {
+constexpr int kSearchStatusPresentationIntervalMs = 100;
+}
 
 // Usual constructor: just copy the data, the search is started by runSearch()
 LogFilteredData::LogFilteredData( const SearchableLogData* logData )
@@ -68,6 +69,10 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     , matching_lines_( SearchResultArray() )
     , currentRegExp_()
     , visibility_()
+    , searchResultsRefreshTimer_( klogg::kIncrementalPresentationIntervalMs,
+                                  [ this ] { publishPendingSearchResults(); } )
+    , searchStatusRefreshTimer_( kSearchStatusPresentationIntervalMs,
+                                 [ this ] { publishPendingSearchStatus(); } )
     , workerThread_( *logData )
 {
     // Starts with an empty result list
@@ -82,30 +87,12 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     // Forward the update signal
     connect( &workerThread_, &LogFilteredDataWorker::searchProgressed, this,
              &LogFilteredData::handleSearchProgressed, Qt::QueuedConnection );
-
-#if !defined( Q_OS_WIN )
-    searchProgressThrottler_.setTimeout( 100 );
-    connect( this, &LogFilteredData::searchProgressedThrottled, &searchProgressThrottler_,
-             &KDToolBox::KDGenericSignalThrottler::throttle );
-
-    connect( &searchProgressThrottler_, &KDToolBox::KDGenericSignalThrottler::triggered, this,
-             &LogFilteredData::handleSearchProgressedThrottled );
-#endif
 }
 
 LogFilteredData::~LogFilteredData()
 {
     shuttingDown_ = true;
-    searchProgressThrottler_.blockSignals( true );
-
-    // KDSignalThrottler owns an internal QTimer and its destructor calls
-    // maybeEmitTriggered().  On x86/Qt5 we can still hit a timeout/metacall race
-    // during teardown unless the internal timer is stopped/disconnected first.
-    if ( auto* throttlerTimer = searchProgressThrottler_.findChild<QTimer*>() ) {
-        throttlerTimer->stop();
-        throttlerTimer->blockSignals( true );
-        disconnect( throttlerTimer, nullptr, &searchProgressThrottler_, nullptr );
-    }
+    cancelPendingPublications();
 
     interruptSearch();
     // Cancel queued work and wait for any in-flight search operations to fully
@@ -117,15 +104,12 @@ LogFilteredData::~LogFilteredData()
     workerThread_.blockSignals( true );
     disconnect( &workerThread_, nullptr, this, nullptr );
     disconnect( this, nullptr, &workerThread_, nullptr );
-    disconnect( &searchProgressThrottler_, nullptr, this, nullptr );
-    disconnect( this, nullptr, &searchProgressThrottler_, nullptr );
 
     detachReaderIfNeeded();
 
-    // Queued MetaCall events can still be pending for this object or the helper
-    // QObjects even after disconnect(); remove them before subobject destruction.
+    // Queued MetaCall events can still be pending after disconnect(); remove them
+    // before subobject destruction.
     QCoreApplication::removePostedEvents( &workerThread_ );
-    QCoreApplication::removePostedEvents( &searchProgressThrottler_ );
     QCoreApplication::removePostedEvents( this );
 
     sourceLogData_ = nullptr;
@@ -168,8 +152,8 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
             // staleness gate in the receiver, corrupting the just-displayed
             // cached result.
             const auto cachedGeneration = workerThread_.bumpGeneration();
-            Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine,
-                                     cachedGeneration );
+            publishTerminal( LinesCount( matching_lines_.cardinality() ), startLine,
+                             cachedGeneration );
         }
     }
 
@@ -183,6 +167,7 @@ void LogFilteredData::updateSearch( LineNumber startLine, LineNumber endLine )
 {
     LOG_DEBUG << "Entering updateSearch";
 
+    cancelPendingPublications();
     setAllLinesVisible( false );
     currentSearchKey_ = {};
 
@@ -198,8 +183,17 @@ void LogFilteredData::interruptSearch()
     workerThread_.interrupt();
 }
 
+void LogFilteredData::bumpSearchGeneration()
+{
+    cancelPendingPublications();
+    workerThread_.bumpGeneration();
+}
+
 void LogFilteredData::clearSearch( bool dropCache )
 {
+    // Clearing abandons both the model and every queued payload from the old
+    // search, so retire its generation before interrupting the worker.
+    bumpSearchGeneration();
     interruptSearch();
 
     allLinesVisible_ = false;
@@ -651,63 +645,98 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
 
     assert( nbMatches >= 0_lcount );
 
+    if ( generation != currentSearchGeneration() ) {
+        return;
+    }
+
     const auto searchResults = workerThread_.getSearchResults();
+    const bool resultsChanged = !searchResults.newMatches.isEmpty();
 
     matching_lines_ |= searchResults.newMatches;
     marks_and_matches_ |= searchResults.newMatches;
 
     maxLength_ = searchResults.maxLength;
     nbLinesProcessed_ = searchResults.processedLines;
-    contextLinesListValid_ = false; // Invalidate context lines cache when search progresses
+    contextLinesListValid_ = false;
 
     if ( progress == 100
          && nbLinesProcessed_.get() == getExpectedSearchEnd( currentSearchKey_ ).get() ) {
         updateSearchResultsCache();
     }
 
-    {
-        ScopedLock lock( searchProgressMutex_ );
-        searchProgress_ = std::make_tuple( nbMatches, progress, initialLine, generation );
-    }
-
     if ( progress == 100 ) {
-        // Do not rely solely on the throttler timer for the terminal update: tests and
-        // shutdown paths need a deterministic completion signal even if the throttler
-        // event is delayed or dropped during teardown.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
+        publishTerminal( nbMatches, initialLine, generation );
         detachReaderIfNeeded();
 
         LOG_INFO << "Matches size " << readableSize( matching_lines_.getSizeInBytes( false ) )
                  << ", marks size " << readableSize( marks_.getSizeInBytes( false ) )
                  << ", union size " << readableSize( marks_and_matches_.getSizeInBytes( false ) );
-    }
-    else {
-#if defined( Q_OS_WIN )
-        // Windows test runs have hit repeated QObject/KDSignalThrottler teardown
-        // crashes after many create/search/destroy cycles. Emit progress directly
-        // instead of using the throttler on Windows.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
-#else
-        Q_EMIT searchProgressedThrottled();
-#endif
-    }
-}
-
-void LogFilteredData::handleSearchProgressedThrottled()
-{
-    if ( shuttingDown_ ) {
         return;
     }
 
-    LinesCount nbMatches;
-    int progress;
-    LineNumber initialLine;
-    quint64 generation;
-    {
-        ScopedLock lock( searchProgressMutex_ );
-        std::tie( nbMatches, progress, initialLine, generation ) = searchProgress_;
+    pendingSearchStatus_ = SearchStatusPayload{ nbMatches, progress, initialLine, generation };
+    searchStatusRefreshTimer_.request();
+
+    if ( resultsChanged || !pendingSearchResults_.has_value()
+         || pendingSearchResults_->nbMatches != nbMatches ) {
+        pendingSearchResults_
+            = SearchResultsPayload{ nbMatches, initialLine, false, generation };
+        searchResultsRefreshTimer_.request();
     }
-    Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
+}
+
+void LogFilteredData::cancelPendingPublications()
+{
+    searchResultsRefreshTimer_.cancel();
+    searchStatusRefreshTimer_.cancel();
+    pendingSearchResults_.reset();
+    pendingSearchStatus_.reset();
+}
+
+void LogFilteredData::publishPendingSearchResults()
+{
+    if ( shuttingDown_ || !pendingSearchResults_.has_value() ) {
+        pendingSearchResults_.reset();
+        return;
+    }
+
+    const auto payload = *pendingSearchResults_;
+    pendingSearchResults_.reset();
+    if ( payload.generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchResultsChanged( payload.nbMatches, payload.initialLine, payload.terminal,
+                                 payload.generation );
+}
+
+void LogFilteredData::publishPendingSearchStatus()
+{
+    if ( shuttingDown_ || !pendingSearchStatus_.has_value() ) {
+        pendingSearchStatus_.reset();
+        return;
+    }
+
+    const auto payload = *pendingSearchStatus_;
+    pendingSearchStatus_.reset();
+    if ( payload.generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchProgressed( payload.nbMatches, payload.progress, payload.initialLine,
+                             payload.generation );
+}
+
+void LogFilteredData::publishTerminal( LinesCount nbMatches, LineNumber initialLine,
+                                       quint64 generation )
+{
+    cancelPendingPublications();
+    if ( shuttingDown_ || generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchResultsChanged( nbMatches, initialLine, true, generation );
+    Q_EMIT searchProgressed( nbMatches, 100, initialLine, generation );
 }
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const

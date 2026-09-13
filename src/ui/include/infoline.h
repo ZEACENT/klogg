@@ -56,6 +56,9 @@ class InfoLine : public QLabel {
     void displayGauge( int completion );
     // Hide the gauge and make the widget like a normal QLabel
     void hideGauge();
+#ifdef KLOGG_TESTS
+    bool isGaugeVisible() const { return origPalette_.has_value(); }
+#endif
 
   protected:
     void paintEvent( QPaintEvent* paintEvent ) override;

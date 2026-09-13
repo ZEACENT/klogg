@@ -231,6 +231,26 @@ struct MainWindowLiveSaveTestAccess {
     }
 };
 
+struct LivePresentationViewAccess;
+template <>
+struct AbstractLogView::access_by<LivePresentationViewAccess> {
+    static void resetRefreshCounts( AbstractLogView* view )
+    {
+        view->updateDataCountForTest_ = 0;
+        view->forceRefreshCountForTest_ = 0;
+    }
+
+    static int updateDataCount( const AbstractLogView* view )
+    {
+        return view->updateDataCountForTest_;
+    }
+
+    static int forceRefreshCount( const AbstractLogView* view )
+    {
+        return view->forceRefreshCountForTest_;
+    }
+};
+
 struct LivePresentationCrawlerAccess;
 template <>
 struct CrawlerWidget::access_by<LivePresentationCrawlerAccess> {
@@ -248,6 +268,59 @@ struct CrawlerWidget::access_by<LivePresentationCrawlerAccess> {
     {
         crawler->logMainView_->selectAll();
         return crawler->logMainView_->getSelectedText();
+    }
+
+    static bool presentationActive( const CrawlerWidget* crawler )
+    {
+        return crawler->presentationActive_;
+    }
+
+    static void resetPresentationCounts( CrawlerWidget* crawler )
+    {
+        crawler->overviewUpdateCountForTest_ = 0;
+        crawler->bulletRefreshCountForTest_ = 0;
+        crawler->presentationRefreshCountForTest_ = 0;
+        crawler->searchCatchUpCountForTest_ = 0;
+        AbstractLogView::access_by<LivePresentationViewAccess>::resetRefreshCounts(
+            crawler->logMainView_ );
+        AbstractLogView::access_by<LivePresentationViewAccess>::resetRefreshCounts(
+            crawler->filteredView_ );
+    }
+
+    static void queuePresentationRefresh( CrawlerWidget* crawler, bool searchCatchUp )
+    {
+        crawler->queuePresentationRefresh( searchCatchUp );
+    }
+
+    static bool presentationCatchUpPending( const CrawlerWidget* crawler )
+    {
+        return crawler->presentationCatchUpQueued_;
+    }
+
+    static void flushPresentationCatchUp( CrawlerWidget* crawler )
+    {
+        if ( crawler->presentationCatchUpQueued_ ) {
+            crawler->deliverPresentationCatchUp();
+        }
+    }
+
+    static int presentationRefreshCount( const CrawlerWidget* crawler )
+    {
+        return crawler->presentationRefreshCountForTest_;
+    }
+
+    static int searchCatchUpCount( const CrawlerWidget* crawler )
+    {
+        return crawler->searchCatchUpCountForTest_;
+    }
+
+    static int viewRefreshCount( const CrawlerWidget* crawler )
+    {
+        using Access = AbstractLogView::access_by<LivePresentationViewAccess>;
+        return Access::updateDataCount( crawler->logMainView_ )
+             + Access::forceRefreshCount( crawler->logMainView_ )
+             + Access::updateDataCount( crawler->filteredView_ )
+             + Access::forceRefreshCount( crawler->filteredView_ );
     }
 };
 
@@ -1573,6 +1646,115 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
 
+    if ( preservationScenario == 15 ) {
+        using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+        auto* data = Access::data( crawler );
+        REQUIRE( data != nullptr );
+        if ( StreamingLogDataTimerTestAccess::pending( *data ) ) {
+            StreamingLogDataTimerTestAccess::deliver( *data );
+        }
+        CaptureStore::Limits segmentedLimits;
+        segmentedLimits.segmentTargetBytes = 1;
+        data->setCaptureLimits( segmentedLimits );
+        Access::resetPresentationCounts( crawler );
+
+        if ( background ) {
+            REQUIRE_FALSE( Access::presentationActive( crawler ) );
+            const auto linesBefore = data->getNbLine();
+            transport->publishBytes( QByteArrayLiteral( "background-old\n" ) );
+            REQUIRE( data->getNbLine() == linesBefore + 1_lcount );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            CHECK( Access::presentationRefreshCount( crawler ) == 0 );
+            CHECK( Access::viewRefreshCount( crawler ) == 0 );
+
+            auto* search = crawler->findChild<SearchToolbar*>();
+            REQUIRE( search != nullptr );
+            search->setAutoRefresh( true );
+            search->searchLineEdit()->setEditText( QStringLiteral( "needle" ) );
+            search->searchButton()->click();
+            REQUIRE( waitUiState( [ & ] { return search->stopButton()->isHidden(); } ) );
+            Access::resetPresentationCounts( crawler );
+
+            transport->publishBytes( QByteArrayLiteral( "needle-in-background\n" ) );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            REQUIRE( waitUiState( [ & ] { return Access::matches( crawler ) == 1_lcount; } ) );
+            CHECK( Access::presentationRefreshCount( crawler ) == 0 );
+            CHECK( Access::viewRefreshCount( crawler ) == 0 );
+
+            CaptureStore::Limits limits;
+            limits.segmentTargetBytes = 1;
+            limits.maxTotalLines = 1;
+            data->setCaptureLimits( limits );
+            transport->publishBytes( QByteArrayLiteral( "truncated-a\ntruncated-b\n" ) );
+            CHECK( data->getNbLine() == 1_lcount );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            CHECK( Access::presentationRefreshCount( crawler ) == 0 );
+            CHECK( Access::viewRefreshCount( crawler ) == 0 );
+
+            Access::queuePresentationRefresh( crawler, false );
+            Access::queuePresentationRefresh( crawler, false );
+            Access::queuePresentationRefresh( crawler, true );
+            Access::queuePresentationRefresh( crawler, true );
+            tabs->setCurrentWidget( crawler );
+            REQUIRE( Access::presentationActive( crawler ) );
+            REQUIRE( Access::presentationCatchUpPending( crawler ) );
+            Access::flushPresentationCatchUp( crawler );
+            CHECK( Access::presentationRefreshCount( crawler ) == 1 );
+            CHECK( Access::searchCatchUpCount( crawler ) <= 1 );
+        }
+        else {
+            REQUIRE( Access::presentationActive( crawler ) );
+            QWidget focusSink;
+            focusSink.show();
+            focusSink.activateWindow();
+            QCoreApplication::processEvents();
+            CHECK( Access::presentationActive( crawler ) );
+
+            mainWindow->hide();
+            QCoreApplication::processEvents();
+            REQUIRE_FALSE( Access::presentationActive( crawler ) );
+            const auto hiddenLinesBefore = data->getNbLine();
+            transport->publishBytes( QByteArrayLiteral( "hidden-model-update\n" ) );
+            REQUIRE( data->getNbLine() == hiddenLinesBefore + 1_lcount );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            Access::queuePresentationRefresh( crawler, false );
+            Access::queuePresentationRefresh( crawler, false );
+            CHECK( Access::presentationRefreshCount( crawler ) == 0 );
+            CHECK( Access::viewRefreshCount( crawler ) == 0 );
+            mainWindow->show();
+            QCoreApplication::processEvents();
+            REQUIRE( Access::presentationActive( crawler ) );
+            REQUIRE( Access::presentationCatchUpPending( crawler ) );
+            Access::flushPresentationCatchUp( crawler );
+            CHECK( Access::presentationRefreshCount( crawler ) == 1 );
+
+            Access::resetPresentationCounts( crawler );
+            mainWindow->setWindowState( Qt::WindowMinimized );
+            QCoreApplication::processEvents();
+            REQUIRE_FALSE( Access::presentationActive( crawler ) );
+            const auto minimizedLinesBefore = data->getNbLine();
+            transport->publishBytes( QByteArrayLiteral( "minimized-model-update\n" ) );
+            REQUIRE( data->getNbLine() == minimizedLinesBefore + 1_lcount );
+            StreamingLogDataTimerTestAccess::deliver( *data );
+            Access::queuePresentationRefresh( crawler, false );
+            Access::queuePresentationRefresh( crawler, true );
+            CHECK( Access::presentationRefreshCount( crawler ) == 0 );
+            CHECK( Access::viewRefreshCount( crawler ) == 0 );
+            mainWindow->setWindowState( Qt::WindowNoState );
+            mainWindow->show();
+            QCoreApplication::processEvents();
+            REQUIRE( Access::presentationActive( crawler ) );
+            REQUIRE( Access::presentationCatchUpPending( crawler ) );
+            Access::flushPresentationCatchUp( crawler );
+            CHECK( Access::presentationRefreshCount( crawler ) == 1 );
+            CHECK( Access::searchCatchUpCount( crawler ) <= 1 );
+        }
+
+        controller->stopRequested();
+        mainWindow->close();
+        return;
+    }
+
     if ( preservationScenario == 12 ) {
         CHECK( MainWindowLiveSaveTestAccess::startInvalidClose( *mainWindow )
                == std::optional<bool>{ false } );
@@ -2127,6 +2309,13 @@ TEST_CASE( "Live bytes and retry countdown preserve opened-files menu actions",
     const auto useIos = GENERATE( false, true );
     const auto background = GENERATE( false, true );
     exerciseLivePresentation( useIos, background );
+}
+
+TEST_CASE( "Presentation activity follows tab visibility rather than window focus",
+           "[ui][refresh-throttling][visibility][presentation]" )
+{
+    const auto background = GENERATE( false, true );
+    exerciseLivePresentation( false, background, 15 );
 }
 
 TEST_CASE( "Live countdown boundaries route only current info and tab switches read current time",

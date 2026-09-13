@@ -25,8 +25,8 @@
 
 // The gate is the receiver-side counterpart to TASK-001.  Pinning it as a
 // free function and unit-testing here means future refactors of
-// CrawlerWidget::updateFilteredView cannot silently weaken the staleness
-// contract (e.g. by changing != to <).
+// CrawlerWidget's result and status consumers cannot silently weaken the
+// staleness contract (e.g. by changing != to <).
 
 TEST_CASE( "isStaleSearchGeneration accepts only the exact active generation" )
 {

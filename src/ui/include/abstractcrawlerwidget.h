@@ -113,6 +113,10 @@ class AbstractCrawlerWidget : public ViewInterface {
     // Interrupt the tab's current long-running search. Default no-op.
     virtual void stopSearch() {}
 
+    // Enable or suspend expensive view presentation while keeping the document
+    // model and search lifecycle active.
+    virtual void setPresentationActive( bool /*active*/ ) {}
+
     // Snapshot of the file currently displayed in this tab's main view (folder
     // mode: the main view shows one selected result file at a time, distinct
     // from the tab's own folder path). MainWindow's info line sources path /

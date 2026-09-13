@@ -64,6 +64,10 @@
 #include "searchablelogdata.h"
 #include "searchtoolbar.h"
 
+namespace {
+constexpr int kSearchStatusPresentationIntervalMs = 100;
+}
+
 // Implementation of the view context for FolderCrawlerWidget (mirrors
 // CrawlerWidgetContext in crawlerwidget.cpp:96-170). Serializes the search
 // pattern text + option toggles (+ optional splitter sizes) so folder tabs can
@@ -183,6 +187,10 @@ FolderCrawlerWidget::ResultPane::~ResultPane() = default;
 FolderCrawlerWidget::FolderCrawlerWidget( QWidget* parent )
     : QWidget( parent )
     , colorLabelsController_( this, [ this ]() { return activeView(); } )
+    , presentationRefreshTimer_( klogg::kIncrementalPresentationIntervalMs,
+                                 [ this ] { deliverFolderPresentationRefresh(); } )
+    , statusRefreshTimer_( kSearchStatusPresentationIntervalMs,
+                           [ this ] { deliverFolderStatusRefresh(); } )
 {
     placeholderData_ = std::make_shared<LogData>();
     currentMainData_ = placeholderData_;
@@ -756,10 +764,9 @@ void FolderCrawlerWidget::refreshAllPanesForMarks()
 {
     // Marks live in the shared folderMarks_ store; every pane's mark query +
     // mark provider read it live, so a mark change must repaint/rebuild ALL
-    // panes (frozen ones too), not just the active one. refreshForMarksChange is
-    // a no-op except under the Marks visibility filter (where it rebuilds the
-    // visible row set); forceRefresh always repaints the (possibly changed)
-    // bullets.
+    // panes (frozen ones too), not just the active one. refreshForMarksChange
+    // rebuilds any mark-dependent row set immediately; each pane then presents
+    // the latest layout and bullets through the common coalesced refresh path.
     for ( auto& pane : panes_ ) {
         if ( pane == nullptr ) {
             continue;
@@ -767,16 +774,9 @@ void FolderCrawlerWidget::refreshAllPanesForMarks()
         if ( pane->results != nullptr ) {
             pane->results->refreshForMarksChange();
         }
-        if ( pane->view != nullptr ) {
-            pane->view->forceRefresh();
-        }
+        schedulePanePresentationRefresh( pane.get() );
     }
-    if ( mainView_ != nullptr ) {
-        mainView_->forceRefresh();
-    }
-    // Refresh the minimap too: it renders the current file's match + mark
-    // ticks (no-op while the overview is hidden or no file is open).
-    refreshFileOverview( currentMainFilePath_ );
+    scheduleMainViewPresentationRefresh( true );
 }
 
 FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString& title )
@@ -832,6 +832,9 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
     viewSignalWiring_->wireHover( view );
     view->setControlsSearchLimits( false );
 
+    ResultPane* const raw = pane.get();
+    FolderSearchResults* const sourceResults = pane->results.get();
+
     // Per-pane signal wiring (self-contained: switching tabs needs no re-wiring).
     connect( view, &FolderFilteredView::newSelection, this, &FolderCrawlerWidget::onResultSelected );
     connect( view, &FolderFilteredView::headerClicked, this, &FolderCrawlerWidget::onHeaderClicked );
@@ -839,21 +842,210 @@ FolderCrawlerWidget::ResultPane* FolderCrawlerWidget::createPane( const QString&
              &FolderCrawlerWidget::onFilteredViewMarkLines );
     connect( view, &AbstractLogView::deleteMarkLines, this,
              &FolderCrawlerWidget::onFilteredViewDeleteMarkLines );
-    // v is captured by value; the connection is auto-disconnected when the pane
-    // results object is destroyed (on pane erase, after the view is deleted).
-    connect( pane->results.get(), &FolderSearchResults::layoutChanged, this,
-             [ view ]() {
-                 view->updateData();
-                 view->forceRefresh();
+    // Resolve the emitting model back to its live pane instead of retaining a
+    // pane pointer in a queued functor. A closed pane can leave queued metacalls
+    // behind, but comparing the old model address never dereferences it.
+    connect( sourceResults, &FolderSearchResults::layoutChanged, this,
+             [ this, sourceResults ]() {
+                 const auto paneIt = std::find_if(
+                     panes_.begin(), panes_.end(), [ sourceResults ]( const auto& item ) {
+                         return item != nullptr && item->results.get() == sourceResults;
+                     } );
+                 if ( paneIt == panes_.end() ) {
+                     return;
+                 }
+                 auto* const sourcePane = paneIt->get();
+                 if ( sourceResults->getNbLine() == 0_lcount ) {
+                     refreshPaneImmediately( sourcePane );
+                 }
+                 else {
+                     schedulePanePresentationRefresh( sourcePane );
+                 }
              } );
 
     const int tabIndex = resultsTabs_->addTab( view, title );
-    ResultPane* raw = pane.get();
     panes_.push_back( std::move( pane ) );
     activePaneIndex_ = static_cast<int>( panes_.size() ) - 1;
     // Keep tab index == pane index (append-only; close erases same index).
     resultsTabs_->setCurrentIndex( tabIndex );
     return raw;
+}
+
+void FolderCrawlerWidget::schedulePanePresentationRefresh( ResultPane* pane )
+{
+    if ( pane == nullptr || pane->view == nullptr ) {
+        return;
+    }
+
+    pane->presentationRefreshPending = true;
+    presentationDirty_ = true;
+    if ( presentationActive_ ) {
+        presentationRefreshTimer_.request();
+    }
+}
+
+void FolderCrawlerWidget::scheduleMainViewPresentationRefresh( bool refreshOverview,
+                                                               bool updateOverviewLineCount )
+{
+    mainViewPresentationRefreshPending_ = true;
+    overviewPresentationRefreshPending_
+        = overviewPresentationRefreshPending_ || refreshOverview;
+    overviewLineCountPresentationPending_
+        = overviewLineCountPresentationPending_ || updateOverviewLineCount;
+    presentationDirty_ = true;
+    if ( presentationActive_ ) {
+        presentationRefreshTimer_.request();
+    }
+}
+
+void FolderCrawlerWidget::setCurrentSearchPattern( const RegularExpressionPattern& pattern )
+{
+    currentSearchPattern_ = pattern;
+    if ( presentationActive_ ) {
+        presentCurrentSearchPattern();
+    }
+    else {
+        searchPatternPresentationPending_ = true;
+        presentationDirty_ = true;
+    }
+}
+
+void FolderCrawlerWidget::presentCurrentSearchPattern()
+{
+    if ( activeFilteredView() != nullptr ) {
+        activeFilteredView()->setSearchPattern( currentSearchPattern_ );
+    }
+    if ( mainView_ != nullptr ) {
+        mainView_->setSearchPattern( currentSearchPattern_ );
+    }
+    searchPatternPresentationPending_ = false;
+}
+
+void FolderCrawlerWidget::recomputePresentationDirty()
+{
+    presentationDirty_ = mainViewPresentationRefreshPending_
+                      || overviewPresentationRefreshPending_
+                      || overviewLineCountPresentationPending_
+                      || searchPatternPresentationPending_
+                      || !pendingProgressStatusText_.isEmpty()
+                      || std::any_of( panes_.cbegin(), panes_.cend(), []( const auto& item ) {
+                             return item != nullptr && item->presentationRefreshPending;
+                         } );
+    if ( !presentationDirty_ ) {
+        presentationRefreshTimer_.cancel();
+        statusRefreshTimer_.cancel();
+        presentationCatchUpQueued_ = false;
+    }
+}
+
+void FolderCrawlerWidget::refreshPaneImmediately( ResultPane* pane )
+{
+    if ( pane == nullptr || pane->view == nullptr ) {
+        return;
+    }
+
+    if ( !presentationActive_ ) {
+        pane->presentationRefreshPending = true;
+        presentationDirty_ = true;
+        return;
+    }
+
+    pane->presentationRefreshPending = false;
+    pane->view->updateData();
+    recomputePresentationDirty();
+}
+
+void FolderCrawlerWidget::deliverFolderPresentationRefresh()
+{
+    if ( !presentationActive_ ) {
+        presentationDirty_ = true;
+        return;
+    }
+
+    const bool activationCatchUp = presentationCatchUpQueued_;
+    if ( searchPatternPresentationPending_ ) {
+        presentCurrentSearchPattern();
+    }
+    if ( activationCatchUp && !pendingProgressStatusText_.isEmpty() ) {
+        statusLabel_->setText( pendingProgressStatusText_ );
+        pendingProgressStatusText_.clear();
+        statusRefreshTimer_.cancel();
+    }
+
+    for ( auto& pane : panes_ ) {
+        if ( pane != nullptr && pane->presentationRefreshPending && pane->view != nullptr ) {
+            pane->presentationRefreshPending = false;
+            pane->view->updateData();
+        }
+    }
+    if ( mainViewPresentationRefreshPending_ && mainView_ != nullptr ) {
+        mainViewPresentationRefreshPending_ = false;
+        mainView_->updateData();
+    }
+    if ( overviewPresentationRefreshPending_ ) {
+        overviewPresentationRefreshPending_ = false;
+        overviewLineCountPresentationPending_ = false;
+        refreshFileOverview( currentMainFilePath_ );
+    }
+    else if ( overviewLineCountPresentationPending_ && currentMainData_ != nullptr ) {
+        overviewLineCountPresentationPending_ = false;
+        if ( overview_.isVisible() ) {
+            overview_.updateData( currentMainData_->getNbLine() );
+            mainView_->refreshOverview();
+        }
+    }
+    presentationCatchUpQueued_ = false;
+    recomputePresentationDirty();
+}
+
+void FolderCrawlerWidget::flushFolderPresentation()
+{
+    presentationRefreshTimer_.cancel();
+    if ( presentationActive_ && presentationDirty_ ) {
+        deliverFolderPresentationRefresh();
+    }
+}
+
+void FolderCrawlerWidget::deliverFolderStatusRefresh()
+{
+    if ( !presentationActive_ || pendingProgressStatusText_.isEmpty() ) {
+        return;
+    }
+
+    statusLabel_->setText( pendingProgressStatusText_ );
+    pendingProgressStatusText_.clear();
+    recomputePresentationDirty();
+}
+
+void FolderCrawlerWidget::queuePresentationCatchUp()
+{
+    if ( presentationCatchUpQueued_ || !presentationActive_ || !presentationDirty_ ) {
+        return;
+    }
+
+    presentationCatchUpQueued_ = true;
+    QTimer::singleShot( 0, this, [ this ] {
+        if ( presentationCatchUpQueued_ && presentationActive_ ) {
+            deliverFolderPresentationRefresh();
+        }
+    } );
+}
+
+void FolderCrawlerWidget::setPresentationActive( bool active )
+{
+    if ( presentationActive_ == active ) {
+        return;
+    }
+
+    presentationActive_ = active;
+    if ( !presentationActive_ ) {
+        presentationRefreshTimer_.cancel();
+        statusRefreshTimer_.cancel();
+        presentationCatchUpQueued_ = false;
+        return;
+    }
+
+    queuePresentationCatchUp();
 }
 
 void FolderCrawlerWidget::onActivePaneChanged( int tabIndex )
@@ -895,6 +1087,7 @@ void FolderCrawlerWidget::onClosePane( int tabIndex )
     resultsTabs_->removeTab( tabIndex );
     delete view;
     panes_.erase( panes_.begin() + tabIndex );
+    recomputePresentationDirty();
 
     activePaneIndex_ = resultsTabs_->currentIndex();
     if ( searchTargetResults_ == erased ) {
@@ -1132,7 +1325,7 @@ void FolderCrawlerWidget::setEncoding( std::optional<int> mib )
             }
         }
     }
-    mainView_->forceRefresh();
+    scheduleMainViewPresentationRefresh( false );
     Q_EMIT mainViewFileChanged();
 }
 
@@ -1224,7 +1417,7 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
     mainDataLoadingFinishedConn_
         = connect( currentMainData_.get(), &SearchableLogData::loadingFinished, this,
                    [ this ]( LoadingStatus ) {
-                       mainView_->updateData();
+                       scheduleMainViewPresentationRefresh( false, true );
                        // Single-file parity (CrawlerWidget::loadingFinishedHandler,
                        // crawlerwidget.cpp:934 refreshes overview_ on every
                        // loadingFinished): when the followed file grows, the
@@ -1236,13 +1429,10 @@ void FolderCrawlerWidget::bindMainViewDataSignals()
                        // single-file, and append-only growth does not change
                        // match/mark ticks, so the heavier refreshFileOverview
                        // (re-collecting matches + marks) is unnecessary here.
-                       if ( overview_.isVisible() ) {
-                           overview_.updateData( currentMainData_->getNbLine() );
-                       }
                    } );
     mainDataLoadingProgressedConn_
         = connect( currentMainData_.get(), &SearchableLogData::loadingProgressed, this,
-                   [ this ]( int ) { mainView_->updateData(); } );
+                   [ this ]( int ) { scheduleMainViewPresentationRefresh( false ); } );
     mainDataFileChangedConn_
         = connect( currentMainData_.get(), &SearchableLogData::fileChanged, this,
                    [ this ]( MonitoredFileStatus status ) {
@@ -1501,6 +1691,13 @@ std::shared_ptr<const ViewContextInterface> FolderCrawlerWidget::doGetViewContex
 
 void FolderCrawlerWidget::startSearch()
 {
+    // Progress text belongs to the superseded generation, but pane refreshes do
+    // not: a Keep-results pane may still owe one presentation of model data that
+    // was committed before this search started.
+    statusRefreshTimer_.cancel();
+    pendingProgressStatusText_.clear();
+    recomputePresentationDirty();
+
     // Supersede the old generation before submitting the next complete
     // enumerate-and-scan operation. Queued old signals are rejected immediately.
     engine_->interrupt();
@@ -1529,14 +1726,8 @@ void FolderCrawlerWidget::startSearch()
         // See emptyfilterpolicy.h for the per-pane-kind policy split.
         searchToolbar_->setSearchInProgress( false );
         searchActive_ = false;
-        currentSearchPattern_ = {};
+        setCurrentSearchPattern( {} );
         lastResultStatusText_.clear();
-        if ( activeFilteredView() != nullptr ) {
-            activeFilteredView()->setSearchPattern( {} );
-        }
-        if ( mainView_ != nullptr ) {
-            mainView_->setSearchPattern( {} );
-        }
         if ( auto* const results = activeResults() ) {
             results->beginSearch( filePaths_ );
         }
@@ -1590,14 +1781,8 @@ void FolderCrawlerWidget::startSearch()
         searchTargetResults_ = nullptr;
         searchToolbar_->setSearchInProgress( false );
         searchActive_ = false;
-        currentSearchPattern_ = {};
+        setCurrentSearchPattern( {} );
         lastResultStatusText_.clear();
-        if ( activeFilteredView() != nullptr ) {
-            activeFilteredView()->setSearchPattern( {} );
-        }
-        if ( mainView_ != nullptr ) {
-            mainView_->setSearchPattern( {} );
-        }
         statusErrorActive_ = true;
         statusLabel_->setPalette( QPalette( Qt::darkYellow ) );
         statusLabel_->setAutoFillBackground( true );
@@ -1617,13 +1802,7 @@ void FolderCrawlerWidget::startSearch()
     // the main view (single-file parity: crawlerwidget.cpp forwards to both
     // logMainView_ and filteredView_). Storing here also lets openFileInMainView
     // re-apply the pattern right after each setDataSource swap.
-    currentSearchPattern_ = regexpPattern;
-    if ( activeFilteredView() != nullptr ) {
-        activeFilteredView()->setSearchPattern( regexpPattern );
-    }
-    if ( mainView_ != nullptr ) {
-        mainView_->setSearchPattern( regexpPattern );
-    }
+    setCurrentSearchPattern( regexpPattern );
     if ( resultsTabs_ != nullptr ) {
         resultsTabs_->setTabText( resultsTabs_->currentIndex(),
                                   QStringLiteral( "Find \"%1\"" ).arg( pattern ) );
@@ -1633,6 +1812,10 @@ void FolderCrawlerWidget::startSearch()
 void FolderCrawlerWidget::stopSearch()
 {
     engine_->interrupt();
+    flushFolderPresentation();
+    statusRefreshTimer_.cancel();
+    pendingProgressStatusText_.clear();
+    recomputePresentationDirty();
     searchToolbar_->setSearchInProgress( false );
     searchActive_ = false;
     updateReadyStatus();
@@ -1662,7 +1845,12 @@ void FolderCrawlerWidget::onSearchProgressed( quint64 nbMatches, int percent, qu
     if ( generation != currentSearchGeneration_ ) {
         return; // stale: a superseded scan (empty/invalid pattern replaced it)
     }
-    statusLabel_->setText( tr( "%1 match(es)  %2%" ).arg( static_cast<qulonglong>( nbMatches ) ).arg( percent ) );
+    pendingProgressStatusText_
+        = tr( "%1 match(es)  %2%" ).arg( static_cast<qulonglong>( nbMatches ) ).arg( percent );
+    presentationDirty_ = true;
+    if ( presentationActive_ ) {
+        statusRefreshTimer_.request();
+    }
 }
 
 void FolderCrawlerWidget::onSearchFinished( quint64 generation )
@@ -1680,6 +1868,10 @@ void FolderCrawlerWidget::onSearchFinished( quint64 generation )
     if ( searchTargetResults_ != nullptr ) {
         searchTargetResults_->flushPending();
     }
+    flushFolderPresentation();
+    statusRefreshTimer_.cancel();
+    pendingProgressStatusText_.clear();
+    recomputePresentationDirty();
 
     searchToolbar_->setSearchInProgress( false );
     searchActive_ = false;
@@ -1993,6 +2185,7 @@ void FolderCrawlerWidget::openFileInMainView( const QString& filePath, LineNumbe
 
 void FolderCrawlerWidget::refreshFileOverview( const QString& filePath )
 {
+    ++overviewRebuildCountForTest_;
     // No-op until a real file is loaded and the overview is user-visible. Uses
     // the active pane's matches (the overview belongs to whatever results the
     // user is browsing).

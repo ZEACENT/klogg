@@ -176,16 +176,7 @@ class TestFilteredDataHandle {
     {
     }
 
-    ~TestFilteredDataHandle()
-    {
-#ifdef Q_OS_WIN
-        // Windows test runs still hit sporadic QObject teardown crashes in
-        // LogFilteredData destruction after heavy create/search/destroy cycles.
-        // The test process is short-lived; leaking the object avoids the flaky
-        // destructor path and keeps behavior assertions intact.
-        (void)data_.release();
-#endif
-    }
+    ~TestFilteredDataHandle() = default;
 
     TestFilteredDataHandle( const TestFilteredDataHandle& ) = delete;
     TestFilteredDataHandle& operator=( const TestFilteredDataHandle& ) = delete;
@@ -1183,7 +1174,7 @@ SCENARIO( "interruptSearch does not advance the search generation",
 {
     // Codifies the Stop-button vs Replace-button contract: interruptSearch()
     // must leave the generation untouched so the final progress signal from
-    // the in-flight search still reaches CrawlerWidget::updateFilteredView()
+    // the in-flight search still reaches CrawlerWidget::updateSearchStatus()
     // and triggers UI cleanup (hide gauge, hide Stop button, show Search /
     // Clear buttons).  Replace-flows that need stale signals dropped use
     // bumpSearchGeneration() explicitly.
@@ -1261,7 +1252,7 @@ SCENARIO( "searchProgressed signal carries the search generation",
 // BUG: In follow mode, each call to updateSearch() bumps the generation counter
 // in LogFilteredDataWorker.  When the search completes, its progress signal
 // carries the generation that was active when the operation started.  By the
-// time the signal arrives in updateFilteredView(), the active generation has
+// time the signal arrives at the result/status consumers, the active generation has
 // moved on (because another updateSearch was dispatched), and
 // isStaleSearchGeneration() drops the signal.  Result: matches ARE found but
 // NEVER displayed.
@@ -1676,4 +1667,274 @@ SCENARIO( "getMaxLength covers source data max length for horizontal scrollbar",
             REQUIRE( filteredMax >= sourceMax );
         }
     }
+}
+
+struct LogFilteredDataPresentationAccess;
+template <>
+struct LogFilteredData::access_by<LogFilteredDataPresentationAccess> {
+    static void publishWorkerProgress( LogFilteredData* data, LinesCount matches, int progress,
+                                       LineNumber initialLine, quint64 generation )
+    {
+        data->handleSearchProgressed( matches, progress, initialLine, generation );
+    }
+
+    static bool resultsPending( const LogFilteredData* data )
+    {
+        return data->searchResultsRefreshTimer_.isPending();
+    }
+
+    static bool statusPending( const LogFilteredData* data )
+    {
+        return data->searchStatusRefreshTimer_.isPending();
+    }
+
+    static void flushResults( LogFilteredData* data )
+    {
+        data->searchResultsRefreshTimer_.flushPending();
+    }
+
+    static void flushStatus( LogFilteredData* data )
+    {
+        data->searchStatusRefreshTimer_.flushPending();
+    }
+};
+
+namespace {
+
+using PresentationAccess = LogFilteredData::access_by<LogFilteredDataPresentationAccess>;
+
+void publishSearchProgress( LogFilteredData& data, LinesCount matches, int progress,
+                            LineNumber initialLine, quint64 generation )
+{
+    PresentationAccess::publishWorkerProgress( &data, matches, progress, initialLine, generation );
+}
+
+struct SearchResultsCacheSettingGuard {
+    Configuration& configuration = Configuration::get();
+    bool previous = configuration.useSearchResultsCache();
+
+    ~SearchResultsCacheSettingGuard()
+    {
+        configuration.setUseSearchResultsCache( previous );
+    }
+};
+
+} // namespace
+
+TEST_CASE( "LogFilteredData publishes result and status streams on independent fixed windows",
+           "[logdata][refresh-throttling][presentation]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+    REQUIRE( status.isValid() );
+
+    const auto generation = filtered->currentSearchGeneration();
+    publishSearchProgress( *filtered, 1_lcount, 10, 3_lnum, generation );
+    publishSearchProgress( *filtered, 2_lcount, 20, 7_lnum, generation );
+
+    // The same latest state is pending in two owner-controlled windows: results
+    // publish at 33 ms, status at 100 ms. There is deliberately no Windows bypass.
+    CHECK( results.count() == 0 );
+    CHECK( status.count() == 0 );
+    CHECK( PresentationAccess::resultsPending( filtered.get() ) );
+    CHECK( PresentationAccess::statusPending( filtered.get() ) );
+
+    PresentationAccess::flushResults( filtered.get() );
+    REQUIRE( results.count() == 1 );
+    CHECK( results.at( 0 ).at( 0 ).value<LinesCount>() == 2_lcount );
+    CHECK( results.at( 0 ).at( 1 ).value<LineNumber>() == 7_lnum );
+    CHECK_FALSE( results.at( 0 ).at( 2 ).toBool() );
+    CHECK( results.at( 0 ).at( 3 ).toULongLong() == generation );
+    CHECK( status.count() == 0 );
+
+    PresentationAccess::flushStatus( filtered.get() );
+    REQUIRE( status.count() == 1 );
+    CHECK( status.at( 0 ).at( 0 ).value<LinesCount>() == 2_lcount );
+    CHECK( status.at( 0 ).at( 1 ).toInt() == 20 );
+    CHECK( status.at( 0 ).at( 2 ).value<LineNumber>() == 7_lnum );
+    CHECK( status.at( 0 ).at( 3 ).toULongLong() == generation );
+}
+
+TEST_CASE( "LogFilteredData terminal publication is result-before-status and leaves no residue",
+           "[logdata][refresh-throttling][presentation]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+
+    int resultsSeenWhenTerminalStatusArrived = -1;
+    QObject::connect( filtered.get(), &LogFilteredData::searchProgressed, filtered.get(),
+                      [ & ]( LinesCount, int progress, LineNumber, quint64 ) {
+                          if ( progress == 100 ) {
+                              resultsSeenWhenTerminalStatusArrived = results.count();
+                          }
+                      } );
+
+    const auto generation = filtered->currentSearchGeneration();
+    publishSearchProgress( *filtered, 3_lcount, 40, 0_lnum, generation );
+    publishSearchProgress( *filtered, 4_lcount, 100, 0_lnum, generation );
+
+    REQUIRE( results.count() == 1 );
+    REQUIRE( status.count() == 1 );
+    CHECK( resultsSeenWhenTerminalStatusArrived == 1 );
+    CHECK( results.at( 0 ).at( 0 ).value<LinesCount>() == 4_lcount );
+    CHECK( results.at( 0 ).at( 2 ).toBool() );
+    CHECK( status.at( 0 ).at( 0 ).value<LinesCount>() == 4_lcount );
+    CHECK( status.at( 0 ).at( 1 ).toInt() == 100 );
+    CHECK_FALSE( PresentationAccess::resultsPending( filtered.get() ) );
+    CHECK_FALSE( PresentationAccess::statusPending( filtered.get() ) );
+
+    PresentationAccess::flushResults( filtered.get() );
+    PresentationAccess::flushStatus( filtered.get() );
+    CHECK( results.count() == 1 );
+    CHECK( status.count() == 1 );
+}
+
+TEST_CASE( "LogFilteredData generation replacement cancels pending publications",
+           "[logdata][refresh-throttling][presentation]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+
+    filtered->bumpSearchGeneration();
+    const auto oldGeneration = filtered->currentSearchGeneration();
+    publishSearchProgress( *filtered, 5_lcount, 50, 0_lnum, oldGeneration );
+    filtered->bumpSearchGeneration();
+    const auto newGeneration = filtered->currentSearchGeneration();
+    REQUIRE( newGeneration != oldGeneration );
+
+    PresentationAccess::flushResults( filtered.get() );
+    PresentationAccess::flushStatus( filtered.get() );
+    CHECK( results.count() == 0 );
+    CHECK( status.count() == 0 );
+
+    publishSearchProgress( *filtered, 6_lcount, 60, 0_lnum, newGeneration );
+    PresentationAccess::flushResults( filtered.get() );
+    PresentationAccess::flushStatus( filtered.get() );
+    REQUIRE( results.count() == 1 );
+    REQUIRE( status.count() == 1 );
+    CHECK_FALSE( results.at( 0 ).at( 2 ).toBool() );
+    CHECK( results.at( 0 ).at( 3 ).toULongLong() == newGeneration );
+    CHECK( status.at( 0 ).at( 3 ).toULongLong() == newGeneration );
+}
+
+TEST_CASE( "LogFilteredData clear retires queued publications from the cleared search",
+           "[logdata][search-generation][refresh-throttling][presentation]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+
+    const auto clearedGeneration = filtered->currentSearchGeneration();
+    filtered->clearSearch();
+    REQUIRE( filtered->currentSearchGeneration() != clearedGeneration );
+
+    publishSearchProgress( *filtered, 5_lcount, 50, 0_lnum, clearedGeneration );
+    PresentationAccess::flushResults( filtered.get() );
+    PresentationAccess::flushStatus( filtered.get() );
+
+    CHECK( results.count() == 0 );
+    CHECK( status.count() == 0 );
+}
+
+TEST_CASE( "LogFilteredData clear invalidates queued publications from the abandoned search",
+           "[logdata][search-generation][refresh-throttling][presentation]" )
+{
+    LogDataLoader loader;
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+
+    filtered->bumpSearchGeneration();
+    const auto abandonedGeneration = filtered->currentSearchGeneration();
+    publishSearchProgress( *filtered, 4_lcount, 40, 0_lnum, abandonedGeneration );
+    REQUIRE( PresentationAccess::resultsPending( filtered.get() ) );
+    REQUIRE( PresentationAccess::statusPending( filtered.get() ) );
+
+    filtered->clearSearch();
+    REQUIRE( filtered->currentSearchGeneration() != abandonedGeneration );
+    PresentationAccess::flushResults( filtered.get() );
+    PresentationAccess::flushStatus( filtered.get() );
+    publishSearchProgress( *filtered, 5_lcount, 100, 0_lnum, abandonedGeneration );
+
+    CHECK( results.count() == 0 );
+    CHECK( status.count() == 0 );
+    CHECK( filtered->getNbMatches() == 0_lcount );
+}
+
+TEST_CASE( "LogFilteredData cache hit emits both terminal streams for its new generation",
+           "[logdata][refresh-throttling][cache][presentation]" )
+{
+    LogDataLoader loader;
+    SearchResultsCacheSettingGuard guard;
+    guard.configuration.setUseSearchResultsCache( true );
+    auto filtered = makeTestFilteredData( loader.log_data );
+    SafeQSignalSpy results{ filtered.get(),
+                            SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+    SafeQSignalSpy status{ filtered.get(), &LogFilteredData::searchProgressed };
+    REQUIRE( results.isValid() );
+
+    runSearch( filtered.get(), QStringLiteral( "line 00001" ), status );
+    results.clear();
+    status.clear();
+
+    int resultsSeenAtTerminalStatus = -1;
+    QObject::connect( filtered.get(), &LogFilteredData::searchProgressed, filtered.get(),
+                      [ & ]( LinesCount, int progress, LineNumber, quint64 ) {
+                          if ( progress == 100 ) {
+                              resultsSeenAtTerminalStatus = results.count();
+                          }
+                      } );
+    filtered->runSearch( RegularExpressionPattern( QStringLiteral( "line 00001" ) ) );
+
+    REQUIRE( results.count() == 1 );
+    REQUIRE( status.count() == 1 );
+    CHECK( resultsSeenAtTerminalStatus == 1 );
+    CHECK( results.at( 0 ).at( 2 ).toBool() );
+    CHECK( results.at( 0 ).at( 3 ).toULongLong()
+           == filtered->currentSearchGeneration() );
+    CHECK( status.at( 0 ).at( 1 ).toInt() == 100 );
+    CHECK( status.at( 0 ).at( 3 ).toULongLong()
+           == filtered->currentSearchGeneration() );
+}
+
+TEST_CASE( "Destroying LogFilteredData discards both pending publication callbacks",
+           "[logdata][refresh-throttling][lifetime][presentation]" )
+{
+    LogDataLoader loader;
+    int statusDeliveries = 0;
+    {
+        auto filtered = makeTestFilteredData( loader.log_data );
+        SafeQSignalSpy results{ filtered.get(),
+                                SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
+        REQUIRE( results.isValid() );
+        QObject::connect( filtered.get(), &LogFilteredData::searchProgressed, &loader.log_data,
+                          [ & ]( LinesCount, int, LineNumber, quint64 ) {
+                              ++statusDeliveries;
+                          } );
+        const auto generation = filtered->currentSearchGeneration();
+        publishSearchProgress( *filtered, 8_lcount, 80, 0_lnum, generation );
+        CHECK( results.count() == 0 );
+        CHECK( statusDeliveries == 0 );
+    }
+
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    QCoreApplication::processEvents();
+    CHECK( statusDeliveries == 0 );
 }

@@ -106,24 +106,32 @@ REQUIRE( QFileInfo( path ).fileName().compare(
 
 ### 8.2 Signal-timing assertions
 
+The historical incident was Windows-specific in appearance: an unthrottled terminal `progress == 100` signal raced a generic throttler's timer, and Windows timer granularity (commonly about 15.6 ms) meant the test often observed no later "residual" emission. The real defect was the contract, not Windows. Completion depended on a helper-owned timer firing again after semantic completion, and the test treated leftover signal residue as success.
+
+The replacement contract is platform-independent:
+
+- the publishing owner owns independent fixed-first-deadline timers for independent consumers (for example, 33 ms result presentation and 100 ms progress/status);
+- a terminal boundary synchronously flushes or supersedes pending state, emits the terminal result, then emits terminal status, and leaves no pending timer residue;
+- cancellation, generation replacement, and destruction discard pending callbacks explicitly;
+- callback re-request starts a new window rather than extending the first window;
+- there is no platform-specific unlimited/direct-emission bypass.
+
 ```cpp
-// AVOID -- relies on the throttler firing again AFTER an unthrottled
-// progress == 100 emit; Windows timer granularity (~15.6ms) makes this
-// path emit zero residue, and the test silently passes 0 > 0.
+// AVOID -- completion is inferred from a generic throttler firing again.
 spy.clear();
 QTest::qWait( 5000 );
 REQUIRE( spy.count() > 0 );
 
-// PREFER -- inspect the signals captured during the consume loop.
-// runSearch()'s helper has been adjusted to leave the spy populated
-// instead of clearing it; SCENARIOs read spy.at(i) for i < spy.count().
-for ( int i = 0; i < spy.count(); ++i ) {
-    const auto args = spy.at( i );
-    // ... assert per-signal contract ...
-}
+// PREFER -- observe semantic completion and inspect the signals captured up to
+// that boundary. Tests of the coalescing window itself use the owner's
+// deterministic flush seam; ordinary search tests wait for terminal status.
+REQUIRE( terminalStatus.safeWait( 30'000 ) );
+REQUIRE( resultsSeenBeforeTerminalStatus );
+CHECK_FALSE( resultsTimerPending );
+CHECK_FALSE( statusTimerPending );
 ```
 
-If the test must wait for a specific deadline, drive the wait off a deterministic state-change predicate (`waitUiState([&]{ return getCount() >= N; })`) rather than off arbitrary signal-spy residue.
+Do not add a sleep to "let the last timer fire." Use a completion signal, terminal state, or deterministic owner flush. A timeout is only the failure bound; success must be driven by semantic completion.
 
 ### 8.3 External-tool dependence
 
