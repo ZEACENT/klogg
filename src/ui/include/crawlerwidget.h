@@ -403,8 +403,9 @@ class CrawlerWidget : public QSplitter,
     // Last main line number received
     LineNumber currentLineNumber_;
 
-    // Current number of matches
+    // Current number of presented matches and the last accepted publication count.
     LinesCount nbMatches_;
+    LinesCount lastPublishedMatchCount_;
 
     LineNumber searchStartLine_;
     LineNumber searchEndLine_;

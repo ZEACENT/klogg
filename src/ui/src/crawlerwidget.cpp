@@ -309,6 +309,7 @@ void CrawlerWidget::reload()
     searchState_.resetState();
     constexpr auto DropCache = true;
     logFilteredData_->clearSearch( DropCache );
+    lastPublishedMatchCount_ = 0_lcount;
     logFilteredData_->clearMarks();
     if ( presentationActive_ ) {
         filteredView_->updateData();
@@ -408,7 +409,8 @@ bool CrawlerWidget::refreshAuthoritativePresentation()
     }
     logMainView_->updateData( searchStartLine_, searchEndLine_ );
     filteredView_->updateData( searchStartLine_, searchEndLine_ );
-    if ( presentationSelectionRestorePending_ && !isFollowEnabled() ) {
+    if ( presentationSelectionRestorePending_ && !isFollowEnabled()
+         && logFilteredData_->getNbLine() > 0_lcount ) {
         const auto currentLineIndex = logFilteredData_->getLineIndexNumber( currentLineNumber_ );
         filteredView_->selectAndDisplayLine( currentLineIndex );
     }
@@ -725,11 +727,12 @@ void CrawlerWidget::updateFilteredResults( LogFilteredData* source, LinesCount n
     if ( terminal && contextLinesMode_ > 0 && contextLinesSpinBox_->value() > 0 ) {
         updateContextLinesModel();
     }
-    if ( initialPosition > 0_lnum ) {
+    if ( initialPosition > 0_lnum && nbMatches != lastPublishedMatchCount_ ) {
         changeDataStatus( DataStatus::NEW_FILTERED_DATA );
     }
-    const bool restoreSelection
-        = terminal && initialPosition == searchStartLine_ && !isFollowEnabled();
+    lastPublishedMatchCount_ = nbMatches;
+    const bool restoreSelection = terminal && initialPosition == searchStartLine_
+                                  && !isFollowEnabled() && logFilteredData_->getNbLine() > 0_lcount;
 
     if ( !presentationActive_ ) {
         presentationSelectionRestorePending_
@@ -1079,6 +1082,7 @@ void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
             // Invalidate the search
             constexpr auto DropCache = true;
             logFilteredData_->clearSearch( DropCache );
+            lastPublishedMatchCount_ = 0_lcount;
             if ( presentationActive_ ) {
                 filteredView_->updateData();
                 nbMatches_ = 0_lcount;
@@ -1149,6 +1153,7 @@ void CrawlerWidget::changeFilteredViewVisibility( int index )
 
     if ( !presentationActive_ ) {
         logFilteredData_->setVisibility( visibility );
+        presentationSelectionRestorePending_ = logFilteredData_->getNbLine() > 0_lcount;
         queuePresentationRefresh( false );
         return;
     }
@@ -1528,6 +1533,7 @@ void CrawlerWidget::changeFilteredView( int tabIndex )
 
         filteredView_ = tabFilteredView;
         logFilteredData_ = filteredViewsData_.at( tabFilteredView );
+        lastPublishedMatchCount_ = logFilteredData_->getNbMatches();
 
         Q_EMIT filteredViewChanged();
 
@@ -1672,6 +1678,7 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
     logFilteredData_->bumpSearchGeneration();
     logFilteredData_->interruptSearch();
 
+    lastPublishedMatchCount_ = 0_lcount;
     if ( presentationActive_ ) {
         nbMatches_ = 0_lcount;
     }
@@ -1852,8 +1859,8 @@ void CrawlerWidget::updateEncoding()
     encodingText_ = encodingPrefix.arg( textCodec->name().constData() );
 
     const auto encodingName = textCodec->name();
-    const auto usesEncoding = [ &encodingName ]( const AbstractLogData* data ) {
-        const auto* const current = data != nullptr ? data->getDisplayEncoding() : nullptr;
+    const auto usesEncoding = [ &encodingName ]( const AbstractLogData* logData ) {
+        const auto* const current = logData != nullptr ? logData->getDisplayEncoding() : nullptr;
         return current != nullptr
             && current->name().compare( encodingName, Qt::CaseInsensitive ) == 0;
     };

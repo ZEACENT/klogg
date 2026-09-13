@@ -373,6 +373,11 @@ struct FolderCrawlerWidget::access_by<FolderViewTestAccess> {
     }
 };
 
+void flushFolderPresentation( FolderCrawlerWidget& widget )
+{
+    FolderCrawlerWidget::access_by<FolderViewTestAccess>::flushPresentation( &widget );
+}
+
 class NoProviderFolderMarkProbeView final : public FolderFilteredView {
   public:
     NoProviderFolderMarkProbeView( FolderSearchResults* results,
@@ -2895,12 +2900,12 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
 
     // Mark a NON-match line: it must appear as a mark tick.
     widget.markMainViewLine( 2_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( !overview->getMarkLines()->empty() );
 
     widget.unmarkMainViewLine( 2_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     // Re-fetch after every update*() call: the returned pointer is documented
     // valid only until the next update (overview.h).
@@ -2909,12 +2914,12 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     // Single-file precedence: a line that is BOTH a match and a mark is drawn
     // as a match (red), so it must NOT be duplicated into the mark list.
     widget.markMainViewLine( 1_lnum ); // "ERROR alpha" is a match
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( overview->getMarkLines()->empty() );
     REQUIRE( !overview->getMatchLines()->empty() );
     widget.unmarkMainViewLine( 1_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
 
     // Rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma.
     // Mark a non-match line in b, then switch between the files: the minimap
@@ -2922,7 +2927,7 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     selectResultRowAndWaitForFile( widget, 4_lnum, b );
     QTest::qWait( 100 );
     widget.markMainViewLine( 1_lnum ); // b.log:1 is "line1", not a match
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( !overview->getMarkLines()->empty() );
 
@@ -4678,11 +4683,6 @@ quint64 folderPresentedRows( const FolderFilteredView& view )
 void resetFolderViewRefreshCounts( FolderFilteredView& view )
 {
     FolderViewAccess::resetRefreshCounts( &view );
-}
-
-void flushFolderPresentation( FolderCrawlerWidget& widget )
-{
-    FolderCrawlerAccess::flushPresentation( &widget );
 }
 
 } // namespace

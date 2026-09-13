@@ -1210,6 +1210,15 @@ SCENARIO( "context lines getLineNumber returns correct mapping", "[logdata][cont
                 REQUIRE( line1.get() == 9 );  // line 8 + 1
                 REQUIRE( line2.get() == 10 ); // line 9 + 1
             }
+
+            THEN( "getLineIndexNumber selects the nearest preceding context row" )
+            {
+                REQUIRE( filtered_data->getLineIndexNumber( 6_lnum ) == 0_lnum );
+                REQUIRE( filtered_data->getLineIndexNumber( 10_lnum ) == 2_lnum );
+                const auto lastFilteredLine
+                    = LineNumber( filtered_data->getNbLine().get() - 1 );
+                REQUIRE( filtered_data->getLineIndexNumber( 500_lnum ) == lastFilteredLine );
+            }
         }
     }
 }

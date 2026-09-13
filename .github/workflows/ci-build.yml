@@ -36,10 +36,18 @@ env:
 
 jobs:
   ReleaseQualificationPreflight:
-    name: "Release qualification preflight"
+    name: "Release and platform-fragile preflight"
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.8'
+      - name: Run narrow platform-fragile lint
+        run: python3 scripts/lint_platform_fragile.py
       - name: Verify release qualification inputs
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release' }}
         shell: bash
@@ -756,7 +764,7 @@ jobs:
     steps: *adb_helper_steps
 
   LinuxPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbLinuxX64]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchLinuxDeployQt, PrefetchCmakeInstaller, BuildAdbLinuxX64, ReleaseQualificationPreflight]
     permissions: &artifact_verification_permissions
       contents: read
       attestations: read
@@ -1197,7 +1205,7 @@ jobs:
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
 
   LinuxSanitizers:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchCmakeInstaller, ReleaseQualificationPreflight]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Linux ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -1262,7 +1270,7 @@ jobs:
     steps: *linux_steps
 
   LinuxTsan:
-    needs: [SaveVersion, PrefetchCpmCache]
+    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Linux ubuntu-22.04-tsan [tsan]"
     env:
@@ -1468,7 +1476,7 @@ jobs:
     steps: *ios_native_steps
 
   MacPackages:
-    needs: [ReleaseQualificationPreflight, SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeX64]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacX64, BuildIosNativeX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS intel-qt6 [vs-gen]"
@@ -1798,7 +1806,7 @@ jobs:
           key: ${{ env.KLOGG_LABEL }}-ccache-v2-${{ steps.ccache-generation.outputs.current }}
 
   MacArmPackages:
-    needs: [ReleaseQualificationPreflight, SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, BuildAdbMacArm64, BuildIosNativeArm64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS arm64-qt6 [vs-arm64]"
@@ -1824,7 +1832,7 @@ jobs:
     steps: *mac_steps
 
   MacSanitizers:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, ReleaseQualificationPreflight]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "macOS ${{ matrix.config.label }} [${{ matrix.config.package_tag }}]"
     env:
@@ -1880,7 +1888,7 @@ jobs:
     steps: *mac_steps
 
   WindowsPackages:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, BuildAdbWindowsX64, ReleaseQualificationPreflight]
     permissions: *artifact_verification_permissions
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows x64-qt6 [vs-avx2]"
@@ -2320,7 +2328,7 @@ jobs:
           if-no-files-found: error
 
   WindowsX86:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchOpenSsl, PrefetchWindowsTools, ReleaseQualificationPreflight]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows x86-qt5 [QTRegex]"
     env:
@@ -2343,7 +2351,7 @@ jobs:
     steps: *windows_steps
 
   WindowsAsan:
-    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools]
+    needs: [SaveVersion, PrefetchCpmCache, PrefetchBoost, PrefetchWindowsTools, ReleaseQualificationPreflight]
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     name: "Windows x64-qt6 ASan [asan]"
     env:

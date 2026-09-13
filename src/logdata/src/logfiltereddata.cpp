@@ -838,14 +838,18 @@ LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
         if ( !contextLinesListValid_ ) {
             rebuildContextLinesList();
         }
-        // Binary search for the line number in the sorted context lines list
-        auto it = std::lower_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum,
-                                   []( const LineNumber& a, const LineNumber& b ) { return a < b; } );
-        if ( it != contextLinesList_.end() && *it == lineNum ) {
-            const auto distance = std::distance( contextLinesList_.begin(), it );
-            return LineNumber( static_cast<LineNumber::UnderlyingType>( distance ) );
+        if ( contextLinesList_.empty() ) {
+            return maxValue<LineNumber>();
         }
-        return maxValue<LineNumber>();
+
+        // Match the no-context mapping semantics: select the last visible row at
+        // or before the source line, clamped to the first/last visible row.
+        auto it = std::upper_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum );
+        if ( it != contextLinesList_.begin() ) {
+            --it;
+        }
+        const auto distance = std::distance( contextLinesList_.begin(), it );
+        return LineNumber( static_cast<LineNumber::UnderlyingType>( distance ) );
     }
     
     // No context lines: use original logic

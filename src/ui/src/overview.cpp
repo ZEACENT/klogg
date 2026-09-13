@@ -81,7 +81,7 @@ template <typename RangeCounter>
 unsigned aggregateOverviewRanges( LinesCount linesInFile, unsigned viewportHeight,
                                   klogg::vector<Overview::WeightedLine>& matchLines,
                                   klogg::vector<Overview::WeightedLine>& markLines,
-                                  RangeCounter&& countRange )
+                                  RangeCounter countRange )
 {
     const auto lineCount = linesInFile.get();
     const auto height = static_cast<uint64_t>( viewportHeight );

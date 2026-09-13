@@ -1242,6 +1242,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         crawler->updateSearchStatus( source, matches, progress, initialLine, generation );
     }
 
+    void acknowledgeDataStatus()
+    {
+        crawler->activityDetected();
+    }
+
+    void changeFilteredVisibility( int index )
+    {
+        crawler->visibilityBox_->setCurrentIndex( index );
+    }
+
     void resetPresentationCounts()
     {
         crawler->overviewUpdateCountForTest_ = 0;
@@ -3850,6 +3860,60 @@ TEST_CASE( "CrawlerWidget separates search status from result presentation consu
     CHECK( visitor.stopButtonHidden() == stopHidden );
 }
 
+TEST_CASE( "CrawlerWidget reports incremental filtered data only when match count changes",
+           "[ui][refresh-throttling][presentation][regression]" )
+{
+    QTemporaryFile file{ "crawler_incremental_data_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    const auto generation = source->currentSearchGeneration();
+    constexpr auto IncrementalStart = 5_lnum;
+
+    visitor.acknowledgeDataStatus();
+    SafeQSignalSpy firstChangeSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 3_lcount, IncrementalStart, false, generation );
+
+    REQUIRE( firstChangeSpy.count() == 1 );
+    CHECK( firstChangeSpy.at( 0 ).at( 0 ).value<DataStatus>() == DataStatus::NEW_FILTERED_DATA );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+
+    visitor.acknowledgeDataStatus();
+    visitor.resetPresentationCounts();
+    SafeQSignalSpy equalTerminalSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 3_lcount, IncrementalStart, true, generation );
+
+    CHECK( equalTerminalSpy.count() == 0 );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+    CHECK( visitor.filteredUpdateCount() == 1 );
+
+    visitor.acknowledgeDataStatus();
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+    SafeQSignalSpy secondChangeSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 4_lcount, IncrementalStart, true, generation );
+
+    REQUIRE( secondChangeSpy.count() == 1 );
+    CHECK( secondChangeSpy.at( 0 ).at( 0 ).value<DataStatus>() == DataStatus::NEW_FILTERED_DATA );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+
+    visitor.acknowledgeDataStatus();
+    SafeQSignalSpy repeatedInactiveSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 4_lcount, IncrementalStart, true, generation );
+    CHECK( repeatedInactiveSpy.count() == 0 );
+
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
 TEST_CASE( "CrawlerWidget replacement retires superseded search status",
            "[ui][search-generation][presentation]" )
 {
@@ -4009,6 +4073,62 @@ TEST_CASE( "CrawlerWidget ignores stale keep-results source even at an equal gen
     CHECK( visitor.filteredUpdateCount() == 0 );
     CHECK( visitor.overviewUpdateCount() == 0 );
     CHECK( visitor.bulletRefreshCount() == 0 );
+}
+
+TEST_CASE( "Inactive CrawlerWidget restores source selection after visibility changes",
+           "[ui][refresh-throttling][visibility][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_hidden_visibility_selection_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    visitor.setSearchPattern( QStringLiteral( "this is line" ) );
+    visitor.runSearch();
+    REQUIRE( waitUiState( [ & ] { return visitor.getLogFilteredNbLines() == 100_lcount; } ) );
+
+    const bool leaveOneVisibleMark = GENERATE( false, true );
+    CAPTURE( leaveOneVisibleMark );
+    constexpr auto MarkedSourceLine = 10_lnum;
+    constexpr auto SelectedSourceLine = 50_lnum;
+    constexpr auto NearestVisibleSourceLine = 12_lnum;
+    constexpr auto PreviousFilteredRow = 50_lnum;
+    constexpr int MarksVisibilityIndex = 1;
+
+    visitor.rawFilteredData()->setContextLines( 2, 2 );
+    if ( leaveOneVisibleMark ) {
+        visitor.addMarksInMainView( { MarkedSourceLine } );
+    }
+    visitor.selectFilteredViewLine( PreviousFilteredRow.get() );
+    visitor.selectMainViewLine( SelectedSourceLine.get() );
+    REQUIRE( visitor.mainSelectedLine() == SelectedSourceLine );
+    REQUIRE( visitor.filteredSelectedLine() == PreviousFilteredRow );
+
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+    visitor.changeFilteredVisibility( MarksVisibilityIndex );
+
+    const auto expectedVisibleLines = leaveOneVisibleMark ? 5_lcount : 0_lcount;
+    REQUIRE( visitor.getLogFilteredNbLines() == expectedVisibleLines );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+
+    CHECK( visitor.filteredUpdateCount() == 1 );
+    const auto restoredSelection = visitor.filteredSelectedLine();
+    if ( leaveOneVisibleMark ) {
+        REQUIRE( restoredSelection.has_value() );
+        CHECK( *restoredSelection == 4_lnum );
+        CHECK( visitor.rawFilteredData()->getMatchingLineNumber( *restoredSelection )
+               == NearestVisibleSourceLine );
+    }
+    else {
+        CHECK_FALSE( restoredSelection.has_value() );
+    }
 }
 
 TEST_CASE( "Inactive CrawlerWidget applies terminal context to the model and presents once",

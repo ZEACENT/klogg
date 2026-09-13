@@ -26,6 +26,8 @@
 #include <KDSignalThrottler.h>
 #include <efsw/efsw.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -43,7 +45,10 @@
 
 class SerialExecutor {
   public:
-    SerialExecutor() : thread_( [ this ] { run(); } ) {}
+    SerialExecutor()
+        : thread_( [ this ] { run(); } )
+    {
+    }
 
     ~SerialExecutor()
     {
@@ -62,10 +67,11 @@ class SerialExecutor {
         taskAvailable_.notify_one();
     }
 
-    void waitForDone()
+    bool waitForDone( std::chrono::milliseconds timeout )
     {
         std::unique_lock<std::mutex> lock( mutex_ );
-        idle_.wait( lock, [ this ] { return tasks_.empty() && !runningTask_; } );
+        return idle_.wait_for( lock, std::max( timeout, std::chrono::milliseconds::zero() ),
+                               [ this ] { return tasks_.empty() && !runningTask_; } );
     }
 
     void shutdown()
@@ -127,6 +133,8 @@ class SerialExecutor {
 };
 
 namespace {
+
+FileWatcher* fileWatcherInstance = nullptr;
 
 struct WatchedFile {
     std::string name;
@@ -326,6 +334,23 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
         }
     }
 
+    std::size_t watchedFileCount()
+    {
+        ScopedRecursiveLock lock( mutex_ );
+
+        std::size_t count = 0;
+        for ( const auto& directory : watchedPaths_ ) {
+            count += directory.files.size();
+        }
+        return count;
+    }
+
+    std::size_t watchedDirectoryCount()
+    {
+        ScopedRecursiveLock lock( mutex_ );
+        return watcher_.directories().size();
+    }
+
     void handleFileAction( efsw::WatchID watchid, const std::string& dir,
                            const std::string& filename, efsw::Action action,
                            std::string oldFilename ) override
@@ -440,6 +465,8 @@ FileWatcher::FileWatcher()
     , worker_{ std::make_unique<SerialExecutor>() }
     , efswWatcher_{ new EfswFileWatcher( this, worker_.get() ) }
 {
+    Q_ASSERT( fileWatcherInstance == nullptr );
+    fileWatcherInstance = this;
 
     connect( checkTimer_, &QTimer::timeout, this, &FileWatcher::checkWatches );
 
@@ -452,6 +479,8 @@ FileWatcher::FileWatcher()
 
 FileWatcher::~FileWatcher()
 {
+    fileWatcherInstance = nullptr;
+
     // Close task admission and drain every queued operation while its
     // EfswFileWatcher receiver is still alive. Native callbacks racing with
     // shutdown are then rejected by SerialExecutor::post().
@@ -465,6 +494,11 @@ FileWatcher& FileWatcher::getFileWatcher()
     return *instance;
 }
 
+FileWatcher* FileWatcher::existingInstance()
+{
+    return fileWatcherInstance;
+}
+
 void FileWatcher::addFile( const QString& fileName )
 {
     updateConfiguration();
@@ -472,8 +506,7 @@ void FileWatcher::addFile( const QString& fileName )
     // thread responsive. On macOS, open() on TCC-protected directories
     // (e.g. ~/Downloads, ~/Desktop, ~/Documents) blocks until the user
     // responds to the system permission dialog.
-    // Uses a dedicated single-worker thread pool to avoid contention
-    // on the global QThreadPool.
+    // Uses a dedicated worker thread to avoid contention on the global QThreadPool.
     auto* watcher = efswWatcher_.get();
     worker_->post( [ watcher, fileName ] { watcher->addFile( fileName ); } );
 }
@@ -485,6 +518,21 @@ void FileWatcher::removeFile( const QString& fileName )
     // serialized with any in-progress addFile on the same worker thread.
     auto* watcher = efswWatcher_.get();
     worker_->post( [ watcher, fileName ] { watcher->removeFile( fileName ); } );
+}
+
+bool FileWatcher::waitForIdle( int timeoutMs )
+{
+    return worker_->waitForDone( std::chrono::milliseconds{ timeoutMs } );
+}
+
+std::size_t FileWatcher::watchedFileCount()
+{
+    return efswWatcher_->watchedFileCount();
+}
+
+std::size_t FileWatcher::watchedDirectoryCount()
+{
+    return efswWatcher_->watchedDirectoryCount();
 }
 
 void FileWatcher::fileChangedOnDisk( const QString& fileName )

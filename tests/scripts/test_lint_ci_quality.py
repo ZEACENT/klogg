@@ -755,18 +755,18 @@ jobs:
             "BuildAdbWindowsX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacX64": {"BuildAdbHelperLegalAssets"},
             "BuildAdbMacArm64": {"BuildAdbHelperLegalAssets"},
-            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "PrefetchCmakeInstaller", "BuildAdbLinuxX64"},
-            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchCmakeInstaller"},
-            "LinuxTsan": {"SaveVersion", "PrefetchCpmCache"},
+            "LinuxPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchLinuxDeployQt", "PrefetchCmakeInstaller", "BuildAdbLinuxX64", "ReleaseQualificationPreflight"},
+            "LinuxSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchCmakeInstaller", "ReleaseQualificationPreflight"},
+            "LinuxTsan": {"SaveVersion", "PrefetchCpmCache", "ReleaseQualificationPreflight"},
             "PrefetchIosNativeSources": set(),
             "BuildIosNativeX64": {"SaveVersion", "PrefetchIosNativeSources"},
             "BuildIosNativeArm64": {"SaveVersion", "PrefetchIosNativeSources"},
-            "MacPackages": {"ReleaseQualificationPreflight", "SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64"},
-            "MacArmPackages": {"ReleaseQualificationPreflight", "SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacArm64", "BuildIosNativeArm64"},
-            "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost"},
-            "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "BuildAdbWindowsX64"},
-            "WindowsX86": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchOpenSsl", "PrefetchWindowsTools"},
-            "WindowsAsan": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools"},
+            "MacPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacX64", "BuildIosNativeX64", "ReleaseQualificationPreflight"},
+            "MacArmPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "BuildAdbMacArm64", "BuildIosNativeArm64", "ReleaseQualificationPreflight"},
+            "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "ReleaseQualificationPreflight"},
+            "WindowsPackages": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "BuildAdbWindowsX64", "ReleaseQualificationPreflight"},
+            "WindowsX86": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchOpenSsl", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
+            "WindowsAsan": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost", "PrefetchWindowsTools", "ReleaseQualificationPreflight"},
             "ci-gate": {"BuildAdbLinuxArm64", "LinuxPackages", "LinuxSanitizers", "LinuxTsan", "MacPackages", "MacArmPackages", "MacSanitizers", "WindowsPackages", "WindowsX86", "WindowsAsan"},
             "DispatchContinuous": {"ci-gate"},
         }
@@ -789,6 +789,488 @@ jobs:
                     MODULE.workflow_job_matrix_values(blocks[job]).get("label"),
                     labels,
                 )
+
+    def test_static_matrix_exclude_fails_closed_for_mapping_row_fields(self):
+        workflow = """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        config:
+          - label: linux
+            runner: ubuntu-24.04
+          - label: windows
+            runner: windows-2022
+        exclude:
+          - label: windows
+    runs-on: ${{ matrix.config.runner }}
+"""
+        issues = self.manifest_issues(
+            workflow, ".github/workflows/example.yml"
+        )
+        self.assertTrue(
+            any(
+                self.STATIC_SINGLETON_MESSAGE in issue
+                or (
+                    "matrix" in issue
+                    and ("malformed" in issue or "unsupported" in issue)
+                )
+                for issue in issues
+            ),
+            issues,
+        )
+
+    def test_static_matrix_exclude_allows_unrelated_scalar_axis(self):
+        workflow = """\
+jobs:
+  Build:
+    strategy:
+      matrix:
+        config:
+          - label: linux
+            runner: ubuntu-24.04
+          - label: windows
+            runner: windows-2022
+        shard: [primary, secondary]
+        exclude:
+          - shard: secondary
+    runs-on: ${{ matrix.config.runner }}
+"""
+        issues = self.manifest_issues(
+            workflow, ".github/workflows/example.yml"
+        )
+        self.assertFalse(
+            any(
+                self.STATIC_SINGLETON_MESSAGE in issue
+                or (
+                    "matrix" in issue
+                    and ("malformed" in issue or "unsupported" in issue)
+                )
+                for issue in issues
+            ),
+            issues,
+        )
+
+
+class PlatformFragilePreflightPolicyTest(unittest.TestCase):
+    CI_PREFLIGHT_JOB = "ReleaseQualificationPreflight"
+    EXPENSIVE_PREFLIGHT_JOB = "PlatformFragilePreflight"
+    CI_PREFLIGHT_MESSAGE = (
+        "CI Build platform-fragile preflight must run in parallel with "
+        "version/prefetch roots and precede every first-party application job"
+    )
+    EXPENSIVE_PREFLIGHT_MESSAGE = (
+        "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
+        "an exact scoped platform-fragile preflight"
+    )
+    CI_PARALLEL_ROOTS = {
+        "SaveVersion",
+        "PrefetchCpmCache",
+        "PrefetchBoost",
+        "PrefetchOpenSsl",
+        "PrefetchLinuxDeployQt",
+        "PrefetchCmakeInstaller",
+        "PrefetchWindowsTools",
+        "PrefetchAdbHelperSources",
+        "PrefetchIosNativeSources",
+    }
+    CI_APPLICATION_JOBS = {
+        "LinuxPackages",
+        "LinuxSanitizers",
+        "LinuxTsan",
+        "MacPackages",
+        "MacArmPackages",
+        "MacSanitizers",
+        "WindowsPackages",
+        "WindowsX86",
+        "WindowsAsan",
+    }
+    WORKFLOW_JOBS = {
+        "codeql-analysis.yml": "analyze",
+        "coverage.yml": "coverage",
+        "static-analysis.yml": "static-analysis",
+    }
+    REQUIRED_EVENTS = {"pull_request", "push", "workflow_dispatch"}
+    SCOPED_PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py --paths src tests"
+
+    @classmethod
+    def repository_workflows(cls) -> dict[str, str]:
+        return {
+            name: (ROOT / ".github" / "workflows" / name).read_text()
+            for name in ("ci-build.yml", *cls.WORKFLOW_JOBS)
+        }
+
+    def repository_issues(self, workflows: dict[str, str]) -> list[str]:
+        original_read = pathlib.Path.read_text
+        replacements = {
+            ROOT / ".github" / "workflows" / name: text
+            for name, text in workflows.items()
+        }
+
+        def read(path, *args, **kwargs):
+            if path in replacements:
+                return replacements[path]
+            return original_read(path, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "read_text", read):
+            return MODULE.check_repo(ROOT)
+
+    def assert_policy_issue(self, message: str, issues: list[str]) -> None:
+        self.assertTrue(any(message in issue for issue in issues), issues)
+
+    def assert_policy_clean(self, message: str, issues: list[str]) -> None:
+        self.assertFalse(any(message in issue for issue in issues), issues)
+
+    def test_preflights_preserve_every_supported_event_projection(self):
+        workflows = self.repository_workflows()
+        for name, workflow in workflows.items():
+            with self.subTest(workflow=name):
+                triggers = MODULE.workflow_trigger_mapping(workflow)
+                self.assertIsNotNone(triggers)
+                assert triggers is not None
+                self.assertEqual(set(triggers), self.REQUIRED_EVENTS)
+                needs = MODULE.workflow_job_needs(workflow)
+                preflight = (
+                    self.CI_PREFLIGHT_JOB
+                    if name == "ci-build.yml"
+                    else self.EXPENSIVE_PREFLIGHT_JOB
+                )
+                expected_roots = {preflight}
+                protected_jobs = set(needs) - {preflight}
+                if name == "ci-build.yml":
+                    expected_roots.update(self.CI_PARALLEL_ROOTS)
+                    protected_jobs = self.CI_APPLICATION_JOBS
+                self.assertEqual(
+                    {job for job, dependencies in needs.items() if not dependencies},
+                    expected_roots,
+                )
+                for event in self.REQUIRED_EVENTS:
+                    with self.subTest(workflow=name, event=event):
+                        self.assertIn(event, triggers)
+                        for job in protected_jobs:
+                            self.assertIn(
+                                preflight,
+                                MODULE.workflow_job_ancestors(needs, job),
+                            )
+
+    def test_quoted_workflow_text_inside_run_scalar_is_allowed(self):
+        workflows = self.repository_workflows()
+        for name, workflow in workflows.items():
+            for scalar_style in ("|", "|2-"):
+                with self.subTest(workflow=name, scalar_style=scalar_style):
+                    mutated = workflow.replace(
+                        "        run: |\n",
+                        f"        run: {scalar_style}\n"
+                        "          cat <<'YAML' >/tmp/generated-workflow.yml\n"
+                        "          \"run\": generated value\n"
+                        "          YAML\n",
+                        1,
+                    )
+                    self.assertNotEqual(mutated, workflow)
+                    candidate = dict(workflows)
+                    candidate[name] = mutated
+                    message = (
+                        self.CI_PREFLIGHT_MESSAGE
+                        if name == "ci-build.yml"
+                        else self.EXPENSIVE_PREFLIGHT_MESSAGE
+                    )
+                    self.assert_policy_clean(message, self.repository_issues(candidate))
+
+    def test_ci_build_reuses_release_preflight_as_the_early_gate(self):
+        workflows = self.repository_workflows()
+        self.assert_policy_clean(
+            self.CI_PREFLIGHT_MESSAGE,
+            self.repository_issues(workflows),
+        )
+
+        ci_build = workflows["ci-build.yml"]
+        transitive = ci_build.replace(
+            "  BuildAdbLinuxX64:\n"
+            "    needs: [BuildAdbHelperLegalAssets]\n",
+            "  BuildAdbLinuxX64:\n"
+            "    needs: [BuildAdbHelperLegalAssets, ReleaseQualificationPreflight]\n",
+            1,
+        ).replace(
+            "PrefetchCmakeInstaller, BuildAdbLinuxX64, "
+            "ReleaseQualificationPreflight]",
+            "PrefetchCmakeInstaller, BuildAdbLinuxX64]",
+            1,
+        )
+        self.assertNotEqual(transitive, ci_build)
+        candidate = dict(workflows)
+        candidate["ci-build.yml"] = transitive
+        self.assert_policy_clean(
+            self.CI_PREFLIGHT_MESSAGE,
+            self.repository_issues(candidate),
+        )
+
+        mutations = {
+            "serialized version root": ci_build.replace(
+                "  SaveVersion:\n",
+                "  SaveVersion:\n"
+                f"    needs: [{self.CI_PREFLIGHT_JOB}]\n",
+                1,
+            ),
+            "serialized dependency prefetch root": ci_build.replace(
+                "  PrefetchBoost:\n",
+                "  PrefetchBoost:\n"
+                f"    needs: [{self.CI_PREFLIGHT_JOB}]\n",
+                1,
+            ),
+            "application job bypass": ci_build.replace(
+                "PrefetchCmakeInstaller, ReleaseQualificationPreflight]",
+                "PrefetchCmakeInstaller]",
+                1,
+            ),
+            "conditional event bypass": ci_build.replace(
+                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                "    if: ${{ github.event_name == 'pull_request' }}\n",
+                1,
+            ),
+            "continued failure": ci_build.replace(
+                f"  {self.CI_PREFLIGHT_JOB}:\n",
+                f"  {self.CI_PREFLIGHT_JOB}:\n    continue-on-error: true\n",
+                1,
+            ),
+            "duplicate dependency key": ci_build.replace(
+                "    needs: [SaveVersion, PrefetchCpmCache, "
+                f"{self.CI_PREFLIGHT_JOB}]\n",
+                "    needs: [SaveVersion, PrefetchCpmCache, "
+                f"{self.CI_PREFLIGHT_JOB}]\n"
+                "    needs: []\n",
+                1,
+            ),
+            "wrong command": ci_build.replace(
+                "run: python3 scripts/lint_platform_fragile.py",
+                "run: python3 scripts/run_ci_quality.py",
+                1,
+            ),
+            "no-op lint step shell": ci_build.replace(
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                "        shell: \"true {0}\"\n"
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                1,
+            ),
+            "no-op workflow default shell": ci_build.replace(
+                "jobs:\n",
+                "defaults:\n  run:\n    shell: \"true {0}\"\n\njobs:\n",
+                1,
+            ),
+            "quoted no-op workflow default shell": ci_build.replace(
+                "jobs:\n",
+                "\"defaults\":\n  run:\n    shell: \"true {0}\"\n\njobs:\n",
+                1,
+            ),
+            "quoted no-op lint step shell": ci_build.replace(
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                "        \"shell\": \"true {0}\"\n"
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                1,
+            ),
+            "escaped failed-needs condition key": ci_build.replace(
+                "  LinuxTsan:\n"
+                "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n",
+                "  LinuxTsan:\n"
+                "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
+                "    \"\\u0069f\": ${{ always() }}\n",
+                1,
+            ),
+            "application job runs after failed preflight": ci_build.replace(
+                "  LinuxTsan:\n"
+                "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
+                "    if: \"!contains(github.event.head_commit.message, '[skip ci]')\"\n",
+                "  LinuxTsan:\n"
+                "    needs: [SaveVersion, PrefetchCpmCache, ReleaseQualificationPreflight]\n"
+                "    if: ${{ always() }}\n",
+                1,
+            ),
+            "duplicate command key": ci_build.replace(
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                "        run: python3 scripts/not-platform-fragile.py\n"
+                "        run: python3 scripts/lint_platform_fragile.py\n",
+                1,
+            ),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(mutated, ci_build)
+                candidate = dict(workflows)
+                candidate["ci-build.yml"] = mutated
+                self.assert_policy_issue(
+                    self.CI_PREFLIGHT_MESSAGE,
+                    self.repository_issues(candidate),
+                )
+
+    def test_expensive_preflights_run_only_the_exact_affected_scope(self):
+        workflows = self.repository_workflows()
+        for name in self.WORKFLOW_JOBS:
+            with self.subTest(workflow=name):
+                blocks = MODULE.workflow_job_blocks(workflows[name])
+                steps = [
+                    MODULE.workflow_step_fields(step)[0]
+                    for step in MODULE.workflow_step_blocks(
+                        blocks[self.EXPENSIVE_PREFLIGHT_JOB]
+                    )
+                ]
+                self.assertEqual(
+                    [fields.get("run") for fields in steps if "run" in fields],
+                    [self.SCOPED_PLATFORM_FRAGILE_COMMAND],
+                )
+
+    def test_expensive_jobs_require_exact_narrow_fail_closed_preflights(self):
+        workflows = self.repository_workflows()
+        self.assert_policy_clean(
+            self.EXPENSIVE_PREFLIGHT_MESSAGE,
+            self.repository_issues(workflows),
+        )
+
+        for name, expensive_job in self.WORKFLOW_JOBS.items():
+            workflow = workflows[name]
+            mutations = {
+                "missing dependency": workflow.replace(
+                    f"  {expensive_job}:\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"  {expensive_job}:\n",
+                    1,
+                ),
+                "continue on error": workflow.replace(
+                    f"  {self.EXPENSIVE_PREFLIGHT_JOB}:\n",
+                    f"  {self.EXPENSIVE_PREFLIGHT_JOB}:\n"
+                    "    continue-on-error: true\n",
+                    1,
+                ),
+                "duplicate dependency key": workflow.replace(
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
+                    "    needs: []\n",
+                    1,
+                ),
+                "full quality runner instead of scoped lint": workflow.replace(
+                    f"run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}",
+                    "run: python3 scripts/run_ci_quality.py",
+                    1,
+                ),
+                "no-op lint step shell": workflow.replace(
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    "        shell: \"true {0}\"\n"
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    1,
+                ),
+                "no-op workflow default shell": workflow.replace(
+                    "jobs:\n",
+                    "defaults:\n  run:\n    shell: \"true {0}\"\n\njobs:\n",
+                    1,
+                ),
+                "quoted no-op workflow default shell": workflow.replace(
+                    "jobs:\n",
+                    "\"defaults\":\n  run:\n    shell: \"true {0}\"\n\njobs:\n",
+                    1,
+                ),
+                "quoted no-op lint step shell": workflow.replace(
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    "        \"shell\": \"true {0}\"\n"
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    1,
+                ),
+                "escaped failed-needs condition key": workflow.replace(
+                    f"  {expensive_job}:\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"  {expensive_job}:\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
+                    "    \"\\u0069f\": ${{ always() }}\n",
+                    1,
+                ),
+                "expensive job runs after failed preflight": workflow.replace(
+                    f"  {expensive_job}:\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    f"  {expensive_job}:\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n"
+                    "    if: ${{ always() }}\n",
+                    1,
+                ),
+                "broadened to full platform-fragile lint": workflow.replace(
+                    f"run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}",
+                    "run: python3 scripts/lint_platform_fragile.py",
+                    1,
+                ),
+                "near-miss scope": workflow.replace(
+                    f"run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}",
+                    "run: python3 scripts/lint_platform_fragile.py --paths src",
+                    1,
+                ),
+                "extra scope": workflow.replace(
+                    f"run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}",
+                    "run: python3 scripts/lint_platform_fragile.py --paths src/ui src/logdata",
+                    1,
+                ),
+                "duplicated full quality runner": workflow.replace(
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n"
+                    "      - name: Duplicate full CI quality gate\n"
+                    "        run: python3 scripts/run_ci_quality.py\n",
+                    1,
+                ),
+                "comment spoof": workflow.replace(
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}",
+                    f"        # run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n"
+                    "        run: python3 scripts/not-platform-fragile.py",
+                    1,
+                ),
+                "duplicate needs key": workflow.replace(
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    "    needs: [MissingSpoof]\n"
+                    f"    needs: [{self.EXPENSIVE_PREFLIGHT_JOB}]\n",
+                    1,
+                ),
+                "duplicate command key": workflow.replace(
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    "        run: python3 scripts/not-platform-fragile.py\n"
+                    f"        run: {self.SCOPED_PLATFORM_FRAGILE_COMMAND}\n",
+                    1,
+                ),
+            }
+            for label, mutated in mutations.items():
+                with self.subTest(workflow=name, mutation=label):
+                    self.assertNotEqual(mutated, workflow)
+                    candidate = dict(workflows)
+                    candidate[name] = mutated
+                    self.assert_policy_issue(
+                        self.EXPENSIVE_PREFLIGHT_MESSAGE,
+                        self.repository_issues(candidate),
+                    )
+
+    def test_expensive_preflight_cannot_be_limited_to_one_event_projection(self):
+        workflows = self.repository_workflows()
+        for name in self.WORKFLOW_JOBS:
+            workflow = workflows[name]
+            for event in sorted(self.REQUIRED_EVENTS):
+                with self.subTest(workflow=name, event=event):
+                    mutated = workflow.replace(
+                        f"  {self.EXPENSIVE_PREFLIGHT_JOB}:\n",
+                        f"  {self.EXPENSIVE_PREFLIGHT_JOB}:\n"
+                        f"    if: ${{{{ github.event_name == '{event}' }}}}\n",
+                        1,
+                    )
+                    self.assertNotEqual(mutated, workflow)
+                    candidate = dict(workflows)
+                    candidate[name] = mutated
+                    self.assert_policy_issue(
+                        self.EXPENSIVE_PREFLIGHT_MESSAGE,
+                        self.repository_issues(candidate),
+                    )
+
+    def test_lint_workflow_keeps_the_complete_quality_runner(self):
+        workflow = (ROOT / ".github" / "workflows" / "lint.yml").read_text()
+        blocks = MODULE.workflow_job_blocks(workflow)
+        self.assertEqual(set(blocks), {"platform-fragile"})
+        steps = [
+            MODULE.workflow_step_fields(step)[0]
+            for step in MODULE.workflow_step_blocks(blocks["platform-fragile"])
+        ]
+        self.assertEqual(
+            [fields.get("run") for fields in steps if "run" in fields],
+            ["python3 scripts/run_ci_quality.py"],
+        )
 
 
 class CiQualityLintTest(unittest.TestCase):
@@ -1061,21 +1543,33 @@ jobs:
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchCmakeInstaller",
+                "ReleaseQualificationPreflight",
             },
-            "LinuxTsan": {"SaveVersion", "PrefetchCpmCache"},
-            "MacSanitizers": {"SaveVersion", "PrefetchCpmCache", "PrefetchBoost"},
+            "LinuxTsan": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "ReleaseQualificationPreflight",
+            },
+            "MacSanitizers": {
+                "SaveVersion",
+                "PrefetchCpmCache",
+                "PrefetchBoost",
+                "ReleaseQualificationPreflight",
+            },
             "WindowsX86": {
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "PrefetchOpenSsl",
                 "PrefetchWindowsTools",
+                "ReleaseQualificationPreflight",
             },
             "WindowsAsan": {
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "PrefetchWindowsTools",
+                "ReleaseQualificationPreflight",
             },
         }
         mobile_jobs = {
@@ -1101,22 +1595,23 @@ jobs:
                 "PrefetchLinuxDeployQt",
                 "PrefetchCmakeInstaller",
                 "BuildAdbLinuxX64",
+                "ReleaseQualificationPreflight",
             },
             "MacPackages": {
-                "ReleaseQualificationPreflight",
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "BuildAdbMacX64",
                 "BuildIosNativeX64",
+                "ReleaseQualificationPreflight",
             },
             "MacArmPackages": {
-                "ReleaseQualificationPreflight",
                 "SaveVersion",
                 "PrefetchCpmCache",
                 "PrefetchBoost",
                 "BuildAdbMacArm64",
                 "BuildIosNativeArm64",
+                "ReleaseQualificationPreflight",
             },
             "WindowsPackages": {
                 "SaveVersion",
@@ -1124,6 +1619,7 @@ jobs:
                 "PrefetchBoost",
                 "PrefetchWindowsTools",
                 "BuildAdbWindowsX64",
+                "ReleaseQualificationPreflight",
             },
         }
         for job, expected_needs in expected_package_jobs.items():
@@ -1379,20 +1875,21 @@ jobs:
             MODULE.ci_build_workflow_issues(comment_spoof),
         )
 
-    def test_ci_build_rejects_a_restored_version_proxy_gate(self):
+    def test_ci_build_rejects_serialized_version_and_prefetch_roots(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
-        mutated = workflow.replace(
-            "  SaveVersion:\n",
-            "  SaveVersion:\n    needs: [PrefetchCpmCache, PrefetchWindowsTools]\n",
-            1,
-        )
-        self.assertNotEqual(mutated, workflow)
-        self.assertTrue(
-            any(
-                "CI root job SaveVersion must not have dependencies" in issue
-                for issue in MODULE.ci_build_workflow_issues(mutated)
-            )
-        )
+        for job in ("SaveVersion", "PrefetchCpmCache", "PrefetchIosNativeSources"):
+            with self.subTest(job=job):
+                mutated = workflow.replace(
+                    f"  {job}:\n",
+                    f"  {job}:\n    needs: [ReleaseQualificationPreflight]\n",
+                    1,
+                )
+                self.assertNotEqual(mutated, workflow)
+                self.assertIn(
+                    f"CI early fan-out job {job} must remain a root parallel to "
+                    "ReleaseQualificationPreflight",
+                    MODULE.ci_build_workflow_issues(mutated),
+                )
 
     def test_ci_build_output_references_require_direct_needs(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()

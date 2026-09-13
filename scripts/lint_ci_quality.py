@@ -1070,7 +1070,10 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             )
     for job in CI_BUILD_ROOT_JOBS & set(needs):
         if needs[job]:
-            issues.append(f"CI root job {job} must not have dependencies")
+            issues.append(
+                f"CI early fan-out job {job} must remain a root parallel to "
+                f"{RELEASE_QUALIFICATION_PREFLIGHT}"
+            )
 
     for job, direct_dependencies in needs.items():
         block = "\n".join(job_blocks.get(job, []))
@@ -1747,7 +1750,9 @@ def yaml_scalar_body_lines(lines: list[str]) -> set[int]:
     body: set[int] = set()
     for index, line in enumerate(lines):
         entry = KEY_VALUE_RE.match(line)
-        if entry is None or scalar(entry.group("value")) not in {"|", "|-", "|+", ">", ">-", ">+"}:
+        if entry is None or re.fullmatch(
+            r"[|>](?:[+-]?[1-9]?|[1-9][+-]?)", scalar(entry.group("value"))
+        ) is None:
             continue
         indent = len(entry.group("indent"))
         for following in range(index + 1, len(lines)):
@@ -2009,6 +2014,31 @@ def static_matrix_cardinality(block: list[str]) -> tuple[int | None, str | None]
     combination_count = math.prod(len(values) for _, values in axis_items)
     if not exclude:
         return combination_count, None
+
+    scalar_axes = {
+        key
+        for key, values in axis_items
+        if all(not isinstance(value, dict) for value in values)
+    }
+    object_axis_names = {
+        key
+        for key, values in axis_items
+        if any(isinstance(value, dict) for value in values)
+    }
+    object_row_fields = {
+        field
+        for _, values in axis_items
+        for value in values
+        if isinstance(value, dict)
+        for field in value
+    }
+    excluded_keys = {key for row in exclude for key in row}
+    if (excluded_keys - scalar_axes) & (object_axis_names | object_row_fields):
+        # GitHub's object-valued matrix rows expose nested properties, but this
+        # bounded evaluator deliberately models only scalar-axis exclusions.
+        # Never guess whether an object-axis field exclusion removes a row.
+        return None, "matrix is malformed or unsupported"
+
     if combination_count > MAX_STATIC_MATRIX_EXCLUSION_CHECKS:
         return None, "matrix is malformed or unsupported"
 
@@ -3554,6 +3584,250 @@ def continuous_release_workflow_issues(text: str) -> list[str]:
     return issues
 
 
+PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py"
+SCOPED_PLATFORM_FRAGILE_COMMAND = "python3 scripts/lint_platform_fragile.py --paths src tests"
+PLATFORM_FRAGILE_EVENTS = {"pull_request", "push", "workflow_dispatch"}
+PLATFORM_FRAGILE_PREFLIGHT = "PlatformFragilePreflight"
+RELEASE_QUALIFICATION_PREFLIGHT = "ReleaseQualificationPreflight"
+CI_PLATFORM_PREFLIGHT_MESSAGE = (
+    "CI Build platform-fragile preflight must run in parallel with "
+    "version/prefetch roots and precede every first-party application job"
+)
+EXPENSIVE_PLATFORM_PREFLIGHT_MESSAGE = (
+    "CodeQL, Coverage, and Static analysis expensive jobs must depend on "
+    "an exact scoped platform-fragile preflight"
+)
+CI_PLATFORM_PARALLEL_ROOTS = CI_BUILD_ROOT_JOBS
+CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS = set(CI_BUILD_PACKAGE_ENABLEMENT)
+
+
+def direct_mapping_fields_are_unique(
+    block: list[str], parent_indent: int, direct_indents: set[int]
+) -> bool:
+    keys = [
+        entry.group("key")
+        for line in block
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+        and len(entry.group("indent")) in direct_indents
+    ]
+    return len(keys) == len(set(keys)) and all(
+        len(line) - len(line.lstrip()) >= parent_indent
+        for line in block
+        if strip_yaml_comment(line)
+    )
+
+
+def workflow_job_direct_fields_are_unique(block: list[str]) -> bool:
+    if not block or (header := KEY_VALUE_RE.match(block[0])) is None:
+        return False
+    job_indent = len(header.group("indent"))
+    return direct_mapping_fields_are_unique(block[1:], job_indent, {job_indent + 2})
+
+
+def workflow_step_direct_fields_are_unique(step: list[str]) -> bool:
+    if not step or (item := LIST_ITEM_RE.match(step[0])) is None:
+        return False
+    item_indent = len(item.group("indent"))
+    return direct_mapping_fields_are_unique(
+        step, item_indent, {item_indent, item_indent + 2}
+    )
+
+
+def exact_platform_fragile_steps(
+    block: list[str], *, release_qualification: bool
+) -> bool:
+    steps = workflow_step_blocks(block)
+    if any(not workflow_step_direct_fields_are_unique(step) for step in steps):
+        return False
+    try:
+        parsed = [workflow_step_fields(step) for step in steps]
+    except ValueError:
+        return False
+
+    if any(
+        fields.get("continue-on-error") not in {None, "false"}
+        for fields, _ in parsed
+    ):
+        return False
+
+    expected_setup = [
+        (
+            {
+                "uses": "actions/checkout@"
+                + REVIEWED_ACTION_REVISIONS["actions/checkout"]
+            },
+            {"with": {"persist-credentials": "false"}},
+        ),
+        (
+            {
+                "uses": "actions/setup-python@"
+                + REVIEWED_ACTION_REVISIONS["actions/setup-python"]
+            },
+            {"with": {"python-version": "3.8"}},
+        ),
+        (
+            {
+                "name": "Run narrow platform-fragile lint",
+                "run": (
+                    PLATFORM_FRAGILE_COMMAND
+                    if release_qualification
+                    else SCOPED_PLATFORM_FRAGILE_COMMAND
+                ),
+            },
+            {},
+        ),
+    ]
+    if len(parsed) != len(expected_setup) + int(release_qualification):
+        return False
+    for (fields, children), (required_fields, required_children) in zip(
+        parsed, expected_setup
+    ):
+        direct_fields = {
+            key: value for key, value in fields.items() if key not in children
+        }
+        if direct_fields != required_fields:
+            return False
+        if children != required_children:
+            return False
+
+    if not release_qualification:
+        return True
+
+    release_fields, release_children = parsed[-1]
+    release_direct_fields = {
+        key: value for key, value in release_fields.items() if key not in release_children
+    }
+    return (
+        set(release_direct_fields) == {"name", "if", "shell", "run"}
+        and set(release_children) == {"env"}
+        and release_fields.get("name") == "Verify release qualification inputs"
+        and release_fields.get("if")
+        == "${{ github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release' }}"
+        and release_fields.get("shell") == "bash"
+        and bool(release_fields.get("run"))
+    )
+
+
+def platform_fragile_preflight_issues(
+    text: str, *, ci_build: bool, expensive_job: str | None = None
+) -> list[str]:
+    message = (
+        CI_PLATFORM_PREFLIGHT_MESSAGE
+        if ci_build
+        else EXPENSIVE_PLATFORM_PREFLIGHT_MESSAGE
+    )
+    lines = text.splitlines()
+    scalar_body_lines = yaml_scalar_body_lines(lines)
+    quoted_control_key = re.compile(r'''^\s*["'][^"']+["']\s*:''')
+    if any(
+        index not in scalar_body_lines and quoted_control_key.match(line)
+        for index, line in enumerate(lines)
+    ):
+        return [message]
+    if any(
+        (entry := KEY_VALUE_RE.match(line)) is not None
+        and not entry.group("indent")
+        and entry.group("key") == "defaults"
+        for line in lines
+    ):
+        return [message]
+
+    triggers = workflow_trigger_mapping(text)
+    if triggers is None or set(triggers) != PLATFORM_FRAGILE_EVENTS:
+        return [message]
+
+    jobs_mapping = workflow_mapping_block(lines, "jobs", 0)
+    blocks = workflow_job_blocks(text)
+    needs = workflow_job_needs(text)
+    if jobs_mapping is None or any(
+        not workflow_job_direct_fields_are_unique(block)
+        for block in blocks.values()
+    ):
+        return [message]
+    preflight = (
+        RELEASE_QUALIFICATION_PREFLIGHT
+        if ci_build
+        else PLATFORM_FRAGILE_PREFLIGHT
+    )
+    block = blocks.get(preflight)
+    if block is None or (header := KEY_VALUE_RE.match(block[0])) is None:
+        return [message]
+
+    job_indent = len(header.group("indent"))
+    direct_job_fields = {
+        entry.group("key")
+        for line in block[1:]
+        if (entry := KEY_VALUE_RE.match(line)) is not None
+        and len(entry.group("indent")) == job_indent + 2
+    }
+    expected_job_fields = {"name", "runs-on", "steps"}
+    if ci_build:
+        expected_job_fields.add("if")
+    if direct_job_fields != expected_job_fields:
+        return [message]
+
+    expected_name = (
+        "Release and platform-fragile preflight"
+        if ci_build
+        else "Platform-fragile preflight"
+    )
+    if (
+        workflow_job_direct_value(block, "name") != expected_name
+        or workflow_job_direct_value(block, "runs-on") != "ubuntu-24.04"
+        or workflow_job_direct_value(block, "continue-on-error")
+        not in {None, "false"}
+        or not exact_platform_fragile_steps(
+            block, release_qualification=ci_build
+        )
+    ):
+        return [message]
+
+    condition = workflow_job_direct_value(block, "if")
+    if ci_build:
+        if condition != "!contains(github.event.head_commit.message, '[skip ci]')":
+            return [message]
+    elif condition is not None:
+        return [message]
+
+    try:
+        roots = {job for job, dependencies in needs.items() if not dependencies}
+        ancestors = {
+            job: workflow_job_ancestors(needs, job) for job in needs
+        }
+    except ValueError:
+        return [message]
+
+    if ci_build:
+        protected_jobs = CI_PLATFORM_PREFLIGHT_APPLICATION_JOBS
+        if roots != {preflight} | CI_PLATFORM_PARALLEL_ROOTS:
+            return [message]
+        if any(
+            preflight not in ancestors.get(job, set()) for job in protected_jobs
+        ):
+            return [message]
+    else:
+        protected_jobs = {expensive_job} if expensive_job is not None else set()
+
+    if any(
+        (condition := workflow_job_direct_value(blocks[job], "if")) is not None
+        and re.search(r"\b(?:always|failure|cancelled)\s*\(", condition)
+        for job in protected_jobs
+        if job in blocks
+    ):
+        return [message]
+
+    if not ci_build and (
+        expensive_job is None
+        or set(needs) != {preflight, expensive_job}
+        or roots != {preflight}
+        or needs.get(expensive_job) != {preflight}
+        or preflight not in ancestors[expensive_job]
+    ):
+        return [message]
+
+    return []
+
+
 def ci_manifests(root: Path) -> list[Path]:
     paths = set()
     for pattern in ("*.yml", "*.yaml"):
@@ -3590,6 +3864,12 @@ def check_repo(root: Path) -> list[str]:
         f".github/workflows/coverage.yml: {issue}"
         for issue in coverage_workflow_issues(coverage_text)
     )
+    issues.extend(
+        f".github/workflows/coverage.yml: {issue}"
+        for issue in platform_fragile_preflight_issues(
+            coverage_text, ci_build=False, expensive_job="coverage"
+        )
+    )
     if "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" not in coverage_text:
         issues.append(
             ".github/workflows/coverage.yml: coverage artifact upload must use a reviewed commit SHA"
@@ -3599,6 +3879,12 @@ def check_repo(root: Path) -> list[str]:
     issues.extend(
         f".github/workflows/codeql-analysis.yml: {issue}"
         for issue in codeql_workflow_issues(codeql_text)
+    )
+    issues.extend(
+        f".github/workflows/codeql-analysis.yml: {issue}"
+        for issue in platform_fragile_preflight_issues(
+            codeql_text, ci_build=False, expensive_job="analyze"
+        )
     )
     thirdparty_text = (root / "3rdparty" / "CMakeLists.txt").read_text()
     issues.extend(
@@ -3624,6 +3910,12 @@ def check_repo(root: Path) -> list[str]:
     issues.extend(
         f".github/workflows/static-analysis.yml: {issue}"
         for issue in static_analysis_workflow_issues(static_text)
+    )
+    issues.extend(
+        f".github/workflows/static-analysis.yml: {issue}"
+        for issue in platform_fragile_preflight_issues(
+            static_text, ci_build=False, expensive_job="static-analysis"
+        )
     )
     if (
         'python3 "$CLANG_TIDY_DIFF"' not in static_text
@@ -3675,6 +3967,12 @@ def check_repo(root: Path) -> list[str]:
     issues.extend(
         f".github/workflows/ci-build.yml: {issue}"
         for issue in ci_build_workflow_issues(ci_text)
+    )
+    issues.extend(
+        f".github/workflows/ci-build.yml: {issue}"
+        for issue in platform_fragile_preflight_issues(
+            ci_text, ci_build=True
+        )
     )
     if not all(
         marker in ci_text

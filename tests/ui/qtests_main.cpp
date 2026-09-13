@@ -21,12 +21,20 @@
 #include <catch2/catch.hpp>
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEvent>
+#include <QEventLoop>
 #include <QMetaType>
 #include <QThreadPool>
 #include <QtConcurrent>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
 #if defined( Q_OS_UNIX )
 #include <sys/resource.h>
@@ -34,8 +42,9 @@
 
 #include <capturestore.h>
 #include <configuration.h>
-#include <linetypes.h>
+#include <filewatcher.h>
 #include <highlighterset.h>
+#include <linetypes.h>
 #include <persistentinfo.h>
 
 #include <logger.h>
@@ -44,6 +53,16 @@
 const bool PersistentInfo::ForcePortable = true;
 
 namespace {
+constexpr auto TeardownTimeoutEnvironment = "KLOGG_TEST_TEARDOWN_TIMEOUT_MS";
+
+int configuredTeardownTimeoutMs( int defaultTimeoutMs )
+{
+    bool valid = false;
+    const auto configuredTimeout
+        = qEnvironmentVariableIntValue( TeardownTimeoutEnvironment, &valid );
+    return valid && configuredTimeout > 0 ? configuredTimeout : defaultTimeoutMs;
+}
+
 void configureTestTempDir()
 {
     // Use the executable directory instead of the process working directory so
@@ -71,40 +90,55 @@ void configureTestFdLimit()
 #if defined( Q_OS_UNIX )
     constexpr rlim_t DesiredFdLimit = 1024;
 
+    const auto describeLimit = []( rlim_t limit ) {
+        return limit == RLIM_INFINITY ? std::string{ "infinity" }
+                                      : std::to_string( static_cast<unsigned long long>( limit ) );
+    };
+
     rlimit fdLimit{};
-    if ( getrlimit( RLIMIT_NOFILE, &fdLimit ) == 0 ) {
-        const rlim_t targetLimit
-            = ( fdLimit.rlim_max < DesiredFdLimit ) ? fdLimit.rlim_max : DesiredFdLimit;
-        if ( targetLimit > fdLimit.rlim_cur ) {
-            fdLimit.rlim_cur = targetLimit;
-            (void)setrlimit( RLIMIT_NOFILE, &fdLimit );
+    if ( getrlimit( RLIMIT_NOFILE, &fdLimit ) != 0 ) {
+        const auto error = errno;
+        fprintf( stderr, "configureTestFdLimit: getrlimit(RLIMIT_NOFILE) failed: %s\n",
+                 std::strerror( error ) );
+        return;
+    }
+
+    const rlim_t targetLimit
+        = ( fdLimit.rlim_max < DesiredFdLimit ) ? fdLimit.rlim_max : DesiredFdLimit;
+    if ( targetLimit > fdLimit.rlim_cur ) {
+        auto raisedLimit = fdLimit;
+        raisedLimit.rlim_cur = targetLimit;
+        if ( setrlimit( RLIMIT_NOFILE, &raisedLimit ) != 0 ) {
+            const auto error = errno;
+            fprintf( stderr, "configureTestFdLimit: setrlimit(RLIMIT_NOFILE, soft=%s) failed: %s\n",
+                     describeLimit( targetLimit ).c_str(), std::strerror( error ) );
         }
     }
+
+    rlimit effectiveLimit{};
+    if ( getrlimit( RLIMIT_NOFILE, &effectiveLimit ) != 0 ) {
+        const auto error = errno;
+        fprintf( stderr, "configureTestFdLimit: effective getrlimit(RLIMIT_NOFILE) failed: %s\n",
+                 std::strerror( error ) );
+        return;
+    }
+
+    const auto softLimit = describeLimit( effectiveLimit.rlim_cur );
+    const auto hardLimit = describeLimit( effectiveLimit.rlim_max );
+    fprintf( stderr, "configureTestFdLimit: effective RLIMIT_NOFILE soft=%s hard=%s\n",
+             softLimit.c_str(), hardLimit.c_str() );
+#else
+    fprintf( stderr, "configureTestFdLimit: RLIMIT_NOFILE is unavailable on this platform\n" );
 #endif
 }
 } // namespace
 
 namespace {
 
-// Catch2 v2 listener that drains the global QThreadPool after every test
-// case. The integration tests run serially in one process, so a forgotten
-// QtConcurrent task that outlives its test would otherwise keep running
-// (and touching dead temp files / destroyed models) while the NEXT test
-// executes — a classic source of flaky cross-test failures on slower
-// Windows/x86 CI legs. Joining between test cases converts such leaks into
-// a deterministic, attributable stall at the end of the offending test.
-//
-// Why this cannot deadlock: the wait runs on the main thread, and no global
-// -pool task in this codebase blocks on the main thread — there is no
-// Qt::BlockingQueuedConnection anywhere in src/, QuickFind search futures are
-// interrupted and joined by widget destructors (stopSearchAndWait, which runs
-// before this listener fires), and decompressor/device-list futures only
-// deliver their finished signal through the queued event loop. A task that
-// never finishes on its own would hang the wait forever, so the wait is
-// bounded: on timeout the test case is named and the run continues.
-//
-// The wait is cheap when idle (waitForDone returns immediately with an empty
-// pool), so per-test-case granularity costs nothing in the common case.
+// Catch2 v2 listener that drives asynchronous teardown to a bounded fixed
+// point after every test. Object destruction can post worker work, worker
+// completion can post Qt events, and deferred deletion can enqueue FileWatcher
+// removals. Two quiet passes prevent that chain from spilling into the next test.
 //
 // CaptureStore is deliberately NOT drained here: its cleanup runs on its own
 // std::thread set whose shutdown flag has no re-arm path, so it can only be
@@ -115,16 +149,63 @@ class ThreadDrainListener : public Catch::TestEventListenerBase {
 
     void testCaseEnded( Catch::TestCaseStats const& testCaseStats ) override
     {
-        // Generous bound: normal pool tasks (search on small temp files)
-        // finish in milliseconds; this only trips for genuinely leaked work.
-        constexpr int DrainTimeoutMs = 30000;
+        constexpr int DefaultDrainTimeoutMs = 30000;
+        constexpr int EventDrainSliceMs = 50;
+        constexpr int RequiredQuietPasses = 2;
 
-        if ( !QThreadPool::globalInstance()->waitForDone( DrainTimeoutMs ) ) {
+        const auto drainTimeoutMs = configuredTeardownTimeoutMs( DefaultDrainTimeoutMs );
+        auto* const threadPool = QThreadPool::globalInstance();
+
+        QElapsedTimer elapsed;
+        elapsed.start();
+
+        int quietPasses = 0;
+
+        const auto failDrain = [ & ]( const char* stage, int pass ) {
             fprintf( stderr,
-                     "ThreadDrainListener: global QThreadPool still busy %d ms after "
-                     "test case \"%s\" -- leaked QtConcurrent task?\n",
-                     DrainTimeoutMs,
-                     testCaseStats.testInfo.name.c_str() );
+                     "ThreadDrainListener: fatal stage=%s test=\"%s\" pass=%d "
+                     "elapsed_ms=%lld timeout_ms=%d quiet_passes=%d active_qthreads=%d\n",
+                     stage, testCaseStats.testInfo.name.c_str(), pass,
+                     static_cast<long long>( elapsed.elapsed() ), drainTimeoutMs, quietPasses,
+                     threadPool->activeThreadCount() );
+            fflush( stderr );
+            // Continuing would let work from this case access the next case's state.
+            std::_Exit( EXIT_FAILURE );
+        };
+
+        const auto remainingTimeMs = [ & ]( const char* stage, int pass ) {
+            const auto remaining = drainTimeoutMs - elapsed.elapsed();
+            if ( remaining <= 0 ) {
+                failDrain( stage, pass );
+            }
+            return static_cast<int>( remaining );
+        };
+
+        for ( int pass = 1;; ++pass ) {
+            if ( !threadPool->waitForDone( remainingTimeMs( "global-qthreadpool", pass ) ) ) {
+                failDrain( "global-qthreadpool", pass );
+            }
+
+            if ( auto* watcher = FileWatcher::existingInstanceForTest();
+                 watcher != nullptr
+                 && !watcher->waitForIdleForTest( remainingTimeMs( "filewatcher", pass ) ) ) {
+                failDrain( "filewatcher", pass );
+            }
+
+            QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
+            QCoreApplication::processEvents( QEventLoop::AllEvents, EventDrainSliceMs );
+
+            auto* watcher = FileWatcher::existingInstanceForTest();
+            const auto watcherNotificationsFlushed
+                = watcher != nullptr && watcher->flushPendingNotificationsForTest();
+            const auto threadPoolIdle = threadPool->waitForDone( 0 );
+            const auto watcherIdle = watcher == nullptr || watcher->waitForIdleForTest( 0 );
+            quietPasses = threadPoolIdle && watcherIdle && !watcherNotificationsFlushed
+                              ? quietPasses + 1
+                              : 0;
+            if ( quietPasses == RequiredQuietPasses ) {
+                return;
+            }
         }
     }
 };

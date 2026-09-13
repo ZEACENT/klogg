@@ -114,8 +114,8 @@ class LogFilteredData : public AbstractLogData {
     // match when matches are visible; marks retain it when matches are hidden.
     // Plain lines mirrored by allLinesVisible are never counted.
     struct LineTypeRangeCounts {
-        const LinesCount matches;
-        const LinesCount marks;
+        LinesCount matches;
+        LinesCount marks;
     };
     LineTypeRangeCounts countLineTypesInRange( LineNumber first, LineNumber end ) const;
 

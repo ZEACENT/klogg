@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -608,7 +609,7 @@ class ApplicationIdentityContractTest(unittest.TestCase):
             with self.subTest(valid=suffix):
                 result = subprocess.run(
                     [
-                        "python3",
+                        sys.executable,
                         str(CI_CONTAINER_SUFFIX_VALIDATOR),
                         "--suffix",
                         suffix,
@@ -622,7 +623,7 @@ class ApplicationIdentityContractTest(unittest.TestCase):
             with self.subTest(invalid=suffix):
                 result = subprocess.run(
                     [
-                        "python3",
+                        sys.executable,
                         str(CI_CONTAINER_SUFFIX_VALIDATOR),
                         "--suffix",
                         suffix,

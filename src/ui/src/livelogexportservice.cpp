@@ -229,6 +229,8 @@ void LiveLogExportJob::scheduleProgressDelivery()
     }
 
     if ( progressTimer_ == nullptr ) {
+        // QTimer is owned by QObject parentage; progressTimer_ is a non-owning observer.
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
         progressTimer_ = new QTimer( this );
         progressTimer_->setSingleShot( true );
         progressTimer_->setInterval( ProgressDeliveryIntervalMs );
