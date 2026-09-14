@@ -2429,7 +2429,44 @@ def _check_native_presentation_test_assertion(
     return findings
 
 
+def _check_shared_ptr_use_count_mutation_gate(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Reject production ownership-count decisions.
+
+    ``shared_ptr::use_count()`` is diagnostic and cannot establish an immutable
+    publication boundary. Production ownership decisions must use explicit state
+    protected by the same lock as publication. Intentional diagnostics require the
+    local allow marker.
+    """
+    if (
+        "logdata" not in path.parts
+        or "tests" in path.parts
+        or "use_count" not in text
+    ):
+        return []
+
+    code = _strip_cpp_literals(_strip_cpp_comments(text))
+    allow_lines = _cpp_allow_marker_lines(text)
+    findings: list[tuple[int, str]] = []
+    message = (
+        "Do not make production decisions from shared_ptr::use_count(); ownership "
+        "count is not synchronization. Publish explicit immutable state under the "
+        "same lock as readers and writers."
+    )
+    for match in re.finditer(r"(?:\.|->)\s*use_count\s*\(", code):
+        use_count_offset = match.start() + match.group(0).index("use_count")
+        line_num = code.count("\n", 0, use_count_offset) + 1
+        if line_num not in allow_lines:
+            findings.append((line_num, message))
+    return findings
+
+
 MULTI_LINE_CHECKS: list[dict] = [
+    {
+        "name": "shared-ptr-use-count-mutation-gate",
+        "check": _check_shared_ptr_use_count_mutation_gate,
+    },
     {
         "name": "writable-reopen-of-live-qlockfile",
         "check": _check_writable_reopen_of_live_qlockfile,

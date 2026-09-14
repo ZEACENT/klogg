@@ -1436,7 +1436,8 @@ void StreamingLogData::rememberAppendedRawLines( const CaptureStore::AppendResul
         auto& tail = cachedRawBatches_.back();
         const auto combinedBytes = static_cast<qint64>( tail->rawUtf8Lines.size() ) + incomingBytes;
         const auto combinedLines = tail->lineCount.get() + appendResult.lineCount.get();
-        if ( tail.use_count() == 1 && tail->firstLine + tail->lineCount == appendResult.firstLine
+        if ( tail->readers == 0
+             && tail->firstLine + tail->lineCount == appendResult.firstLine
              && combinedBytes <= CachedRawBatchTargetBytes
              && combinedLines <= CachedRawBatchLineLimit ) {
             const auto previousMetadataBytes = cachedRawBatchMetadataBytes( *tail );
@@ -1505,6 +1506,7 @@ StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) 
     auto nextLine = first;
     const auto requestedEnd = first + number;
     std::vector<CachedRawSlice> slices;
+    std::function<void()> afterLeaseForTesting;
     slices.reserve( 4u );
     {
         std::lock_guard<std::mutex> lock( cachedRawBatchesMutex_ );
@@ -1537,9 +1539,32 @@ StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) 
                 break;
             }
         }
+        if ( nextLine >= requestedEnd ) {
+            for ( const auto& slice : slices ) {
+                ++slice.batch->readers;
+            }
+            afterLeaseForTesting = std::move( afterRawCacheLeaseForTesting_ );
+        }
     }
     if ( nextLine < requestedEnd ) {
         return std::nullopt;
+    }
+
+    struct CachedRawReaderLease {
+        std::mutex& mutex;
+        std::vector<CachedRawSlice>& slices;
+        ~CachedRawReaderLease()
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            for ( const auto& slice : slices ) {
+                Q_ASSERT( slice.batch->readers > 0 );
+                --slice.batch->readers;
+            }
+        }
+    } readerLease{ cachedRawBatchesMutex_, slices };
+
+    if ( afterLeaseForTesting ) {
+        afterLeaseForTesting();
     }
 
     RawLines rawLines;

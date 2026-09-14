@@ -191,6 +191,7 @@ class StreamingLogData : public SearchableLogData {
         LinesCount lineCount = 0_lcount;
         QByteArray rawUtf8Lines;
         klogg::vector<qint64> endOfLines;
+        mutable std::size_t readers = 0;
     };
 
     struct SuspendedOutputBinding {
@@ -286,9 +287,11 @@ class StreamingLogData : public SearchableLogData {
     static constexpr LinesCount::UnderlyingType CachedRawBatchLineLimit = 4096;
 
     mutable std::mutex cachedRawBatchesMutex_;
-    // Queries retain immutable shared batches after releasing this lock. New
-    // appends may coalesce only into a uniquely-owned tail batch.
+    // Successful queries register readers on the exact batches they retain before
+    // releasing this lock. Appends coalesce only into a tail with no reader,
+    // using explicit synchronized state rather than shared_ptr::use_count().
     std::deque<std::shared_ptr<CachedRawBatch>> cachedRawBatches_;
+    mutable std::function<void()> afterRawCacheLeaseForTesting_;
     qint64 cachedRawBytes_ = 0;
     qint64 cachedRawMetadataBytes_ = 0;
     std::size_t cachedRawBatchCountLimit_ = CachedRawBatchCountLimit;

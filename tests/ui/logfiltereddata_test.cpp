@@ -205,16 +205,42 @@ void requireOverviewRangeCounts( const LogFilteredData& filteredData, LineNumber
     REQUIRE( counts.marks == expectedMarks );
 }
 
+struct SearchConfigurationGuard {
+    explicit SearchConfigurationGuard( Configuration& config )
+        : config_( config )
+        , previousThreadPoolSize_( config.searchThreadPoolSize() )
+        , previousParallelSearch_( config.useParallelSearch() )
+        , previousResultsCache_( config.useSearchResultsCache() )
+    {
+    }
+
+    ~SearchConfigurationGuard()
+    {
+        config_.setSearchThreadPoolSize( previousThreadPoolSize_ );
+        config_.setUseParallelSearch( previousParallelSearch_ );
+        config_.setUseSearchResultsCache( previousResultsCache_ );
+    }
+
+    SearchConfigurationGuard( const SearchConfigurationGuard& ) = delete;
+    SearchConfigurationGuard& operator=( const SearchConfigurationGuard& ) = delete;
+
+  private:
+    Configuration& config_;
+    int previousThreadPoolSize_;
+    bool previousParallelSearch_;
+    bool previousResultsCache_;
+};
+
 TEST_CASE( "Overview range counts classify only visible matches and marks",
            "[logdata][overview][range-counts]" )
 {
     LogDataLoader logDataLoader;
-    auto filteredData = makeTestFilteredData( logDataLoader.log_data );
-
     auto& config = Configuration::get();
+    SearchConfigurationGuard configGuard( config );
     config.setSearchThreadPoolSize( 0 );
     config.setUseParallelSearch( false );
 
+    auto filteredData = makeTestFilteredData( logDataLoader.log_data );
     SafeQSignalSpy searchProgressSpy{ filteredData.get(),
                                       &LogFilteredData::searchProgressed };
     runSearch( filteredData.get(),
@@ -1811,16 +1837,6 @@ void publishSearchProgress( LogFilteredData& data, LinesCount matches, int progr
     PresentationAccess::publishWorkerProgress( &data, matches, progress, initialLine, generation );
 }
 
-struct SearchResultsCacheSettingGuard {
-    Configuration& configuration = Configuration::get();
-    bool previous = configuration.useSearchResultsCache();
-
-    ~SearchResultsCacheSettingGuard()
-    {
-        configuration.setUseSearchResultsCache( previous );
-    }
-};
-
 } // namespace
 
 TEST_CASE( "LogFilteredData publishes result and status streams on independent fixed windows",
@@ -1984,8 +2000,9 @@ TEST_CASE( "LogFilteredData cache hit emits both terminal streams for its new ge
            "[logdata][refresh-throttling][cache][presentation]" )
 {
     LogDataLoader loader;
-    SearchResultsCacheSettingGuard guard;
-    guard.configuration.setUseSearchResultsCache( true );
+    auto& config = Configuration::get();
+    SearchConfigurationGuard guard( config );
+    config.setUseSearchResultsCache( true );
     auto filtered = makeTestFilteredData( loader.log_data );
     SafeQSignalSpy results{ filtered.get(),
                             SIGNAL( searchResultsChanged( LinesCount, LineNumber, bool, quint64 ) ) };
