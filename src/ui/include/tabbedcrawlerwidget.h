@@ -107,6 +107,7 @@ class TabbedCrawlerWidget : public QTabWidget {
 
         addTabBarItem( index, documentId, displayName, toolTip,
                        associatedPath.value_or( toolTip ) );
+        Q_EMIT crawlerAdded();
 
         return index;
     }
@@ -127,6 +128,7 @@ class TabbedCrawlerWidget : public QTabWidget {
 
   Q_SIGNALS:
     void tabsReordered();
+    void crawlerAdded();
 
   protected:
     void keyPressEvent( QKeyEvent* event ) override;

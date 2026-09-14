@@ -404,6 +404,8 @@ MainWindow::MainWindow( WindowSession session, AdbLiveServices* adbLiveServices,
              [ this ]( int index ) { this->closeTab( index, ActionInitiator::User ); } );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::currentChanged, this,
              &MainWindow::currentTabChanged );
+    connect( &mainTabWidget_, &TabbedCrawlerWidget::crawlerAdded, this,
+             &MainWindow::syncCrawlerPresentationActivity );
     connect( &mainTabWidget_, &TabbedCrawlerWidget::tabsReordered, this,
              &MainWindow::scheduleSessionPersistence );
 
@@ -544,6 +546,7 @@ void MainWindow::reloadSession()
 
     updateOpenedFilesMenu();
     suspendSessionPersistence_ = false;
+    syncCrawlerPresentationActivity();
     scheduleSessionPersistence();
 }
 
@@ -1892,11 +1895,14 @@ void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outp
     progress->setMinimumDuration( 0 );
     progress->setAutoClose( false );
     progress->setAutoReset( false );
+    const QPointer<QProgressDialog> progressGuard( progress );
     connect( progress, &QProgressDialog::canceled, job.get(), &klogg::livelog::LiveLogExportJob::cancel );
     connect( job.get(), &klogg::livelog::LiveLogExportJob::progressChanged, progress,
-             [ progress ]( qint64 bytes ) {
-                 progress->setLabelText(
-                     MainWindow::tr( "Saving live log... %1 bytes written" ).arg( bytes ) );
+             [ progressGuard ]( qint64 bytes ) {
+                 if ( progressGuard != nullptr ) {
+                     progressGuard->setLabelText(
+                         MainWindow::tr( "Saving live log... %1 bytes written" ).arg( bytes ) );
+                 }
              } );
 
     const QPointer<MainWindow> windowGuard( this );
@@ -1904,10 +1910,12 @@ void MainWindow::startLiveLogExport( CrawlerWidget* crawler, const QString& outp
     const QPointer<AdbLogcatSource> sourceGuard( adbSource );
     job->onFinished(
         this,
-        [ windowGuard, crawlerGuard, sourceGuard, progress,
+        [ windowGuard, crawlerGuard, sourceGuard, progressGuard,
           ansiMode ]( klogg::livelog::LiveLogExportResult result ) {
-            progress->close();
-            progress->deleteLater();
+            if ( progressGuard != nullptr ) {
+                progressGuard->close();
+                progressGuard->deleteLater();
+            }
             if ( windowGuard == nullptr || crawlerGuard == nullptr
                  || sourceGuard == nullptr ) {
                 return;
@@ -2732,9 +2740,24 @@ void MainWindow::showLiveCloseFailureDialog(
     }
 }
 
+void MainWindow::syncCrawlerPresentationActivity()
+{
+    const bool windowCanPresent
+        = isVisible() && !windowState().testFlag( Qt::WindowMinimized );
+    const int currentIndex = mainTabWidget_.currentIndex();
+    for ( int index = 0; index < mainTabWidget_.count(); ++index ) {
+        auto* const crawler
+            = dynamic_cast<AbstractCrawlerWidget*>( mainTabWidget_.widget( index ) );
+        if ( crawler != nullptr ) {
+            crawler->setPresentationActive( windowCanPresent && index == currentIndex );
+        }
+    }
+}
+
 void MainWindow::currentTabChanged( int index )
 {
     LOG_DEBUG << "currentTabChanged";
+    syncCrawlerPresentationActivity();
 
     if ( index >= 0 ) {
         auto* widget = mainTabWidget_.widget( index );
@@ -3113,6 +3136,9 @@ void MainWindow::changeEvent( QEvent* event )
     }
 
     QMainWindow::changeEvent( event );
+    if ( event->type() == QEvent::WindowStateChange ) {
+        syncCrawlerPresentationActivity();
+    }
 }
 
 // Accepts the drag event if it looks like a filename
@@ -3192,7 +3218,11 @@ bool MainWindow::event( QEvent* event )
         }
     }
 
-    return QMainWindow::event( event );
+    const bool handled = QMainWindow::event( event );
+    if ( event->type() == QEvent::Show || event->type() == QEvent::Hide ) {
+        syncCrawlerPresentationActivity();
+    }
+    return handled;
 }
 
 //

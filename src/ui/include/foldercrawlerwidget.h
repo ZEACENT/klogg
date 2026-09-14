@@ -35,6 +35,7 @@
 
 #include "linetypes.h"
 #include "markprovider.h"
+#include "coalescingtimer.h"
 #include "colorlabelscontroller.h"
 #include "foldersearchresults.h"
 #include "quickfindmux.h"
@@ -88,6 +89,9 @@ class FolderCrawlerWidget : public QWidget,
     Q_OBJECT
 
   public:
+    template <class T>
+    struct access_by;
+
     explicit FolderCrawlerWidget( QWidget* parent = nullptr );
     ~FolderCrawlerWidget() override;
 
@@ -222,6 +226,7 @@ class FolderCrawlerWidget : public QWidget,
     bool isFollowEnabled() const override;
     void enteringQuickFind() override;
     void exitingQuickFind() override;
+    void setPresentationActive( bool active ) override;
 
   Q_SIGNALS:
     // Required by TabbedCrawlerWidget::addCrawler (template expects this
@@ -352,6 +357,8 @@ class FolderCrawlerWidget : public QWidget,
     std::unique_ptr<ViewSignalWiring> viewSignalWiring_;
 
     FolderSearchEngine* engine_ = nullptr;
+    klogg::CoalescingTimer presentationRefreshTimer_;
+    klogg::CoalescingTimer statusRefreshTimer_;
     LogMainView* mainView_ = nullptr;
     QSplitter* splitter_ = nullptr;
 
@@ -381,6 +388,7 @@ class FolderCrawlerWidget : public QWidget,
         FolderFilteredView* view = nullptr;
         std::unique_ptr<FolderFilteredMarkProvider> markProvider;
         QString title;
+        bool presentationRefreshPending = false;
     };
     std::vector<std::unique_ptr<ResultPane>> panes_;
     int activePaneIndex_ = -1;
@@ -519,6 +527,15 @@ class FolderCrawlerWidget : public QWidget,
     // whose generation differs are dropped (superseded by a newer search).
     quint64 currentSearchGeneration_ = 0;
     bool searchActive_ = false;
+    bool presentationActive_ = true;
+    bool presentationDirty_ = false;
+    bool presentationCatchUpQueued_ = false;
+    bool mainViewPresentationRefreshPending_ = false;
+    bool overviewPresentationRefreshPending_ = false;
+    bool overviewLineCountPresentationPending_ = false;
+    bool searchPatternPresentationPending_ = false;
+    QString pendingProgressStatusText_;
+    int overviewRebuildCountForTest_ = 0;
 
     // The last search pattern run by startSearch. Forwarded to mainView_ so that
     // when a result is clicked and its file opens, the matched substring is
@@ -655,6 +672,17 @@ class FolderCrawlerWidget : public QWidget,
     void onContextControlsChanged();
     // Results-pane management (Keep results in a new window).
     ResultPane* createPane( const QString& title );
+    void schedulePanePresentationRefresh( ResultPane* pane );
+    void scheduleMainViewPresentationRefresh( bool refreshOverview,
+                                              bool updateOverviewLineCount = false );
+    void refreshPaneImmediately( ResultPane* pane );
+    void deliverFolderPresentationRefresh();
+    void flushFolderPresentation();
+    void deliverFolderStatusRefresh();
+    void queuePresentationCatchUp();
+    void recomputePresentationDirty();
+    void setCurrentSearchPattern( const RegularExpressionPattern& pattern );
+    void presentCurrentSearchPattern();
     void onActivePaneChanged( int tabIndex );
     void onClosePane( int tabIndex );
 };

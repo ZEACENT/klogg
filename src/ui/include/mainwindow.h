@@ -245,6 +245,7 @@ class MainWindow : public QMainWindow {
     bool extractAndLoadFile( const QString& fileName );
     void openRemoteFile( const QUrl& url );
     void updateTitleBar( const QString& fileName );
+    void syncCrawlerPresentationActivity();
     void addRecentFile( const QString& fileName );
     void addRecentFolder( const QString& folderPath );
     void updateRecentFileActions();

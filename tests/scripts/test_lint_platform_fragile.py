@@ -530,6 +530,516 @@ class QFileInfoDirectIncludeTest(unittest.TestCase):
         )
 
 
+class QWidgetDataLambdaParameterShadowingTest(unittest.TestCase):
+    def check(self, text, name="src/ui/src/examplewidget.cpp"):
+        return lint._check_data_variable_shadowing(text, Path(name))
+
+    def test_one_line_lambda_data_parameter_is_flagged(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        QObject::connect( source, &Source::ready, this, "
+            "[ this ]( const QByteArray& data ) { consume( data ); } );\n"
+            "    }\n"
+            "};\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 4)
+
+    def test_multiline_lambda_data_parameter_is_flagged(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        QObject::connect( source, &Source::ready, this, [ this ](\n"
+            "            const QByteArray&\n"
+            "                data ) { consume( data ); } );\n"
+            "    }\n"
+            "};\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 6)
+
+    def test_common_local_declarator_forms_are_flagged_in_widget_members(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        app::Payload data;\n"
+            "        Payload* data = payload;\n"
+            "        const Payload& data = payload;\n"
+            "        std::vector<Payload> data{};\n"
+            "        const auto data = makePayload();\n"
+            "    }\n"
+            "};\n"
+        )
+        findings = self.check(text)
+        self.assertEqual([line for line, _ in findings], [4, 5, 6, 7, 8])
+
+    def test_ui_widget_names_without_widget_suffix_are_flagged(self):
+        cases = [
+            ("MainWindow", "src/ui/src/mainwindow.cpp"),
+            ("AbstractLogView", "src/ui/src/abstractlogview.cpp"),
+            ("SearchToolbar", "src/ui/src/searchtoolbar.cpp"),
+            ("KeySequencePresenter", "src/ui/src/optionsdialog.cpp"),
+            ("CrawlerTabBar", "src/ui/src/tabbedcrawlerwidget.cpp"),
+            ("CrawlerWidget", "src/ui/src/crawlerwidget.cpp"),
+            ("TabbedCrawlerWidget", "src/ui/src/tabbedcrawlerwidget.cpp"),
+        ]
+        for class_name, path in cases:
+            with self.subTest(class_name=class_name):
+                text = (
+                    f"void {class_name}::bind() {{\n"
+                    "    auto callback = []( const QByteArray& data ) {};\n"
+                    "}\n"
+                )
+                findings = self.check(text, name=path)
+                self.assertEqual([line for line, _ in findings], [2])
+
+    def test_widget_member_parameters_and_range_declarators_are_flagged(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "public:\n"
+            "    void bind( const QByteArray& data ) {\n"
+            "        for ( const auto& data : payloads ) { consume( data ); }\n"
+            "    }\n"
+            "};\n"
+        )
+        findings = self.check(text)
+        self.assertEqual([line for line, _ in findings], [4, 5])
+
+    def test_qmainwindow_inline_member_parameter_is_flagged(self):
+        text = (
+            "#include <QMainWindow>\n"
+            "class MainWindow : public QMainWindow {\n"
+            "    void bind( const QByteArray& data ) {}\n"
+            "};\n"
+        )
+        findings = self.check(text, name="src/ui/src/mainwindow.cpp")
+        self.assertEqual([line for line, _ in findings], [3])
+
+    def test_constructor_initializer_braces_do_not_hide_body_lambda_parameter(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "public:\n"
+            "    ExampleWidget();\n"
+            "};\n"
+            "ExampleWidget::ExampleWidget() : state_{ makeState() } {\n"
+            "    auto callback = []( const QByteArray& data ) { consume( data ); };\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual([line for line, _ in findings], [7])
+
+    def test_free_function_local_in_widget_implementation_is_allowed(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "public:\n"
+            "    void bind();\n"
+            "};\n"
+            "void ExampleWidget::bind() { consume(); }\n"
+            "void loadPayload() {\n"
+            "    Payload data;\n"
+            "    consume( data );\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_non_widget_ui_helper_is_not_inferred_from_its_name(self):
+        text = (
+            "void EncodingMenu::rebuild() {\n"
+            "    Payload data;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            self.check(text, name="src/ui/src/encodings.cpp"), []
+        )
+
+    def test_non_ui_suffix_heuristic_does_not_create_widget_false_positive(self):
+        text = (
+            "void CommandLine::parse() {\n"
+            "    Payload data;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            self.check(text, name="src/core/commandline.cpp"), []
+        )
+
+    def test_safe_names_and_lambda_near_misses_are_allowed(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        auto payloadHandler = [ this ]( const QByteArray& payload ) "
+            "{ consume( payload ); };\n"
+            "        auto databaseHandler = [ this ]( QVariant database ) "
+            "{ consume( database ); };\n"
+            "        auto captureOnly = [ this ] { return this->data; };\n"
+            "        auto typeNearMiss = [ this ]( DataPacket packet ) "
+            "{ consume( packet ); };\n"
+            "    }\n"
+            "};\n"
+        )
+        self.assertEqual(self.check(text), [])
+        self.assertEqual(
+            self.check(
+                "#include <QWidget>\n"
+                "auto makeHandler() { return []( QByteArray data ) {}; }\n",
+                name="src/core/widget_catalog.cpp",
+            ),
+            [],
+        )
+
+    def test_qualified_data_defaults_are_allowed(self):
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind( int role = Roles::data ) {\n"
+            "        auto callback = []( int role = Roles::data ) {};\n"
+            "    }\n"
+            "};\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_comments_and_string_spoofs_are_allowed(self):
+        bad = "[ this ]( const QByteArray& data ) { consume( data ); }"
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {};\n"
+            "// " + bad + "\n"
+            "/* " + bad + " */\n"
+            'const auto quoted = "[ this ]( const QByteArray& data )";\n'
+            'const auto raw = R"cpp([ this ]( const QByteArray& data ))cpp";\n'
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_suppresses_only_the_lambda_parameter(self):
+        allowed = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        auto callback = [ this ]( const QByteArray& data ) {}; "
+            "// lint-allow: platform-fragile\n"
+            "    }\n"
+            "};\n"
+        )
+        self.assertEqual(self.check(allowed), [])
+
+        text = (
+            "#include <QWidget>\n"
+            "class ExampleWidget : public QWidget {\n"
+            "    void bind() {\n"
+            "        auto allowed = [ this ]( const QByteArray& data ) {}; "
+            "// lint-allow: platform-fragile\n"
+            "        auto rejected = [ this ]( const QByteArray& data ) {};\n"
+            "    }\n"
+            "};\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+
+class FolderMarkOverviewFixedWaitTest(unittest.TestCase):
+    def check(self, text, name="tests/ui/foldercrawler_test.cpp"):
+        return [
+            finding
+            for rule in lint.MULTI_LINE_CHECKS
+            if rule["name"] == "folder-mark-overview-fixed-wait"
+            for finding in rule["check"](text, Path(name))
+        ]
+
+    def test_direct_mark_and_unmark_fixed_waits_before_overview_observation_are_flagged(self):
+        cases = [
+            (
+                "widget.markMainViewLine( 2_lnum );",
+                "overview->updateView( 100 );\n"
+                "    REQUIRE( !overview->getMarkLines()->empty() );",
+            ),
+            (
+                "widget.unmarkMainViewLine( 2_lnum );",
+                "REQUIRE( overview->getMarkLines()->empty() );",
+            ),
+        ]
+        for mutation, observation in cases:
+            with self.subTest(mutation=mutation):
+                text = (
+                    'TEST_CASE( "overview marks", "[folder][overview]" )\n'
+                    "{\n"
+                    f"    {mutation}\n"
+                    "    QTest::qWait( 50 );\n"
+                    f"    {observation}\n"
+                    "}\n"
+                )
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0][0], 4)
+
+    def test_direct_overview_observation_without_flush_is_flagged(self):
+        text = """\
+TEST_CASE( "overview marks", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    overview->updateView( 100 );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 4)
+
+    def test_direct_widget_overview_observation_without_flush_is_flagged(self):
+        text = """\
+TEST_CASE( "overview marks", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    REQUIRE( !widget.overviewModel()->getMarkLines()->empty() );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 4)
+
+    def test_multiline_direct_mark_sequence_is_flagged(self):
+        text = """\
+TEST_CASE( "overview marks", "[folder][overview]" )
+{
+    widget
+        .markMainViewLine(
+            2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 6)
+
+    def test_explicit_presentation_flush_is_accepted(self):
+        text = """\
+TEST_CASE( "overview marks", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    flushFolderPresentation( widget );
+    overview->updateView( 100 );
+    REQUIRE( !overview->getMarkLines()->empty() );
+
+    widget.unmarkMainViewLine( 2_lnum );
+    flushFolderPresentation( widget );
+    REQUIRE( overview->getMarkLines()->empty() );
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_legitimate_key_and_mouse_input_pacing_is_accepted(self):
+        cases = [
+            "QTest::keyClick( widget.mainView(), Qt::Key_M );",
+            "QTest::mouseClick( widget.mainView(), Qt::LeftButton );",
+        ]
+        for input_action in cases:
+            with self.subTest(input_action=input_action):
+                text = (
+                    'TEST_CASE( "overview input", "[folder][overview]" )\n'
+                    "{\n"
+                    f"    {input_action}\n"
+                    "    QTest::qWait( 50 );\n"
+                    "    overview->updateView( 100 );\n"
+                    "    REQUIRE( !overview->getMarkLines()->empty() );\n"
+                    "}\n"
+                )
+                self.assertEqual(self.check(text), [])
+
+    def test_near_miss_sequences_are_accepted(self):
+        cases = [
+            """\
+TEST_CASE( "state only", "[folder]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    REQUIRE( widget.isMainViewLineMarked( 2_lnum ) );
+}
+""",
+            """\
+TEST_CASE( "wait before mutation", "[folder][overview]" )
+{
+    QTest::qWait( 50 );
+    widget.markMainViewLine( 2_lnum );
+    flushFolderPresentation( widget );
+    overview->updateView( 100 );
+}
+""",
+            """\
+TEST_CASE( "different mutation", "[folder][overview]" )
+{
+    widget.selectResultRow( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+}
+""",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.check(text), [])
+
+        folder_sequence = """\
+TEST_CASE( "overview marks", "[overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    overview->updateView( 100 );
+}
+"""
+        self.assertEqual(
+            self.check(folder_sequence, name="tests/ui/crawlerwidget_test.cpp"), []
+        )
+
+    def test_sibling_catch_sections_do_not_form_one_sequence(self):
+        text = """\
+TEST_CASE( "sectioned overview", "[folder][overview]" )
+{
+    SECTION( "mutation only" )
+    {
+        widget.markMainViewLine( 2_lnum );
+    }
+    SECTION( "unrelated observation" )
+    {
+        QTest::qWait( 50 );
+        overview->updateView( 100 );
+    }
+}
+"""
+        self.assertEqual(self.check(text), [])
+
+    def test_sibling_section_flush_does_not_cover_observation_path(self):
+        text = """\
+TEST_CASE( "sectioned overview", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    SECTION( "flush only" )
+    {
+        flushFolderPresentation( widget );
+    }
+    SECTION( "observe without flush" )
+    {
+        overview->updateView( 100 );
+    }
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 10)
+
+    def test_later_unflushed_sibling_observation_is_flagged(self):
+        text = """\
+TEST_CASE( "sectioned overview", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    SECTION( "flushed observation" )
+    {
+        flushFolderPresentation( widget );
+        overview->updateView( 100 );
+    }
+    SECTION( "unflushed observation" )
+    {
+        overview->updateView( 100 );
+    }
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 11)
+
+    def test_mutation_in_section_reaches_observation_after_section(self):
+        text = """\
+TEST_CASE( "sectioned overview", "[folder][overview]" )
+{
+    SECTION( "mutation" )
+    {
+        widget.markMainViewLine( 2_lnum );
+    }
+    overview->updateView( 100 );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 7)
+
+    def test_comments_and_string_spoofs_are_accepted(self):
+        bad = (
+            "widget.markMainViewLine( 2_lnum );\n"
+            "QTest::qWait( 50 );\n"
+            "overview->updateView( 100 );"
+        )
+        text = (
+            "// widget.markMainViewLine( 2_lnum );\n"
+            "// QTest::qWait( 50 );\n"
+            "// overview->updateView( 100 );\n"
+            'const auto quoted = "widget.markMainViewLine; QTest::qWait; overview";\n'
+            'const auto raw = R"cpp(' + bad + ')cpp";\n'
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_suppresses_only_the_intentional_wait(self):
+        allowed = """\
+TEST_CASE( "intentional timing", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50 ); // lint-allow: platform-fragile -- timing is under test
+    overview->updateView( 100 );
+}
+"""
+        self.assertEqual(self.check(allowed), [])
+
+        text = allowed + """\
+TEST_CASE( "unallowed timing", "[folder][overview]" )
+{
+    widget.unmarkMainViewLine( 2_lnum );
+    QTest::qWait( 50 );
+    REQUIRE( overview->getMarkLines()->empty() );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 10)
+
+    def test_malformed_fixed_wait_sequence_fails_closed(self):
+        text = """\
+TEST_CASE( "truncated wait", "[folder][overview]" )
+{
+    widget.markMainViewLine( 2_lnum );
+    QTest::qWait( 50;
+    overview->updateView( 100 );
+}
+"""
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("malformed", findings[0][1].lower())
+
+    def test_current_tree_is_clean_and_real_wait_mutation_is_rejected(self):
+        path = REPO_ROOT / "tests" / "ui" / "foldercrawler_test.cpp"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(self.check(text, name=str(path)), [])
+
+        corrected = (
+            "    widget.markMainViewLine( 2_lnum );\n"
+            "    flushFolderPresentation( widget );\n"
+            "    overview->updateView( 100 );"
+        )
+        escaped = (
+            "    widget.markMainViewLine( 2_lnum );\n"
+            "    QTest::qWait( 50 );\n"
+            "    overview->updateView( 100 );"
+        )
+        mutated = text.replace(corrected, escaped, 1)
+        self.assertNotEqual(mutated, text)
+        self.assertGreaterEqual(len(self.check(mutated, name=str(path))), 1)
+
+
 class VectorscanCapabilityAssertionTest(unittest.TestCase):
     def test_unguarded_require_is_flagged(self):
         # The exact shape that broke the Windows x86-qt5 [QTRegex] job in PR #42.

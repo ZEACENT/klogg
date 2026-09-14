@@ -23,6 +23,10 @@
 
 namespace klogg::livelog {
 
+namespace {
+constexpr int ProgressDeliveryIntervalMs = 33;
+}
+
 struct LiveLogExportJob::OwnerCall {
     explicit OwnerCall( std::function<void()> callback )
         : operation( std::move( callback ) )
@@ -184,6 +188,78 @@ LiveLogExportJob::mapFailure( StreamingLogData::OutputExportFailure failure )
     return LiveLogExportResult::WriteFailed;
 }
 
+bool LiveLogExportJob::progressIsSuppressed() const
+{
+    return progressTerminal_.load( std::memory_order_acquire )
+           || publicationDecision_.load( std::memory_order_acquire )
+                  == PublicationDecision::Cancelled;
+}
+
+void LiveLogExportJob::recordProgress( qint64 bytesWritten )
+{
+    if ( progressIsSuppressed() ) {
+        return;
+    }
+
+    latestProgressBytes_.store( bytesWritten, std::memory_order_release );
+    // Use a release read-modify-write for every report, including coalesced
+    // reports. The owner's acquire exchange then observes the latest value that
+    // arrived before it cleared the pending flag. A failed compare-exchange
+    // would only read the existing flag and would not publish that later value
+    // across the two atomics.
+    if ( progressDispatchPending_.exchange( true, std::memory_order_release ) ) {
+        return;
+    }
+    if ( progressIsSuppressed() ) {
+        progressDispatchPending_.store( false, std::memory_order_release );
+        return;
+    }
+    if ( !QMetaObject::invokeMethod( this, "scheduleProgressDelivery",
+                                     Qt::QueuedConnection ) ) {
+        progressDispatchPending_.store( false, std::memory_order_release );
+    }
+}
+
+void LiveLogExportJob::scheduleProgressDelivery()
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    if ( progressIsSuppressed() ) {
+        progressDispatchPending_.store( false, std::memory_order_release );
+        return;
+    }
+
+    if ( progressTimer_ == nullptr ) {
+        // QTimer is owned by QObject parentage; progressTimer_ is a non-owning observer.
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+        progressTimer_ = new QTimer( this );
+        progressTimer_->setSingleShot( true );
+        progressTimer_->setInterval( ProgressDeliveryIntervalMs );
+        progressTimer_->setTimerType( Qt::CoarseTimer );
+        QObject::connect( progressTimer_, &QTimer::timeout, this,
+                          &LiveLogExportJob::deliverProgress );
+    }
+    if ( !progressTimer_->isActive() ) {
+        progressTimer_->start();
+    }
+}
+
+void LiveLogExportJob::deliverProgress()
+{
+    Q_ASSERT( QThread::currentThread() == thread() );
+    progressDispatchPending_.exchange( false, std::memory_order_acquire );
+    if ( progressIsSuppressed() ) {
+        return;
+    }
+
+    const auto latestProgress
+        = latestProgressBytes_.load( std::memory_order_acquire );
+    if ( latestProgress == deliveredProgressBytes_ ) {
+        return;
+    }
+    deliveredProgressBytes_ = latestProgress;
+    Q_EMIT progressChanged( latestProgress );
+}
+
 void LiveLogExportJob::run()
 {
     {
@@ -211,7 +287,7 @@ void LiveLogExportJob::run()
             return written;
         }
         bytesWritten += written;
-        Q_EMIT progressChanged( bytesWritten );
+        recordProgress( bytesWritten );
         return written;
     };
     const auto cancelled = [ this ] {
@@ -421,6 +497,8 @@ StreamingLogData::OutputExportTail LiveLogExportJob::takeCandidateTail()
 
 void LiveLogExportJob::complete( LiveLogExportResult result )
 {
+    progressTerminal_.store( true, std::memory_order_release );
+
     // A completed job retains only its observable result. Releasing the
     // immutable snapshot here lets CaptureStore retire trimmed spill files
     // even while the service keeps the latest job available to the UI.

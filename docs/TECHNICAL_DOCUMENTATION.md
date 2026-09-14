@@ -108,8 +108,8 @@ flowchart TB
         CW --> FilterView[FilteredView<br/>search results]
         CW --> QuickFind[QuickFindMux<br/>pattern and mode selection]
         CW --> Overview[OverviewWidget<br/>marks and matches]
-        CW --> LiveThrottle[Live search throttle<br/>250ms active / 1000ms inactive]
-        CW --> UiRefresh[Live UI refresh throttle<br/>~30 FPS loadingFinished]
+        CW --> LiveThrottle[Live search request coalescing<br/>250ms while presentable]
+        CW --> UiRefresh[Incremental presentation<br/>33ms / ~30 FPS]
         MainView --> AbstractView[AbstractLogView<br/>scrolling, rendering, selection]
         FilterView --> AbstractView
     end
@@ -204,7 +204,7 @@ flowchart TB
     Bench -.-> Docs
 ```
 
-The hot runtime path starts with `SearchableLogData` implementations (`LogData` for files and `StreamingLogData` for live sources), flows through `LogFilteredDataWorker`, and returns match bitmaps to both the filtered view and overview. Live streaming adds two scheduling gates: `StreamingLogData` appends into `CaptureStore` and coalesces UI refresh notifications to frame-level cadence, while `CrawlerWidget` coalesces auto-refresh search requests through a throttle timer. `LogFilteredDataWorker` then coalesces live target end lines before dispatching update operations. ANSI render mode has a separate recent-line display cache in `StreamingLogData` so the main view can reuse stripped text and color spans across repeated paints. UI components own interaction state; data and search components own indexing, matching, and thread-side counters.
+The hot runtime path starts with `SearchableLogData` implementations (`LogData` for files and `StreamingLogData` for live sources), flows through `LogFilteredDataWorker`, and returns match bitmaps to both the filtered view and overview. Incremental visual publication has one common cadence: live append notifications, filtered-result publication, and folder-result pane presentation use a fixed-first-deadline 33 ms window (about 30 FPS). Search progress/status is independent and remains on a 100 ms window; terminal completion publishes the final result and then terminal status immediately, with no residual callback. `CrawlerWidget` separately coalesces live auto-refresh search requests while a tab is presentable, and `LogFilteredDataWorker` coalesces target end lines before dispatching update operations. Hidden, background-tab, and minimized views keep their data and search models authoritative but suspend expensive view publication; activation consumes all accumulated dirtiness in one latest-state catch-up. A visible but unfocused window remains presentable. ANSI render mode has a separate recent-line display cache in `StreamingLogData` so the main view can reuse stripped text and color spans across repeated paints. UI components own interaction state and presentation scheduling; data and search components own indexing, matching, and thread-side counters.
 
 ---
 
@@ -468,9 +468,12 @@ paintEvent() → drawTextArea() → QPainter → viewport()
 
 3. **Bottom Alignment Detection**
 
-4. **Live Refresh Throttling**
-   - `StreamingLogData` coalesces live append `loadingFinished` notifications to about 30 FPS.
-   - Prevents high-rate iOS/ADB stream chunks from driving one `CrawlerWidget::loadingFinishedHandler()` call and one main-view/overview refresh per process read.
+4. **Incremental Presentation Cadence**
+   - `StreamingLogData` coalesces live append `loadingFinished` notifications on a fixed 33 ms window (about 30 FPS).
+   - `LogFilteredData` publishes changed result sets on the same 33 ms cadence, independently from its 100 ms search progress/status stream.
+   - `FolderCrawlerWidget` commits each file group to the authoritative model immediately and coalesces presentation with a pending flag per result pane; `AbstractLogView::updateData()` owns the resulting `forceRefresh()`.
+   - Terminal search publication bypasses both windows deterministically: final results are published first, terminal status follows immediately, and both timers are left empty.
+   - A hidden window, minimized window, or background tab suspends expensive view publication without suspending ingestion or search. Returning to presentation-active state queues exactly one latest-state catch-up. Window focus alone does not suspend a visible tab.
 
 5. **ANSI Display Cache**
    - `StreamingLogData` caches recent ANSI-rendered display lines as stripped text plus color spans.
@@ -535,10 +538,11 @@ LogFilteredData → LogFilteredDataWorker → SearchOperation → PatternMatcher
    - Qt Regex (fallback)
    - Boolean evaluation
 
-4. **Result Storage**
+4. **Result Storage and Publication**
    - Roaring Bitmaps for matches
-   - Updates `matching_lines_`
-   - Emits progress signals
+   - Updates `matching_lines_` immediately on the UI-thread receiver
+   - Publishes changed filtered results at 33 ms cadence and progress/status at 100 ms cadence
+   - Publishes terminal results before terminal status immediately
 
 ### Search Caching
 
@@ -714,7 +718,8 @@ Supports:
 
 - Qt signals for cross-thread communication
 - `Qt::QueuedConnection` for thread safety
-- Progress signals throttled to reduce overhead
+- Independent owner-owned coalescing timers: 33 ms for incremental result presentation, 100 ms for progress/status
+- Deterministic terminal result-then-status publication with no timer residue
 
 ---
 

@@ -42,10 +42,8 @@
 
 #include "log.h"
 
-#include <KDSignalThrottler.h>
 #include <QCoreApplication>
 #include <QString>
-#include <QTimer>
 
 #include <algorithm>
 #include <cassert>
@@ -60,7 +58,30 @@
 
 #include "configuration.h"
 #include "readablesize.h"
-#include "synchronization.h"
+
+namespace {
+constexpr int kSearchStatusPresentationIntervalMs = 100;
+}
+
+namespace {
+
+uint64_t countBitmapValuesInHalfOpenRange( const SearchResultArray& values,
+                                           LineNumber first, LineNumber end )
+{
+    if ( end <= first ) {
+        return 0;
+    }
+
+    // CRoaring rank is inclusive: rank(x) counts values <= x. Convert the
+    // half-open range [first, end) without constructing a temporary bitmap.
+    const auto countThroughEnd = values.rank( end.get() - 1 );
+    const auto countBeforeFirst
+        = first == 0_lnum ? uint64_t{ 0 } : values.rank( first.get() - 1 );
+    Q_ASSERT( countThroughEnd >= countBeforeFirst );
+    return countThroughEnd - countBeforeFirst;
+}
+
+} // namespace
 
 // Usual constructor: just copy the data, the search is started by runSearch()
 LogFilteredData::LogFilteredData( const SearchableLogData* logData )
@@ -68,6 +89,10 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     , matching_lines_( SearchResultArray() )
     , currentRegExp_()
     , visibility_()
+    , searchResultsRefreshTimer_( klogg::kIncrementalPresentationIntervalMs,
+                                  [ this ] { publishPendingSearchResults(); } )
+    , searchStatusRefreshTimer_( kSearchStatusPresentationIntervalMs,
+                                 [ this ] { publishPendingSearchStatus(); } )
     , workerThread_( *logData )
 {
     // Starts with an empty result list
@@ -82,30 +107,12 @@ LogFilteredData::LogFilteredData( const SearchableLogData* logData )
     // Forward the update signal
     connect( &workerThread_, &LogFilteredDataWorker::searchProgressed, this,
              &LogFilteredData::handleSearchProgressed, Qt::QueuedConnection );
-
-#if !defined( Q_OS_WIN )
-    searchProgressThrottler_.setTimeout( 100 );
-    connect( this, &LogFilteredData::searchProgressedThrottled, &searchProgressThrottler_,
-             &KDToolBox::KDGenericSignalThrottler::throttle );
-
-    connect( &searchProgressThrottler_, &KDToolBox::KDGenericSignalThrottler::triggered, this,
-             &LogFilteredData::handleSearchProgressedThrottled );
-#endif
 }
 
 LogFilteredData::~LogFilteredData()
 {
     shuttingDown_ = true;
-    searchProgressThrottler_.blockSignals( true );
-
-    // KDSignalThrottler owns an internal QTimer and its destructor calls
-    // maybeEmitTriggered().  On x86/Qt5 we can still hit a timeout/metacall race
-    // during teardown unless the internal timer is stopped/disconnected first.
-    if ( auto* throttlerTimer = searchProgressThrottler_.findChild<QTimer*>() ) {
-        throttlerTimer->stop();
-        throttlerTimer->blockSignals( true );
-        disconnect( throttlerTimer, nullptr, &searchProgressThrottler_, nullptr );
-    }
+    cancelPendingPublications();
 
     interruptSearch();
     // Cancel queued work and wait for any in-flight search operations to fully
@@ -117,15 +124,12 @@ LogFilteredData::~LogFilteredData()
     workerThread_.blockSignals( true );
     disconnect( &workerThread_, nullptr, this, nullptr );
     disconnect( this, nullptr, &workerThread_, nullptr );
-    disconnect( &searchProgressThrottler_, nullptr, this, nullptr );
-    disconnect( this, nullptr, &searchProgressThrottler_, nullptr );
 
     detachReaderIfNeeded();
 
-    // Queued MetaCall events can still be pending for this object or the helper
-    // QObjects even after disconnect(); remove them before subobject destruction.
+    // Queued MetaCall events can still be pending after disconnect(); remove them
+    // before subobject destruction.
     QCoreApplication::removePostedEvents( &workerThread_ );
-    QCoreApplication::removePostedEvents( &searchProgressThrottler_ );
     QCoreApplication::removePostedEvents( this );
 
     sourceLogData_ = nullptr;
@@ -168,8 +172,8 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
             // staleness gate in the receiver, corrupting the just-displayed
             // cached result.
             const auto cachedGeneration = workerThread_.bumpGeneration();
-            Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine,
-                                     cachedGeneration );
+            publishTerminal( LinesCount( matching_lines_.cardinality() ), startLine,
+                             cachedGeneration );
         }
     }
 
@@ -183,6 +187,7 @@ void LogFilteredData::updateSearch( LineNumber startLine, LineNumber endLine )
 {
     LOG_DEBUG << "Entering updateSearch";
 
+    cancelPendingPublications();
     setAllLinesVisible( false );
     currentSearchKey_ = {};
 
@@ -198,8 +203,17 @@ void LogFilteredData::interruptSearch()
     workerThread_.interrupt();
 }
 
+void LogFilteredData::bumpSearchGeneration()
+{
+    cancelPendingPublications();
+    workerThread_.bumpGeneration();
+}
+
 void LogFilteredData::clearSearch( bool dropCache )
 {
+    // Clearing abandons both the model and every queued payload from the old
+    // search, so retire its generation before interrupting the worker.
+    bumpSearchGeneration();
     interruptSearch();
 
     allLinesVisible_ = false;
@@ -274,6 +288,39 @@ LinesCount LogFilteredData::getNbMatches() const
 LinesCount LogFilteredData::getNbMarks() const
 {
     return LinesCount( marks_.cardinality() );
+}
+
+LogFilteredData::LineTypeRangeCounts
+LogFilteredData::countLineTypesInRange( LineNumber first, LineNumber end ) const
+{
+    if ( end <= first ) {
+        return { 0_lcount, 0_lcount };
+    }
+
+    const bool matchesVisible = visibility_.testFlag( VisibilityFlags::Matches );
+    const bool marksVisible = visibility_.testFlag( VisibilityFlags::Marks );
+    if ( !matchesVisible && !marksVisible ) {
+        return { 0_lcount, 0_lcount };
+    }
+
+    const auto matchCount = matchesVisible
+                                ? countBitmapValuesInHalfOpenRange( matching_lines_, first, end )
+                                : uint64_t{ 0 };
+    if ( !marksVisible ) {
+        return { LinesCount( matchCount ), 0_lcount };
+    }
+
+    if ( !matchesVisible ) {
+        return { 0_lcount,
+                 LinesCount( countBitmapValuesInHalfOpenRange( marks_, first, end ) ) };
+    }
+
+    // |matches union marks| - |matches| is exactly the mark-only cardinality,
+    // so match precedence needs no intersection bitmap or per-line lookup.
+    const auto unionCount
+        = countBitmapValuesInHalfOpenRange( marks_and_matches_, first, end );
+    Q_ASSERT( unionCount >= matchCount );
+    return { LinesCount( matchCount ), LinesCount( unionCount - matchCount ) };
 }
 
 LogFilteredData::LineType LogFilteredData::lineTypeByIndex( LineNumber index ) const
@@ -651,63 +698,98 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
 
     assert( nbMatches >= 0_lcount );
 
+    if ( generation != currentSearchGeneration() ) {
+        return;
+    }
+
     const auto searchResults = workerThread_.getSearchResults();
+    const bool resultsChanged = !searchResults.newMatches.isEmpty();
 
     matching_lines_ |= searchResults.newMatches;
     marks_and_matches_ |= searchResults.newMatches;
 
     maxLength_ = searchResults.maxLength;
     nbLinesProcessed_ = searchResults.processedLines;
-    contextLinesListValid_ = false; // Invalidate context lines cache when search progresses
+    contextLinesListValid_ = false;
 
     if ( progress == 100
          && nbLinesProcessed_.get() == getExpectedSearchEnd( currentSearchKey_ ).get() ) {
         updateSearchResultsCache();
     }
 
-    {
-        ScopedLock lock( searchProgressMutex_ );
-        searchProgress_ = std::make_tuple( nbMatches, progress, initialLine, generation );
-    }
-
     if ( progress == 100 ) {
-        // Do not rely solely on the throttler timer for the terminal update: tests and
-        // shutdown paths need a deterministic completion signal even if the throttler
-        // event is delayed or dropped during teardown.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
+        publishTerminal( nbMatches, initialLine, generation );
         detachReaderIfNeeded();
 
         LOG_INFO << "Matches size " << readableSize( matching_lines_.getSizeInBytes( false ) )
                  << ", marks size " << readableSize( marks_.getSizeInBytes( false ) )
                  << ", union size " << readableSize( marks_and_matches_.getSizeInBytes( false ) );
-    }
-    else {
-#if defined( Q_OS_WIN )
-        // Windows test runs have hit repeated QObject/KDSignalThrottler teardown
-        // crashes after many create/search/destroy cycles. Emit progress directly
-        // instead of using the throttler on Windows.
-        Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
-#else
-        Q_EMIT searchProgressedThrottled();
-#endif
-    }
-}
-
-void LogFilteredData::handleSearchProgressedThrottled()
-{
-    if ( shuttingDown_ ) {
         return;
     }
 
-    LinesCount nbMatches;
-    int progress;
-    LineNumber initialLine;
-    quint64 generation;
-    {
-        ScopedLock lock( searchProgressMutex_ );
-        std::tie( nbMatches, progress, initialLine, generation ) = searchProgress_;
+    pendingSearchStatus_ = SearchStatusPayload{ nbMatches, progress, initialLine, generation };
+    searchStatusRefreshTimer_.request();
+
+    if ( resultsChanged || !pendingSearchResults_.has_value()
+         || pendingSearchResults_->nbMatches != nbMatches ) {
+        pendingSearchResults_
+            = SearchResultsPayload{ nbMatches, initialLine, false, generation };
+        searchResultsRefreshTimer_.request();
     }
-    Q_EMIT searchProgressed( nbMatches, progress, initialLine, generation );
+}
+
+void LogFilteredData::cancelPendingPublications()
+{
+    searchResultsRefreshTimer_.cancel();
+    searchStatusRefreshTimer_.cancel();
+    pendingSearchResults_.reset();
+    pendingSearchStatus_.reset();
+}
+
+void LogFilteredData::publishPendingSearchResults()
+{
+    if ( shuttingDown_ || !pendingSearchResults_.has_value() ) {
+        pendingSearchResults_.reset();
+        return;
+    }
+
+    const auto payload = *pendingSearchResults_;
+    pendingSearchResults_.reset();
+    if ( payload.generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchResultsChanged( payload.nbMatches, payload.initialLine, payload.terminal,
+                                 payload.generation );
+}
+
+void LogFilteredData::publishPendingSearchStatus()
+{
+    if ( shuttingDown_ || !pendingSearchStatus_.has_value() ) {
+        pendingSearchStatus_.reset();
+        return;
+    }
+
+    const auto payload = *pendingSearchStatus_;
+    pendingSearchStatus_.reset();
+    if ( payload.generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchProgressed( payload.nbMatches, payload.progress, payload.initialLine,
+                             payload.generation );
+}
+
+void LogFilteredData::publishTerminal( LinesCount nbMatches, LineNumber initialLine,
+                                       quint64 generation )
+{
+    cancelPendingPublications();
+    if ( shuttingDown_ || generation != currentSearchGeneration() ) {
+        return;
+    }
+
+    Q_EMIT searchResultsChanged( nbMatches, initialLine, true, generation );
+    Q_EMIT searchProgressed( nbMatches, 100, initialLine, generation );
 }
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const
@@ -756,14 +838,19 @@ LineNumber LogFilteredData::findFilteredLine( LineNumber lineNum ) const
         if ( !contextLinesListValid_ ) {
             rebuildContextLinesList();
         }
-        // Binary search for the line number in the sorted context lines list
-        auto it = std::lower_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum,
-                                   []( const LineNumber& a, const LineNumber& b ) { return a < b; } );
-        if ( it != contextLinesList_.end() && *it == lineNum ) {
-            const auto distance = std::distance( contextLinesList_.begin(), it );
-            return LineNumber( static_cast<LineNumber::UnderlyingType>( distance ) );
+        if ( contextLinesList_.empty() ) {
+            return maxValue<LineNumber>();
         }
-        return maxValue<LineNumber>();
+
+        // Match the no-context mapping semantics: select the last visible row at
+        // or before the source line, clamped to the first/last visible row.
+        auto contextLineIt
+            = std::upper_bound( contextLinesList_.begin(), contextLinesList_.end(), lineNum );
+        if ( contextLineIt != contextLinesList_.begin() ) {
+            --contextLineIt;
+        }
+        const auto distance = std::distance( contextLinesList_.begin(), contextLineIt );
+        return LineNumber{ static_cast<LineNumber::UnderlyingType>( distance ) };
     }
     
     // No context lines: use original logic

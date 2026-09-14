@@ -122,6 +122,7 @@ class CrawlerWidget : public QSplitter,
     qint64 searchPendingLines() const { return searchPendingLines_; }
 
     void registerShortcuts() override;
+    void setPresentationActive( bool active ) override;
 
   public Q_SLOTS:
     // Stop the asynchoronous loading of the file if one is in progress
@@ -209,14 +210,11 @@ class CrawlerWidget : public QSplitter,
     void enteringQuickFind() override;
     // QuickFind is being closed.
     void exitingQuickFind() override;
-    // Called when new data must be displayed in the filtered window.
-    // The generation matches the LogFilteredData::currentSearchGeneration() at
-    // the time the underlying SearchOperation started -- stale signals from a
-    // superseded search carry an older generation and are dropped.  The wire
-    // type is plain quint64 to round-trip cleanly through queued connections
-    // (see LogFilteredDataWorker::OperationGeneration).
-    void updateFilteredView( LinesCount nbMatches, int progress, LineNumber initialPosition,
-                             quint64 generation );
+    void updateSearchStatus( LogFilteredData* source, LinesCount nbMatches, int progress,
+                             LineNumber initialPosition, quint64 generation );
+    void updateFilteredResults( LogFilteredData* source, LinesCount nbMatches,
+                                LineNumber initialPosition, bool terminal,
+                                quint64 generation );
     // Called when a new line has been selected in the filtered view,
     // to instruct the main view to jump to the matching line.
     void jumpToMatchingLine( LineNumber filteredLineNb, LinesCount nLines, LineColumn startCol,
@@ -336,6 +334,14 @@ class CrawlerWidget : public QSplitter,
     void resetStateOnSearchPatternChanges();
 
     void connectAllFilteredViewSlots( FilteredView* view);
+    void connectSearchPublication( LogFilteredData* source );
+    bool acceptsSearchPublication( const LogFilteredData* source, quint64 generation ) const;
+    void queuePresentationRefresh( bool searchCatchUp );
+    void deliverPresentationCatchUp();
+    bool refreshAuthoritativePresentation();
+    void startPendingSearchCatchUp();
+    void updateContextLinesModel();
+    void retireSearchStatusPresentation();
 
     void saveSplitterSizes() const;
 
@@ -397,8 +403,9 @@ class CrawlerWidget : public QSplitter,
     // Last main line number received
     LineNumber currentLineNumber_;
 
-    // Current number of matches
+    // Current number of presented matches and the last accepted publication count.
     LinesCount nbMatches_;
+    LinesCount lastPublishedMatchCount_;
 
     LineNumber searchStartLine_;
     LineNumber searchEndLine_;
@@ -433,6 +440,19 @@ class CrawlerWidget : public QSplitter,
     QTimer searchUpdateThrottleTimer_;
     bool searchUpdatePending_ = false;
     LineNumber pendingSearchEndLine_;
+
+    bool presentationActive_ = true;
+    bool presentationDirty_ = false;
+    bool presentationCatchUpQueued_ = false;
+    bool presentationSearchCatchUpPending_ = false;
+    bool presentationFocusPending_ = false;
+    bool presentationSelectionRestorePending_ = false;
+    bool presentationSearchPatternPending_ = false;
+    RegularExpressionPattern currentSearchPattern_;
+    int overviewUpdateCountForTest_ = 0;
+    int bulletRefreshCountForTest_ = 0;
+    int presentationRefreshCountForTest_ = 0;
+    int searchCatchUpCountForTest_ = 0;
 };
 
 #endif

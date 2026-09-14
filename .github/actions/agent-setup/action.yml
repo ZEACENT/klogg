@@ -1,8 +1,32 @@
 name: "Setup agent"
 description: Install the pinned CMake, Ninja, Qt, Boost, and CPM build dependencies
+inputs:
+  qt-version:
+    description: Qt version to install
+    required: true
+  qt-arch:
+    description: Qt architecture to install
+    required: true
+  qt-modules:
+    description: Additional Qt modules to install
+    required: false
+    default: ""
+  qt-archives:
+    description: Qt archives to install
+    required: false
+    default: qtbase icu
 runs:
   using: "composite"
   steps:
+    - name: Validate setup inputs
+      shell: bash
+      env:
+        KLOGG_INPUT_QT_VERSION: ${{ inputs.qt-version }}
+        KLOGG_INPUT_QT_ARCH: ${{ inputs.qt-arch }}
+      run: |
+        test -n "$KLOGG_INPUT_QT_VERSION" || { echo "::error::qt-version is required"; exit 1; }
+        test -n "$KLOGG_INPUT_QT_ARCH" || { echo "::error::qt-arch is required"; exit 1; }
+
     - name: Install CMake and Ninja
       uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
       with:
@@ -10,14 +34,13 @@ runs:
         ninjaVersion: 1.12.1
 
     - name: Install Qt
-      if: ${{ matrix.config.qt_arch }}
       uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
       with:
-        version: ${{ matrix.config.qt_version }}
-        arch: ${{ matrix.config.qt_arch }}
+        version: ${{ inputs.qt-version }}
+        arch: ${{ inputs.qt-arch }}
         cache: true
-        modules: ${{ matrix.config.qt_modules }}
-        archives: ${{ matrix.config.qt_archives || 'qtbase icu' }}
+        modules: ${{ inputs.qt-modules }}
+        archives: ${{ inputs.qt-archives || 'qtbase icu' }}
 
     - name: Set boost env vars
       shell: sh
@@ -69,4 +92,3 @@ runs:
           cd $BOOST_ROOT && cp -r boost_*/* .
           rm -rf boost_*/* download.tar.bz2 download.tar
         fi
-        

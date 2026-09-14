@@ -123,6 +123,15 @@ class Overview {
     // Return the y coordinate corresponding to the passed line number.
     int yFromFileLine( LineNumber fileLine ) const;
 
+#if defined( KLOGG_TESTS )
+    // Number of bounded range aggregations performed by the most recent
+    // single-file, folder, or live recalculation.
+    unsigned lastAggregationWorkCountForTest() const
+    {
+        return lastAggregationWorkCount_;
+    }
+#endif
+
   private:
     // List of matches associated with this Overview.
     const LogFilteredData* logFilteredData_;
@@ -143,6 +152,10 @@ class Overview {
     unsigned height_;
     // Does the cache (matchesLines, markLines) need to be recalculated.
     bool dirty_;
+    // Bounded range queries performed by any overview data source. Kept at this
+    // boundary so tests can verify aggregation work without exposing storage
+    // implementation details.
+    unsigned lastAggregationWorkCount_ = 0;
 
     // List of lines representing matches and marks (are shared with the client)
     klogg::vector<WeightedLine> matchLines_;

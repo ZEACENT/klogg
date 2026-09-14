@@ -131,6 +131,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Refresh the widget when the data set has changed.
     void updateData();
+    // Apply the authoritative search range as part of the same data refresh.
+    // updateData owns the one forceRefresh for this presentation transaction.
+    void updateData( LineNumber searchStart, LineNumber searchEnd );
 
     // Swap the underlying data set to `newLogData` (folder mode: the main view
     // is repointed at the file of the selected result row). Resets scroll,
@@ -647,6 +650,9 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool visibleLineMapKeyValid_ = false;
     // Test instrumentation: counts paint-free map rebuilds (buildVisibleLineMap).
     int visibleLineMapBuildCount_ = 0;
+    int updateDataCountForTest_ = 0;
+    int forceRefreshCountForTest_ = 0;
+    quint64 presentedLineCountForTest_ = 0;
 
     LinesCount getNbVisibleLines() const;
     // Composition of the bottom frame in wrap mode: how many logical lines the

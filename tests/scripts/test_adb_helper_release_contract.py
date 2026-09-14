@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import pathlib
 import re
@@ -27,6 +28,12 @@ SEVEN_Z_LIST = ROOT / "packaging" / "windows" / "7z_klogg_listfile.txt"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_adb_helper_artifact.py"
 SMOKE_SCRIPT = ROOT / "scripts" / "smoke_adb_helper.py"
 TOOLCHAIN_SCRIPT = ROOT / "scripts" / "verify_adb_helper_toolchain.py"
+_CI_SPEC = importlib.util.spec_from_file_location(
+    "adb_release_ci_quality", ROOT / "scripts" / "lint_ci_quality.py"
+)
+assert _CI_SPEC is not None and _CI_SPEC.loader is not None
+CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
+_CI_SPEC.loader.exec_module(CI_MODULE)
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -568,6 +575,184 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn("verify_adb_helper_artifact", files[package])
                 self.assertIn("smoke_adb_helper", files[package])
+
+    def test_adb_package_support_and_full_release_artifacts_have_distinct_ownership(self):
+        workflow = self.required_text(CI_BUILD)
+        records = CI_MODULE.workflow_artifact_records(workflow)
+        package_support = "adb-helper-package-support"
+        full_release = "adb-helper-legal-assets"
+        full_release_condition = (
+            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
+            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') }}"
+        )
+
+        legal_records = records.get("BuildAdbHelperLegalAssets", [])
+        self.assertCountEqual(
+            [
+                record
+                for record in legal_records
+                if record[1] in {package_support, full_release}
+            ],
+            [
+                ("uploads", package_support, None),
+                ("uploads", full_release, full_release_condition),
+            ],
+        )
+
+        blocks = CI_MODULE.workflow_job_blocks(workflow)
+        legal_block = blocks["BuildAdbHelperLegalAssets"]
+        self.assertEqual(
+            CI_MODULE.workflow_job_direct_value(legal_block, "if"),
+            "!contains(github.event.head_commit.message, '[skip ci]')",
+            "the unconditional package-support upload is useless if its job is event-gated",
+        )
+        uploads = {}
+        for step in CI_MODULE.workflow_job_steps(workflow)["BuildAdbHelperLegalAssets"]:
+            fields, children = CI_MODULE.workflow_step_fields(step)
+            if not fields.get("uses", "").startswith("actions/upload-artifact@"):
+                continue
+            settings = children.get("with", {})
+            if settings.get("name") in {package_support, full_release}:
+                self.assertNotIn(settings["name"], uploads)
+                uploads[settings["name"]] = settings
+        self.assertEqual(set(uploads), {package_support, full_release})
+        support_path = CI_MODULE.active_script_content(
+            uploads[package_support].get("path", "")
+        )
+        self.assertEqual(
+            support_path.strip().strip("'\""),
+            "prefetch_artifacts/adb-helper-package-support/*",
+            "the workflow must upload the generator-owned package-support projection",
+        )
+        self.assertEqual(uploads[package_support].get("if-no-files-found"), "error")
+
+        full_release_path = CI_MODULE.active_script_content(
+            uploads[full_release].get("path", "")
+        )
+        self.assertEqual(
+            full_release_path.strip().strip("'\""),
+            "prefetch_artifacts/adb-helper-release/*",
+            "the release-only artifact must publish the complete legal staging root",
+        )
+        self.assertEqual(uploads[full_release].get("if-no-files-found"), "error")
+
+        helper_jobs = {
+            "BuildAdbLinuxX64",
+            "BuildAdbLinuxArm64",
+            "BuildAdbWindowsX64",
+            "BuildAdbMacX64",
+            "BuildAdbMacArm64",
+        }
+        for job in helper_jobs:
+            with self.subTest(helper=job):
+                downloads = {
+                    (artifact, condition)
+                    for kind, artifact, condition in records.get(job, [])
+                    if kind == "downloads"
+                }
+                self.assertIn((package_support, None), downloads)
+                self.assertNotIn(full_release, {artifact for artifact, _ in downloads})
+
+        package_jobs = {
+            job: "${{ env.klogg_package_enabled == 'true' }}"
+            for job in (
+                "LinuxPackages",
+                "MacPackages",
+                "MacArmPackages",
+                "WindowsPackages",
+            )
+        }
+        for job, expected_condition in package_jobs.items():
+            with self.subTest(package=job):
+                downloads = {
+                    (artifact, condition)
+                    for kind, artifact, condition in records.get(job, [])
+                    if kind == "downloads"
+                }
+                self.assertIn((package_support, expected_condition), downloads)
+                self.assertNotIn(full_release, {artifact for artifact, _ in downloads})
+
+        continuous = self.required_text(CI_CONTINUOUS)
+        continuous_records = CI_MODULE.workflow_artifact_records(continuous)
+        publish_downloads = {
+            artifact
+            for kind, artifact, _ in continuous_records.get("publish", [])
+            if kind == "downloads"
+        }
+        self.assertIn(full_release, publish_downloads)
+        self.assertNotIn(package_support, publish_downloads)
+
+    def test_adb_helper_build_consumes_package_support_scope_only(self):
+        build_action = self.required_text(BUILD_ACTION)
+        build_script = self.required_text(ADB_BUILD_SCRIPT)
+        workflow = self.required_text(CI_BUILD)
+
+        self.assertIn("package-support-root:", build_action)
+        self.assertNotIn("release-assets-root:", build_action)
+        self.assertIn('--package-support-root "${{ inputs.package-support-root }}"', build_action)
+        self.assertIn("--asset-scope package", build_action)
+        self.assertIn(
+            '--source-assets-root "${{ inputs.package-support-root }}"', build_action
+        )
+        self.assertIn('parser.add_argument("--package-support-root"', build_script)
+        self.assertNotIn('parser.add_argument("--release-assets-root"', build_script)
+        self.assertIn(
+            "package-support-root: ${{ runner.temp }}/adb-helper-package-support",
+            workflow,
+        )
+
+    def test_adb_artifact_event_projection_keeps_package_validation_on_every_ci_event(self):
+        workflow = self.required_text(CI_BUILD)
+        records = CI_MODULE.workflow_artifact_records(workflow)
+        package_support = "adb-helper-package-support"
+        full_release = "adb-helper-legal-assets"
+        producers = {
+            artifact: condition
+            for kind, artifact, condition in records.get(
+                "BuildAdbHelperLegalAssets", []
+            )
+            if kind == "uploads" and artifact in {package_support, full_release}
+        }
+        self.assertEqual(set(producers), {package_support, full_release})
+        self.assertIsNone(producers[package_support])
+        full_release_condition = (
+            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || "
+            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && "
+            "inputs.qualification-mode == 'release') }}"
+        )
+        self.assertEqual(producers.get(full_release), full_release_condition)
+
+        for event, ref, qualification_mode, full_release_expected in (
+            ("pull_request", "refs/pull/1/merge", "validation", False),
+            ("push", "refs/heads/master", "validation", True),
+            ("push", "refs/heads/topic", "validation", False),
+            ("workflow_dispatch", "refs/heads/master", "validation", False),
+            ("workflow_dispatch", "refs/heads/master", "release", True),
+            ("workflow_dispatch", "refs/heads/topic", "release", False),
+        ):
+            with self.subTest(
+                event=event, ref=ref, qualification_mode=qualification_mode
+            ):
+                self.assertTrue(
+                    producers.get(package_support) is None,
+                    "package-support assets must remain available to package validation",
+                )
+                full_release_runs = (
+                    event == "push" and ref == "refs/heads/master"
+                ) or (
+                    event == "workflow_dispatch"
+                    and ref == "refs/heads/master"
+                    and qualification_mode == "release"
+                )
+                self.assertEqual(full_release_runs, full_release_expected)
+
+        trigger_mapping = CI_MODULE.workflow_trigger_mapping(workflow)
+        self.assertIsNotNone(trigger_mapping)
+        self.assertTrue(
+            {"pull_request", "push", "workflow_dispatch"}
+            <= set(trigger_mapping)
+        )
 
     def test_release_matrix_builds_every_target_and_publishes_source_assets(self):
         build_action = self.required_text(BUILD_ACTION)

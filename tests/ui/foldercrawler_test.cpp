@@ -271,11 +271,112 @@ struct AbstractLogView::access_by<FolderViewTestAccess> {
         return view->logData_;
     }
 
+    static void resetRefreshCounts( AbstractLogView* view )
+    {
+        view->updateDataCountForTest_ = 0;
+        view->forceRefreshCountForTest_ = 0;
+    }
+
+    static int updateDataCount( const AbstractLogView* view )
+    {
+        return view->updateDataCountForTest_;
+    }
+
+    static int forceRefreshCount( const AbstractLogView* view )
+    {
+        return view->forceRefreshCountForTest_;
+    }
+
+    static quint64 presentedLineCount( const AbstractLogView* view )
+    {
+        return view->presentedLineCountForTest_;
+    }
+
     static void selectNextMark( AbstractLogView* view )
     {
         view->selectNextMark();
     }
 };
+
+template <>
+struct FolderCrawlerWidget::access_by<FolderViewTestAccess> {
+    static bool refreshPending( const FolderCrawlerWidget* widget )
+    {
+        return widget->presentationRefreshTimer_.isPending();
+    }
+
+    static bool statusPending( const FolderCrawlerWidget* widget )
+    {
+        return widget->statusRefreshTimer_.isPending();
+    }
+
+    static void flushStatus( FolderCrawlerWidget* widget )
+    {
+        widget->statusRefreshTimer_.flushPending();
+    }
+
+    static void publishProgress( FolderCrawlerWidget* widget, quint64 matches, int percent )
+    {
+        widget->onSearchProgressed( matches, percent, widget->currentSearchGeneration_ );
+    }
+
+    static bool presentationDirty( const FolderCrawlerWidget* widget )
+    {
+        return widget->presentationDirty_;
+    }
+
+    static bool catchUpQueued( const FolderCrawlerWidget* widget )
+    {
+        return widget->presentationCatchUpQueued_;
+    }
+
+    static void flushPresentation( FolderCrawlerWidget* widget )
+    {
+        if ( widget->presentationCatchUpQueued_ && widget->presentationActive_ ) {
+            widget->deliverFolderPresentationRefresh();
+            widget->presentationRefreshTimer_.cancel();
+            return;
+        }
+        widget->presentationRefreshTimer_.flushPending();
+    }
+
+    static bool paneRefreshPending( const FolderCrawlerWidget* widget, int index )
+    {
+        return index >= 0 && index < static_cast<int>( widget->panes_.size() )
+            && widget->panes_[ static_cast<size_t>( index ) ] != nullptr
+            && widget->panes_[ static_cast<size_t>( index ) ]->presentationRefreshPending;
+    }
+
+    static void closePane( FolderCrawlerWidget* widget, int index )
+    {
+        widget->onClosePane( index );
+    }
+
+    static void stopSearch( FolderCrawlerWidget* widget )
+    {
+        widget->stopSearch();
+    }
+
+    static void finishSearch( FolderCrawlerWidget* widget )
+    {
+        widget->onSearchFinished( widget->currentSearchGeneration_ );
+    }
+
+    static void resetOverviewRebuildCount( FolderCrawlerWidget* widget )
+    {
+        widget->overviewRebuildCountForTest_ = 0;
+    }
+
+    static int overviewRebuildCount( const FolderCrawlerWidget* widget )
+    {
+        return widget->overviewRebuildCountForTest_;
+    }
+};
+
+void flushFolderPresentation( FolderCrawlerWidget& widget )
+{
+    FolderCrawlerWidget::access_by<FolderViewTestAccess>::flushPresentation( &widget );
+}
 
 class NoProviderFolderMarkProbeView final : public FolderFilteredView {
   public:
@@ -2799,12 +2900,12 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
 
     // Mark a NON-match line: it must appear as a mark tick.
     widget.markMainViewLine( 2_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( !overview->getMarkLines()->empty() );
 
     widget.unmarkMainViewLine( 2_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     // Re-fetch after every update*() call: the returned pointer is documented
     // valid only until the next update (overview.h).
@@ -2813,12 +2914,12 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     // Single-file precedence: a line that is BOTH a match and a mark is drawn
     // as a match (red), so it must NOT be duplicated into the mark list.
     widget.markMainViewLine( 1_lnum ); // "ERROR alpha" is a match
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( overview->getMarkLines()->empty() );
     REQUIRE( !overview->getMatchLines()->empty() );
     widget.unmarkMainViewLine( 1_lnum );
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
 
     // Rows: 0 = header(a), 1 = alpha, 2 = beta, 3 = header(b), 4 = gamma.
     // Mark a non-match line in b, then switch between the files: the minimap
@@ -2826,7 +2927,7 @@ TEST_CASE( "FolderCrawlerWidget marks appear in the overview", "[folder][overvie
     selectResultRowAndWaitForFile( widget, 4_lnum, b );
     QTest::qWait( 100 );
     widget.markMainViewLine( 1_lnum ); // b.log:1 is "line1", not a match
-    QTest::qWait( 50 );
+    flushFolderPresentation( widget );
     overview->updateView( 100 );
     REQUIRE( !overview->getMarkLines()->empty() );
 
@@ -4494,6 +4595,7 @@ TEST_CASE( "FolderCrawlerWidget follow growth refreshes the overview line count"
     // Baseline: the open-time total (refreshFileOverview ->
     // overview_.updateData( currentMainData_->getNbLine() )).
     REQUIRE( overviewLinesInFile( widget ) == uint64_t{ 200 } );
+    FolderCrawlerWidget::access_by<FolderViewTestAccess>::resetOverviewRebuildCount( &widget );
 
     // Enable follow through the same dispatch MainWindow uses (same as the
     // follow-tail test): the view jumps to the bottom of the 200-line file.
@@ -4540,4 +4642,320 @@ TEST_CASE( "FolderCrawlerWidget follow growth refreshes the overview line count"
     // single-file. RED: linesInFile_ stays at the open-time 200 -- nothing in
     // the folder follow data-flow calls Overview::updateData on growth.
     REQUIRE( overviewLinesInFile( widget ) == uint64_t{ 300 } );
+    CHECK( FolderCrawlerWidget::access_by<FolderViewTestAccess>::overviewRebuildCount( &widget )
+           == 0 );
+}
+
+namespace {
+
+klogg::folder::FileGroup oneFolderMatch( const QString& path, LineNumber line )
+{
+    klogg::folder::FileGroup group;
+    group.filePath = path;
+    group.matches.push_back( klogg::folder::MatchRecord{ line, 0_offset, 1_offset,
+                                                         1_length, 1_length } );
+    return group;
+}
+
+using FolderCrawlerAccess = FolderCrawlerWidget::access_by<FolderViewTestAccess>;
+using FolderViewAccess = AbstractLogView::access_by<FolderViewTestAccess>;
+
+bool folderRefreshPending( const FolderCrawlerWidget& widget )
+{
+    return FolderCrawlerAccess::refreshPending( &widget );
+}
+
+int folderViewUpdateCount( const FolderFilteredView& view )
+{
+    return FolderViewAccess::updateDataCount( &view );
+}
+
+int folderViewForceRefreshCount( const FolderFilteredView& view )
+{
+    return FolderViewAccess::forceRefreshCount( &view );
+}
+
+quint64 folderPresentedRows( const FolderFilteredView& view )
+{
+    return FolderViewAccess::presentedLineCount( &view );
+}
+
+void resetFolderViewRefreshCounts( FolderFilteredView& view )
+{
+    FolderViewAccess::resetRefreshCounts( &view );
+}
+
+} // namespace
+
+TEST_CASE( "Folder result commits coalesce into one latest-state presentation refresh",
+           "[folder][refresh-throttling][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, QStringLiteral( "a.log" ), QByteArrayLiteral( "a\n" ) );
+    const auto b = writeFile( dir, QStringLiteral( "b.log" ), QByteArrayLiteral( "b\n" ) );
+    const auto c = writeFile( dir, QStringLiteral( "c.log" ), QByteArrayLiteral( "c\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b, c } );
+    auto* const results = widget.folderResults();
+    auto* const pane = widget.filteredView();
+    REQUIRE( results != nullptr );
+    REQUIRE( pane != nullptr );
+
+    // beginSearch is a lifecycle clear, so it bypasses the 33 ms window.
+    resetFolderViewRefreshCounts( *pane );
+    results->beginSearch( { a, b, c } );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    // updateData already performs its forceRefresh; the layout callback must not
+    // invoke forceRefresh a second time.
+    CHECK( folderViewForceRefreshCount( *pane ) == 1 );
+
+    resetFolderViewRefreshCounts( *pane );
+    results->addFileGroup( 0, oneFolderMatch( a, 0_lnum ) );
+    CHECK( results->getNbLine() == 2_lcount );
+    results->addFileGroup( 1, oneFolderMatch( b, 0_lnum ) );
+    CHECK( results->getNbLine() == 4_lcount );
+    results->addFileGroup( 2, oneFolderMatch( c, 0_lnum ) );
+    CHECK( results->getNbLine() == 6_lcount );
+
+    CHECK( widget.filteredView() == pane );
+    CHECK( folderRefreshPending( widget ) );
+    CHECK( folderViewUpdateCount( *pane ) == 0 );
+    CHECK( folderViewForceRefreshCount( *pane ) == 0 );
+
+    flushFolderPresentation( widget );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    CHECK( widget.filteredView() == pane );
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    CHECK( folderViewForceRefreshCount( *pane ) == 1 );
+    CHECK( folderPresentedRows( *pane ) == 6u );
+}
+
+TEST_CASE( "Folder result presentation and status use independent fixed windows",
+           "[folder][refresh-throttling][status][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto file = writeFile( dir, QStringLiteral( "status.log" ),
+                                 QByteArrayLiteral( "match\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { file } );
+    auto* const results = widget.folderResults();
+    auto* const pane = widget.filteredView();
+    REQUIRE( results != nullptr );
+    REQUIRE( pane != nullptr );
+    results->beginSearch( { file } );
+    resetFolderViewRefreshCounts( *pane );
+    const auto statusBefore = widget.statusText();
+
+    results->addFileGroup( 0, oneFolderMatch( file, 0_lnum ) );
+    FolderCrawlerAccess::publishProgress( &widget, 1, 25 );
+    REQUIRE( folderRefreshPending( widget ) );
+    REQUIRE( FolderCrawlerAccess::statusPending( &widget ) );
+
+    flushFolderPresentation( widget );
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    CHECK( widget.statusText() == statusBefore );
+    CHECK( FolderCrawlerAccess::statusPending( &widget ) );
+
+    FolderCrawlerAccess::flushStatus( &widget );
+    CHECK_FALSE( FolderCrawlerAccess::statusPending( &widget ) );
+    CHECK( widget.statusText().contains( QStringLiteral( "25" ) ) );
+}
+
+TEST_CASE( "Folder search cancel and terminal boundaries flush pending presentation",
+           "[folder][refresh-throttling][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, QStringLiteral( "a.log" ),
+                              QByteArrayLiteral( "ERROR one\nERROR two\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a } );
+    auto* const pane = widget.filteredView();
+    auto* const results = widget.folderResults();
+    REQUIRE( pane != nullptr );
+    REQUIRE( results != nullptr );
+
+    results->beginSearch( { a } );
+    resetFolderViewRefreshCounts( *pane );
+    results->addFileGroup( 0, oneFolderMatch( a, 0_lnum ) );
+    REQUIRE( folderRefreshPending( widget ) );
+    FolderCrawlerAccess::stopSearch( &widget );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+
+    resetFolderViewRefreshCounts( *pane );
+    widget.searchFor( QStringLiteral( "ERROR" ) );
+    REQUIRE( waitFor( [ &widget ] { return !widget.isSearchActive(); } ) );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    CHECK( widget.filteredView() == pane );
+    CHECK( folderPresentedRows( *pane )
+           == static_cast<quint64>( results->getNbLine().get() ) );
+}
+
+TEST_CASE( "Folder terminal boundary flushes an activation catch-up before status",
+           "[folder][refresh-throttling][visibility][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto file = writeFile( dir, QStringLiteral( "activation-terminal.log" ),
+                                 QByteArrayLiteral( "match\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { file } );
+    auto* const pane = widget.filteredView();
+    auto* const results = widget.folderResults();
+    REQUIRE( pane != nullptr );
+    REQUIRE( results != nullptr );
+    results->beginSearch( { file } );
+    resetFolderViewRefreshCounts( *pane );
+
+    widget.setPresentationActive( false );
+    results->addFileGroup( 0, oneFolderMatch( file, 0_lnum ) );
+    REQUIRE( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+    widget.setPresentationActive( true );
+    REQUIRE( FolderCrawlerAccess::catchUpQueued( &widget ) );
+
+    FolderCrawlerAccess::finishSearch( &widget );
+
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    CHECK_FALSE( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+    CHECK_FALSE( FolderCrawlerAccess::catchUpQueued( &widget ) );
+}
+
+TEST_CASE( "Inactive folder streaming updates the model and catches presentation up once",
+           "[folder][refresh-throttling][visibility][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto a = writeFile( dir, QStringLiteral( "a.log" ), QByteArrayLiteral( "a\n" ) );
+    const auto b = writeFile( dir, QStringLiteral( "b.log" ), QByteArrayLiteral( "b\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { a, b } );
+    auto* const pane = widget.filteredView();
+    auto* const results = widget.folderResults();
+    REQUIRE( pane != nullptr );
+    REQUIRE( results != nullptr );
+    results->beginSearch( { a, b } );
+    resetFolderViewRefreshCounts( *pane );
+
+    widget.setPresentationActive( false );
+    results->addFileGroup( 0, oneFolderMatch( a, 0_lnum ) );
+    results->addFileGroup( 1, oneFolderMatch( b, 0_lnum ) );
+
+    // The authoritative model never waits for a visible frame.
+    CHECK( results->getNbLine() == 4_lcount );
+    CHECK( folderViewUpdateCount( *pane ) == 0 );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    CHECK( FolderCrawlerAccess::presentationDirty( &widget ) );
+
+    widget.setPresentationActive( true );
+    CHECK( FolderCrawlerAccess::catchUpQueued( &widget ) );
+    flushFolderPresentation( widget );
+
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    CHECK( folderViewForceRefreshCount( *pane ) == 1 );
+    CHECK( folderPresentedRows( *pane ) == 4u );
+}
+
+TEST_CASE( "Inactive folder clear remains pending until one activation catch-up",
+           "[folder][refresh-throttling][visibility][clear][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto file = writeFile( dir, QStringLiteral( "clear.log" ),
+                                 QByteArrayLiteral( "line\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { file } );
+    auto* const pane = widget.filteredView();
+    auto* const results = widget.folderResults();
+    REQUIRE( pane != nullptr );
+    REQUIRE( results != nullptr );
+
+    results->beginSearch( { file } );
+    results->addFileGroup( 0, oneFolderMatch( file, 0_lnum ) );
+    flushFolderPresentation( widget );
+    REQUIRE( folderPresentedRows( *pane ) == 2u );
+    resetFolderViewRefreshCounts( *pane );
+
+    widget.setPresentationActive( false );
+    results->beginSearch( { file } );
+    CHECK( results->getNbLine() == 0_lcount );
+    CHECK( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+    CHECK( folderViewUpdateCount( *pane ) == 0 );
+
+    widget.setPresentationActive( true );
+    REQUIRE( FolderCrawlerAccess::catchUpQueued( &widget ) );
+    flushFolderPresentation( widget );
+    CHECK( folderViewUpdateCount( *pane ) == 1 );
+    CHECK( folderPresentedRows( *pane ) == 0u );
+}
+
+TEST_CASE( "Starting a kept folder search preserves an older pane's pending presentation",
+           "[folder][refresh-throttling][keep-results][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto file = writeFile( dir, QStringLiteral( "keep.log" ),
+                                 QByteArrayLiteral( "match\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { file } );
+    auto* const oldPane = widget.filteredView();
+    auto* const oldResults = widget.folderResults();
+    REQUIRE( oldPane != nullptr );
+    REQUIRE( oldResults != nullptr );
+
+    oldResults->beginSearch( { file } );
+    resetFolderViewRefreshCounts( *oldPane );
+    oldResults->addFileGroup( 0, oneFolderMatch( file, 0_lnum ) );
+    REQUIRE( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchToolbar()->setUseRegexp( true );
+    widget.searchFor( QStringLiteral( "[" ) );
+    REQUIRE( widget.paneCount() == 2 );
+    CHECK( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+
+    flushFolderPresentation( widget );
+    CHECK( folderViewUpdateCount( *oldPane ) == 1 );
+    CHECK( folderPresentedRows( *oldPane ) == 2u );
+}
+
+TEST_CASE( "Closing the only dirty folder pane cancels its pending presentation safely",
+           "[folder][refresh-throttling][keep-results][close][presentation]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto file = writeFile( dir, QStringLiteral( "close.log" ),
+                                 QByteArrayLiteral( "match\n" ) );
+
+    FolderCrawlerWidget widget;
+    widget.setFolder( dir.path(), { file } );
+    auto* const results = widget.folderResults();
+    REQUIRE( results != nullptr );
+    results->beginSearch( { file } );
+    results->addFileGroup( 0, oneFolderMatch( file, 0_lnum ) );
+    REQUIRE( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+
+    widget.searchToolbar()->setKeepResultsChecked( true );
+    widget.searchToolbar()->setUseRegexp( true );
+    widget.searchFor( QStringLiteral( "[" ) );
+    REQUIRE( widget.paneCount() == 2 );
+    REQUIRE( FolderCrawlerAccess::paneRefreshPending( &widget, 0 ) );
+
+    FolderCrawlerAccess::closePane( &widget, 0 );
+    CHECK( widget.paneCount() == 1 );
+    CHECK_FALSE( FolderCrawlerAccess::presentationDirty( &widget ) );
+    CHECK_FALSE( folderRefreshPending( widget ) );
+    QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
+    QCoreApplication::processEvents();
+    CHECK( widget.paneCount() == 1 );
 }

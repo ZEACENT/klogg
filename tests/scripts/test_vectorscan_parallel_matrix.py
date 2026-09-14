@@ -168,12 +168,14 @@ class VectorscanParallelMatrixTest(unittest.TestCase):
 
         self.assertIn('"KLOGG_VECTORSCAN_EXHAUSTIVE=0"', ci)
         self.assertIn('"KLOGG_VECTORSCAN_CHILD_CONCURRENCY=8"', ci)
-        self.assertIn('"${{ matrix.config.sanitizer }}" = "address"', ci)
+        self.assertIn('"${{ env.KLOGG_SANITIZER }}" = "address"', ci)
 
-        # The exhaustive-vs-avx2 leg (package_tag: vs-avx2) must NOT carry a
-        # sanitizer key, so it never enters the sampling branch.
-        avx2_block = ci[ci.index("package_tag: vs-avx2") : ci.index("package_tag: asan")]
-        self.assertNotIn("sanitizer:", avx2_block)
+        # The direct exhaustive-vs-avx2 leg keeps an empty sanitizer value,
+        # while the direct ASan leg opts into address instrumentation.
+        avx2_block = ci[ci.index("  WindowsPackages:") : ci.index("  WindowsX86:")]
+        asan_block = ci[ci.index("  WindowsAsan:") : ci.index("  ci-gate:")]
+        self.assertIn('KLOGG_SANITIZER: ""', avx2_block)
+        self.assertIn("KLOGG_SANITIZER: address", asan_block)
 
     def test_only_process_scheduler_helpers_are_windows_msvc_specific(self):
         platform_guard = "#if defined(Q_OS_WIN) && defined(_MSC_VER)"

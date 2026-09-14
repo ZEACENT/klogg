@@ -93,7 +93,6 @@ set_tests_properties(
   libimobiledevice_ostrace_patch_contract
   ios_native_release_contract
   external_source_asset_package_contract
-  live_capture_benchmark_contract
   live_capture_results_contract
   live_session_ui_retirement_contract
   livelog_controller_retirement_contract
@@ -103,6 +102,7 @@ set_tests_properties(
   ios_compiler_portability_contract
   PROPERTIES TIMEOUT 60
 )
+set_tests_properties(live_capture_benchmark_contract PROPERTIES TIMEOUT 120)
 
 
 

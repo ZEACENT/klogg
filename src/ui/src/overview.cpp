@@ -28,6 +28,98 @@
 
 #include "overview.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <iterator>
+
+namespace {
+
+uint64_t sourceLineBoundaryForPixel( uint64_t pixelBoundary, uint64_t lineCount,
+                                     uint64_t height )
+{
+    Q_ASSERT( height > 0 );
+    Q_ASSERT( pixelBoundary <= height );
+
+    // ceil(pixelBoundary * lineCount / height), decomposed to avoid the
+    // potentially overflowing pixelBoundary * lineCount product. height and
+    // pixelBoundary originate from an unsigned viewport size, so the remaining
+    // product is bounded by UINT32_MAX squared and fits in uint64_t.
+    const auto wholeLinesPerPixel = lineCount / height;
+    const auto remainder = lineCount % height;
+    const auto partialProduct = pixelBoundary * remainder;
+    return pixelBoundary * wholeLinesPerPixel + partialProduct / height
+           + ( partialProduct % height != 0 ? 1 : 0 );
+}
+
+void appendWeightedLine( klogg::vector<Overview::WeightedLine>& lines, int position,
+                         LinesCount count )
+{
+    if ( count == 0_lcount ) {
+        return;
+    }
+
+    lines.emplace_back( position );
+    const auto additionalWeight = std::min<uint64_t>(
+        count.get() - 1, static_cast<uint64_t>( Overview::WeightedLine::WEIGHT_STEPS - 1 ) );
+    for ( uint64_t load = 0; load < additionalWeight; ++load ) {
+        lines.back().load();
+    }
+}
+
+uint64_t pixelForSourceLine( uint64_t line, uint64_t lineCount, uint64_t height )
+{
+    Q_ASSERT( lineCount > 0 );
+    Q_ASSERT( line < lineCount );
+    Q_ASSERT( lineCount <= height );
+
+    // This path is used only when both factors are bounded by the unsigned
+    // viewport height, so the product fits in uint64_t without a wider type.
+    return line * height / lineCount;
+}
+
+template <typename RangeCounter>
+unsigned aggregateOverviewRanges( LinesCount linesInFile, unsigned viewportHeight,
+                                  klogg::vector<Overview::WeightedLine>& matchLines,
+                                  klogg::vector<Overview::WeightedLine>& markLines,
+                                  RangeCounter countRange )
+{
+    const auto lineCount = linesInFile.get();
+    const auto height = static_cast<uint64_t>( viewportHeight );
+    if ( lineCount == 0 || height == 0 ) {
+        return 0;
+    }
+
+    unsigned workCount = 0;
+    if ( lineCount <= height ) {
+        // More pixels than lines creates empty pixel buckets. Visit each source
+        // line once instead of issuing a range query for every empty pixel.
+        for ( uint64_t line = 0; line < lineCount; ++line ) {
+            const auto counts = countRange( LineNumber( line ), LineNumber( line + 1 ) );
+            const auto position
+                = static_cast<int>( pixelForSourceLine( line, lineCount, height ) );
+            appendWeightedLine( matchLines, position, counts.matches );
+            appendWeightedLine( markLines, position, counts.marks );
+            ++workCount;
+        }
+        return workCount;
+    }
+
+    auto firstLine = 0_lnum;
+    for ( unsigned position = 0; position < viewportHeight; ++position ) {
+        const auto endLine = LineNumber( sourceLineBoundaryForPixel(
+            static_cast<uint64_t>( position ) + 1, lineCount, height ) );
+        const auto counts = countRange( firstLine, endLine );
+        const auto weightedPosition = static_cast<int>( position );
+        appendWeightedLine( matchLines, weightedPosition, counts.matches );
+        appendWeightedLine( markLines, weightedPosition, counts.marks );
+        firstLine = endLine;
+        ++workCount;
+    }
+    return workCount;
+}
+
+} // namespace
+
 Overview::Overview()
     : matchLines_()
     , markLines_()
@@ -136,64 +228,51 @@ void Overview::recalculatesLines()
     // <-> folder) cannot leave stale entries from the previous mode.
     matchLines_.clear();
     markLines_.clear();
+    lastAggregationWorkCount_ = 0;
 
     if ( logFilteredData_ != nullptr ) {
-        if ( linesInFile_.get() > 0 ) {
-            logFilteredData_->iterateOverLines( [ this ]( LineNumber line ) {
-                const auto lineType = logFilteredData_->lineTypeByLine( line );
-                const auto position = yFromFileLine( line );
-                if ( lineType.testFlag( LogFilteredData::LineTypeFlags::Match ) ) {
-                    if ( ( !matchLines_.empty() ) && matchLines_.back().position() == position ) {
-                        // If the line is already there, we increase its weight
-                        matchLines_.back().load();
-                    }
-                    else {
-                        // If not we just add it
-                        matchLines_.emplace_back( position );
-                    }
-                }
-                else {
-                    if ( ( !markLines_.empty() ) && markLines_.back().position() == position ) {
-                        // If the line is already there, we increase its weight
-                        markLines_.back().load();
-                    }
-                    else {
-                        // If not we just add it
-                        markLines_.emplace_back( position );
-                    }
-                }
-            } );
+        const auto visibility = logFilteredData_->visibility();
+        const bool hasVisibleMatches
+            = visibility.testFlag( LogFilteredData::VisibilityFlags::Matches )
+              && logFilteredData_->getNbMatches() != 0_lcount;
+        const bool hasVisibleMarks
+            = visibility.testFlag( LogFilteredData::VisibilityFlags::Marks )
+              && logFilteredData_->getNbMarks() != 0_lcount;
+        if ( hasVisibleMatches || hasVisibleMarks ) {
+            lastAggregationWorkCount_ = aggregateOverviewRanges(
+                linesInFile_, height_, matchLines_, markLines_,
+                [ this ]( LineNumber first, LineNumber end ) {
+                    return logFilteredData_->countLineTypesInRange( first, end );
+                } );
         }
     }
-    else if ( linesInFile_.get() > 0
+    else if ( linesInFile_.get() > 0 && height_ > 0
               && ( !explicitMatchLines_.empty() || !explicitMarkLines_.empty() ) ) {
-        // Folder mode: explicit per-file match/mark lists. Cost is O(marks +
-        // matches in file), identical to the single-file iterateOverLines path
-        // (which also walks only the match/mark result set, not every file
-        // line). Both lists are sorted, so same-y neighbours collapse via
-        // back().
-        for ( const auto& line : explicitMatchLines_ ) {
-            const auto position = yFromFileLine( line );
-            if ( ( !matchLines_.empty() ) && matchLines_.back().position() == position ) {
-                // Collapses to the same y as the previous match: darken it.
-                matchLines_.back().load();
-            }
-            else {
-                matchLines_.emplace_back( position );
-            }
-        }
-        for ( const auto& line : explicitMarkLines_ ) {
-            const auto position = yFromFileLine( line );
-            if ( ( !markLines_.empty() ) && markLines_.back().position() == position ) {
-                markLines_.back().load();
-            }
-            else {
-                markLines_.emplace_back( position );
-            }
-        }
+        // Folder result lists are sorted. Advance to each range boundary with
+        // binary search so dense folder matches share the viewport-bounded path
+        // used by single-file and live sources.
+        auto firstMatch = explicitMatchLines_.cbegin();
+        auto firstMark = explicitMarkLines_.cbegin();
+        lastAggregationWorkCount_ = aggregateOverviewRanges(
+            linesInFile_, height_, matchLines_, markLines_,
+            [ this, &firstMatch, &firstMark ]( LineNumber, LineNumber end ) {
+                const auto endMatch
+                    = std::lower_bound( firstMatch, explicitMatchLines_.cend(), end );
+                const auto endMark
+                    = std::lower_bound( firstMark, explicitMarkLines_.cend(), end );
+                const auto matchCount = static_cast<uint64_t>(
+                    std::distance( firstMatch, endMatch ) );
+                const auto markCount = static_cast<uint64_t>(
+                    std::distance( firstMark, endMark ) );
+                firstMatch = endMatch;
+                firstMark = endMark;
+                return LogFilteredData::LineTypeRangeCounts{
+                    LinesCount( matchCount ), LinesCount( markCount ) };
+            } );
     }
-    else
-        LOG_INFO << "Overview::recalculatesLines: logFilteredData_ == NULL";
+    else {
+        LOG_INFO << "Overview::recalculatesLines: no overview categories";
+    }
 
     dirty_ = false;
 }

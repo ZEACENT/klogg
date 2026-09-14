@@ -3,13 +3,6 @@ description: "Generate the build files and build the code"
 runs:
   using: "composite"
   steps:
-
-    - name: Prepare compiler env
-      shell: sh
-      run: |
-        echo "CC=${{ matrix.config.cc }}" >> $GITHUB_ENV
-        echo "CXX=${{ matrix.config.cxx }}" >> $GITHUB_ENV
-
     - name: configure
       shell: sh
       run: |

@@ -7,8 +7,8 @@ inputs:
   source-root:
     description: Extracted and verified source closure
     required: true
-  release-assets-root:
-    description: Verified legal, SBOM, source, and source-offer assets
+  package-support-root:
+    description: Verified package-required legal, SBOM, manifest, receipt, and source-offer assets
     required: true
   artifact-root:
     description: Output directory for the helper closure and receipt
@@ -67,7 +67,7 @@ runs:
               --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
               --target "${{ inputs.target }}" \
               --artifact-root "${{ inputs.artifact-root }}" \
-              --release-assets-root "${{ inputs.release-assets-root }}"
+              --package-support-root "${{ inputs.package-support-root }}"
           '
 
     - name: Build native macOS helper from prefetched sources
@@ -85,7 +85,7 @@ runs:
           --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
           --target "${{ inputs.target }}" \
           --artifact-root "${{ inputs.artifact-root }}" \
-          --release-assets-root "${{ inputs.release-assets-root }}"
+          --package-support-root "${{ inputs.package-support-root }}"
 
     - name: Build native Windows helper from prefetched sources
       if: ${{ inputs.target == 'windows-x86_64' }}
@@ -103,7 +103,7 @@ runs:
           --build-root "$RUNNER_TEMP/klogg-adb-${{ inputs.target }}" \
           --target "${{ inputs.target }}" \
           --artifact-root "${{ inputs.artifact-root }}" \
-          --release-assets-root "${{ inputs.release-assets-root }}"
+          --package-support-root "${{ inputs.package-support-root }}"
 
     - name: Smoke and verify source-built ADB artifact
       shell: bash
@@ -121,8 +121,8 @@ runs:
           --receipt "${{ inputs.artifact-root }}/receipt.json" \
           --binary-smoke-receipt "${{ inputs.artifact-root }}/package-smoke.json" \
           --package-root "${{ inputs.artifact-root }}" \
-          --asset-scope release \
-          --source-assets-root "${{ inputs.release-assets-root }}" \
+          --asset-scope package \
+          --source-assets-root "${{ inputs.package-support-root }}" \
           --helper-path "helpers/${helper_name}" \
           --expected-target "${{ inputs.target }}" \
           --package-verification-receipt "${{ inputs.artifact-root }}/package-verification.json" \

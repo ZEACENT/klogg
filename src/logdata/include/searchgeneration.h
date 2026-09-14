@@ -26,8 +26,9 @@ namespace klogg {
 
 // Returns true when an incoming searchProgressed signal should be dropped
 // because its generation does not match the receiver's currently-active
-// generation.  Used as the staleness gate in CrawlerWidget::updateFilteredView
-// after the disconnect/reconnect-around-replaceCurrentSearch hack was retired
+// generation. Used as the staleness gate for CrawlerWidget's independent
+// result-presentation and progress/status consumers after the
+// disconnect/reconnect-around-replaceCurrentSearch hack was retired
 // (see TASK-001 in README.md backlog and docs/PORTABILITY.md).
 //
 // Both ordering directions are considered stale -- a newer generation arriving

@@ -86,3 +86,35 @@ index 32ef3dc..5249c8d 100644
  			return;
  		}
  	}
+diff --git a/src/efsw/WatcherKqueue.cpp b/src/efsw/WatcherKqueue.cpp
+index 26cf024..b10b4c5 100644
+--- a/src/efsw/WatcherKqueue.cpp
++++ b/src/efsw/WatcherKqueue.cpp
+@@ -66,17 +66,23 @@ WatcherKqueue::~WatcherKqueue() {
+ 	// Remove the childs watchers ( sub-folders watches )
+ 	removeAll();
+
+-	for ( size_t i = 0; i < mChangeListCount; i++ ) {
++	// Index zero owns the directory descriptor and the remaining active entries
++	// own the descriptors for files present when the watch was created.
++	for ( size_t i = 0; i <= mChangeListCount && i < mChangeList.size(); i++ ) {
+ 		if ( NULL != mChangeList[i].udata ) {
+ 			FileInfo* fi = reinterpret_cast<FileInfo*>( mChangeList[i].udata );
+
+ 			efSAFE_DELETE( fi );
+ 		}
++
++		close( mChangeList[i].ident );
++		mWatcher->removeFD();
+ 	}
+
+-	close( mKqueue );
+-
+-	mWatcher->removeFD();
++	if ( -1 != mKqueue ) {
++		close( mKqueue );
++		mWatcher->removeFD();
++	}
+ }
+
+ void WatcherKqueue::addAll() {

@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 
@@ -50,16 +51,13 @@
 #include <QObject>
 #include <QStringList>
 
-#include <KDSignalThrottler.h>
-
 #include "abstractlogdata.h"
+#include "coalescingtimer.h"
 #include "hsregularexpression.h"
 #include "linetypes.h"
 #include "logfiltereddataworker.h"
-#include "synchronization.h"
 
 class SearchableLogData;
-class QTimer;
 
 // A list of matches found in a LogData, it stores all the matching lines,
 // which can be accessed using the AbstractLogData interface, together with
@@ -70,6 +68,9 @@ class LogFilteredData : public AbstractLogData {
     Q_OBJECT
 
   public:
+    template <class T>
+    struct access_by;
+
     // Constructor used by LogData
     explicit LogFilteredData( const SearchableLogData* logData );
     ~LogFilteredData();
@@ -88,7 +89,8 @@ class LogFilteredData : public AbstractLogData {
     // Interrupt the running search if one is in progress.
     // Nothing is done if no search is in progress.
     void interruptSearch();
-    // Clear the search and the list of results.
+    // Clear the search and results, invalidating queued publications from the
+    // abandoned logical search.
     void clearSearch( bool dropCache = false );
     void setAllLinesVisible( bool visible );
     bool allLinesVisible() const { return allLinesVisible_; }
@@ -106,6 +108,16 @@ class LogFilteredData : public AbstractLogData {
     LinesCount getNbMatches() const;
     // Returns the number of marks (independently of the visibility)
     LinesCount getNbMarks() const;
+
+    // Counts the visible overview categories in the half-open source-line range
+    // [first, end). A line that is both matched and marked is counted as a
+    // match when matches are visible; marks retain it when matches are hidden.
+    // Plain lines mirrored by allLinesVisible are never counted.
+    struct LineTypeRangeCounts {
+        LinesCount matches;
+        LinesCount marks;
+    };
+    LineTypeRangeCounts countLineTypesInRange( LineNumber first, LineNumber end ) const;
 
     LineType lineTypeByIndex( LineNumber index ) const;
     LineType lineTypeByLine( LineNumber lineNumber ) const;
@@ -169,7 +181,7 @@ class LogFilteredData : public AbstractLogData {
     // are recognised as stale and dropped.  Does NOT advance for the
     // Stop-button pathway -- that one wants the final progress signal to
     // reach the receiver and trigger UI cleanup.
-    void bumpSearchGeneration() { workerThread_.bumpGeneration(); }
+    void bumpSearchGeneration();
 
   Q_SIGNALS:
     // Sent when the search has progressed, give the number of matches (so far)
@@ -178,12 +190,12 @@ class LogFilteredData : public AbstractLogData {
     // currentSearchGeneration().
     void searchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine,
                            quint64 generation );
-    void searchProgressedThrottled();
+    void searchResultsChanged( LinesCount nbMatches, LineNumber initialLine, bool terminal,
+                               quint64 generation );
 
   private Q_SLOTS:
     void handleSearchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine,
                                  quint64 generation );
-    void handleSearchProgressedThrottled();
 
   private:
     void attachReaderIfNeeded() const;
@@ -245,10 +257,28 @@ class LogFilteredData : public AbstractLogData {
     mutable bool contextLinesListValid_ = false;
     mutable LineLength maxLengthContext_ = 0_length;
 
-    Mutex searchProgressMutex_;
-    std::tuple<LinesCount, int, LineNumber, quint64> searchProgress_;
+    struct SearchResultsPayload {
+        LinesCount nbMatches = 0_lcount;
+        LineNumber initialLine = 0_lnum;
+        bool terminal = false;
+        quint64 generation = 0;
+    };
+    struct SearchStatusPayload {
+        LinesCount nbMatches = 0_lcount;
+        int progress = 0;
+        LineNumber initialLine = 0_lnum;
+        quint64 generation = 0;
+    };
 
-    KDToolBox::KDSignalThrottler searchProgressThrottler_;
+    void cancelPendingPublications();
+    void publishPendingSearchResults();
+    void publishPendingSearchStatus();
+    void publishTerminal( LinesCount nbMatches, LineNumber initialLine, quint64 generation );
+
+    std::optional<SearchResultsPayload> pendingSearchResults_;
+    std::optional<SearchStatusPayload> pendingSearchStatus_;
+    klogg::CoalescingTimer searchResultsRefreshTimer_;
+    klogg::CoalescingTimer searchStatusRefreshTimer_;
 
     LogFilteredDataWorker workerThread_;
     mutable bool readerAttached_{ false };

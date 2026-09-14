@@ -386,7 +386,7 @@ void SearchToolbar::setKeepResultsChecked( bool checked )
 
 void SearchToolbar::setSearchInProgress( bool busy )
 {
-    // Ports replaceCurrentSearch 1985-1988 + updateFilteredView 674-677.
+    // Shared by search start and terminal status publication.
     if ( busy ) {
         stopButton_->setEnabled( true );
         stopButton_->show();

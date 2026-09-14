@@ -9,12 +9,12 @@
 #include <QMetaObject>
 #include <QSaveFile>
 
+#include "coalescingtimer.h"
 #include "logfiltereddata.h"
 #include "stagedoutputfile.h"
 
 namespace {
 constexpr qint64 CachedRawBatchBytesLimit = 256 * 1024 * 1024;
-constexpr int LiveAppendRefreshIntervalMs = 33;
 constexpr size_t AnsiDisplayCacheLineLimit = 4096;
 }
 
@@ -478,7 +478,7 @@ CaptureStore::AppendResult StreamingLogData::appendUtf8( const QByteArray& data 
     }
     // A rolling replacement is dirty even when its retained count is unchanged.
     if ( appendResult.lineCount > 0_lcount || wasTrimmed ) {
-        scheduleLoadingFinished( LiveAppendRefreshIntervalMs );
+        scheduleLoadingFinished( klogg::kIncrementalPresentationIntervalMs );
     }
 
 #ifdef KLOGG_PERF_MEASURE_STREAMING

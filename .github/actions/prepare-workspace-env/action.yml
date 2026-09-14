@@ -1,19 +1,54 @@
 name: "Set common env vars"
-description: "Export shared klogg build env vars (workspace, build root, arch, package tag, CMake opts, Qt version/dir) from the matrix config."
+description: "Export shared klogg build env vars from explicit job configuration."
+inputs:
+  arch:
+    description: Target architecture
+    required: true
+  package-tag:
+    description: Package feature tag
+    required: true
+  cmake-options:
+    description: Additional CMake options
+    required: false
+    default: ""
+  qt-version:
+    description: Configured Qt version; empty for container-provided Qt
+    required: false
+    default: ""
+  build-root:
+    description: Relative build directory
+    required: false
+    default: build_root
 runs:
   using: "composite"
   steps:
+    - name: Validate build configuration inputs
+      shell: sh
+      env:
+        KLOGG_INPUT_ARCH: ${{ inputs.arch }}
+        KLOGG_INPUT_PACKAGE_TAG: ${{ inputs.package-tag }}
+        KLOGG_INPUT_BUILD_ROOT: ${{ inputs.build-root }}
+        KLOGG_INPUT_QT_VERSION: ${{ inputs.qt-version }}
+      run: |
+        test -n "$KLOGG_INPUT_ARCH" || { echo "::error::arch is required"; exit 1; }
+        test -n "$KLOGG_INPUT_PACKAGE_TAG" || { echo "::error::package-tag is required"; exit 1; }
+        test -n "$KLOGG_INPUT_BUILD_ROOT" || { echo "::error::build-root is required"; exit 1; }
+        case "$KLOGG_INPUT_QT_VERSION" in
+          ""|5.*|6.*) ;;
+          *) echo "::error::qt-version must be empty, Qt 5, or Qt 6"; exit 1 ;;
+        esac
+
     - name: Set common env vars
       shell: sh
       run: |
-        echo "KLOGG_WORKSPACE=${{ github.workspace }}" >> $GITHUB_ENV 
-        echo "KLOGG_BUILD_ROOT=build_root" >> $GITHUB_ENV 
-        echo "KLOGG_ARCH=${{ matrix.config.arch }}" >> $GITHUB_ENV 
-        echo "KLOGG_PACKAGE_TAG=${{ matrix.config.package_tag }}" >> $GITHUB_ENV
-        echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=ON -DWARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX=/usr ${{ matrix.config.cmake_opts }}" >> $GITHUB_ENV
+        echo "KLOGG_WORKSPACE=${{ github.workspace }}" >> $GITHUB_ENV
+        echo "KLOGG_BUILD_ROOT=${{ inputs.build-root }}" >> $GITHUB_ENV
+        echo "KLOGG_ARCH=${{ inputs.arch }}" >> $GITHUB_ENV
+        echo "KLOGG_PACKAGE_TAG=${{ inputs.package-tag }}" >> $GITHUB_ENV
+        echo "KLOGG_CMAKE_OPTS=-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKLOGG_GENERIC_CPU=ON -DKLOGG_USE_SENTRY=ON -DWARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX=/usr ${{ inputs.cmake-options }}" >> $GITHUB_ENV
 
-    - name: Set qt env var
-      if: "startsWith(matrix.config.qt_version, '5')"
+    - name: Set Qt 5 env vars
+      if: ${{ startsWith(inputs.qt-version, '5') }}
       shell: sh
       run: |
         echo "KLOGG_QT=Qt5" >> $GITHUB_ENV
@@ -21,8 +56,8 @@ runs:
         # and plugins/ live), which is exactly what KLOGG_QT_DIR needs.
         echo "KLOGG_QT_DIR=${{ env.QT_ROOT_DIR }}" >> $GITHUB_ENV
 
-    - name: Set qt env var
-      if: "startsWith(matrix.config.qt_version, '6')"
+    - name: Set Qt 6 env vars
+      if: ${{ startsWith(inputs.qt-version, '6') }}
       shell: sh
       run: |
         echo "KLOGG_QT=Qt6" >> $GITHUB_ENV

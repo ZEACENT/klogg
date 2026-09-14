@@ -203,6 +203,7 @@ add_executable(klogg_tests
     shortcut_bindings_test.cpp
     styles_test.cpp
     streaminglogdata_test.cpp
+    coalescingtimer_test.cpp
     tabgroupdropresolver_test.cpp
     tabgroupmanager_test.cpp
     tabbedcrawlerwidget_test.cpp

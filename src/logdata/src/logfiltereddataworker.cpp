@@ -563,8 +563,8 @@ void LogFilteredDataWorker::interrupt()
     interruptRequested_.set();
     // Intentionally NOT advancing the generation here.  A user pressing the
     // Stop button calls this path and still needs the in-flight progress
-    // signal (typically progress < 100, but completion semantics live in
-    // CrawlerWidget::updateFilteredView) to reach the receiver -- otherwise
+    // signal (typically progress < 100, while terminal cleanup is consumed by
+    // CrawlerWidget::updateSearchStatus) to reach the receiver -- otherwise
     // the Stop-button UI cleanup never runs.  The replaceCurrentSearch
     // pathway, which DOES want stale signals dropped, calls
     // LogFilteredData::bumpSearchGeneration() explicitly.

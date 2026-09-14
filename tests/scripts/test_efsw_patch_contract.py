@@ -68,10 +68,29 @@ class EfswPatchContractTest(unittest.TestCase):
         self.assertIn("-\t\t\tremoveWatch( iter->first )", remove_by_path)
         self.assertIn("+\t\t\tmWatches.erase( iter )", remove_by_path)
 
+        descriptor_cleanup = patch[patch.index("diff --git a/src/efsw/WatcherKqueue.cpp") :]
+        self.assertIn("i <= mChangeListCount", descriptor_cleanup)
+        self.assertIn(
+            "+\t\tclose( mChangeList[i].ident );\n"
+            "+\t\tmWatcher->removeFD();\n"
+            " \t}",
+            descriptor_cleanup,
+        )
+        self.assertIn("if ( -1 != mKqueue )", descriptor_cleanup)
+
     def test_dependency_is_immutable_and_rejects_target_substitution(self):
         text = THIRD_PARTY.read_text()
         pinned_revision = "62f785c56b7a34f035193d4cb831921347b586b8"
         prefetch = PREFETCH.read_text()
+        self.assertIn(
+            "klogg_apply_pinned_patch_series(\n"
+            "  efsw\n"
+            "  ${efsw_SOURCE_DIR}\n"
+            f"  {pinned_revision}\n"
+            "  c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677\n"
+            "  dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3\n",
+            text,
+        )
         self.assertIn(pinned_revision, text)
         self.assertIn(pinned_revision, prefetch)
         self.assertIn("c43294a81501e0fdf14adc83818d47f7f9bc1bb6", prefetch)
@@ -87,7 +106,7 @@ class EfswPatchContractTest(unittest.TestCase):
             "3f4a410e6b1ad8f1f1d53c8463dc7accc7e1c94a32ca1ed1da778a181f5892b9",
             "d736c1c9bc9e3aca800bea90765f805e27229785e3d8e417e64103ba5fc96164",
             "c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677",
-            "08283124ae155e995254ef3282fb41882c7599f30b79346764b71ec0815789ee",
+            "dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3",
             "04357c577d094b3ea8760c3635c776789fb671c1bff010c66a43f479f442eefd",
             "505337c394bf0b6ed954a62a865e6814eccab821e4fd22bba5ecbbdd3fb57e8d",
         ):

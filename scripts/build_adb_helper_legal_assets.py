@@ -12,6 +12,7 @@ import io
 import json
 import pathlib
 import re
+import shutil
 import tarfile
 
 from source_publication_identity import (
@@ -111,6 +112,88 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def release_asset_plan(lock: dict) -> list[dict]:
+    assets = lock.get("release_assets")
+    if not isinstance(assets, list) or not assets:
+        raise RuntimeError("ADB lock release_assets must be a non-empty array")
+
+    seen_kinds: set[str] = set()
+    seen_paths: set[str] = set()
+    validated = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise RuntimeError("ADB release asset must be an object")
+        kind = asset.get("kind")
+        if not isinstance(kind, str) or not kind or kind in seen_kinds:
+            raise RuntimeError(f"invalid or duplicate ADB release asset kind: {kind}")
+        seen_kinds.add(kind)
+        if asset.get("required") is not True:
+            raise RuntimeError(f"ADB release asset must be required: {kind}")
+
+        distribution = asset.get("distribution")
+        if not isinstance(distribution, dict) or set(distribution) != {
+            "package_required",
+            "release_required",
+        }:
+            raise RuntimeError(f"invalid ADB release asset distribution: {kind}")
+        if not all(
+            isinstance(distribution[field], bool)
+            for field in ("package_required", "release_required")
+        ):
+            raise RuntimeError(f"non-boolean ADB release asset distribution: {kind}")
+        if distribution["release_required"] is not True:
+            raise RuntimeError(f"ADB release asset is outside the full release closure: {kind}")
+
+        for field in ("file_name", "sha256_file"):
+            value = asset.get(field)
+            if not isinstance(value, str):
+                raise RuntimeError(f"ADB release asset lacks {field}: {kind}")
+            relative = safe_archive_member_name(value, f"ADB release asset {field}")
+            if pathlib.PurePosixPath(relative).name != relative:
+                raise RuntimeError(
+                    f"ADB release asset {field} must be a flat file name: {kind}"
+                )
+            if relative in seen_paths:
+                raise RuntimeError(f"duplicate ADB release asset path: {relative}")
+            seen_paths.add(relative)
+        validated.append(asset)
+    return validated
+
+
+def materialize_package_support(
+    release_root: pathlib.Path,
+    package_support_root: pathlib.Path,
+    release_assets: list[dict],
+) -> None:
+    release_resolved = release_root.resolve()
+    support_resolved = package_support_root.resolve()
+    if (
+        release_resolved == support_resolved
+        or release_resolved in support_resolved.parents
+        or support_resolved in release_resolved.parents
+    ):
+        raise RuntimeError("ADB release and package-support outputs must be disjoint")
+    if package_support_root.is_symlink():
+        raise RuntimeError("ADB package-support output must not be a symlink")
+    if package_support_root.exists():
+        if not package_support_root.is_dir():
+            raise RuntimeError("ADB package-support output must be a directory")
+        shutil.rmtree(package_support_root)
+    package_support_root.mkdir(parents=True)
+
+    for asset in release_assets:
+        if asset["distribution"]["package_required"] is not True:
+            continue
+        for field in ("file_name", "sha256_file"):
+            relative = pathlib.PurePosixPath(asset[field])
+            source = release_root.joinpath(*relative.parts)
+            if not source.is_file() or source.is_symlink():
+                raise RuntimeError(f"missing package-support projection source: {source}")
+            destination = package_support_root.joinpath(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+
+
 def spdx_package(item: dict) -> dict:
     archive_identity = str(item.get("archive_identity", RAW_ARCHIVE_IDENTITY))
     if archive_identity not in SUPPORTED_ARCHIVE_IDENTITIES:
@@ -150,13 +233,15 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", required=True, type=pathlib.Path)
+    parser.add_argument("--package-support-output", type=pathlib.Path)
     args = parser.parse_args()
 
     version = validate_version(args.version)
     base_url = normalize_base_url(args.base_url)
     lock = json.loads(args.lock.read_text(encoding="utf-8"))
+    release_assets = release_asset_plan(lock)
     args.output.mkdir(parents=True, exist_ok=True)
-    by_kind = {asset["kind"]: asset for asset in lock["release_assets"]}
+    by_kind = {asset["kind"]: asset for asset in release_assets}
 
     source_manifest = {
         "schema_version": 1,
@@ -311,8 +396,8 @@ def main() -> int:
 
     source_set_asset = by_kind["source-set-receipt"]
     package_support_assets = []
-    for asset in lock["release_assets"]:
-        distribution = asset.get("distribution", {})
+    for asset in release_assets:
+        distribution = asset["distribution"]
         if (
             asset["kind"] == "source-set-receipt"
             or distribution.get("package_required") is not True
@@ -365,7 +450,7 @@ def main() -> int:
     )
 
     receipt_assets = []
-    for asset in lock["release_assets"]:
+    for asset in release_assets:
         path = args.output / asset["file_name"]
         if not path.is_file():
             raise RuntimeError(f"required ADB release asset was not generated: {path}")
@@ -374,6 +459,10 @@ def main() -> int:
     (args.output / "adb-helper-release-assets.json").write_text(
         json.dumps(receipt_assets, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if args.package_support_output is not None:
+        materialize_package_support(
+            args.output, args.package_support_output, release_assets
+        )
     return 0
 
 

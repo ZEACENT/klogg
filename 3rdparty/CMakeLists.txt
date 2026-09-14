@@ -649,7 +649,7 @@ klogg_apply_pinned_patch_series(
   ${efsw_SOURCE_DIR}
   62f785c56b7a34f035193d4cb831921347b586b8
   c9dfe877307cb578f7db72f536a8ce26f4049573ceb434d3a8736862746be677
-  08283124ae155e995254ef3282fb41882c7599f30b79346764b71ec0815789ee
+  dd0fac8dd03bee124f4b780ad131019590dd49e7ae7ce75f812e280e50c039f3
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_inotify_watcher_uaf.patch
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/fix_efsw_kqueue_watcher_races.patch
 )

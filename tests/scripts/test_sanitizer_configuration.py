@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import pathlib
@@ -37,6 +38,12 @@ TSAN_ELF_RUNTIME_CLOSURE = (
     ROOT / "docker" / "ubuntu22.04-tsan" / "verify_elf_runtime_closure.sh"
 )
 CAPTURESTORE_TEST = ROOT / "tests" / "unit" / "capturestore_test.cpp"
+_CI_SPEC = importlib.util.spec_from_file_location(
+    "sanitizer_ci_quality", ROOT / "scripts" / "lint_ci_quality.py"
+)
+assert _CI_SPEC is not None and _CI_SPEC.loader is not None
+CI_MODULE = importlib.util.module_from_spec(_CI_SPEC)
+_CI_SPEC.loader.exec_module(CI_MODULE)
 
 
 class SanitizerConfigurationTest(unittest.TestCase):
@@ -712,22 +719,22 @@ class SanitizerConfigurationTest(unittest.TestCase):
 
     def test_linux_tsan_uses_a_dedicated_instrumented_qt_runtime(self):
         workflow = CI_BUILD.read_text()
-        self.assertIn("container_root: docker/ubuntu22.04-tsan", workflow)
+        self.assertIn("KLOGG_CONTAINER_ROOT: docker/ubuntu22.04-tsan", workflow)
         self.assertTrue(
-            "container_suffix: _ubuntu22.04-tsan" in workflow,
-            "TSan matrix leg must use the unified _ubuntu22.04-tsan image suffix",
+            "KLOGG_CONTAINER_SUFFIX: _ubuntu22.04-tsan" in workflow,
+            "The direct TSan leg must use the unified _ubuntu22.04-tsan image suffix",
         )
         self.assertTrue(
-            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ matrix.config.container_suffix }}"
+            "${{ env.KLOGG_CI_IMAGE_PREFIX }}${{ env.KLOGG_CONTAINER_SUFFIX }}"
             in workflow,
-            "TSan image consumers must resolve KLOGG_CI_IMAGE_PREFIX plus container_suffix",
+            "TSan image consumers must resolve the explicit image suffix env",
         )
         self.assertIn("-DCMAKE_C_COMPILER=clang-14", workflow)
         self.assertIn("-DCMAKE_CXX_COMPILER=clang++-14", workflow)
         self.assertIn("-DCMAKE_PREFIX_PATH=/opt/qt5-tsan", workflow)
         self.assertIn("-DKLOGG_TSAN_QT_PREFIX=/opt/qt5-tsan", workflow)
         self.assertIn("-DKLOGG_TSAN_QT_VERSION=5.15.19", workflow)
-        self.assertIn("timeout-minutes: ${{ matrix.config.timeout_minutes || 60 }}", workflow)
+        self.assertIn("timeout-minutes: 120", workflow)
         self.assertNotIn("ignore_noninstrumented_modules", workflow)
         docker_build_action = DOCKER_BUILD_ACTION.read_text()
         self.assertEqual(docker_build_action.count("--env TSAN_OPTIONS"), 2)
@@ -737,7 +744,7 @@ class SanitizerConfigurationTest(unittest.TestCase):
             self.assertNotIn("suppressions=", options)
         self.assertRegex(
             workflow,
-            r"label: ubuntu-22\.04-tsan[\s\S]*?timeout_minutes: 120",
+            r"KLOGG_LABEL: ubuntu-22\.04-tsan[\s\S]*?timeout-minutes: 120",
         )
 
     def test_container_build_forwards_all_strict_sanitizer_options(self):
@@ -1072,7 +1079,7 @@ class SanitizerConfigurationTest(unittest.TestCase):
         )
         self.assertIn("cache-from: type=gha,scope=klogg-qt5-tsan", workflow)
         self.assertIn(
-            "cache-to: ${{ github.event_name == 'push' && matrix.config.cache_write && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}",
+            "cache-to: ${{ github.event_name == 'push' && env.KLOGG_CACHE_WRITE == 'true' && 'type=gha,mode=max,scope=klogg-qt5-tsan' || '' }}",
             workflow,
         )
 
@@ -1123,12 +1130,70 @@ class SanitizerConfigurationTest(unittest.TestCase):
 
     def test_windows_asan_failure_retains_vectorscan_symbols(self):
         workflow = CI_BUILD.read_text()
-        self.assertIn("Collect Windows ASan diagnostics", workflow)
-        self.assertIn("klogg_vectorscan_tests.pdb", workflow)
-        self.assertIn("windows-x64-asan-diagnostics", workflow)
-        self.assertIn(
-            "matrix.config.sanitizer == 'address' && steps.run-tests.outcome == 'failure'",
-            workflow,
+        blocks = CI_MODULE.workflow_job_blocks(workflow)
+        self.assertIn("WindowsAsan", blocks)
+        block = blocks["WindowsAsan"]
+
+        display_name = CI_MODULE.workflow_job_direct_value(block, "name")
+        self.assertIsNotNone(display_name)
+        self.assertIn("ASan", display_name)
+        self.assertNotIn("${{", display_name)
+        self.assertEqual(
+            CI_MODULE.workflow_job_direct_value(block, "runs-on"),
+            "windows-2022",
+        )
+        self.assertEqual(CI_MODULE.workflow_job_matrix_values(block), {})
+
+        resolved_steps = CI_MODULE.workflow_job_steps(workflow)["WindowsAsan"]
+        active_job = CI_MODULE.active_script_content(
+            "\n".join(block + [line for step in resolved_steps for line in step])
+        )
+        self.assertNotRegex(active_job, r"\$\{\{[^}]*\bmatrix\.")
+        parsed_steps = [
+            CI_MODULE.workflow_step_fields(step) for step in resolved_steps
+        ]
+        required_steps = (
+            "Collect Windows ASan diagnostics",
+            "Upload Windows ASan diagnostics artifact",
+        )
+        for name in required_steps:
+            self.assertEqual(
+                sum(fields.get("name") == name for fields, _ in parsed_steps),
+                1,
+                f"WindowsAsan must define exactly one {name!r} step",
+            )
+        by_name = {
+            fields.get("name"): (fields, children)
+            for fields, children in parsed_steps
+            if fields.get("name")
+        }
+        collector, _ = by_name["Collect Windows ASan diagnostics"]
+        collector_condition = collector.get("if", "")
+        self.assertIn("always()", collector_condition)
+        self.assertIn("steps.run-tests.outcome == 'failure'", collector_condition)
+        self.assertNotIn("matrix.", collector_condition)
+        self.assertEqual(collector.get("shell"), "pwsh")
+        self.assertEqual(collector.get("continue-on-error"), "true")
+        active_collector = CI_MODULE.active_script_content(
+            CI_MODULE.strip_powershell_comments(collector.get("run", ""))
+        )
+        self.assertIn("klogg_vectorscan_tests.exe", active_collector)
+        self.assertIn("klogg_vectorscan_tests.pdb", active_collector)
+
+        uploader, uploader_children = by_name[
+            "Upload Windows ASan diagnostics artifact"
+        ]
+        self.assertEqual(uploader.get("if"), collector_condition)
+        self.assertTrue(
+            uploader.get("uses", "").startswith("actions/upload-artifact@")
+        )
+        self.assertEqual(
+            uploader_children.get("with"),
+            {
+                "name": "windows-x64-asan-diagnostics",
+                "path": "${{ github.workspace }}\\build_root\\asan_diagnostics\\**\\*",
+                "if-no-files-found": "error",
+            },
         )
 
     def test_msvc_address_sanitizer_marks_intercepted_dependency_allocations(self):

@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ PLIST_TEMPLATE = ROOT / "cmake" / "MacOSXBundleInfo.plist.in"
 DISTRIBUTION = ROOT / "packaging" / "osx" / "distribution.xml"
 DISTRIBUTION_TEMPLATE = ROOT / "packaging" / "osx" / "distribution.xml.in"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
+CI_CONTAINER_SUFFIX_VALIDATOR = ROOT / "scripts" / "validate_ci_container_suffix.py"
 CI_CONTAINER_CONSUMERS = (
     CI_BUILD,
     ROOT / ".github" / "actions" / "docker-build" / "action.yml",
@@ -37,9 +39,13 @@ KNOWN_LEGACY_FORKS = {
     f"{LEGACY_OWNER}/klogg_exprtk",
     f"{LEGACY_OWNER}/oneTBB",
 }
-CI_IMAGE_EXPRESSION = (
+CI_IMAGE_ENV_EXPRESSION = (
     "${{ env.KLOGG_CI_IMAGE_PREFIX }}"
-    "${{ matrix.config.container_suffix }}"
+    "${{ env.KLOGG_CONTAINER_SUFFIX }}"
+)
+CI_IMAGE_INPUT_EXPRESSION = (
+    "${{ env.KLOGG_CI_IMAGE_PREFIX }}"
+    "${{ inputs.container-suffix }}"
 )
 
 
@@ -509,7 +515,9 @@ class ApplicationIdentityContractTest(unittest.TestCase):
             failures.append("KLOGG_CI_IMAGE_PREFIX must be declared in workflow-level env")
 
         suffixes = re.findall(
-            r"^\s*container_suffix:\s*([^\s#]+)", workflow, re.MULTILINE
+            r"^\s*(?:container_suffix|KLOGG_CONTAINER_SUFFIX):\s*([^\s#]+)",
+            workflow,
+            re.MULTILINE,
         )
         expected_suffixes = {
             "_ubuntu20.04",
@@ -523,8 +531,13 @@ class ApplicationIdentityContractTest(unittest.TestCase):
                 "Linux matrix must keep first-party image suffixes; missing "
                 + ", ".join(sorted(expected_suffixes - set(suffixes)))
             )
+        literal_suffixes = [
+            suffix for suffix in suffixes if not suffix.startswith("${{")
+        ]
         invalid_suffixes = sorted(
-            suffix for suffix in suffixes if re.fullmatch(r"_[a-z0-9.-]+", suffix) is None
+            suffix
+            for suffix in literal_suffixes
+            if re.fullmatch(r"_[a-z0-9.-]+", suffix) is None
         )
         if invalid_suffixes:
             failures.append(
@@ -553,14 +566,31 @@ class ApplicationIdentityContractTest(unittest.TestCase):
             relative = consumer.relative_to(ROOT).as_posix()
             if re.search(r"matrix\.config\.container(?![A-Za-z0-9_])", source):
                 failures.append(f"{relative} still consumes the old matrix.config.container full tag")
-            if CI_IMAGE_EXPRESSION not in source:
+            image_expression = (
+                CI_IMAGE_ENV_EXPRESSION
+                if consumer == CI_BUILD
+                else CI_IMAGE_INPUT_EXPRESSION
+            )
+            if image_expression not in source:
                 failures.append(
                     f"{relative} does not resolve the active image from "
-                    "KLOGG_CI_IMAGE_PREFIX + matrix.config.container_suffix"
+                    "KLOGG_CI_IMAGE_PREFIX + its explicit container suffix"
                 )
-            unresolved = source.replace(CI_IMAGE_EXPRESSION, "")
-            if "matrix.config.container_suffix" in unresolved:
-                failures.append(f"{relative} consumes container_suffix without the unified prefix")
+            unprefixed_lines = [
+                line.strip()
+                for line in source.splitlines()
+                if (
+                    "${{ env.KLOGG_CONTAINER_SUFFIX }}" in line
+                    or "${{ inputs.container-suffix }}" in line
+                )
+                and any(token in line for token in ("docker run", "tags:", "image:"))
+                and image_expression not in line
+            ]
+            if unprefixed_lines:
+                failures.append(
+                    f"{relative} consumes the image suffix without the unified prefix: "
+                    + "; ".join(unprefixed_lines)
+                )
 
         for external_image in (
             "check_container: ubuntu:22.04",
@@ -573,6 +603,40 @@ class ApplicationIdentityContractTest(unittest.TestCase):
                 failures.append(f"external image was changed or removed: {external_image}")
 
         self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_ci_container_suffix_validator_is_shared_and_fail_closed(self):
+        for suffix in ("_ubuntu22.04", "_ubuntu22.04-tsan"):
+            with self.subTest(valid=suffix):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(CI_CONTAINER_SUFFIX_VALIDATOR),
+                        "--suffix",
+                        suffix,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for suffix in ("", "ubuntu22.04", "_Ubuntu22.04", "_ubuntu/22.04"):
+            with self.subTest(invalid=suffix):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(CI_CONTAINER_SUFFIX_VALIDATOR),
+                        "--suffix",
+                        suffix,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+        for action in CI_CONTAINER_CONSUMERS[1:]:
+            source = read(action)
+            self.assertIn("scripts/validate_ci_container_suffix.py", source)
 
     def test_legacy_owner_occurrences_are_confined_to_explicit_history_and_forks(self):
         failures = unexpected_legacy_owner_references()

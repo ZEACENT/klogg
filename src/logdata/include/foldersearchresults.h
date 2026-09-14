@@ -192,8 +192,9 @@ class FolderSearchResults : public AbstractLogData {
 
   Q_SIGNALS:
     // Emitted whenever the visible-row layout changes (new results, collapse
-    // toggle, collapse/expand all). The view responds with updateData() +
-    // forceRefresh().
+    // toggle, collapse/expand all). The owning widget coalesces incremental
+    // presentation per pane; lifecycle clears may refresh immediately. A single
+    // updateData() owns the resulting forceRefresh().
     void layoutChanged();
 
   protected:

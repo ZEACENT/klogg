@@ -25,6 +25,8 @@
 #include <QProxyStyle>
 #include <QPointer>
 #include <QScrollBar>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStyle>
 #include <QTemporaryFile>
 #include <QTest>
@@ -54,6 +56,7 @@
 #include "streaminglogdata.h"
 
 #include "crawlerwidget.h"
+#include "infoline.h"
 #include "platform/platform_input.h"
 #include "shortcuts.h"
 
@@ -321,6 +324,22 @@ struct AbstractLogView::access_by<AbstractLogViewPrivate> {
     static void rebuildLineMap( AbstractLogView* view )
     {
         view->buildVisibleLineMap();
+    }
+
+    static void resetRefreshCounts( AbstractLogView* view )
+    {
+        view->updateDataCountForTest_ = 0;
+        view->forceRefreshCountForTest_ = 0;
+    }
+
+    static int updateDataCount( const AbstractLogView* view )
+    {
+        return view->updateDataCountForTest_;
+    }
+
+    static int forceRefreshCount( const AbstractLogView* view )
+    {
+        return view->forceRefreshCountForTest_;
     }
 };
 
@@ -1116,11 +1135,193 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QCoreApplication::processEvents();
     }
 
+    void changeFilteredView( int index )
+    {
+        crawler->changeFilteredView( index );
+    }
+
+    void replaceSearch( const QString& pattern )
+    {
+        crawler->searchToolbar_->searchLineEdit()->setEditText( pattern );
+        crawler->replaceCurrentSearch( pattern );
+    }
+
+    void reload()
+    {
+        crawler->reload();
+    }
+
+    void notifyFileTruncated()
+    {
+        crawler->fileChangedHandler( MonitoredFileStatus::Truncated );
+    }
+
+    void setUseRegexp( bool enabled )
+    {
+        crawler->searchToolbar_->setUseRegexp( enabled );
+    }
+
+    void armPendingSearchUpdate( LineNumber endLine )
+    {
+        crawler->searchState_.setAutorefresh( true );
+        crawler->searchState_.startSearch();
+        crawler->pendingSearchEndLine_ = endLine;
+        crawler->searchUpdatePending_ = true;
+        crawler->searchUpdateThrottleTimer_.start( 250 );
+    }
+
+    void updateEncoding()
+    {
+        crawler->updateEncoding();
+    }
+
     void closeFilteredView( int index )
     {
         crawler->closeFilteredView( index );
         QCoreApplication::sendPostedEvents( nullptr, QEvent::DeferredDelete );
         QCoreApplication::processEvents();
+    }
+
+    QString searchStatusText() const
+    {
+        return crawler->searchInfoLine_->text();
+    }
+
+    void clearSearchStatusText()
+    {
+        crawler->searchInfoLine_->setText( {} );
+    }
+
+    bool stopButtonHidden() const
+    {
+        return crawler->searchToolbar_->stopButton()->isHidden();
+    }
+
+    bool searchGaugeVisible() const
+    {
+        return crawler->searchInfoLine_->isGaugeVisible();
+    }
+
+    void setSearchInProgress( bool inProgress )
+    {
+        crawler->searchToolbar_->setSearchInProgress( inProgress );
+    }
+
+    qint64 pendingSearchLines() const
+    {
+        return crawler->searchPendingLines_;
+    }
+
+    LinesCount presentedMatchCount() const
+    {
+        return crawler->nbMatches_;
+    }
+
+    std::pair<int, int> contextLines() const
+    {
+        return { crawler->logFilteredData_->contextLinesBefore(),
+                 crawler->logFilteredData_->contextLinesAfter() };
+    }
+
+    void configureContextLines( int mode, int count )
+    {
+        crawler->contextLinesMode_ = mode;
+        const QSignalBlocker blocker{ crawler->contextLinesSpinBox_ };
+        crawler->contextLinesSpinBox_->setValue( count );
+    }
+
+    void changeContextLinesValue( int count )
+    {
+        crawler->contextLinesSpinBox_->setValue( count );
+    }
+
+    LineNumber filteredSearchEnd() const
+    {
+        return crawler->filteredView_->searchEndLine();
+    }
+
+    void setSearchLimitsForTest( LineNumber first, LineNumber last )
+    {
+        crawler->setSearchLimits( first, last );
+    }
+
+    void deliverSearchResults( LogFilteredData* source, LinesCount matches,
+                               LineNumber initialLine, bool terminal, quint64 generation )
+    {
+        crawler->updateFilteredResults( source, matches, initialLine, terminal, generation );
+    }
+
+    void deliverSearchStatus( LogFilteredData* source, LinesCount matches, int progress,
+                              LineNumber initialLine, quint64 generation )
+    {
+        crawler->updateSearchStatus( source, matches, progress, initialLine, generation );
+    }
+
+    void acknowledgeDataStatus()
+    {
+        crawler->activityDetected();
+    }
+
+    void changeFilteredVisibility( int index )
+    {
+        crawler->visibilityBox_->setCurrentIndex( index );
+    }
+
+    void resetPresentationCounts()
+    {
+        crawler->overviewUpdateCountForTest_ = 0;
+        crawler->bulletRefreshCountForTest_ = 0;
+        crawler->presentationRefreshCountForTest_ = 0;
+        crawler->searchCatchUpCountForTest_ = 0;
+        AbstractLogView::access_by<AbstractLogViewPrivate>::resetRefreshCounts(
+            crawler->logMainView_ );
+        AbstractLogView::access_by<AbstractLogViewPrivate>::resetRefreshCounts(
+            crawler->filteredView_ );
+    }
+
+    int overviewUpdateCount() const { return crawler->overviewUpdateCountForTest_; }
+    int bulletRefreshCount() const { return crawler->bulletRefreshCountForTest_; }
+
+    int filteredUpdateCount() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::updateDataCount(
+            crawler->filteredView_ );
+    }
+
+    int filteredForceRefreshCount() const
+    {
+        return AbstractLogView::access_by<AbstractLogViewPrivate>::forceRefreshCount(
+            crawler->filteredView_ );
+    }
+
+    int totalForceRefreshCount() const
+    {
+        using Access = AbstractLogView::access_by<AbstractLogViewPrivate>;
+        return Access::forceRefreshCount( crawler->logMainView_ )
+             + Access::forceRefreshCount( crawler->filteredView_ );
+    }
+
+    void setPresentationActive( bool active )
+    {
+        crawler->setPresentationActive( active );
+    }
+
+    void flushPresentationCatchUp()
+    {
+        if ( crawler->presentationCatchUpQueued_ ) {
+            crawler->deliverPresentationCatchUp();
+        }
+    }
+
+    void markMainLine( LineNumber line )
+    {
+        crawler->markLinesFromMain( { line } );
+    }
+
+    bool mainLineMarked( LineNumber line ) const
+    {
+        return crawler->logFilteredData_->lineTypeByLine( line ).testFlag(
+            AbstractLogData::LineTypeFlags::Mark );
     }
 };
 
@@ -3310,7 +3511,7 @@ SCENARIO( "Filtered view wheel scrolling works after elastic pull, collapse and 
         REQUIRE( crawlerVisitor.filteredVerticalScrollMaximum() > 0 );
         crawlerVisitor.render();
 
-        // Drain the queued search-completion signals (updateFilteredView at
+        // Drain the queued search-completion result/status signals at
         // 100% restores the saved scroll position) so they cannot yank the
         // scroll value back after the wheel event below.
         QCoreApplication::sendPostedEvents( nullptr, QEvent::MetaCall );
@@ -3630,4 +3831,434 @@ SCENARIO( "Crawler widget color labels apply to every line of a multi-line selec
         REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, line11 ) );
         REQUIRE_FALSE( crawlerVisitor.mainViewHasLabelledText( 0, line12 ) );
     }
+}
+
+TEST_CASE( "CrawlerWidget separates search status from result presentation consumers",
+           "[ui][refresh-throttling][presentation]" )
+{
+    QTemporaryFile file{ "crawler_search_consumers_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    const auto generation = source->currentSearchGeneration();
+    visitor.setSearchInProgress( true );
+    visitor.resetPresentationCounts();
+
+    visitor.deliverSearchStatus( source, 5_lcount, 50, 0_lnum, generation );
+    CHECK( visitor.searchStatusText().contains( QStringLiteral( "50" ) ) );
+    CHECK( visitor.pendingSearchLines() > 0 );
+    CHECK( visitor.searchGaugeVisible() );
+    CHECK_FALSE( visitor.stopButtonHidden() );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+    CHECK( visitor.overviewUpdateCount() == 0 );
+    CHECK( visitor.bulletRefreshCount() == 0 );
+
+    const auto statusText = visitor.searchStatusText();
+    const auto pending = visitor.pendingSearchLines();
+    const auto gaugeVisible = visitor.searchGaugeVisible();
+    const auto stopHidden = visitor.stopButtonHidden();
+    visitor.deliverSearchResults( source, 5_lcount, 0_lnum, false, generation );
+    CHECK( visitor.presentedMatchCount() == 5_lcount );
+    CHECK( visitor.filteredUpdateCount() == 1 );
+    CHECK( visitor.overviewUpdateCount() == 1 );
+    CHECK( visitor.bulletRefreshCount() == 1 );
+    CHECK( visitor.searchStatusText() == statusText );
+    CHECK( visitor.pendingSearchLines() == pending );
+    CHECK( visitor.searchGaugeVisible() == gaugeVisible );
+    CHECK( visitor.stopButtonHidden() == stopHidden );
+}
+
+TEST_CASE( "CrawlerWidget reports incremental filtered data only when match count changes",
+           "[ui][refresh-throttling][presentation][regression]" )
+{
+    QTemporaryFile file{ "crawler_incremental_data_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    const auto generation = source->currentSearchGeneration();
+    constexpr auto IncrementalStart = 5_lnum;
+
+    visitor.acknowledgeDataStatus();
+    SafeQSignalSpy firstChangeSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 3_lcount, IncrementalStart, false, generation );
+
+    REQUIRE( firstChangeSpy.count() == 1 );
+    CHECK( firstChangeSpy.at( 0 ).at( 0 ).value<DataStatus>() == DataStatus::NEW_FILTERED_DATA );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+
+    visitor.acknowledgeDataStatus();
+    visitor.resetPresentationCounts();
+    SafeQSignalSpy equalTerminalSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 3_lcount, IncrementalStart, true, generation );
+
+    CHECK( equalTerminalSpy.count() == 0 );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+    CHECK( visitor.filteredUpdateCount() == 1 );
+
+    visitor.acknowledgeDataStatus();
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+    SafeQSignalSpy secondChangeSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 4_lcount, IncrementalStart, true, generation );
+
+    REQUIRE( secondChangeSpy.count() == 1 );
+    CHECK( secondChangeSpy.at( 0 ).at( 0 ).value<DataStatus>() == DataStatus::NEW_FILTERED_DATA );
+    CHECK( visitor.presentedMatchCount() == 3_lcount );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+
+    visitor.acknowledgeDataStatus();
+    SafeQSignalSpy repeatedInactiveSpy{ visitor.crawler.get(), &CrawlerWidget::dataStatusChanged };
+    visitor.deliverSearchResults( source, 4_lcount, IncrementalStart, true, generation );
+    CHECK( repeatedInactiveSpy.count() == 0 );
+
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
+TEST_CASE( "CrawlerWidget replacement retires superseded search status",
+           "[ui][search-generation][presentation]" )
+{
+    QTemporaryFile file{ "crawler_replacement_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    const auto replacement = GENERATE( QString{}, QStringLiteral( "[" ) );
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    visitor.setSearchInProgress( true );
+    visitor.deliverSearchStatus( source, 2_lcount, 50, 0_lnum,
+                                 source->currentSearchGeneration() );
+    REQUIRE_FALSE( visitor.stopButtonHidden() );
+    REQUIRE( visitor.searchGaugeVisible() );
+    if ( !replacement.isEmpty() ) {
+        visitor.setUseRegexp( true );
+    }
+
+    visitor.replaceSearch( replacement );
+
+    CHECK( visitor.stopButtonHidden() );
+    CHECK_FALSE( visitor.searchGaugeVisible() );
+    CHECK( visitor.pendingSearchLines() == 0 );
+}
+
+TEST_CASE( "Reload and truncation retire abandoned search presentation",
+           "[ui][search-generation][presentation][regression]" )
+{
+    QTemporaryFile file{ "crawler_abandoned_search_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    const bool useReload = GENERATE( false, true );
+    const bool clearStatusText = GENERATE( false, true );
+    CAPTURE( useReload, clearStatusText );
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    const auto generation = source->currentSearchGeneration();
+    visitor.deliverSearchResults( source, 7_lcount, 0_lnum, false, generation );
+    visitor.setSearchInProgress( true );
+    visitor.deliverSearchStatus( source, 7_lcount, 50, 0_lnum, generation );
+    if ( clearStatusText ) {
+        visitor.clearSearchStatusText();
+    }
+    REQUIRE( visitor.presentedMatchCount() == 7_lcount );
+    REQUIRE_FALSE( visitor.stopButtonHidden() );
+    REQUIRE( visitor.searchGaugeVisible() );
+    REQUIRE( visitor.pendingSearchLines() > 0 );
+
+    if ( useReload ) {
+        visitor.reload();
+    }
+    else {
+        visitor.notifyFileTruncated();
+    }
+
+    CHECK( visitor.presentedMatchCount() == 0_lcount );
+    CHECK( visitor.stopButtonHidden() );
+    CHECK_FALSE( visitor.searchGaugeVisible() );
+    CHECK( visitor.pendingSearchLines() == 0 );
+}
+
+TEST_CASE( "Switching filtered panes retires the previous pane search status",
+           "[ui][search-generation][keep-results][presentation]" )
+{
+    QTemporaryFile file{ "crawler_switch_status_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+    visitor.createAdditionalFilteredView();
+    REQUIRE( visitor.filteredViewCount() == 2 );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    visitor.setSearchInProgress( true );
+    visitor.deliverSearchStatus( source, 2_lcount, 50, 0_lnum,
+                                 source->currentSearchGeneration() );
+    REQUIRE_FALSE( visitor.stopButtonHidden() );
+
+    visitor.changeFilteredView( 0 );
+
+    CHECK( visitor.stopButtonHidden() );
+    CHECK_FALSE( visitor.searchGaugeVisible() );
+    CHECK( visitor.pendingSearchLines() == 0 );
+}
+
+TEST_CASE( "Deactivation dispatches an already-pending live search update",
+           "[ui][refresh-throttling][visibility][search]" )
+{
+    QTemporaryFile file{ "crawler_pending_search_update_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    const auto before = visitor.searchPerformanceCounters().updateRequests;
+    visitor.armPendingSearchUpdate( 100_lnum );
+
+    visitor.setPresentationActive( false );
+
+    CHECK( visitor.searchPerformanceCounters().updateRequests == before + 1 );
+}
+
+TEST_CASE( "Unchanged encoding does not invalidate both views again",
+           "[ui][refresh-throttling][encoding][presentation]" )
+{
+    QTemporaryFile file{ "crawler_unchanged_encoding_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    visitor.resetPresentationCounts();
+    visitor.updateEncoding();
+
+    CHECK( visitor.totalForceRefreshCount() == 0 );
+}
+
+TEST_CASE( "CrawlerWidget terminal results preserve view context selection and limits",
+           "[ui][refresh-throttling][presentation]" )
+{
+    QTemporaryFile file{ "crawler_terminal_context_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    ScopedShowAllEmptyFilterSetting showAllEmptyFilter{ true };
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    source->setContextLines( 2, 2 );
+    visitor.selectFilteredViewLine( 10 );
+    visitor.setSearchLimitsForTest( 5_lnum, 50_lnum );
+    const auto selection = visitor.filteredSelectedLine();
+    const auto context = visitor.contextLines();
+    const auto searchEnd = visitor.filteredSearchEnd();
+    const auto generation = source->currentSearchGeneration();
+
+    visitor.resetPresentationCounts();
+    visitor.deliverSearchResults( source, 7_lcount, 5_lnum, true, generation );
+    visitor.deliverSearchStatus( source, 7_lcount, 100, 5_lnum, generation );
+
+    CHECK( visitor.filteredSelectedLine() == selection );
+    CHECK( visitor.contextLines() == context );
+    CHECK( visitor.filteredSearchEnd() == searchEnd );
+    CHECK( visitor.presentedMatchCount() == 7_lcount );
+    CHECK( visitor.filteredUpdateCount() == 1 );
+    // One refresh belongs to the data/range transaction and one to restoring
+    // the selected line; setSearchLimits must not add a third refresh.
+    CHECK( visitor.filteredForceRefreshCount() == 2 );
+    CHECK( visitor.pendingSearchLines() == 0 );
+    CHECK( visitor.stopButtonHidden() );
+}
+
+TEST_CASE( "CrawlerWidget ignores stale keep-results source even at an equal generation",
+           "[ui][refresh-throttling][presentation]" )
+{
+    QTemporaryFile file{ "crawler_stale_results_source_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const staleSource = visitor.rawFilteredData();
+    REQUIRE( staleSource != nullptr );
+    visitor.createAdditionalFilteredView();
+    auto* const activeSource = visitor.rawFilteredData();
+    REQUIRE( activeSource != nullptr );
+    REQUIRE( activeSource != staleSource );
+
+    const auto equalGeneration = activeSource->currentSearchGeneration();
+    const auto matchesBefore = visitor.presentedMatchCount();
+    visitor.resetPresentationCounts();
+    visitor.deliverSearchResults( staleSource, 99_lcount, 0_lnum, false,
+                                  equalGeneration );
+
+    CHECK( visitor.presentedMatchCount() == matchesBefore );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+    CHECK( visitor.overviewUpdateCount() == 0 );
+    CHECK( visitor.bulletRefreshCount() == 0 );
+}
+
+TEST_CASE( "Inactive CrawlerWidget restores source selection after visibility changes",
+           "[ui][refresh-throttling][visibility][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_hidden_visibility_selection_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    visitor.setSearchPattern( QStringLiteral( "this is line" ) );
+    visitor.runSearch();
+    REQUIRE( waitUiState( [ & ] { return visitor.getLogFilteredNbLines() == 100_lcount; } ) );
+
+    const bool leaveOneVisibleMark = GENERATE( false, true );
+    CAPTURE( leaveOneVisibleMark );
+    constexpr auto MarkedSourceLine = 10_lnum;
+    constexpr auto SelectedSourceLine = 50_lnum;
+    constexpr auto NearestVisibleSourceLine = 12_lnum;
+    constexpr auto PreviousFilteredRow = 50_lnum;
+    constexpr int MarksVisibilityIndex = 1;
+
+    visitor.rawFilteredData()->setContextLines( 2, 2 );
+    if ( leaveOneVisibleMark ) {
+        visitor.addMarksInMainView( { MarkedSourceLine } );
+    }
+    visitor.selectFilteredViewLine( PreviousFilteredRow.get() );
+    visitor.selectMainViewLine( SelectedSourceLine.get() );
+    REQUIRE( visitor.mainSelectedLine() == SelectedSourceLine );
+    REQUIRE( visitor.filteredSelectedLine() == PreviousFilteredRow );
+
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+    visitor.changeFilteredVisibility( MarksVisibilityIndex );
+
+    const auto expectedVisibleLines = leaveOneVisibleMark ? 5_lcount : 0_lcount;
+    REQUIRE( visitor.getLogFilteredNbLines() == expectedVisibleLines );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+
+    CHECK( visitor.filteredUpdateCount() == 1 );
+    const auto restoredSelection = visitor.filteredSelectedLine();
+    if ( leaveOneVisibleMark ) {
+        REQUIRE( restoredSelection.has_value() );
+        CHECK( *restoredSelection == 4_lnum );
+        CHECK( visitor.rawFilteredData()->getMatchingLineNumber( *restoredSelection )
+               == NearestVisibleSourceLine );
+    }
+    else {
+        CHECK_FALSE( restoredSelection.has_value() );
+    }
+}
+
+TEST_CASE( "Inactive CrawlerWidget applies terminal context to the model and presents once",
+           "[ui][refresh-throttling][visibility][presentation]" )
+{
+    QTemporaryFile file{ "crawler_hidden_terminal_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    visitor.configureContextLines( 3, 2 );
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+
+    visitor.deliverSearchResults( source, 4_lcount, 0_lnum, true,
+                                  source->currentSearchGeneration() );
+
+    CHECK( visitor.contextLines() == std::make_pair( 2, 2 ) );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
+TEST_CASE( "Inactive CrawlerWidget clears context in the model and defers presentation",
+           "[ui][refresh-throttling][visibility][context][presentation]" )
+{
+    QTemporaryFile file{ "crawler_hidden_context_clear_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    auto* const source = visitor.rawFilteredData();
+    REQUIRE( source != nullptr );
+    source->setContextLines( 2, 2 );
+    visitor.configureContextLines( 3, 2 );
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+
+    visitor.changeContextLinesValue( 0 );
+
+    CHECK( visitor.contextLines() == std::make_pair( 0, 0 ) );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    CHECK( visitor.filteredUpdateCount() == 1 );
+}
+
+TEST_CASE( "Inactive CrawlerWidget keeps marks authoritative and defers their presentation",
+           "[ui][refresh-throttling][visibility][marks][presentation]" )
+{
+    QTemporaryFile file{ "crawler_hidden_mark_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+    Session session;
+    CrawlerWidgetVisitor visitor;
+    visitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), [] { return new CrawlerWidget(); } ) ) );
+    REQUIRE( waitUiState( [ & ] { return visitor.isLoadingFinished(); } ) );
+
+    visitor.resetPresentationCounts();
+    visitor.setPresentationActive( false );
+    visitor.markMainLine( 1_lnum );
+
+    CHECK( visitor.mainLineMarked( 1_lnum ) );
+    CHECK( visitor.filteredUpdateCount() == 0 );
+    visitor.setPresentationActive( true );
+    visitor.flushPresentationCatchUp();
+    CHECK( visitor.filteredUpdateCount() == 1 );
 }

@@ -3,6 +3,7 @@ set(UI_TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/logdata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/logfiltereddata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/crawlerwidget_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/filewatcher_lifecycle_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/concatenatedlogdata_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foldercrawler_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foldercrawler_pending_failure_test.cpp
@@ -27,6 +28,30 @@ if(NOT KLOGG_ANY_SANITIZER)
 endif()
 
 klogg_add_runtime_test(klogg_itests klogg_itests)
+if(UNIX)
+  klogg_add_runtime_test(
+    klogg_itests_filewatcher_low_fd
+    klogg_itests
+    "[.filewatcher-lifecycle]"
+  )
+  set_tests_properties(
+    klogg_itests_filewatcher_low_fd
+    PROPERTIES
+      LABELS "ui;filewatcher;resource-limit"
+      RUN_SERIAL TRUE
+      SKIP_RETURN_CODE 77
+  )
+
+  klogg_add_runtime_test(
+    klogg_itests_filewatcher_teardown_timeout
+    klogg_itests
+    "[.filewatcher-teardown-timeout]"
+  )
+  set_tests_properties(
+    klogg_itests_filewatcher_teardown_timeout
+    PROPERTIES RUN_SERIAL TRUE LABELS "ui;filewatcher;lifecycle"
+  )
+endif()
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   set_tests_properties(klogg_itests PROPERTIES RUN_SERIAL TRUE)
 endif()

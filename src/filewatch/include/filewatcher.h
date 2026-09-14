@@ -41,6 +41,7 @@
 
 #include <QObject>
 
+#include <cstddef>
 #include <memory>
 
 class EfswFileWatcher;
@@ -66,6 +67,13 @@ class FileWatcher : public QObject {
 
     static FileWatcher& getFileWatcher();
 
+#ifdef KLOGG_TESTS
+    static FileWatcher* existingInstanceForTest()
+    {
+        return existingInstance();
+    }
+#endif
+
     // Adds the file to the list of file to watch
     // (do nothing if a file is already monitored)
     void addFile( const QString& fileName );
@@ -76,6 +84,29 @@ class FileWatcher : public QObject {
 
     void updateConfiguration();
 
+#ifdef KLOGG_TESTS
+    // Bounded synchronization and resource snapshots for lifecycle tests.
+    // Counts are safe to query after waitForIdleForTest() returns true.
+    bool waitForIdleForTest( int timeoutMs )
+    {
+        return waitForIdle( timeoutMs );
+    }
+    std::size_t watchedFileCountForTest()
+    {
+        return watchedFileCount();
+    }
+    std::size_t watchedDirectoryCountForTest()
+    {
+        return watchedDirectoryCount();
+    }
+    bool flushPendingNotificationsForTest()
+    {
+        const auto hadPendingNotifications = !changes_.empty();
+        sendChangesNotifications();
+        return hadPendingNotifications;
+    }
+#endif
+
   public Q_SLOTS:
     void fileChangedOnDisk( const QString& );
 
@@ -83,7 +114,6 @@ class FileWatcher : public QObject {
     // Sent when the file on disk has changed in any way.
     void fileChanged( const QString& );
     void notifyFileChangedOnDisk();
-
 
   private Q_SLOTS:
     void checkWatches();
@@ -93,6 +123,11 @@ class FileWatcher : public QObject {
     // Create an empty object
     FileWatcher();
     ~FileWatcher() override; // for complete EfswFileWatcher
+
+    static FileWatcher* existingInstance();
+    bool waitForIdle( int timeoutMs );
+    std::size_t watchedFileCount();
+    std::size_t watchedDirectoryCount();
 
     QTimer* checkTimer_;
     KDToolBox::KDGenericSignalThrottler* throttler_;

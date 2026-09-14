@@ -51,6 +51,64 @@ def sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def safe_package_support_path(value: object, label: str) -> pathlib.PurePosixPath:
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        raise RuntimeError(f"unsafe ADB package-support {label}: {value}")
+    relative = pathlib.PurePosixPath(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"unsafe ADB package-support {label}: {value}")
+    return relative
+
+
+def package_support_receipt_assets(lock: dict, root: pathlib.Path) -> list[dict]:
+    assets = lock.get("release_assets")
+    if not isinstance(assets, list) or not assets:
+        raise RuntimeError("ADB lock release_assets must be a non-empty array")
+
+    receipt_assets = []
+    seen_kinds: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise RuntimeError("ADB release asset must be an object")
+        kind = asset.get("kind")
+        distribution = asset.get("distribution")
+        if (
+            not isinstance(kind, str)
+            or not kind
+            or kind in seen_kinds
+            or not isinstance(distribution, dict)
+            or set(distribution) != {"package_required", "release_required"}
+            or not all(isinstance(value, bool) for value in distribution.values())
+            or distribution["release_required"] is not True
+        ):
+            raise RuntimeError(f"invalid ADB package-support distribution: {kind}")
+        seen_kinds.add(kind)
+        if distribution["package_required"] is not True:
+            continue
+
+        relative = safe_package_support_path(asset.get("file_name"), f"asset path ({kind})")
+        sidecar_relative = safe_package_support_path(
+            asset.get("sha256_file"), f"checksum path ({kind})"
+        )
+        path = root.joinpath(*relative.parts)
+        sidecar = root.joinpath(*sidecar_relative.parts)
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or not sidecar.is_file()
+            or sidecar.is_symlink()
+        ):
+            raise RuntimeError(f"missing ADB package-support asset or checksum: {kind}")
+        digest = sha256(path)
+        expected_sidecar = f"{digest}  {relative.name}\n"
+        if sidecar.read_text(encoding="utf-8") != expected_sidecar:
+            raise RuntimeError(f"ADB package-support checksum mismatch: {kind}")
+        receipt_assets.append(
+            {"kind": kind, "path": relative.as_posix(), "sha256": digest}
+        )
+    return receipt_assets
+
+
 def verify_required_runtime_loads(source_root: pathlib.Path, target_plan: dict) -> list[dict]:
     usb = target_plan.get("usb", {})
     runtime_files = set(usb.get("runtime_files", []))
@@ -682,7 +740,7 @@ def main() -> int:
     parser.add_argument("--build-root", required=True, type=pathlib.Path)
     parser.add_argument("--target", required=True)
     parser.add_argument("--artifact-root", required=True, type=pathlib.Path)
-    parser.add_argument("--release-assets-root", required=True, type=pathlib.Path)
+    parser.add_argument("--package-support-root", required=True, type=pathlib.Path)
     parser.add_argument("--parallel", default=str(os.cpu_count() or 2))
     parser.add_argument(
         "--inspection-only",
@@ -870,16 +928,12 @@ def main() -> int:
             json.dumps(smoke, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
-    release_assets = json.loads(
-        (args.release_assets_root / "adb-helper-release-assets.json").read_text(encoding="utf-8")
-    )
+    release_assets = package_support_receipt_assets(lock, args.package_support_root)
     source_set_assets = [
-        asset
-        for asset in release_assets
-        if isinstance(asset, dict) and asset.get("kind") == "source-set-receipt"
+        asset for asset in release_assets if asset.get("kind") == "source-set-receipt"
     ]
     if len(source_set_assets) != 1:
-        raise RuntimeError("ADB release assets must contain exactly one source-set receipt")
+        raise RuntimeError("ADB package support must contain exactly one source-set receipt")
     source_set_receipt_sha256 = source_set_assets[0].get("sha256")
     if not isinstance(source_set_receipt_sha256, str):
         raise RuntimeError("ADB source-set receipt lacks sha256 binding")

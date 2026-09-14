@@ -663,6 +663,9 @@ _PERFORMANCE_ASSERTION_RE = re.compile(
 _CATCH_CASE_RE = re.compile(
     r"\b(?:TEST_CASE|SCENARIO|TEST_CASE_METHOD|TEMPLATE_TEST_CASE)\s*\("
 )
+_CATCH_SECTION_RE = re.compile(
+    r"\b(?:DYNAMIC_SECTION|SECTION|GIVEN|AND_GIVEN|WHEN|AND_WHEN|THEN|AND_THEN)\s*\("
+)
 _SANITIZER_EXCLUSION_RE = re.compile(
     r"^\s*#\s*(?:if\s+.*!\s*defined\s*\(\s*KLOGG_SANITIZER_BUILD\s*\)"
     r"|ifndef\s+KLOGG_SANITIZER_BUILD)"
@@ -1145,49 +1148,294 @@ def _check_vectorscan_capability_assertion(text: str, path: Path) -> list[tuple[
     return findings
 
 
-def _check_data_variable_shadowing(text: str, path: Path) -> list[tuple[int, str]]:
-    """Flag local variables named ``data`` inside QWidget subclass methods.
+_DATA_SHADOWING_MESSAGE = (
+    "Local variable or lambda parameter named 'data' shadows QWidget::data "
+    "(protected member). MSVC C4458 diagnoses the collision and /WX promotes "
+    "it to an error, while the project's GCC/Clang warning sets do not reliably "
+    "report it. Rename the declaration (for example, to 'sessionData' or "
+    "'payload') to avoid a Windows-only CI failure. (PR #38)"
+)
+_WIDGET_SUBCLASS_RE = re.compile(
+    r"\b(?:class|struct)\s+(?P<name>[A-Za-z_]\w*)[^;{}]*:\s*[^;{}]*"
+    r"\b(?:QWidget|QDialog|QMainWindow|QAbstractScrollArea|QFrame|QToolBar|QTabBar|QTabWidget|QSplitter|QMenu)\b"
+    r"[^;{}]*\{",
+    re.DOTALL,
+)
+_OUT_OF_CLASS_METHOD_RE = re.compile(
+    r"\b(?P<class>[A-Za-z_]\w*)\s*::\s*[~A-Za-z_]\w*\s*\("
+)
+_INLINE_METHOD_NAME_RE = re.compile(
+    r"(?:~?[A-Za-z_]\w*|operator\s*(?:\[\]|\(\)|[^\s(]+))\s*$"
+)
+_LOCAL_DATA_DECL_RE = re.compile(
+    r"(?m)^[ \t]+(?:for\s*\(\s*)?"
+    r"(?:(?:static|thread_local|constexpr|const|volatile)\s+)*"
+    r"(?:auto|[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*"
+    r"(?:\s*<[^;\n{}=()]*>)?)"
+    r"\s*(?:(?:\*|&&?)\s*(?:const\s*)?)*"
+    r"\bdata\b\s*(?=[;:={([])"
+)
 
-    QWidget has a protected member ``data`` (QScopedPointer<QWidgetData>).
-    GCC/Clang ``-Wshadow`` does NOT warn about shadowing protected members,
-    but MSVC C4458 (enabled by /W4, promoted to error by /WX) does.  This
-    causes Windows-only CI failures that pass on macOS/Linux.
 
-    PR #38 exposed this in AdbLogcatDialog::sessionData() and
-    IosLogDialog::sessionData().
+def _skip_cpp_space(code: str, position: int) -> int:
+    while position < len(code) and code[position].isspace():
+        position += 1
+    return position
 
-    The check looks for:
-    - Files whose name contains "dialog" (heuristic for QDialog subclasses).
-    - A local variable declaration ``Type data;`` or ``Type data{}``.
+
+def _member_function_body_open(code: str, parameters_close: int) -> int | None:
+    """Find a function body after its parameters, including constructors.
+
+    Constructor member initializers may themselves use braces. Parse and skip
+    each initializer rather than treating the first ``{`` after ``)`` as the
+    body opener.
     """
-    if "dialog" not in path.name.lower() and "widget" not in path.name.lower():
-        return []
-
-    # Only flag if the file actually includes QWidget/QDialog headers
-    # or inherits from QDialog — avoids false positives in non-Qt files.
-    if "QDialog" not in text and "QWidget" not in text:
-        return []
-
-    findings: list[tuple[int, str]] = []
-    # Match: TypeIdentifier data;  or  TypeIdentifier data{...}
-    # Captures patterns like:  AdbLogcatSessionData data;
-    decl_re = re.compile(
-        r"^\s+\w+(?:::\w+)*\s+data\s*[;={]"
-    )
-    for i, line in enumerate(text.splitlines(), start=1):
-        if ALLOW_MARKER in line:
+    position = parameters_close + 1
+    while position < len(code):
+        position = _skip_cpp_space(code, position)
+        if position >= len(code) or code[position] in ";=":
+            return None
+        if code[position] == "{":
+            return position
+        if code[position] in "([":
+            close = _balanced_close(code, position)
+            if close is None:
+                return None
+            position = close + 1
             continue
-        if decl_re.match(line):
-            findings.append(
-                (
-                    i,
-                    "Local variable named 'data' shadows QWidget::data "
-                    "(protected member). GCC/Clang -Wshadow does NOT catch "
-                    "this, but MSVC C4458 does (promoted to error by /WX). "
-                    "Rename the variable (e.g. 'sessionData') to avoid a "
-                    "Windows-only CI failure. (PR #38)",
-                )
-            )
+        if (
+            code[position] == ":"
+            and (position == 0 or code[position - 1] != ":")
+            and (position + 1 >= len(code) or code[position + 1] != ":")
+        ):
+            position += 1
+            break
+        position += 1
+    else:
+        return None
+
+    # Constructor initializer-list grammar is a comma-separated sequence of
+    # member/base identifiers followed by a balanced (...) or {...} initializer.
+    while position < len(code):
+        position = _skip_cpp_space(code, position)
+        initializer_open = position
+        while initializer_open < len(code) and code[initializer_open] not in "({;":
+            initializer_open += 1
+        if initializer_open >= len(code) or code[initializer_open] == ";":
+            return None
+        initializer_close = _balanced_close(code, initializer_open)
+        if initializer_close is None:
+            return None
+        position = _skip_cpp_space(code, initializer_close + 1)
+        if code.startswith("...", position):
+            position = _skip_cpp_space(code, position + 3)
+        if position < len(code) and code[position] == ",":
+            position += 1
+            continue
+        if position < len(code) and code[position] == "{":
+            return position
+        return None
+    return None
+
+
+def _inline_widget_member_ranges(
+    code: str, class_open: int, class_close: int
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Return parameter and body ranges declared directly in a widget subclass."""
+    body_ranges: list[tuple[int, int]] = []
+    parameter_ranges: list[tuple[int, int]] = []
+    position = class_open + 1
+    while position < class_close:
+        ch = code[position]
+        if ch == "{":
+            # A nested type or data-member initializer cannot contain a direct
+            # member declaration of the surrounding widget.
+            close = _balanced_close(code, position)
+            position = class_close if close is None else close + 1
+            continue
+        if ch != "(":
+            position += 1
+            continue
+
+        prefix = code[class_open + 1 : position]
+        line_prefix = prefix[prefix.rfind("\n") + 1 :]
+        if _INLINE_METHOD_NAME_RE.search(line_prefix) is None:
+            position += 1
+            continue
+        parameters_close = _balanced_close(code, position)
+        if parameters_close is None:
+            position += 1
+            continue
+        body_open = _member_function_body_open(code, parameters_close)
+        if body_open is None or body_open >= class_close:
+            position = parameters_close + 1
+            continue
+        body_close = _balanced_close(code, body_open)
+        if body_close is None or body_close > class_close:
+            position = body_open + 1
+            continue
+        parameter_ranges.append((position + 1, parameters_close))
+        body_ranges.append((body_open, body_close))
+        position = body_close + 1
+    return body_ranges, parameter_ranges
+
+
+def _widget_member_ranges(
+    code: str, inferred_widget_names: set[str]
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Return balanced parameter/body ranges for QWidget member functions."""
+    body_ranges: list[tuple[int, int]] = []
+    parameter_ranges: list[tuple[int, int]] = []
+    widget_class_names = set(inferred_widget_names)
+    for declaration in _WIDGET_SUBCLASS_RE.finditer(code):
+        class_open = declaration.end() - 1
+        class_close = _balanced_close(code, class_open)
+        if class_close is None:
+            continue
+        widget_class_names.add(declaration.group("name"))
+        inline_bodies, inline_parameters = _inline_widget_member_ranges(
+            code, class_open, class_close
+        )
+        body_ranges.extend(inline_bodies)
+        parameter_ranges.extend(inline_parameters)
+
+    for method in _OUT_OF_CLASS_METHOD_RE.finditer(code):
+        class_name = method.group("class")
+        if class_name not in widget_class_names:
+            continue
+        parameter_open = method.end() - 1
+        parameters_close = _balanced_close(code, parameter_open)
+        if parameters_close is None:
+            continue
+        body_open = _member_function_body_open(code, parameters_close)
+        if body_open is None:
+            continue
+        body_close = _balanced_close(code, body_open)
+        if body_close is not None:
+            parameter_ranges.append((parameter_open + 1, parameters_close))
+            body_ranges.append((body_open, body_close))
+    return sorted(set(body_ranges)), sorted(set(parameter_ranges))
+
+
+def _widget_names_from_headers(text: str, path: Path) -> set[str]:
+    source_path = path if path.is_absolute() else Path.cwd() / path
+    candidates: set[Path] = set()
+    if source_path.parent.name == "src":
+        include_dir = source_path.parent.parent / "include"
+        candidates.update(
+            {include_dir / f"{source_path.stem}.h", include_dir / f"{source_path.stem}.hpp"}
+        )
+    else:
+        include_dir = source_path.parent
+
+    for include in re.findall(r'^\s*#\s*include\s*"([^"]+)"', text, re.MULTILINE):
+        candidates.add(source_path.parent / include)
+        candidates.add(include_dir / include)
+
+    names: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        header_text = candidate.read_text(encoding="utf-8")
+        header_code = _strip_cpp_literals(_strip_cpp_comments(header_text))
+        names.update(
+            declaration.group("name")
+            for declaration in _WIDGET_SUBCLASS_RE.finditer(header_code)
+        )
+    return names
+
+
+def _declared_data_offsets(parameters: str) -> list[int]:
+    """Return `data` tokens that are parameter declarators, not expressions."""
+    offsets: list[int] = []
+    for data_match in re.finditer(r"\bdata\b", parameters):
+        prefix = parameters[: data_match.start()]
+        parameter_start = max(prefix.rfind(","), prefix.rfind("("), prefix.rfind("{")) + 1
+        declaration_prefix = prefix[parameter_start:].strip()
+        suffix = parameters[data_match.end() :].lstrip()
+        if (
+            not declaration_prefix
+            or "=" in declaration_prefix
+            or declaration_prefix.endswith(("::", ".", "->"))
+            or (suffix and suffix[0] not in ",=)[")
+        ):
+            continue
+        offsets.append(data_match.start())
+    return offsets
+
+
+def _check_data_variable_shadowing(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag declarations named ``data`` in QWidget subclass implementation files.
+
+    QWidget has a protected member ``data`` (QScopedPointer<QWidgetData>). MSVC
+    C4458 diagnoses both ordinary locals and parameters of lambdas introduced in
+    a member-function scope; the GCC/Clang warning sets used by the project do not
+    reliably diagnose this inherited protected-name collision. With /WX, the
+    result is a Windows-only build failure.
+
+    PR #38 exposed the local-declaration form in AdbLogcatDialog::sessionData()
+    and IosLogDialog::sessionData(). Lambda parameter lists are parsed as balanced
+    C++ regions so declarations split across lines cannot escape the same rule.
+    """
+    findings: list[tuple[int, str]] = []
+    comment_free = _strip_cpp_comments(text)
+    code = _strip_cpp_literals(comment_free)
+    allow_lines = _cpp_allow_marker_lines(text)
+    inferred_widget_names = _widget_names_from_headers(text, path)
+    member_ranges, member_parameter_ranges = _widget_member_ranges(
+        code, inferred_widget_names
+    )
+    if not member_ranges and not member_parameter_ranges:
+        return []
+
+    for parameters_start, parameters_end in member_parameter_ranges:
+        parameters = code[parameters_start:parameters_end]
+        for relative in _declared_data_offsets(parameters):
+            absolute = parameters_start + relative
+            line_num = code.count("\n", 0, absolute) + 1
+            if line_num not in allow_lines:
+                findings.append((line_num, _DATA_SHADOWING_MESSAGE))
+
+    # Ordinary declarations are only relevant in member-function scope. Match
+    # common qualified/template/pointer/reference/auto declarators, then require
+    # the `data` token itself to fall inside one of the parsed member bodies.
+    for declaration in _LOCAL_DATA_DECL_RE.finditer(code):
+        data_offset = declaration.group().rfind("data")
+        absolute = declaration.start() + data_offset
+        if not any(start < absolute < end for start, end in member_ranges):
+            continue
+        line_num = code.count("\n", 0, absolute) + 1
+        if line_num in allow_lines:
+            continue
+        findings.append((line_num, _DATA_SHADOWING_MESSAGE))
+
+    # Locate lambda captures, then balance the immediately following parameter
+    # list. This handles both one-line and arbitrarily wrapped declarations while
+    # retaining same-line allow-marker behavior for the actual `data` token.
+    for capture in re.finditer(r"\[", code):
+        capture_start = capture.start()
+        if not any(start < capture_start < end for start, end in member_ranges):
+            continue
+        capture_close = _balanced_close(code, capture_start)
+        if capture_close is None:
+            continue
+        parameter_open = capture_close + 1
+        while parameter_open < len(code) and code[parameter_open].isspace():
+            parameter_open += 1
+        if parameter_open >= len(code) or code[parameter_open] != "(":
+            continue
+        parameter_close = _balanced_close(code, parameter_open)
+        if parameter_close is None:
+            continue
+
+        parameters = code[parameter_open + 1 : parameter_close]
+        for relative in _declared_data_offsets(parameters):
+            absolute = parameter_open + 1 + relative
+            line_num = code.count("\n", 0, absolute) + 1
+            if line_num not in allow_lines:
+                findings.append((line_num, _DATA_SHADOWING_MESSAGE))
+                break
+
     return findings
 
 
@@ -1819,6 +2067,279 @@ def _cpp_allow_marker_lines(text: str) -> set[int]:
     return marker_lines
 
 
+_FOLDER_MARK_MUTATION_RE = re.compile(
+    r"\b(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*"
+    r"(?:markMainViewLine|unmarkMainViewLine)\s*\("
+)
+_FOLDER_PRESENTATION_WAIT_RE = re.compile(r"\bQTest\s*::\s*qWait\s*\(")
+_FOLDER_PRESENTATION_FLUSH_RE = re.compile(
+    r"\bflushFolderPresentation\s*\(\s*(?P<receiver>[A-Za-z_]\w*)\s*\)"
+)
+_FOLDER_OVERVIEW_BINDING_RE = re.compile(
+    r"\bauto\s*\*?(?:\s+const)?\s+(?P<overview>[A-Za-z_]\w*)\s*=\s*"
+    r"(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*overviewModel\s*\(\s*\)"
+)
+_FOLDER_OVERVIEW_OBSERVATION_RE = re.compile(
+    r"\b(?:"
+    r"(?P<receiver>[A-Za-z_]\w*)\s*(?:\.|->)\s*overviewModel\s*\(\s*\)\s*->\s*"
+    r"|(?P<overview>[A-Za-z_]\w*)\s*(?:\.|->)\s*"
+    r")"
+    r"(?:updateView|getMarkLines)\s*\("
+)
+
+
+def _catch_section_body_ranges(code: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for section in _CATCH_SECTION_RE.finditer(code):
+        arguments_close = _balanced_close(code, section.end() - 1)
+        if arguments_close is None:
+            continue
+        body_open = _skip_cpp_space(code, arguments_close + 1)
+        if body_open >= len(code) or code[body_open] != "{":
+            continue
+        body_close = _balanced_close(code, body_open)
+        if body_close is not None:
+            ranges.append((body_open, body_close))
+    return ranges
+
+
+def _catch_section_path(
+    section_ranges: list[tuple[int, int]], position: int
+) -> tuple[int, ...]:
+    return tuple(
+        index
+        for index, (start, end) in enumerate(section_ranges)
+        if start < position < end
+    )
+
+
+def _combined_catch_path(
+    left: tuple[int, ...], right: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    if left == right[: len(left)]:
+        return right
+    if right == left[: len(right)]:
+        return left
+    return None
+
+
+def _catch_path_is_prefix(prefix: tuple[int, ...], path: tuple[int, ...]) -> bool:
+    return prefix == path[: len(prefix)]
+
+
+def _folder_observation_receiver(
+    observation: re.Match[str], overview_receivers: dict[str, str], fallback: str
+) -> str | None:
+    direct_receiver = observation.group("receiver")
+    if direct_receiver is not None:
+        return direct_receiver
+    overview = observation.group("overview")
+    return overview_receivers.get(
+        overview, fallback if overview == "overview" else None
+    )
+
+
+def _check_folder_mark_overview_fixed_wait(
+    text: str, path: Path
+) -> list[tuple[int, str]]:
+    """Reject fixed waits used to publish folder marks to the overview.
+
+    Direct mark mutations enqueue presentation work. A QTest::qWait delay is not
+    a completion boundary; tests must flush the mutated FolderCrawlerWidget's
+    presentation explicitly before observing its overview. Key/mouse-driven
+    scenarios remain outside this rule because their short waits intentionally
+    pace input rather than stand in for direct mutation completion.
+    """
+    if path.name != "foldercrawler_test.cpp" or "tests" not in path.parts:
+        return []
+
+    comment_free = _strip_cpp_comments(text)
+    code = _strip_cpp_literals(comment_free)
+    allow_lines = _cpp_allow_marker_lines(text)
+    case_starts = list(_CATCH_CASE_RE.finditer(code))
+    findings: list[tuple[int, str]] = []
+    reported_waits: set[int] = set()
+
+    for case_index, case_start in enumerate(case_starts):
+        case_end = (
+            case_starts[case_index + 1].start()
+            if case_index + 1 < len(case_starts)
+            else len(code)
+        )
+        case = code[case_start.start() : case_end]
+        overview_receivers = {
+            binding.group("overview"): binding.group("receiver")
+            for binding in _FOLDER_OVERVIEW_BINDING_RE.finditer(case)
+        }
+        section_ranges = _catch_section_body_ranges(case)
+        mutations = list(_FOLDER_MARK_MUTATION_RE.finditer(case))
+
+        for mutation_index, mutation in enumerate(mutations):
+            receiver = mutation.group("receiver")
+            mutation_open = mutation.end() - 1
+            mutation_close = _balanced_close(case, mutation_open)
+            mutation_malformed = mutation_close is None
+            mutation_end = mutation.end() if mutation_malformed else mutation_close + 1
+
+            mutation_path = _catch_section_path(section_ranges, mutation.start())
+
+            # A later direct mutation starts a new publication cycle only when
+            # both statements can execute on the same Catch SECTION path.
+            segment_end = next(
+                (
+                    later.start()
+                    for later in mutations[mutation_index + 1 :]
+                    if later.group("receiver") == receiver
+                    and _combined_catch_path(
+                        mutation_path,
+                        _catch_section_path(section_ranges, later.start()),
+                    )
+                    is not None
+                ),
+                len(case),
+            )
+            segment = case[mutation_end:segment_end]
+            sequence_allowed = False
+            sequence_reported = False
+
+            for wait in _FOLDER_PRESENTATION_WAIT_RE.finditer(segment):
+                wait_open = wait.end() - 1
+                wait_close = _balanced_close(segment, wait_open)
+                wait_malformed = wait_close is None
+                if not wait_malformed:
+                    delay = segment[wait_open + 1 : wait_close]
+                    if _is_zero_timer_delay(delay):
+                        continue
+                    observation_search_start = wait_close + 1
+                else:
+                    observation_search_start = wait.end()
+
+                observation = next(
+                    (
+                        candidate
+                        for candidate in _FOLDER_OVERVIEW_OBSERVATION_RE.finditer(
+                            segment, observation_search_start
+                        )
+                        if _folder_observation_receiver(
+                            candidate, overview_receivers, receiver
+                        )
+                        == receiver
+                        and _combined_catch_path(
+                            mutation_path,
+                            _catch_section_path(
+                                section_ranges, mutation_end + candidate.start()
+                            ),
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+                if observation is None:
+                    continue
+
+                # Only a flush of the same FolderCrawlerWidget is a semantic
+                # boundary for this mutation. A different receiver's flush must
+                # not accidentally legitimize the fixed wait.
+                observation_path = _catch_section_path(
+                    section_ranges, mutation_end + observation.start()
+                )
+                execution_path = _combined_catch_path(mutation_path, observation_path)
+                if execution_path is None:
+                    continue
+                before_observation = segment[: observation.start()]
+                if any(
+                    flush.group("receiver") == receiver
+                    and _catch_path_is_prefix(
+                        _catch_section_path(
+                            section_ranges, mutation_end + flush.start()
+                        ),
+                        execution_path,
+                    )
+                    for flush in _FOLDER_PRESENTATION_FLUSH_RE.finditer(
+                        before_observation
+                    )
+                ):
+                    continue
+
+                absolute_wait = case_start.start() + mutation_end + wait.start()
+                line_num = code.count("\n", 0, absolute_wait) + 1
+                if line_num in allow_lines:
+                    sequence_allowed = True
+                    break
+                if absolute_wait in reported_waits:
+                    continue
+                reported_waits.add(absolute_wait)
+
+                if mutation_malformed or wait_malformed:
+                    message = (
+                        "Malformed folder mark/presentation sequence: unbalanced "
+                        "brackets prevent verifying an explicit presentation flush."
+                    )
+                else:
+                    message = (
+                        "Do not use QTest::qWait() as the completion boundary "
+                        "between a direct markMainViewLine()/unmarkMainViewLine() "
+                        "mutation and an overview observation. Call "
+                        f"flushFolderPresentation( {receiver} ) so the same "
+                        "FolderCrawlerWidget publishes the mark state deterministically."
+                    )
+                findings.append((line_num, message))
+                sequence_reported = True
+                break
+
+            if sequence_allowed or sequence_reported:
+                continue
+
+            for observation in _FOLDER_OVERVIEW_OBSERVATION_RE.finditer(segment):
+                if (
+                    _folder_observation_receiver(
+                        observation, overview_receivers, receiver
+                    )
+                    != receiver
+                ):
+                    continue
+                observation_path = _catch_section_path(
+                    section_ranges, mutation_end + observation.start()
+                )
+                execution_path = _combined_catch_path(
+                    mutation_path, observation_path
+                )
+                if execution_path is None:
+                    continue
+                before_observation = segment[: observation.start()]
+                if any(
+                    flush.group("receiver") == receiver
+                    and _catch_path_is_prefix(
+                        _catch_section_path(
+                            section_ranges, mutation_end + flush.start()
+                        ),
+                        execution_path,
+                    )
+                    for flush in _FOLDER_PRESENTATION_FLUSH_RE.finditer(
+                        before_observation
+                    )
+                ):
+                    continue
+
+                absolute_observation = (
+                    case_start.start() + mutation_end + observation.start()
+                )
+                line_num = code.count("\n", 0, absolute_observation) + 1
+                if line_num in allow_lines:
+                    continue
+                findings.append(
+                    (
+                        line_num,
+                        "Observe folder marks only after calling "
+                        f"flushFolderPresentation( {receiver} ) for the same direct "
+                        "markMainViewLine()/unmarkMainViewLine() mutation.",
+                    )
+                )
+                break
+
+    return findings
+
+
 def _check_native_presentation_test_assertion(
     text: str, path: Path
 ) -> list[tuple[int, str]]:
@@ -1916,6 +2437,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "known-completion-event-polling",
         "check": _check_known_completion_event_polling,
+    },
+    {
+        "name": "folder-mark-overview-fixed-wait",
+        "check": _check_folder_mark_overview_fixed_wait,
     },
     {
         "name": "folder-engine-qsignalspy",

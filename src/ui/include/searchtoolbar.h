@@ -106,8 +106,8 @@ class SearchToolbar : public QWidget {
     bool isKeepResultsChecked() const;
     void setKeepResultsChecked( bool checked );
 
-    // The search start/stop show-hide dance (ports crawlerwidget.cpp
-    // replaceCurrentSearch 1985-1988 + updateFilteredView 674-677).
+    // The search start/stop show-hide dance shared by search start and
+    // terminal status publication.
     // busy: stop enable+show, clear/search hide.
     // !busy: stop disable+hide, search/clear show.
     void setSearchInProgress( bool busy );

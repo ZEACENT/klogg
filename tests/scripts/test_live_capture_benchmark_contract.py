@@ -15,6 +15,7 @@ import zlib
 ROOT = pathlib.Path(__file__).parents[2]
 BENCHMARK_SCRIPT = ROOT / "scripts" / "run_live_capture_benchmarks.py"
 BENCHMARK_CORE = ROOT / "benchmarks" / "live_capture_benchmark_core.cpp"
+TESTS_CMAKE = ROOT / "tests" / "CMakeLists.txt"
 
 
 class LiveCaptureBenchmarkContractTest(unittest.TestCase):
@@ -40,6 +41,23 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
     def test_unsigned_strong_counts_are_not_checked_for_negative_values(self):
         source = BENCHMARK_CORE.read_text(encoding="utf-8")
         self.assertNotRegex(source, r"\b(?:lineCount|matches)\.get\(\)\s*<\s*0")
+
+    def test_process_heavy_contract_has_isolated_ctest_timeout(self):
+        cmake = TESTS_CMAKE.read_text(encoding="utf-8")
+        shared_timeout = re.search(
+            r"set_tests_properties\((.*?)PROPERTIES TIMEOUT 60\s*\)",
+            cmake,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(shared_timeout)
+        self.assertNotIn("live_capture_benchmark_contract", shared_timeout.group(1))
+        self.assertRegex(
+            cmake,
+            r"set_tests_properties\(\s*live_capture_benchmark_contract\s+"
+            r"PROPERTIES TIMEOUT 120\s*\)",
+        )
+        fixture_source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        self.assertIn("time.sleep(300)", fixture_source)
 
     @staticmethod
     def record(
@@ -479,7 +497,7 @@ if MODE.startswith('artifact_collision:') and a.trial == 0:
     if not sentinel.exists():
         sentinel.write_bytes(b'child-owned sentinel')
 if MODE == 'timeout':
-    time.sleep(60)
+    time.sleep(300)
 if MODE == 'exit':
     sys.stderr.write('private fixture diagnostic\n')
     sys.exit(7)
