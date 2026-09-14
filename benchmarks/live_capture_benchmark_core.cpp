@@ -1112,7 +1112,7 @@ ArmObservation runSyntheticArm( const SyntheticArmPlan& plan )
             throw std::runtime_error( "synthetic fixture failed framed-record validation" );
         }
 
-        controller.stopRequested();
+        controller.stopRequested( klogg::livecapture::StopDisposition::SettleAccepted );
         effects.releasePendingSettlements();
         if ( !pumpEventsUntil( [ &controller ] {
                  return controller.snapshot().source.status

@@ -1944,7 +1944,7 @@ void MainWindow::disconnectCurrentSource()
     }
 
     if ( auto* controller = session_.getLiveLogController( crawler ) ) {
-        controller->stopRequested();
+        controller->stopRequested( klogg::livecapture::StopDisposition::SettleAccepted );
         updateMenuBarFromDocument( crawler );
         scheduleSessionPersistence();
     }

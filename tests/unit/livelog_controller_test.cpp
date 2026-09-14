@@ -1181,7 +1181,7 @@ TEST_CASE( "Presentation countdown uses nonnegative ceil seconds without changin
     REQUIRE( changes.size() == 5u );
     CHECK( changes.back() == livelog::LiveLogPresentationChange::Control );
     CHECK_FALSE( controller.controlPresentation().retryCountdownSeconds.has_value() );
-    controller.stopRequested();
+    controller.stopRequested( live::StopDisposition::DiscardPending );
     controller.stopCompleted( *controller.snapshot().source.stoppingGeneration );
     const auto count = changes.size();
     controller.streamBytesReceived( controller.snapshot().generation - 1u, QByteArrayLiteral( "stale\n" ) );

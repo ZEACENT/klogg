@@ -636,7 +636,7 @@ RealDeviceObservation runRealDeviceArm( const RealDevicePlan& plan )
         }
 
         observation.queue = factory.queueMetrics();
-        controller.stopRequested();
+        controller.stopRequested( klogg::livecapture::StopDisposition::SettleAccepted );
         if ( !pumpUntil(
                  [ &controller ] {
                      return controller.snapshot().source.status
