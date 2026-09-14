@@ -297,17 +297,23 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
     return { CommitStatus::Success, replacement };
 }
 
+PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitUsingSettings(
+    QSettings& sharedSettings, const Collection& expected, const Collection& replacement )
+{
+    const auto result = commitToSettings( sharedSettings, storageLockFilePath( sharedSettings ),
+                                          expected, replacement );
+    sharedSettings.sync();
+    return result;
+}
+
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commit(
     const Collection& expected, const Collection& replacement )
 {
-    auto& sharedSettings = PersistentInfo::getSettings( app_settings{} );
-    QSettings transactionSettings{ sharedSettings.fileName(), sharedSettings.format() };
-    auto result = commitToSettings( transactionSettings, storageLockFilePath( sharedSettings ),
-                                    expected, replacement );
+    const auto result = commitUsingSettings( PersistentInfo::getSettings( app_settings{} ), expected,
+                                             replacement );
     if ( result.status == CommitStatus::Success || result.status == CommitStatus::Unchanged
          || result.status == CommitStatus::Conflict || result.status == CommitStatus::WriteError ) {
         PredefinedFiltersCollection::get().setFilters( result.storedFilters );
     }
-    sharedSettings.sync();
     return result;
 }

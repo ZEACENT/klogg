@@ -34,6 +34,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
+#include <QUuid>
 #include <QVariant>
 
 #include "filterfavoritesmodel.h"
@@ -44,6 +45,13 @@
 #include "uimessage.h"
 
 struct PredefinedFiltersCollectionTestAccess {
+    static PredefinedFiltersCollection::CommitResult commitUsingSettings(
+        QSettings& settings, const PredefinedFiltersCollection::Collection& expected,
+        const PredefinedFiltersCollection::Collection& replacement )
+    {
+        return PredefinedFiltersCollection::commitUsingSettings( settings, expected, replacement );
+    }
+
     static PredefinedFiltersCollection::CommitResult commitToSettings(
         QSettings& settings, const QString& lockFile,
         const PredefinedFiltersCollection::Collection& expected,
@@ -126,6 +134,49 @@ class PersistedFavoritesGuard {
     QMap<QString, QVariant> savedValues_;
     Collection savedStoredFavorites_;
 };
+
+class NativeSettingsGuard final {
+  public:
+    NativeSettingsGuard()
+        : organization_( QStringLiteral( "org.klogg.favorite-test.%1" )
+                             .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) ) )
+        , application_( QStringLiteral( "filter-favorites" ) )
+        , settings_( QSettings::NativeFormat, QSettings::UserScope, organization_, application_ )
+    {
+        clear();
+    }
+
+    ~NativeSettingsGuard() { clear(); }
+
+    NativeSettingsGuard( const NativeSettingsGuard& ) = delete;
+    NativeSettingsGuard& operator=( const NativeSettingsGuard& ) = delete;
+
+    QSettings& settings() { return settings_; }
+
+  private:
+    void clear()
+    {
+        settings_.clear();
+        settings_.sync();
+
+        QSettings fileSettings{ settings_.fileName(), settings_.format() };
+        fileSettings.clear();
+        fileSettings.sync();
+        settings_.sync();
+    }
+
+    QString organization_;
+    QString application_;
+    QSettings settings_;
+};
+
+Collection readFavoritesFromSettings( QSettings& settings )
+{
+    settings.sync();
+    PredefinedFiltersCollection collection;
+    collection.retrieveFromStorage( settings );
+    return collection.getFilters();
+}
 
 void replaceStoredFavorites( const Collection& favorites )
 {
@@ -337,6 +388,31 @@ TEST_CASE( "Invalid persisted filter favorites keep the last valid collection",
     collection.retrieveFromStorage( settings );
 
     requireFavoritesEqual( collection.getFilters(), initial );
+}
+
+TEST_CASE( "Filter favorite commits remain visible through the existing native settings object",
+           "[filter-favorites][native-settings][regression]" )
+{
+    NativeSettingsGuard guard;
+    auto& settings = guard.settings();
+    const Collection firstFavorite{
+        { QStringLiteral( "First" ), QStringLiteral( "first-pattern" ), false } };
+
+    const auto firstCommit = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, Collection{}, firstFavorite );
+
+    REQUIRE( firstCommit.status == PredefinedFiltersCollection::CommitStatus::Success );
+    REQUIRE( settings.status() == QSettings::NoError );
+    requireFavoritesEqual( readFavoritesFromSettings( settings ), firstFavorite );
+
+    auto secondFavorite = firstFavorite;
+    secondFavorite.push_back(
+        { QStringLiteral( "Second" ), QStringLiteral( "second-pattern" ), true } );
+    const auto secondCommit = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, firstFavorite, secondFavorite );
+
+    REQUIRE( secondCommit.status == PredefinedFiltersCollection::CommitStatus::Success );
+    requireFavoritesEqual( readFavoritesFromSettings( settings ), secondFavorite );
 }
 
 TEST_CASE( "Filter favorite storage commit is locked and compare-and-replace",
