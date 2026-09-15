@@ -748,6 +748,37 @@ def artifact_condition_is_statically_false(
     return False
 
 
+def artifact_condition_is_publish_only(condition: str) -> bool:
+    expression = scalar(condition).strip()
+    if expression.startswith("${{") and expression.endswith("}}"):
+        expression = expression[3:-2].strip()
+    event_expression = (
+        "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' "
+        "&& inputs.qualification-mode == 'release')"
+    )
+    publish_clause = next(
+        (
+            candidate
+            for candidate in (f"({event_expression})", event_expression)
+            if expression.endswith(candidate)
+        ),
+        None,
+    )
+    if publish_clause is None:
+        return False
+    prefix = expression[: -len(publish_clause)].rstrip()
+    if not prefix:
+        return True
+    if not prefix.endswith("&&"):
+        return False
+    prefix = prefix[:-2]
+    return (
+        "||" not in prefix
+        and "github.event_name" not in prefix
+        and "inputs.qualification-mode" not in prefix
+    )
+
+
 def workflow_job_steps(
     text: str,
 ) -> dict[str, list[list[str]]]:
@@ -1226,23 +1257,54 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     active_text = "\n".join(
         active for line in text.splitlines() if (active := strip_yaml_comment(line))
     )
-    windows_active = "\n".join(
-        active
-        for line in job_blocks.get("WindowsPackages", [])
-        if (active := strip_yaml_comment(line))
-    )
-    if "github.event_name" in windows_active and any(
-        marker in windows_active
-        for marker in (
-            "adb-helper-",
-            "agent-package-win",
-            "Package tarball for upload",
-            "upload-artifact@",
+    windows_block = job_blocks.get("WindowsPackages", [])
+    windows_job_condition = workflow_job_direct_value(windows_block, "if") or ""
+    windows_steps = workflow_job_steps(text).get("WindowsPackages", [])
+    validation_is_event_gated = "github.event_name" in windows_job_condition
+    transport_is_publish_only = True
+    saw_transport = False
+    for step in windows_steps:
+        fields, children = workflow_step_fields(step)
+        uses = fields.get("uses", "")
+        condition = fields.get("if", "")
+        if uses == "./.github/actions/agent-package-win":
+            validation_is_event_gated = validation_is_event_gated or (
+                "github.event_name" in condition
+            )
+        upload = children.get("with", {})
+        upload_name = upload.get("name", "")
+        upload_path = upload.get("path", "").replace("\\", "/")
+        is_package_upload = uses.startswith("actions/upload-artifact@") and (
+            upload_name.startswith(("packages-", "symbols-"))
+            or "/packages/" in upload_path
+            or "/symbols/" in upload_path
         )
-    ):
-        issues.append(
-            "Windows package preparation and artifact upload must run on pull requests"
-        )
+        if is_package_upload:
+            saw_transport = True
+            transport_is_publish_only = (
+                transport_is_publish_only
+                and artifact_condition_is_publish_only(condition)
+            )
+    if validation_is_event_gated:
+        issues.append("Windows package preparation must run on pull requests")
+    if saw_transport and not transport_is_publish_only:
+        issues.append("Windows package artifact upload must skip pull requests")
+
+    for package_job in ("LinuxPackages", "MacPackages"):
+        for step in workflow_job_steps(text).get(package_job, []):
+            fields, children = workflow_step_fields(step)
+            uses = fields.get("uses", "")
+            upload = children.get("with", {})
+            upload_name = upload.get("name", "")
+            upload_path = upload.get("path", "").replace("\\", "/")
+            if not uses.startswith("actions/upload-artifact@") or not (
+                upload_name.startswith("packages-") or "/packages/" in upload_path
+            ):
+                continue
+            if not artifact_condition_is_publish_only(fields.get("if", "")):
+                issues.append(
+                    f"{package_job} package artifact upload must run only for publishable events"
+                )
 
     release_secret_re = re.compile(
         r"secrets\.(?:CODESIGN|NOTARIZATION|APPLE_DEVELOPER)"

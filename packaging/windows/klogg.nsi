@@ -165,6 +165,7 @@ Section "MSVC Runtime libraries" vcruntime
     SetOutPath $INSTDIR
     File release\msvcp140.dll
     File release\msvcp140_1.dll
+    File release\msvcp140_2.dll
     File release\vcruntime140.dll
 
 !if ${PLATFORM} == "x64"
@@ -252,6 +253,7 @@ Section "Uninstall"
     RMDir "$INSTDIR\imageformats"
     Delete "$INSTDIR\msvcp140.dll"
     Delete "$INSTDIR\msvcp140_1.dll"
+    Delete "$INSTDIR\msvcp140_2.dll"
     Delete "$INSTDIR\vcruntime140.dll"
     Delete "$INSTDIR\vcruntime140_1.dll"
     Delete "$INSTDIR\tbb12.dll"

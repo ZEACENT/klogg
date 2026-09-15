@@ -176,8 +176,13 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/newversiondialog.cpp
 )
 
-set_target_properties(klogg_ui PROPERTIES AUTOUIC ON)
-set_target_properties(klogg_ui PROPERTIES AUTOMOC ON)
+option(KLOGG_UI_AUTOGEN_ORIGIN_DEPENDS "Preserve UI autogen dependency ordering" ON)
+set_target_properties(
+  klogg_ui
+  PROPERTIES AUTOUIC ON
+             AUTOMOC ON
+             AUTOGEN_ORIGIN_DEPENDS "${KLOGG_UI_AUTOGEN_ORIGIN_DEPENDS}"
+)
 
 set_property(
   TARGET klogg_ui

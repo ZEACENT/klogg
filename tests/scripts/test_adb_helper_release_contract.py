@@ -24,7 +24,6 @@ WIN_PACKAGE = ROOT / ".github" / "actions" / "agent-package-win" / "action.yml"
 APPIMAGE_SCRIPT = ROOT / "packaging" / "linux" / "appimage" / "generate_appimage.sh"
 WIN_PREPARE = ROOT / "packaging" / "windows" / "prepare_release.cmd"
 NSIS = ROOT / "packaging" / "windows" / "klogg.nsi"
-SEVEN_Z_LIST = ROOT / "packaging" / "windows" / "7z_klogg_listfile.txt"
 VERIFY_SCRIPT = ROOT / "scripts" / "verify_adb_helper_artifact.py"
 SMOKE_SCRIPT = ROOT / "scripts" / "smoke_adb_helper.py"
 TOOLCHAIN_SCRIPT = ROOT / "scripts" / "verify_adb_helper_toolchain.py"
@@ -79,7 +78,7 @@ EXPECTED_INSTALL_PATHS = {
     "appimage": "usr/bin/helpers/adb",
     "dmg": "klogg.app/Contents/MacOS/helpers/adb",
     "nsis": "helpers/adb.exe",
-    "7z": "release/helpers/adb.exe",
+    "7z": "helpers/adb.exe",
 }
 
 REQUIRED_RELEASE_ASSET_KINDS = {
@@ -516,6 +515,7 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             runtime_section,
         )
         self.assertNotIn("%platform%", runtime_section)
+        installer = self.required_text(NSIS)
         for runtime in (
             "msvcp140.dll",
             "msvcp140_1.dll",
@@ -524,6 +524,8 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             "vcruntime140_1.dll",
         ):
             self.assertIn(runtime, runtime_section)
+            self.assertIn(f"File release\\{runtime}", installer)
+            self.assertIn(f'Delete "$INSTDIR\\{runtime}"', installer)
         self.assertRegex(
             runtime_section,
             re.compile(
@@ -545,7 +547,6 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
             "windows-package-action": self.required_text(WIN_PACKAGE),
             "windows-prepare": self.required_text(WIN_PREPARE),
             "windows-nsis": self.required_text(NSIS),
-            "windows-7z": self.required_text(SEVEN_Z_LIST),
         }
 
         self.assertRegex(files["linux-cpack"], r"DESTINATION[^\n]*bin/helpers")
@@ -568,13 +569,41 @@ class AdbHelperReleaseContractTest(unittest.TestCase):
         self.assertNotRegex(
             files["windows-nsis"], r"File\s+/nonfatal\s+release\\helpers\\libusb-1\.0\.dll"
         )
-        self.assertIn(r".\release\helpers\adb.exe", files["windows-7z"])
-        self.assertIn(r".\release\helpers\libusb-1.0.dll", files["windows-7z"])
+        self.assertIn('pushd "%KLOGG_WORKSPACE%\\release"', files["windows-prepare"])
+        self.assertIn("7z a -r", files["windows-prepare"])
+        self.assertIn(r".\* -x!klogg.exe", files["windows-prepare"])
 
         for package in ("linux-package-action", "mac-dmg", "windows-package-action"):
             with self.subTest(package=package):
                 self.assertIn("verify_adb_helper_artifact", files[package])
                 self.assertIn("smoke_adb_helper", files[package])
+
+    def test_windows_portable_archive_preserves_runtime_layout_and_is_smoke_tested(self):
+        prepare = self.required_text(WIN_PREPARE)
+        package_action = self.required_text(WIN_PACKAGE)
+
+        self.assertIn('if exist "%KLOGG_WORKSPACE%\\release" rmdir /s /q', prepare)
+        self.assertIn('if exist "%KLOGG_PORTABLE_ZIP%" del /q', prepare)
+        self.assertIn('pushd "%KLOGG_WORKSPACE%\\release"', prepare)
+        self.assertIn("7z a -r", prepare)
+        self.assertIn(r".\* -x!klogg.exe", prepare)
+        self.assertNotIn("7z_klogg_listfile.txt", prepare)
+        self.assertIn('if not "%KLOGG_7Z_RESULT%"=="0"', prepare)
+        self.assertNotIn("LEQ 1", prepare)
+        self.assertIn("Verify Windows portable archive layout", package_action)
+        self.assertIn("Verify Windows installer layout", package_action)
+        self.assertIn("portable-check\\helpers\\adb.exe", package_action)
+        self.assertIn('Join-Path $env:GITHUB_WORKSPACE "$env:KLOGG_BUILD_ROOT\\installer-check"', package_action)
+        self.assertIn('Join-Path $installRoot "helpers\\adb.exe"', package_action)
+        self.assertIn("adb-helper-windows-installer-smoke.json", package_action)
+        self.assertIn("adb-helper-windows-portable-verification.json", package_action)
+        self.assertIn("adb-helper-windows-installer-verification.json", package_action)
+        self.assertIn("content_verifications", package_action)
+        self.assertIn('$portableDocument["package_sha256"] = $null', package_action)
+        self.assertIn("portable-check\\klogg_portable.exe", package_action)
+        self.assertIn("portable-check\\adb-helper-assets", package_action)
+        self.assertIn("source-built ADB helper leaked to portable archive root", package_action)
+        self.assertIn("smoke_adb_helper.py", package_action)
 
     def test_adb_package_support_and_full_release_artifacts_have_distinct_ownership(self):
         workflow = self.required_text(CI_BUILD)

@@ -245,18 +245,6 @@ jobs:
             echo "KLOGG_SOURCE_COMMIT=$KLOGG_SOURCE_COMMIT"
           } >> "$GITHUB_ENV"
 
-      - name: Extract package tarballs
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r -d '' archive; do
-            directory="$(dirname "$archive")"
-            staging="$(mktemp -d)"
-            python3 scripts/extract_verified_tar.py --archive "$archive" --destination "$staging"
-            cp -a "$staging"/. "$directory"/
-            rm -rf "$staging" "$archive"
-          done < <(find packages-all -name 'packages-*.tar.gz' -type f -print0)
-
       - name: Generate continuous changelog
         shell: bash
         run: |
