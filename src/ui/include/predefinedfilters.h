@@ -123,7 +123,7 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     static CommitResult commitUsingSettings( QSettings& sharedSettings,
                                               const Collection& expected,
                                               const Collection& replacement );
-    static CommitResult commitToSettings( QSettings& settings, const QString& lockFile,
+    static CommitResult commitToSettings( const QSettings& settings, const QString& lockFile,
                                           const Collection& expected,
                                           const Collection& replacement );
     static QString storageLockFilePath( const QSettings& settings );

@@ -56,7 +56,7 @@ struct PredefinedFiltersCollectionTestAccess {
     }
 
     static PredefinedFiltersCollection::CommitResult commitToSettings(
-        QSettings& settings, const QString& lockFile,
+        const QSettings& settings, const QString& lockFile,
         const PredefinedFiltersCollection::Collection& expected,
         const PredefinedFiltersCollection::Collection& replacement )
     {

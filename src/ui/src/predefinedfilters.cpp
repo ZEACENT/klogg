@@ -311,7 +311,7 @@ QString PredefinedFiltersCollection::storageLockFilePath( const QSettings& setti
 }
 
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToSettings(
-    QSettings& settings, const QString& lockFile, const Collection& expected,
+    const QSettings& settings, const QString& lockFile, const Collection& expected,
     const Collection& replacement )
 {
     if ( replacement.size() > MaximumFilterCount ) {
