@@ -368,15 +368,12 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
 }
 
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitUsingSettings(
-    QSettings& sharedSettings, const Collection& expected, const Collection& replacement )
+    const QSettings& sharedSettings, const Collection& expected, const Collection& replacement )
 {
-    const bool sharedSettingsCanRefresh = sharedSettings.status() == QSettings::NoError;
-    const auto result = commitToSettings( sharedSettings, storageLockFilePath( sharedSettings ),
-                                          expected, replacement );
-    if ( sharedSettingsCanRefresh && commitResultHasStoredFilters( result.status ) ) {
-        sharedSettings.sync();
-    }
-    return result;
+    // The transaction result is authoritative and callers publish storedFilters directly.
+    // Storage consumers synchronize explicitly, so do not flush unrelated shared settings here.
+    return commitToSettings( sharedSettings, storageLockFilePath( sharedSettings ), expected,
+                             replacement );
 }
 
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commit(
@@ -384,8 +381,7 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commit(
 {
     const auto result = commitUsingSettings( PersistentInfo::getSettings( app_settings{} ), expected,
                                              replacement );
-    if ( result.status == CommitStatus::Success || result.status == CommitStatus::Unchanged
-         || result.status == CommitStatus::Conflict || result.status == CommitStatus::WriteError ) {
+    if ( commitResultHasStoredFilters( result.status ) ) {
         PredefinedFiltersCollection::get().setFilters( result.storedFilters );
     }
     return result;
