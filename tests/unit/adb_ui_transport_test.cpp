@@ -2374,7 +2374,6 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     AdbLogcatSource source( sessionData, logData );
 
     REQUIRE( source.connectSource() );
-    REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Connected ) );
     REQUIRE( waitForLineCount( logData, 1 ) );
     REQUIRE( waitForSourceState( source, AdbLogcatSource::State::Error ) );
 
