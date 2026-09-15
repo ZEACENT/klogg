@@ -803,7 +803,7 @@ TEST_CASE( "Filter favorite popup uses full text width when the screen can fit i
     REQUIRE( popupWidth >= metrics.horizontalAdvance( longButFittingName ) );
 }
 
-TEST_CASE( "SearchToolbar star and context action persist a favorite across toolbars",
+TEST_CASE( "SearchToolbar immediately exposes a saved favorite across toolbars",
            "[searchtoolbar][filter-favorites]" )
 {
     const auto exerciseSave = []( bool useContextAction ) {
@@ -823,6 +823,16 @@ TEST_CASE( "SearchToolbar star and context action persist a favorite across tool
         first.setUseRegexp( true );
 
         FavoriteModalResult modal;
+        int warningCount = 0;
+        QString warningText;
+        [[maybe_unused]] const klogg::ui::ScopedMessageHandler messageHandler{
+            [ &warningCount, &warningText ]( klogg::ui::MessageKind kind, QWidget*,
+                                             const QString&, const QString& text ) {
+                if ( kind == klogg::ui::MessageKind::Warning ) {
+                    ++warningCount;
+                    warningText = text;
+                }
+            } };
         scheduleCreateFavoriteAcceptance( &first, favoriteName, modal );
         if ( useContextAction ) {
             auto* const action = first.findChild<QAction*>(
@@ -836,13 +846,24 @@ TEST_CASE( "SearchToolbar star and context action persist a favorite across tool
 
         REQUIRE( modal.error.isEmpty() );
         REQUIRE( modal.saveDialogFound );
+        CAPTURE( warningText );
+        REQUIRE( warningCount == 0 );
+        auto* const originatingPicker = first.predefinedFilters();
         REQUIRE( processEventsUntil( [ & ] {
-            return model.rowCount() == 1 && second.predefinedFilters()->count() == 1
+            return model.rowCount() == 1 && originatingPicker->count() == 1
+                   && originatingPicker->itemText( 0 ) == favoriteName
+                   && second.predefinedFilters()->count() == 1
                    && second.predefinedFilters()->itemText( 0 ) == favoriteName;
         } ) );
         requireFavorite( model.favorites(), favoriteName, pattern, true );
         requireFavorite( PredefinedFiltersCollection::getSynced().getFilters(), favoriteName,
                          pattern, true );
+
+        originatingPicker->showPopup();
+        REQUIRE( processEventsUntil( [ & ] { return originatingPicker->view()->isVisible(); } ) );
+        REQUIRE( originatingPicker->findText( favoriteName ) >= 0 );
+        originatingPicker->hidePopup();
+        REQUIRE( warningCount == 0 );
         REQUIRE( QApplication::activeModalWidget() == nullptr );
     };
 

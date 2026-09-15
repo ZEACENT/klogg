@@ -204,7 +204,9 @@ public:
             [ this ]( auto generation, klogg::livecapture::LiveSourceError error ) {
                 controller_->streamFailed( generation, std::move( error ) );
             },
-            [ this ] { controller_->stopRequested(); },
+            [ this ] {
+                controller_->stopRequested( klogg::livecapture::StopDisposition::DiscardPending );
+            },
             [ this ] { controller_->startRequested(); } );
     }
 

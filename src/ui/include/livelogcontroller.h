@@ -125,8 +125,7 @@ public:
 
     void armRunIntent();
     void startRequested();
-    void stopRequested( livecapture::StopDisposition disposition
-                            = livecapture::StopDisposition::DiscardPending );
+    void stopRequested( livecapture::StopDisposition disposition );
     void stopCompleted( livecapture::Generation generation, std::uint64_t discardedBytes = 0 );
     void inputTerminated( livecapture::Generation generation,
                           const livecapture::CaptureDeliveryResult& result );

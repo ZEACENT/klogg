@@ -21,6 +21,7 @@
 
 #include <cstdio>
 #include <ctime>
+#include <utility>
 
 #include <QAction>
 #include <QElapsedTimer>
@@ -185,7 +186,7 @@ struct LiveLogControllerTimeTestAccess {
     ~LiveLogControllerTimeTestAccess()
     {
         // Cancel substituted scheduler tokens before either dependency expires.
-        controller_.stopRequested();
+        controller_.stopRequested( livecapture::StopDisposition::DiscardPending );
         CHECK_FALSE( scheduler.pending() );
         controller_.clock_ = previousClock_;
         controller_.scheduler_ = previousScheduler_;
@@ -479,11 +480,29 @@ public:
     void start( Generation generation ) override { startedGeneration = generation; }
     void stop( Generation generation ) override
     {
+        requestStop( generation, klogg::livecapture::StopDisposition::DiscardPending );
+    }
+    void requestStop( Generation generation,
+                      klogg::livecapture::StopDisposition disposition ) override
+    {
+        stopRequests.emplace_back( generation, disposition );
+        const auto acceptedTail = std::exchange( acceptedStopTail, {} );
+        quint64 discardedBytes = 0u;
+        if ( disposition == klogg::livecapture::StopDisposition::SettleAccepted ) {
+            if ( !acceptedTail.isEmpty() ) {
+                Q_EMIT bytesReceived( generation, acceptedTail );
+            }
+        }
+        else {
+            discardedBytes = static_cast<quint64>( acceptedTail.size() );
+        }
+
         if ( deferStop ) {
             pendingStoppedGeneration = generation;
+            pendingDiscardedBytes = discardedBytes;
             return;
         }
-        Q_EMIT stateChanged( generation, State::Disconnected );
+        publishStopCompletion( generation, discardedBytes );
     }
     void clearRemoteAsync( Generation, ClearRequestId ) override {}
     QString lastError() const override { return {}; }
@@ -501,11 +520,25 @@ public:
         REQUIRE( pendingStoppedGeneration.has_value() );
         const auto generation = *pendingStoppedGeneration;
         pendingStoppedGeneration.reset();
-        Q_EMIT stateChanged( generation, State::Disconnected );
+        const auto discardedBytes = std::exchange( pendingDiscardedBytes, 0u );
+        publishStopCompletion( generation, discardedBytes );
     }
     Generation startedGeneration{ 0 };
     bool deferStop = false;
+    QByteArray acceptedStopTail;
+    std::vector<std::pair<Generation, klogg::livecapture::StopDisposition>> stopRequests;
     std::optional<Generation> pendingStoppedGeneration;
+    quint64 pendingDiscardedBytes = 0u;
+
+private:
+    void publishStopCompletion( Generation generation, quint64 discardedBytes )
+    {
+        QPointer<MenuLiveSourceTransport> guard{ this };
+        Q_EMIT stateChanged( generation, State::Disconnected );
+        if ( guard ) {
+            Q_EMIT guard->stopped( generation, discardedBytes );
+        }
+    }
 };
 
 class MenuLiveSourceTransportFactory final : public LiveSourceTransportFactory {
@@ -1678,6 +1711,37 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::Streaming );
     REQUIRE( transport->startedGeneration == controller->snapshot().generation );
 
+    if ( preservationScenario == 16 ) {
+        using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
+        auto* data = Access::data( crawler );
+        auto* info = mainWindow->findChild<PathLine*>();
+        auto* disconnect
+            = mainWindow->findChild<QAction*>( QStringLiteral( "disconnectSourceAction" ) );
+        REQUIRE( data != nullptr );
+        REQUIRE( info != nullptr );
+        REQUIRE( disconnect != nullptr );
+
+        transport->publishBytes( QByteArrayLiteral( "partial" ) );
+        transport->acceptedStopTail = QByteArrayLiteral( " tail\n" );
+        disconnect->trigger();
+
+        REQUIRE( waitUiState( [ & ] {
+            return controller->snapshot().source.status == live::SourceStatus::Stopped;
+        } ) );
+        REQUIRE( transport->stopRequests.size() == 1u );
+        CHECK( transport->stopRequests.front().second == live::StopDisposition::SettleAccepted );
+        CHECK( data->getLineString( 0_lnum ) == QStringLiteral( "partial tail" ) );
+        const auto presentation = controller->controlPresentation();
+        CHECK( presentation.integrity.discardedBytes == 0u );
+        CHECK_FALSE( presentation.integrity.gapPossible );
+        CHECK_FALSE( presentation.integrity.replayPossible );
+        CHECK_FALSE( info->text().contains( QStringLiteral( "Capture integrity warning:" ) ) );
+        CHECK_FALSE( tabs->tabToolTip( 0 ).contains( QStringLiteral( "Capture integrity:" ) ) );
+
+        mainWindow->close();
+        return;
+    }
+
     if ( preservationScenario == 15 ) {
         using Access = CrawlerWidget::access_by<LivePresentationCrawlerAccess>;
         auto* data = Access::data( crawler );
@@ -1782,7 +1846,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
             CHECK( Access::searchCatchUpCount( crawler ) <= 1 );
         }
 
-        controller->stopRequested();
+        controller->stopRequested( live::StopDisposition::DiscardPending );
         mainWindow->close();
         return;
     }
@@ -1935,7 +1999,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                    == QStringLiteral( "old-001\nnew-002" ) );
             QTest::qWait( 200 ); // Retire the actual search/load completion before teardown.
             menu->removeEventFilter( &changes );
-            controller->stopRequested();
+            controller->stopRequested( live::StopDisposition::DiscardPending );
             mainWindow->close();
             return;
         }
@@ -2056,7 +2120,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                            && factory.created.size() >= 2;
                 } ) );
                 StreamingLogDataTimerTestAccess::recoverOutputForClose( *data );
-                controller->stopRequested();
+                controller->stopRequested( live::StopDisposition::DiscardPending );
             }
             else {
                 REQUIRE( waitUiState( [ & ] { return tabs->count() == 1; } ) );
@@ -2299,7 +2363,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
                    == QByteArrayLiteral( "preserved\nsaved tail\n" ) );
         }
         menu->removeEventFilter( &changes );
-        controller->stopRequested();
+        controller->stopRequested( live::StopDisposition::DiscardPending );
         mainWindow->close();
         return;
     }
@@ -2361,7 +2425,7 @@ void exerciseLivePresentation( bool useIos, bool background, int preservationSce
     CHECK( menu->actions().at( 3 ) == secondEntry.data() );
 
     menu->removeEventFilter( &changes );
-    controller->stopRequested();
+    controller->stopRequested( live::StopDisposition::DiscardPending );
     mainWindow->close();
 }
 
@@ -2547,7 +2611,7 @@ TEST_CASE( "Concurrent Android and iOS filtered bound-output presentation baseli
         static_cast<long long>( CLOCKS_PER_SEC ), static_cast<long long>( elapsedNs ) );
 
     for ( auto* controller : controllers ) {
-        controller->stopRequested();
+        controller->stopRequested( live::StopDisposition::DiscardPending );
     }
     mainWindow->close();
 }
@@ -2582,6 +2646,13 @@ TEST_CASE( "Live save repairs and switches an existing output without reopening 
 {
     const auto useIos = GENERATE( false, true );
     exerciseLivePresentation( useIos, false, 13 );
+}
+
+TEST_CASE( "Disconnect action gracefully settles accepted live tail without integrity warning",
+           "[ui][session][live-integrity-policy-red][disconnect]" )
+{
+    const auto useIos = GENERATE( false, true );
+    exerciseLivePresentation( useIos, false, 16 );
 }
 
 TEST_CASE( "Fresh live capture keeps lifecycle status separate from diagnostics",

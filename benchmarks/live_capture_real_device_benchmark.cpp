@@ -321,6 +321,18 @@ public:
     void attach( livelog::LiveLogController& controller )
     {
         controller_ = &controller;
+        source_->setFinalizedCallback(
+            [ this ]( auto generation, const auto& result ) {
+                if ( controller_ != nullptr ) {
+                    controller_->inputTerminated( generation, result );
+                }
+            } );
+        source_->setStoppedCallback(
+            [ this ]( auto generation, auto discarded ) {
+                if ( controller_ != nullptr ) {
+                    controller_->stopCompleted( generation, discarded );
+                }
+            } );
         source_->setControllerCallbacks(
             [ this ]( auto generation, const QByteArray& bytes, auto settled ) {
                 receive( generation, bytes );
@@ -339,6 +351,8 @@ public:
     {
         if ( source_ ) {
             source_->setControllerCallbacks( {}, {}, {} );
+            source_->setStoppedCallback( {} );
+            source_->setFinalizedCallback( {} );
         }
         controller_ = nullptr;
     }
@@ -350,13 +364,13 @@ public:
 
     void cancelStream( ::klogg::livecapture::Generation generation ) override
     {
-        source_->cancelTransport( generation );
-        refreshCommittedLines();
-        if ( controller_ != nullptr
-             && controller_->snapshot().source.status
-                    == ::klogg::livecapture::SourceStatus::Stopping ) {
-            controller_->stopCompleted( generation );
-        }
+        retireStream( generation, ::klogg::livecapture::StopDisposition::DiscardPending );
+    }
+
+    void retireStream( ::klogg::livecapture::Generation generation,
+                       ::klogg::livecapture::StopDisposition disposition ) override
+    {
+        source_->cancelTransport( generation, disposition );
     }
 
     void startInfrastructure( ::klogg::livecapture::Generation generation ) override
@@ -636,7 +650,7 @@ RealDeviceObservation runRealDeviceArm( const RealDevicePlan& plan )
         }
 
         observation.queue = factory.queueMetrics();
-        controller.stopRequested();
+        controller.stopRequested( klogg::livecapture::StopDisposition::SettleAccepted );
         if ( !pumpUntil(
                  [ &controller ] {
                      return controller.snapshot().source.status

@@ -1861,5 +1861,91 @@ class NativePresentationAssertionTest(unittest.TestCase):
                 self.assertGreaterEqual(len(self.check(mutated, name=str(path))), 1)
 
 
+class SharedPtrUseCountMutationGateTest(unittest.TestCase):
+    def check(self, text, name="src/logdata/src/streaminglogdata.cpp"):
+        rule = next(
+            item
+            for item in lint.MULTI_LINE_CHECKS
+            if item["name"] == "shared-ptr-use-count-mutation-gate"
+        )
+        return rule["check"](text, Path(name))
+
+    def test_production_ownership_count_queries_are_flagged(self):
+        cases = [
+            "if ( tail.use_count() == 1 ) { tail->bytes.append( data ); }",
+            "if ( cache.owner().use_count() < 2 ) { mutate(); }",
+            "if ( 1 >= entries[index].use_count() ) { mutate(); }",
+            "if ( tail.use_count() != 1 ) { return; } mutate();",
+            "const auto owners = tail.use_count();",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1)
+                self.assertIn("synchronization", findings[0][1])
+        self.assertEqual(
+            len(
+                self.check(
+                    "if ( batch.use_count() == 1 ) { mutate(); }",
+                    name="src/logdata/include/rawcache.h",
+                )
+            ),
+            1,
+        )
+
+    def test_non_ownership_count_helpers_and_test_assertions_are_allowed(self):
+        self.assertEqual(self.check("if ( tail.uniqueOwner() ) { observe(); }"), [])
+        self.assertEqual(self.check("const auto owners = tail.ownerCount();"), [])
+        self.assertEqual(
+            self.check(
+                "CHECK( tail.use_count() == 1 );",
+                name="tests/unit/lifetime_test.cpp",
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.check(
+                "LOG_DEBUG << diagnostics.use_count();",
+                name="src/diagnostics.cpp",
+            ),
+            [],
+        )
+
+    def test_comments_and_string_spoofs_are_allowed(self):
+        bad = "if ( tail.use_count() == 1 ) { mutate(); }"
+        text = (
+            "// " + bad + "\n"
+            "/* " + bad + " */\n"
+            'const auto quoted = "' + bad + '";\n'
+            'const auto raw = R"cpp(' + bad + ')cpp";\n'
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_allow_marker_is_local(self):
+        bad = "if ( tail.use_count() == 1 ) { mutate(); }"
+        text = bad + " // lint-allow: platform-fragile\n" + bad
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 2)
+
+    def test_malformed_query_fails_closed(self):
+        findings = self.check("if ( tail.use_count( == 1 ) { mutate(); }")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("synchronization", findings[0][1])
+
+    def test_real_tree_mutation_restores_the_escaped_gate(self):
+        path = REPO_ROOT / "src" / "logdata" / "src" / "streaminglogdata.cpp"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(self.check(text, name=str(path)), [])
+        original = "if ( tail->readers == 0"
+        mutated = text.replace(
+            original,
+            "if ( tail.use_count() == 1 && tail->readers == 0",
+        )
+        self.assertNotEqual(mutated, text)
+        findings = self.check(mutated, name=str(path))
+        self.assertEqual(len(findings), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

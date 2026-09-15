@@ -35,11 +35,13 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <new>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "capturestore.h"
@@ -196,6 +198,7 @@ struct StreamingLogDataTimerTestAccess {
 
     struct RawCacheStats {
         size_t batches = 0;
+        size_t readers = 0;
         qint64 metadataBytes = 0;
         std::uint64_t lookupBatchVisits = 0;
     };
@@ -208,10 +211,20 @@ struct StreamingLogDataTimerTestAccess {
         data.cachedRawMetadataBytesLimit_ = maximumMetadataBytes;
     }
 
+    static void afterRawCacheLease( StreamingLogData& data, std::function<void()> callback )
+    {
+        std::lock_guard<std::mutex> lock( data.cachedRawBatchesMutex_ );
+        data.afterRawCacheLeaseForTesting_ = std::move( callback );
+    }
+
     static RawCacheStats rawCacheStats( const StreamingLogData& data )
     {
         std::lock_guard<std::mutex> lock( data.cachedRawBatchesMutex_ );
-        return { data.cachedRawBatches_.size(), data.cachedRawMetadataBytes_,
+        size_t readers = 0;
+        for ( const auto& batch : data.cachedRawBatches_ ) {
+            readers += batch->readers;
+        }
+        return { data.cachedRawBatches_.size(), readers, data.cachedRawMetadataBytes_,
                  data.cachedRawLookupBatchVisitsForTesting_ };
     }
 
@@ -2037,7 +2050,7 @@ public:
     bool waitUntilEntered()
     {
         std::unique_lock<std::mutex> lock( mutex_ );
-        return condition_.wait_for( lock, std::chrono::milliseconds{ 500 },
+        return condition_.wait_for( lock, std::chrono::milliseconds{ kAsyncCompletionTimeoutMs },
                                     [ this ] { return entered_; } );
     }
 
@@ -2075,6 +2088,109 @@ private:
     bool entered_ = false;
     bool released_ = false;
 };
+
+TEST_CASE( "Streaming raw cache registers reader leases around concurrent appends",
+           "[streaming][raw-cache][concurrency][regression]" )
+{
+    QTemporaryDir tempDir;
+    REQUIRE( tempDir.isValid() );
+
+    StreamingLogData logData( makeCaptureId(), tempDir.path() );
+    const auto initialAppend = logData.appendUtf8( QByteArrayLiteral( "before-0\nbefore-1\n" ) );
+    REQUIRE_FALSE( initialAppend.failure.has_value() );
+
+    ExportBarrier leaseBarrier;
+    StreamingLogDataTimerTestAccess::afterRawCacheLease(
+        logData, [ &leaseBarrier ] { leaseBarrier.block(); } );
+    std::optional<SearchableLogData::RawLines> leasedLines;
+    bool readerFailed = false;
+    std::thread reader( [ & ] {
+        try {
+            leasedLines = logData.getLinesRaw( 0_lnum, 2_lcount );
+        } catch ( ... ) {
+            readerFailed = true;
+        }
+    } );
+
+    const auto leaseEntered = leaseBarrier.waitUntilEntered();
+    std::optional<CaptureStore::AppendResult> concurrentAppend;
+    std::optional<StreamingLogDataTimerTestAccess::RawCacheStats> statsDuringLease;
+    if ( leaseEntered ) {
+        concurrentAppend = logData.appendUtf8( QByteArrayLiteral( "after-2\n" ) );
+        statsDuringLease = StreamingLogDataTimerTestAccess::rawCacheStats( logData );
+    }
+
+    leaseBarrier.release();
+    reader.join();
+    StreamingLogDataTimerTestAccess::afterRawCacheLease( logData, {} );
+
+    REQUIRE( leaseEntered );
+    REQUIRE_FALSE( readerFailed );
+    REQUIRE( concurrentAppend.has_value() );
+    REQUIRE_FALSE( concurrentAppend->failure.has_value() );
+    REQUIRE( statsDuringLease.has_value() );
+    CHECK( statsDuringLease->batches == 2u );
+    CHECK( statsDuringLease->readers == 1u );
+    REQUIRE( leasedLines.has_value() );
+    CHECK( leasedLines->decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "before-0" ),
+                                      QStringLiteral( "before-1" ) } );
+
+    CHECK( StreamingLogDataTimerTestAccess::rawCacheStats( logData ).readers == 0u );
+
+    // A completed reader releases the explicit lease, allowing the new tail to
+    // resume bounded coalescing without consulting shared_ptr ownership counts.
+    CHECK( logData.getLinesRaw( 2_lnum, 1_lcount ).decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "after-2" ) } );
+    CHECK( StreamingLogDataTimerTestAccess::rawCacheStats( logData ).readers == 0u );
+    const auto postLeaseAppend = logData.appendUtf8( QByteArrayLiteral( "after-3\n" ) );
+    REQUIRE_FALSE( postLeaseAppend.failure.has_value() );
+    CHECK( StreamingLogDataTimerTestAccess::rawCacheStats( logData ).batches == 2u );
+
+    // A historical batch lease must not block safe coalescing into an unrelated
+    // reader-free tail.
+    ExportBarrier historicalLeaseBarrier;
+    StreamingLogDataTimerTestAccess::afterRawCacheLease(
+        logData, [ &historicalLeaseBarrier ] { historicalLeaseBarrier.block(); } );
+    std::optional<SearchableLogData::RawLines> historicalLines;
+    bool historicalReaderFailed = false;
+    std::thread historicalReader( [ & ] {
+        try {
+            historicalLines = logData.getLinesRaw( 0_lnum, 2_lcount );
+        } catch ( ... ) {
+            historicalReaderFailed = true;
+        }
+    } );
+
+    const auto historicalLeaseEntered = historicalLeaseBarrier.waitUntilEntered();
+    std::optional<CaptureStore::AppendResult> tailAppend;
+    std::optional<StreamingLogDataTimerTestAccess::RawCacheStats> historicalLeaseStats;
+    if ( historicalLeaseEntered ) {
+        tailAppend = logData.appendUtf8( QByteArrayLiteral( "after-4\n" ) );
+        historicalLeaseStats = StreamingLogDataTimerTestAccess::rawCacheStats( logData );
+    }
+    historicalLeaseBarrier.release();
+    historicalReader.join();
+    StreamingLogDataTimerTestAccess::afterRawCacheLease( logData, {} );
+
+    REQUIRE( historicalLeaseEntered );
+    REQUIRE_FALSE( historicalReaderFailed );
+    REQUIRE( tailAppend.has_value() );
+    REQUIRE_FALSE( tailAppend->failure.has_value() );
+    REQUIRE( historicalLeaseStats.has_value() );
+    CHECK( historicalLeaseStats->readers == 1u );
+    CHECK( historicalLeaseStats->batches == 2u );
+    REQUIRE( historicalLines.has_value() );
+    CHECK( historicalLines->decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "before-0" ),
+                                      QStringLiteral( "before-1" ) } );
+    CHECK( logData.getLinesRaw( 0_lnum, 5_lcount ).decodeLines()
+           == klogg::vector<QString>{ QStringLiteral( "before-0" ),
+                                      QStringLiteral( "before-1" ),
+                                      QStringLiteral( "after-2" ),
+                                      QStringLiteral( "after-3" ),
+                                      QStringLiteral( "after-4" ) } );
+}
 
 QByteArray makeProgressBurstSnapshot()
 {

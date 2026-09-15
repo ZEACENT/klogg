@@ -120,7 +120,10 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
     static constexpr int PredefinedFiltersCollection_VERSION = 2;
 
     static LoadResult readFromSettings( QSettings& settings, bool missingIsSuccess );
-    static CommitResult commitToSettings( QSettings& settings, const QString& lockFile,
+    static CommitResult commitUsingSettings( const QSettings& sharedSettings,
+                                              const Collection& expected,
+                                              const Collection& replacement );
+    static CommitResult commitToSettings( const QSettings& settings, const QString& lockFile,
                                           const Collection& expected,
                                           const Collection& replacement );
     static QString storageLockFilePath( const QSettings& settings );

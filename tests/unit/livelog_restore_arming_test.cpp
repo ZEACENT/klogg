@@ -1699,7 +1699,7 @@ TEST_CASE( "queued iOS snapshot from a retired observation cannot arm a restarte
     const auto staleCallback = catalog.callbackCopy();
     REQUIRE( static_cast<bool>( staleCallback ) );
 
-    controller->stopRequested();
+    controller->stopRequested( live::StopDisposition::DiscardPending );
     REQUIRE( controller->snapshot().runIntent == live::RunIntent::Stopped );
     controller->startRequested();
     REQUIRE( controller->snapshot().source.status == live::SourceStatus::WaitingForDevice );
@@ -1797,7 +1797,7 @@ TEST_CASE( "Failed output rebind keeps the rolled-back per-tab binding healthy",
     REQUIRE( source->bindOutputFile( outputPath, LiveLogSaveAnsiMode::Strip ) );
     CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
 
-    controller->stopRequested();
+    controller->stopRequested( live::StopDisposition::DiscardPending );
     CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Healthy );
     closeAndDeleteViews( *appSession, opened );
 }
@@ -1837,7 +1837,7 @@ TEST_CASE( "Capture output degradation survives stop and fresh start until rebin
     factory.createdTransports.back()->publishBytes( generation, QByteArrayLiteral( "line\n" ) );
     REQUIRE( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
 
-    controller->stopRequested();
+    controller->stopRequested( live::StopDisposition::DiscardPending );
     CHECK( controller->snapshot().outputBinding == live::OutputBindingState::Degraded );
 
     controller->startRequested();
