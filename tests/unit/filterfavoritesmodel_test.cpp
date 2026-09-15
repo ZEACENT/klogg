@@ -24,6 +24,9 @@
 #include <QAbstractItemModel>
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileDevice>
+#include <QIODevice>
+#include <QList>
 #include <QMap>
 #include <QModelIndex>
 #include <QLockFile>
@@ -60,10 +63,126 @@ struct PredefinedFiltersCollectionTestAccess {
         return PredefinedFiltersCollection::commitToSettings( settings, lockFile, expected,
                                                               replacement );
     }
+
+    static QString storageLockFilePath( const QSettings& settings )
+    {
+        return PredefinedFiltersCollection::storageLockFilePath( settings );
+    }
 };
 
 namespace {
 using Collection = PredefinedFiltersCollection::Collection;
+
+struct ControlledSettingsWrite {
+    QString path;
+    QSettings::SettingsMap values;
+    bool lockHeld = false;
+    bool succeeded = false;
+};
+
+struct ControlledSettingsState {
+    QMap<QString, QSettings::SettingsMap> durableValues;
+    QList<ControlledSettingsWrite> writes;
+    QList<bool> writeResults;
+    QString lockFile;
+    int persistFailedWrite = -1;
+};
+
+ControlledSettingsState* activeControlledSettings = nullptr;
+
+QString controlledSettingsPath( QIODevice& device )
+{
+    const auto* file = dynamic_cast<QFileDevice*>( &device );
+    return file != nullptr ? file->fileName() : QString{};
+}
+
+bool readControlledSettings( QIODevice& device, QSettings::SettingsMap& values )
+{
+    if ( activeControlledSettings == nullptr ) {
+        return false;
+    }
+
+    const auto path = controlledSettingsPath( device );
+    if ( path.isEmpty() ) {
+        return false;
+    }
+    values = activeControlledSettings->durableValues.value( path );
+    return true;
+}
+
+bool writeControlledSettings( QIODevice& device, const QSettings::SettingsMap& values )
+{
+    if ( activeControlledSettings == nullptr ) {
+        return false;
+    }
+
+    const auto path = controlledSettingsPath( device );
+    if ( path.isEmpty() ) {
+        return false;
+    }
+
+    bool lockHeld = false;
+    if ( !activeControlledSettings->lockFile.isEmpty() ) {
+        QLockFile lockProbe{ activeControlledSettings->lockFile };
+        if ( lockProbe.tryLock() ) {
+            lockProbe.unlock();
+        }
+        else {
+            lockHeld = true;
+        }
+    }
+
+    auto succeeded = activeControlledSettings->writeResults.isEmpty()
+                         || activeControlledSettings->writeResults.takeFirst();
+    const auto writeIndex = activeControlledSettings->writes.size();
+    if ( !succeeded && writeIndex == activeControlledSettings->persistFailedWrite ) {
+        activeControlledSettings->durableValues.insert( path, values );
+    }
+    if ( succeeded ) {
+        const auto marker = QByteArrayLiteral( "controlled-settings" );
+        succeeded = device.write( marker ) == marker.size();
+    }
+    activeControlledSettings->writes.push_back( { path, values, lockHeld, succeeded } );
+    if ( succeeded ) {
+        activeControlledSettings->durableValues.insert( path, values );
+    }
+    return succeeded;
+}
+
+QSettings::Format controlledSettingsFormat()
+{
+    static const auto format
+        = QSettings::registerFormat( QStringLiteral( "klogg-settings-transaction-test" ),
+                                     readControlledSettings, writeControlledSettings,
+                                     Qt::CaseSensitive );
+    return format;
+}
+
+class ControlledSettingsGuard final {
+  public:
+    explicit ControlledSettingsGuard( ControlledSettingsState& state )
+    {
+        REQUIRE( activeControlledSettings == nullptr );
+        REQUIRE( controlledSettingsFormat() != QSettings::InvalidFormat );
+        activeControlledSettings = &state;
+    }
+
+    ~ControlledSettingsGuard() { activeControlledSettings = nullptr; }
+
+    ControlledSettingsGuard( const ControlledSettingsGuard& ) = delete;
+    ControlledSettingsGuard& operator=( const ControlledSettingsGuard& ) = delete;
+};
+
+void seedControlledFavorites( QSettings& settings, const Collection& favorites,
+                              const QVariant& opaqueValue )
+{
+    PredefinedFiltersCollection seed;
+    seed.setFilters( favorites );
+    seed.saveToStorage( settings );
+    settings.setValue( QStringLiteral( "PredefinedFiltersCollection/opaque" ), opaqueValue );
+    settings.sync();
+    REQUIRE( settings.status() == QSettings::NoError );
+}
 
 Collection orderedFavorites()
 {
@@ -143,10 +262,13 @@ class NativeSettingsGuard final {
         , application_( QStringLiteral( "filter-favorites" ) )
         , settings_( QSettings::NativeFormat, QSettings::UserScope, organization_, application_ )
     {
-        clear();
     }
 
-    ~NativeSettingsGuard() { clear(); }
+    ~NativeSettingsGuard()
+    {
+        settings_.clear();
+        settings_.sync();
+    }
 
     NativeSettingsGuard( const NativeSettingsGuard& ) = delete;
     NativeSettingsGuard& operator=( const NativeSettingsGuard& ) = delete;
@@ -154,17 +276,6 @@ class NativeSettingsGuard final {
     QSettings& settings() { return settings_; }
 
   private:
-    void clear()
-    {
-        settings_.clear();
-        settings_.sync();
-
-        QSettings fileSettings{ settings_.fileName(), settings_.format() };
-        fileSettings.clear();
-        fileSettings.sync();
-        settings_.sync();
-    }
-
     QString organization_;
     QString application_;
     QSettings settings_;
@@ -413,6 +524,177 @@ TEST_CASE( "Filter favorite commits remain visible through the existing native s
 
     REQUIRE( secondCommit.status == PredefinedFiltersCollection::CommitStatus::Success );
     requireFavoritesEqual( readFavoritesFromSettings( settings ), secondFavorite );
+}
+
+TEST_CASE( "Failed filter favorite writes are rolled back before releasing the lock",
+           "[filter-favorites][settings-transaction][regression]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    ControlledSettingsState state;
+    ControlledSettingsGuard guard{ state };
+    const auto settingsPath = dir.filePath( QStringLiteral( "favorites.transaction" ) );
+    QSettings settings{ settingsPath, controlledSettingsFormat() };
+    const auto initial = twoFavorites();
+    const auto replacement = orderedFavorites();
+    seedControlledFavorites( settings, initial, QStringLiteral( "preserve-me" ) );
+    requireFavoritesEqual( readFavoritesFromSettings( settings ), initial );
+
+    const auto primaryPath = settings.fileName();
+    const auto protectedValues = state.durableValues.value( primaryPath );
+    state.lockFile = PredefinedFiltersCollectionTestAccess::storageLockFilePath( settings );
+    state.writes.clear();
+    state.writeResults = { false, true };
+
+    const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, initial, replacement );
+
+    REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::WriteError );
+    requireFavoritesEqual( failed.storedFilters, initial );
+    REQUIRE( settings.status() == QSettings::NoError );
+    REQUIRE( state.durableValues.value( primaryPath ) == protectedValues );
+    REQUIRE( state.writes.size() == 2 );
+    REQUIRE( state.writes.at( 0 ).lockHeld );
+    REQUIRE_FALSE( state.writes.at( 0 ).succeeded );
+    REQUIRE( state.writes.at( 0 ).values != protectedValues );
+    REQUIRE( state.writes.at( 1 ).lockHeld );
+    REQUIRE( state.writes.at( 1 ).succeeded );
+    REQUIRE( state.writes.at( 1 ).values == protectedValues );
+
+    const auto writeCountAfterFailure = state.writes.size();
+    settings.sync();
+    REQUIRE( settings.status() == QSettings::NoError );
+    REQUIRE( state.writes.size() == writeCountAfterFailure );
+    REQUIRE( state.durableValues.value( primaryPath ) == protectedValues );
+
+    state.writes.clear();
+    const auto retried = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, initial, replacement );
+
+    REQUIRE( retried.status == PredefinedFiltersCollection::CommitStatus::Success );
+    requireFavoritesEqual( retried.storedFilters, replacement );
+    REQUIRE( settings.status() == QSettings::NoError );
+    REQUIRE( state.writes.size() == 1 );
+    REQUIRE( state.writes.at( 0 ).lockHeld );
+    REQUIRE( state.writes.at( 0 ).succeeded );
+    requireFavoritesEqual( readFavoritesFromSettings( settings ), replacement );
+}
+
+TEST_CASE( "Unverified filter favorite rollback is reported as a storage error",
+           "[filter-favorites][settings-transaction][regression]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    ControlledSettingsState state;
+    ControlledSettingsGuard guard{ state };
+    QSettings settings{ dir.filePath( QStringLiteral( "unverified.transaction" ) ),
+                        controlledSettingsFormat() };
+    const auto initial = twoFavorites();
+    seedControlledFavorites( settings, initial, QStringLiteral( "preserve-me" ) );
+
+    state.lockFile = PredefinedFiltersCollectionTestAccess::storageLockFilePath( settings );
+    state.writes.clear();
+    state.writeResults = { false, false, false, false, false, false, false, false };
+    state.persistFailedWrite = 0;
+
+    const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, initial, orderedFavorites() );
+
+    REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::StorageError );
+    REQUIRE( failed.storedFilters.isEmpty() );
+    REQUIRE( settings.status() == QSettings::NoError );
+    REQUIRE( state.writes.size() >= 3 );
+    for ( const auto& write : state.writes ) {
+        REQUIRE( write.lockHeld );
+        REQUIRE_FALSE( write.succeeded );
+    }
+}
+
+TEST_CASE( "Failed malformed filter favorite repair restores the exact settings group",
+           "[filter-favorites][settings-transaction][regression]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    ControlledSettingsState state;
+    ControlledSettingsGuard guard{ state };
+    const auto settingsPath = dir.filePath( QStringLiteral( "malformed.transaction" ) );
+    QSettings settings{ settingsPath, controlledSettingsFormat() };
+    settings.setValue( QStringLiteral( "PredefinedFiltersCollection/version" ), 2 );
+    settings.setValue( QStringLiteral( "PredefinedFiltersCollection/filters/size" ),
+                       PredefinedFiltersCollection::MaximumFilterCount + 1 );
+    settings.setValue( QStringLiteral( "PredefinedFiltersCollection/opaque" ),
+                       QByteArrayLiteral( "preserve-malformed-bytes" ) );
+    settings.sync();
+    REQUIRE( settings.status() == QSettings::NoError );
+
+    const auto primaryPath = settings.fileName();
+    const auto protectedValues = state.durableValues.value( primaryPath );
+    state.lockFile = PredefinedFiltersCollectionTestAccess::storageLockFilePath( settings );
+    state.writes.clear();
+    state.writeResults = { false, true };
+
+    const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        settings, Collection{}, twoFavorites() );
+
+    REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::StorageError );
+    REQUIRE( failed.storedFilters.isEmpty() );
+    REQUIRE( settings.status() == QSettings::NoError );
+    REQUIRE( state.durableValues.value( primaryPath ) == protectedValues );
+    REQUIRE( state.writes.size() == 2 );
+    REQUIRE( state.writes.at( 0 ).lockHeld );
+    REQUIRE_FALSE( state.writes.at( 0 ).succeeded );
+    REQUIRE( state.writes.at( 0 ).values != protectedValues );
+    REQUIRE( state.writes.at( 1 ).lockHeld );
+    REQUIRE( state.writes.at( 1 ).succeeded );
+    REQUIRE( state.writes.at( 1 ).values == protectedValues );
+}
+
+TEST_CASE( "Failed favorite writes do not materialize fallback settings",
+           "[filter-favorites][settings-transaction][regression]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+
+    const auto format = controlledSettingsFormat();
+    QSettings::setPath( format, QSettings::UserScope, dir.path() );
+    ControlledSettingsState state;
+    ControlledSettingsGuard guard{ state };
+    const auto organization
+        = QStringLiteral( "org.klogg.favorite-fallback.%1" )
+              .arg( QUuid::createUuid().toString( QUuid::WithoutBraces ) );
+    QSettings fallbackSettings{ format, QSettings::UserScope, organization };
+    const auto fallbackFavorites = twoFavorites();
+    seedControlledFavorites( fallbackSettings, fallbackFavorites,
+                             QStringLiteral( "fallback-only" ) );
+    const auto fallbackPath = fallbackSettings.fileName();
+    const auto fallbackValues = state.durableValues.value( fallbackPath );
+
+    QSettings primarySettings{ format, QSettings::UserScope, organization,
+                               QStringLiteral( "filter-favorites" ) };
+    requireFavoritesEqual( readFavoritesFromSettings( primarySettings ), fallbackFavorites );
+    const auto primaryPath = primarySettings.fileName();
+    REQUIRE( state.durableValues.value( primaryPath ).isEmpty() );
+
+    state.lockFile
+        = PredefinedFiltersCollectionTestAccess::storageLockFilePath( primarySettings );
+    state.writes.clear();
+    state.writeResults = { false, true };
+    const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
+        primarySettings, fallbackFavorites, orderedFavorites() );
+
+    REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::WriteError );
+    requireFavoritesEqual( failed.storedFilters, fallbackFavorites );
+    REQUIRE( state.durableValues.value( primaryPath ).isEmpty() );
+    REQUIRE( state.durableValues.value( fallbackPath ) == fallbackValues );
+    REQUIRE_FALSE( state.writes.isEmpty() );
+    for ( const auto& write : state.writes ) {
+        REQUIRE( write.path == primaryPath );
+        REQUIRE( write.lockHeld );
+    }
+    REQUIRE_FALSE( state.writes.constFirst().succeeded );
 }
 
 TEST_CASE( "Filter favorite storage commit is locked and compare-and-replace",

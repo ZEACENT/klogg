@@ -38,6 +38,8 @@
 
 #include "predefinedfilters.h"
 
+#include <memory>
+
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
@@ -53,6 +55,72 @@ constexpr auto SettingsGroup = "PredefinedFiltersCollection";
 constexpr auto FiltersArray = "filters";
 constexpr auto VersionKey = "version";
 constexpr int LockTimeoutMs = 100;
+
+std::unique_ptr<QSettings> makeTransactionSettings( const QSettings& settings )
+{
+    std::unique_ptr<QSettings> transactionSettings;
+    if ( settings.organizationName().isEmpty() ) {
+        transactionSettings = std::make_unique<QSettings>( settings.fileName(), settings.format() );
+    }
+    else {
+        transactionSettings = std::make_unique<QSettings>(
+            settings.format(), settings.scope(), settings.organizationName(),
+            settings.applicationName() );
+    }
+    transactionSettings->setFallbacksEnabled( settings.fallbacksEnabled() );
+    transactionSettings->setAtomicSyncRequired( settings.isAtomicSyncRequired() );
+    return transactionSettings;
+}
+
+QSettings::SettingsMap snapshotSettingsGroup( QSettings& settings )
+{
+    QSettings::SettingsMap values;
+    settings.beginGroup( QLatin1String( SettingsGroup ) );
+    for ( const auto& key : settings.allKeys() ) {
+        values.insert( key, settings.value( key ) );
+    }
+    settings.endGroup();
+    return values;
+}
+
+QSettings::SettingsMap snapshotWritableSettingsGroup( QSettings& settings )
+{
+    const bool fallbacksEnabled = settings.fallbacksEnabled();
+    settings.setFallbacksEnabled( false );
+    const auto values = snapshotSettingsGroup( settings );
+    settings.setFallbacksEnabled( fallbacksEnabled );
+    return values;
+}
+
+void restoreWritableSettingsGroup( QSettings& settings,
+                                   const QSettings::SettingsMap& values )
+{
+    settings.setFallbacksEnabled( false );
+    settings.beginGroup( QLatin1String( SettingsGroup ) );
+    settings.remove( QString{} );
+    for ( auto it = values.cbegin(); it != values.cend(); ++it ) {
+        settings.setValue( it.key(), it.value() );
+    }
+    settings.endGroup();
+    settings.sync();
+}
+
+bool writableSettingsGroupMatches( const QSettings& identity,
+                                   const QSettings::SettingsMap& expected )
+{
+    auto verificationSettings = makeTransactionSettings( identity );
+    verificationSettings->setFallbacksEnabled( false );
+    verificationSettings->sync();
+    return verificationSettings->status() == QSettings::NoError
+           && snapshotSettingsGroup( *verificationSettings ) == expected;
+}
+
+bool commitResultHasStoredFilters( PredefinedFiltersCollection::CommitStatus status )
+{
+    using CommitStatus = PredefinedFiltersCollection::CommitStatus;
+    return status == CommitStatus::Success || status == CommitStatus::Unchanged
+           || status == CommitStatus::Conflict || status == CommitStatus::WriteError;
+}
 } // namespace
 
 PredefinedFiltersCollection::LoadResult PredefinedFiltersCollection::readFromSettings(
@@ -260,12 +328,14 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
         return { CommitStatus::LockError, {} };
     }
 
-    settings.sync();
-    if ( settings.status() != QSettings::NoError ) {
+    auto transactionSettings = makeTransactionSettings( settings );
+    transactionSettings->sync();
+    if ( transactionSettings->status() != QSettings::NoError ) {
         return { CommitStatus::StorageError, {} };
     }
 
-    const auto current = readFromSettings( settings, true );
+    const auto storedValues = snapshotWritableSettingsGroup( *transactionSettings );
+    const auto current = readFromSettings( *transactionSettings, true );
     const bool repairingMalformedStorage = current.status == LoadStatus::MalformedFile;
     if ( current.status == LoadStatus::UnsupportedVersion ) {
         return { CommitStatus::StorageError, {} };
@@ -282,16 +352,16 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
 
     PredefinedFiltersCollection replacementCollection;
     replacementCollection.setFilters( replacement );
-    replacementCollection.saveToStorage( settings );
-    settings.sync();
-    if ( settings.status() != QSettings::NoError ) {
-        QSettings verificationSettings{ settings.fileName(), settings.format() };
-        verificationSettings.sync();
-        const auto durable = readFromSettings( verificationSettings, true );
-        if ( durable.status == LoadStatus::Success ) {
-            return { CommitStatus::WriteError, durable.filters };
+    replacementCollection.saveToStorage( *transactionSettings );
+    transactionSettings->sync();
+    if ( transactionSettings->status() != QSettings::NoError ) {
+        restoreWritableSettingsGroup( *transactionSettings, storedValues );
+        transactionSettings.reset();
+        if ( !writableSettingsGroupMatches( settings, storedValues )
+             || repairingMalformedStorage ) {
+            return { CommitStatus::StorageError, {} };
         }
-        return { CommitStatus::StorageError, {} };
+        return { CommitStatus::WriteError, current.filters };
     }
 
     return { CommitStatus::Success, replacement };
@@ -300,9 +370,12 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitUsingSettings(
     QSettings& sharedSettings, const Collection& expected, const Collection& replacement )
 {
+    const bool sharedSettingsCanRefresh = sharedSettings.status() == QSettings::NoError;
     const auto result = commitToSettings( sharedSettings, storageLockFilePath( sharedSettings ),
                                           expected, replacement );
-    sharedSettings.sync();
+    if ( sharedSettingsCanRefresh && commitResultHasStoredFilters( result.status ) ) {
+        sharedSettings.sync();
+    }
     return result;
 }
 

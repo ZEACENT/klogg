@@ -1,6 +1,7 @@
 #include "streaminglogdata.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 
@@ -1551,12 +1552,12 @@ StreamingLogData::tryBuildCachedRawLines( LineNumber first, LinesCount number ) 
     }
 
     struct CachedRawReaderLease {
-        std::mutex& mutex;
-        std::vector<CachedRawSlice>& slices;
+        std::reference_wrapper<std::mutex> mutex;
+        std::reference_wrapper<const std::vector<CachedRawSlice>> slices;
         ~CachedRawReaderLease()
         {
-            std::lock_guard<std::mutex> lock( mutex );
-            for ( const auto& slice : slices ) {
+            std::lock_guard<std::mutex> lock( mutex.get() );
+            for ( const auto& slice : slices.get() ) {
                 Q_ASSERT( slice.batch->readers > 0 );
                 --slice.batch->readers;
             }

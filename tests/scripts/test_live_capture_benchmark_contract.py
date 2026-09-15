@@ -15,6 +15,7 @@ import zlib
 ROOT = pathlib.Path(__file__).parents[2]
 BENCHMARK_SCRIPT = ROOT / "scripts" / "run_live_capture_benchmarks.py"
 BENCHMARK_CORE = ROOT / "benchmarks" / "live_capture_benchmark_core.cpp"
+REAL_DEVICE_BENCHMARK = ROOT / "benchmarks" / "live_capture_real_device_benchmark.cpp"
 TESTS_CMAKE = ROOT / "tests" / "CMakeLists.txt"
 
 
@@ -41,6 +42,42 @@ class LiveCaptureBenchmarkContractTest(unittest.TestCase):
     def test_unsigned_strong_counts_are_not_checked_for_negative_values(self):
         source = BENCHMARK_CORE.read_text(encoding="utf-8")
         self.assertNotRegex(source, r"\b(?:lineCount|matches)\.get\(\)\s*<\s*0")
+
+    def test_real_device_owner_waits_for_source_retirement(self):
+        source = REAL_DEVICE_BENCHMARK.read_text(encoding="utf-8")
+        effects_match = re.search(
+            r"class RealEffects final.*?\n};\n\nbool pumpUntil", source, re.DOTALL
+        )
+        self.assertIsNotNone(effects_match)
+        effects = effects_match.group(0)
+
+        self.assertRegex(
+            effects,
+            r"(?s)setStoppedCallback\s*\(.*?stopCompleted\s*\(\s*generation\s*,\s*discarded\s*\)",
+        )
+        self.assertRegex(
+            effects,
+            r"(?s)setFinalizedCallback\s*\(.*?inputTerminated\s*\(\s*generation\s*,\s*result\s*\)",
+        )
+        self.assertGreaterEqual(effects.count("setStoppedCallback( {} )"), 1)
+        self.assertGreaterEqual(effects.count("setFinalizedCallback( {} )"), 1)
+        self.assertRegex(
+            effects,
+            r"(?s)void retireStream\s*\(.*?StopDisposition disposition.*?override.*?"
+            r"cancelTransport\s*\(\s*generation\s*,\s*disposition\s*\)",
+        )
+
+        cancel_match = re.search(
+            r"void cancelStream\s*\([^}]+\}\n", effects, re.DOTALL
+        )
+        self.assertIsNotNone(cancel_match)
+        self.assertNotIn("stopCompleted", cancel_match.group(0))
+        self.assertRegex(
+            source,
+            r"controller\.stopRequested\s*\(\s*"
+            r"(?:klogg::livecapture::|::klogg::livecapture::)?"
+            r"StopDisposition::SettleAccepted\s*\)",
+        )
 
     def test_process_heavy_contract_has_isolated_ctest_timeout(self):
         cmake = TESTS_CMAKE.read_text(encoding="utf-8")
