@@ -182,6 +182,10 @@ void Selection::crop( LineNumber last_line )
     if ( selectedRange_.startLine.has_value() && *selectedRange_.startLine > last_line )
         selectedRange_.startLine = last_line;
 
+    // The shift anchor must not resurrect lines beyond the cropped range.
+    if ( lastToggledLine_.has_value() && *lastToggledLine_ > last_line )
+        lastToggledLine_ = last_line;
+
     for ( auto it = toggledRanges_.begin(); it != toggledRanges_.end(); ) {
         if ( it->first > last_line ) {
             it = toggledRanges_.erase( it );

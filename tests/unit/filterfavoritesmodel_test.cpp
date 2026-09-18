@@ -1136,6 +1136,33 @@ TEST_CASE( "Filter favorites dialog keeps the current row on the renamed favorit
                              { QStringLiteral( "A" ), QStringLiteral( "first" ), false } } );
 }
 
+TEST_CASE( "Filter favorites dialog restores the current row by the full favorite identity",
+           "[filter-favorites][predefined-filters-dialog]" )
+{
+    PersistedFavoritesGuard guard;
+    auto& model = FilterFavoritesModel::instance();
+    model.replaceFavorites( { { QStringLiteral( "Dup" ), QStringLiteral( "p1" ), false },
+                              { QStringLiteral( "Dup" ), QStringLiteral( "p2" ), true } } );
+
+    PredefinedFiltersDialog dialog;
+    auto* const table = filtersTable( dialog );
+    auto* const apply = standardButton( dialog, QDialogButtonBox::Apply );
+    REQUIRE( table != nullptr );
+    REQUIRE( apply != nullptr );
+    REQUIRE( table->rowCount() == 2 );
+
+    // Two favorites share the name; the user edits the second row's pattern.
+    // The current row must follow that exact favorite, not the first row that
+    // happens to share the name.
+    table->setCurrentCell( 1, 1 );
+    table->item( 1, 1 )->setText( QStringLiteral( "p9" ) );
+    apply->click();
+
+    REQUIRE( table->currentRow() == 1 );
+    REQUIRE( table->item( table->currentRow(), 0 )->text() == QStringLiteral( "Dup" ) );
+    REQUIRE( table->item( table->currentRow(), 1 )->text() == QStringLiteral( "p9" ) );
+}
+
 TEST_CASE( "Filter favorites dialog advances its conflict base after Apply",
            "[filter-favorites][predefined-filters-dialog]" )
 {

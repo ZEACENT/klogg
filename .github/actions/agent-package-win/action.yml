@@ -75,8 +75,11 @@ runs:
           }
         }
 
-        & $portableApp -v
-        if ($LASTEXITCODE -ne 0) { throw "portable klogg version smoke failed" }
+        # klogg.exe is a GUI-subsystem binary: `& $portableApp -v` returns
+        # immediately and never updates $LASTEXITCODE, so drive the smoke
+        # through a waited process handle (its console output still flows).
+        $portableSmoke = Start-Process -FilePath $portableApp -ArgumentList "-v" -Wait -PassThru
+        if ($portableSmoke.ExitCode -ne 0) { throw "portable klogg version smoke failed with exit code $($portableSmoke.ExitCode)" }
         python scripts/smoke_adb_helper.py `
           --adb $portableHelper --port 0 --timeout-seconds 15 `
           --json-output "$env:KLOGG_BUILD_ROOT/adb-helper-windows-portable-smoke.json"
@@ -117,8 +120,11 @@ runs:
           if (!(Test-Path $required)) { throw "installed package entry missing: $required" }
         }
 
-        & $installedApp -v
-        if ($LASTEXITCODE -ne 0) { throw "installed klogg version smoke failed" }
+        # klogg.exe is a GUI-subsystem binary: `& $installedApp -v` returns
+        # immediately and never updates $LASTEXITCODE, so drive the smoke
+        # through a waited process handle (its console output still flows).
+        $installedSmoke = Start-Process -FilePath $installedApp -ArgumentList "-v" -Wait -PassThru
+        if ($installedSmoke.ExitCode -ne 0) { throw "installed klogg version smoke failed with exit code $($installedSmoke.ExitCode)" }
         python scripts/smoke_adb_helper.py `
           --adb $installedHelper --port 0 --timeout-seconds 15 `
           --json-output "$env:KLOGG_BUILD_ROOT/adb-helper-windows-installer-smoke.json"

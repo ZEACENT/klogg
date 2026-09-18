@@ -69,6 +69,21 @@ class ExternalSourceAssetPackageContractTest(unittest.TestCase):
         cls.adb = cls.contract["source_sets"]["adb-helper"]
         cls.ios = cls.contract["source_sets"]["ios-native"]
 
+    def test_windows_version_smoke_waits_for_the_gui_app_exit_code(self):
+        # klogg.exe is a GUI-subsystem binary: `& app -v` in pwsh returns
+        # immediately and never updates $LASTEXITCODE, so the smoke must drive
+        # a waited process handle (PR #75: the portable check passed vacuously
+        # on the previous command's exit code, the installer check failed on
+        # $null -ne 0).
+        action = WIN_PACKAGE.read_text()
+        self.assertIsNone(re.search(r"(?m)^\s*& \$\w+App -v", action))
+        waited_smokes = re.findall(
+            r"Start-Process -FilePath \$\w+App -ArgumentList \"-v\" -Wait -PassThru",
+            action,
+        )
+        self.assertEqual(len(waited_smokes), 2)
+        self.assertEqual(action.count("version smoke failed with exit code"), 2)
+
     def test_source_publication_identity_accepts_ci_calver_with_build_number(self):
         result = subprocess.run(
             [

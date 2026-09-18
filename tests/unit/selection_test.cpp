@@ -347,6 +347,24 @@ TEST_CASE( "shift-click after toggling a line off anchors on the last toggled li
     REQUIRE_FALSE( selection.isLineSelected( 7_lnum ) );
 }
 
+TEST_CASE( "crop clamps the shift anchor of a toggled selection", "[selection]" )
+{
+    Selection selection;
+
+    selection.toggleLine( 2_lnum );
+    selection.toggleLine( 8_lnum );
+
+    // Data shrinks: line 8 is gone, so the anchor must not resurrect it.
+    selection.crop( 6_lnum );
+    selection.selectRangeFromPrevious( 4_lnum );
+
+    REQUIRE_FALSE( selection.isLineSelected( 7_lnum ) );
+    REQUIRE_FALSE( selection.isLineSelected( 8_lnum ) );
+    REQUIRE( selection.isLineSelected( 2_lnum ) );
+    REQUIRE( selection.isLineSelected( 4_lnum ) );
+    REQUIRE( selection.isLineSelected( 6_lnum ) );
+}
+
 TEST_CASE( "a single toggled line behaves as a single line selection", "[selection]" )
 {
     Selection selection;

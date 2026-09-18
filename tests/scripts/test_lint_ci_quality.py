@@ -2236,6 +2236,22 @@ jobs:
         )
         self.assertIn(validation_message, MODULE.ci_build_workflow_issues(job_level))
 
+        # Ref- and qualification-mode restrictions suppress pull_request
+        # validation just as surely as an event_name restriction.
+        ref_gated = good.replace(
+            "  WindowsPackages:\n",
+            "  WindowsPackages:\n    if: ${{ github.ref == 'refs/heads/master' }}\n",
+            1,
+        )
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(ref_gated))
+
+        mode_gated = good.replace(
+            "if: ${{ matrix.config.package != false }}",
+            "if: ${{ matrix.config.package != false && inputs.qualification-mode == 'release' }}",
+            1,
+        )
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(mode_gated))
+
     def test_linux_and_macos_package_uploads_are_publish_only(self):
         publish_condition = "${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release') }}"
         for job_name in ("LinuxPackages", "MacPackages"):
@@ -2261,6 +2277,15 @@ jobs:
                     "inputs.qualification-mode == 'release') || github.event_name == 'pull_request' }}",
                 )
                 self.assertIn(message, MODULE.ci_build_workflow_issues(tautology))
+
+                # Symbol uploads are publishable artifacts too: they must be
+                # publish-gated exactly like package uploads.
+                symbols = good.replace("packages-test", "symbols-test").replace(
+                    "build_root/packages/*", "build_root/symbols/*"
+                )
+                self.assertNotIn(message, MODULE.ci_build_workflow_issues(symbols))
+                symbols_unguarded = symbols.replace(f"        if: {publish_condition}\n", "")
+                self.assertIn(message, MODULE.ci_build_workflow_issues(symbols_unguarded))
 
     def test_windows_package_composite_must_not_hide_validation_by_event(self):
         message = "Windows package composite must remain event-neutral"

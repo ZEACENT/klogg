@@ -167,11 +167,22 @@ bool PredefinedFiltersDialog::saveSettings()
     case PredefinedFiltersCollection::CommitStatus::Unchanged: {
         // Remember the edited row: repopulating resets the current cell, and
         // a rename may re-place the row once the table shows the sorted order.
+        // Track the full favorite identity -- distinct favorites can share a name.
         const auto currentRow = filtersTableWidget->currentRow();
         const auto* const currentNameItem
             = currentRow >= 0 ? filtersTableWidget->item( currentRow, 0 ) : nullptr;
+        const auto* const currentPatternItem
+            = currentRow >= 0 ? filtersTableWidget->item( currentRow, 1 ) : nullptr;
+        const auto* const currentRegexCheckbox
+            = currentRow >= 0 ? dynamic_cast<CenteredCheckbox*>(
+                  filtersTableWidget->cellWidget( currentRow, 2 ) )
+                              : nullptr;
         const auto currentName
             = currentNameItem != nullptr ? currentNameItem->text() : QString{};
+        const auto currentPattern
+            = currentPatternItem != nullptr ? currentPatternItem->text() : QString{};
+        const auto currentUseRegex
+            = currentRegexCheckbox != nullptr && currentRegexCheckbox->isChecked();
 
         baseFavorites_ = result.storedFilters;
         // The stored order is sorted by name; reflect the re-placement of
@@ -181,7 +192,14 @@ bool PredefinedFiltersDialog::saveSettings()
         if ( !currentName.isEmpty() ) {
             for ( int row = 0; row < filtersTableWidget->rowCount(); ++row ) {
                 const auto* const nameItem = filtersTableWidget->item( row, 0 );
-                if ( nameItem != nullptr && nameItem->text() == currentName ) {
+                const auto* const patternItem = filtersTableWidget->item( row, 1 );
+                const auto* const regexCheckbox = dynamic_cast<CenteredCheckbox*>(
+                    filtersTableWidget->cellWidget( row, 2 ) );
+                if ( nameItem != nullptr && patternItem != nullptr
+                     && nameItem->text() == currentName
+                     && patternItem->text() == currentPattern
+                     && regexCheckbox != nullptr
+                     && regexCheckbox->isChecked() == currentUseRegex ) {
                     filtersTableWidget->setCurrentCell( row, 0 );
                     break;
                 }

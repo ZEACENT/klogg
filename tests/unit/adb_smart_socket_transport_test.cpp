@@ -661,7 +661,8 @@ TEST_CASE( "ADB smart-socket transport sends the legacy logcat time format on th
     REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 4; } ) );
     CHECK( server.requests().at( 3 ) == QByteArray( "shell,v2,raw:logcat -v threadtime" ) );
 
-    FakeAdbServer::send( *server.socketAt( 1 ), QByteArrayLiteral( "OKAY" ) );
+    // The fake server already acknowledged the shell service with OKAY, which
+    // drives shellServiceStarted -> Connected; no further bytes are needed.
     REQUIRE( pumpEventsUntil(
         [ &probe ] { return probe.stateCount( LiveSourceTransport::State::Connected ) == 1; } ) );
 

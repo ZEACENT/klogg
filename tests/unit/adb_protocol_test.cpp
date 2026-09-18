@@ -697,6 +697,13 @@ TEST_CASE( "ADB logcat rejection predicate recognizes only owned modifier reject
     // The normalized wrapper keeps the original diagnostic, so the predicate must
     // still recognize it when the surfaced error text is inspected again.
     CHECK( logcatDiagnosticRejectsOwnedFormat( normalizeLogcatStreamError( reported ) ) );
+
+    // Near-match parameter names share substrings with the owned modifiers but
+    // are not the rejection signature.
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter yearly to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter timezone to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter usecs to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter colors to -v" ) );
 }
 
 TEST_CASE( "ADB logcat legacy-retry predicate matches only time modifier rejections",
@@ -715,6 +722,13 @@ TEST_CASE( "ADB logcat legacy-retry predicate matches only time modifier rejecti
     CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter color to -v" ) );
     CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( {} ) );
     CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "logcat: failure\n" ) );
+
+    // Near-match parameter names share substrings with the owned modifiers but
+    // are not the rejection signature; matching them would start an
+    // unrecoverable retry.
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter yearly to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter timezone to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter usecs to -v" ) );
 }
 
 TEST_CASE( "ADB logcat command builder shell-quotes filter values without interpolation",

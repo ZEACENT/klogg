@@ -268,14 +268,14 @@ bool lineRejectsLogcatModifier( std::string_view line,
         return static_cast<char>( std::tolower( static_cast<unsigned char>( value ) ) );
     } );
 
-    if ( normalized.find( "invalid parameter" ) == std::string::npos
-         || normalized.find( "to -v" ) == std::string::npos ) {
-        return false;
-    }
-
+    // Match the exact rejection token sequence so near-match parameter names
+    // (e.g. "yearly", "timezone") cannot trip the predicate.
     return std::any_of( modifiers.cbegin(), modifiers.cend(),
                         [ &normalized ]( std::string_view modifier ) {
-                            return normalized.find( modifier ) != std::string::npos;
+                            std::string rejection{ "invalid parameter " };
+                            rejection.append( modifier );
+                            rejection.append( " to -v" );
+                            return normalized.find( rejection ) != std::string::npos;
                         } );
 }
 

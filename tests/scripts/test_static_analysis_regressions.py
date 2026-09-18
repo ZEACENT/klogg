@@ -73,6 +73,20 @@ class StaticAnalysisRegressionTest(unittest.TestCase):
         )
         self.assertIn("-DKLOGG_UI_AUTOGEN_ORIGIN_DEPENDS=OFF", workflow)
 
+    def test_static_analysis_prep_builds_generated_version_header(self):
+        # clang-tidy analyzes klogg_version.cpp, which includes the generated
+        # version.h. With AUTOGEN_ORIGIN_DEPENDS=OFF the autogen prep build no
+        # longer follows dependencies, so the producer target must be built
+        # explicitly (PR #75 static-analysis failure: 'version.h' not found).
+        workflow = STATIC_ANALYSIS_WORKFLOW.read_text()
+        prep = re.search(
+            r'cmake --build "\$KLOGG_BUILD_ROOT" --target (?P<targets>[^\n]+)', workflow
+        )
+        self.assertIsNotNone(prep)
+        targets = prep.group("targets")
+        self.assertIn("klogg_ui_autogen", targets)
+        self.assertIn("generate_version", targets)
+
     def test_windows_file_identity_rejects_unrepresentable_qt_handles_before_narrowing(self):
         source = PLATFORM_FILES_SOURCE.read_text()
         file_identity = function_body(

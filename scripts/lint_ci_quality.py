@@ -1260,7 +1260,13 @@ def ci_build_workflow_issues(text: str) -> list[str]:
     windows_block = job_blocks.get("WindowsPackages", [])
     windows_job_condition = workflow_job_direct_value(windows_block, "if") or ""
     windows_steps = workflow_job_steps(text).get("WindowsPackages", [])
-    validation_is_event_gated = "github.event_name" in windows_job_condition
+    # Any of event_name / github.ref / inputs.qualification-mode in the
+    # condition can suppress pull-request validation runs, so all three count
+    # as gating here (PR #75 review: an event-only check missed ref gating).
+    pr_suppression_tokens = ("github.event_name", "github.ref", "inputs.qualification-mode")
+    validation_is_event_gated = any(
+        token in windows_job_condition for token in pr_suppression_tokens
+    )
     transport_is_publish_only = True
     saw_transport = False
     for step in windows_steps:
@@ -1268,8 +1274,8 @@ def ci_build_workflow_issues(text: str) -> list[str]:
         uses = fields.get("uses", "")
         condition = fields.get("if", "")
         if uses == "./.github/actions/agent-package-win":
-            validation_is_event_gated = validation_is_event_gated or (
-                "github.event_name" in condition
+            validation_is_event_gated = validation_is_event_gated or any(
+                token in condition for token in pr_suppression_tokens
             )
         upload = children.get("with", {})
         upload_name = upload.get("name", "")
@@ -1298,7 +1304,9 @@ def ci_build_workflow_issues(text: str) -> list[str]:
             upload_name = upload.get("name", "")
             upload_path = upload.get("path", "").replace("\\", "/")
             if not uses.startswith("actions/upload-artifact@") or not (
-                upload_name.startswith("packages-") or "/packages/" in upload_path
+                upload_name.startswith(("packages-", "symbols-"))
+                or "/packages/" in upload_path
+                or "/symbols/" in upload_path
             ):
                 continue
             if not artifact_condition_is_publish_only(fields.get("if", "")):
