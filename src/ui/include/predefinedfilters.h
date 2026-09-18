@@ -104,6 +104,9 @@ class PredefinedFiltersCollection final : public Persistable<PredefinedFiltersCo
         return "PredefinedFiltersCollection";
     }
 
+    // Favorites are always sorted by name (case-insensitive, with
+    // case-sensitive name, pattern, and useRegex tie-breaks); every boundary
+    // normalizes, so any previously stored manual order is discarded.
     Collection getSyncedFilters();
     Collection getFilters() const;
     void setFilters( const Collection& filters );

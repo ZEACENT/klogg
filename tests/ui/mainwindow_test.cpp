@@ -4088,12 +4088,18 @@ TEST_CASE( "Filter Favorites import validates before replacing every document to
     REQUIRE( comboFavoriteRows( fileCombo ) == initialFavorites );
     REQUIRE( comboFavoriteRows( folderCombo ) == initialFavorites );
 
-    const PredefinedFiltersCollection::Collection importedFavorites{
+    const PredefinedFiltersCollection::Collection importFileOrder{
         { QStringLiteral( "Gamma" ), QStringLiteral( "INFO|NOTICE" ), true },
         { QStringLiteral( "Delta" ), QStringLiteral( "plain text" ), false },
     };
+    // Favorites are always sorted by name at the storage boundary, so every
+    // consumer observes the lexicographic order regardless of the file order.
+    const PredefinedFiltersCollection::Collection importedFavorites{
+        { QStringLiteral( "Delta" ), QStringLiteral( "plain text" ), false },
+        { QStringLiteral( "Gamma" ), QStringLiteral( "INFO|NOTICE" ), true },
+    };
     const auto importPath = QDir( tempDirPath ).absoluteFilePath( "valid-import.conf" );
-    REQUIRE( PredefinedFiltersCollection::saveToFile( importPath, importedFavorites ) );
+    REQUIRE( PredefinedFiltersCollection::saveToFile( importPath, importFileOrder ) );
 
     // Make storage newer than the shared model. Import must first observe this
     // external state, then replace it authoritatively with the validated file.

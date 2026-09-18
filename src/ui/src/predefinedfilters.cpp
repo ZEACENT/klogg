@@ -38,6 +38,7 @@
 
 #include "predefinedfilters.h"
 
+#include <algorithm>
 #include <memory>
 
 #include <QCryptographicHash>
@@ -55,6 +56,32 @@ constexpr auto SettingsGroup = "PredefinedFiltersCollection";
 constexpr auto FiltersArray = "filters";
 constexpr auto VersionKey = "version";
 constexpr int LockTimeoutMs = 100;
+
+// Favorites are always ordered by name: case-insensitive first, then
+// case-sensitive name, pattern, and useRegex give a total deterministic order.
+bool favoriteSortsBefore( const PredefinedFilter& left, const PredefinedFilter& right )
+{
+    const int insensitiveName = left.name.compare( right.name, Qt::CaseInsensitive );
+    if ( insensitiveName != 0 ) {
+        return insensitiveName < 0;
+    }
+    const int sensitiveName = left.name.compare( right.name, Qt::CaseSensitive );
+    if ( sensitiveName != 0 ) {
+        return sensitiveName < 0;
+    }
+    const int pattern = left.pattern.compare( right.pattern );
+    if ( pattern != 0 ) {
+        return pattern < 0;
+    }
+    return !left.useRegex && right.useRegex;
+}
+
+PredefinedFiltersCollection::Collection sortedByName(
+    PredefinedFiltersCollection::Collection filters )
+{
+    std::stable_sort( filters.begin(), filters.end(), &favoriteSortsBefore );
+    return filters;
+}
 
 std::unique_ptr<QSettings> makeTransactionSettings( const QSettings& settings )
 {
@@ -184,7 +211,7 @@ PredefinedFiltersCollection::LoadResult PredefinedFiltersCollection::readFromSet
     if ( settings.status() != QSettings::NoError ) {
         return { LoadStatus::MalformedFile, {} };
     }
-    return { LoadStatus::Success, filters };
+    return { LoadStatus::Success, sortedByName( std::move( filters ) ) };
 }
 
 void PredefinedFiltersCollection::retrieveFromStorage( QSettings& settings )
@@ -233,7 +260,7 @@ void PredefinedFiltersCollection::saveToStorage(
         return;
     }
 
-    filters_ = filters;
+    setFilters( filters );
     this->save();
 }
 
@@ -250,7 +277,7 @@ PredefinedFiltersCollection::Collection PredefinedFiltersCollection::getSyncedFi
 
 void PredefinedFiltersCollection::setFilters( const Collection& filters )
 {
-    filters_ = filters;
+    filters_ = sortedByName( filters );
 }
 
 PredefinedFiltersCollection::LoadResult PredefinedFiltersCollection::tryLoadFromFile(
@@ -318,6 +345,8 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
         return { CommitStatus::InvalidReplacement, {} };
     }
 
+    const Collection sortedReplacement = sortedByName( replacement );
+
     const QFileInfo lockInfo{ lockFile };
     if ( !QDir{}.mkpath( lockInfo.absolutePath() ) ) {
         return { CommitStatus::LockError, {} };
@@ -346,12 +375,12 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
     if ( !repairingMalformedStorage && current.filters != expected ) {
         return { CommitStatus::Conflict, current.filters };
     }
-    if ( !repairingMalformedStorage && current.filters == replacement ) {
+    if ( !repairingMalformedStorage && current.filters == sortedReplacement ) {
         return { CommitStatus::Unchanged, current.filters };
     }
 
     PredefinedFiltersCollection replacementCollection;
-    replacementCollection.setFilters( replacement );
+    replacementCollection.setFilters( sortedReplacement );
     replacementCollection.saveToStorage( *transactionSettings );
     transactionSettings->sync();
     if ( transactionSettings->status() != QSettings::NoError ) {
@@ -364,7 +393,7 @@ PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitToS
         return { CommitStatus::WriteError, current.filters };
     }
 
-    return { CommitStatus::Success, replacement };
+    return { CommitStatus::Success, sortedReplacement };
 }
 
 PredefinedFiltersCollection::CommitResult PredefinedFiltersCollection::commitUsingSettings(

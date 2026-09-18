@@ -50,6 +50,10 @@ SaveFavoriteDialog::SaveFavoriteDialog(
     createNewLayout->addWidget( createNewRadio_ );
     createNewLayout->addWidget( newNameEdit_, 1 );
 
+    // The stored order is derived from the name, so say so next to the field.
+    auto* sortOrderHint = new QLabel( tr( "Favorites are listed sorted by name." ), this );
+    sortOrderHint->setObjectName( QStringLiteral( "sortOrderHintLabel" ) );
+
     // Overwrite existing section
     auto* overwriteLayout = new QHBoxLayout();
     overwriteRadio_ = new QRadioButton( tr( "Overwrite existing:" ), this );
@@ -76,6 +80,7 @@ SaveFavoriteDialog::SaveFavoriteDialog(
     }
 
     layout->addLayout( createNewLayout );
+    layout->addWidget( sortOrderHint );
     layout->addLayout( overwriteLayout );
 
     // Button box

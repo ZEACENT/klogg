@@ -56,9 +56,6 @@ class PredefinedFiltersDialog : public QDialog, public Ui::PredefinedFiltersDial
     void addFilter();
     void removeFilter();
 
-    void moveFilterUp();
-    void moveFilterDown();
-
     void exportFilters();
     void importFilters();
     void exportFiltersToFile( const QString& file );
@@ -66,20 +63,14 @@ class PredefinedFiltersDialog : public QDialog, public Ui::PredefinedFiltersDial
 
     void resolveStandardButton( QAbstractButton* button );
 
-    void onCurrentCellChanged( int currentRow, int currentColumn, int previousRow,
-                               int previousColumn );
-
   private:
     void addFilterRow( const QString& newFilter );
     void populateFiltersTable( const PredefinedFiltersCollection::Collection& filters );
-
-    void swapFilters( int currentRow, int newRow, int column );
 
     bool saveSettings();
     PredefinedFiltersCollection::Collection readFiltersTable() const;
 
     void updateButtons();
-    void updateUpDownButtons( int currentRow );
 
     PredefinedFiltersCollection::Collection baseFavorites_;
 };

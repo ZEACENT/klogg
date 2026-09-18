@@ -96,8 +96,6 @@ PredefinedFiltersDialog::PredefinedFiltersDialog( QWidget* parent )
     connect( addFilterButton, &QToolButton::clicked, this, &PredefinedFiltersDialog::addFilter );
     connect( removeFilterButton, &QToolButton::clicked, this,
              &PredefinedFiltersDialog::removeFilter );
-    connect( upButton, &QToolButton::clicked, this, &PredefinedFiltersDialog::moveFilterUp );
-    connect( downButton, &QToolButton::clicked, this, &PredefinedFiltersDialog::moveFilterDown );
     connect( importFilterButton, &QToolButton::clicked, this,
              &PredefinedFiltersDialog::importFilters );
     connect( exportFilterButton, &QToolButton::clicked, this,
@@ -106,16 +104,11 @@ PredefinedFiltersDialog::PredefinedFiltersDialog( QWidget* parent )
     connect( buttonBox, &QDialogButtonBox::clicked, this,
              &PredefinedFiltersDialog::resolveStandardButton );
 
-    connect( filtersTableWidget, &QTableWidget::currentCellChanged, this,
-             &PredefinedFiltersDialog::onCurrentCellChanged );
-
     QTimer::singleShot( 0, this, [ this ] {
         IconLoader iconLoader( this );
 
         addFilterButton->setIcon( iconLoader.load( "icons8-plus" ) );
         removeFilterButton->setIcon( iconLoader.load( "icons8-minus" ) );
-        upButton->setIcon( iconLoader.load( "icons8-up" ) );
-        downButton->setIcon( iconLoader.load( "icons8-down-arrow" ) );
     } );
 }
 
@@ -131,24 +124,6 @@ void PredefinedFiltersDialog::updateButtons()
 {
     const auto filtersCount = filtersTableWidget->rowCount();
     removeFilterButton->setEnabled( filtersCount > 0 );
-
-    updateUpDownButtons( filtersTableWidget->currentRow() );
-}
-
-void PredefinedFiltersDialog::onCurrentCellChanged( int currentRow, int currentColumn,
-                                                    int previousRow, int previousColumn )
-{
-    Q_UNUSED( currentColumn )
-    Q_UNUSED( previousRow )
-    Q_UNUSED( previousColumn )
-
-    updateUpDownButtons( currentRow );
-}
-
-void PredefinedFiltersDialog::updateUpDownButtons( int currentRow )
-{
-    upButton->setEnabled( currentRow > 0 );
-    downButton->setEnabled( currentRow < filtersTableWidget->rowCount() - 1 );
 }
 
 void PredefinedFiltersDialog::populateFiltersTable(
@@ -189,9 +164,31 @@ bool PredefinedFiltersDialog::saveSettings()
 
     switch ( result.status ) {
     case PredefinedFiltersCollection::CommitStatus::Success:
-    case PredefinedFiltersCollection::CommitStatus::Unchanged:
+    case PredefinedFiltersCollection::CommitStatus::Unchanged: {
+        // Remember the edited row: repopulating resets the current cell, and
+        // a rename may re-place the row once the table shows the sorted order.
+        const auto currentRow = filtersTableWidget->currentRow();
+        const auto* const currentNameItem
+            = currentRow >= 0 ? filtersTableWidget->item( currentRow, 0 ) : nullptr;
+        const auto currentName
+            = currentNameItem != nullptr ? currentNameItem->text() : QString{};
+
         baseFavorites_ = result.storedFilters;
+        // The stored order is sorted by name; reflect the re-placement of
+        // renamed favorites in the table.
+        populateFiltersTable( baseFavorites_ );
+
+        if ( !currentName.isEmpty() ) {
+            for ( int row = 0; row < filtersTableWidget->rowCount(); ++row ) {
+                const auto* const nameItem = filtersTableWidget->item( row, 0 );
+                if ( nameItem != nullptr && nameItem->text() == currentName ) {
+                    filtersTableWidget->setCurrentCell( row, 0 );
+                    break;
+                }
+            }
+        }
         return true;
+    }
     case PredefinedFiltersCollection::CommitStatus::Conflict:
         klogg::ui::warning(
             this, tr( "klogg" ),
@@ -261,56 +258,6 @@ void PredefinedFiltersDialog::removeFilter()
     filtersTableWidget->removeRow( filtersTableWidget->currentRow() );
 
     updateButtons();
-}
-
-void PredefinedFiltersDialog::moveFilterUp()
-{
-    const auto currentRow = filtersTableWidget->currentRow();
-    const auto selectedColumn = filtersTableWidget->currentColumn();
-
-    if ( currentRow >= 0 ) {
-        swapFilters( currentRow, currentRow - 1, selectedColumn );
-    }
-}
-
-void PredefinedFiltersDialog::moveFilterDown()
-{
-    const auto currentRow = filtersTableWidget->currentRow();
-    const auto selectedColumn = filtersTableWidget->currentColumn();
-
-    if ( currentRow >= 0 ) {
-        swapFilters( currentRow, currentRow + 1, selectedColumn );
-    }
-}
-
-void PredefinedFiltersDialog::swapFilters( int currentRow, int newRow, int selectedColumn )
-{
-    if ( currentRow < 0 || currentRow >= filtersTableWidget->rowCount() || newRow < 0
-         || newRow >= filtersTableWidget->rowCount() ) {
-        return;
-    }
-
-    for ( int column = 0; column < filtersTableWidget->columnCount(); ++column ) {
-        auto currentUseRegex
-            = dynamic_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( currentRow, column ) );
-        auto newUseRegex
-            = dynamic_cast<CenteredCheckbox*>( filtersTableWidget->cellWidget( newRow, column ) );
-
-        if ( currentUseRegex && newUseRegex ) {
-            const auto currentCheckState = currentUseRegex->isChecked();
-            const auto newCheckState = newUseRegex->isChecked();
-            currentUseRegex->setChecked( newCheckState );
-            newUseRegex->setChecked( currentCheckState );
-        }
-        else {
-            auto currentItem = filtersTableWidget->takeItem( currentRow, column );
-            auto newItem = filtersTableWidget->takeItem( newRow, column );
-
-            filtersTableWidget->setItem( newRow, column, currentItem );
-            filtersTableWidget->setItem( currentRow, column, newItem );
-        }
-    }
-    filtersTableWidget->setCurrentCell( newRow, selectedColumn );
 }
 
 void PredefinedFiltersDialog::importFilters()
