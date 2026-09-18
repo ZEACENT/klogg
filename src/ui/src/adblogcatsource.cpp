@@ -41,7 +41,8 @@ DefaultLiveSourceTransportFactory::create( const LiveSourceTransportConfig& conf
         return nullptr;
     }
     return std::make_unique<AdbProcessTransport>( config.executable, config.deviceId,
-                                                  config.extraArgs, config.ansiOutputEnabled );
+                                                  config.extraArgs, config.ansiOutputEnabled,
+                                                  config.logcatTimeFormat );
 }
 
 namespace {
@@ -72,6 +73,24 @@ const LiveSourceTransportFactory& defaultTransportFactory()
 {
     static const DefaultLiveSourceTransportFactory factory;
     return factory;
+}
+
+// The legacy retry drops only the year/zone/usec modifiers and keeps -v color,
+// so the gate matches time-modifier rejections alone; a color rejection would
+// retry into an identical failure.
+bool diagnosticRejectsOwnedLogcatTimeFormat(
+    const QString& diagnostic,
+    const std::optional<klogg::livecapture::LiveSourceError>& structured )
+{
+    namespace adb = klogg::livecapture::adb;
+    if ( adb::logcatDiagnosticRejectsOwnedTimeFormat( diagnostic.toStdString() ) ) {
+        return true;
+    }
+    if ( structured.has_value() ) {
+        return adb::logcatDiagnosticRejectsOwnedTimeFormat( structured->message )
+               || adb::logcatDiagnosticRejectsOwnedTimeFormat( structured->nativeDetail );
+    }
+    return false;
 }
 
 } // namespace
@@ -291,7 +310,9 @@ bool AdbLogcatSource::connectSource()
     restartAfterClear_ = false;
     lastError_.clear();
     if ( !transport_ && transportFactory_ != nullptr ) {
-        transport_ = transportFactory_->create( transportConfigFromSessionData( sessionData_ ) );
+        auto config = transportConfigFromSessionData( sessionData_ );
+        transport_ = transportFactory_->create( config );
+        activeTransportConfig_ = std::move( config );
         wireTransport();
     }
     if ( !transport_ ) {
@@ -551,6 +572,7 @@ void AdbLogcatSource::openTransport( Generation generation,
     reportedErrorGeneration_.reset();
     connecting_ = false;
     retireTransport();
+    activeTransportConfig_ = config;
     transport_ = transportFactory_->create( config );
     wireTransport();
     if ( !transport_ ) {
@@ -797,6 +819,46 @@ void AdbLogcatSource::setState( State state )
     Q_EMIT stateChanged( state_ );
 }
 
+bool AdbLogcatSource::restartTransportWithLegacyLogcatFormat( Generation generation )
+{
+    namespace adb = klogg::livecapture::adb;
+    if ( !activeTransportConfig_.has_value()
+         || activeTransportConfig_->sourceType != LiveLogSourceType::AdbLogcat
+         || activeTransportConfig_->logcatTimeFormat != adb::LogcatTimeFormat::Extended
+         || transportFactory_ == nullptr || sessionData_.readOnlyCompatibility ) {
+        return false;
+    }
+
+    LOG_WARNING << "ADB logcat rejected the year, zone, and microsecond format modifiers; "
+                   "retrying the stream once with the legacy threadtime-only format. This "
+                   "device reports no year or timezone, so source-device wall time may be "
+                   "ambiguous.";
+
+    auto legacyConfig = *activeTransportConfig_;
+    legacyConfig.logcatTimeFormat = adb::LogcatTimeFormat::Legacy;
+
+    // Mirror openTransport's replacement discipline, but keep the generation and
+    // the delivery settlement token: the controller still owns this stream
+    // attempt, and late settlements of pre-failure deliveries stay valid.
+    activeGeneration_.reset();
+    reportedErrorGeneration_.reset();
+    connecting_ = false;
+    retireTransport();
+    transport_ = transportFactory_->create( legacyConfig );
+    wireTransport();
+    if ( !transport_ ) {
+        // The terminal error path still owns the original diagnostic.
+        return false;
+    }
+    activeTransportConfig_ = std::move( legacyConfig );
+    persistenceSchedulingArmed_ = true;
+    activeGeneration_ = generation;
+    connecting_ = true;
+    lastError_.clear();
+    transport_->start( generation );
+    return true;
+}
+
 void AdbLogcatSource::setStateFromTransport( Generation generation,
                                              LiveSourceTransport::State state )
 {
@@ -811,6 +873,15 @@ void AdbLogcatSource::setStateFromTransport( Generation generation,
         const auto terminalText
             = diagnostic.isEmpty() ? QString::fromStdString( failure.message ) : diagnostic;
         QPointer<AdbLogcatSource> guard( this );
+
+        // A device whose logcat predates the year/zone/usec modifiers gets exactly
+        // one silent same-generation retry with the legacy format; the terminal
+        // path below keeps any other or repeated failure.
+        if ( diagnosticRejectsOwnedLogcatTimeFormat( diagnostic, structured ) ) {
+            const auto restarted = restartTransportWithLegacyLogcatFormat( generation );
+            if ( !guard ) { return; }
+            if ( restarted ) { return; }
+        }
 
         connecting_ = false;
         if ( !guard ) { return; }

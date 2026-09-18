@@ -51,9 +51,11 @@ QStringList removeLogcatFormatArguments( const QStringList& arguments )
     return filtered;
 }
 
-void appendLogcatFormatArguments( QStringList& arguments, bool ansiOutputEnabled )
+void appendLogcatFormatArguments( QStringList& arguments, bool ansiOutputEnabled,
+                                  adb::LogcatTimeFormat timeFormat )
 {
-    for ( const auto& argument : adb::buildLogcatFormatArguments( ansiOutputEnabled ) ) {
+    for ( const auto& argument : adb::buildLogcatFormatArguments( ansiOutputEnabled,
+                                                                  timeFormat ) ) {
         arguments.append( QString::fromStdString( argument ) );
     }
 }
@@ -62,12 +64,13 @@ void appendLogcatFormatArguments( QStringList& arguments, bool ansiOutputEnabled
 
 AdbProcessTransport::AdbProcessTransport( QString adbExecutable, QString deviceSerial,
                                           QString extraArgs, bool ansiOutputEnabled,
-                                          QObject* parent )
+                                          adb::LogcatTimeFormat timeFormat, QObject* parent )
     : ProcessLiveSourceTransport( parent )
     , adbExecutable_( std::move( adbExecutable ) )
     , deviceSerial_( std::move( deviceSerial ) )
     , extraArgs_( std::move( extraArgs ) )
     , ansiOutputEnabled_( ansiOutputEnabled )
+    , timeFormat_( timeFormat )
     , deviceProvider_( std::make_unique<AdbDeviceListProvider>( adbExecutable_, this ) )
 {
 }
@@ -113,7 +116,7 @@ QString AdbProcessTransport::normalizedAdbExecutable() const
 QStringList AdbProcessTransport::logcatArguments() const
 {
     QStringList arguments{ QStringLiteral( "-s" ), deviceSerial_, QStringLiteral( "logcat" ) };
-    appendLogcatFormatArguments( arguments, ansiOutputEnabled_ );
+    appendLogcatFormatArguments( arguments, ansiOutputEnabled_, timeFormat_ );
 
     const auto trimmedExtraArgs = extraArgs_.trimmed();
     if ( !trimmedExtraArgs.isEmpty() ) {

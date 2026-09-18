@@ -6,6 +6,7 @@
 
 #include "adbdeviceinfo.h"
 #include "adbdevicelistprovider.h"
+#include "adbprotocol.h"
 #include "livesourcetransport.h"
 
 class AdbProcessTransport : public ProcessLiveSourceTransport {
@@ -13,7 +14,10 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
 
   public:
     AdbProcessTransport( QString adbExecutable, QString deviceSerial, QString extraArgs,
-                         bool ansiOutputEnabled = false, QObject* parent = nullptr );
+                         bool ansiOutputEnabled = false,
+                         klogg::livecapture::adb::LogcatTimeFormat timeFormat
+                         = klogg::livecapture::adb::LogcatTimeFormat::Extended,
+                         QObject* parent = nullptr );
 
     // Delegate to AdbDeviceListProvider.  Kept for backward compatibility
     // with dialog callers that call this static method directly.
@@ -40,6 +44,7 @@ class AdbProcessTransport : public ProcessLiveSourceTransport {
     QString deviceSerial_;
     QString extraArgs_;
     bool ansiOutputEnabled_;
+    klogg::livecapture::adb::LogcatTimeFormat timeFormat_;
     std::unique_ptr<AdbDeviceListProvider> deviceProvider_;
 };
 

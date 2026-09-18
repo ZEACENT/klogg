@@ -629,6 +629,45 @@ TEST_CASE( "ADB smart-socket transport starts nonblocking and reaches Connected 
     transport.stop( StreamGeneration );
 }
 
+TEST_CASE( "ADB smart-socket transport sends the legacy logcat time format on the wire",
+           "[livecapture][adb][transport][startup][logcat-format-fallback]" )
+{
+    FakeAdbServer server(
+        []( QTcpSocket& socket, int connectionIndex, int requestIndex, const QByteArray& request ) {
+            if ( requestIndex == 0 ) {
+                REQUIRE( request == QByteArray( TransportRequest ) );
+                FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+                return;
+            }
+
+            REQUIRE( requestIndex == 1 );
+            if ( connectionIndex % 2 == 0 ) {
+                REQUIRE( request == QByteArray( UnscopedFeaturesRequest ) );
+                sendFeaturesOkay( socket );
+                return;
+            }
+
+            REQUIRE( request == QByteArray( "shell,v2,raw:logcat -v threadtime" ) );
+            FakeAdbServer::send( socket, QByteArrayLiteral( "OKAY" ) );
+        } );
+    TrackingSocketFactory socketFactory;
+    ManualDeadlineScheduler deadlines;
+    auto config = transportConfig( server.port() );
+    config.logcatOptions.timeFormat = LogcatTimeFormat::Legacy;
+    AdbSmartSocketTransport transport( std::move( config ), socketFactory, deadlines );
+    TransportProbe probe( transport );
+
+    transport.start( StreamGeneration );
+    REQUIRE( pumpEventsUntil( [ &server ] { return server.requestCount() == 4; } ) );
+    CHECK( server.requests().at( 3 ) == QByteArray( "shell,v2,raw:logcat -v threadtime" ) );
+
+    FakeAdbServer::send( *server.socketAt( 1 ), QByteArrayLiteral( "OKAY" ) );
+    REQUIRE( pumpEventsUntil(
+        [ &probe ] { return probe.stateCount( LiveSourceTransport::State::Connected ) == 1; } ) );
+
+    transport.stop( StreamGeneration );
+}
+
 TEST_CASE( "ADB smart-socket stdout crosses the bounded queue byte-for-byte with boundary-local "
            "statistics",
            "[livecapture][adb][transport][stdout][queue][statistics]" )

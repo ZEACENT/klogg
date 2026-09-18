@@ -259,7 +259,9 @@ std::optional<char> logPriorityLetter( LogPriority priority )
     return std::nullopt;
 }
 
-bool lineRejectsOwnedLogcatFormat( std::string_view line )
+template <std::size_t ModifierCount>
+bool lineRejectsLogcatModifier( std::string_view line,
+                                const std::array<std::string_view, ModifierCount>& modifiers )
 {
     std::string normalized( line );
     std::transform( normalized.begin(), normalized.end(), normalized.begin(), []( char value ) {
@@ -271,11 +273,42 @@ bool lineRejectsOwnedLogcatFormat( std::string_view line )
         return false;
     }
 
-    constexpr std::array<std::string_view, 4> OwnedModifiers{ "year", "zone", "usec", "color" };
-    return std::any_of( OwnedModifiers.cbegin(), OwnedModifiers.cend(),
+    return std::any_of( modifiers.cbegin(), modifiers.cend(),
                         [ &normalized ]( std::string_view modifier ) {
                             return normalized.find( modifier ) != std::string::npos;
                         } );
+}
+
+bool lineRejectsOwnedLogcatFormat( std::string_view line )
+{
+    constexpr std::array<std::string_view, 4> OwnedModifiers{ "year", "zone", "usec", "color" };
+    return lineRejectsLogcatModifier( line, OwnedModifiers );
+}
+
+// The legacy retry drops the year/zone/usec modifiers but keeps -v color, so a
+// color rejection can never be recovered by it.
+bool lineRejectsOwnedLogcatTimeFormat( std::string_view line )
+{
+    constexpr std::array<std::string_view, 3> OwnedTimeModifiers{ "year", "zone", "usec" };
+    return lineRejectsLogcatModifier( line, OwnedTimeModifiers );
+}
+
+bool anyDiagnosticLineMatches( std::string_view diagnostic,
+                               bool ( *linePredicate )( std::string_view ) )
+{
+    std::string_view remaining( diagnostic );
+    while ( !remaining.empty() ) {
+        const auto end = remaining.find( '\n' );
+        const auto line = remaining.substr( 0u, end );
+        if ( linePredicate( line ) ) {
+            return true;
+        }
+        if ( end == std::string_view::npos ) {
+            break;
+        }
+        remaining.remove_prefix( end + 1u );
+    }
+    return false;
 }
 
 ProtocolResult<std::string> commandError( ProtocolErrorCode code, std::string message )
@@ -611,11 +644,13 @@ ProtocolResult<std::string> buildTransportService( const TransportSelection& sel
     return ProtocolResult<std::string>{ std::move( service ), std::nullopt };
 }
 
-std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled )
+std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled,
+                                                     LogcatTimeFormat timeFormat )
 {
-    std::vector<std::string> arguments{
-        "-v", "threadtime", "-v", "year", "-v", "zone", "-v", "usec"
-    };
+    std::vector<std::string> arguments{ "-v", "threadtime" };
+    if ( timeFormat == LogcatTimeFormat::Extended ) {
+        arguments.insert( arguments.end(), { "-v", "year", "-v", "zone", "-v", "usec" } );
+    }
     if ( ansiOutputEnabled ) {
         arguments.emplace_back( "-v" );
         arguments.emplace_back( "color" );
@@ -623,22 +658,23 @@ std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled )
     return arguments;
 }
 
+bool logcatDiagnosticRejectsOwnedFormat( std::string_view diagnostic )
+{
+    return anyDiagnosticLineMatches( diagnostic, &lineRejectsOwnedLogcatFormat );
+}
+
+bool logcatDiagnosticRejectsOwnedTimeFormat( std::string_view diagnostic )
+{
+    return anyDiagnosticLineMatches( diagnostic, &lineRejectsOwnedLogcatTimeFormat );
+}
+
 std::string normalizeLogcatStreamError( const std::string& diagnostic )
 {
-    std::string_view remaining( diagnostic );
-    while ( !remaining.empty() ) {
-        const auto end = remaining.find( '\n' );
-        const auto line = remaining.substr( 0u, end );
-        if ( lineRejectsOwnedLogcatFormat( line ) ) {
-            return "This ADB device cannot provide unambiguous source-device wall time because "
-                   "its logcat does not support the required year, zone, and microsecond format "
-                   "modifiers (Android 7.0 or compatible is required). Original error: "
-                   + diagnostic;
-        }
-        if ( end == std::string_view::npos ) {
-            break;
-        }
-        remaining.remove_prefix( end + 1u );
+    if ( logcatDiagnosticRejectsOwnedFormat( diagnostic ) ) {
+        return "This ADB device cannot provide unambiguous source-device wall time because "
+               "its logcat does not support the required year, zone, and microsecond format "
+               "modifiers (Android 7.0 or compatible is required). Original error: "
+               + diagnostic;
     }
     return diagnostic;
 }
@@ -647,7 +683,8 @@ ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& opti
 {
     std::string service{ "shell,v2,raw:logcat" };
     // appendBounded mutates the command and must stop at the first overflow.
-    for ( const auto& argument : buildLogcatFormatArguments( options.ansiOutputEnabled ) ) {
+    for ( const auto& argument :
+          buildLogcatFormatArguments( options.ansiOutputEnabled, options.timeFormat ) ) {
         // cppcheck-suppress useStlAlgorithm
         if ( !appendBounded( service, " " ) || !appendBounded( service, argument ) ) {
             return commandError( ProtocolErrorCode::PayloadTooLarge,

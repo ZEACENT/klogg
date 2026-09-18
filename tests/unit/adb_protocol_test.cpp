@@ -651,6 +651,72 @@ TEST_CASE( "ADB logcat diagnostics classify only rejected owned format modifiers
     CHECK( normalizeLogcatStreamError( unrelated ) == unrelated );
 }
 
+TEST_CASE( "ADB logcat legacy time format keeps only the threadtime modifier",
+           "[livecapture][adb][protocol][command][wall-time][legacy]" )
+{
+    LogcatCommandOptions legacyOptions;
+    legacyOptions.timeFormat = LogcatTimeFormat::Legacy;
+    const auto legacy = buildLogcatService( legacyOptions );
+    REQUIRE( legacy.value.has_value() );
+    REQUIRE_FALSE( legacy.error.has_value() );
+    CHECK( *legacy.value == "shell,v2,raw:logcat -v threadtime" );
+
+    legacyOptions.ansiOutputEnabled = true;
+    const auto legacyColor = buildLogcatService( legacyOptions );
+    REQUIRE( legacyColor.value.has_value() );
+    CHECK( *legacyColor.value == "shell,v2,raw:logcat -v threadtime -v color" );
+
+    CHECK( buildLogcatFormatArguments( false )
+           == std::vector<std::string>{ "-v", "threadtime", "-v", "year", "-v", "zone", "-v",
+                                        "usec" } );
+    CHECK( buildLogcatFormatArguments( false, LogcatTimeFormat::Legacy )
+           == std::vector<std::string>{ "-v", "threadtime" } );
+    CHECK( buildLogcatFormatArguments( true, LogcatTimeFormat::Legacy )
+           == std::vector<std::string>{ "-v", "threadtime", "-v", "color" } );
+    CHECK( buildLogcatFormatArguments( true, LogcatTimeFormat::Extended )
+           == std::vector<std::string>{ "-v", "threadtime", "-v", "year", "-v", "zone", "-v",
+                                        "usec", "-v", "color" } );
+}
+
+TEST_CASE( "ADB logcat rejection predicate recognizes only owned modifier rejections",
+           "[livecapture][adb][protocol][command][wall-time][diagnostic]" )
+{
+    const std::string reported{ "Invalid parameter year to -v\n"
+                                "usage: logcat [options] filterspecs\n"
+                                "  -v <format>      Sets the log print format\n" };
+    CHECK( logcatDiagnosticRejectsOwnedFormat( reported ) );
+    CHECK( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter zone to -v" ) );
+    CHECK( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter usec to -v" ) );
+    CHECK( logcatDiagnosticRejectsOwnedFormat( "Invalid PARAMETER Year TO -v" ) );
+
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( {} ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedFormat( "Invalid parameter nope to -r" ) );
+    CHECK_FALSE(
+        logcatDiagnosticRejectsOwnedFormat( "logcat: failure\nusage: logcat [options]\n" ) );
+
+    // The normalized wrapper keeps the original diagnostic, so the predicate must
+    // still recognize it when the surfaced error text is inspected again.
+    CHECK( logcatDiagnosticRejectsOwnedFormat( normalizeLogcatStreamError( reported ) ) );
+}
+
+TEST_CASE( "ADB logcat legacy-retry predicate matches only time modifier rejections",
+           "[livecapture][adb][protocol][command][wall-time][diagnostic]" )
+{
+    CHECK( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter year to -v" ) );
+    CHECK( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter zone to -v" ) );
+    CHECK( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter usec to -v" ) );
+    CHECK( logcatDiagnosticRejectsOwnedTimeFormat(
+        "ADB logcat exited with code 1. Original error: Invalid parameter year to -v\n"
+        "usage: logcat [options] filterspecs\n" ) );
+
+    // A color-only rejection cannot be fixed by the legacy time-format retry,
+    // which still appends -v color; it must stay terminal instead of retrying
+    // into an identical failure.
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "Invalid parameter color to -v" ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( {} ) );
+    CHECK_FALSE( logcatDiagnosticRejectsOwnedTimeFormat( "logcat: failure\n" ) );
+}
+
 TEST_CASE( "ADB logcat command builder shell-quotes filter values without interpolation",
            "[livecapture][adb][protocol][command][security]" )
 {

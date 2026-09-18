@@ -13,6 +13,7 @@
 #include <QString>
 #include <QStringList>
 
+#include "adbprotocol.h"
 #include "ioscatalogprovider.h"
 #include "livedatastatistics.h"
 #include "livestate.h"
@@ -45,6 +46,10 @@ struct LiveSourceTransportConfig {
     QString deviceId;
     QString extraArgs;
     bool ansiOutputEnabled = false;
+    // Extended requests the unambiguous wall-time modifiers (Android 7.0+); the
+    // source downgrades to Legacy for one retry when a device rejects them.
+    klogg::livecapture::adb::LogcatTimeFormat logcatTimeFormat
+        = klogg::livecapture::adb::LogcatTimeFormat::Extended;
     QStringList androidBuffers;
     QString androidFilterSpec;
     QString androidPriority;

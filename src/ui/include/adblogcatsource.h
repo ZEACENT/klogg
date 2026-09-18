@@ -110,6 +110,11 @@ private:
     bool persistenceSchedulingArmed_{ false };
     void setState( State state );
     void setStateFromTransport( Generation generation, LiveSourceTransport::State state );
+    // One-shot recovery for pre-Android-7 devices: when the stream dies from the
+    // owned format-modifier rejection and the active config still requests the
+    // extended wall-time format, restart the same generation with the legacy
+    // threadtime-only format instead of entering State::Error.
+    bool restartTransportWithLegacyLogcatFormat( Generation generation );
     void finishClear( Generation generation, ClearRequestId requestId, bool succeeded,
                       const QString& error );
 
@@ -117,6 +122,9 @@ private:
     std::shared_ptr<StreamingLogData> logData_;
     const LiveSourceTransportFactory* transportFactory_{ nullptr };
     std::unique_ptr<LiveSourceTransport> transport_;
+    // Config the active transport was created from; the legacy logcat fallback
+    // re-issues it with the degraded time format.
+    std::optional<LiveSourceTransportConfig> activeTransportConfig_;
     std::vector<std::unique_ptr<LiveSourceTransport>> retiredTransports_;
     State state_{ State::Disconnected };
     QString lastError_;
