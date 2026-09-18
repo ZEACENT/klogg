@@ -114,34 +114,34 @@ void Selection::toggleLine( LineNumber line )
 void Selection::insertToggledRange( LineNumber firstLine, LineNumber lastLine )
 {
     // First interval that is not entirely before (or adjacent to) the new one
-    auto it = std::lower_bound( toggledRanges_.begin(), toggledRanges_.end(), firstLine,
-                                []( const auto& range, LineNumber line ) {
-                                    return range.second + 1_lcount < line;
-                                } );
+    auto rangeIt = std::lower_bound( toggledRanges_.begin(), toggledRanges_.end(), firstLine,
+                                     []( const auto& range, LineNumber line ) {
+                                         return range.second + 1_lcount < line;
+                                     } );
 
     // Merge every following interval the new range overlaps or touches
-    while ( it != toggledRanges_.end() && !( lastLine + 1_lcount < it->first ) ) {
-        firstLine = std::min( firstLine, it->first );
-        lastLine = std::max( lastLine, it->second );
-        it = toggledRanges_.erase( it );
+    while ( rangeIt != toggledRanges_.end() && !( lastLine + 1_lcount < rangeIt->first ) ) {
+        firstLine = std::min( firstLine, rangeIt->first );
+        lastLine = std::max( lastLine, rangeIt->second );
+        rangeIt = toggledRanges_.erase( rangeIt );
     }
 
-    toggledRanges_.insert( it, { firstLine, lastLine } );
+    toggledRanges_.insert( rangeIt, { firstLine, lastLine } );
 }
 
 bool Selection::isInToggledRanges( LineNumber line ) const
 {
     // toggledRanges_ is ascending and non-overlapping
-    const auto it = std::upper_bound( toggledRanges_.begin(), toggledRanges_.end(), line,
-                                      []( LineNumber needle, const auto& range ) {
-                                          return needle < range.first;
-                                      } );
+    const auto rangeIt = std::upper_bound( toggledRanges_.begin(), toggledRanges_.end(), line,
+                                           []( LineNumber needle, const auto& range ) {
+                                               return needle < range.first;
+                                           } );
 
-    if ( it == toggledRanges_.begin() ) {
+    if ( rangeIt == toggledRanges_.begin() ) {
         return false;
     }
 
-    return line <= std::prev( it )->second;
+    return line <= std::prev( rangeIt )->second;
 }
 
 void Selection::selectRangeFromPrevious( LineNumber line )
@@ -211,13 +211,10 @@ Portion Selection::getPortionForLine( LineNumber line ) const
 
 bool Selection::isLineSelected( LineNumber line ) const
 {
-    if ( selectedLine_.has_value() && line == *selectedLine_ )
-        return true;
-    else if ( selectedRange_.startLine.has_value() && ( line >= *selectedRange_.startLine )
-              && ( line <= selectedRange_.endLine ) )
-        return true;
-    else
-        return isInToggledRanges( line );
+    return ( selectedLine_.has_value() && line == *selectedLine_ )
+           || ( selectedRange_.startLine.has_value() && line >= *selectedRange_.startLine
+                && line <= selectedRange_.endLine )
+           || isInToggledRanges( line );
 }
 
 bool Selection::isPortionSelected( LineNumber line, LineColumn startColumn,
@@ -368,13 +365,13 @@ Selection::getSelectionWithLineNumbers( const AbstractLogData* logData ) const
         for ( const auto& range : toggledRanges_ ) {
             const auto list
                 = logData->getLines( range.first, ( range.second - range.first ) + 1_lcount );
-            LineNumber ln = range.first;
+            LineNumber lineNumber = range.first;
 
             for ( const auto& line : list ) {
-                if ( logData->isLineCopyable( ln ) ) {
-                    selectionData.emplace_back( logData->getLineNumber( ln ), line );
+                if ( logData->isLineCopyable( lineNumber ) ) {
+                    selectionData.emplace_back( logData->getLineNumber( lineNumber ), line );
                 }
-                ln++;
+                lineNumber++;
             }
         }
     }
