@@ -87,6 +87,8 @@ class Selection {
     {
         selectedPartial_.line = {};
         selectedLine_ = {};
+        toggledRanges_.clear();
+        lastToggledLine_ = {};
     }
 
     // Select one line
@@ -94,6 +96,8 @@ class Selection {
     {
         selectedPartial_.line = {};
         selectedRange_.startLine = {};
+        toggledRanges_.clear();
+        lastToggledLine_ = {};
         selectedLine_ = line;
     }
     // Select a portion of line (both start and end included)
@@ -105,6 +109,12 @@ class Selection {
     // Select a range of lines (both start and end included)
     void selectRange( LineNumber startLine, LineNumber endLine );
 
+    // Toggle one line's membership in the selection (ctrl+click behaviour):
+    // an unselected line is added, an already selected line is removed.
+    // A whole-line or range selection is folded into the toggled set first,
+    // so toggling composes with it; a portion selection is superseded.
+    void toggleLine( LineNumber line );
+
     // Select a range from the previously selected line or beginning
     // of range (shift+click behaviour)
     void selectRangeFromPrevious( LineNumber line );
@@ -115,13 +125,13 @@ class Selection {
     // Returns whether the selection is empty
     bool isEmpty() const
     {
-        return ( !selectedPartial_.line ) && ( !selectedLine_ );
+        return ( !selectedPartial_.line ) && ( !selectedLine_ ) && toggledRanges_.empty();
     }
 
     // Returns whether the selection is a single line
     bool isSingleLine() const
     {
-        return !!selectedLine_;
+        return !!selectedLine_ || isSingleToggledLine();
     }
 
     // Returns whether the selection is a portion of line
@@ -208,6 +218,30 @@ class Selection {
     };
     struct SelectedPartial selectedPartial_;
     struct SelectedRange selectedRange_;
+
+    // Inclusive [firstLine, lastLine] intervals toggled line-by-line
+    // (ctrl+click), kept ascending, non-overlapping and non-adjacent
+    // (merge-on-insert). Mutually exclusive with the primary selection above:
+    // toggleLine folds any whole-line/range selection into this set and the
+    // select*/clear members empty it (replace semantics).
+    std::vector<std::pair<LineNumber, LineNumber>> toggledRanges_;
+
+    // Most recent ctrl-clicked line, used as the shift+click anchor once the
+    // selection lives entirely in the toggled set.
+    OptionalLineNumber lastToggledLine_;
+
+    // Returns whether the whole selection is exactly one toggled line.
+    bool isSingleToggledLine() const
+    {
+        return toggledRanges_.size() == 1
+               && toggledRanges_.front().first == toggledRanges_.front().second;
+    }
+
+    // Insert [firstLine, lastLine] into toggledRanges_, merging every
+    // interval it overlaps or touches.
+    void insertToggledRange( LineNumber firstLine, LineNumber lastLine );
+    // Returns whether the line is covered by one of the toggled ranges.
+    bool isInToggledRanges( LineNumber line ) const;
 };
 
 #endif

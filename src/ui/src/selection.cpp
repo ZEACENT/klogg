@@ -23,6 +23,7 @@
 // There are three types of selection, only one type might be active
 // at any time.
 
+#include <algorithm>
 #include <numeric>
 
 #include "abstractlogdata.h"
@@ -44,6 +45,8 @@ void Selection::selectPortion( LineNumber line, LineColumn startColumn, LineColu
     // First unselect any whole line or range
     selectedLine_ = {};
     selectedRange_.startLine = {};
+    toggledRanges_.clear();
+    lastToggledLine_ = {};
 
     selectedPartial_.line = line;
     selectedPartial_.startColumn = std::min( startColumn, endColumn );
@@ -55,11 +58,90 @@ void Selection::selectRange( LineNumber startLine, LineNumber endLine )
     // First unselect any whole line and portion
     selectedLine_ = {};
     selectedPartial_.line = {};
+    toggledRanges_.clear();
+    lastToggledLine_ = {};
 
     selectedRange_.startLine = std::min( startLine, endLine );
     selectedRange_.endLine = std::max( startLine, endLine );
 
     selectedRange_.firstLine = startLine;
+}
+
+void Selection::toggleLine( LineNumber line )
+{
+    // Fold the primary whole-line/range selection into the toggled set so
+    // toggling composes with it; a portion selection is superseded by this
+    // line-oriented gesture.
+    if ( selectedLine_.has_value() ) {
+        insertToggledRange( *selectedLine_, *selectedLine_ );
+        selectedLine_ = {};
+    }
+    else if ( selectedRange_.startLine.has_value() ) {
+        insertToggledRange( *selectedRange_.startLine, selectedRange_.endLine );
+        selectedRange_.startLine = {};
+    }
+    selectedPartial_.line = {};
+
+    // The last ctrl-clicked line becomes the shift+click anchor whether the
+    // toggle added or removed it.
+    lastToggledLine_ = line;
+
+    for ( auto it = toggledRanges_.begin(); it != toggledRanges_.end(); ++it ) {
+        if ( line >= it->first && line <= it->second ) {
+            // The line is already selected: remove it, splitting the
+            // interval if it sits in the middle.
+            if ( it->first == line && it->second == line ) {
+                toggledRanges_.erase( it );
+            }
+            else if ( it->first == line ) {
+                it->first = line + 1_lcount;
+            }
+            else if ( it->second == line ) {
+                it->second = line - 1_lcount;
+            }
+            else {
+                const auto oldEnd = it->second;
+                it->second = line - 1_lcount;
+                toggledRanges_.insert( it + 1, { line + 1_lcount, oldEnd } );
+            }
+            return;
+        }
+    }
+
+    insertToggledRange( line, line );
+}
+
+void Selection::insertToggledRange( LineNumber firstLine, LineNumber lastLine )
+{
+    // First interval that is not entirely before (or adjacent to) the new one
+    auto it = std::lower_bound( toggledRanges_.begin(), toggledRanges_.end(), firstLine,
+                                []( const auto& range, LineNumber line ) {
+                                    return range.second + 1_lcount < line;
+                                } );
+
+    // Merge every following interval the new range overlaps or touches
+    while ( it != toggledRanges_.end() && !( lastLine + 1_lcount < it->first ) ) {
+        firstLine = std::min( firstLine, it->first );
+        lastLine = std::max( lastLine, it->second );
+        it = toggledRanges_.erase( it );
+    }
+
+    toggledRanges_.insert( it, { firstLine, lastLine } );
+}
+
+bool Selection::isInToggledRanges( LineNumber line ) const
+{
+    // toggledRanges_ is ascending and non-overlapping
+    const auto it = std::upper_bound( toggledRanges_.begin(), toggledRanges_.end(), line,
+                                      []( LineNumber needle, const auto& range ) {
+                                          return needle < range.first;
+                                      } );
+
+    if ( it == toggledRanges_.begin() ) {
+        return false;
+    }
+
+    return line <= std::prev( it )->second;
 }
 
 void Selection::selectRangeFromPrevious( LineNumber line )
@@ -72,6 +154,14 @@ void Selection::selectRangeFromPrevious( LineNumber line )
         previous_line = selectedRange_.firstLine;
     else if ( selectedPartial_.line.has_value() )
         previous_line = *selectedPartial_.line;
+    else if ( lastToggledLine_.has_value() ) {
+        // Shift+click on a ctrl-click selection extends a range from the last
+        // toggled line and merges it into the toggled set, keeping the
+        // non-contiguous lines already selected.
+        insertToggledRange( std::min( *lastToggledLine_, line ),
+                            std::max( *lastToggledLine_, line ) );
+        return;
+    }
     else
         previous_line = 0_lnum;
 
@@ -91,6 +181,18 @@ void Selection::crop( LineNumber last_line )
 
     if ( selectedRange_.startLine.has_value() && *selectedRange_.startLine > last_line )
         selectedRange_.startLine = last_line;
+
+    for ( auto it = toggledRanges_.begin(); it != toggledRanges_.end(); ) {
+        if ( it->first > last_line ) {
+            it = toggledRanges_.erase( it );
+        }
+        else {
+            if ( it->second > last_line ) {
+                it->second = last_line;
+            }
+            ++it;
+        }
+    }
 }
 
 Portion Selection::getPortionForLine( LineNumber line ) const
@@ -107,10 +209,11 @@ bool Selection::isLineSelected( LineNumber line ) const
 {
     if ( selectedLine_.has_value() && line == *selectedLine_ )
         return true;
-    else if ( selectedRange_.startLine.has_value() )
-        return ( ( line >= *selectedRange_.startLine ) && ( line <= selectedRange_.endLine ) );
+    else if ( selectedRange_.startLine.has_value() && ( line >= *selectedRange_.startLine )
+              && ( line <= selectedRange_.endLine ) )
+        return true;
     else
-        return false;
+        return isInToggledRanges( line );
 }
 
 bool Selection::isPortionSelected( LineNumber line, LineColumn startColumn,
@@ -130,7 +233,15 @@ bool Selection::isPortionSelected( LineNumber line, LineColumn startColumn,
 
 OptionalLineNumber Selection::selectedLine() const
 {
-    return selectedLine_;
+    if ( selectedLine_.has_value() ) {
+        return selectedLine_;
+    }
+    // A single ctrl-clicked line answers as the single selected line so the
+    // context menu and search/selection-range actions treat it uniformly.
+    if ( isSingleToggledLine() ) {
+        return toggledRanges_.front().first;
+    }
+    return {};
 }
 
 klogg::vector<LineNumber> Selection::getLines() const
@@ -147,13 +258,27 @@ klogg::vector<LineNumber> Selection::getLines() const
         selection.resize( selectedRange_.size().get() );
         std::iota( selection.begin(), selection.end(), *selectedRange_.startLine );
     }
+    else {
+        for ( const auto& range : toggledRanges_ ) {
+            for ( LineNumber line = range.first;; ++line ) {
+                selection.push_back( line );
+                if ( line == range.second ) {
+                    break;
+                }
+            }
+        }
+    }
 
     return selection;
 }
 
 LinesCount Selection::getSelectedLinesCount() const
 {
-    return selectedRange_.size();
+    auto count = selectedRange_.size();
+    for ( const auto& range : toggledRanges_ ) {
+        count += ( range.second - range.first ) + 1_lcount;
+    }
+    return count;
 }
 
 // The tab behaviour is a bit odd at the moment, full lines are not expanded
@@ -235,6 +360,20 @@ Selection::getSelectionWithLineNumbers( const AbstractLogData* logData ) const
             ln++;
         }
     }
+    else {
+        for ( const auto& range : toggledRanges_ ) {
+            const auto list
+                = logData->getLines( range.first, ( range.second - range.first ) + 1_lcount );
+            LineNumber ln = range.first;
+
+            for ( const auto& line : list ) {
+                if ( logData->isLineCopyable( ln ) ) {
+                    selectionData.emplace_back( logData->getLineNumber( ln ), line );
+                }
+                ln++;
+            }
+        }
+    }
 
     return selectionData;
 }
@@ -249,6 +388,9 @@ FilePosition Selection::getNextPosition() const
     }
     else if ( selectedRange_.startLine.has_value() ) {
         line = selectedRange_.endLine + 1_lcount;
+    }
+    else if ( !toggledRanges_.empty() ) {
+        line = toggledRanges_.back().second + 1_lcount;
     }
     else if ( selectedPartial_.line.has_value() ) {
         line = *selectedPartial_.line;
@@ -268,6 +410,9 @@ FilePosition Selection::getPreviousPosition() const
     }
     else if ( selectedRange_.startLine.has_value() ) {
         line = *selectedRange_.startLine;
+    }
+    else if ( !toggledRanges_.empty() ) {
+        line = toggledRanges_.front().first;
     }
     else if ( selectedPartial_.line.has_value() ) {
         line = *selectedPartial_.line;

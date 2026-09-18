@@ -198,6 +198,7 @@ add_executable(klogg_tests
     qt_event_queue_test.cpp
     searchgeneration_test.cpp
     searchtoolbar_test.cpp
+    selection_test.cpp
     logfiltereddataworker_test.cpp
     sessioninfo_test.cpp
     shortcut_bindings_test.cpp
