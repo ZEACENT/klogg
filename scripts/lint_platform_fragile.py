@@ -657,9 +657,10 @@ def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]
 
 
 _PERFORMANCE_ASSERTION_RE = re.compile(
-    r"\b(?:CHECK|REQUIRE)\s*\(\s*elapsedMs\s*<\s*"
+    r"\b(?:CHECK|REQUIRE)\s*\(\s*(?P<timer>\w*[Ee]lapsedMs)\s*<\s*"
     r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))\s*\)"
 )
+_MULTI_SAMPLE_TIMER_RE = re.compile(r"^(?:best|min|median)[A-Z]")
 _CATCH_CASE_RE = re.compile(
     r"\b(?:TEST_CASE|SCENARIO|TEST_CASE_METHOD|TEMPLATE_TEST_CASE)\s*\("
 )
@@ -686,13 +687,21 @@ def _requires_optimized_build(guard_line: str) -> bool:
 def _check_uninstrumented_performance_budget(
     text: str, path: Path
 ) -> list[tuple[int, str]]:
-    """Require strict performance budgets to exclude instrumented builds.
+    """Require strict performance budgets to exclude instrumented builds and
+    to sample multiple timed runs.
 
     Absolute wall-clock limits in algorithmic performance tests are useful on
     optimized builds, but TSan/ASan, coverage, and Debug instrumentation distort
     those timings and make hosted-runner load decide whether CI passes. The
     correctness assertions still run everywhere; only the performance budget is
     gated.
+
+    Even on optimized builds, a single wall-clock sample turns hosted-runner
+    load into a failure signal (master CI run 35418667929 failed this way:
+    292ms against a 200ms budget on a runner whose leg took 1.7x its usual
+    duration). Budget assertions must therefore read from a multi-sample timer
+    variable (best*/min*/median*, e.g. min-of-N fresh runs) so transient
+    preemption is filtered while a real regression still blows every sample.
     """
     if "tests" not in path.parts:
         return []
@@ -702,7 +711,8 @@ def _check_uninstrumented_performance_budget(
     findings: list[tuple[int, str]] = []
 
     for line_num, line in enumerate(code_lines, start=1):
-        if not _PERFORMANCE_ASSERTION_RE.search(line):
+        assertion = _PERFORMANCE_ASSERTION_RE.search(line)
+        if not assertion:
             continue
         if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
             continue
@@ -729,19 +739,30 @@ def _check_uninstrumented_performance_budget(
         requires_optimized = any(
             _requires_optimized_build(guard_line) for guard_line in guard_lines
         )
-        if excludes_sanitizers and requires_optimized:
+        if not (excludes_sanitizers and requires_optimized):
+            findings.append(
+                (
+                    line_num,
+                    "Strict wall-clock performance budgets must run only in optimized "
+                    "non-sanitized builds. TSan/ASan, coverage, and Debug instrumentation "
+                    "make hosted-runner speed part of the result. Keep correctness checks "
+                    "on every build, and guard the timing assertion with "
+                    "#if !defined(KLOGG_SANITIZER_BUILD) && defined(NDEBUG).",
+                )
+            )
             continue
 
-        findings.append(
-            (
-                line_num,
-                "Strict wall-clock performance budgets must run only in optimized "
-                "non-sanitized builds. TSan/ASan, coverage, and Debug instrumentation "
-                "make hosted-runner speed part of the result. Keep correctness checks "
-                "on every build, and guard the timing assertion with "
-                "#if !defined(KLOGG_SANITIZER_BUILD) && defined(NDEBUG).",
+        if not _MULTI_SAMPLE_TIMER_RE.match(assertion.group("timer")):
+            findings.append(
+                (
+                    line_num,
+                    "Strict wall-clock performance budgets must not rely on a single "
+                    "timed sample: hosted-runner load varies and turns machine speed "
+                    "into a failure signal (see master CI run 35418667929, 292ms vs a "
+                    "200ms budget on a 1.7x-slow leg). Time several fresh runs and "
+                    "assert on a best*/min*/median* variable instead.",
+                )
             )
-        )
 
     return findings
 

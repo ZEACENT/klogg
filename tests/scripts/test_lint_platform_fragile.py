@@ -1401,9 +1401,9 @@ class TestInstrumentedPerformanceBudget(unittest.TestCase):
         text = (
             'TEST_CASE( "large append stays within budget" )\n'
             "{\n"
-            "    const auto elapsedMs = measureLargeAppend();\n"
+            "    const auto bestElapsedMs = measureLargeAppendBestOfThree();\n"
             "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
-            "    CHECK( elapsedMs < 2000 );\n"
+            "    CHECK( bestElapsedMs < 2000 );\n"
             "#endif\n"
             "}\n"
         )
@@ -1438,6 +1438,47 @@ class TestInstrumentedPerformanceBudget(unittest.TestCase):
             "    // KLOGG_SANITIZER_BUILD should be handled someday.\n"
             "    const auto elapsedMs = measureLargeAppend();\n"
             "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
+    def test_single_sample_budget_is_flagged(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+    def test_multi_sample_budget_is_accepted(self):
+        for timer_name in ("bestElapsedMs", "minElapsedMs", "medianElapsedMs"):
+            with self.subTest(timer_name=timer_name):
+                text = (
+                    'TEST_CASE( "large append stays within budget" )\n'
+                    "{\n"
+                    f"    const auto {timer_name} = measureLargeAppendBestOfThree();\n"
+                    "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+                    f"    CHECK( {timer_name} < LargeAppendBudgetMs );\n"
+                    "#endif\n"
+                    "}\n"
+                )
+                self.assertEqual(self.check(text), [])
+
+    def test_sampling_claim_in_comment_does_not_cover_single_sample(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    // Take the best of three runs to filter runner noise.\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
             "}\n"
         )
         self.assertEqual(len(self.check(text)), 1)
