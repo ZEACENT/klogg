@@ -32,14 +32,14 @@ TEST_CASE( "Suggested filename stems separate device labels without UI punctuati
         std::make_pair( "Pixel 8 (ABC123)", "Pixel-8-ABC123" ),
         std::make_pair( "iPhone 15 Pro (USB)", "iPhone-15-Pro-USB" ),
         std::make_pair( "device [online] {USB}", "device-online-USB" ),
-        std::make_pair( "测试设备（USB）［在线］｛记录｝", "测试设备-USB-在线-记录" ),
-        std::make_pair( "设备【在线】「日志」《备份》", "设备-在线-日志-备份" ),
+        std::make_pair( "测试设备（USB）［在线］｛记录｝", "测试设备-USB-在线-记录" ),  // lint-allow: repo-hygiene
+        std::make_pair( "设备【在线】「日志」《备份》", "设备-在线-日志-备份" ),  // lint-allow: repo-hygiene
         std::make_pair( "  --device ( [USB] )--  ", "device-USB" ),
         std::make_pair( "device<>:\"/\\|?*name", "device-name" ),
         std::make_pair( "../../device/name", "device-name" ),
         std::make_pair( "...device...", "device" ),
         std::make_pair( "device_01.trace", "device_01.trace" ),
-        std::make_pair( "中文-é-é-📱-𠮷", "中文-é-é-📱-𠮷" ),
+        std::make_pair( "中文-é-é-📱-𠮷", "中文-é-é-📱-𠮷" ),  // lint-allow: repo-hygiene
         std::make_pair( "ZEACENT's iPhone", "ZEACENT's-iPhone" ),
         std::make_pair( "device\U000e0001USB", "device-USB" ) );
     const auto label = QString::fromUtf8( example.first );

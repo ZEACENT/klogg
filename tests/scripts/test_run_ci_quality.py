@@ -32,6 +32,7 @@ class RunCiQualityTest(unittest.TestCase):
         self.assertEqual(
             commands,
             [
+                [sys.executable, "scripts/lint_repo_hygiene.py"],
                 [sys.executable, "scripts/lint_platform_fragile.py"],
                 [sys.executable, "scripts/lint_linux_package_runtime.py"],
                 [sys.executable, "scripts/lint_ci_quality.py"],
@@ -70,7 +71,7 @@ class RunCiQualityTest(unittest.TestCase):
         ), mock.patch.object(
             MODULE.subprocess, "run", return_value=completed
         ), mock.patch.object(
-            MODULE.time, "monotonic", side_effect=[1.0, 1.25] * 5
+            MODULE.time, "monotonic", side_effect=[1.0, 1.25] * 6
         ), mock.patch.object(sys, "argv", [str(SCRIPT), "--json"]):
             output = io.StringIO()
             with redirect_stdout(output):
@@ -80,7 +81,7 @@ class RunCiQualityTest(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertEqual(payload["commit"], "a" * 40)
         self.assertIs(payload["dirty"], True)
-        self.assertEqual(len(payload["checks"]), 5)
+        self.assertEqual(len(payload["checks"]), 6)
         self.assertTrue(all(check["durationSeconds"] == 0.25 for check in payload["checks"]))
 
 

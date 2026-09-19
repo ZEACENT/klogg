@@ -75,5 +75,5 @@ cmake-build-relwithdebinfo/
 website/hugo
 website/.hugo_build.lock
 website/resources/
-scripts/__pycache__/
+__pycache__/
 /.ccache/

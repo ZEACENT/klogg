@@ -461,7 +461,7 @@ SmallAppendWorkload smallAppendWorkload( int batchCount )
     for ( int batchIndex = 0; batchIndex < batchCount; ++batchIndex ) {
         QByteArray batch;
         for ( int lineIndex = 0; lineIndex < 2; ++lineIndex ) {
-            const auto line = QStringLiteral( "batch-%1 line-%2 café 日志" )
+            const auto line = QStringLiteral( "batch-%1 line-%2 café 日志" )  // lint-allow: repo-hygiene
                                   .arg( batchIndex, 4, 10, QLatin1Char( '0' ) )
                                   .arg( lineIndex );
             workload.lines.push_back( line );
