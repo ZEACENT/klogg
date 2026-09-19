@@ -7,6 +7,10 @@ inputs:
   adb-target:
     description: Locked ADB helper target packaged into the application
     required: true
+  collect-symbols:
+    description: Preserve debug symbols for shipped builds
+    required: false
+    default: "false"
   p12-file-base64:
     required: false
   p12-password:
@@ -688,17 +692,17 @@ runs:
         cp "$KLOGG_BUILD_ROOT/adb-helper-signing-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
         cp "$KLOGG_BUILD_ROOT/adb-helper-notarization-receipt.json" "$KLOGG_BUILD_ROOT/packages/"
 
-    - name: Mac symbols
+    - name: Collect macOS symbols
+      if: ${{ inputs.collect-symbols == 'true' }}
       shell: sh
       run: |
-        cd $KLOGG_BUILD_ROOT
+        set -euo pipefail
+        cd "$KLOGG_BUILD_ROOT"
+        mkdir -p ./symbols
+        destination=./symbols/klogg-${{ env.KLOGG_ARCH }}.dSym
         if [ -d ./output/klogg.dSym ]; then
-          cp -a ./output/klogg.dSym ./packages/klogg-${{ env.KLOGG_ARCH }}.dSym
+          cp -a ./output/klogg.dSym "$destination"
         else
-          echo "Warning: klogg.dSym not found - skipping dSYM copy"
+          dsymutil ./output/klogg.app/Contents/MacOS/klogg -o "$destination"
         fi
-        if [ -d "$KLOGG_MAC_APP" ]; then
-          cp -a "$KLOGG_MAC_APP" ./packages/klogg-${{ env.KLOGG_ARCH }}.app
-        else
-          echo "Warning: klogg.app not found - skipping app copy"
-        fi
+        test -d "$destination/Contents/Resources/DWARF"

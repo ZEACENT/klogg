@@ -1,5 +1,10 @@
 name: "Prepare windows packages"
 description: Verify and package the target-matched Windows application and ADB helper
+inputs:
+  collect-symbols:
+    description: Preserve debug symbols for shipped builds
+    required: false
+    default: "false"
 runs:
   using: "composite"
   steps:
@@ -40,6 +45,46 @@ runs:
           --require-lock-binding
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    - name: Verify Windows portable archive layout
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $portable = Join-Path $env:KLOGG_WORKSPACE "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-portable.zip"
+        $portableRoot = Join-Path $env:KLOGG_BUILD_ROOT "portable-check"
+        Remove-Item -Recurse -Force $portableRoot -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $portableRoot | Out-Null
+        & 7z x -y "-o$portableRoot" $portable | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "failed to extract portable archive" }
+
+        $portableApp = Join-Path $env:KLOGG_BUILD_ROOT "portable-check\klogg_portable.exe"
+        $portableHelper = Join-Path $env:KLOGG_BUILD_ROOT "portable-check\helpers\adb.exe"
+        $portableAssets = Join-Path $env:KLOGG_BUILD_ROOT "portable-check\adb-helper-assets"
+        foreach ($required in @(
+          $portableApp,
+          $portableHelper,
+          (Join-Path (Split-Path $portableHelper -Parent) "AdbWinApi.dll"),
+          (Join-Path (Split-Path $portableHelper -Parent) "AdbWinUsbApi.dll"),
+          (Join-Path (Split-Path $portableHelper -Parent) "libusb-1.0.dll"),
+          $portableAssets
+        )) {
+          if (!(Test-Path $required)) { throw "portable archive entry missing: $required" }
+        }
+        foreach ($forbidden in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "libusb-1.0.dll")) {
+          if (Test-Path (Join-Path $portableRoot $forbidden)) {
+            throw "source-built ADB helper leaked to portable archive root: $forbidden"
+          }
+        }
+
+        # klogg.exe is a GUI-subsystem binary: `& $portableApp -v` returns
+        # immediately and never updates $LASTEXITCODE, so drive the smoke
+        # through a waited process handle (its console output still flows).
+        $portableSmoke = Start-Process -FilePath $portableApp -ArgumentList "-v" -Wait -PassThru
+        if ($portableSmoke.ExitCode -ne 0) { throw "portable klogg version smoke failed with exit code $($portableSmoke.ExitCode)" }
+        python scripts/smoke_adb_helper.py `
+          --adb $portableHelper --port 0 --timeout-seconds 15 `
+          --json-output "$env:KLOGG_BUILD_ROOT/adb-helper-windows-portable-smoke.json"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     - name: Win installer
       shell: pwsh
       run: |
@@ -50,35 +95,138 @@ runs:
         if ($LASTEXITCODE -ne 0) {
           throw "makensis failed with exit code $LASTEXITCODE"
         }
-    
+
+    - name: Verify Windows installer layout
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $setup = Join-Path $env:KLOGG_WORKSPACE "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-setup.exe"
+        $installRoot = Join-Path $env:GITHUB_WORKSPACE "$env:KLOGG_BUILD_ROOT\installer-check"
+        Remove-Item -Recurse -Force $installRoot -ErrorAction SilentlyContinue
+        $process = Start-Process -FilePath $setup -ArgumentList @("/S", "/D=$installRoot") -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "silent installer failed with exit code $($process.ExitCode)" }
+
+        $installedApp = Join-Path $installRoot "klogg.exe"
+        $installedHelper = Join-Path $installRoot "helpers\adb.exe"
+        $installedAssets = Join-Path $installRoot "adb-helper-assets"
+        foreach ($required in @(
+          $installedApp,
+          $installedHelper,
+          (Join-Path (Split-Path $installedHelper -Parent) "AdbWinApi.dll"),
+          (Join-Path (Split-Path $installedHelper -Parent) "AdbWinUsbApi.dll"),
+          (Join-Path (Split-Path $installedHelper -Parent) "libusb-1.0.dll"),
+          $installedAssets
+        )) {
+          if (!(Test-Path $required)) { throw "installed package entry missing: $required" }
+        }
+
+        # klogg.exe is a GUI-subsystem binary: `& $installedApp -v` returns
+        # immediately and never updates $LASTEXITCODE, so drive the smoke
+        # through a waited process handle (its console output still flows).
+        $installedSmoke = Start-Process -FilePath $installedApp -ArgumentList "-v" -Wait -PassThru
+        if ($installedSmoke.ExitCode -ne 0) { throw "installed klogg version smoke failed with exit code $($installedSmoke.ExitCode)" }
+        python scripts/smoke_adb_helper.py `
+          --adb $installedHelper --port 0 --timeout-seconds 15 `
+          --json-output "$env:KLOGG_BUILD_ROOT/adb-helper-windows-installer-smoke.json"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Win package
       shell: cmd
       run: |
         if not exist "%KLOGG_BUILD_ROOT%\packages" md "%KLOGG_BUILD_ROOT%\packages"
         copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-portable.zip"
-        copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-pdb.zip" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-pdb.zip"
         copy /y "klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-setup.exe" "%KLOGG_BUILD_ROOT%\packages\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-%KLOGG_PACKAGE_TAG%-setup.exe"
+
+    - name: Collect Windows symbols
+      if: ${{ inputs.collect-symbols == 'true' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $buildRoot = Join-Path $env:GITHUB_WORKSPACE $env:KLOGG_BUILD_ROOT
+        $symbolStage = Join-Path $buildRoot "symbols-stage"
+        $symbolRoot = Join-Path $buildRoot "symbols"
+        Remove-Item -Recurse -Force $symbolStage -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $symbolStage, $symbolRoot | Out-Null
+        foreach ($name in @("klogg.exe", "klogg.pdb", "klogg_portable.exe", "klogg_portable.pdb")) {
+          $source = Join-Path $buildRoot "output\$name"
+          if (!(Test-Path $source)) { throw "required Windows symbol input missing: $source" }
+          Copy-Item $source $symbolStage
+        }
+        foreach ($name in @("tbb12.dll", "tbb12.pdb")) {
+          $source = Join-Path $buildRoot "output\$name"
+          if (Test-Path $source) { Copy-Item $source $symbolStage }
+        }
+        $archive = Join-Path $symbolRoot "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-$env:KLOGG_PACKAGE_TAG-pdb.zip"
+        Push-Location $symbolStage
+        try {
+          & 7z a -tzip $archive .\*
+          if ($LASTEXITCODE -ne 0) { throw "Windows symbol archive failed with exit code $LASTEXITCODE" }
+        } finally {
+          Pop-Location
+        }
 
     - name: Bind Windows qualification receipt to final packages
       shell: pwsh
       run: |
-        $packageRoot = Join-Path $env:KLOGG_BUILD_ROOT "packages"
+        $buildRoot = Join-Path $env:GITHUB_WORKSPACE $env:KLOGG_BUILD_ROOT
+        $packageRoot = Join-Path $buildRoot "packages"
+        $portableRoot = Join-Path $buildRoot "portable-check"
+        $installerRoot = Join-Path $buildRoot "installer-check"
         $portable = Join-Path $packageRoot "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-$env:KLOGG_PACKAGE_TAG-portable.zip"
         $setup = Join-Path $packageRoot "klogg-$env:KLOGG_VERSION-$env:KLOGG_ARCH-$env:KLOGG_QT-$env:KLOGG_PACKAGE_TAG-setup.exe"
+        $portableReceipt = Join-Path $buildRoot "adb-helper-windows-portable-verification.json"
+        $installerReceipt = Join-Path $buildRoot "adb-helper-windows-installer-verification.json"
         python scripts/verify_adb_helper_artifact.py `
           --lock packaging/adb/adb-helper.lock.json `
           --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
-          --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-smoke.json" `
-          --package-root release `
+          --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-portable-smoke.json" `
+          --package-root $portableRoot `
           --asset-scope package `
-          --source-assets-root release/adb-helper-assets `
-          --layout nsis `
+          --source-assets-root (Join-Path $portableRoot "adb-helper-assets") `
+          --layout 7z `
           --expected-target $env:KLOGG_ADB_HELPER_TARGET `
           --package-target windows-x86_64 `
           --package-file $portable `
-          --package-file $setup `
-          --package-verification-receipt "$packageRoot/adb-helper-windows-package-verification.json" `
+          --package-verification-receipt $portableReceipt `
           --checksum-envelope "$env:KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" `
           --require-lock-binding
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        python scripts/verify_adb_helper_artifact.py `
+          --lock packaging/adb/adb-helper.lock.json `
+          --receipt "$env:KLOGG_BUILD_ROOT/adb-helper-staged/receipt.json" `
+          --binary-smoke-receipt "$env:KLOGG_BUILD_ROOT/adb-helper-windows-installer-smoke.json" `
+          --package-root $installerRoot `
+          --asset-scope package `
+          --source-assets-root (Join-Path $installerRoot "adb-helper-assets") `
+          --layout nsis `
+          --expected-target $env:KLOGG_ADB_HELPER_TARGET `
+          --package-target windows-x86_64 `
+          --package-file $setup `
+          --package-verification-receipt $installerReceipt `
+          --checksum-envelope "$env:KLOGG_BUILD_ROOT/adb-helper-staged/SHA256SUMS" `
+          --require-lock-binding
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $portableDocument = Get-Content -Raw $portableReceipt | ConvertFrom-Json -AsHashtable
+        $installerDocument = Get-Content -Raw $installerReceipt | ConvertFrom-Json -AsHashtable
+        foreach ($key in @(
+          "receipt_kind", "target", "package_target", "source_set_receipt_sha256",
+          "source_helper_sha256", "helper_sha256", "required_receipts", "release_qualified"
+        )) {
+          if (($portableDocument[$key] | ConvertTo-Json -Compress) -ne ($installerDocument[$key] | ConvertTo-Json -Compress)) {
+            throw "Windows package verification mismatch for $key"
+          }
+        }
+        if ($portableDocument.release_qualified -ne $true) {
+          throw "Windows package verification is not release-qualified"
+        }
+        $portableEvidence = $portableDocument.Clone()
+        $combinedPackages = @($portableDocument.packages) + @($installerDocument.packages)
+        $portableDocument["layout"] = "portable-and-nsis"
+        $portableDocument["packages"] = $combinedPackages
+        $portableDocument["package_sha256"] = $null
+        $contentVerifications = @{}
+        $contentVerifications[$combinedPackages[0].name] = $portableEvidence
+        $contentVerifications[$combinedPackages[1].name] = $installerDocument
+        $portableDocument["content_verifications"] = $contentVerifications
+        $portableDocument | ConvertTo-Json -Depth 100 | Set-Content -Encoding utf8NoBOM `
+          "$packageRoot/adb-helper-windows-package-verification.json"
 

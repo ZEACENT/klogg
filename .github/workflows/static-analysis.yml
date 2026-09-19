@@ -168,6 +168,7 @@ jobs:
             -DKLOGG_USE_LTO=OFF \
             -DKLOGG_USE_SENTRY=ON \
             -DKLOGG_GENERIC_CPU=ON \
+            -DKLOGG_UI_AUTOGEN_ORIGIN_DEPENDS=OFF \
             -DCPM_SOURCE_CACHE="$KLOGG_WORKSPACE/cpm_cache" \
             -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -184,7 +185,10 @@ jobs:
 
       - name: Generate Qt UI headers for analysis
         shell: bash
-        run: cmake --build "$KLOGG_BUILD_ROOT" --target klogg_ui_autogen -j"$(nproc)"
+        # klogg_ui_autogen is detached from its link dependencies in this
+        # configuration, so build the generated version.h producer explicitly;
+        # clang-tidy analyzes klogg_version.cpp and fails without it.
+        run: cmake --build "$KLOGG_BUILD_ROOT" --target klogg_ui_autogen generate_version -j"$(nproc)"
 
       - name: Run clang-tidy
         shell: bash

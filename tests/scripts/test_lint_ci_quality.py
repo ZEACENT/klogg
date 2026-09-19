@@ -2165,8 +2165,9 @@ jobs:
         self.assertNotEqual(mutated, workflow)
         self.assertEqual(MODULE.ci_build_workflow_issues(mutated), [])
 
-    def test_windows_package_preparation_and_artifact_upload_run_on_pull_requests(self):
-        message = "Windows package preparation and artifact upload must run on pull requests"
+    def test_windows_package_validation_runs_on_pr_but_transport_does_not(self):
+        validation_message = "Windows package preparation must run on pull requests"
+        transport_message = "Windows package artifact upload must skip pull requests"
         good = """\
 jobs:
   WindowsPackages:
@@ -2175,41 +2176,116 @@ jobs:
         config:
           - package: true
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        if: ${{ matrix.config.package != false }}
-        with:
-          name: adb-helper-${{ matrix.config.adb_target }}
       - uses: ./.github/actions/agent-package-win
         if: ${{ matrix.config.package != false }}
-      - name: Package tarball for upload
-        if: ${{ matrix.config.package != false }}
-        run: tar -czf packages-windows.tar.gz packages
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ matrix.config.package != false }}
+        if: ${{ matrix.config.package != false && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}
+        with:
+          name: packages-windows
+          path: build_root/packages/*
 """
-        self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+        issues = MODULE.ci_build_workflow_issues(good)
+        self.assertNotIn(validation_message, issues)
+        self.assertNotIn(transport_message, issues)
 
-        bad = good.replace(
+        gated_validation = good.replace(
             "if: ${{ matrix.config.package != false }}",
             "if: ${{ matrix.config.package != false && github.event_name != 'pull_request' }}",
             1,
         )
-        self.assertNotEqual(bad, good)
-        self.assertIn(message, MODULE.ci_build_workflow_issues(bad))
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(gated_validation))
 
-        spoofed = bad.replace(
+        uploaded_on_pr = good.replace(
+            "if: ${{ matrix.config.package != false && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release')) }}",
+            "if: ${{ matrix.config.package != false }}",
+        )
+        self.assertIn(transport_message, MODULE.ci_build_workflow_issues(uploaded_on_pr))
+
+        renamed_and_unguarded = uploaded_on_pr.replace(
+            "name: packages-windows", "name: windows-output", 1
+        )
+        self.assertIn(
+            transport_message,
+            MODULE.ci_build_workflow_issues(renamed_and_unguarded),
+        )
+
+        tautology = good.replace(
+            "inputs.qualification-mode == 'release')) }}",
+            "inputs.qualification-mode == 'release')) || github.event_name == 'pull_request' }}",
+            1,
+        )
+        self.assertIn(transport_message, MODULE.ci_build_workflow_issues(tautology))
+        prefix_bypass = good.replace(
+            "matrix.config.package != false && (github.event_name",
+            "true || matrix.config.package != false && (github.event_name",
+            1,
+        )
+        self.assertIn(transport_message, MODULE.ci_build_workflow_issues(prefix_bypass))
+
+        spoofed = gated_validation.replace(
             "  WindowsPackages:\n",
             "  WindowsPackages:\n    # Package preparation runs on pull_request\n",
             1,
         )
-        self.assertIn(message, MODULE.ci_build_workflow_issues(spoofed))
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(spoofed))
 
         job_level = good.replace(
             "  WindowsPackages:\n",
             "  WindowsPackages:\n    if: ${{ github.event_name == 'push' }}\n",
             1,
         )
-        self.assertIn(message, MODULE.ci_build_workflow_issues(job_level))
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(job_level))
+
+        # Ref- and qualification-mode restrictions suppress pull_request
+        # validation just as surely as an event_name restriction.
+        ref_gated = good.replace(
+            "  WindowsPackages:\n",
+            "  WindowsPackages:\n    if: ${{ github.ref == 'refs/heads/master' }}\n",
+            1,
+        )
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(ref_gated))
+
+        mode_gated = good.replace(
+            "if: ${{ matrix.config.package != false }}",
+            "if: ${{ matrix.config.package != false && inputs.qualification-mode == 'release' }}",
+            1,
+        )
+        self.assertIn(validation_message, MODULE.ci_build_workflow_issues(mode_gated))
+
+    def test_linux_and_macos_package_uploads_are_publish_only(self):
+        publish_condition = "${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification-mode == 'release') }}"
+        for job_name in ("LinuxPackages", "MacPackages"):
+            with self.subTest(job=job_name):
+                good = f"""\
+jobs:
+  {job_name}:
+    steps:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: {publish_condition}
+        with:
+          name: packages-test
+          path: build_root/packages/*
+"""
+                message = (
+                    f"{job_name} package artifact upload must run only for publishable events"
+                )
+                self.assertNotIn(message, MODULE.ci_build_workflow_issues(good))
+                unguarded = good.replace(f"        if: {publish_condition}\n", "")
+                self.assertIn(message, MODULE.ci_build_workflow_issues(unguarded))
+                tautology = good.replace(
+                    "inputs.qualification-mode == 'release') }}",
+                    "inputs.qualification-mode == 'release') || github.event_name == 'pull_request' }}",
+                )
+                self.assertIn(message, MODULE.ci_build_workflow_issues(tautology))
+
+                # Symbol uploads are publishable artifacts too: they must be
+                # publish-gated exactly like package uploads.
+                symbols = good.replace("packages-test", "symbols-test").replace(
+                    "build_root/packages/*", "build_root/symbols/*"
+                )
+                self.assertNotIn(message, MODULE.ci_build_workflow_issues(symbols))
+                symbols_unguarded = symbols.replace(f"        if: {publish_condition}\n", "")
+                self.assertIn(message, MODULE.ci_build_workflow_issues(symbols_unguarded))
 
     def test_windows_package_composite_must_not_hide_validation_by_event(self):
         message = "Windows package composite must remain event-neutral"
@@ -2668,11 +2744,21 @@ jobs:
         )
         self.assertIn(message, MODULE.ci_build_workflow_issues(comment_spoof))
 
-    def test_ccache_refreshes_daily_without_unbounded_per_run_keys(self):
+    def test_ccache_refreshes_daily_and_restores_the_latest_retained_generation(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
         self.assertEqual(workflow.count("current={today.isoformat()}"), 2)
-        self.assertEqual(workflow.count("days=1"), 2)
+        self.assertNotIn("datetime.timedelta(days=1)", workflow)
+        self.assertNotIn("outputs.previous", workflow)
+        self.assertEqual(
+            workflow.count("${{ env.KLOGG_LABEL }}-ccache-v2-\n"),
+            2,
+        )
         self.assertNotIn("isocalendar()", workflow)
+
+    def test_ccache_statistics_keep_stderr_visible(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()
+        self.assertEqual(workflow.count("ccache -s 2>&1"), 2)
+        self.assertNotIn("ccache -s 2>/dev/null", workflow)
 
     def test_ccache_is_saved_only_after_tests_and_package_qualification(self):
         workflow = (ROOT / ".github" / "workflows" / "ci-build.yml").read_text()

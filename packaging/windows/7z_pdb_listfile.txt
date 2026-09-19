@@ -1,7 +1,0 @@
-.\release\klogg.exe
-.\release\klogg.pdb
-.\release\klogg_portable.exe
-.\release\klogg_portable.pdb
-.\release\tbb12.dll
-.\release\tbb12.pdb
-

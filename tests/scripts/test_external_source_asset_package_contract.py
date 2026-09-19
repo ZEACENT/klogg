@@ -22,9 +22,10 @@ APP_CMAKE = ROOT / "src" / "app" / "CMakeLists.txt"
 THIRD_PARTY_CMAKE = ROOT / "3rdparty" / "CMakeLists.txt"
 APPIMAGE_PACKAGE = ROOT / "packaging" / "linux" / "appimage" / "generate_appimage.sh"
 MAC_PACKAGE = ROOT / ".github" / "actions" / "agent-package-mac" / "action.yml"
+DOCKER_PACKAGE = ROOT / ".github" / "actions" / "docker-package" / "action.yml"
+WIN_PACKAGE = ROOT / ".github" / "actions" / "agent-package-win" / "action.yml"
 WIN_PREPARE = ROOT / "packaging" / "windows" / "prepare_release.cmd"
 WIN_NSIS = ROOT / "packaging" / "windows" / "klogg.nsi"
-WIN_PORTABLE = ROOT / "packaging" / "windows" / "7z_klogg_listfile.txt"
 CI_BUILD = ROOT / ".github" / "workflows" / "ci-build.yml"
 CI_CONTINUOUS = ROOT / ".github" / "workflows" / "ci-continuous.yml"
 CI_RELEASE = ROOT / ".github" / "workflows" / "ci-release.yml"
@@ -67,6 +68,21 @@ class ExternalSourceAssetPackageContractTest(unittest.TestCase):
         cls.contract = required_json(FIXTURE)
         cls.adb = cls.contract["source_sets"]["adb-helper"]
         cls.ios = cls.contract["source_sets"]["ios-native"]
+
+    def test_windows_version_smoke_waits_for_the_gui_app_exit_code(self):
+        # klogg.exe is a GUI-subsystem binary: `& app -v` in pwsh returns
+        # immediately and never updates $LASTEXITCODE, so the smoke must drive
+        # a waited process handle (PR #75: the portable check passed vacuously
+        # on the previous command's exit code, the installer check failed on
+        # $null -ne 0).
+        action = WIN_PACKAGE.read_text()
+        self.assertIsNone(re.search(r"(?m)^\s*& \$\w+App -v", action))
+        waited_smokes = re.findall(
+            r"Start-Process -FilePath \$\w+App -ArgumentList \"-v\" -Wait -PassThru",
+            action,
+        )
+        self.assertEqual(len(waited_smokes), 2)
+        self.assertEqual(action.count("version smoke failed with exit code"), 2)
 
     def test_source_publication_identity_accepts_ci_calver_with_build_number(self):
         result = subprocess.run(
@@ -233,13 +249,13 @@ publish_component(
         windows_files = {
             "prepare": required_text(WIN_PREPARE),
             "installer": required_text(WIN_NSIS),
-            "portable": required_text(WIN_PORTABLE),
         }
         for label, source in windows_files.items():
             with self.subTest(windows=label):
                 for name in retained:
                     self.assertIn(name, source, f"{label} package omits {name}")
                 self.assertNotIn(adb_archive, source)
+        self.assertIn('7z a -r "%KLOGG_PORTABLE_ZIP%" .\\* -x!klogg.exe', windows_files["prepare"])
         self.assertNotRegex(
             windows_files["prepare"],
             re.compile(r"adb-helper-release\\\*", re.IGNORECASE),
@@ -256,13 +272,9 @@ publish_component(
             windows_files["installer"],
             re.compile(r"File\s+/r\s+release\\adb-helper-assets\\\*", re.IGNORECASE),
         )
-        self.assertNotRegex(
-            windows_files["portable"],
-            re.compile(r"adb-helper-assets\\\*", re.IGNORECASE),
-        )
         for runtime in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "libusb-1.0.dll"):
             self.assertIn(runtime, windows_files["installer"])
-            self.assertIn(runtime, windows_files["portable"])
+            self.assertIn(runtime, windows_files["prepare"])
 
     def test_linux_packages_install_only_the_klogg_runtime_component(self):
         root_cmake = required_text(ROOT_CMAKE)
@@ -330,11 +342,9 @@ publish_component(
 
     def test_macos_qualification_reverifies_ios_closure_inside_final_dmg(self):
         action = required_text(MAC_PACKAGE)
-        qualification = section(
-            action,
-            "- name: Sign and verify macOS disk image",
-            "- name: Mac symbols",
-        )
+        qualification = action[
+            action.index("- name: Sign and verify macOS disk image") :
+        ]
         for marker in (
             "hdiutil attach",
             "mounted_app",
@@ -2228,6 +2238,77 @@ class ConsolidatedReleasePublicationContractTest(unittest.TestCase):
             self.release_contract["uploaded_asset_count"],
             8 + 2 + 2 + 8 + 1 + 1 + 1,
         )
+
+    def test_ci_package_artifacts_contain_only_publication_inputs(self):
+        linux_action = required_text(DOCKER_PACKAGE)
+        mac_action = required_text(MAC_PACKAGE)
+        windows_action = required_text(WIN_PACKAGE)
+
+        for obsolete in (
+            "Copy deps",
+            "klogg_deps.tar.xz",
+            "cp ./output/klogg ./packages",
+        ):
+            self.assertNotIn(obsolete, linux_action)
+        self.assertIn("Collect Linux symbols", linux_action)
+        self.assertIn("./symbols/klogg_", linux_action)
+        self.assertIn("Collect macOS symbols", mac_action)
+        self.assertIn("./symbols/klogg-${{ env.KLOGG_ARCH }}.dSym", mac_action)
+        self.assertNotIn("./packages/klogg-${{ env.KLOGG_ARCH }}.app", mac_action)
+        self.assertIn("Collect Windows symbols", windows_action)
+        self.assertIn('Join-Path $buildRoot "symbols"', windows_action)
+        self.assertIn("-$env:KLOGG_PACKAGE_TAG-pdb.zip", windows_action)
+        self.assertNotIn("-pdb.zip\" \"%KLOGG_BUILD_ROOT%\\packages", windows_action)
+
+        workflow = required_text(CI_BUILD)
+        symbol_name = "name: symbols-${{ env.KLOGG_ARTIFACTS_ID }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}"
+        self.assertEqual(workflow.count('collect-symbols: "true"'), 3)
+        self.assertEqual(workflow.count(symbol_name), 3)
+        self.assertEqual(workflow.count("retention-days: 90"), 3)
+        offset = 0
+        for _ in range(3):
+            name_position = workflow.index(symbol_name, offset)
+            upload_start = workflow.rfind("      - uses: actions/upload-artifact@", 0, name_position)
+            upload_end = workflow.find("\n      - ", name_position)
+            upload = workflow[upload_start : upload_end if upload_end >= 0 else len(workflow)]
+            self.assertIn("github.event_name == 'push'", upload)
+            self.assertIn("inputs.qualification-mode == 'release'", upload)
+            self.assertIn("compression-level: 0", upload)
+            offset = name_position + len(symbol_name)
+
+    def test_ci_uploads_only_minimal_package_roots_for_publishable_events(self):
+        workflow = required_text(CI_BUILD)
+        job_sections = (
+            section(workflow, "  LinuxPackages:", "  LinuxSanitizers:"),
+            section(workflow, "  MacPackages:", "  MacArmPackages:"),
+            section(workflow, "  WindowsPackages:", "  WindowsX86:"),
+        )
+        upload_name = "name: packages-${{ env.KLOGG_ARTIFACTS_ID }}-${{ env.KLOGG_CONFIG_PACKAGE_TAG }}"
+        for job in job_sections:
+            with self.subTest(job=job.splitlines()[0].strip()):
+                self.assertNotIn("Package tarball for upload", job)
+                name_position = job.index(upload_name)
+                upload_start = job.rfind("      - uses: actions/upload-artifact@", 0, name_position)
+                upload_end = job.find("\n      - ", name_position)
+                upload = job[upload_start : upload_end if upload_end >= 0 else len(job)]
+                self.assertIn("github.event_name == 'push'", upload)
+                self.assertIn("inputs.qualification-mode == 'release'", upload)
+                self.assertIn("retention-days: 7", upload)
+                self.assertIn("compression-level: 0", upload)
+                self.assertIn("packages/*", upload.replace("\\", "/"))
+                self.assertNotIn(".tar", upload)
+        continuous = required_text(CI_CONTINUOUS)
+        self.assertNotIn("Extract package tarballs", continuous)
+        self.assertNotIn("packages-*.tar", continuous)
+
+    def test_deb_smoke_mount_is_read_only_and_outside_package_output(self):
+        action = required_text(DOCKER_PACKAGE)
+        workflow = required_text(CI_BUILD)
+        check_step = section(action, "    - name: Check package", "    - name: Linux AppImage")
+        self.assertIn(':/packages:ro', check_step)
+        self.assertNotIn(':/usr/local', check_step)
+        self.assertEqual(workflow.count("apt-get install -y /packages/klogg*.deb"), 3)
+        self.assertNotIn("apt-get install -y /usr/local/klogg*.deb", workflow)
 
     def test_stable_release_has_no_dead_legacy_package_bin_or_debug_repackaging(self):
         stable = required_text(CI_RELEASE)

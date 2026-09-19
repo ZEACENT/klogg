@@ -26,6 +26,7 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QIODevice>
+#include <QLabel>
 #include <QList>
 #include <QMap>
 #include <QModelIndex>
@@ -45,6 +46,7 @@
 #include "predefinedfilters.h"
 #include "predefinedfilterscombobox.h"
 #include "predefinedfiltersdialog.h"
+#include "savefavoritedialog.h"
 #include "uimessage.h"
 
 struct PredefinedFiltersCollectionTestAccess {
@@ -184,10 +186,17 @@ void seedControlledFavorites( QSettings& settings, const Collection& favorites,
     REQUIRE( settings.status() == QSettings::NoError );
 }
 
-Collection orderedFavorites()
+Collection unsortedFavorites()
 {
     return { { QStringLiteral( "Bravo" ), QStringLiteral( "bravo-pattern" ), true },
              { QStringLiteral( "Alpha" ), QStringLiteral( "alpha-pattern" ), false },
+             { QStringLiteral( "Charlie" ), QStringLiteral( "charlie-pattern" ), true } };
+}
+
+Collection sortedFavorites()
+{
+    return { { QStringLiteral( "Alpha" ), QStringLiteral( "alpha-pattern" ), false },
+             { QStringLiteral( "Bravo" ), QStringLiteral( "bravo-pattern" ), true },
              { QStringLiteral( "Charlie" ), QStringLiteral( "charlie-pattern" ), true } };
 }
 
@@ -195,6 +204,28 @@ Collection twoFavorites()
 {
     return { { QStringLiteral( "A" ), QStringLiteral( "first" ), false },
              { QStringLiteral( "B" ), QStringLiteral( "second" ), true } };
+}
+
+// Writes the persisted representation directly, bypassing the collection's own
+// normalization, to emulate files produced by older builds that stored the
+// manually arranged order.
+void writeRawFavorites( QSettings& settings, const Collection& favorites )
+{
+    settings.beginGroup( QStringLiteral( "PredefinedFiltersCollection" ) );
+    settings.setValue( QStringLiteral( "version" ), 2 );
+    settings.beginWriteArray( QStringLiteral( "filters" ) );
+    int index = 0;
+    for ( const auto& filter : favorites ) {
+        settings.setArrayIndex( index );
+        settings.setValue( QStringLiteral( "name" ), filter.name );
+        settings.setValue( QStringLiteral( "filter" ), filter.pattern );
+        settings.setValue( QStringLiteral( "regex" ), filter.useRegex );
+        ++index;
+    }
+    settings.endArray();
+    settings.endGroup();
+    settings.sync();
+    REQUIRE( settings.status() == QSettings::NoError );
 }
 
 void requireFavoritesEqual( const Collection& actual, const Collection& expected )
@@ -369,40 +400,91 @@ TEST_CASE( "Scoped UI message handlers support reentrancy and non-LIFO cleanup",
     REQUIRE( innerCount == 2 );
 }
 
-TEST_CASE( "Predefined filter settings roundtrip preserves insertion order",
+TEST_CASE( "Predefined filter settings roundtrip discards the stored manual order",
            "[filter-favorites]" )
 {
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
     const auto settingsPath = dir.filePath( QStringLiteral( "favorites.ini" ) );
-    const auto expected = orderedFavorites();
 
     {
         QSettings settings( settingsPath, QSettings::IniFormat );
-        PredefinedFiltersCollection saved;
-        saved.setFilters( expected );
-        saved.saveToStorage( settings );
-        settings.sync();
-        REQUIRE( settings.status() == QSettings::NoError );
+        writeRawFavorites( settings, unsortedFavorites() );
     }
 
     QSettings settings( settingsPath, QSettings::IniFormat );
     PredefinedFiltersCollection restored;
     restored.retrieveFromStorage( settings );
 
-    requireFavoritesEqual( restored.getFilters(), expected );
+    requireFavoritesEqual( restored.getFilters(), sortedFavorites() );
 }
 
-TEST_CASE( "Predefined filter file export and import preserves insertion order",
+TEST_CASE( "Predefined filter file export and import yields favorites sorted by name",
            "[filter-favorites]" )
 {
     QTemporaryDir dir;
     REQUIRE( dir.isValid() );
     const auto exportPath = dir.filePath( QStringLiteral( "favorites.ini" ) );
-    const auto expected = orderedFavorites();
 
-    REQUIRE( PredefinedFiltersCollection::saveToFile( exportPath, expected ) );
-    requireFavoritesEqual( PredefinedFiltersCollection::loadFromFile( exportPath ), expected );
+    REQUIRE( PredefinedFiltersCollection::saveToFile( exportPath, unsortedFavorites() ) );
+    requireFavoritesEqual( PredefinedFiltersCollection::loadFromFile( exportPath ),
+                           sortedFavorites() );
+}
+
+TEST_CASE( "Predefined filter import sorts legacy manual order by name", "[filter-favorites]" )
+{
+    QTemporaryDir dir;
+    REQUIRE( dir.isValid() );
+    const auto legacyPath = dir.filePath( QStringLiteral( "legacy.conf" ) );
+
+    {
+        QSettings settings( legacyPath, QSettings::IniFormat );
+        writeRawFavorites( settings, unsortedFavorites() );
+    }
+
+    const auto result = PredefinedFiltersCollection::tryLoadFromFile( legacyPath );
+    REQUIRE( result.status == PredefinedFiltersCollection::LoadStatus::Success );
+    requireFavoritesEqual( result.filters, sortedFavorites() );
+}
+
+TEST_CASE( "Filter favorites sort by name with case, pattern, and regex tie-breaks",
+           "[filter-favorites]" )
+{
+    const Collection unsorted{
+        { QStringLiteral( "delta" ), QStringLiteral( "p1" ), true },
+        { QStringLiteral( "alpha" ), QStringLiteral( "p1" ), false },
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p2" ), false },
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p1" ), true },
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p1" ), false },
+        { QStringLiteral( "bravo" ), QStringLiteral( "p1" ), true },
+    };
+    const Collection expected{
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p1" ), false },
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p1" ), true },
+        { QStringLiteral( "Alpha" ), QStringLiteral( "p2" ), false },
+        { QStringLiteral( "alpha" ), QStringLiteral( "p1" ), false },
+        { QStringLiteral( "bravo" ), QStringLiteral( "p1" ), true },
+        { QStringLiteral( "delta" ), QStringLiteral( "p1" ), true },
+    };
+
+    SECTION( "the collection normalizes unsorted input" )
+    {
+        PredefinedFiltersCollection collection;
+        collection.setFilters( unsorted );
+        requireFavoritesEqual( collection.getFilters(), expected );
+    }
+
+    SECTION( "the model publishes and persists sorted favorites" )
+    {
+        PersistedFavoritesGuard guard;
+        auto& model = FilterFavoritesModel::instance();
+
+        const auto result = model.replaceFavorites( unsorted );
+
+        REQUIRE( result.status == PredefinedFiltersCollection::CommitStatus::Success );
+        requireFavoritesEqual( model.favorites(), expected );
+        requireFavoritesEqual( PredefinedFiltersCollection::getSynced().getFilters(), expected );
+    }
 }
 
 TEST_CASE( "Validated filter favorite import distinguishes empty and invalid files",
@@ -537,7 +619,7 @@ TEST_CASE( "Failed filter favorite writes are rolled back before releasing the l
     const auto settingsPath = dir.filePath( QStringLiteral( "favorites.transaction" ) );
     QSettings settings{ settingsPath, controlledSettingsFormat() };
     const auto initial = twoFavorites();
-    const auto replacement = orderedFavorites();
+    const auto replacement = sortedFavorites();
     seedControlledFavorites( settings, initial, QStringLiteral( "preserve-me" ) );
     requireFavoritesEqual( readFavoritesFromSettings( settings ), initial );
 
@@ -600,7 +682,7 @@ TEST_CASE( "Unverified filter favorite rollback is reported as a storage error",
     state.persistFailedWrite = 0;
 
     const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
-        settings, initial, orderedFavorites() );
+        settings, initial, sortedFavorites() );
 
     REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::StorageError );
     REQUIRE( failed.storedFilters.isEmpty() );
@@ -683,7 +765,7 @@ TEST_CASE( "Failed favorite writes do not materialize fallback settings",
     state.writes.clear();
     state.writeResults = { false, true };
     const auto failed = PredefinedFiltersCollectionTestAccess::commitUsingSettings(
-        primarySettings, fallbackFavorites, orderedFavorites() );
+        primarySettings, fallbackFavorites, sortedFavorites() );
 
     REQUIRE( failed.status == PredefinedFiltersCollection::CommitStatus::WriteError );
     requireFavoritesEqual( failed.storedFilters, fallbackFavorites );
@@ -713,7 +795,7 @@ TEST_CASE( "Filter favorite storage commit is locked and compare-and-replace",
     settings.sync();
     REQUIRE( settings.status() == QSettings::NoError );
 
-    const auto replacement = orderedFavorites();
+    const auto replacement = sortedFavorites();
     const auto success = PredefinedFiltersCollectionTestAccess::commitToSettings(
         settings, lockPath, initial, replacement );
     REQUIRE( success.status == PredefinedFiltersCollection::CommitStatus::Success );
@@ -769,13 +851,14 @@ TEST_CASE( "Failed filter favorite commit is not published by the shared model",
     requireFavoritesEqual( PredefinedFiltersCollection::getSynced().getFilters(), initial );
 }
 
-TEST_CASE( "Filter favorites model exposes ordered rows and roles", "[filter-favorites]" )
+TEST_CASE( "Filter favorites model exposes rows sorted by name and roles",
+           "[filter-favorites]" )
 {
     PersistedFavoritesGuard guard;
     auto& model = FilterFavoritesModel::instance();
-    const auto expected = orderedFavorites();
+    const auto expected = sortedFavorites();
 
-    model.replaceFavorites( expected );
+    model.replaceFavorites( unsortedFavorites() );
 
     requireFavoritesEqual( model.favorites(), expected );
     REQUIRE( model.rowCount( QModelIndex{} ) == expected.size() );
@@ -804,7 +887,7 @@ TEST_CASE( "Stale filter favorites replacement reports conflict and publishes du
     auto& model = FilterFavoritesModel::instance();
     const auto expected = twoFavorites();
     model.replaceFavorites( expected );
-    const auto concurrent = orderedFavorites();
+    const auto concurrent = sortedFavorites();
     replaceStoredFavorites( concurrent );
     QSignalSpy resetSpy( &model, &QAbstractItemModel::modelReset );
 
@@ -821,7 +904,7 @@ TEST_CASE( "Identical model and storage replacement emits no change signals",
 {
     PersistedFavoritesGuard guard;
     auto& model = FilterFavoritesModel::instance();
-    const auto favorites = orderedFavorites();
+    const auto favorites = sortedFavorites();
     model.replaceFavorites( favorites );
     model.synchronizeFromStorage();
 
@@ -847,7 +930,7 @@ TEST_CASE( "Replacing changed filter favorites emits one model reset", "[filter-
     model.replaceFavorites( twoFavorites() );
     QSignalSpy resetSpy( &model, &QAbstractItemModel::modelReset );
 
-    model.replaceFavorites( orderedFavorites() );
+    model.replaceFavorites( sortedFavorites() );
 
     REQUIRE( resetSpy.count() == 1 );
 }
@@ -856,7 +939,7 @@ TEST_CASE( "Replacing identical filter favorites emits no model reset", "[filter
 {
     PersistedFavoritesGuard guard;
     auto& model = FilterFavoritesModel::instance();
-    const auto favorites = orderedFavorites();
+    const auto favorites = sortedFavorites();
     model.replaceFavorites( favorites );
     QSignalSpy resetSpy( &model, &QAbstractItemModel::modelReset );
 
@@ -865,20 +948,18 @@ TEST_CASE( "Replacing identical filter favorites emits no model reset", "[filter
     REQUIRE( resetSpy.count() == 0 );
 }
 
-TEST_CASE( "Reordering filter favorites persists the new order", "[filter-favorites]" )
+TEST_CASE( "Replacing filter favorites persists them sorted by name", "[filter-favorites]" )
 {
     PersistedFavoritesGuard guard;
     auto& model = FilterFavoritesModel::instance();
-    const auto initial = twoFavorites();
-    const Collection reordered{ initial.at( 1 ), initial.at( 0 ) };
+    model.replaceFavorites( twoFavorites() );
+    model.replaceFavorites( unsortedFavorites() );
 
-    model.replaceFavorites( initial );
-    model.replaceFavorites( reordered );
-
-    requireFavoritesEqual( PredefinedFiltersCollection::getSynced().getFilters(), reordered );
+    requireFavoritesEqual( PredefinedFiltersCollection::getSynced().getFilters(),
+                           sortedFavorites() );
 
     model.synchronizeFromStorage();
-    requireFavoritesEqual( model.favorites(), reordered );
+    requireFavoritesEqual( model.favorites(), sortedFavorites() );
 }
 
 TEST_CASE( "Filter favorite export reports QSettings write failures", "[filter-favorites]" )
@@ -889,7 +970,7 @@ TEST_CASE( "Filter favorite export reports QSettings write failures", "[filter-f
     // An existing directory cannot be replaced by an INI file. QSettings only
     // exposes the failure after sync(), so saveToFile must synchronize and check
     // status rather than unconditionally reporting success.
-    REQUIRE_FALSE( PredefinedFiltersCollection::saveToFile( dir.path(), orderedFavorites() ) );
+    REQUIRE_FALSE( PredefinedFiltersCollection::saveToFile( dir.path(), sortedFavorites() ) );
 }
 
 TEST_CASE( "Filter favorites dialog rejects a concurrent full-table overwrite",
@@ -963,12 +1044,13 @@ TEST_CASE( "Filter favorites dialog updates visible and hidden pickers after eve
     auto* const add = dialog.findChild<QToolButton*>( QStringLiteral( "addFilterButton" ) );
     auto* const remove
         = dialog.findChild<QToolButton*>( QStringLiteral( "removeFilterButton" ) );
-    auto* const up = dialog.findChild<QToolButton*>( QStringLiteral( "upButton" ) );
     REQUIRE( table != nullptr );
     REQUIRE( apply != nullptr );
     REQUIRE( add != nullptr );
     REQUIRE( remove != nullptr );
-    REQUIRE( up != nullptr );
+    // Favorites are always sorted by name, so no manual reordering controls exist.
+    REQUIRE( dialog.findChild<QToolButton*>( QStringLiteral( "upButton" ) ) == nullptr );
+    REQUIRE( dialog.findChild<QToolButton*>( QStringLiteral( "downButton" ) ) == nullptr );
 
     const auto requirePickers = [ & ]( const Collection& expected ) {
         requireFavoritesEqual( model.favorites(), expected );
@@ -995,18 +1077,90 @@ TEST_CASE( "Filter favorites dialog updates visible and hidden pickers after eve
     expected[ 2 ].name = QStringLiteral( "Gamma Prime" );
     requirePickers( expected );
 
-    table->setCurrentCell( addedRow, 0 );
-    up->click();
-    up->click();
+    // Renaming re-places the favorite by name in the stored order and the table.
+    table->item( addedRow, 0 )->setText( QStringLiteral( "0-First" ) );
     apply->click();
-    expected.move( 2, 0 );
+    expected = { { QStringLiteral( "0-First" ), QStringLiteral( "third" ), false }, initial.at( 0 ),
+                 initial.at( 1 ) };
     requirePickers( expected );
+    REQUIRE( table->item( 0, 0 )->text() == QStringLiteral( "0-First" ) );
 
     table->setCurrentCell( 2, 0 );
     remove->click();
     apply->click();
     expected.removeAt( 2 );
     requirePickers( expected );
+}
+
+TEST_CASE( "Filter favorite dialogs hint that the name determines display order",
+           "[filter-favorites][predefined-filters-dialog]" )
+{
+    PersistedFavoritesGuard guard;
+    FilterFavoritesModel::instance().replaceFavorites( twoFavorites() );
+
+    PredefinedFiltersDialog dialog;
+    auto* const hint = dialog.findChild<QLabel*>( QStringLiteral( "sortOrderHintLabel" ) );
+    REQUIRE( hint != nullptr );
+    REQUIRE_FALSE( hint->text().isEmpty() );
+
+    SaveFavoriteDialog saveDialog( QStringLiteral( "pattern" ), twoFavorites() );
+    auto* const saveHint
+        = saveDialog.findChild<QLabel*>( QStringLiteral( "sortOrderHintLabel" ) );
+    REQUIRE( saveHint != nullptr );
+    REQUIRE_FALSE( saveHint->text().isEmpty() );
+}
+
+TEST_CASE( "Filter favorites dialog keeps the current row on the renamed favorite after Apply",
+           "[filter-favorites][predefined-filters-dialog]" )
+{
+    PersistedFavoritesGuard guard;
+    auto& model = FilterFavoritesModel::instance();
+    model.replaceFavorites( twoFavorites() );
+
+    PredefinedFiltersDialog dialog;
+    auto* const table = filtersTable( dialog );
+    auto* const apply = standardButton( dialog, QDialogButtonBox::Apply );
+    REQUIRE( table != nullptr );
+    REQUIRE( apply != nullptr );
+
+    // Renaming "B" to "0-Renamed" re-places it at the top of the sorted table;
+    // the current row must follow the edited favorite instead of resetting.
+    table->setCurrentCell( 1, 0 );
+    table->item( 1, 0 )->setText( QStringLiteral( "0-Renamed" ) );
+    apply->click();
+
+    REQUIRE( table->currentRow() == 0 );
+    REQUIRE( table->item( table->currentRow(), 0 )->text() == QStringLiteral( "0-Renamed" ) );
+    requireFavoritesEqual( model.favorites(),
+                           { { QStringLiteral( "0-Renamed" ), QStringLiteral( "second" ), true },
+                             { QStringLiteral( "A" ), QStringLiteral( "first" ), false } } );
+}
+
+TEST_CASE( "Filter favorites dialog restores the current row by the full favorite identity",
+           "[filter-favorites][predefined-filters-dialog]" )
+{
+    PersistedFavoritesGuard guard;
+    auto& model = FilterFavoritesModel::instance();
+    model.replaceFavorites( { { QStringLiteral( "Dup" ), QStringLiteral( "p1" ), false },
+                              { QStringLiteral( "Dup" ), QStringLiteral( "p2" ), true } } );
+
+    PredefinedFiltersDialog dialog;
+    auto* const table = filtersTable( dialog );
+    auto* const apply = standardButton( dialog, QDialogButtonBox::Apply );
+    REQUIRE( table != nullptr );
+    REQUIRE( apply != nullptr );
+    REQUIRE( table->rowCount() == 2 );
+
+    // Two favorites share the name; the user edits the second row's pattern.
+    // The current row must follow that exact favorite, not the first row that
+    // happens to share the name.
+    table->setCurrentCell( 1, 1 );
+    table->item( 1, 1 )->setText( QStringLiteral( "p9" ) );
+    apply->click();
+
+    REQUIRE( table->currentRow() == 1 );
+    REQUIRE( table->item( table->currentRow(), 0 )->text() == QStringLiteral( "Dup" ) );
+    REQUIRE( table->item( table->currentRow(), 1 )->text() == QStringLiteral( "p9" ) );
 }
 
 TEST_CASE( "Filter favorites dialog advances its conflict base after Apply",

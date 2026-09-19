@@ -13,7 +13,7 @@
   <property name="windowTitle">
    <string>Filter Favorites</string>
   </property>
-  <layout class="QVBoxLayout" name="verticalLayout_2" stretch="0,0,0">
+  <layout class="QVBoxLayout" name="verticalLayout_2" stretch="0,0,0,0">
    <property name="sizeConstraint">
     <enum>QLayout::SetDefaultConstraint</enum>
    </property>
@@ -96,29 +96,14 @@
        </property>
       </spacer>
      </item>
-     <item>
-      <widget class="QToolButton" name="upButton">
-       <property name="text">
-        <string/>
-       </property>
-       <property name="icon">
-        <iconset resource="../../app/klogg.qrc">
-         <normaloff>:/images/icons8-up.svg</normaloff>:/images/icons8-up.svg</iconset>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QToolButton" name="downButton">
-       <property name="text">
-        <string/>
-       </property>
-       <property name="icon">
-        <iconset resource="../../app/klogg.qrc">
-         <normaloff>:/images/icons8-down-arrow.svg</normaloff>:/images/icons8-down-arrow.svg</iconset>
-       </property>
-      </widget>
-     </item>
     </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="sortOrderHintLabel">
+     <property name="text">
+      <string>Favorites are listed sorted by name.</string>
+     </property>
+    </widget>
    </item>
    <item>
     <widget class="QTableWidget" name="filtersTableWidget"/>

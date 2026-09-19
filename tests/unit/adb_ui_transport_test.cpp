@@ -537,6 +537,20 @@ TEST_CASE( "AdbProcessTransport owns ordered wall-time modifiers and unchanged c
                              QStringLiteral( "*:I" ) } );
 }
 
+TEST_CASE( "AdbProcessTransport legacy time format keeps only the threadtime modifier" )
+{
+    TestAdbProcessTransport transport(
+        QString{}, QStringLiteral( "emulator-5554" ), QStringLiteral( "-T 25" ), false,
+        klogg::livecapture::adb::LogcatTimeFormat::Legacy );
+
+    const auto streaming = transport.streamingCommandForTest();
+    REQUIRE( streaming.arguments
+             == QStringList{ QStringLiteral( "-s" ), QStringLiteral( "emulator-5554" ),
+                             QStringLiteral( "logcat" ), QStringLiteral( "-v" ),
+                             QStringLiteral( "threadtime" ), QStringLiteral( "-T" ),
+                             QStringLiteral( "25" ) } );
+}
+
 TEST_CASE( "AdbProcessTransport preserves literal backslashes in extra args" )
 {
     TestAdbProcessTransport transport(

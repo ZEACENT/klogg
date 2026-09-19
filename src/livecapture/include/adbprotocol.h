@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace klogg::livecapture::adb {
@@ -155,15 +156,31 @@ struct LogcatFilter {
     LogPriority priority{ LogPriority::Verbose };
 };
 
+// Wall-time modifier set requested from the device logcat. Extended adds the year,
+// zone, and microsecond modifiers that make source-device wall time unambiguous
+// (Android 7.0+). Legacy keeps only threadtime for devices whose logcat rejects
+// the newer modifiers.
+enum class LogcatTimeFormat : std::uint8_t { Extended, Legacy };
+
 struct LogcatCommandOptions {
     bool ansiOutputEnabled{ false };
+    LogcatTimeFormat timeFormat{ LogcatTimeFormat::Extended };
     std::vector<LogBuffer> buffers;
     std::optional<std::uint32_t> initialTailLineCount;
     std::optional<std::uint32_t> processId;
     std::vector<LogcatFilter> filters;
 };
 
-std::vector<std::string> buildLogcatFormatArguments( bool ansiOutputEnabled );
+std::vector<std::string>
+buildLogcatFormatArguments( bool ansiOutputEnabled,
+                            LogcatTimeFormat timeFormat = LogcatTimeFormat::Extended );
+// True only when a diagnostic line rejects one of the format modifiers this layer
+// owns (year/zone/usec/color); unrelated stream failures must not match.
+bool logcatDiagnosticRejectsOwnedFormat( std::string_view diagnostic );
+// True only when a diagnostic line rejects one of the wall-time modifiers
+// (year/zone/usec). The legacy time-format retry drops exactly those modifiers but
+// keeps -v color, so only this subset is recoverable by the retry.
+bool logcatDiagnosticRejectsOwnedTimeFormat( std::string_view diagnostic );
 std::string normalizeLogcatStreamError( const std::string& diagnostic );
 ProtocolResult<std::string> buildLogcatService( const LogcatCommandOptions& options );
 ProtocolResult<std::string> buildClearLogcatService( const std::vector<LogBuffer>& buffers );

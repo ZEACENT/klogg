@@ -1,13 +1,12 @@
 echo %KLOGG_QT%
 echo %KLOGG_QT_DIR%
 
-md %KLOGG_WORKSPACE%\release
+if exist "%KLOGG_WORKSPACE%\release" rmdir /s /q "%KLOGG_WORKSPACE%\release"
+md "%KLOGG_WORKSPACE%\release"
 
 echo "Copying klogg binaries..."
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg_portable.exe %KLOGG_WORKSPACE%\release\ /y
-xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg_portable.pdb %KLOGG_WORKSPACE%\release\ /y
 xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg.exe %KLOGG_WORKSPACE%\release\ /y
-xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\klogg.pdb %KLOGG_WORKSPACE%\release\ /y
 
 if not exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\helpers\adb.exe (
     echo ERROR: source-built ADB helper missing from output\helpers\adb.exe
@@ -59,11 +58,6 @@ echo "Copying TBB libraries..."
 rem Try to copy from output directory first (most likely location)
 if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.dll (
     xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-    if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.pdb (
-        xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.pdb %KLOGG_WORKSPACE%\release\ /y
-    ) else (
-        echo "Warning: tbb12.pdb not found in output directory"
-    )
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbbmalloc.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbbmalloc.dll %KLOGG_WORKSPACE%\release\ /y
     )
@@ -74,27 +68,15 @@ if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\output\tbb12.dll (
     echo "Trying alternative TBB paths..."
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-        if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.pdb (
-            xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_64_md_relwithdebinfo\tbb12.pdb %KLOGG_WORKSPACE%\release\ /y
-        )
     )
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-        if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.pdb (
-            xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.41_cxx17_32_md_relwithdebinfo\tbb12.pdb %KLOGG_WORKSPACE%\release\ /y
-        )
     )
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-        if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.pdb (
-            xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_64_md_relwithdebinfo\tbb12.pdb %KLOGG_WORKSPACE%\release\ /y
-        )
     )
     if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.dll (
         xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.dll %KLOGG_WORKSPACE%\release\ /y
-        if exist %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.pdb (
-            xcopy %KLOGG_WORKSPACE%\%KLOGG_BUILD_ROOT%\msvc_19.42_cxx17_32_md_relwithdebinfo\tbb12.pdb %KLOGG_WORKSPACE%\release\ /y
-        )
     )
 )
 
@@ -166,42 +148,22 @@ if "%KLOGG_QT%"=="Qt6" (
 )
 
 echo "Copying packaging files..."
-md %KLOGG_WORKSPACE%\chocolately
-xcopy %KLOGG_WORKSPACE%\packaging\windows\klogg.nuspec chocolately /y
-
-md %KLOGG_WORKSPACE%\chocolately\tools
-xcopy %KLOGG_WORKSPACE%\packaging\windows\chocolatelyInstall.ps1 chocolately\tools\ /y
-
 xcopy %KLOGG_WORKSPACE%\packaging\windows\klogg.nsi  /y
 xcopy %KLOGG_WORKSPACE%\packaging\windows\FileAssociation.nsh  /y
 
 echo "Making portable archive..."
-rem Create portable archive, ignore warnings about missing files
-rem Exit code 0 = success, 1 = warning (non-fatal), 2+ = fatal error
-7z a -r %KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip @%KLOGG_WORKSPACE%\packaging\windows\7z_klogg_listfile.txt
-if %ERRORLEVEL% LEQ 1 (
-    echo "Portable archive created (exit code %ERRORLEVEL%)"
+set "KLOGG_PORTABLE_ZIP=%KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-portable.zip"
+if exist "%KLOGG_PORTABLE_ZIP%" del /q "%KLOGG_PORTABLE_ZIP%"
+rem Archive the complete staged runtime tree, excluding the installer-only exe.
+pushd "%KLOGG_WORKSPACE%\release"
+7z a -r "%KLOGG_PORTABLE_ZIP%" .\* -x!klogg.exe
+set "KLOGG_7Z_RESULT=%ERRORLEVEL%"
+popd
+if not "%KLOGG_7Z_RESULT%"=="0" (
+    echo "Error creating portable archive (exit code %KLOGG_7Z_RESULT%)"
+    exit /b %KLOGG_7Z_RESULT%
 )
-if %ERRORLEVEL% GEQ 2 (
-    echo "Error creating portable archive (exit code %ERRORLEVEL%)"
-    exit /b %ERRORLEVEL%
-)
-
-echo "Making PDB archive..."
-rem Create PDB archive, ignore warnings about missing files
-rem Exit code 0 = success, 1 = warning (non-fatal), 2 = fatal error
-7z a %KLOGG_WORKSPACE%\klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-%KLOGG_QT%-pdb.zip @%KLOGG_WORKSPACE%\packaging\windows\7z_pdb_listfile.txt
-if %ERRORLEVEL% LEQ 1 (
-    echo "PDB archive created (exit code %ERRORLEVEL%)"
-    exit /b 0
-)
-if %ERRORLEVEL% EQU 2 (
-    echo "Warning: Some PDB files were not found, but archive was created"
-    exit /b 0
-)
-if %ERRORLEVEL% GTR 2 (
-    echo "Error creating PDB archive (exit code %ERRORLEVEL%)"
-    exit /b %ERRORLEVEL%
-)
+echo "Portable archive created"
 
 echo "Done!"
+exit /b 0

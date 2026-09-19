@@ -39,6 +39,7 @@
 #include <QUuid>
 
 #include "adblogcatsource.h"
+#include "adbprotocol.h"
 #include "ioslogprocesstransport.h"
 #include "livelogclosetransaction.h"
 #include "livelogcontroller.h"
@@ -1360,4 +1361,179 @@ TEST_CASE( "AdbLogcatSource intentional stop emits no error even with synchronou
     REQUIRE( factory.lastTransport->stopGenerations.size() == 1u );
     REQUIRE( sourceErrors.empty() );
     REQUIRE( source.state() == AdbLogcatSource::State::Disconnected );
+}
+
+klogg::livecapture::LiveSourceError legacyLogcatFormatRejection()
+{
+    return klogg::livecapture::LiveSourceError{
+        klogg::livecapture::ErrorCategory::Stream, "adb-logcat-exited",
+        klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
+        "ADB logcat exited with code 1. This ADB device cannot provide unambiguous "
+        "source-device wall time because its logcat does not support the required year, "
+        "zone, and microsecond format modifiers (Android 7.0 or compatible is required). "
+        "Original error: Invalid parameter year to -v",
+        "Invalid parameter year to -v\nusage: logcat [options] filterspecs\n"
+    };
+}
+
+TEST_CASE( "AdbLogcatSource retries once with the legacy logcat time format after an owned "
+           "modifier rejection",
+           "[livecapture][transport][factory][source][logcat-format-fallback]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( {}, {}, factory );
+    std::vector<QString> sourceErrors;
+    QObject::connect( &source, &AdbLogcatSource::errorOccurred,
+                      [ &sourceErrors ]( const QString& error ) {
+                          sourceErrors.push_back( error );
+                      } );
+
+    REQUIRE( source.connectSource() );
+    REQUIRE( factory.requestedConfigs.size() == 1u );
+    CHECK( factory.requestedConfigs.back().logcatTimeFormat
+           == klogg::livecapture::adb::LogcatTimeFormat::Extended );
+    auto* const rejectedTransport = factory.lastTransport;
+    REQUIRE( rejectedTransport != nullptr );
+    REQUIRE( rejectedTransport->startGenerations.size() == 1u );
+    const auto generation = rejectedTransport->startGenerations.back();
+
+    rejectedTransport->publishTerminalError( generation, legacyLogcatFormatRejection() );
+
+    // The fallback is a silent same-generation restart with the degraded format:
+    // neither a terminal state nor an error notification may escape the source.
+    REQUIRE( factory.requestedConfigs.size() == 2u );
+    CHECK( factory.requestedConfigs.back().logcatTimeFormat
+           == klogg::livecapture::adb::LogcatTimeFormat::Legacy );
+    auto* const legacyTransport = factory.lastTransport;
+    REQUIRE( legacyTransport != nullptr );
+    REQUIRE( legacyTransport != rejectedTransport );
+    REQUIRE( legacyTransport->startGenerations.size() == 1u );
+    CHECK( legacyTransport->startGenerations.back() == generation );
+    CHECK( source.state() != AdbLogcatSource::State::Error );
+    CHECK( sourceErrors.empty() );
+}
+
+TEST_CASE( "AdbLogcatSource surfaces the terminal error when the legacy logcat retry also fails",
+           "[livecapture][transport][factory][source][logcat-format-fallback]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( {}, {}, factory );
+
+    REQUIRE( source.connectSource() );
+    auto* const rejectedTransport = factory.lastTransport;
+    const auto generation = rejectedTransport->startGenerations.back();
+    rejectedTransport->publishTerminalError( generation, legacyLogcatFormatRejection() );
+    REQUIRE( factory.requestedConfigs.size() == 2u );
+
+    auto* const legacyTransport = factory.lastTransport;
+    REQUIRE( legacyTransport != rejectedTransport );
+    legacyTransport->publishTerminalError( generation, legacyLogcatFormatRejection() );
+
+    // Exactly one fallback attempt: a legacy-mode rejection stays terminal.
+    CHECK( factory.requestedConfigs.size() == 2u );
+    CHECK( source.state() == AdbLogcatSource::State::Error );
+    CHECK( source.lastError().contains( QStringLiteral( "Invalid parameter year to -v" ) ) );
+}
+
+TEST_CASE( "AdbLogcatSource keeps arbitrary stream failures terminal without a format retry",
+           "[livecapture][transport][factory][source][logcat-format-fallback]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( {}, {}, factory );
+
+    REQUIRE( source.connectSource() );
+    auto* const transport = factory.lastTransport;
+    const auto generation = transport->startGenerations.back();
+    transport->publishTerminalError(
+        generation,
+        klogg::livecapture::LiveSourceError{
+            klogg::livecapture::ErrorCategory::Stream, "adb-logcat-exited",
+            klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
+            "ADB logcat exited with code 1. logcat: failure", "logcat: failure" } );
+
+    CHECK( factory.requestedConfigs.size() == 1u );
+    CHECK( factory.lastTransport == transport );
+    CHECK( source.state() == AdbLogcatSource::State::Error );
+}
+
+TEST_CASE( "AdbLogcatSource keeps a color-only modifier rejection terminal without a retry",
+           "[livecapture][transport][factory][source][logcat-format-fallback]" )
+{
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( {}, {}, factory );
+
+    REQUIRE( source.connectSource() );
+    auto* const transport = factory.lastTransport;
+    const auto generation = transport->startGenerations.back();
+
+    // The legacy retry still appends -v color, so retrying a color rejection
+    // would fail identically; it must go straight to the terminal error.
+    transport->publishTerminalError(
+        generation,
+        klogg::livecapture::LiveSourceError{
+            klogg::livecapture::ErrorCategory::Stream, "adb-logcat-exited",
+            klogg::livecapture::ErrorScope::Stream, klogg::livecapture::RetryPolicy::Backoff,
+            "ADB logcat exited with code 1. Invalid parameter color to -v",
+            "Invalid parameter color to -v\nusage: logcat [options] filterspecs\n" } );
+
+    CHECK( factory.requestedConfigs.size() == 1u );
+    CHECK( factory.lastTransport == transport );
+    CHECK( source.state() == AdbLogcatSource::State::Error );
+}
+
+TEST_CASE( "AdbLogcatSource legacy format fallback keeps the controller generation streaming",
+           "[livecapture][transport][controller][logcat-format-fallback]" )
+{
+    QTemporaryDir root;
+    REQUIRE( root.isValid() );
+    auto data = std::make_shared<StreamingLogData>( makeCaptureId(), root.path() );
+    RecordingLiveSourceTransportFactory factory;
+    AdbLogcatSource source( AdbLogcatSessionData{}, data, factory );
+    SourceControllerEffects effects( source );
+    auto spec = controllerSessionSpec();
+    klogg::livelog::LiveLogController controller( spec, klogg::livelog::LiveLogControllerConfig{},
+                                                  effects );
+    int controllerFailures = 0;
+
+    source.setControllerCallbacks(
+        [ & ]( Generation generation, const QByteArray& bytes, auto settled ) {
+            controller.streamBytesReceived( generation, bytes, std::move( settled ) );
+        },
+        [ & ]( Generation generation, LiveSourceTransport::State state ) {
+            if ( state == LiveSourceTransport::State::Connected ) {
+                controller.protocolServiceReady( generation );
+                controller.streamHandleOpened( generation );
+                controller.streamReadArmed( generation );
+            }
+        },
+        [ & ]( Generation generation, klogg::livecapture::LiveSourceError error ) {
+            ++controllerFailures;
+            controller.streamFailed( generation, std::move( error ) );
+        } );
+
+    controller.armRunIntent();
+    controller.infrastructureChanged(
+        klogg::livecapture::InfrastructureStatus::Ready,
+        klogg::livecapture::InfrastructureOwnership::ExternalShared );
+    controller.deviceAvailable( controller.snapshot().generation );
+    REQUIRE( factory.lastTransport != nullptr );
+    const auto generation = controller.snapshot().generation;
+    REQUIRE( controller.snapshot().source.status
+             == klogg::livecapture::SourceStatus::OpeningStream );
+
+    factory.lastTransport->publishTerminalError( generation, legacyLogcatFormatRejection() );
+
+    // The fallback must not surface as a controller failure and must keep the
+    // controller-owned generation so the replacement stream stays authoritative.
+    REQUIRE( factory.requestedConfigs.size() == 2u );
+    CHECK( factory.requestedConfigs.back().logcatTimeFormat
+           == klogg::livecapture::adb::LogcatTimeFormat::Legacy );
+    CHECK( controllerFailures == 0 );
+    CHECK( controller.snapshot().source.status
+           == klogg::livecapture::SourceStatus::OpeningStream );
+
+    auto* const legacyTransport = factory.lastTransport;
+    legacyTransport->publishState( generation, LiveSourceTransport::State::Connected );
+    CHECK( controller.snapshot().source.status
+           == klogg::livecapture::SourceStatus::Streaming );
 }

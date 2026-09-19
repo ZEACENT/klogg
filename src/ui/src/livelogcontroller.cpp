@@ -872,6 +872,7 @@ makeAdbSmartSocketTransportConfig( const LiveSourceTransportConfig& config )
     adb::AdbSmartSocketTransportConfig result;
     result.deviceSerial = config.deviceId;
     result.logcatOptions.ansiOutputEnabled = config.ansiOutputEnabled;
+    result.logcatOptions.timeFormat = config.logcatTimeFormat;
     for ( const auto& bufferName : config.androidBuffers ) {
         const auto buffer = androidBuffer( bufferName );
         if ( !buffer.has_value() ) {

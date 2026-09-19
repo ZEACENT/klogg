@@ -815,7 +815,7 @@
     "appimage": "usr/bin/helpers/adb",
     "dmg": "klogg.app/Contents/MacOS/helpers/adb",
     "nsis": "helpers/adb.exe",
-    "7z": "release/helpers/adb.exe"
+    "7z": "helpers/adb.exe"
   },
   "release_assets": [
     {
