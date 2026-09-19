@@ -3126,6 +3126,61 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
     }
 }
 
+SCENARIO( "Shift-click extending a ctrl-click selection announces the full selected line count",
+          "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_shift_click_count_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    GIVEN( "a loaded log file with lines 5 and 10 ctrl-click selected" )
+    {
+        const auto charHeight = crawlerVisitor.mainCharHeight();
+        const auto leftMargin = crawlerVisitor.mainLeftMargin();
+        const int xPos = leftMargin + 20;
+
+        auto* viewport = crawlerVisitor.mainViewport();
+
+        QSignalSpy selectionSpy( crawlerVisitor.mainView(), &AbstractLogView::newSelection );
+
+        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+                           QPoint( xPos, charHeight * 5 + charHeight / 2 ) );
+        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+                           QPoint( xPos, charHeight * 10 + charHeight / 2 ) );
+
+        WHEN( "shift-clicking line 12 to extend a range from the last toggled line" )
+        {
+            selectionSpy.clear();
+
+            QTest::mouseClick( viewport, Qt::LeftButton, Qt::ShiftModifier,
+                               QPoint( xPos, charHeight * 12 + charHeight / 2 ) );
+
+            THEN( "the press emission already carries the total selected line count" )
+            {
+                // The mouse release re-emits with the deferred nSymbols; the
+                // first (press) emission is what listeners see for the gesture.
+                REQUIRE( selectionSpy.count() >= 1 );
+
+                const auto pressArgs = selectionSpy.takeFirst();
+                // Selection is { 5 } + { 10, 11, 12 } = 4 lines.
+                REQUIRE( pressArgs.at( 0 ).value<LineNumber>() == 12_lnum );
+                REQUIRE( pressArgs.at( 1 ).value<LinesCount>() == 4_lcount );
+            }
+        }
+    }
+}
+
 SCENARIO( "Filtered view with sparse results does not block horizontal scroll",
           "[ui][scrollbar][regression]" )
 {
