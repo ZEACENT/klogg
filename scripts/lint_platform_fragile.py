@@ -656,10 +656,17 @@ def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]
     return findings
 
 
+# The budget comparison itself, matched against the balanced-call body (the
+# opener is consumed by the scanner, so both single-line and line-wrapped
+# assertions funnel through the same expression match).
 _PERFORMANCE_ASSERTION_RE = re.compile(
-    r"\b(?:CHECK|REQUIRE|KLOGG_CHECK_PERF_BUDGET)\s*\(\s*(?P<timer>\w*[Ee]lapsedMs)\s*<\s*"
-    r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))\s*\)"
+    r"\b(?P<timer>\w*[Ee]lapsedMs)\s*<\s*"
+    r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))"
 )
+# Opener used by the balanced-call scanner (multiline assertions): the word
+# boundary before CHECK/REQUIRE excludes *_FALSE variants (underscore is a
+# word character).
+_ASSERTION_OPENER_RE = re.compile(r"\b(?:CHECK|REQUIRE|KLOGG_CHECK_PERF_BUDGET)\s*\(")
 _MULTI_SAMPLE_TIMER_RE = re.compile(r"^(?:best|min|median)[A-Z]")
 _CATCH_CASE_RE = re.compile(
     r"\b(?:TEST_CASE|SCENARIO|TEST_CASE_METHOD|TEMPLATE_TEST_CASE)\s*\("
@@ -694,7 +701,7 @@ def _check_pixel_click_arithmetic(text: str, path: Path) -> list[tuple[int, str]
     """
     if "tests" not in path.parts:
         return []
-    code_lines = _strip_cpp_comments(text).splitlines()
+    code_lines = _strip_cpp_literals(_strip_cpp_comments(text)).splitlines()
     source_lines = text.splitlines()
     findings: list[tuple[int, str]] = []
     for line_num, line in enumerate(code_lines, start=1):
@@ -749,10 +756,53 @@ def _check_uninstrumented_performance_budget(
     code_lines = _strip_cpp_literals(_strip_cpp_comments(text)).splitlines()
     findings: list[tuple[int, str]] = []
 
-    for line_num, line in enumerate(code_lines, start=1):
-        assertion = _PERFORMANCE_ASSERTION_RE.search(line)
+    # Line-wrapped assertions must not escape the rule: scan for every
+    # assertion opener in the masked source and parse the balanced call, so
+    # CHECK/REQUIRE/KLOGG_CHECK_PERF_BUDGET bodies that span lines are still
+    # matched. Positions are tracked over the joined masked text; each parsed
+    # call is consumed so a nested opener inside it is not double-reported.
+    masked = "\n".join(code_lines)
+    line_offsets = [0]
+    for line in code_lines:
+        line_offsets.append(line_offsets[-1] + len(line) + 1)
+
+    def offset_to_line(offset: int) -> int:
+        low, high = 0, len(line_offsets) - 1
+        while low < high:
+            mid = (low + high + 1) // 2
+            if line_offsets[mid] <= offset:
+                low = mid
+            else:
+                high = mid - 1
+        return low + 1
+
+    consumed_until = 0
+    for opener in _ASSERTION_OPENER_RE.finditer(masked):
+        if opener.start() < consumed_until:
+            continue
+        open_paren = masked.find("(", opener.end() - 1)
+        if open_paren == -1:
+            continue
+        depth = 0
+        close_paren = -1
+        for index in range(open_paren, len(masked)):
+            if masked[index] == "(":
+                depth += 1
+            elif masked[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren = index
+                    break
+        if close_paren == -1:
+            continue
+        consumed_until = close_paren + 1
+
+        expression = masked[open_paren + 1 : close_paren]
+        assertion = _PERFORMANCE_ASSERTION_RE.search(expression)
         if not assertion:
             continue
+
+        line_num = offset_to_line(opener.start())
         if line_num <= len(source_lines) and ALLOW_MARKER in source_lines[line_num - 1]:
             continue
 

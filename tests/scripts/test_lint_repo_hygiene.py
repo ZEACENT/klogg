@@ -51,6 +51,21 @@ class Utf8LintTest(unittest.TestCase):
         data = b"\xef\xbb\xbf" + "content\n".encode("utf-8")
         self.assertIsNone(MODULE.utf8_issue("README.md", data))
 
+    def test_utf8_bom_is_not_reported_as_non_english(self):
+        # U+FEFF (BOM) sits inside the Arabic presentation-forms reject range;
+        # the English-only scan must decode the BOM-stripped payload so a
+        # BOM-prefixed English file does not fail as non-English.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            data = b"\xef\xbb\xbf" + "# klogg build notes\n".encode("utf-8")
+            (root / "bom-notes.md").write_bytes(data)
+
+            issues = MODULE.check_file(root, "bom-notes.md")
+
+            self.assertEqual(issues, 0)
+
     def test_legacy_encoding_is_rejected(self):
         gbk = "中文".encode("gbk")  # lint-allow: repo-hygiene
         issue = MODULE.utf8_issue("docs/notes.md", gbk)

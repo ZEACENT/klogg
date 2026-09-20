@@ -1504,6 +1504,30 @@ class TestInstrumentedPerformanceBudget(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0][0], 5)
 
+    def test_multiline_single_sample_budget_is_flagged(self):
+        # A line-wrapped assertion must not escape the rule: the macro and the
+        # elapsed expression often land on different lines in formatted code.
+        for opener, closer in (
+            ("CHECK", ""),
+            ("REQUIRE", ""),
+            ("KLOGG_CHECK_PERF_BUDGET", ""),
+        ):
+            with self.subTest(opener=opener):
+                text = (
+                    'TEST_CASE( "large append stays within budget" )\n'
+                    "{\n"
+                    "    const auto elapsedMs = measureLargeAppend();\n"
+                    "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+                    f"    {opener}(\n"
+                    "        elapsedMs\n"
+                    "        < LargeAppendBudgetMs );\n"
+                    "#endif\n"
+                    "}\n"
+                )
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1, opener)
+                self.assertEqual(findings[0][0], 5, opener)
+
     def test_macro_wrapped_multi_sample_budget_is_accepted(self):
         text = (
             'TEST_CASE( "large append stays within budget" )\n'
@@ -2032,6 +2056,12 @@ class TestPixelClickArithmetic(unittest.TestCase):
             "const int lineY = charHeight * 5 + charHeight / 2;"
             " // lint-allow: platform-fragile\n"
         )
+        self.assertEqual(self.check(text), [])
+
+    def test_string_literal_containing_the_idiom_is_allowed(self):
+        # The idiom inside a string literal (a log message, a lint test
+        # fixture, ...) is not executable arithmetic.
+        text = 'const auto* doc = "const int lineY = charHeight * 5 + charHeight / 2;";\n'
         self.assertEqual(self.check(text), [])
 
     def test_viewport_sizing_arithmetic_is_allowed(self):

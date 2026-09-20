@@ -105,6 +105,11 @@ QString resolveBundledPortableConfigPath( const QString& executableDirPath )
 #endif
 } // namespace
 
+bool PersistentInfo::portableOverrideActive()
+{
+    return !qEnvironmentVariable( "KLOGG_PORTABLE_CONFIG_DIR" ).isEmpty();
+}
+
 QString PersistentInfo::resolvePortableConfigPath( const QString& executablePath )
 {
     auto portableConfigPath
@@ -118,7 +123,7 @@ QString PersistentInfo::resolvePortableConfigPath( const QString& executablePath
     // directory so per-process settings (favorites, session state) cannot
     // cross-pollute through the shared build output directory.
     const auto portableOverride = qEnvironmentVariable( "KLOGG_PORTABLE_CONFIG_DIR" );
-    if ( !portableOverride.isEmpty() ) {
+    if ( portableOverrideActive() ) {
         QDir{}.mkpath( portableOverride );
         portableConfigPath
             = QDir( portableOverride )
@@ -147,9 +152,10 @@ PersistentInfo::PersistentInfo()
     // A nonempty override itself selects portable mode: the override points at
     // a fresh per-process directory where no klogg.conf exists yet, so without
     // this, non-ForcePortable binaries (e.g. the klogg_smoke app) would fall
-    // through to the OS settings and escape the test isolation.
+    // through to the OS settings and escape the test isolation. The condition
+    // mirrors the resolver: an empty override behaves like no override.
     const auto usePortableConfiguration
-        = ForcePortable || qEnvironmentVariableIsSet( "KLOGG_PORTABLE_CONFIG_DIR" )
+        = ForcePortable || portableOverrideActive()
           || QFileInfo::exists( portableConfigPath );
 
     if ( usePortableConfiguration ) {

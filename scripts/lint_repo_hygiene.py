@@ -141,10 +141,14 @@ def binary_issue(relative_path: str, data: bytes) -> str | None:
     )
 
 
+def strip_utf8_bom(data: bytes) -> bytes:
+    return data[len(_UTF8_BOM) :] if data.startswith(_UTF8_BOM) else data
+
+
 def utf8_issue(relative_path: str, data: bytes) -> str | None:
     if is_binary(data):
         return None
-    payload = data[len(_UTF8_BOM) :] if data.startswith(_UTF8_BOM) else data
+    payload = strip_utf8_bom(data)
     try:
         payload.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -248,7 +252,7 @@ def check_file(repo_root: Path, relative_path: str, from_index: bool = False) ->
         return 1
 
     for line_num, message in non_english_issues(
-        relative_path, data.decode("utf-8")
+        relative_path, strip_utf8_bom(data).decode("utf-8")
     ):
         print(f"[repo-hygiene] non-english-text")
         print(f"  at {relative_path}:{line_num}")

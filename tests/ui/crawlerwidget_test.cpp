@@ -752,11 +752,16 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
     // growing the view if the current viewport cannot show that row (font
     // metrics and default viewport sizes differ across platforms; the Linux
     // CI legs resolved raw charHeight-derived clicks to the wrong rows).
-    // Returns -1 when the line is still not visible at the largest size.
+    // ensureLineMapFresh() is required before every scan: the visible-line
+    // map is otherwise rebuilt only as a paint side effect, so a viewport
+    // grown by resizeViews would still expose the map of the old (smaller)
+    // geometry and rows beyond it would never resolve. Returns -1 when the
+    // line is still not visible at the largest size.
     int mainYForLine( LineNumber line )
     {
         auto* view = crawler->logMainView_;
         const auto scan = [ & ]() -> int {
+            view->ensureLineMapFresh();
             const int viewportHeight = view->viewport()->height();
             for ( int y = 0; y < viewportHeight; ++y ) {
                 const auto hit = view->lineAtYForTest( y );
@@ -769,10 +774,17 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         if ( const int y = scan(); y >= 0 ) {
             return y;
         }
+        // setFixedSize, not resize(): logMainView_ is managed by the crawler's
+        // layout, which snaps a plain resize() back to the splitter-assigned
+        // size when the event loop pumps -- the growth below would never take
+        // effect. setFixedSize overrides the layout constraints (same
+        // technique as resizeViewsToPartialTextLineHeight).
         int height = std::max( view->height(), 400 );
         while ( height <= 2400 ) {
             height += 300;
-            resizeViews( 900, height );
+            crawler->filteredView_->setFixedSize( 900, height );
+            view->setFixedSize( 900, height );
+            QTest::qWait( 10 );
             render();
             if ( const int y = scan(); y >= 0 ) {
                 return y;
@@ -3223,6 +3235,34 @@ SCENARIO( "Shift-click extending a ctrl-click selection announces the full selec
             }
         }
     }
+}
+
+SCENARIO( "Row lookup resolves rows beyond the initial viewport after a resize",
+          "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_row_lookup_resize_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    // Shrink the view to a few rows WITHOUT an explicit render afterwards:
+    // the visible-line map then reflects the old geometry until it is rebuilt
+    // (ensureLineMapFresh). mainYForLine must grow the view AND rebuild the
+    // map, or rows beyond the initial viewport never resolve -- the exact
+    // failure of the PR #76 Linux legs (REQUIRE( endY >= 0 ) on line 15).
+    crawlerVisitor.resizeViews( 900, 120 );
+    REQUIRE( crawlerVisitor.mainYForLine( 5_lnum ) >= 0 );
+    REQUIRE( crawlerVisitor.mainYForLine( 15_lnum ) >= 0 );
 }
 
 SCENARIO( "Filtered view with sparse results does not block horizontal scroll",
