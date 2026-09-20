@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include <QByteArray>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -80,6 +81,41 @@ struct TestTimer {
     std::string text_;
 };
 */
+// RAII env var guard for tests: restores the previous value (or unsets) on
+// scope exit. Tests that mutate process-global environment must never leak
+// the mutation into later cases -- under ctest --parallel the per-process
+// isolation variables (KLOGG_CAPTURE_COORDINATION_ROOT,
+// KLOGG_PORTABLE_CONFIG_DIR) are set by ctest, and clobbering them silently
+// re-enables cross-process state sharing for the rest of the binary.
+class ScopedEnvironmentVariable final {
+  public:
+    ScopedEnvironmentVariable( QByteArray name, const QByteArray& value )
+        : name_( std::move( name ) )
+        , wasSet_( qEnvironmentVariableIsSet( name_.constData() ) )
+        , previous_( qgetenv( name_.constData() ) )
+    {
+        qputenv( name_.constData(), value );
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        if ( wasSet_ ) {
+            qputenv( name_.constData(), previous_ );
+        }
+        else {
+            qunsetenv( name_.constData() );
+        }
+    }
+
+    ScopedEnvironmentVariable( const ScopedEnvironmentVariable& ) = delete;
+    ScopedEnvironmentVariable& operator=( const ScopedEnvironmentVariable& ) = delete;
+
+  private:
+    QByteArray name_;
+    bool wasSet_{ false };
+    QByteArray previous_;
+};
+
 // Performance budgets must never gate CI on runner speed. Budget assertions
 // go through KLOGG_CHECK_PERF_BUDGET so the measurement is always reported
 // (Catch2 CAPTURE-style INFO keeps it visible in failure logs) but the
@@ -89,7 +125,7 @@ struct TestTimer {
 // a wall-clock threshold.
 inline bool perfGatesEnabled()
 {
-    return qEnvironmentVariableIsSet( "KLOGG_PERF_GATES" );
+    return qgetenv( "KLOGG_PERF_GATES" ) == "1";
 }
 
 #define KLOGG_CHECK_PERF_BUDGET( expr )                                                            \

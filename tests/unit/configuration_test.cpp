@@ -28,6 +28,7 @@
 #include "configuration.h"
 #include "persistentinfo.h"
 #include "shortcuts.h"
+#include "test_utils.h"
 
 namespace {
 constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
@@ -73,12 +74,14 @@ void writeShortcutArray( QSettings& settings, const std::map<std::string, QStrin
 TEST_CASE( "Portable config path honors the test isolation override" )
 {
     const auto dirPath = makeTestDir( "portable_config_override" );
-    qputenv( "KLOGG_PORTABLE_CONFIG_DIR", dirPath.toUtf8() );
+    // Scoped restore: ctest sets this variable per process for parallel
+    // isolation; leaking the unset would silently re-share the default
+    // portable config with other test processes for the rest of this binary.
+    const ScopedEnvironmentVariable overrideGuard{ "KLOGG_PORTABLE_CONFIG_DIR",
+                                                   dirPath.toUtf8() };
 
-    const auto resolved = PersistentInfo::portableConfigPathForTest(
+    const auto resolved = PersistentInfo::resolvePortableConfigPath(
         QStringLiteral( "/some/executable/dir" ) );
-
-    qunsetenv( "KLOGG_PORTABLE_CONFIG_DIR" );
 
     REQUIRE( resolved == QDir{ dirPath }.filePath( "klogg.conf" ) );
 }

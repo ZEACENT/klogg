@@ -815,11 +815,13 @@ TEST_CASE( "Capture coordination root honors the test isolation override",
     QTemporaryDir isolated;
     REQUIRE( isolated.isValid() );
     const auto overridePath = isolated.filePath( QStringLiteral( "coordination" ) );
-    qputenv( "KLOGG_CAPTURE_COORDINATION_ROOT", overridePath.toUtf8() );
+    // Scoped restore: ctest sets this variable per process for parallel
+    // isolation; leaking the unset would silently re-share the default root
+    // with other test processes for the rest of this binary.
+    const ScopedEnvironmentVariable overrideGuard{ "KLOGG_CAPTURE_COORDINATION_ROOT",
+                                                   overridePath.toUtf8() };
 
     const auto root = captureCoordinationRoot();
-
-    qunsetenv( "KLOGG_CAPTURE_COORDINATION_ROOT" );
 
     REQUIRE( root == QDir( overridePath ).absolutePath() );
     REQUIRE( QDir{ root }.exists() );

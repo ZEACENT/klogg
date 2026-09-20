@@ -35,6 +35,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -77,30 +78,39 @@ NON_ENGLISH_EXEMPT_PREFIXES = (
     "website/themes/",
 )
 
-# Scripts other than Latin. Everything not matched here (ASCII, Latin
-# extended, general punctuation, arrows, box drawing, ...) is allowed, so
-# English prose with typographic dashes/quotes or names like "café" pass.
+# Non-Latin writing systems, rejected on sight. Symbol/punctuation blocks
+# (arrows, box drawing, geometric shapes, dingbats, emoji, ...) stay allowed:
+# they legitimately appear in English docs and diagrams. Latin script
+# extensions (Vietnamese diacritics U+1E00-1EFF, U+2C60+, U+A720+) stay
+# allowed; Greek extended (U+1F00+) and every other script below do not.
 NON_LATIN_SCRIPT_RE = re.compile(
     "["
-    "\u0370-\u03ff"  # Greek and Coptic
-    "\u0400-\u052f"  # Cyrillic + supplement
+    "\u0370-\u03ff\u1f00-\u1fff"  # Greek, Coptic, Greek extended
+    "\u0400-\u052f\u2de0-\u2dff\ua640-\ua69f"  # Cyrillic + supplements
+    "\u0530-\u058f\ufb13-\ufb17"  # Armenian + ligatures
     "\u0590-\u05ff"  # Hebrew
-    "\u0600-\u06ff"  # Arabic
-    "\u0750-\u077f"  # Arabic supplement
-    "\u0900-\u097f"  # Devanagari
-    "\u0e00-\u0e7f"  # Thai
-    "\u1100-\u11ff"  # Hangul Jamo
-    "\u2e80-\u2fdf"  # CJK radicals / Kangxi
-    "\u3000-\u303f"  # CJK symbols and punctuation
-    "\u3040-\u30ff"  # Hiragana + Katakana
-    "\u31f0-\u31ff"  # Katakana phonetic extensions
-    "\u3400-\u4dbf"  # CJK ext A
-    "\u4e00-\u9fff"  # CJK unified ideographs
-    "\uac00-\ud7af"  # Hangul syllables
-    "\uf900-\ufaff"  # CJK compatibility ideographs
-    "\uff00-\uff65"  # fullwidth forms (fullwidth Latin, CJK brackets, ...)
-    "\uff66-\uff9f"  # halfwidth katakana
-    "\U00020000-\U0002a6df"  # CJK ext B
+    "\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff"  # Arabic family
+    "\ufe70-\ufeff\u0700-\u074f\u0780-\u07bf"  # Arabic forms, Syriac, Thaana
+    "\u07c0-\u07ff\u0800-\u083f\u0840-\u085f\u0860-\u086f"  # NKo, Samaritan, Mandaic
+    "\u0900-\u097f\u0980-\u09ff\u0a00-\u0a7f\u0a80-\u0aff"  # Indic N-C
+    "\u0b00-\u0b7f\u0b80-\u0bff\u0c00-\u0c7f\u0c80-\u0cff"  # Indic O-K
+    "\u0d00-\u0d7f\u0d80-\u0dff"  # Malayalam, Sinhala
+    "\u0e00-\u0e7f\u0e80-\u0eff\u0f00-\u0fff"  # Thai, Lao, Tibetan
+    "\u1000-\u109f\u1780-\u17ff\u19e0-\u19ff"  # Myanmar, Khmer
+    "\u1950-\u197f\u1980-\u19df\uaa60-\uaa7f\uaa80-\uaadf"  # Tai scripts
+    "\u1700-\u177f\u1a20-\u1a6f\ua980-\ua9df"  # Philippine, Tai Tham, Javanese
+    "\ua930-\ua95f\u1900-\u194f"  # Rejang, Limbu
+    "\u1800-\u18af\u18b0-\u18ff"  # Mongolian, Canadian Aboriginal
+    "\u1680-\u169f\u16a0-\u16ff\u13a0-\u13ff"  # Ogham, Runic, Cherokee
+    "\ua500-\ua63f\ua000-\ua4cf"  # Vai, Yi
+    "\u10a0-\u10ff\u2d00-\u2d2f\u1200-\u139f\uab00-\uab2f"  # Georgian, Ethiopic
+    "\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\ud7b0-\ud7ff\uac00-\ud7af"  # Hangul
+    "\u2e80-\u2fdf\u3000-\u303f\u3100-\u312f\u31a0-\u31bf"  # CJK radicals..Bopomofo
+    "\u3190-\u319f\u31c0-\u31ef\u3200-\u32ff\u3300-\u33ff"  # Kanbun..compat
+    "\U0001b000-\U0001b16f"  # Kana supplement
+    "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"  # CJK ideographs
+    "\U00020000-\U0002fa1f\U00030000-\U0003234f"  # CJK ext planes
+    "\ufe10-\ufe6f\uff00-\uffdc"  # CJK compat forms, small/halfwidth/fullwidth
     "]"
 )
 
@@ -170,33 +180,58 @@ def non_english_issues(relative_path: str, text: str) -> list[tuple[int, str]]:
     return findings
 
 
-def tracked_files(repo_root: Path) -> list[str]:
+def _git_entries(repo_root: Path, args: list[str]) -> list[str]:
+    # -z: NUL-delimited and never C-style quoted, so filenames with non-ASCII
+    # or control characters arrive literally. Line-based output under the
+    # default core.quotePath would quote those names, making read_bytes() fail
+    # and silently skipping the file (an OSError used to read as "no issue").
     completed = subprocess.run(
-        ["git", "ls-files"],
-        cwd=repo_root,
-        text=True,
-        capture_output=True,
-        check=True,
+        ["git", *args], cwd=repo_root, capture_output=True, check=True
     )
-    return completed.stdout.splitlines()
+    return [os.fsdecode(entry) for entry in completed.stdout.split(b"\0") if entry]
+
+
+def tracked_files(repo_root: Path) -> list[str]:
+    return _git_entries(repo_root, ["ls-files", "-z"])
 
 
 def staged_files(repo_root: Path) -> list[str]:
+    return _git_entries(
+        repo_root, ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"]
+    )
+
+
+def _read_index_blob(repo_root: Path, relative_path: str) -> bytes:
     completed = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        ["git", "show", f":{relative_path}"],
         cwd=repo_root,
-        text=True,
         capture_output=True,
         check=True,
     )
-    return completed.stdout.splitlines()
+    return completed.stdout
 
 
-def check_file(repo_root: Path, relative_path: str) -> int:
-    try:
-        data = (repo_root / relative_path).read_bytes()
-    except OSError:
-        return 0
+def check_file(repo_root: Path, relative_path: str, from_index: bool = False) -> int:
+    if from_index:
+        # Staged mode audits the blob selected in the index, not the working
+        # tree: reading the worktree copy lets a developer stage prohibited
+        # content and pass the pre-commit check after cleaning the worktree
+        # (and produces false failures the other way round). Fail closed when
+        # the blob cannot be read.
+        try:
+            data = _read_index_blob(repo_root, relative_path)
+        except (OSError, subprocess.CalledProcessError):
+            print(
+                "[repo-hygiene] unreadable-staged-entry\n"
+                f"  at {relative_path}\n"
+                "  the index blob could not be read; failing closed.\n"
+            )
+            return 1
+    else:
+        try:
+            data = (repo_root / relative_path).read_bytes()
+        except OSError:
+            return 0
 
     issues = 0
     issue = binary_issue(relative_path, data)
@@ -233,8 +268,12 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    files = staged_files(repo_root) if args.check_staged else tracked_files(repo_root)
-    issues = sum(check_file(repo_root, path) for path in files)
+    if args.check_staged:
+        files = staged_files(repo_root)
+        issues = sum(check_file(repo_root, path, from_index=True) for path in files)
+    else:
+        files = tracked_files(repo_root)
+        issues = sum(check_file(repo_root, path) for path in files)
 
     if issues:
         print(f"Found {issues} repo-hygiene issue(s).")

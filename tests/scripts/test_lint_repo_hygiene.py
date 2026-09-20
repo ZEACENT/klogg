@@ -110,5 +110,94 @@ class NonEnglishLintTest(unittest.TestCase):
         self.assertEqual(findings[0][0], 1)
 
 
+class NonLatinScriptCoverageTest(unittest.TestCase):
+    def test_armenian_georgian_bengali_letters_are_rejected(self):
+        text = (
+            "// Հայերեն\n"  # lint-allow: repo-hygiene
+            "// ქართული\n"  # lint-allow: repo-hygiene
+            "// বাংলা\n"  # lint-allow: repo-hygiene
+        )
+        findings = MODULE.non_english_issues("src/app/main.cpp", text)
+        self.assertEqual(len(findings), 3)
+        self.assertEqual([line for line, _ in findings], [1, 2, 3])
+
+    def test_cjk_punctuation_and_fullwidth_forms_still_rejected(self):
+        text = "x = 、！\n"  # lint-allow: repo-hygiene
+        findings = MODULE.non_english_issues("src/app/main.cpp", text)
+        self.assertEqual(len(findings), 1)
+
+    def test_typographic_punctuation_still_passes(self):
+        text = "// dashes — – quotes “…” arrow →\n"
+        self.assertEqual(MODULE.non_english_issues("src/app/main.cpp", text), [])
+
+
+class GitFilenameParsingTest(unittest.TestCase):
+    @staticmethod
+    def make_repo(root):
+        import subprocess
+
+        def git(*args):
+            return subprocess.run(
+                ["git", *args], cwd=root, capture_output=True, check=True
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "test")
+        return git
+
+    def test_tracked_files_returns_non_ascii_names_unquoted(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            git = self.make_repo(root)
+            (root / "docs").mkdir()
+            name = "docs/测试.md"  # lint-allow: repo-hygiene
+            (root / name).write_text("hello\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "init")
+
+            files = MODULE.tracked_files(root)
+
+            self.assertEqual(files, [name])
+
+    def test_staged_files_returns_non_ascii_names_unquoted(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            git = self.make_repo(root)
+            (root / "src").mkdir()
+            name = "src/测试.cpp"  # lint-allow: repo-hygiene
+            (root / name).write_text("int x;\n", encoding="utf-8")
+            git("add", ".")
+
+            files = MODULE.staged_files(root)
+
+            self.assertEqual(files, [name])
+
+
+class StagedModeIndexTest(unittest.TestCase):
+    def test_check_file_reads_index_blob_not_worktree(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            git = GitFilenameParsingTest.make_repo(root)
+            (root / "a.md").write_text("clean\n", encoding="utf-8")
+            git("add", "a.md")
+            git("commit", "-qm", "init")
+
+            # Stage a violating blob, then clean the working-tree copy.
+            (root / "a.md").write_text("// 中文\n", encoding="utf-8")  # lint-allow: repo-hygiene
+            git("add", "a.md")
+            (root / "a.md").write_text("clean\n", encoding="utf-8")
+
+            issues = MODULE.check_file(root, "a.md", from_index=True)
+
+            self.assertEqual(issues, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

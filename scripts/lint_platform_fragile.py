@@ -657,7 +657,7 @@ def _check_nonzero_watchdog_timer(text: str, path: Path) -> list[tuple[int, str]
 
 
 _PERFORMANCE_ASSERTION_RE = re.compile(
-    r"\b(?:CHECK|REQUIRE)\s*\(\s*(?P<timer>\w*[Ee]lapsedMs)\s*<\s*"
+    r"\b(?:CHECK|REQUIRE|KLOGG_CHECK_PERF_BUDGET)\s*\(\s*(?P<timer>\w*[Ee]lapsedMs)\s*<\s*"
     r"(?P<budget>(?:[1-9]\d{3,}|[A-Za-z_]\w*BudgetMs))\s*\)"
 )
 _MULTI_SAMPLE_TIMER_RE = re.compile(r"^(?:best|min|median)[A-Z]")
@@ -673,6 +673,45 @@ _SANITIZER_EXCLUSION_RE = re.compile(
 )
 _NDEBUG_DEFINED_RE = re.compile(r"defined\s*\(\s*NDEBUG\s*\)")
 _NDEBUG_IFDEF_RE = re.compile(r"^\s*#\s*ifdef\s+NDEBUG\b")
+
+
+_PIXEL_CLICK_ARITHMETIC_RE = re.compile(
+    r"\bcharHeight\s*\*\s*\d+\s*\+\s*charHeight\s*/\s*2"
+)
+
+
+def _check_pixel_click_arithmetic(text: str, path: Path) -> list[tuple[int, str]]:
+    """Flag the charHeight * N + charHeight / 2 click-position idiom in tests.
+
+    Deriving a viewport y from raw font height assumes y == charHeight * line,
+    which ignores drawingTopOffset_ and each platform's font metrics. On the
+    Linux CI legs the shift-click scenario (crawlerwidget_test.cpp, PR #76)
+    resolved its presses to the wrong rows and the asserted line count never
+    arrived; the same latent pattern existed in the selection-drag scenarios.
+    Resolve click positions through the view's own coordinate mapping
+    (AbstractLogView::lineAtYForTest) instead, growing the viewport when the
+    default offscreen size cannot show the target rows.
+    """
+    if "tests" not in path.parts:
+        return []
+    code_lines = _strip_cpp_comments(text).splitlines()
+    source_lines = text.splitlines()
+    findings: list[tuple[int, str]] = []
+    for line_num, line in enumerate(code_lines, start=1):
+        if not _PIXEL_CLICK_ARITHMETIC_RE.search(line):
+            continue
+        if ALLOW_MARKER in source_lines[line_num - 1]:
+            continue
+        findings.append(
+            (
+                line_num,
+                "Deriving a click y from raw font height maps to different rows on "
+                "different platforms (Linux CI resolved shift-click presses to the "
+                "wrong rows, PR #76). Resolve the position through the view's "
+                "coordinate mapping (lineAtYForTest) instead.",
+            )
+        )
+    return findings
 
 
 def _requires_optimized_build(guard_line: str) -> bool:
@@ -2571,6 +2610,10 @@ MULTI_LINE_CHECKS: list[dict] = [
     {
         "name": "uninstrumented-performance-budget",
         "check": _check_uninstrumented_performance_budget,
+    },
+    {
+        "name": "pixel-click-arithmetic",
+        "check": _check_pixel_click_arithmetic,
     },
 ]
 

@@ -68,7 +68,7 @@ QString makeSessionSettingsPath( const QString& appConfigPath )
 }
 
 #ifdef Q_OS_MAC
-QString resolvePortableConfigPath( const QString& executableDirPath )
+QString resolveBundledPortableConfigPath( const QString& executableDirPath )
 {
     const auto portableConfigName = QString( ApplicationSessionFile ) + PortableExtension;
     const auto bundledPortableConfigPath = QDir( executableDirPath ).filePath( portableConfigName );
@@ -105,13 +105,13 @@ QString resolvePortableConfigPath( const QString& executableDirPath )
 #endif
 } // namespace
 
-QString PersistentInfo::portableConfigPathForTest( const QString& executablePath )
+QString PersistentInfo::resolvePortableConfigPath( const QString& executablePath )
 {
     auto portableConfigPath
         = executablePath + QDir::separator() + ApplicationSessionFile + PortableExtension;
 
 #ifdef Q_OS_MAC
-    portableConfigPath = resolvePortableConfigPath( executablePath );
+    portableConfigPath = resolveBundledPortableConfigPath( executablePath );
 #endif
 
     // Test seam: parallel ctest processes each get their own portable config
@@ -140,11 +140,17 @@ PersistentInfo::PersistentInfo()
         executablePath = QString::fromUtf8( path.data(), dirnameLength );
     }
 
-    const auto portableConfigPath = portableConfigPathForTest( executablePath );
+    const auto portableConfigPath = resolvePortableConfigPath( executablePath );
 
     LOG_INFO << "Portable config path " << portableConfigPath;
 
-    const auto usePortableConfiguration = ForcePortable || QFileInfo::exists( portableConfigPath );
+    // A nonempty override itself selects portable mode: the override points at
+    // a fresh per-process directory where no klogg.conf exists yet, so without
+    // this, non-ForcePortable binaries (e.g. the klogg_smoke app) would fall
+    // through to the OS settings and escape the test isolation.
+    const auto usePortableConfiguration
+        = ForcePortable || qEnvironmentVariableIsSet( "KLOGG_PORTABLE_CONFIG_DIR" )
+          || QFileInfo::exists( portableConfigPath );
 
     if ( usePortableConfiguration ) {
         PreparePortableSettings( portableConfigPath );
