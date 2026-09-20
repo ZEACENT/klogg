@@ -500,7 +500,7 @@ void requireSmallAppendContent( const CaptureStore& store,
     REQUIRE( store.lineCount().get() == workload.lines.size() );
     REQUIRE( store.lastTrimResult().trimmedLines == 0_lcount );
     REQUIRE( store.lastTrimResult().trimmedBytes == 0 );
-    REQUIRE( segmentFiles( store.capturePath() ).isEmpty() );
+    REQUIRE( waitForNoSegments( store.capturePath() ) );
     auto* codec = QTextCodec::codecForName( "UTF-8" );
     const auto raw = store.buildRawLines( 0_lnum, store.lineCount(), codec, {} );
     REQUIRE( QByteArray( raw.buffer.data(), static_cast<int>( raw.buffer.size() ) )
@@ -2194,7 +2194,7 @@ TEST_CASE( "CaptureStore retries retired file deletion immediately after a trans
     CaptureStoreTestAccess::failNextRetiredFileRemoval( store );
     store.clear();
 
-    REQUIRE( segmentFiles( store.capturePath() ).isEmpty() );
+    REQUIRE( waitForNoSegments( store.capturePath() ) );
 }
 
 TEST_CASE( "CaptureStore retries a transient capture directory removal failure" )
@@ -2263,7 +2263,7 @@ TEST_CASE( "CaptureStore releases retired leases after dropping the path mutex" 
     // sanitizer-instrumented runs several seconds of legitimate headroom.
     KLOGG_CHECK_PERF_BUDGET( clearElapsed < 4000 );
     sibling.reset();
-    REQUIRE( segmentFiles( owner.capturePath() ).isEmpty() );
+    REQUIRE( waitForNoSegments( owner.capturePath() ) );
 }
 
 TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
@@ -4686,7 +4686,9 @@ TEST_CASE( "CaptureStore reuses a live lease after same-name identity cycling" )
     cycledLease.reset();
     REQUIRE( QFileInfo::exists( selectedPath ) );
     originalLease.reset();
-    REQUIRE_FALSE( QFileInfo::exists( selectedPath ) );
+    // Deletion is retired by the background retry thread; wait instead of
+    // racing it (slow filesystems observed this failing, container runs).
+    REQUIRE( waitForMissingFile( selectedPath ) );
     REQUIRE( QFileInfo::exists( replacementPath ) );
 }
 
@@ -6292,7 +6294,7 @@ TEST_CASE( "CaptureStore background persistence keeps a sparse mutable tail resi
         store.retryPersistence();
     }
     CHECK( CaptureStoreTestAccess::segmentCount( store ) == 1u );
-    CHECK( segmentFiles( store.capturePath() ).isEmpty() );
+    CHECK( waitForNoSegments( store.capturePath() ) );
     CHECK( store.persistenceState().pendingSegments == 1 );
     CHECK( store.persistenceState().retryableSegments == 0 );
 
@@ -6705,7 +6707,7 @@ TEST_CASE( "CaptureStore pending publication never adopts a same length replacem
                        == "abc" );
             }
             store.clear();
-            CHECK( segmentFiles( store.capturePath() ).isEmpty() );
+            CHECK( waitForNoSegments( store.capturePath() ) );
         }
     }
 }
