@@ -748,6 +748,39 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::qWait( 50 );
     }
 
+    // Resolves the viewport y at which the view renders a source line,
+    // growing the view if the current viewport cannot show that row (font
+    // metrics and default viewport sizes differ across platforms; the Linux
+    // CI legs resolved raw charHeight-derived clicks to the wrong rows).
+    // Returns -1 when the line is still not visible at the largest size.
+    int mainYForLine( LineNumber line )
+    {
+        auto* view = crawler->logMainView_;
+        const auto scan = [ & ]() -> int {
+            const int viewportHeight = view->viewport()->height();
+            for ( int y = 0; y < viewportHeight; ++y ) {
+                const auto hit = view->lineAtYForTest( y );
+                if ( hit.has_value() && *hit == line ) {
+                    return y;
+                }
+            }
+            return -1;
+        };
+        if ( const int y = scan(); y >= 0 ) {
+            return y;
+        }
+        int height = std::max( view->height(), 400 );
+        while ( height <= 2400 ) {
+            height += 300;
+            resizeViews( 900, height );
+            render();
+            if ( const int y = scan(); y >= 0 ) {
+                return y;
+            }
+        }
+        return -1;
+    }
+
     void resizeViewsToPartialTextLineHeight( int width )
     {
         for ( int height = 70; height < 140; ++height ) {
@@ -2986,12 +3019,12 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
     {
         WHEN( "dragging to create a portion selection on one line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto charWidth = crawlerVisitor.mainCharWidth();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
             // Click on line 5 and drag horizontally
-            const int lineY = charHeight * 5 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 5_lnum );
+            REQUIRE( lineY >= 0 );
             const int startX = leftMargin + charWidth * 5;
             const int endX = leftMargin + charWidth * 20;
 
@@ -3016,12 +3049,13 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
 
         WHEN( "dragging to create a range selection across lines" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
             // Click on line 5 and drag to line 15
-            const int startY = charHeight * 5 + charHeight / 2;
-            const int endY = charHeight * 15 + charHeight / 2;
+            const int startY = crawlerVisitor.mainYForLine( 5_lnum );
+            const int endY = crawlerVisitor.mainYForLine( 15_lnum );
+            REQUIRE( startY >= 0 );
+            REQUIRE( endY >= 0 );
             const int xPos = leftMargin + 20;
 
             crawlerVisitor.mainResetGetSelectedTextCallCount();
@@ -3045,10 +3079,10 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
 
         WHEN( "clicking to select a single line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
-            const int lineY = charHeight * 10 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 10_lnum );
+            REQUIRE( lineY >= 0 );
             const int xPos = leftMargin + 20;
 
             crawlerVisitor.mainResetGetSelectedTextCallCount();
@@ -3104,10 +3138,10 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
 
         WHEN( "clicking to select a different line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
-            const int lineY = charHeight * 5 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 5_lnum );
+            REQUIRE( lineY >= 0 );
             const int xPos = leftMargin + 20;
 
             auto* viewport = crawlerVisitor.mainViewport();
@@ -3151,22 +3185,13 @@ SCENARIO( "Shift-click extending a ctrl-click selection announces the full selec
 
         auto* viewport = crawlerVisitor.mainViewport();
 
-        // Font metrics and drawing offsets differ across platforms, so derive
-        // each target row's y from the view's own coordinate mapping instead
-        // of assuming y == charHeight * line.
-        const auto yForLine = [ & ]( LineNumber line ) -> int {
-            const int viewportHeight = viewport->height();
-            for ( int y = 0; y < viewportHeight; ++y ) {
-                const auto hit = crawlerVisitor.mainView()->lineAtYForTest( y );
-                if ( hit.has_value() && *hit == line ) {
-                    return y;
-                }
-            }
-            return -1;
-        };
-        const int y5 = yForLine( 5_lnum );
-        const int y10 = yForLine( 10_lnum );
-        const int y12 = yForLine( 12_lnum );
+        // Resolve each target row's y through the view's own coordinate
+        // mapping (mainYForLine grows the viewport when the platform's font
+        // metrics leave the row invisible) instead of assuming
+        // y == charHeight * line.
+        const int y5 = crawlerVisitor.mainYForLine( 5_lnum );
+        const int y10 = crawlerVisitor.mainYForLine( 10_lnum );
+        const int y12 = crawlerVisitor.mainYForLine( 12_lnum );
         REQUIRE( y5 >= 0 );
         REQUIRE( y10 >= 0 );
         REQUIRE( y12 >= 0 );
