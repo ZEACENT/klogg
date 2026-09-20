@@ -69,7 +69,14 @@ GENERATED_PATHS = {("3rdparty", "boost")}
 def is_generated_path(relative: pathlib.Path) -> bool:
     if not relative.parts:
         return False
-    if relative.parts[0] in GENERATED_ROOTS:
+    first = relative.parts[0]
+    if first in GENERATED_ROOTS:
+        return True
+    # Out-of-tree build/cache directories inside the checkout: .gitignore
+    # already anticipates the suffixed variants (build_root_*, cpm_cache*),
+    # so a developer building in-tree under a suffixed name must not fail
+    # the source-inventory assertions.
+    if first.startswith("build_root_") or first.startswith("cpm_cache"):
         return True
     return any(
         relative.parts[: len(prefix)] == prefix for prefix in GENERATED_PATHS

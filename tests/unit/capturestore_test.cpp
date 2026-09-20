@@ -379,6 +379,21 @@ QStringList segmentFiles( const QString& capturePath )
                                           QDir::Name | QDir::IgnoreCase );
 }
 
+// Segment files are removed by the background retry thread after a clear/
+// retire, so an immediate existence check races it (seen on slow
+// filesystems). Poll for semantic completion; returns immediately when the
+// files are already gone.
+bool waitForNoSegments( const QString& capturePath, int timeoutMs = 5000 )
+{
+    QElapsedTimer deadline;
+    deadline.start();
+    while ( !segmentFiles( capturePath ).isEmpty() && deadline.elapsed() < timeoutMs ) {
+        std::this_thread::yield();
+    }
+    return segmentFiles( capturePath ).isEmpty();
+}
+
+
 QString readUtf8File( const QString& filePath )
 {
     QFile file( filePath );
@@ -4238,12 +4253,12 @@ TEST_CASE( "CaptureStore publishes spilled segments only after a complete write"
         CaptureStore store( captureId, rootPath, limits );
         capturePath = store.capturePath();
         store.appendUtf8( QByteArrayLiteral( "aaa\nbbb\n" ) );
-        REQUIRE( segmentFiles( capturePath ).isEmpty() );
+        REQUIRE( waitForNoSegments( capturePath ) );
 
         CaptureStoreTestAccess::failNextRetiredFileRemoval( store );
         CaptureStoreTestAccess::failNextSegmentWrite( store );
         REQUIRE_FALSE( CaptureStoreTestAccess::spillFirstSegment( store ) );
-        REQUIRE( segmentFiles( capturePath ).isEmpty() );
+        REQUIRE( waitForNoSegments( capturePath ) );
         const auto abandonedTemporaryFiles = QDir( capturePath ).entryList(
             QStringList{ QStringLiteral( ".klogg-segment-*.tmp" ) },
             QDir::Files | QDir::Hidden, QDir::NoSort );
@@ -4930,7 +4945,7 @@ TEST_CASE( "CaptureStore maintenance retires persisted segments before loading" 
     SECTION( "clear" )
     {
         store.clear();
-        REQUIRE( segmentFiles( capturePath ).isEmpty() );
+        REQUIRE( waitForNoSegments( capturePath ) );
         REQUIRE( QFileInfo::exists( capturePath ) );
     }
     SECTION( "delete capture files" )

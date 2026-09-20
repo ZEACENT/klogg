@@ -97,10 +97,16 @@ set_tests_properties(
   live_session_ui_retirement_contract
   livelog_controller_retirement_contract
   static_link_policy_contract
-  application_identity_contract
   adb_compiler_portability_contract
   ios_compiler_portability_contract
   PROPERTIES TIMEOUT 60
+)
+# The identity test walks the whole repository (git ls-files with an os.walk
+# fallback); give it its own outer bound with real headroom on slow
+# filesystems instead of raising the shared 60s block for everyone.
+set_tests_properties(
+  application_identity_contract
+  PROPERTIES TIMEOUT 120
 )
 set_tests_properties(live_capture_benchmark_contract PROPERTIES TIMEOUT 120)
 
