@@ -52,6 +52,9 @@ if(UNIX)
     PROPERTIES RUN_SERIAL TRUE LABELS "ui;filewatcher;lifecycle"
   )
 endif()
-if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+# Windows itests have a history of latent cross-test races (destruction-order
+# UAF class) that surface under CPU contention from sibling test processes;
+# keep the binary serialized against everything on both architectures.
+if(WIN32)
   set_tests_properties(klogg_itests PROPERTIES RUN_SERIAL TRUE)
 endif()

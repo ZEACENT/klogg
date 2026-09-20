@@ -3940,7 +3940,7 @@ SCENARIO( "Tab switches coalesce session persistence into a debounced write", "[
 
     // Let any setup-triggered persistence fire and settle (the debounce
     // interval is sub-second), then start counting from a quiet baseline.
-    QTest::qWait( 1200 );
+    QTest::qWait( 1200 );  // lint-allow: test-timing -- the debounce interval itself is the behavior under test
     auto& saveCount = SessionInfo::saveCountForTesting();
     saveCount.store( 0 );
 

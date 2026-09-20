@@ -89,6 +89,18 @@ class LogFilteredData : public AbstractLogData {
     // Interrupt the running search if one is in progress.
     // Nothing is done if no search is in progress.
     void interruptSearch();
+
+#ifdef KLOGG_TESTS
+    // Test seam: true while a throttled publication (results or status) is
+    // still armed. Tests drain the event loop until this is false instead of
+    // waiting out a fixed idle window after each search.
+    bool hasPendingPublicationsForTest() const
+    {
+        return pendingSearchResults_.has_value() || pendingSearchStatus_.has_value()
+               || searchResultsRefreshTimer_.isPending()
+               || searchStatusRefreshTimer_.isPending();
+    }
+#endif
     // Clear the search and results, invalidating queued publications from the
     // abandoned logical search.
     void clearSearch( bool dropCache = false );

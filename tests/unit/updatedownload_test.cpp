@@ -111,7 +111,7 @@ TEST_CASE( "Downloader abort prevents finished signal",
 
     // Process events briefly to verify no signal is emitted.
     QCoreApplication::processEvents();
-    QThread::msleep( 50 );
+    QThread::msleep( 50 );  // lint-allow: test-timing -- absence window: verify no signal fires after abort
     QCoreApplication::processEvents();
 
     CHECK( finishedSpy.count() == 0 );

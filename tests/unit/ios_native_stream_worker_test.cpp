@@ -2218,7 +2218,7 @@ TEST_CASE( "cleanup waits for an in-flight native callback before stop and free"
     }
     worker.stop( 73u );
     auto cleanupThread = executor.startNextOnWorker();
-    std::this_thread::sleep_for( 20ms );
+    std::this_thread::sleep_for( 20ms );  // lint-allow: test-timing -- absence window before checking teardown invariants
     CHECK_FALSE( state.callbackTeardownViolation() );
     {
         std::lock_guard<std::mutex> lock( callbackMutex );
@@ -2276,7 +2276,7 @@ TEST_CASE( "cleanup rejection falls back asynchronously and waits for active cal
     }
 
     worker.stop( 74u );
-    std::this_thread::sleep_for( 20ms );
+    std::this_thread::sleep_for( 20ms );  // lint-allow: test-timing -- absence window before checking teardown invariants
     CHECK_FALSE( stopped.load() );
     CHECK_FALSE( state.callbackTeardownViolation() );
 
@@ -2288,7 +2288,7 @@ TEST_CASE( "cleanup rejection falls back asynchronously and waits for active cal
     callbackThread.join();
     const auto stoppedDeadline = std::chrono::steady_clock::now() + 2s;
     while ( !stopped.load() && std::chrono::steady_clock::now() < stoppedDeadline ) {
-        std::this_thread::sleep_for( 1ms );
+        std::this_thread::sleep_for( 1ms );  // lint-allow: test-timing -- poll pacing under the 2s watchdog
     }
 
     CHECK( stopped.load() );
@@ -2395,7 +2395,7 @@ TEST_CASE( "default worker factory bounds sessions while native startup remains 
         auto retry = factory.create( config( 805u ), {} );
         replacement = std::move( retry.session );
         if ( replacement == nullptr ) {
-            std::this_thread::sleep_for( 1ms );
+            std::this_thread::sleep_for( 1ms );  // lint-allow: test-timing -- retry pacing under the 2s recreate deadline
         }
     }
     CHECK( replacement != nullptr );

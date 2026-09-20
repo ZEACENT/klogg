@@ -19,6 +19,8 @@
 
 #include <catch2/catch.hpp>
 
+#include "test_utils.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -795,7 +797,7 @@ class ActiveCaptureChild {
             else {
                 probe.unlock();
             }
-            std::this_thread::sleep_for( std::chrono::milliseconds{ 10 } );
+            std::this_thread::sleep_for( std::chrono::milliseconds{ 10 } );  // lint-allow: test-timing -- poll pacing under the waitForFlag deadline
         }
         return false;
     }
@@ -806,6 +808,22 @@ class ActiveCaptureChild {
     QString readyContents_;
 };
 } // namespace
+
+TEST_CASE( "Capture coordination root honors the test isolation override",
+           "[capturestore][coordination-root]" )
+{
+    QTemporaryDir isolated;
+    REQUIRE( isolated.isValid() );
+    const auto overridePath = isolated.filePath( QStringLiteral( "coordination" ) );
+    qputenv( "KLOGG_CAPTURE_COORDINATION_ROOT", overridePath.toUtf8() );
+
+    const auto root = captureCoordinationRoot();
+
+    qunsetenv( "KLOGG_CAPTURE_COORDINATION_ROOT" );
+
+    REQUIRE( root == QDir( overridePath ).absolutePath() );
+    REQUIRE( QDir{ root }.exists() );
+}
 
 TEST_CASE( "CaptureStore small appends below limits avoid coordinated maintenance",
            "[capturestore][maintenance-no-work]" )
@@ -1073,7 +1091,7 @@ TEST_CASE( "Published content wait tolerates a transient empty publication" )
 
     std::atomic<bool> published{ false };
     std::thread publisher( [ readyPath, &published ] {
-        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );  // lint-allow: test-timing -- publisher thread deliberately delays the write
         // QSaveFile::commit() renames over the destination. On Windows a
         // concurrent reader, or an AV scan of the temp file, can make that
         // rename fail with a sharing violation; retry so a transient failure
@@ -1087,7 +1105,7 @@ TEST_CASE( "Published content wait tolerates a transient empty publication" )
                              && publishedFile.write( payload ) == payload.size()
                              && publishedFile.commit() );
             if ( !published.load() ) {
-                std::this_thread::sleep_for( std::chrono::milliseconds( 25 ) );
+                std::this_thread::sleep_for( std::chrono::milliseconds( 25 ) );  // lint-allow: test-timing -- retry pacing against transient sharing violations
             }
         }
     } );
@@ -1120,7 +1138,7 @@ TEST_CASE( "Published content wait follows a late publication" )
 
     std::atomic<bool> published{ false };
     std::thread publisher( [ readyPath, &published ] {
-        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+        std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );  // lint-allow: test-timing -- publisher thread deliberately delays the write
         QSaveFile publishedFile( readyPath );
         publishedFile.setDirectWriteFallback( false );
         const auto payload = QByteArrayLiteral( "content" );
@@ -2041,13 +2059,13 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     const auto elapsedMs = timer.elapsed();
 
     INFO( "cleanup scheduling elapsed ms: " << elapsedMs );
-    CHECK( elapsedMs < 200 );
+    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );
     REQUIRE( QDir{ retainedPath }.exists() );
 
     QElapsedTimer deadline;
     deadline.start();
     while ( QDir{ orphanPath }.exists() && deadline.elapsed() < 5000 ) {
-        std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+        std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );  // lint-allow: test-timing -- poll pacing under the cleanup deadline
     }
 
     REQUIRE_FALSE( QDir{ orphanPath }.exists() );
@@ -2226,7 +2244,7 @@ TEST_CASE( "CaptureStore releases retired leases after dropping the path mutex" 
     // full default 5000ms gate timeout (plus QLockFile contention sleeps).
     // Keep the bound comfortably below that regression floor while allowing
     // sanitizer-instrumented runs several seconds of legitimate headroom.
-    REQUIRE( clearElapsed < 4000 );
+    KLOGG_CHECK_PERF_BUDGET( clearElapsed < 4000 );
     sibling.reset();
     REQUIRE( segmentFiles( owner.capturePath() ).isEmpty() );
 }
@@ -2299,7 +2317,7 @@ TEST_CASE( "CaptureStore lifecycle transitions survive a gate timeout" )
     // waited the full default 5000ms gate timeout. Keep an elapsed bound
     // below that regression floor while allowing sanitizer-instrumented runs
     // several seconds of legitimate headroom.
-    REQUIRE( deletionElapsed < 4000 );
+    KLOGG_CHECK_PERF_BUDGET( deletionElapsed < 4000 );
     REQUIRE( deletionFinished.load( std::memory_order_acquire ) );
     REQUIRE( deletionCompletedAfterRelease );
 }
@@ -2369,7 +2387,7 @@ TEST_CASE( "CaptureStore deactivation survives a gate timeout" )
     // Same regression floor as the deletion case: a destruction that wrongly
     // waited the full default 5000ms gate timeout must not slip past the
     // generous watchdog.
-    REQUIRE( destructionElapsed < 4000 );
+    KLOGG_CHECK_PERF_BUDGET( destructionElapsed < 4000 );
     REQUIRE( destructionFinished.load( std::memory_order_acquire ) );
     // The directory removal is deferred to a background retry thread, so an
     // immediate existence check races it (it flaked under the ubsan-only leg).
@@ -3907,7 +3925,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
     // Instrumented and unoptimized builds validate correctness above without
     // turning hosted-runner speed into a performance regression signal.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
-    CHECK( bestElapsedMs < 2000 );
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );
 #endif
 }
 
@@ -3952,7 +3970,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
     // optimized implementation itself is being measured.
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 200;
-    CHECK( bestElapsedMs < MetadataOverheadBudgetMs );
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );
 #endif
 }
 

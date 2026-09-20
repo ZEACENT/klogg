@@ -71,7 +71,7 @@ int main( int argc, const char** argv )
         file.write( newLine, static_cast<qint64>( qstrlen( newLine ) ) );
 
         if ( flag == WriteFileModification::DelayClosingFile ) {
-            QThread::sleep( 2 );
+            QThread::sleep( 2 );  // lint-allow: test-timing -- DelayClosingFile deliberately simulates a slow writer
         }
     }
 

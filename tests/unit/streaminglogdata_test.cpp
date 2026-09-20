@@ -1353,7 +1353,7 @@ TEST_CASE( "Streaming live search dispatches while updates keep arriving" )
         logData.appendUtf8( makeStreamingSearchLines( 1000 + batch * 10, 10 ) );
         filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
         QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
-        QThread::msleep( 5 );
+        QThread::msleep( 5 );  // lint-allow: test-timing -- producer pacing while streaming steady updates
 
         const auto counters = filteredData->searchPerformanceCounters();
         if ( counters.operationStarts > countersAfterInitialSearch.operationStarts ) {

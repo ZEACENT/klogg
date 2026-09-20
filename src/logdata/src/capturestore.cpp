@@ -347,13 +347,22 @@ QString captureCoordinationRoot()
     // capture-path ownership across processes, so another local user must not
     // be able to pre-create or redirect them. GenericCacheLocation never
     // depends on QCoreApplication::applicationName(), which klogg does not set.
+    // Tests redirect the root through KLOGG_CAPTURE_COORDINATION_ROOT so that
+    // parallel ctest processes never share ownership markers; the override is
+    // honored verbatim (already a per-test directory) without the app suffix.
+    const auto overrideRoot = qEnvironmentVariable( "KLOGG_CAPTURE_COORDINATION_ROOT" );
     const auto cacheRoot
-        = QStandardPaths::writableLocation( QStandardPaths::GenericCacheLocation );
+        = overrideRoot.isEmpty()
+              ? QStandardPaths::writableLocation( QStandardPaths::GenericCacheLocation )
+              : overrideRoot;
     if ( cacheRoot.isEmpty() ) {
         return {};
     }
-    const auto root = QDir( QDir( cacheRoot ).filePath( QStringLiteral( "klogg" ) ) )
-                          .filePath( QStringLiteral( "capture_coordination" ) );
+    const auto root
+        = overrideRoot.isEmpty()
+              ? QDir( QDir( cacheRoot ).filePath( QStringLiteral( "klogg" ) ) )
+                    .filePath( QStringLiteral( "capture_coordination" ) )
+              : QDir( cacheRoot ).absolutePath();
     if ( !QDir{}.mkpath( root ) ) {
         return {};
     }

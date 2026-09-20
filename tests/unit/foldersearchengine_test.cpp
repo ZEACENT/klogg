@@ -19,6 +19,8 @@
 
 #include <catch2/catch.hpp>
 
+#include "test_utils.h"
+
 #include "configuration.h"
 #include "encodingdetector.h"
 #include "foldersearchengine.h"
@@ -50,7 +52,7 @@ bool waitUntil( const std::function<bool()>& predicate, int timeoutMilliseconds 
     timer.start();
     while ( !predicate() && timer.elapsed() < timeoutMilliseconds ) {
         QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
-        QThread::msleep( 1 );
+        QThread::msleep( 1 );  // lint-allow: test-timing -- poll pacing under the waitUntil deadline
     }
     QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
     return predicate();
@@ -588,7 +590,7 @@ TEST_CASE( "FolderSearchEngine bounds quarantined blocked enumerations",
     REQUIRE( state->enteredSecond.tryAcquire( 1, 3000 ) );
     engine.startFolderSearch( dir.path(), RegularExpressionPattern( "MATCH" ) );
 
-    QThread::msleep( 200 );
+    QThread::msleep( 200 );  // lint-allow: test-timing -- absence assertion: give a would-be third enumeration a grace window
     QCoreApplication::processEvents();
     CHECK( state->calls.load() == 2 );
     CHECK( snapshotCount == 0 );
@@ -677,7 +679,7 @@ TEST_CASE( "FolderSearchEngine destruction does not wait for blocked enumeration
     QElapsedTimer destructionTimer;
     destructionTimer.start();
     engine.reset();
-    CHECK( destructionTimer.elapsed() < 1000 );
+    KLOGG_CHECK_PERF_BUDGET( destructionTimer.elapsed() < 1000 );
 
     state->release.release();
     REQUIRE( waitUntil( [ &state ] { return state->returned.load(); } ) );

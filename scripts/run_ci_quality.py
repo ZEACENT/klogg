@@ -17,6 +17,7 @@ def quality_commands(root: pathlib.Path) -> list[list[str]]:
     return [
         [sys.executable, "scripts/lint_repo_hygiene.py"],
         [sys.executable, "scripts/lint_platform_fragile.py"],
+        [sys.executable, "scripts/lint_test_determinism.py"],
         [sys.executable, "scripts/lint_linux_package_runtime.py"],
         [sys.executable, "scripts/lint_ci_quality.py"],
         [sys.executable, "scripts/lint_translation_catalogs.py"],

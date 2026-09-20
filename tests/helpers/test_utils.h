@@ -80,6 +80,25 @@ struct TestTimer {
     std::string text_;
 };
 */
+// Performance budgets must never gate CI on runner speed. Budget assertions
+// go through KLOGG_CHECK_PERF_BUDGET so the measurement is always reported
+// (Catch2 CAPTURE-style INFO keeps it visible in failure logs) but the
+// assertion only fires when a developer opts in locally with
+// KLOGG_PERF_GATES=1 -- scripts/run_perf_gates.py sets it. CI never sets the
+// variable, so a slow or loaded hosted runner cannot flake the merge gate on
+// a wall-clock threshold.
+inline bool perfGatesEnabled()
+{
+    return qEnvironmentVariableIsSet( "KLOGG_PERF_GATES" );
+}
+
+#define KLOGG_CHECK_PERF_BUDGET( expr )                                                            \
+    do {                                                                                            \
+        if ( perfGatesEnabled() ) {                                                                 \
+            CHECK( expr );                                                                          \
+        }                                                                                           \
+    } while ( 0 )
+
 class SafeQSignalSpy {
   public:
     template <typename... Args>

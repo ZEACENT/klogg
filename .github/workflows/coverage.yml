@@ -100,7 +100,7 @@ jobs:
         shell: bash
         run: |
           cd "$KLOGG_BUILD_ROOT"
-          ctest --output-on-failure
+          ctest --output-on-failure --parallel "$(getconf _NPROCESSORS_ONLN)"
 
       - name: Generate coverage report
         shell: bash

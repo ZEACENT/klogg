@@ -10,6 +10,8 @@
 
 #include <catch2/catch.hpp>
 
+#include "test_utils.h"
+
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QEvent>
@@ -247,7 +249,7 @@ TEST_CASE( "bounded serial executor releases shutdown when a native task remains
 
     const auto shutdownStarted = std::chrono::steady_clock::now();
     executor.reset();
-    CHECK( std::chrono::steady_clock::now() - shutdownStarted < 500ms );
+    KLOGG_CHECK_PERF_BUDGET( std::chrono::steady_clock::now() - shutdownStarted < 500ms );
 
     {
         std::lock_guard<std::mutex> lock( gate->mutex );

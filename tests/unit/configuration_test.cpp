@@ -26,6 +26,7 @@
 #include <QUuid>
 
 #include "configuration.h"
+#include "persistentinfo.h"
 #include "shortcuts.h"
 
 namespace {
@@ -68,6 +69,19 @@ void writeShortcutArray( QSettings& settings, const std::map<std::string, QStrin
     settings.sync();
 }
 } // namespace
+
+TEST_CASE( "Portable config path honors the test isolation override" )
+{
+    const auto dirPath = makeTestDir( "portable_config_override" );
+    qputenv( "KLOGG_PORTABLE_CONFIG_DIR", dirPath.toUtf8() );
+
+    const auto resolved = PersistentInfo::portableConfigPathForTest(
+        QStringLiteral( "/some/executable/dir" ) );
+
+    qunsetenv( "KLOGG_PORTABLE_CONFIG_DIR" );
+
+    REQUIRE( resolved == QDir{ dirPath }.filePath( "klogg.conf" ) );
+}
 
 TEST_CASE( "Configuration defaults line spacing to an editor-friendly value" )
 {

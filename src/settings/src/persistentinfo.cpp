@@ -105,6 +105,29 @@ QString resolvePortableConfigPath( const QString& executableDirPath )
 #endif
 } // namespace
 
+QString PersistentInfo::portableConfigPathForTest( const QString& executablePath )
+{
+    auto portableConfigPath
+        = executablePath + QDir::separator() + ApplicationSessionFile + PortableExtension;
+
+#ifdef Q_OS_MAC
+    portableConfigPath = resolvePortableConfigPath( executablePath );
+#endif
+
+    // Test seam: parallel ctest processes each get their own portable config
+    // directory so per-process settings (favorites, session state) cannot
+    // cross-pollute through the shared build output directory.
+    const auto portableOverride = qEnvironmentVariable( "KLOGG_PORTABLE_CONFIG_DIR" );
+    if ( !portableOverride.isEmpty() ) {
+        QDir{}.mkpath( portableOverride );
+        portableConfigPath
+            = QDir( portableOverride )
+                  .absoluteFilePath( QString( ApplicationSessionFile ) + PortableExtension );
+    }
+
+    return portableConfigPath;
+}
+
 PersistentInfo::PersistentInfo()
 {
     QString executablePath;
@@ -117,12 +140,7 @@ PersistentInfo::PersistentInfo()
         executablePath = QString::fromUtf8( path.data(), dirnameLength );
     }
 
-    auto portableConfigPath
-        = executablePath + QDir::separator() + ApplicationSessionFile + PortableExtension;
-
-#ifdef Q_OS_MAC
-    portableConfigPath = resolvePortableConfigPath( executablePath );
-#endif
+    const auto portableConfigPath = portableConfigPathForTest( executablePath );
 
     LOG_INFO << "Portable config path " << portableConfigPath;
 
@@ -191,7 +209,7 @@ void PersistentInfo::UpdateSettings()
         appSettings_->remove( "SavedSearches" );
     }
 
-    std::pair<QString, QString> keysToMoveAround[] = {
+    const std::pair<QString, QString> keysToMoveAround[] = {
         { "DefaultConfigurationView.searchAutoRefresh", "defaultView.searchAutoRefresh" },
         { "DefaultConfigurationView.searchIgnoreCase", "defaultView.searchIgnoreCase" },
         { "DefaultConfigurationView.splitterSizes", "defaultView.splitterSizes" },
