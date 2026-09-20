@@ -3146,25 +3146,44 @@ SCENARIO( "Shift-click extending a ctrl-click selection announces the full selec
 
     GIVEN( "a loaded log file with lines 5 and 10 ctrl-click selected" )
     {
-        const auto charHeight = crawlerVisitor.mainCharHeight();
         const auto leftMargin = crawlerVisitor.mainLeftMargin();
         const int xPos = leftMargin + 20;
 
         auto* viewport = crawlerVisitor.mainViewport();
 
+        // Font metrics and drawing offsets differ across platforms, so derive
+        // each target row's y from the view's own coordinate mapping instead
+        // of assuming y == charHeight * line.
+        const auto yForLine = [ & ]( LineNumber line ) -> int {
+            const int viewportHeight = viewport->height();
+            for ( int y = 0; y < viewportHeight; ++y ) {
+                const auto hit = crawlerVisitor.mainView()->lineAtYForTest( y );
+                if ( hit.has_value() && *hit == line ) {
+                    return y;
+                }
+            }
+            return -1;
+        };
+        const int y5 = yForLine( 5_lnum );
+        const int y10 = yForLine( 10_lnum );
+        const int y12 = yForLine( 12_lnum );
+        REQUIRE( y5 >= 0 );
+        REQUIRE( y10 >= 0 );
+        REQUIRE( y12 >= 0 );
+
         QSignalSpy selectionSpy( crawlerVisitor.mainView(), &AbstractLogView::newSelection );
 
         QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
-                           QPoint( xPos, charHeight * 5 + charHeight / 2 ) );
+                           QPoint( xPos, y5 ) );
         QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
-                           QPoint( xPos, charHeight * 10 + charHeight / 2 ) );
+                           QPoint( xPos, y10 ) );
 
         WHEN( "shift-clicking line 12 to extend a range from the last toggled line" )
         {
             selectionSpy.clear();
 
             QTest::mouseClick( viewport, Qt::LeftButton, Qt::ShiftModifier,
-                               QPoint( xPos, charHeight * 12 + charHeight / 2 ) );
+                               QPoint( xPos, y12 ) );
 
             THEN( "the press emission already carries the total selected line count" )
             {
