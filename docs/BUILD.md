@@ -377,6 +377,23 @@ Sanitizer and Debug builds distort timings; expect spurious budget failures
 there. `scripts/lint_test_determinism.py` (part of the CI lint gate) rejects
 new raw wall-clock assertions and unbounded timing patterns in tests.
 
+Because the macro's expression is skipped unless `KLOGG_PERF_GATES=1`, and CI
+never sets it, a `KLOGG_CHECK_PERF_BUDGET` call site is a statement that **CI
+does not check that property**. Route only genuine speed budgets through it,
+and mark every call site with `// lint-allow: perf-budget` plus the reason (the
+lint enforces the marker). A *correctness* or *liveness* property — "the call
+only dispatches and never runs the work on the caller's thread", "the
+contended lock was waited on for the configured timeout" — must be asserted
+deterministically so it runs on every CI leg, by observing the mechanism
+rather than the elapsed time:
+
+- `FileWatcher::efswOperationThreadForTest()` reports which thread executed the
+  last efsw operation, so a test can assert `addFile` / `updateConfiguration` /
+  `checkWatches` dispatched their work instead of running it on the caller.
+- `CaptureStoreTestAccess::capturePathGateWaits()` records the timeouts that
+  reached the capture-path gate, so a test can assert the configured timeout
+  was used instead of a hardcoded default.
+
 ### macOS first-party ThreadSanitizer: live-save guard
 
 Changes to asynchronous live-save ownership need a ThreadSanitizer run before

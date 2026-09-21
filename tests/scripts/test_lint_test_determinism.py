@@ -252,6 +252,58 @@ class PerfBudgetRuleTest(unittest.TestCase):
         findings = scan(self.CASE % 'CHECK( timer.elapsed() >= 1 );')
         self.assertEqual(findings, [])
 
+    def test_negated_elapsed_comparison_is_not_a_budget(self):
+        # CHECK_FALSE( elapsed < minimum ) demands a *minimum* duration, so it
+        # is a correctness assertion that must keep running in the default CI
+        # run rather than being pushed behind a [.perf] tag.
+        for snippet in (
+            'CHECK_FALSE( timer.elapsed() < 50 );',
+            'REQUIRE_FALSE( timer.elapsed() < 50 );',
+            'CHECK_FALSE( std::chrono::steady_clock::now() - started < 50ms );',
+        ):
+            self.assertEqual(scan(self.CASE % snippet), [], snippet)
+
+
+class PerfBudgetMacroRuleTest(unittest.TestCase):
+    def test_unmarked_macro_call_site_is_flagged(self):
+        findings = scan('KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );')
+        self.assertEqual([f.rule for f in findings], ["perf-budget-unmarked"])
+
+    def test_marked_macro_call_site_is_allowed(self):
+        self.assertEqual(
+            scan(
+                'KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 ); '
+                '// lint-allow: perf-budget'
+            ),
+            [],
+        )
+
+    def test_line_wrapped_macro_with_marker_is_allowed(self):
+        text = (
+            'KLOGG_CHECK_PERF_BUDGET(\n'
+            '    elapsedMs\n'
+            '    < 200 );  // lint-allow: perf-budget\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_macro_definition_is_not_a_call_site(self):
+        text = (
+            '#define KLOGG_CHECK_PERF_BUDGET( expr )\\\n'
+            '    do {                                \\\n'
+            '        CHECK( expr );                  \\\n'
+            '    } while ( 0 )\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_marker_does_not_silence_plain_budget_rule(self):
+        # A marked plain assertion inside an untagged case still reports the
+        # missing [.perf] tag.
+        text = (
+            'TEST_CASE( "fast path", "[capture]" )\n{\n'
+            'CHECK( elapsedMs < 200 ); // lint-allow: perf-budget\n}\n'
+        )
+        self.assertEqual([f.rule for f in scan(text)], ["perf-budget-needs-perf-tag"])
+
 
 class ScopeTest(unittest.TestCase):
     def test_non_test_files_are_not_scanned(self):

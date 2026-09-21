@@ -1324,7 +1324,10 @@ TEST_CASE( "iOS native transport stop is idempotent returns promptly and retires
     const auto stopElapsedMs = elapsed.elapsed();
     transport.stop( 301u );
 
-    KLOGG_CHECK_PERF_BUDGET( stopElapsedMs < 100 );
+    // Local-only latency budget for the non-blocking stop: CI covers the
+    // contract through the stopCalls assertion below and the recorded state
+    // transitions, not through how long stop() took.
+    KLOGG_CHECK_PERF_BUDGET( stopElapsedMs < 100 );  // lint-allow: perf-budget
     CHECK( factory.sessions.at( 0 )->stopCalls == 1 );
     factory.publishStopped( 0u );
     drainQtEvents();

@@ -29,10 +29,23 @@ repository:
   gates. They must be marked ``lint-allow: perf-budget`` AND live inside a
   Catch2 case tagged ``[.perf]`` so CI (which runs the default tag set)
   never executes them; developers run them locally via ``ctest -L perf``.
+  Assertion polarity matters: ``CHECK_FALSE( elapsed < N )`` and
+  ``CHECK( elapsed >= N )`` demand a *minimum* duration, so they are
+  correctness assertions and stay in the default CI run.
+* ``KLOGG_CHECK_PERF_BUDGET( expr )`` never evaluates ``expr`` in CI --
+  the macro only fires when ``KLOGG_PERF_GATES=1`` is set, and CI never
+  sets it. Every call site therefore needs a ``lint-allow: perf-budget``
+  marker stating why skipping it is safe. Routing a *correctness* or
+  *liveness* property through the macro silently drops CI coverage (PR
+  #76 did this to the "returns immediately" and "gate timeout" checks);
+  those must be asserted deterministically instead -- observe the
+  mechanism (dispatch thread, effective timeout) rather than the elapsed
+  time.
 
 When a pattern is genuinely intentional, add a trailing comment on the same
 line: ``// lint-allow: test-timing`` (waits/sleeps) or
-``// lint-allow: perf-budget`` (budget assertions). The legacy
+``// lint-allow: perf-budget`` (budget assertions and
+``KLOGG_CHECK_PERF_BUDGET`` call sites). The legacy
 ``// lint-allow: platform-fragile`` marker is accepted for waits/sleeps.
 
 Usage:
@@ -69,6 +82,15 @@ THREAD_SLEEP_RE = re.compile(
     r"\bQThread::(?:m|u)?sleep\s*\(|\bstd::this_thread::sleep_for\s*\("
 )
 ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE|CHECK_FALSE|REQUIRE_FALSE)\s*\(")
+# An assertion opcode that inverts its expression. The `<` matchers below only
+# describe a runner-speed gate when the assertion demands a small duration;
+# negated, the same comparison forbids one, i.e. it is a minimum-duration
+# correctness assertion that must keep running in CI.
+NEGATED_ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE)_FALSE\s*\(")
+# The sanctioned opt-in macro for wall-clock budgets. Its expression is skipped
+# unless KLOGG_PERF_GATES=1, so a call site is an explicit statement that CI
+# does not check the property (see the module docstring).
+KLOGG_PERF_BUDGET_RE = re.compile(r"\bKLOGG_CHECK_PERF_BUDGET\s*\(")
 ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*(?:\s*\(\s*\))?\s*<")
 CHRONO_DIFF_RE = re.compile(r"\bnow\s*\(\s*\)\s*-")
 # duration_cast<...> / static_cast<...> angle brackets are not comparisons;
@@ -139,6 +161,26 @@ def _is_chrono_budget(logical: str) -> bool:
         return False
     tail = CAST_RE.sub("cast", logical[diff.end() :])
     return "<" in tail
+
+
+def _is_negated_assertion(logical: str) -> bool:
+    """True for `CHECK_FALSE` / `REQUIRE_FALSE` assertion bodies.
+
+    `CHECK_FALSE( timer.elapsed() < minimum )` asserts a minimum duration, the
+    opposite of a runner-speed budget, so the `<` matchers must not classify it
+    as one: the mandatory gate would otherwise demand a `[.perf]` tag and push
+    a correctness assertion out of the default CI run.
+    """
+    return NEGATED_ASSERT_RE.search(logical) is not None
+
+
+def _span_has_perf_marker(
+    original_lines: list[str], start: int, end: int
+) -> bool:
+    return any(
+        PERF_MARKER in original_lines[j]
+        for j in range(start, min(end + 1, len(original_lines)))
+    )
 
 
 def check_text(text: str, path: Path) -> list[Finding]:
@@ -222,14 +264,33 @@ def check_text(text: str, path: Path) -> list[Finding]:
                         )
                     )
                     break
+        if KLOGG_PERF_BUDGET_RE.search(code) and not code.lstrip().startswith("#"):
+            # Preprocessor lines are the macro's own #define/#undef, not a
+            # call site.
+            _, budget_span_end = _assertion_span(stripped, index)
+            if not _span_has_perf_marker(original_lines, index, budget_span_end):
+                findings.append(
+                    Finding(
+                        "perf-budget-unmarked",
+                        path,
+                        line_no,
+                        "KLOGG_CHECK_PERF_BUDGET never runs in CI: its expression is "
+                        "skipped unless KLOGG_PERF_GATES=1 is set, and CI never sets "
+                        "it. Add '// lint-allow: perf-budget' with the reason, and keep "
+                        "the property covered in CI -- a genuine speed budget belongs "
+                        "to scripts/run_perf_gates.py, while a correctness or liveness "
+                        "property (which thread ran the work, which timeout reached "
+                        "the lock) must be asserted deterministically instead.",
+                    )
+                )
         if ASSERT_RE.search(code):
             logical, span_end = _assertion_span(stripped, index)
-            if ELAPSED_BUDGET_RE.search(logical) or _is_chrono_budget(logical):
-                marker_present = any(
-                    PERF_MARKER in original_lines[j]
-                    for j in range(index, min(span_end + 1, len(original_lines)))
-                )
-                if not marker_present:
+            is_budget = (
+                ELAPSED_BUDGET_RE.search(logical) is not None
+                or _is_chrono_budget(logical)
+            )
+            if is_budget and not _is_negated_assertion(logical):
+                if not _span_has_perf_marker(original_lines, index, span_end):
                     findings.append(
                         Finding(
                             "perf-budget-assertion",

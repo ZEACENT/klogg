@@ -249,7 +249,10 @@ TEST_CASE( "bounded serial executor releases shutdown when a native task remains
 
     const auto shutdownStarted = std::chrono::steady_clock::now();
     executor.reset();
-    KLOGG_CHECK_PERF_BUDGET( std::chrono::steady_clock::now() - shutdownStarted < 500ms );
+    // Local-only cancellation-latency budget: CI covers the contract through
+    // the release/finished handshake around this block, which asserts that the
+    // in-flight task was observed and shut down deterministically.
+    KLOGG_CHECK_PERF_BUDGET( std::chrono::steady_clock::now() - shutdownStarted < 500ms );  // lint-allow: perf-budget
 
     {
         std::lock_guard<std::mutex> lock( gate->mutex );

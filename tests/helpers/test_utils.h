@@ -123,6 +123,15 @@ class ScopedEnvironmentVariable final {
 // KLOGG_PERF_GATES=1 -- scripts/run_perf_gates.py sets it. CI never sets the
 // variable, so a slow or loaded hosted runner cannot flake the merge gate on
 // a wall-clock threshold.
+//
+// The flip side: an expression behind this macro is NOT checked in CI. Mark
+// every call site with '// lint-allow: perf-budget' (the determinism lint
+// enforces the marker), and route only genuine speed budgets through it. A
+// correctness or liveness property -- "this call only dispatches and never
+// runs the work on the caller's thread", "the contended lock waited for the
+// configured timeout" -- must be asserted deterministically (observe the
+// mechanism: the executing thread, the effective timeout) so every CI leg
+// checks it; see docs/BUILD.md.
 inline bool perfGatesEnabled()
 {
     return qgetenv( "KLOGG_PERF_GATES" ) == "1";

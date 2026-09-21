@@ -43,6 +43,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <thread>
 
 class EfswFileWatcher;
 class SerialExecutor;
@@ -105,6 +106,18 @@ class FileWatcher : public QObject {
         sendChangesNotifications();
         return hadPendingNotifications;
     }
+    // Thread that executed the most recent efsw operation, valid once
+    // waitForIdleForTest() has returned true. addFile/updateConfiguration/
+    // checkWatches only *dispatch* to the serial worker, so a test asserts this
+    // differs from the calling thread -- the host-speed-independent form of the
+    // "returns immediately without blocking the caller" contract. A wall-clock
+    // bound cannot carry that check into CI: KLOGG_CHECK_PERF_BUDGET never
+    // evaluates its expression unless KLOGG_PERF_GATES is set, and CI never
+    // sets it.
+    std::thread::id efswOperationThreadForTest() const
+    {
+        return efswOperationThread();
+    }
 #endif
 
   public Q_SLOTS:
@@ -128,6 +141,9 @@ class FileWatcher : public QObject {
     bool waitForIdle( int timeoutMs );
     std::size_t watchedFileCount();
     std::size_t watchedDirectoryCount();
+    // Unconditional so the definition stays visible to the library
+    // translation units; KLOGG_TESTS only gates the header wrapper above.
+    std::thread::id efswOperationThread() const;
 
     QTimer* checkTimer_;
     KDToolBox::KDGenericSignalThrottler* throttler_;
