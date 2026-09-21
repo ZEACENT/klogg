@@ -64,10 +64,14 @@ LONG CALLBACK firstChanceCrashTrace( EXCEPTION_POINTERS* info )
     auto context = *info->ContextRecord;
     STACKFRAME64 frame{};
 #ifdef _WIN64
+    // IMAGE_FILE_MACHINE_NATIVE needs a newer Windows SDK than the oldest CI
+    // toolchain ships; pick the machine type explicitly.
+    constexpr DWORD machineType = IMAGE_FILE_MACHINE_AMD64;
     frame.AddrPC.Offset = context.Rip;
     frame.AddrStack.Offset = context.Rsp;
     frame.AddrFrame.Offset = context.Rbp;
 #else
+    constexpr DWORD machineType = IMAGE_FILE_MACHINE_I386;
     frame.AddrPC.Offset = context.Eip;
     frame.AddrStack.Offset = context.Esp;
     frame.AddrFrame.Offset = context.Ebp;
@@ -78,8 +82,8 @@ LONG CALLBACK firstChanceCrashTrace( EXCEPTION_POINTERS* info )
 
     const auto thread = GetCurrentThread();
     for ( int index = 0; index < 64; ++index ) {
-        if ( !StackWalk64( IMAGE_FILE_MACHINE_NATIVE, process, thread, &frame, &context,
-                           nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr ) ) {
+        if ( !StackWalk64( machineType, process, thread, &frame, &context, nullptr,
+                           SymFunctionTableAccess64, SymGetModuleBase64, nullptr ) ) {
             break;
         }
         if ( frame.AddrPC.Offset == 0 ) {
