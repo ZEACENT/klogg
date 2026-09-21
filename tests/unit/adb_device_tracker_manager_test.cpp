@@ -71,7 +71,12 @@ bool drainEventsUntil( const std::function<bool()>& predicate )
     QElapsedTimer guard;
     guard.start();
     constexpr qint64 DrainTimeoutMs = 10000;
-    while ( !predicate() && guard.elapsed() < DrainTimeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( guard.elapsed() < DrainTimeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::sendPostedEvents();
         QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
     }

@@ -50,7 +50,12 @@ bool waitUntil( const std::function<bool()>& predicate, int timeoutMilliseconds 
 {
     QElapsedTimer timer;
     timer.start();
-    while ( !predicate() && timer.elapsed() < timeoutMilliseconds ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( timer.elapsed() < timeoutMilliseconds ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
         QThread::msleep( 1 );  // lint-allow: test-timing -- poll pacing under the waitUntil deadline
     }

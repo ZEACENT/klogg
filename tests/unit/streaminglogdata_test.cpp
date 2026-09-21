@@ -2013,7 +2013,12 @@ bool waitForSemanticStateWithoutEvents( Predicate&& predicate, int timeoutMs = 5
 {
     QElapsedTimer deadline;
     deadline.start();
-    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         std::this_thread::yield();
     }
     return predicate();
@@ -2025,7 +2030,12 @@ bool waitForSemanticStateWithMetaCalls( QObject* receiver, Predicate&& predicate
 {
     QElapsedTimer deadline;
     deadline.start();
-    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::sendPostedEvents( receiver, QEvent::MetaCall );
         std::this_thread::yield();
     }

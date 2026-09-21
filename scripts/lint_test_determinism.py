@@ -18,6 +18,11 @@ repository:
   which flaked the Windows ASan CI leg (PR #76). Bound drains by wall-clock
   with QElapsedTimer instead, like ``pumpEventsUntil`` in
   adb_smart_socket_*_test.cpp.
+* Double-checked wait predicates (``while ( !pred() && ... )`` followed by
+  ``return pred();``) re-read volatile state after the loop observed it
+  true; a torn re-read (e.g. a heartbeat file mid-rewrite) flips the result
+  and flakes the test (macOS arm64 CI leg, PR #76). Evaluate once per
+  iteration and return the observed value.
 * Wall-clock budget assertions (``CHECK( elapsed < N )``, including the
   ``timer.elapsed() < N`` call form, ``now() - start`` chrono diffs, and
   line-wrapped assertions) are performance
@@ -66,7 +71,11 @@ THREAD_SLEEP_RE = re.compile(
 ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE|CHECK_FALSE|REQUIRE_FALSE)\s*\(")
 ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*(?:\s*\(\s*\))?\s*<")
 CHRONO_DIFF_RE = re.compile(r"\bnow\s*\(\s*\)\s*-")
-SPIN_DRAIN_RE = re.compile(r"\bfor\s*\([^;]*;\s*\w+\s*<\s*\d{4,}\s*&&\s*!")
+SPIN_DRAIN_CAP = r"\w+\s*<\s*\d{4,}"
+SPIN_DRAIN_RE = re.compile(
+    rf"\bfor\s*\([^;]*;\s*(?:{SPIN_DRAIN_CAP}\s*&&\s*!|!\w+\s*\(\s*\)\s*&&\s*{SPIN_DRAIN_CAP})"
+)
+DOUBLE_CHECK_WHILE_RE = re.compile(r"\bwhile\s*\(\s*!(\w+)\s*\(\s*\)\s*&&")
 TEST_CASE_RE = re.compile(r"\b(?:TEST_CASE|SCENARIO)\s*\(")
 PERF_TAG = "[.perf]"
 
@@ -173,6 +182,29 @@ def check_text(text: str, path: Path) -> list[Finding]:
                     "'// lint-allow: test-timing' with a reason.",
                 )
             )
+        double_check = DOUBLE_CHECK_WHILE_RE.search(code)
+        if double_check:
+            predicate_name = double_check.group(1)
+            trailing_return = re.compile(
+                rf"\breturn\s+{re.escape(predicate_name)}\s*\(\s*\)\s*;"
+            )
+            lookahead_end = min(index + 9, len(stripped))
+            for follow in range(index + 1, lookahead_end):
+                if trailing_return.search(stripped[follow]) and not _has_timing_marker(
+                    original_lines[follow] if follow < len(original_lines) else ""
+                ):
+                    findings.append(
+                        Finding(
+                            "double-checked-predicate",
+                            path,
+                            follow + 1,
+                            f"Trailing `return {predicate_name}();` re-reads volatile "
+                            "state after the while loop already observed it true; "
+                            "evaluate once per iteration and return the observed "
+                            "value, or add '// lint-allow: test-timing' with a reason.",
+                        )
+                    )
+                    break
         if ASSERT_RE.search(code):
             logical, span_end = _assertion_span(stripped, index)
             if ELAPSED_BUDGET_RE.search(logical) or CHRONO_DIFF_RE.search(logical):

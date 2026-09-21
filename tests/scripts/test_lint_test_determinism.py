@@ -87,6 +87,7 @@ class SpinDrainRuleTest(unittest.TestCase):
         for snippet in (
             'for ( int iteration = 0; iteration < 10000 && !predicate(); ++iteration ) {',
             'for ( int attempt = 0; attempt < 10000 && !ready(); ++attempt ) {',
+            'for ( int iteration = 0; !predicate() && iteration < 10000; ++iteration ) {',
         ):
             findings = scan(snippet)
             self.assertEqual([f.rule for f in findings], ["spin-drain-loop"], snippet)
@@ -113,6 +114,50 @@ class SpinDrainRuleTest(unittest.TestCase):
         self.assertEqual(
             scan('for ( int i = 0; i < 100 && !pred(); ++i ) {'), []
         )
+
+
+class DoubleCheckedPredicateRuleTest(unittest.TestCase):
+    def test_trailing_predicate_recheck_is_flagged(self):
+        text = (
+            'while ( !predicate() && timer.elapsed() < timeoutMs ) {\n'
+            '    QTest::qWait( 10 );\n'
+            '}\n'
+            'return predicate();\n'
+        )
+        findings = scan(text)
+        self.assertEqual(
+            [(f.rule, f.line) for f in findings], [("double-checked-predicate", 4)]
+        )
+
+    def test_single_evaluation_is_allowed(self):
+        text = (
+            'while ( timer.elapsed() < timeoutMs ) {\n'
+            '    if ( predicate() ) {\n'
+            '        return true;\n'
+            '    }\n'
+            '    QTest::qWait( 10 );\n'
+            '}\n'
+            'return predicate();\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_marked_trailing_recheck_is_allowed(self):
+        text = (
+            'while ( !predicate() && timer.elapsed() < timeoutMs ) {\n'
+            '    QTest::qWait( 10 );\n'
+            '}\n'
+            'return predicate(); // lint-allow: test-timing\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_different_predicate_name_is_not_flagged(self):
+        text = (
+            'while ( !ready() && timer.elapsed() < timeoutMs ) {\n'
+            '    pump();\n'
+            '}\n'
+            'return done();\n'
+        )
+        self.assertEqual(scan(text), [])
 
 
 class PerfBudgetRuleTest(unittest.TestCase):

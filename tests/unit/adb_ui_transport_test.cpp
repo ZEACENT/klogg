@@ -406,7 +406,12 @@ bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData,
     };
     QElapsedTimer deadline;
     deadline.start();
-    while ( !reached() && deadline.elapsed() < 5000 ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < 5000 ) {
+        if ( reached() ) {
+            return true;
+        }
         QCoreApplication::processEvents();
         QTest::qWait( 50 );
     }

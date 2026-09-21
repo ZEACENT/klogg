@@ -81,7 +81,12 @@ bool processEventsUntil( Predicate predicate )
 {
     QElapsedTimer deadline;
     deadline.start();
-    while ( !predicate() && deadline.elapsed() < 500 ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < 500 ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
     }
     return predicate();

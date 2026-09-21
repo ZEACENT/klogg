@@ -66,7 +66,15 @@ bool waitForQtCondition( Predicate predicate )
 {
     QElapsedTimer timer;
     timer.start();
-    while ( !predicate() && timer.elapsed() < AsyncWaitTimeoutMs ) {
+    // Single evaluation per iteration: predicates that read volatile state
+    // (e.g. a heartbeat file the helper rewrites every 20 ms) can flip
+    // true -> false between the loop condition and a separate trailing
+    // `return predicate()` re-read (observed as a sub-second false failure
+    // on the macOS arm64 CI leg, PR #76).
+    while ( timer.elapsed() < AsyncWaitTimeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QTest::qWait( AsyncPollIntervalMs );
     }
     return predicate();
