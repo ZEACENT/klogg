@@ -49,6 +49,7 @@ object_script.glogg.Release
 /build_root_qt6/
 /cpm-package-lock.cmake
 /cpm_cache/
+/cpm_cache_*/
 /generated/
 /test_tmp/
 /.klogg_sdk_version

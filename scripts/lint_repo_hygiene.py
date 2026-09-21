@@ -143,8 +143,11 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 
 
 def is_binary(data: bytes) -> bool:
-    """NUL byte in the first 8 KiB: the same heuristic git itself uses."""
-    return b"\0" in data[:8192]
+    """NUL byte anywhere in the payload. Git itself samples only the first
+    8 KiB, but a prohibited blob could hide its first NUL behind a longer
+    textual header and slip past a sampled check; the payload is already in
+    memory, so scan it all."""
+    return b"\0" in data
 
 
 def binary_issue(relative_path: str, data: bytes) -> str | None:

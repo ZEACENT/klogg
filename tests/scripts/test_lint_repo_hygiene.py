@@ -25,6 +25,13 @@ class BinaryFileLintTest(unittest.TestCase):
     def test_plain_text_is_not_binary(self):
         self.assertIsNone(MODULE.binary_issue("src/app/main.cpp", b"int main() {}\n"))
 
+    def test_nul_beyond_8kib_still_detected(self):
+        # A textual header longer than the sampled prefix must not let a
+        # binary blob through (review finding on PR #76).
+        blob = b"textual header\n" * 1000 + b"\0" + b"tail"
+        self.assertTrue(MODULE.is_binary(blob))
+        self.assertIsNotNone(MODULE.binary_issue("src/app/main.cpp", blob))
+
     def test_asset_under_allowlisted_root_and_extension_is_allowed(self):
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
         self.assertIsNone(MODULE.binary_issue("src/app/images/hicolor/16x16/klogg.png", png))

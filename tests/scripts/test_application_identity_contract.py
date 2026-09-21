@@ -73,10 +73,12 @@ def is_generated_path(relative: pathlib.Path) -> bool:
     if first in GENERATED_ROOTS:
         return True
     # Out-of-tree build/cache directories inside the checkout: .gitignore
-    # already anticipates the suffixed variants (build_root_*, cpm_cache*),
+    # already anticipates the suffixed variants (/build_root_*/, /cpm_cache_*/),
     # so a developer building in-tree under a suffixed name must not fail
-    # the source-inventory assertions.
-    if first.startswith("build_root_") or first.startswith("cpm_cache"):
+    # the source-inventory assertions. The underscore keeps ordinary tracked
+    # directories that merely share the prefix (e.g. cpm_cache_tools/) inside
+    # the contract's scope.
+    if first.startswith("build_root_") or first.startswith("cpm_cache_"):
         return True
     return any(
         relative.parts[: len(prefix)] == prefix for prefix in GENERATED_PATHS
