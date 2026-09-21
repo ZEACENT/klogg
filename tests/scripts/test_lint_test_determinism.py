@@ -204,6 +204,29 @@ class PerfBudgetRuleTest(unittest.TestCase):
         )
         self.assertIn("perf-budget-assertion", [f.rule for f in findings])
 
+    def test_chrono_now_diff_lower_bound_is_not_a_budget(self):
+        findings = scan(
+            self.CASE
+            % 'CHECK( std::chrono::steady_clock::now() - started >= minimum );'
+        )
+        self.assertEqual(findings, [])
+
+    def test_chrono_cast_diff_budget_assertion_is_flagged(self):
+        findings = scan(
+            self.CASE
+            % 'CHECK( std::chrono::duration_cast<std::chrono::milliseconds>('
+              ' timer.now() - started ).count() < 200 );'
+        )
+        self.assertIn("perf-budget-assertion", [f.rule for f in findings])
+
+    def test_chrono_cast_diff_lower_bound_is_not_a_budget(self):
+        findings = scan(
+            self.CASE
+            % 'CHECK( std::chrono::duration_cast<std::chrono::milliseconds>('
+              ' timer.now() - started ).count() >= 1 );'
+        )
+        self.assertEqual(findings, [])
+
     def test_line_wrapped_budget_assertion_is_flagged(self):
         text = (
             'TEST_CASE( "fast path", "[.perf]" )\n{\n'

@@ -71,6 +71,9 @@ THREAD_SLEEP_RE = re.compile(
 ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE|CHECK_FALSE|REQUIRE_FALSE)\s*\(")
 ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*(?:\s*\(\s*\))?\s*<")
 CHRONO_DIFF_RE = re.compile(r"\bnow\s*\(\s*\)\s*-")
+# duration_cast<...> / static_cast<...> angle brackets are not comparisons;
+# strip them before looking for the budget's upper-bound '<'.
+CAST_RE = re.compile(r"\b\w*cast\s*<[^;<>]*>")
 SPIN_DRAIN_CAP = r"\w+\s*<\s*\d{4,}"
 SPIN_DRAIN_RE = re.compile(
     rf"\bfor\s*\([^;]*;\s*(?:{SPIN_DRAIN_CAP}\s*&&\s*!|!\w+\s*\(\s*\)\s*&&\s*{SPIN_DRAIN_CAP})"
@@ -122,6 +125,20 @@ def _assertion_span(stripped_lines: list[str], start: int) -> tuple[str, int]:
         if seen_open and balance <= 0:
             break
     return " ".join(parts), end
+
+
+def _is_chrono_budget(logical: str) -> bool:
+    """A chrono diff is only a budget when it feeds an upper-bound '<'.
+
+    `CHECK( now() - started >= minimum )` is a correctness assertion, not a
+    runner-speed gate. Strip cast<> angle brackets first so the '<' inside
+    `duration_cast<milliseconds>( ... )` is not mistaken for the comparison.
+    """
+    diff = CHRONO_DIFF_RE.search(logical)
+    if diff is None:
+        return False
+    tail = CAST_RE.sub("cast", logical[diff.end() :])
+    return "<" in tail
 
 
 def check_text(text: str, path: Path) -> list[Finding]:
@@ -207,7 +224,7 @@ def check_text(text: str, path: Path) -> list[Finding]:
                     break
         if ASSERT_RE.search(code):
             logical, span_end = _assertion_span(stripped, index)
-            if ELAPSED_BUDGET_RE.search(logical) or CHRONO_DIFF_RE.search(logical):
+            if ELAPSED_BUDGET_RE.search(logical) or _is_chrono_budget(logical):
                 marker_present = any(
                     PERF_MARKER in original_lines[j]
                     for j in range(index, min(span_end + 1, len(original_lines)))

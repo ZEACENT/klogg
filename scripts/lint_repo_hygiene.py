@@ -137,6 +137,11 @@ def _is_non_latin_letter(char: str) -> bool:
     if not unicodedata.category(char).startswith("L"):
         return False
     code = ord(char)
+    # Letterlike Symbols (U+2100-214F) are categorized as letters but serve
+    # as mathematical/technical notation in English prose (R, C, Kelvin
+    # sign); they are not a writing system.
+    if 0x2100 <= code <= 0x214F:
+        return False
     return not any(start <= code <= end for start, end in _LATIN_LETTER_RANGES)
 
 _UTF8_BOM = b"\xef\xbb\xbf"

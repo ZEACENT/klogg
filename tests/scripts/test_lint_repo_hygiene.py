@@ -113,8 +113,15 @@ class NonEnglishLintTest(unittest.TestCase):
         self.assertIn("U+03B2", findings[0][1])
         self.assertIn("U+FF1C", findings[0][1])
 
-    def test_supplementary_plane_scripts_are_rejected(self):
-        # These scripts are not in the enumerated NON_LATIN_SCRIPT_RE blocks;
+    def test_letterlike_math_symbols_pass(self):
+        # R (U+211D), C (U+2102) and the Kelvin sign (U+212A) are Unicode
+        # letters but serve as math/technical notation in English prose; the
+        # letter catch-all must exempt the Letterlike Symbols block. These
+        # characters need no lint-allow marker precisely because they pass.
+        text = "// the domain is ℝ, the field is ℂ, the unit is K\n"
+        self.assertEqual(MODULE.non_english_issues("docs/math.md", text), [])
+
+    def test_supplementary_plane_scripts_are_rejected(self):        # These scripts are not in the enumerated NON_LATIN_SCRIPT_RE blocks;
         # the letter-category catch-all must still reject them.
         for sample, code_point in (
             (ADLAM_SAMPLE, "U+1E900"),

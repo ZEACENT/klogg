@@ -30,9 +30,11 @@
 namespace {
 
 // Vectored handlers run on the faulting thread before any SEH frame handler
-// (including Catch2's), so the captured stack is the fault stack. Everything
-// here is last-gasp diagnostics: no heap allocation after SymInitialize,
-// plain stdio, and we always continue the search so Catch2/WER still run.
+// (including Catch2's). Walk the stack from the EXCEPTION_POINTERS context
+// record so the trace is rooted at the faulting instruction rather than at
+// the handler's own exception-dispatch frames. Everything here is last-gasp
+// diagnostics: no heap allocation after SymInitialize, plain stdio, and we
+// always continue the search so Catch2/WER still run.
 LONG CALLBACK firstChanceCrashTrace( EXCEPTION_POINTERS* info )
 {
     const auto code = info->ExceptionRecord->ExceptionCode;
@@ -47,9 +49,6 @@ LONG CALLBACK firstChanceCrashTrace( EXCEPTION_POINTERS* info )
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    void* frames[ 64 ];
-    const auto frameCount = CaptureStackBackTrace( 2, 64, frames, nullptr );
-
     std::fprintf( stderr, "\n=== first-chance crash trace (exception 0x%08lx) ===\n",
                   static_cast<unsigned long>( code ) );
 
@@ -62,16 +61,38 @@ LONG CALLBACK firstChanceCrashTrace( EXCEPTION_POINTERS* info )
     symbol->SizeOfStruct = sizeof( SYMBOL_INFO );
     symbol->MaxNameLen = 255;
 
-    for ( DWORD frame = 0; frame < frameCount; ++frame ) {
-        const auto address = reinterpret_cast<DWORD64>( frames[ frame ] );
+    auto context = *info->ContextRecord;
+    STACKFRAME64 frame{};
+#ifdef _WIN64
+    frame.AddrPC.Offset = context.Rip;
+    frame.AddrStack.Offset = context.Rsp;
+    frame.AddrFrame.Offset = context.Rbp;
+#else
+    frame.AddrPC.Offset = context.Eip;
+    frame.AddrStack.Offset = context.Esp;
+    frame.AddrFrame.Offset = context.Ebp;
+#endif
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
+
+    const auto thread = GetCurrentThread();
+    for ( int index = 0; index < 64; ++index ) {
+        if ( !StackWalk64( IMAGE_FILE_MACHINE_NATIVE, process, thread, &frame, &context,
+                           nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr ) ) {
+            break;
+        }
+        if ( frame.AddrPC.Offset == 0 ) {
+            break;
+        }
         DWORD64 displacement = 0;
-        if ( SymFromAddr( process, address, &displacement, symbol ) ) {
-            std::fprintf( stderr, "  #%02lu %s+0x%llx\n", static_cast<unsigned long>( frame ),
-                          symbol->Name, static_cast<unsigned long long>( displacement ) );
+        if ( SymFromAddr( process, frame.AddrPC.Offset, &displacement, symbol ) ) {
+            std::fprintf( stderr, "  #%02d %s+0x%llx\n", index, symbol->Name,
+                          static_cast<unsigned long long>( displacement ) );
         }
         else {
-            std::fprintf( stderr, "  #%02lu 0x%llx\n", static_cast<unsigned long>( frame ),
-                          static_cast<unsigned long long>( address ) );
+            std::fprintf( stderr, "  #%02d 0x%llx\n", index,
+                          static_cast<unsigned long long>( frame.AddrPC.Offset ) );
         }
     }
     std::fflush( stderr );
