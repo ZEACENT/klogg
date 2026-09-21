@@ -8,7 +8,8 @@ runs:
       if: runner.os == 'Windows'
       shell: sh
       run: |
-        # backward-cpp (StackWalker/dbghelp) builds its symbol search path from
+        # The test binaries' first-chance crash trace (tests/helpers/crash_trace.cpp,
+        # dbghelp SymFromAddr) builds its symbol search path from
         # _NT_SYMBOL_PATH. Point it at the Microsoft public symbol server with
         # a local downstream store so crash stacks printed on test failure can
         # resolve OS/CRT frames instead of bare addresses.

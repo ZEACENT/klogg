@@ -128,12 +128,6 @@ cpmaddpackage(
   DOWNLOAD_ONLY YES
 )
 cpmaddpackage(
-  NAME backward-cpp
-  GITHUB_REPOSITORY bombela/backward-cpp
-  VERSION 1.6
-  DOWNLOAD_ONLY YES
-)
-cpmaddpackage(
   NAME Catch2
   GITHUB_REPOSITORY catchorg/Catch2
   VERSION 2.13.8

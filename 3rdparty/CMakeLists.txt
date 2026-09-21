@@ -506,7 +506,6 @@ if(NOT TARGET robin_hood)
 endif(NOT TARGET robin_hood)
 
 if(KLOGG_BUILD_TESTS)
-  cpmaddpackage("gh:bombela/backward-cpp@1.6")
   cpmaddpackage(
     NAME
     Catch2

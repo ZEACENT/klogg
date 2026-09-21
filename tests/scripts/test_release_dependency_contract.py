@@ -18,7 +18,6 @@ NOTICE = ROOT / "NOTICE"
 # binaries. Everything else declared through CPM is release legal/pinning
 # surface and must be covered by the checks below.
 NON_RELEASE_DEPENDENCIES = {
-    "backward-cpp",
     "Catch2",
     "macdeployqtfix",
     "maddy",
