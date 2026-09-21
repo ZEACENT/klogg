@@ -148,6 +148,42 @@ class PerfBudgetRuleTest(unittest.TestCase):
         findings = scan(self.CASE % 'CHECK( shutdownElapsed < std::chrono::milliseconds( 500 ) );')
         self.assertIn("perf-budget-assertion", [f.rule for f in findings])
 
+    def test_timer_call_budget_assertion_is_flagged(self):
+        findings = scan(self.CASE % 'CHECK( timer.elapsed() < 100 );')
+        self.assertIn("perf-budget-assertion", [f.rule for f in findings])
+
+    def test_chrono_now_diff_budget_assertion_is_flagged(self):
+        findings = scan(
+            self.CASE
+            % 'CHECK( std::chrono::steady_clock::now() - started < limit );'
+        )
+        self.assertIn("perf-budget-assertion", [f.rule for f in findings])
+
+    def test_line_wrapped_budget_assertion_is_flagged(self):
+        text = (
+            'TEST_CASE( "fast path", "[.perf]" )\n{\n'
+            'REQUIRE(\n'
+            '    bestElapsedMs\n'
+            '    < 200 );\n'
+            '}\n'
+        )
+        findings = scan(text)
+        self.assertIn("perf-budget-assertion", [f.rule for f in findings])
+
+    def test_line_wrapped_budget_with_marker_on_closing_line_is_allowed(self):
+        text = (
+            'TEST_CASE( "fast path", "[.perf]" )\n{\n'
+            'REQUIRE(\n'
+            '    bestElapsedMs\n'
+            '    < 200 ); // lint-allow: perf-budget\n'
+            '}\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_elapsed_lower_bound_is_not_a_budget(self):
+        findings = scan(self.CASE % 'CHECK( timer.elapsed() >= 1 );')
+        self.assertEqual(findings, [])
+
 
 class ScopeTest(unittest.TestCase):
     def test_non_test_files_are_not_scanned(self):

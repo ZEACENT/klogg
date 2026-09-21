@@ -18,7 +18,9 @@ repository:
   which flaked the Windows ASan CI leg (PR #76). Bound drains by wall-clock
   with QElapsedTimer instead, like ``pumpEventsUntil`` in
   adb_smart_socket_*_test.cpp.
-* Wall-clock budget assertions (``CHECK( elapsed < N )``) are performance
+* Wall-clock budget assertions (``CHECK( elapsed < N )``, including the
+  ``timer.elapsed() < N`` call form, ``now() - start`` chrono diffs, and
+  line-wrapped assertions) are performance
   gates. They must be marked ``lint-allow: perf-budget`` AND live inside a
   Catch2 case tagged ``[.perf]`` so CI (which runs the default tag set)
   never executes them; developers run them locally via ``ctest -L perf``.
@@ -62,7 +64,8 @@ THREAD_SLEEP_RE = re.compile(
     r"\bQThread::(?:m|u)?sleep\s*\(|\bstd::this_thread::sleep_for\s*\("
 )
 ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE|CHECK_FALSE|REQUIRE_FALSE)\s*\(")
-ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*\s*<")
+ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*(?:\s*\(\s*\))?\s*<")
+CHRONO_DIFF_RE = re.compile(r"\bnow\s*\(\s*\)\s*-")
 SPIN_DRAIN_RE = re.compile(r"\bfor\s*\([^;]*;\s*\w+\s*<\s*\d{4,}\s*&&\s*!")
 TEST_CASE_RE = re.compile(r"\b(?:TEST_CASE|SCENARIO)\s*\(")
 PERF_TAG = "[.perf]"
@@ -88,6 +91,28 @@ def _enclosing_case_has_perf_tag(stripped_lines: list[str], line_index: int) -> 
                 PERF_TAG in stripped_lines[i] for i in range(start, line_index + 1)
             )
     return False
+
+
+def _assertion_span(stripped_lines: list[str], start: int) -> tuple[str, int]:
+    """Join a (possibly multiline) assertion into one logical text.
+
+    A line-wrapped ``REQUIRE(`` would otherwise evade the per-line budget
+    scan. Parentheses are counted on literal-masked lines, so parens inside
+    string literals cannot skew the balance.
+    """
+    parts: list[str] = []
+    balance = 0
+    seen_open = False
+    end = start
+    for i in range(start, min(start + 20, len(stripped_lines))):
+        line = stripped_lines[i]
+        parts.append(line)
+        balance += line.count("(") - line.count(")")
+        seen_open = seen_open or "(" in line
+        end = i
+        if seen_open and balance <= 0:
+            break
+    return " ".join(parts), end
 
 
 def check_text(text: str, path: Path) -> list[Finding]:
@@ -148,28 +173,34 @@ def check_text(text: str, path: Path) -> list[Finding]:
                     "'// lint-allow: test-timing' with a reason.",
                 )
             )
-        if ASSERT_RE.search(code) and ELAPSED_BUDGET_RE.search(code):
-            if PERF_MARKER not in original:
-                findings.append(
-                    Finding(
-                        "perf-budget-assertion",
-                        path,
-                        line_no,
-                        "Wall-clock budget assertions are performance gates; add "
-                        "'// lint-allow: perf-budget' and tag the case '[.perf]' "
-                        "so CI never gates on runner speed.",
-                    )
+        if ASSERT_RE.search(code):
+            logical, span_end = _assertion_span(stripped, index)
+            if ELAPSED_BUDGET_RE.search(logical) or CHRONO_DIFF_RE.search(logical):
+                marker_present = any(
+                    PERF_MARKER in original_lines[j]
+                    for j in range(index, min(span_end + 1, len(original_lines)))
                 )
-            elif not _enclosing_case_has_perf_tag(uncommented, index):
-                findings.append(
-                    Finding(
-                        "perf-budget-needs-perf-tag",
-                        path,
-                        line_no,
-                        "Perf-budget assertion must live in a Catch2 case tagged "
-                        "'[.perf]' so the default CI test run excludes it.",
+                if not marker_present:
+                    findings.append(
+                        Finding(
+                            "perf-budget-assertion",
+                            path,
+                            line_no,
+                            "Wall-clock budget assertions are performance gates; add "
+                            "'// lint-allow: perf-budget' and tag the case '[.perf]' "
+                            "so CI never gates on runner speed.",
+                        )
                     )
-                )
+                elif not _enclosing_case_has_perf_tag(uncommented, index):
+                    findings.append(
+                        Finding(
+                            "perf-budget-needs-perf-tag",
+                            path,
+                            line_no,
+                            "Perf-budget assertion must live in a Catch2 case tagged "
+                            "'[.perf]' so the default CI test run excludes it.",
+                        )
+                    )
     return findings
 
 

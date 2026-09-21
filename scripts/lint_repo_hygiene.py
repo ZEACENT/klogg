@@ -39,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 ALLOW_MARKER = "lint-allow: repo-hygiene"
@@ -114,6 +115,30 @@ NON_LATIN_SCRIPT_RE = re.compile(
     "]"
 )
 
+# Letters outside the Latin blocks are non-English prose no matter whether
+# the specific script block was enumerated above (Adlam, Deseret, Osage,
+# Cherokee Supplement, and every future Unicode addition). This
+# category-based catch-all makes the denylist above belt-and-braces: it is
+# still needed for non-letter codepoints such as CJK punctuation, which
+# carry no letter category. Symbols, emoji, and math are unaffected because
+# they are not letters.
+_LATIN_LETTER_RANGES = (
+    (0x0000, 0x024F),  # Basic Latin, Latin-1, Latin Extended-A/B
+    (0x1E00, 0x1EFF),  # Latin Extended Additional
+    (0x2C60, 0x2C7F),  # Latin Extended-C
+    (0xA720, 0xA7FF),  # Latin Extended-D
+    (0xAB30, 0xAB6F),  # Latin Extended-E
+    (0x10780, 0x107BF),  # Latin Extended-F
+    (0x1DF00, 0x1DF1F),  # Latin Extended-G
+)
+
+
+def _is_non_latin_letter(char: str) -> bool:
+    if not unicodedata.category(char).startswith("L"):
+        return False
+    code = ord(char)
+    return not any(start <= code <= end for start, end in _LATIN_LETTER_RANGES)
+
 _UTF8_BOM = b"\xef\xbb\xbf"
 
 
@@ -166,7 +191,10 @@ def non_english_issues(relative_path: str, text: str) -> list[tuple[int, str]]:
         return []
     findings: list[tuple[int, str]] = []
     for line_num, line in enumerate(text.splitlines(), start=1):
-        offenders = sorted(set(NON_LATIN_SCRIPT_RE.findall(line)))
+        offenders = sorted(
+            set(NON_LATIN_SCRIPT_RE.findall(line))
+            | {ch for ch in line if _is_non_latin_letter(ch)}
+        )
         if not offenders or ALLOW_MARKER in line:
             continue
         rendered = " ".join(f"U+{ord(ch):04X} {ch}" for ch in offenders)

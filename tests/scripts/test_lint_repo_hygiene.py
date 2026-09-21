@@ -14,6 +14,11 @@ SPEC.loader.exec_module(MODULE)
 # so each line carrying them opts in with the lint's own allow marker.
 CJK_SAMPLE = "中文日志"  # lint-allow: repo-hygiene
 GREEK_SAMPLE = "βγδ"  # lint-allow: repo-hygiene
+# Supplementary-plane and other scripts missing from the enumerated denylist;
+# caught by the non-Latin-letter catch-all (review finding on PR #76).
+ADLAM_SAMPLE = "𞤀𞤣𞤤𞤢𞤥"  # lint-allow: repo-hygiene
+DESERET_SAMPLE = "𐐔𐐯𐑆𐐨𐑉𐐯𐐻"  # lint-allow: repo-hygiene
+CHEROKEE_SUPPLEMENT_SAMPLE = "ꭰꭱꭲ"  # lint-allow: repo-hygiene
 
 
 class BinaryFileLintTest(unittest.TestCase):
@@ -100,6 +105,19 @@ class NonEnglishLintTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("U+03B2", findings[0][1])
         self.assertIn("U+FF1C", findings[0][1])
+
+    def test_supplementary_plane_scripts_are_rejected(self):
+        # These scripts are not in the enumerated NON_LATIN_SCRIPT_RE blocks;
+        # the letter-category catch-all must still reject them.
+        for sample, code_point in (
+            (ADLAM_SAMPLE, "U+1E900"),
+            (DESERET_SAMPLE, "U+10414"),
+            (CHEROKEE_SUPPLEMENT_SAMPLE, "U+AB70"),
+        ):
+            text = f"// note: {sample}\n"
+            findings = MODULE.non_english_issues("docs/notes.md", text)
+            self.assertEqual(len(findings), 1, sample)
+            self.assertIn(code_point, findings[0][1])
 
     def test_allow_marker_suppresses_its_own_line_only(self):
         text = (
