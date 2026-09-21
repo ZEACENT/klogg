@@ -501,7 +501,11 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         else if ( line.has_value() && mouseEvent->modifiers() & Qt::ShiftModifier ) {
             selection_.selectRangeFromPrevious( *line );
             selectionCurrentEndPos_ = convertCoordToFilePos( mouseEvent->pos() );
-            Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
+            // Announce the full count: after a ctrl-click multi-selection the
+            // extended range merges into the toggled set, so the selection is
+            // more than the shift-clicked line (matches the drag path).
+            Q_EMIT newSelection( *line, selection_.getSelectedLinesCount(), 0_lcol,
+                                 0_length );
             update();
         }
         else if ( line.has_value() ) {

@@ -2162,7 +2162,8 @@ jobs:
 
           # Pre-create the symbol downstream store used by _NT_SYMBOL_PATH (set
           # in the agent-run-tests action) so dbghelp can cache OS/CRT symbols
-          # when backward-cpp/StackWalker symbolizes crash stacks.
+          # when the test binaries' first-chance crash trace
+          # (tests/helpers/crash_trace.cpp) symbolizes crash stacks.
           New-Item -ItemType Directory -Force -Path "C:\symbols" | Out-Null
 
       - name: Stage MSVC AddressSanitizer runtime next to test binaries

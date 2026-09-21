@@ -356,6 +356,27 @@ cd build_root
 ctest --build-config RelWithDebInfo --verbose
 ```
 
+Tests can run in parallel; every registered test gets its own
+capture-coordination root (`KLOGG_CAPTURE_COORDINATION_ROOT`) and portable
+config directory (`KLOGG_PORTABLE_CONFIG_DIR`), so
+`ctest --parallel $(getconf _NPROCESSORS_ONLN)` is safe (CI runs it this way).
+
+### Performance budgets (local-only gates)
+
+Wall-clock budget assertions never gate CI: they are compiled into the tests
+but only fire when `KLOGG_PERF_GATES=1` is set (see `KLOGG_CHECK_PERF_BUDGET`
+in `tests/helpers/test_utils.h`). To check performance budgets locally, run
+against an optimized (RelWithDebInfo, non-sanitizer) build:
+
+```bash
+python3 scripts/run_perf_gates.py            # full suite with budgets enabled
+python3 scripts/run_perf_gates.py -- -R klogg_tests   # one binary only
+```
+
+Sanitizer and Debug builds distort timings; expect spurious budget failures
+there. `scripts/lint_test_determinism.py` (part of the CI lint gate) rejects
+new raw wall-clock assertions and unbounded timing patterns in tests.
+
 ### macOS first-party ThreadSanitizer: live-save guard
 
 Changes to asynchronous live-save ownership need a ThreadSanitizer run before

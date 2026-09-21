@@ -84,15 +84,17 @@ void runSearch( LogFilteredData* filtered_data, const QString& regexp,
     // SCENARIOs) need to introspect the signals captured during the consume
     // loop, and on Windows the throttler may not emit any extra signal after
     // the unthrottled progress==100 emit, leaving spy.count() == 0 if cleared.
+    // Gate on the semantic condition (no armed publication timers) instead of
+    // waiting out a fixed idle window: a completed search usually leaves
+    // nothing pending, so the drain then returns immediately.
     QElapsedTimer drainTimer;
     drainTimer.start();
-    const int idleTimeoutMs = 500;
     const int maxDrainMs = 5000;
-    while ( drainTimer.elapsed() < maxDrainMs ) {
-        if ( !searchProgressSpy.wait( idleTimeoutMs ) ) {
-            break;
-        }
+    while ( filtered_data->hasPendingPublicationsForTest()
+            && drainTimer.elapsed() < maxDrainMs ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
     }
+    REQUIRE( !filtered_data->hasPendingPublicationsForTest() );
 }
 
 } // namespace
@@ -1429,14 +1431,15 @@ SCENARIO( "updateSearch should not bump generation beyond what the search itself
         progress = progressArgs.at( 1 ).toInt();
     } while ( progress < 100 );
 
-    // Drain throttled signals
+    // Drain throttled signals until no publication timer remains armed
+    // (semantic completion; returns immediately when nothing is pending).
     QElapsedTimer drainTimer;
     drainTimer.start();
-    while ( drainTimer.elapsed() < 3000 ) {
-        if ( !searchProgressSpy.wait( 500 ) ) {
-            break;
-        }
+    while ( filtered_data->hasPendingPublicationsForTest()
+            && drainTimer.elapsed() < 3000 ) {
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 20 );
     }
+    REQUIRE( !filtered_data->hasPendingPublicationsForTest() );
 
     // CRITICAL ASSERTION: after updateSearch completes, the results must
     // still be accessible.  The BUG is that the generation bump from

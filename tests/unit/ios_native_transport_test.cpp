@@ -1324,7 +1324,7 @@ TEST_CASE( "iOS native transport stop is idempotent returns promptly and retires
     const auto stopElapsedMs = elapsed.elapsed();
     transport.stop( 301u );
 
-    CHECK( stopElapsedMs < 100 );
+    KLOGG_CHECK_PERF_BUDGET( stopElapsedMs < 100 );
     CHECK( factory.sessions.at( 0 )->stopCalls == 1 );
     factory.publishStopped( 0u );
     drainQtEvents();

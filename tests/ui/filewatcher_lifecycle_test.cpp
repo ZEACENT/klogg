@@ -291,7 +291,7 @@ TEST_CASE( "A teardown drain timeout fails the integration-test process",
         QSemaphore workerStarted;
         const auto future = QtConcurrent::run( [ &workerStarted ] {
             workerStarted.release();
-            QThread::msleep( 250 );
+            QThread::msleep( 250 );  // lint-allow: test-timing -- child keeps the watcher drained past the injected 20ms timeout
         } );
         Q_UNUSED( future );
 

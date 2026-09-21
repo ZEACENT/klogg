@@ -26,7 +26,9 @@
 #include <QUuid>
 
 #include "configuration.h"
+#include "persistentinfo.h"
 #include "shortcuts.h"
+#include "test_utils.h"
 
 namespace {
 constexpr auto CtrlGDefaultsMigrationMarker = "shortcuts.ctrlGDefaultsMigrated";
@@ -68,6 +70,42 @@ void writeShortcutArray( QSettings& settings, const std::map<std::string, QStrin
     settings.sync();
 }
 } // namespace
+
+TEST_CASE( "Portable config path honors the test isolation override" )
+{
+    const auto dirPath = makeTestDir( "portable_config_override" );
+    // Scoped restore: ctest sets this variable per process for parallel
+    // isolation; leaking the unset would silently re-share the default
+    // portable config with other test processes for the rest of this binary.
+    const ScopedEnvironmentVariable overrideGuard{ "KLOGG_PORTABLE_CONFIG_DIR",
+                                                   dirPath.toUtf8() };
+
+    const auto resolved = PersistentInfo::resolvePortableConfigPath(
+        QStringLiteral( "/some/executable/dir" ) );
+
+    REQUIRE( resolved == QDir{ dirPath }.filePath( "klogg.conf" ) );
+    REQUIRE( PersistentInfo::portableOverrideActive() );
+}
+
+TEST_CASE( "An empty portable config override is treated as unset" )
+{
+    // An exported-but-empty variable must not force portable mode: the
+    // resolver ignores an empty value (executable-adjacent config), so the
+    // portable-mode decision has to use the same nonempty condition. A normal
+    // non-portable install launched with an empty exported variable would
+    // otherwise fall back to (often unwritable) files beside the executable.
+    const ScopedEnvironmentVariable overrideGuard{ "KLOGG_PORTABLE_CONFIG_DIR",
+                                                   QByteArray{} };
+
+    REQUIRE_FALSE( PersistentInfo::portableOverrideActive() );
+    const auto resolved = PersistentInfo::resolvePortableConfigPath(
+        QStringLiteral( "/some/executable/dir" ) );
+    // The resolver joins with QDir::separator(), which is "\\" on Windows;
+    // build the expectation the same way instead of hardcoding '/'.
+    const auto expected = QStringLiteral( "/some/executable/dir" ) + QDir::separator()
+                          + QStringLiteral( "klogg.conf" );
+    REQUIRE( resolved == expected );
+}
 
 TEST_CASE( "Configuration defaults line spacing to an editor-friendly value" )
 {

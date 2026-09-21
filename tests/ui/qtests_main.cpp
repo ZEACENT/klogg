@@ -48,6 +48,7 @@
 #include <persistentinfo.h>
 
 #include <logger.h>
+#include <crash_trace.h>
 #include <test_utils.h>
 
 const bool PersistentInfo::ForcePortable = true;
@@ -252,6 +253,7 @@ int main( int argc, char* argv[] )
 {
     QApplication a( argc, argv );
 
+    klogg::testing::installFirstChanceCrashTrace();
     logging::enableLogging( true, logging::LogLevel::Warning );
     configureTestTempDir();
     configureTestFdLimit();

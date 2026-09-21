@@ -1401,9 +1401,9 @@ class TestInstrumentedPerformanceBudget(unittest.TestCase):
         text = (
             'TEST_CASE( "large append stays within budget" )\n'
             "{\n"
-            "    const auto elapsedMs = measureLargeAppend();\n"
+            "    const auto bestElapsedMs = measureLargeAppendBestOfThree();\n"
             "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
-            "    CHECK( elapsedMs < 2000 );\n"
+            "    CHECK( bestElapsedMs < 2000 );\n"
             "#endif\n"
             "}\n"
         )
@@ -1442,9 +1442,103 @@ class TestInstrumentedPerformanceBudget(unittest.TestCase):
         )
         self.assertEqual(len(self.check(text)), 1)
 
+    def test_single_sample_budget_is_flagged(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+    def test_multi_sample_budget_is_accepted(self):
+        for timer_name in ("bestElapsedMs", "minElapsedMs", "medianElapsedMs"):
+            with self.subTest(timer_name=timer_name):
+                text = (
+                    'TEST_CASE( "large append stays within budget" )\n'
+                    "{\n"
+                    f"    const auto {timer_name} = measureLargeAppendBestOfThree();\n"
+                    "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+                    f"    CHECK( {timer_name} < LargeAppendBudgetMs );\n"
+                    "#endif\n"
+                    "}\n"
+                )
+                self.assertEqual(self.check(text), [])
+
+    def test_sampling_claim_in_comment_does_not_cover_single_sample(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    // Take the best of three runs to filter runner noise.\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    CHECK( elapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(len(self.check(text)), 1)
+
     def test_non_test_file_is_ignored(self):
         text = "CHECK( elapsedMs < 2000 );\n"
         self.assertEqual(self.check(text, name="src/logdata/src/capturestore.cpp"), [])
+
+    def test_macro_wrapped_single_sample_budget_is_flagged(self):
+        # The KLOGG_CHECK_PERF_BUDGET macro must not be a bypass: a
+        # single-sample budget inside a budget-named case wrapped in the macro
+        # is still a single-sample budget.
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto elapsedMs = measureLargeAppend();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    KLOGG_CHECK_PERF_BUDGET( elapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
+            "}\n"
+        )
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 5)
+
+    def test_multiline_single_sample_budget_is_flagged(self):
+        # A line-wrapped assertion must not escape the rule: the macro and the
+        # elapsed expression often land on different lines in formatted code.
+        for opener, closer in (
+            ("CHECK", ""),
+            ("REQUIRE", ""),
+            ("KLOGG_CHECK_PERF_BUDGET", ""),
+        ):
+            with self.subTest(opener=opener):
+                text = (
+                    'TEST_CASE( "large append stays within budget" )\n'
+                    "{\n"
+                    "    const auto elapsedMs = measureLargeAppend();\n"
+                    "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+                    f"    {opener}(\n"
+                    "        elapsedMs\n"
+                    "        < LargeAppendBudgetMs );\n"
+                    "#endif\n"
+                    "}\n"
+                )
+                findings = self.check(text)
+                self.assertEqual(len(findings), 1, opener)
+                self.assertEqual(findings[0][0], 5, opener)
+
+    def test_macro_wrapped_multi_sample_budget_is_accepted(self):
+        text = (
+            'TEST_CASE( "large append stays within budget" )\n'
+            "{\n"
+            "    const auto bestElapsedMs = measureLargeAppendBestOfThree();\n"
+            "#if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )\n"
+            "    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < LargeAppendBudgetMs );\n"
+            "#endif\n"
+            "}\n"
+        )
+        self.assertEqual(self.check(text), [])
 
     def test_current_capturestore_tests_are_clean(self):
         path = REPO_ROOT / "tests" / "unit" / "capturestore_test.cpp"
@@ -1945,6 +2039,61 @@ class SharedPtrUseCountMutationGateTest(unittest.TestCase):
         self.assertNotEqual(mutated, text)
         findings = self.check(mutated, name=str(path))
         self.assertEqual(len(findings), 1)
+
+
+class TestPixelClickArithmetic(unittest.TestCase):
+    def check(self, text, name="tests/ui/crawlerwidget_test.cpp"):
+        return lint._check_pixel_click_arithmetic(text, Path(name))
+
+    def test_char_height_click_idiom_is_flagged(self):
+        text = "const int lineY = charHeight * 5 + charHeight / 2;\n"
+        findings = self.check(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 1)
+
+    def test_allow_marker_suppresses(self):
+        text = (
+            "const int lineY = charHeight * 5 + charHeight / 2;"
+            " // lint-allow: platform-fragile\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_string_literal_containing_the_idiom_is_allowed(self):
+        # The idiom inside a string literal (a log message, a lint test
+        # fixture, ...) is not executable arithmetic.
+        text = 'const auto* doc = "const int lineY = charHeight * 5 + charHeight / 2;";\n'
+        self.assertEqual(self.check(text), [])
+
+    def test_viewport_sizing_arithmetic_is_allowed(self):
+        # Growing the viewport to fit rows is not a click position.
+        text = (
+            "for ( int height = 400;\n"
+            "      mainTextViewportHeight() < charHeight * 14 && height <= 2000;\n"
+            "      height += 200 ) {\n"
+        )
+        self.assertEqual(self.check(text), [])
+
+    def test_non_test_file_is_ignored(self):
+        text = "const int lineY = charHeight * 5 + charHeight / 2;\n"
+        self.assertEqual(self.check(text, name="src/ui/src/abstractlogview.cpp"), [])
+
+    def test_no_test_source_still_uses_the_click_idiom(self):
+        # Regression guard for PR #76: every remaining raw charHeight-derived
+        # click position was converted to the lineAtYForTest mapping after the
+        # Linux legs resolved the shift-click presses to the wrong rows.
+        for name in (
+            "tests/ui/crawlerwidget_test.cpp",
+            "tests/ui/foldercrawler_test.cpp",
+            "tests/ui/mainwindow_test.cpp",
+        ):
+            path = REPO_ROOT / name
+            with self.subTest(path=name):
+                self.assertEqual(
+                    lint._check_pixel_click_arithmetic(
+                        path.read_text(encoding="utf-8", errors="replace"), path
+                    ),
+                    [],
+                )
 
 
 if __name__ == "__main__":

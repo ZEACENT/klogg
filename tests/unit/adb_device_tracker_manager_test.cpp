@@ -13,6 +13,7 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHostAddress>
 #include <QObject>
@@ -62,9 +63,22 @@ constexpr auto ReplacementServerIdentity = "adb-server:replacement";
 
 bool drainEventsUntil( const std::function<bool()>& predicate )
 {
-    for ( int iteration = 0; iteration < 10000 && !predicate(); ++iteration ) {
+    // Time-bounded, not iteration-bounded: with no pending events each spin
+    // iteration returns immediately, so an iteration cap can expire long
+    // before asynchronous socket delivery on a loaded runner (observed on
+    // the Windows ASan CI leg, PR #76). Matches pumpEventsUntil in the
+    // sibling adb_smart_socket_* tests.
+    QElapsedTimer guard;
+    guard.start();
+    constexpr qint64 DrainTimeoutMs = 10000;
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( guard.elapsed() < DrainTimeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::sendPostedEvents();
-        QCoreApplication::processEvents( QEventLoop::AllEvents );
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
     }
     return predicate();
 }

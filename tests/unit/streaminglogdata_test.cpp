@@ -474,7 +474,7 @@ TEST_CASE( "Streaming coalescer preserves empty partial UTF8 CRLF and repeat bur
     data.appendUtf8( {} );
     data.finishInput();
     REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
-    const auto utf8 = QString::fromUtf8( "雪" ).toUtf8();
+    const auto utf8 = QString::fromUtf8( "雪" ).toUtf8();  // lint-allow: repo-hygiene
     data.appendUtf8( utf8.left( 1 ) );
     data.appendUtf8( {} );
     REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
@@ -490,7 +490,7 @@ TEST_CASE( "Streaming coalescer preserves empty partial UTF8 CRLF and repeat bur
     StreamingLogDataTimerTestAccess::deliver( data );
     REQUIRE( loadingSpy.count() == 1 );
     CHECK( data.getNbLine() == 65_lcount );
-    CHECK( data.getLineString( 0_lnum ) == QString::fromUtf8( "雪" ) );
+    CHECK( data.getLineString( 0_lnum ) == QString::fromUtf8( "雪" ) );  // lint-allow: repo-hygiene
     CHECK( data.getLineString( 64_lnum ) == QStringLiteral( "63" ) );
     data.appendUtf8( QByteArrayLiteral( "tail" ) );
     REQUIRE_FALSE( StreamingLogDataTimerTestAccess::pending( data ) );
@@ -1353,7 +1353,7 @@ TEST_CASE( "Streaming live search dispatches while updates keep arriving" )
         logData.appendUtf8( makeStreamingSearchLines( 1000 + batch * 10, 10 ) );
         filteredData->updateSearch( 0_lnum, LineNumber( logData.getNbLine().get() ) );
         QCoreApplication::processEvents( QEventLoop::AllEvents, 10 );
-        QThread::msleep( 5 );
+        QThread::msleep( 5 );  // lint-allow: test-timing -- producer pacing while streaming steady updates
 
         const auto counters = filteredData->searchPerformanceCounters();
         if ( counters.operationStarts > countersAfterInitialSearch.operationStarts ) {
@@ -2013,7 +2013,12 @@ bool waitForSemanticStateWithoutEvents( Predicate&& predicate, int timeoutMs = 5
 {
     QElapsedTimer deadline;
     deadline.start();
-    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         std::this_thread::yield();
     }
     return predicate();
@@ -2025,7 +2030,12 @@ bool waitForSemanticStateWithMetaCalls( QObject* receiver, Predicate&& predicate
 {
     QElapsedTimer deadline;
     deadline.start();
-    while ( !predicate() && deadline.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::sendPostedEvents( receiver, QEvent::MetaCall );
         std::this_thread::yield();
     }

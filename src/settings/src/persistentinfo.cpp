@@ -68,7 +68,7 @@ QString makeSessionSettingsPath( const QString& appConfigPath )
 }
 
 #ifdef Q_OS_MAC
-QString resolvePortableConfigPath( const QString& executableDirPath )
+QString resolveBundledPortableConfigPath( const QString& executableDirPath )
 {
     const auto portableConfigName = QString( ApplicationSessionFile ) + PortableExtension;
     const auto bundledPortableConfigPath = QDir( executableDirPath ).filePath( portableConfigName );
@@ -105,6 +105,34 @@ QString resolvePortableConfigPath( const QString& executableDirPath )
 #endif
 } // namespace
 
+bool PersistentInfo::portableOverrideActive()
+{
+    return !qEnvironmentVariable( "KLOGG_PORTABLE_CONFIG_DIR" ).isEmpty();
+}
+
+QString PersistentInfo::resolvePortableConfigPath( const QString& executablePath )
+{
+    auto portableConfigPath
+        = executablePath + QDir::separator() + ApplicationSessionFile + PortableExtension;
+
+#ifdef Q_OS_MAC
+    portableConfigPath = resolveBundledPortableConfigPath( executablePath );
+#endif
+
+    // Test seam: parallel ctest processes each get their own portable config
+    // directory so per-process settings (favorites, session state) cannot
+    // cross-pollute through the shared build output directory.
+    const auto portableOverride = qEnvironmentVariable( "KLOGG_PORTABLE_CONFIG_DIR" );
+    if ( portableOverrideActive() ) {
+        QDir{}.mkpath( portableOverride );
+        portableConfigPath
+            = QDir( portableOverride )
+                  .absoluteFilePath( QString( ApplicationSessionFile ) + PortableExtension );
+    }
+
+    return portableConfigPath;
+}
+
 PersistentInfo::PersistentInfo()
 {
     QString executablePath;
@@ -117,16 +145,18 @@ PersistentInfo::PersistentInfo()
         executablePath = QString::fromUtf8( path.data(), dirnameLength );
     }
 
-    auto portableConfigPath
-        = executablePath + QDir::separator() + ApplicationSessionFile + PortableExtension;
-
-#ifdef Q_OS_MAC
-    portableConfigPath = resolvePortableConfigPath( executablePath );
-#endif
+    const auto portableConfigPath = resolvePortableConfigPath( executablePath );
 
     LOG_INFO << "Portable config path " << portableConfigPath;
 
-    const auto usePortableConfiguration = ForcePortable || QFileInfo::exists( portableConfigPath );
+    // A nonempty override itself selects portable mode: the override points at
+    // a fresh per-process directory where no klogg.conf exists yet, so without
+    // this, non-ForcePortable binaries (e.g. the klogg_smoke app) would fall
+    // through to the OS settings and escape the test isolation. The condition
+    // mirrors the resolver: an empty override behaves like no override.
+    const auto usePortableConfiguration
+        = ForcePortable || portableOverrideActive()
+          || QFileInfo::exists( portableConfigPath );
 
     if ( usePortableConfiguration ) {
         PreparePortableSettings( portableConfigPath );
@@ -191,7 +221,7 @@ void PersistentInfo::UpdateSettings()
         appSettings_->remove( "SavedSearches" );
     }
 
-    std::pair<QString, QString> keysToMoveAround[] = {
+    const std::pair<QString, QString> keysToMoveAround[] = {
         { "DefaultConfigurationView.searchAutoRefresh", "defaultView.searchAutoRefresh" },
         { "DefaultConfigurationView.searchIgnoreCase", "defaultView.searchIgnoreCase" },
         { "DefaultConfigurationView.splitterSizes", "defaultView.splitterSizes" },

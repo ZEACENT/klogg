@@ -748,6 +748,51 @@ struct CrawlerWidget::access_by<CrawlerWidgetPrivate> {
         QTest::qWait( 50 );
     }
 
+    // Resolves the viewport y at which the view renders a source line,
+    // growing the view if the current viewport cannot show that row (font
+    // metrics and default viewport sizes differ across platforms; the Linux
+    // CI legs resolved raw charHeight-derived clicks to the wrong rows).
+    // ensureLineMapFresh() is required before every scan: the visible-line
+    // map is otherwise rebuilt only as a paint side effect, so a viewport
+    // grown by resizeViews would still expose the map of the old (smaller)
+    // geometry and rows beyond it would never resolve. Returns -1 when the
+    // line is still not visible at the largest size.
+    int mainYForLine( LineNumber line )
+    {
+        auto* view = crawler->logMainView_;
+        const auto scan = [ & ]() -> int {
+            view->ensureLineMapFresh();
+            const int viewportHeight = view->viewport()->height();
+            for ( int y = 0; y < viewportHeight; ++y ) {
+                const auto hit = view->lineAtYForTest( y );
+                if ( hit.has_value() && *hit == line ) {
+                    return y;
+                }
+            }
+            return -1;
+        };
+        if ( const int y = scan(); y >= 0 ) {
+            return y;
+        }
+        // setFixedSize, not resize(): logMainView_ is managed by the crawler's
+        // layout, which snaps a plain resize() back to the splitter-assigned
+        // size when the event loop pumps -- the growth below would never take
+        // effect. setFixedSize overrides the layout constraints (same
+        // technique as resizeViewsToPartialTextLineHeight).
+        int height = std::max( view->height(), 400 );
+        while ( height <= 2400 ) {
+            height += 300;
+            crawler->filteredView_->setFixedSize( 900, height );
+            view->setFixedSize( 900, height );
+            QTest::qWait( 10 );
+            render();
+            if ( const int y = scan(); y >= 0 ) {
+                return y;
+            }
+        }
+        return -1;
+    }
+
     void resizeViewsToPartialTextLineHeight( int width )
     {
         for ( int height = 70; height < 140; ++height ) {
@@ -2986,12 +3031,12 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
     {
         WHEN( "dragging to create a portion selection on one line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto charWidth = crawlerVisitor.mainCharWidth();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
             // Click on line 5 and drag horizontally
-            const int lineY = charHeight * 5 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 5_lnum );
+            REQUIRE( lineY >= 0 );
             const int startX = leftMargin + charWidth * 5;
             const int endX = leftMargin + charWidth * 20;
 
@@ -3016,12 +3061,13 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
 
         WHEN( "dragging to create a range selection across lines" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
             // Click on line 5 and drag to line 15
-            const int startY = charHeight * 5 + charHeight / 2;
-            const int endY = charHeight * 15 + charHeight / 2;
+            const int startY = crawlerVisitor.mainYForLine( 5_lnum );
+            const int endY = crawlerVisitor.mainYForLine( 15_lnum );
+            REQUIRE( startY >= 0 );
+            REQUIRE( endY >= 0 );
             const int xPos = leftMargin + 20;
 
             crawlerVisitor.mainResetGetSelectedTextCallCount();
@@ -3045,10 +3091,10 @@ SCENARIO( "Selection drag performance", "[ui][selection][regression]" )
 
         WHEN( "clicking to select a single line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
-            const int lineY = charHeight * 10 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 10_lnum );
+            REQUIRE( lineY >= 0 );
             const int xPos = leftMargin + 20;
 
             crawlerVisitor.mainResetGetSelectedTextCallCount();
@@ -3104,10 +3150,10 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
 
         WHEN( "clicking to select a different line" )
         {
-            const auto charHeight = crawlerVisitor.mainCharHeight();
             const auto leftMargin = crawlerVisitor.mainLeftMargin();
 
-            const int lineY = charHeight * 5 + charHeight / 2;
+            const int lineY = crawlerVisitor.mainYForLine( 5_lnum );
+            REQUIRE( lineY >= 0 );
             const int xPos = leftMargin + 20;
 
             auto* viewport = crawlerVisitor.mainViewport();
@@ -3124,6 +3170,99 @@ SCENARIO( "Selection uses selectionChanged flag instead of cache invalidation", 
             }
         }
     }
+}
+
+SCENARIO( "Shift-click extending a ctrl-click selection announces the full selected line count",
+          "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_shift_click_count_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    GIVEN( "a loaded log file with lines 5 and 10 ctrl-click selected" )
+    {
+        const auto leftMargin = crawlerVisitor.mainLeftMargin();
+        const int xPos = leftMargin + 20;
+
+        auto* viewport = crawlerVisitor.mainViewport();
+
+        // Resolve each target row's y through the view's own coordinate
+        // mapping (mainYForLine grows the viewport when the platform's font
+        // metrics leave the row invisible) instead of assuming
+        // y == charHeight * line.
+        const int y5 = crawlerVisitor.mainYForLine( 5_lnum );
+        const int y10 = crawlerVisitor.mainYForLine( 10_lnum );
+        const int y12 = crawlerVisitor.mainYForLine( 12_lnum );
+        REQUIRE( y5 >= 0 );
+        REQUIRE( y10 >= 0 );
+        REQUIRE( y12 >= 0 );
+
+        QSignalSpy selectionSpy( crawlerVisitor.mainView(), &AbstractLogView::newSelection );
+
+        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+                           QPoint( xPos, y5 ) );
+        QTest::mouseClick( viewport, Qt::LeftButton, Qt::ControlModifier,
+                           QPoint( xPos, y10 ) );
+
+        WHEN( "shift-clicking line 12 to extend a range from the last toggled line" )
+        {
+            selectionSpy.clear();
+
+            QTest::mouseClick( viewport, Qt::LeftButton, Qt::ShiftModifier,
+                               QPoint( xPos, y12 ) );
+
+            THEN( "the press emission already carries the total selected line count" )
+            {
+                // The mouse release re-emits with the deferred nSymbols; the
+                // first (press) emission is what listeners see for the gesture.
+                REQUIRE( selectionSpy.count() >= 1 );
+
+                const auto pressArgs = selectionSpy.takeFirst();
+                // Selection is { 5 } + { 10, 11, 12 } = 4 lines.
+                REQUIRE( pressArgs.at( 0 ).value<LineNumber>() == 12_lnum );
+                REQUIRE( pressArgs.at( 1 ).value<LinesCount>() == 4_lcount );
+            }
+        }
+    }
+}
+
+SCENARIO( "Row lookup resolves rows beyond the initial viewport after a resize",
+          "[ui][selection][regression]" )
+{
+    QTemporaryFile file{ "crawler_row_lookup_resize_XXXXXX" };
+    REQUIRE( generateDataFiles( file ) );
+
+    Session session;
+    session.savedSearches().clear();
+
+    CrawlerWidgetVisitor crawlerVisitor;
+    crawlerVisitor.crawler.reset( static_cast<CrawlerWidget*>(
+        session.open( file.fileName(), []() { return new CrawlerWidget(); } ) ) );
+
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.getLogNbLines().get() == SL_NB_LINES; } ) );
+    REQUIRE( waitUiState( [ & ]() { return crawlerVisitor.isLoadingFinished(); } ) );
+
+    crawlerVisitor.render();
+
+    // Shrink the view to a few rows WITHOUT an explicit render afterwards:
+    // the visible-line map then reflects the old geometry until it is rebuilt
+    // (ensureLineMapFresh). mainYForLine must grow the view AND rebuild the
+    // map, or rows beyond the initial viewport never resolve -- the exact
+    // failure of the PR #76 Linux legs (REQUIRE( endY >= 0 ) on line 15).
+    crawlerVisitor.resizeViews( 900, 120 );
+    REQUIRE( crawlerVisitor.mainYForLine( 5_lnum ) >= 0 );
+    REQUIRE( crawlerVisitor.mainYForLine( 15_lnum ) >= 0 );
 }
 
 SCENARIO( "Filtered view with sparse results does not block horizontal scroll",

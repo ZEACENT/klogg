@@ -74,7 +74,12 @@ bool pumpEventsUntil( const std::function<bool()>& predicate, int timeoutMs = Ev
 {
     QElapsedTimer guard;
     guard.start();
-    while ( !predicate() && guard.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( guard.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
     }
     return predicate();

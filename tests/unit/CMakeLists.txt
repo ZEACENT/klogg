@@ -15,6 +15,7 @@ target_link_libraries(
 klogg_configure_test_target(klogg_ios_protocol_tests)
 add_test(NAME klogg_ios_protocol_tests COMMAND klogg_ios_protocol_tests)
 set_tests_properties(klogg_ios_protocol_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_ios_protocol_tests)
 
 # Configuration loads before KloggApp in production, so migrations must not
 # require a QGuiApplication or a platform plugin.
@@ -34,6 +35,7 @@ add_test(
   COMMAND klogg_configuration_preapplication_tests
 )
 set_tests_properties(klogg_configuration_preapplication_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_configuration_preapplication_tests)
 
 find_package(Threads REQUIRED)
 
@@ -55,6 +57,7 @@ target_link_libraries(
 klogg_configure_test_target(klogg_ios_native_contract_tests)
 add_test(NAME klogg_ios_native_contract_tests COMMAND klogg_ios_native_contract_tests)
 set_tests_properties(klogg_ios_native_contract_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_ios_native_contract_tests)
 
 # Task 6 cycle 1 RED: versioned, typed, source-neutral live-log session spec
 # contracts (livelogsession.h). Pure data plumbing only — no devices,
@@ -73,6 +76,7 @@ target_link_libraries(
 klogg_configure_test_target(klogg_livelog_session_spec_tests)
 add_test(NAME klogg_livelog_session_spec_tests COMMAND klogg_livelog_session_spec_tests)
 set_tests_properties(klogg_livelog_session_spec_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_livelog_session_spec_tests)
 
 # Task 6 cycle 2 RED: restore arming contracts. Restored tabs must route
 # through the typed accept gate before anything arms a transport; valid
@@ -96,6 +100,7 @@ add_test(NAME klogg_livelog_restore_arming_tests COMMAND klogg_livelog_restore_a
 # fixed persisted capture ids. Keep it isolated from parallel test executables
 # that may create/remove the same root while identity checks are in flight.
 set_tests_properties(klogg_livelog_restore_arming_tests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+klogg_set_test_isolation(klogg_livelog_restore_arming_tests)
 
 # Task 6 cycle 2 RED: once-per-capture-id migration notices. Intentionally
 # NOT compilable yet — Session has lastRestoreRejections() but no notice
@@ -113,6 +118,7 @@ target_link_libraries(
 klogg_configure_test_target(klogg_livelog_migration_notice_tests)
 add_test(NAME klogg_livelog_migration_notice_tests COMMAND klogg_livelog_migration_notice_tests)
 set_tests_properties(klogg_livelog_migration_notice_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_livelog_migration_notice_tests)
 
 # Task 6 cycle 3 RED: one source-neutral controller per live tab owns the
 # reducer snapshot, generation-aware effects, and retry scheduler. The test
@@ -131,6 +137,7 @@ target_link_libraries(
 klogg_configure_test_target(klogg_livelog_controller_tests)
 add_test(NAME klogg_livelog_controller_tests COMMAND klogg_livelog_controller_tests)
 set_tests_properties(klogg_livelog_controller_tests PROPERTIES TIMEOUT 120)
+klogg_set_test_isolation(klogg_livelog_controller_tests)
 
 # Task 7 cycle 2: deterministic, device-free contracts for the synthetic
 # process-vs-integrated live-capture benchmark. The process child and benchmark
@@ -157,6 +164,7 @@ if(KLOGG_BUILD_BENCHMARKS)
     COMMAND klogg_live_capture_benchmark_contract_tests
   )
   set_tests_properties(klogg_live_capture_benchmark_contract_tests PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+klogg_set_test_isolation(klogg_live_capture_benchmark_contract_tests)
 endif()
 
 # Add test cpp file
@@ -223,7 +231,7 @@ add_executable(klogg_tests
     tests_main.cpp
 )
 
-target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils)
+target_link_libraries(klogg_tests klogg_ui klogg_utils klogg_logging klogg_versioncheck klogg_livecapture klogg_adb_smartsocket Catch2 Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Test test_utils test_crash_trace)
 add_dependencies(klogg_tests adb_server_test_helper)
 target_compile_definitions(
   klogg_tests PRIVATE KLOGG_ADB_SERVER_TEST_HELPER_PATH="$<TARGET_FILE:adb_server_test_helper>"

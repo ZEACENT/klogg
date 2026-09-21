@@ -1,5 +1,4 @@
 redundantInitialization:*/src/settings/src/styles.cpp:719
-constVariable:*/src/settings/src/persistentinfo.cpp:194
 shadowFunction:*/src/settings/src/shortcuts.cpp:120
 functionStatic:*/src/regex/src/hsregularexpression.cpp:191
 noExplicitConstructor:*/src/regex/include/hsregularexpression.h:82

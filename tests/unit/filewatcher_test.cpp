@@ -19,6 +19,8 @@
 
 #include <catch2/catch.hpp>
 
+#include "test_utils.h"
+
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -85,7 +87,7 @@ TEST_CASE( "FileWatcher addFile returns immediately without blocking caller" )
     const auto elapsed = timer.elapsed();
 
     // addFile should return in well under 100ms (it dispatches to worker thread)
-    CHECK( elapsed < 100 );
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
 
     watcher.removeFile( tempFile.fileName() );
 }
@@ -123,7 +125,7 @@ TEST_CASE( "FileWatcher::updateConfiguration returns immediately" )
     // updateConfiguration should return in well under 100ms —
     // it dispatches enableWatch to the worker thread asynchronously
     // rather than calling into efsw synchronously on the calling thread.
-    CHECK( elapsed < 100 );
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
 }
 
 TEST_CASE( "FileWatcher::checkWatches returns immediately" )
@@ -142,5 +144,5 @@ TEST_CASE( "FileWatcher::checkWatches returns immediately" )
     // it dispatches the efsw check to the worker thread asynchronously
     // rather than calling efswWatcher_->checkWatches() synchronously
     // on the calling thread.
-    CHECK( elapsed < 100 );
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
 }

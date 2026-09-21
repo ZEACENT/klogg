@@ -406,7 +406,12 @@ bool waitForLineCount( const std::shared_ptr<StreamingLogData>& logData,
     };
     QElapsedTimer deadline;
     deadline.start();
-    while ( !reached() && deadline.elapsed() < 5000 ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( deadline.elapsed() < 5000 ) {
+        if ( reached() ) {
+            return true;
+        }
         QCoreApplication::processEvents();
         QTest::qWait( 50 );
     }
@@ -1715,12 +1720,10 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
     const auto elapsed = timer.elapsed();
 
     // Disconnect should complete in well under 100ms (no blocking waitForFinished)
-    CHECK( elapsed < 100 );
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );
 
-    // Process events to let async cleanup finish
-    QCoreApplication::processEvents();
-    QTest::qWait( 2000 );
-    QCoreApplication::processEvents();
+    // Drain async cleanup deterministically (fixpoint DeferredDelete delivery).
+    drainLiveSourceEvents( 200 );
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,10 +1947,8 @@ TEST_CASE( "ProcessLiveSourceTransport reconnects immediately after async discon
 
     transport.stopCurrent();
 
-    // Process events to let async cleanup finish
-    QCoreApplication::processEvents();
-    QTest::qWait( 2000 );
-    QCoreApplication::processEvents();
+    // Drain async cleanup deterministically (fixpoint DeferredDelete delivery).
+    drainLiveSourceEvents( 200 );
 }
 
 TEST_CASE( "Live-source dialogs expose only typed built-in transport controls" )
@@ -2394,7 +2395,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     QElapsedTimer clearTimer;
     clearTimer.start();
     REQUIRE( source.clearAndRestart() );
-    REQUIRE( clearTimer.elapsed() < 2000 );
+    KLOGG_CHECK_PERF_BUDGET( clearTimer.elapsed() < 2000 );
     REQUIRE( waitForLineCount( logData, 0 ) );
 
     source.disconnectSource();
@@ -2637,9 +2638,8 @@ TEST_CASE( "ProcessLiveSourceTransport delivers every line of a slow streaming p
     CHECK( accumulated.count( '\n' ) == 5 );
 
     transport.stopCurrent();
-    QCoreApplication::processEvents();
-    QTest::qWait( 1500 );
-    QCoreApplication::processEvents();
+    // Drain async cleanup deterministically (fixpoint DeferredDelete delivery).
+    drainLiveSourceEvents( 200 );
 }
 
 TEST_CASE( "expandTildePath expands bare tilde to home directory" )

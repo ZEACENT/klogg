@@ -27,6 +27,7 @@
 
 #include "capturestore.h"
 #include "configuration.h"
+#include "crash_trace.h"
 #include <persistentinfo.h>
 #include "test_utils.h"
 
@@ -58,6 +59,7 @@ int main( int argc, char* argv[] )
 {
     QApplication a( argc, argv );
 
+    klogg::testing::installFirstChanceCrashTrace();
     logging::enableLogging( true, logging::LogLevel::Warning );
     configureTestTempDir();
 

@@ -117,6 +117,6 @@ int main( int argc, char* argv[] )
         }
         std::cout << outputChunk << std::flush;
         std::cerr << outputChunk << std::flush;
-        std::this_thread::sleep_for( std::chrono::milliseconds{ 20 } );
+        std::this_thread::sleep_for( std::chrono::milliseconds{ 20 } );  // lint-allow: test-timing -- fixture heartbeat pacing inside the helper child process
     }
 }

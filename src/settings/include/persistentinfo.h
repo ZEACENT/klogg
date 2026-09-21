@@ -56,6 +56,16 @@ class PersistentInfo {
     static QSettings& getSettings( app_settings );
     static QSettings& getSettings( session_settings );
 
+    // Test seam used by ctest isolation and its unit test: resolves the
+    // portable config path, honoring the KLOGG_PORTABLE_CONFIG_DIR
+    // per-process isolation override. The constructor uses the same helper.
+    static QString resolvePortableConfigPath( const QString& executablePath );
+    // True when a nonempty KLOGG_PORTABLE_CONFIG_DIR override is present.
+    // The path resolver and the portable-mode decision must use this same
+    // condition: an empty (exported-but-unset) variable must behave exactly
+    // like no override at all.
+    static bool portableOverrideActive();
+
   private:
     static const bool ForcePortable;
 

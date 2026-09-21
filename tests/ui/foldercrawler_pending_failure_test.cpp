@@ -35,7 +35,12 @@ bool waitFor( const std::function<bool()>& predicate, int timeoutMs = 5000 )
 {
     QElapsedTimer timer;
     timer.start();
-    while ( !predicate() && timer.elapsed() < timeoutMs ) {
+    // Single evaluation per iteration: a volatile predicate can flip
+    // true -> false between the loop condition and a trailing re-read.
+    while ( timer.elapsed() < timeoutMs ) {
+        if ( predicate() ) {
+            return true;
+        }
         QTest::qWait( 10 );
     }
     return predicate();

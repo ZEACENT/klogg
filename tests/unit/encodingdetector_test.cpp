@@ -70,7 +70,7 @@ TEST_CASE( "EncodingDetector skips uchardet for clear UTF-8", "[encoding][detect
     {
         const auto before = uchardetCalls.load();
         QTextCodec* codec = detector.detectEncoding(
-            toVec( u8"日志行：启动完成 ✓ résumé café naïve\n第二行 βγδ\n" ) );
+            toVec( u8"日志行：启动完成 ✓ résumé café naïve\n第二行 βγδ\n" ) );  // lint-allow: repo-hygiene
         REQUIRE( codec != nullptr );
         REQUIRE( EncodingParameters{ codec }.isUtf8Compatible );
         REQUIRE( uchardetCalls.load() == before );
@@ -130,7 +130,7 @@ TEST_CASE( "EncodingDetector is safe under concurrent detection", "[encoding][de
     // consistent results. Must hold before and after the fast-path change.
     auto& detector = EncodingDetector::getInstance();
 
-    const auto utf8 = toVec( u8"并发测试 log line with unicode 内容 ✓\n" );
+    const auto utf8 = toVec( u8"并发测试 log line with unicode 内容 ✓\n" );  // lint-allow: repo-hygiene
     const std::array<char, 8> latin1Bytes
         = { 'c', 'a', 'f', static_cast<char>( 0xE9 ), ' ', 'o', 'k', '\n' };
     const auto latin1 = toVec( std::string_view( latin1Bytes.data(), latin1Bytes.size() ) );

@@ -356,6 +356,26 @@ add_subdirectory(website)
 
 enable_testing()
 
+# Give every registered test its own capture-coordination root and portable
+# config directory so parallel ctest processes never share ownership markers
+# or persisted settings (both default to per-machine locations shared by
+# every klogg test binary). KLOGG_TEST_STATE_ROOT relocates that state onto
+# a filesystem with working lock semantics: container builds whose build
+# tree lives on a mounted/virtiofs filesystem fail QLockFile-based capture
+# gates there (CI's ext4 build trees are unaffected by the default).
+set(KLOGG_TEST_STATE_ROOT "${CMAKE_BINARY_DIR}/Testing" CACHE PATH
+    "Directory for per-test isolation state (coordination roots, portable config)")
+function(klogg_set_test_isolation test_name)
+  file(MAKE_DIRECTORY "${KLOGG_TEST_STATE_ROOT}/work/${test_name}")
+  set_tests_properties(
+    ${test_name}
+    PROPERTIES
+      WORKING_DIRECTORY "${KLOGG_TEST_STATE_ROOT}/work/${test_name}"
+      ENVIRONMENT
+      "KLOGG_CAPTURE_COORDINATION_ROOT=${KLOGG_TEST_STATE_ROOT}/coordination/${test_name};KLOGG_PORTABLE_CONFIG_DIR=${KLOGG_TEST_STATE_ROOT}/config/${test_name}"
+  )
+endfunction()
+
 function(klogg_add_runtime_test test_name target)
   if(WIN32)
     add_test(
@@ -377,6 +397,7 @@ function(klogg_add_runtime_test test_name target)
     set(_klogg_test_timeout 1200)
   endif()
   set_tests_properties(${test_name} PROPERTIES TIMEOUT ${_klogg_test_timeout})
+  klogg_set_test_isolation(${test_name})
 endfunction()
 
 klogg_add_runtime_test(klogg_smoke klogg -v)
@@ -385,7 +406,7 @@ if(APPLE AND KLOGG_ENABLE_IOS_NATIVE_STACK)
   set_tests_properties(
     klogg_smoke
     PROPERTIES ENVIRONMENT
-               "DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH};DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH}"
+               "DYLD_FRAMEWORK_PATH=${KLOGG_SMOKE_QT_RPATH};DYLD_LIBRARY_PATH=${KLOGG_SMOKE_QT_RPATH};KLOGG_CAPTURE_COORDINATION_ROOT=${KLOGG_TEST_STATE_ROOT}/coordination/klogg_smoke;KLOGG_PORTABLE_CONFIG_DIR=${KLOGG_TEST_STATE_ROOT}/config/klogg_smoke"
   )
 endif()
 
