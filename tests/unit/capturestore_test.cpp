@@ -1779,7 +1779,7 @@ TEST_CASE( "CaptureStore tombstones stay bound to the displaced directory genera
 
     REQUIRE( QFileInfo::exists( replacementPath ) );
     REQUIRE( readUtf8File( replacementPath ) == QStringLiteral( "replacement\n" ) );
-    REQUIRE_FALSE( QFileInfo::exists(
+    REQUIRE( waitForMissingFile(
         QDir( displacedPath ).filePath( originalFiles.front() ) ) );
 }
 

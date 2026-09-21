@@ -366,9 +366,11 @@ enable_testing()
 set(KLOGG_TEST_STATE_ROOT "${CMAKE_BINARY_DIR}/Testing" CACHE PATH
     "Directory for per-test isolation state (coordination roots, portable config)")
 function(klogg_set_test_isolation test_name)
+  file(MAKE_DIRECTORY "${KLOGG_TEST_STATE_ROOT}/work/${test_name}")
   set_tests_properties(
     ${test_name}
     PROPERTIES
+      WORKING_DIRECTORY "${KLOGG_TEST_STATE_ROOT}/work/${test_name}"
       ENVIRONMENT
       "KLOGG_CAPTURE_COORDINATION_ROOT=${KLOGG_TEST_STATE_ROOT}/coordination/${test_name};KLOGG_PORTABLE_CONFIG_DIR=${KLOGG_TEST_STATE_ROOT}/config/${test_name}"
   )
