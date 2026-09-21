@@ -100,7 +100,11 @@ TEST_CASE( "An empty portable config override is treated as unset" )
     REQUIRE_FALSE( PersistentInfo::portableOverrideActive() );
     const auto resolved = PersistentInfo::resolvePortableConfigPath(
         QStringLiteral( "/some/executable/dir" ) );
-    REQUIRE( resolved == QStringLiteral( "/some/executable/dir/klogg.conf" ) );
+    // The resolver joins with QDir::separator(), which is "\\" on Windows;
+    // build the expectation the same way instead of hardcoding '/'.
+    const auto expected = QStringLiteral( "/some/executable/dir" ) + QDir::separator()
+                          + QStringLiteral( "klogg.conf" );
+    REQUIRE( resolved == expected );
 }
 
 TEST_CASE( "Configuration defaults line spacing to an editor-friendly value" )

@@ -82,6 +82,39 @@ class ThreadSleepRuleTest(unittest.TestCase):
         self.assertEqual(scan('harness.sleep_for( 1 );'), [])
 
 
+class SpinDrainRuleTest(unittest.TestCase):
+    def test_iteration_bounded_drain_is_flagged(self):
+        for snippet in (
+            'for ( int iteration = 0; iteration < 10000 && !predicate(); ++iteration ) {',
+            'for ( int attempt = 0; attempt < 10000 && !ready(); ++attempt ) {',
+        ):
+            findings = scan(snippet)
+            self.assertEqual([f.rule for f in findings], ["spin-drain-loop"], snippet)
+
+    def test_marked_spin_drain_is_allowed(self):
+        self.assertEqual(
+            scan(
+                'for ( int i = 0; i < 10000 && !pred(); ++i ) { // lint-allow: test-timing'
+            ),
+            [],
+        )
+
+    def test_time_bounded_drain_is_allowed(self):
+        text = (
+            'QElapsedTimer guard;\n'
+            'guard.start();\n'
+            'while ( !predicate() && guard.elapsed() < DrainTimeoutMs ) {\n'
+            '    QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );\n'
+            '}\n'
+        )
+        self.assertEqual(scan(text), [])
+
+    def test_small_iteration_caps_are_allowed(self):
+        self.assertEqual(
+            scan('for ( int i = 0; i < 100 && !pred(); ++i ) {'), []
+        )
+
+
 class PerfBudgetRuleTest(unittest.TestCase):
     CASE = 'TEST_CASE( "fast path", "[.perf]" )\n{\n%s\n}\n'
 

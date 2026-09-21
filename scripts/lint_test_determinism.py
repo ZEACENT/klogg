@@ -13,6 +13,11 @@ repository:
 * Raw thread sleeps (``QThread::*sleep``, ``std::this_thread::sleep_for``)
   in test code are hope-waits; production fixtures that deliberately
   simulate slow writers must carry an explicit allowance.
+* Iteration-bounded event-drain loops (``for ( i = 0; i < 10000 && !pred()``)
+  spin out faster than asynchronous socket/IO delivery on loaded runners,
+  which flaked the Windows ASan CI leg (PR #76). Bound drains by wall-clock
+  with QElapsedTimer instead, like ``pumpEventsUntil`` in
+  adb_smart_socket_*_test.cpp.
 * Wall-clock budget assertions (``CHECK( elapsed < N )``) are performance
   gates. They must be marked ``lint-allow: perf-budget`` AND live inside a
   Catch2 case tagged ``[.perf]`` so CI (which runs the default tag set)
@@ -58,6 +63,7 @@ THREAD_SLEEP_RE = re.compile(
 )
 ASSERT_RE = re.compile(r"\b(?:CHECK|REQUIRE|CHECK_FALSE|REQUIRE_FALSE)\s*\(")
 ELAPSED_BUDGET_RE = re.compile(r"\b\w*[eE]lapsed\w*\s*<")
+SPIN_DRAIN_RE = re.compile(r"\bfor\s*\([^;]*;\s*\w+\s*<\s*\d{4,}\s*&&\s*!")
 TEST_CASE_RE = re.compile(r"\b(?:TEST_CASE|SCENARIO)\s*\(")
 PERF_TAG = "[.perf]"
 
@@ -128,6 +134,18 @@ def check_text(text: str, path: Path) -> list[Finding]:
                     line_no,
                     "Raw thread sleeps in tests are hope-waits; gate on a semantic "
                     "condition, or add '// lint-allow: test-timing' with a reason.",
+                )
+            )
+        if SPIN_DRAIN_RE.search(code) and not _has_timing_marker(original):
+            findings.append(
+                Finding(
+                    "spin-drain-loop",
+                    path,
+                    line_no,
+                    "Iteration-bounded event drains outrun asynchronous delivery on "
+                    "loaded runners; bound by wall-clock with QElapsedTimer (see "
+                    "pumpEventsUntil in adb_smart_socket_*_test.cpp), or add "
+                    "'// lint-allow: test-timing' with a reason.",
                 )
             )
         if ASSERT_RE.search(code) and ELAPSED_BUDGET_RE.search(code):

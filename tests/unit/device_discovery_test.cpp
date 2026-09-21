@@ -14,6 +14,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QEventLoop>
 #include <QFutureWatcher>
@@ -47,9 +48,15 @@ using klogg::livecapture::RetryPolicy;
 template <typename Predicate>
 void drainEventsUntil( Predicate predicate )
 {
-    for ( int attempt = 0; attempt < 10000 && !predicate(); ++attempt ) {
+    // Time-bounded, not iteration-bounded: with no pending events each spin
+    // iteration returns immediately, so an iteration cap can expire long
+    // before asynchronous delivery on a loaded runner.
+    QElapsedTimer guard;
+    guard.start();
+    constexpr qint64 DrainTimeoutMs = 10000;
+    while ( !predicate() && guard.elapsed() < DrainTimeoutMs ) {
         QCoreApplication::sendPostedEvents();
-        QCoreApplication::processEvents( QEventLoop::AllEvents );
+        QCoreApplication::processEvents( QEventLoop::AllEvents, 1 );
         QThread::yieldCurrentThread();
     }
 }
