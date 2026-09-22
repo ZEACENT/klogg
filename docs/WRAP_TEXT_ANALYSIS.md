@@ -1,5 +1,14 @@
 # Wrap Text Analysis and Implementation Details
 
+> Historical investigation, not the current rendering/scrolling specification.
+> Code excerpts, line references, and proposed fixes below describe the state
+> investigated at the time and may have been superseded. In particular, fixed
+> `QTest::qWait(...)` delays are not current test guidance: observe deterministic
+> completion or explicit state/mechanism seams instead. See
+> [BUILD.md](BUILD.md#performance-budgets-local-only-gates) for test policy,
+> [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md#rendering-and-ui-system)
+> for the current presentation overview, and the [documentation hub](README.md).
+
 ## Overview
 This document analyzes the implementation of "Wrap text" in Klogg, focusing on the `AbstractLogView` and its derived classes. It details the mechanism for displaying wrapped lines, calculating scroll ranges, and handling bottom alignment, which has been a source of bugs (e.g., last line visibility).
 
@@ -347,7 +356,7 @@ The following bugs were **pre-existing** or **edge cases in the new logic**:
 ### Integration Test Fix (`tests/ui/logfiltereddata_test.cpp`)
 - Fixed intermittent heap corruption (`0xc0000374`) on Windows
 - Root cause: Signal throttler timer firing after LogFilteredData destruction
-- Fix: Added `QTest::qWait(150)` after search completes to allow pending signals to process
+- Historical workaround: added `QTest::qWait(150)` after search completion. This timing-based advice is superseded by deterministic completion/state checks; do not copy it into new tests.
 
 ## Debug Logging
 

@@ -1,176 +1,192 @@
-[![GitHub license](https://img.shields.io/github/license/ZEACENT/klogg.svg?style=flat)](https://github.com/ZEACENT/klogg/blob/master/COPYING)
-[![C++](https://img.shields.io/github/languages/top/ZEACENT/klogg?style=flat)]()
-[![GitHub contributors](https://img.shields.io/github/contributors/ZEACENT/klogg.svg?style=flat)](https://github.com/ZEACENT/klogg/graphs/contributors/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](https://makeapullrequest.com/)
-[![Github all releases](https://img.shields.io/github/downloads/ZEACENT/klogg/total?style=flat)](https://github.com/ZEACENT/klogg/releases/)
-[![Github](https://img.shields.io/github/v/release/ZEACENT/klogg?style=flat&label=Stable%20release)](https://github.com/ZEACENT/klogg/releases/latest)
-[![CI Build](https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml/badge.svg)](https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml)
+<p align="center">
+  <img src="src/app/images/hicolor/scalable/klogg.svg" width="80" height="80" alt="klogg logo">
+</p>
 
-## Overview
+<h1 align="center">klogg</h1>
 
-Klogg is a multi-platform GUI application that helps browse and search
-through long and complex log files. It is designed with programmers and
-system administrators in mind and can be seen as a graphical, interactive
-combination of grep, less, and tail.
+<p align="center"><strong>Find the signal. Keep the context.</strong></p>
 
-Please refer to the
-[technical documentation](docs/TECHNICAL_DOCUMENTATION.md)
-page for how to use Klogg.
+<p align="center">
+  A desktop workspace for understanding logs.<br>
+  Explore large files, search across folders, and follow live device logs without losing the bigger picture.
+</p>
 
-A [changelog](CHANGELOG.md) tracks monthly changes.
+<p align="center">
+  <a href="https://github.com/ZEACENT/klogg/releases/latest"><strong>Download</strong></a> &nbsp;·&nbsp;
+  <a href="#start-exploring">Quick start</a> &nbsp;·&nbsp;
+  <a href="docs/README.md">Documentation</a> &nbsp;·&nbsp;
+  <a href="docs/BUILD.md">Build from source</a>
+</p>
 
-## Table of Contents
+<p align="center">
+  <a href="https://github.com/ZEACENT/klogg/releases/latest"><img src="https://img.shields.io/github/v/release/ZEACENT/klogg?style=flat&label=release&color=008765" alt="Latest release"></a>
+  <a href="https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml"><img src="https://github.com/ZEACENT/klogg/actions/workflows/ci-build.yml/badge.svg" alt="CI build status"></a>
+  <a href="COPYING"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-555555?style=flat" alt="GPL version 3 or later"></a>
+</p>
 
-1. [About the Project](#about-the-project)
-1. [Installation](#installation)
-1. [Building](#building)
-1. [Third-Party Dependencies](#third-party-dependencies)
-1. [How to Get Help](#how-to-get-help)
-1. [Contributing](#contributing)
-1. [License](#license)
-1. [Authors](#authors)
-1. [Backlog](#backlog)
+---
 
-## About the Project
+## From the first match to the full story
 
-Klogg started as a fork of [glogg](https://github.com/nickbnf/glogg) - the fast, smart log explorer in 2016.
+A timeout is easy to find. Understanding what led to it takes context.
+klogg keeps your original log and filtered results together, so you can move
+between a useful match and the surrounding events instead of juggling editor
+windows and terminal output.
 
-Since then it has evolved from fixing small annoying bugs to rewriting core components to
-make it faster and smarter than its predecessor.
+![klogg showing the original file above its filtered results, with matching text highlighted in both views](website/static/screenshots/mainwindow.png)
 
-### Comparing with glogg
+*Interface overview from an earlier upstream release. Current controls and the
+folder/device workflows are described in the [user guide](DOCUMENTATION.md).*
 
-Klogg has all the best features of glogg:
+### One large file. A focused investigation.
 
-* Runs on Unix-like systems, Windows and Mac thanks to Qt5/Qt6
-* Is fast and reads the file directly from disk, without loading it into memory
-* Can operate on huge text files (10+ Gb is not a problem)
-* Search results are displayed separately from original file
-* Supports Perl-compatible regular expressions
-* Colorizes the log and search results
-* Displays a context view of where in the log the lines of interest are
-* Watches for file changes on disk and reloads it (kind of like tail)
-* Is open source, released under the GPL
+Open a log too large for a comfortable editor session. Narrow it down with plain
+text, regular expressions, or Boolean combinations, then jump from each result
+back into the original file. Add lines before or after matches when an isolated
+message is not enough.
 
-And on top of that klogg:
+- Read file content on demand rather than loading the whole text into an editor buffer.
+- Limit a single-file search to a relevant range of lines.
+- Follow a growing file and enable **Auto-refresh** to keep search results up to date.
+- Work with common text encodings, automatic detection, and manual overrides.
 
-* Is heavily optimized using multi-threading and SIMD
-* Supports files with more than 2147483647 lines
-* Includes optimized regular expressions search; benchmark details live in [docs/REGEX_BENCHMARKS.md](docs/REGEX_BENCHMARKS.md)
-* Allows combining regular expressions with boolean operators (AND, OR, NOT)
-* Supports many common text encodings
-* Detects file encoding automatically using [uchardet](https://www.freedesktop.org/wiki/Software/uchardet/) library (supports utf8, utf16, cp1251 and more)
-* Can limit search operations to some part of huge file
-* Allows configuring several highlighter sets and switching between them
-* Has a list of configurable predefined regular expression patterns
-* Includes a dark mode
-* Has configurable shortcuts
-* Has a scratchpad window for taking notes and doing basic data transformations
-* Provides lots of small features that make life easier (closing tabs, copying file paths, favorite files menu, etc.)
+### A whole folder. One place to look.
 
-List of glogg issues that have been fixed/implemented in klogg can be found [here](https://github.com/ZEACENT/klogg/discussions/302).
+When the trail crosses several services or rotated logs, use **Open Folder**.
+klogg searches recursively and groups results by file. Select a match to inspect
+its source in the upper view; collapse groups to concentrate on the files that
+matter.
 
-List of all changes can be found [here](https://github.com/ZEACENT/klogg/milestone/8?closed=1).
+Use the same search modes, reusable filters, highlights, and line marks across
+the investigation. **Keep Results** preserves a result pane while you try the
+next query. Folder searches are snapshots: run the search again to include
+changed files; they do not continuously watch the directory.
 
-### Comparing with variar/klogg
+### Live devices. The same familiar workspace.
 
-This fork builds on [variar/klogg](https://github.com/variar/klogg) and adds:
+Bring Android logcat directly into klogg with the bundled ADB helper. On macOS,
+connect to an iOS device through the bundled native capture stack, without a
+Python setup. Search and highlight incoming logs as you would a file.
 
-* **iOS live log streaming** — device discovery and log capture via pymobiledevice3
-* **Android logcat live streaming** — ADB-based logcat with persistent-file save mode
-* **ANSI color rendering** — configurable output modes (strip / render / plain) for live streams
-* **Live-source search throttling** — smooth UI during streaming without blocking the event loop
-* **Search generation IDs** — monotonic counter prevents stale search results after interrupting a search (see [PORTABILITY.md](docs/PORTABILITY.md))
-* **Batched flush** — triple-threshold output flushing (64 KB / 100 lines / 1 s) for live log captures
-* **Highlighter coexistence** — selection highlighting preserves keyword highlighter colors
-* **Status bar pending indicator** — shows pending search lines as `Ln:X/Y (+N pending)`
-* **Platform-aware tool resolution** — robust external-tool discovery across macOS launchd, Windows, and Linux (see [PORTABILITY.md](docs/PORTABILITY.md))
+Control reconnect behavior, choose rolling-output limits, and explicitly save
+the capture with or without ANSI sequences. Restored saved sessions start
+stopped, so reconnecting a device remains your choice.
 
-## Installation
+[Learn about live capture and saving](DOCUMENTATION.md#live-device-logs)
 
-This project uses [Calendar Versioning](https://calver.org/). For a list of available versions, see the [repository tag list](https://github.com/ZEACENT/klogg/tags).
+## Make the important lines stand out
 
-Binaries for all platforms are available from [GitHub Releases](https://github.com/ZEACENT/klogg/releases/latest).
+| When you need to... | klogg helps you... |
+| --- | --- |
+| Follow a request through noisy output | Combine patterns with AND, OR, and NOT; keep matching lines beside their context. |
+| Recognize recurring signals | Apply multiple highlighter sets and quick color labels without losing selection visibility. |
+| Collect evidence | Mark lines, extend a selection with Shift-click, or select separate lines with Ctrl-click (Command-click on macOS); copy with line numbers or save the selection. |
+| Compare investigations | Reuse filter favorites and search history, or keep results in another tab. |
+| Read comfortably | Choose dark mode, wrap long lines, adjust fonts, and customize shortcuts. |
+| Take a working note | Send text to the scratchpad for notes and basic transformations. |
 
-### Continuous builds
+## Download
 
-Automated rolling builds are available from the [continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous). Windows and Linux packages are CI-validated; macOS disk images are unsigned CI validation artifacts and may require local Gatekeeper approval.
+Choose a package from **[GitHub Releases](https://github.com/ZEACENT/klogg/releases/latest)**.
+Use the **[Continuous release](https://github.com/ZEACENT/klogg/releases/tag/continuous)**
+for the latest rolling build. Features described here follow the current source;
+check your release notes if a control is missing in an older package. The table
+below describes the current Continuous packages; an older Stable release may
+offer a different set of files.
 
-Stable releases are created manually by promoting the current manifest-verified Continuous release. The package, source, support, and evidence payloads are reused byte-for-byte; only immutable Stable release metadata and checksums are regenerated. Stable macOS disk images therefore remain unsigned validation artifacts and are never described as signed or notarized.
+| Platform | Current Continuous packages | Before you install |
+| --- | --- | --- |
+| Windows | x64 installer or portable ZIP | Current packages use Qt 6 and Vectorscan AVX2; choose hardware that supports AVX2. |
+| Linux | Ubuntu 22.04, 24.04, and 26.04 DEB; AppImage | Choose the DEB for your Ubuntu version, or the AppImage for a compatible distribution. |
+| macOS | Separate Apple Silicon and Intel DMGs | Choose your processor architecture and check the release's minimum macOS version. |
 
-## Building
+**macOS packages are unsigned CI validation artifacts, not signed or notarized
+releases.** Gatekeeper may require explicit local approval. Review the source
+and release before approving an application; do not disable Gatekeeper globally.
 
-Please review
-[docs/BUILD.md](docs/BUILD.md)
-for how to set up Klogg on your local machine for development and testing purposes.
+For Windows, run the installer or extract the portable ZIP before launching.
+On Ubuntu, install the matching downloaded package with `sudo apt install ./<package>.deb`.
+For an AppImage, make the downloaded file executable with `chmod +x <package>.AppImage`
+and run it. On macOS, open the matching DMG and copy the application to Applications.
 
-### Regex Benchmark Snapshot
+Stable releases promote a manifest-verified Continuous release and reuse its
+package payloads; promotion does not add macOS signing or notarization. Release
+pages include checksums and source/support assets. klogg uses
+[calendar versioning](https://calver.org/).
 
-Regular-expression benchmark methodology now lives in [docs/REGEX_BENCHMARKS.md](docs/REGEX_BENCHMARKS.md). The current snapshot was refreshed on March 1, 2026 across `simple`, `normal`, and `complex` regex profiles with `50MB`, `500MB`, and `5GB` tmpfs-backed corpora, comparing `Qt`, `Vectorscan generic`, and `Vectorscan AVX` builds.
+Third-party package-manager listings may track upstream klogg rather than this
+fork. Use this repository's releases for the capabilities documented here.
 
-500MB median search time snapshot:
+## Start exploring
 
-| Profile | Qt (ms) | Vectorscan generic (ms) | Vectorscan AVX (ms) |
+1. **Choose a source.** Open a file, choose **File > Open Folder...**, or connect
+   through **File > Open ADB Logcat...** / **Open iOS Log Stream...** (macOS).
+2. **Ask a focused question.** Enter `timeout` as plain text, or enable regex and
+   try `ERROR|WARN`. Search results appear below the source view.
+3. **Follow the evidence.** Select a result to see it in context. Highlight useful
+   patterns, mark lines worth revisiting, and keep or export the results you need.
+
+The **[user guide](DOCUMENTATION.md)** covers search syntax, device prerequisites,
+keyboard commands, and saving. It is also available from the application's Help
+menu. The **[documentation hub](docs/README.md)** separates everyday workflows
+from architecture, build instructions, benchmarks, and future plans.
+
+## Built for demanding logs
+
+The interface is backed by C++17 and Qt, 64-bit line addressing, parallel search,
+SIMD-assisted text processing, and compressed match storage. Vectorscan
+accelerates compatible regular expressions; Qt's regular-expression engine
+provides the fallback/verification path for patterns that need it. Indexes,
+caches, results, and live capture still consume memory: usage depends on the
+workload, not just the source file's byte size.
+
+### Performance, with the conditions attached
+
+The recorded **May 17, 2026** benchmark compares search backends on generated
+corpora using macOS x86_64 and Qt 6.10.1, with five measured iterations after one
+warmup. Below are **500 MiB full-search median times** (the benchmark's `500MB`
+case), not end-to-end application startup times or a promise for every machine:
+
+| Regex profile | Qt | Vectorscan generic | Vectorscan AVX |
 | --- | ---: | ---: | ---: |
-| `simple` | 523.41 | 169.98 | 169.92 |
-| `normal` | 690.74 | 186.47 | 180.23 |
-| `complex` | 1071.93 | 219.07 | 204.00 |
+| Simple | 573.93 ms | 169.90 ms | 165.90 ms |
+| Normal | 606.89 ms | 208.23 ms | 215.07 ms |
+| Complex | 1046.55 ms | 235.67 ms | 244.48 ms |
 
-The full matrix, throughput tables, regex contents, and fairness counters (`searched lines`, `matches`, `hit rate`) live in [docs/benchmarks/regex-benchmark-results.md](docs/benchmarks/regex-benchmark-results.md) and [docs/benchmarks/regex-benchmark-results.json](docs/benchmarks/regex-benchmark-results.json).
+Hardware, storage, encoding, expressions, and the selected backend affect results.
+See the [methodology](docs/REGEX_BENCHMARKS.md),
+[full results](docs/benchmarks/regex-benchmark-results.md), and
+[machine-readable evidence](docs/benchmarks/regex-benchmark-results.json), including
+incremental and ANSI-streaming measurements. These are recorded snapshots, not
+new measurements of every release.
 
-## Third-Party Dependencies
+For implementation details, read the [architecture overview](docs/TECHNICAL_DOCUMENTATION.md),
+[portability guidance](docs/PORTABILITY.md), and [dependency reference](docs/DEPENDENCIES.md).
 
-All C++ dependencies are managed via [CPM](https://github.com/cpm-cmake/CPM.cmake) unless noted otherwise.
+## Build, contribute, and get help
 
-| Dependency | Version / Commit | Source | Purpose |
-|---|---|---|---|
-| [Qt](https://www.qt.io/) | 5 or 6 | System | GUI framework (Core, Widgets, Concurrent, Network, Xml, Svg) |
-| [Vectorscan](https://github.com/VectorCamp/vectorscan) | `d29730e` | `VectorCamp/vectorscan` | Regex acceleration (default engine) |
-| [Boost](https://www.boost.org/) | - | System | Required by Vectorscan |
-| [simdutf](https://github.com/simdutf/simdutf) | 5.6.2 | `simdutf/simdutf` | SIMD UTF-8 processing |
-| [CRoaring](https://github.com/RoaringBitmap/CRoaring) | 4.2.1 | `RoaringBitmap/CRoaring` | Compressed bitmaps |
-| [streamvbyte](https://github.com/lemire/streamvbyte) | 1.0.0 | `lemire/streamvbyte` | Variable-byte integer encoding |
-| [robin_hood](https://github.com/martinus/robin-hood-hashing) | 3.11.2 | `martinus/robin-hood-hashing` | Fast hash maps/sets |
-| [xxHash](https://github.com/Cyan4973/xxHash) | 0.8.1 | `Cyan4973/xxHash` | Fast hashing |
-| [type_safe](https://github.com/foonathan/type_safe) | 0.2.4 | `foonathan/type_safe` | Type-safe utilities |
-| [oneTBB](https://github.com/variar/oneTBB) | `c9be1ac` | `variar/oneTBB` | Threading / parallelism |
-| [mimalloc](https://github.com/microsoft/mimalloc) | 2.1.7 | `microsoft/mimalloc` | Memory allocator |
-| [efsw](https://github.com/SpartanJ/efsw) | 1.4.1 | `SpartanJ/efsw` | File system watcher |
-| [Uchardet](https://gitlab.freedesktop.org/uchardet/uchardet) | 0.0.8 | `uchardet/uchardet` (GitLab) | Character encoding detection |
-| [maddy](https://github.com/variar/maddy) | `602e266` | `variar/maddy` | Markdown to HTML conversion |
-| [exprtk](https://github.com/variar/klogg_exprtk) | `1f9f4cd` | `variar/klogg_exprtk` | Expression parsing |
-| [KF5Archive](https://github.com/variar/klogg_karchive) | `f546bf6` | `variar/klogg_karchive` | Archive format support (tar, zip, bzip2, lzma) |
-| [KDSingleApplication](https://github.com/variar/KDSingleApplication) | `5b30db3` | `variar/KDSingleApplication` | Single-instance enforcement |
-| [KDToolBox](https://github.com/KDAB/KDToolBox) | `6468867` | `KDAB/KDToolBox` | Signal throttler |
-| [whereami](https://github.com/gpakosz/whereami) | `dcb52a0` | `gpakosz/whereami` | Executable path detection |
-| [Sentry Native SDK](https://github.com/getsentry/sentry-native) | `a3d5862` | `getsentry/sentry-native` | Crash reporting (optional) |
-| [macdeployqtfix](https://github.com/arl/macdeployqtfix) | `df88850` | `arl/macdeployqtfix` | macOS Qt deployment (macOS only) |
-| [Catch2](https://github.com/catchorg/Catch2) | 2.13.8 | `catchorg/Catch2` | Unit testing framework |
-| [backward-cpp](https://github.com/bombela/backward-cpp) | 1.6 | `bombela/backward-cpp` | Stack trace capture (testing) |
+**GitHub is this project's only communication channel.**
 
-## How to Get Help
+- **Build locally:** follow the [build guide](docs/BUILD.md) for platform setup,
+  configuration, tests, and local performance gates.
+- **Report a problem or request a feature:** use [GitHub Issues](https://github.com/ZEACENT/klogg/issues),
+  including your version, platform, and a minimal example without private log data.
+- **Contribute:** start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
+  [Code of Conduct](CODE_OF_CONDUCT.md). Documentation and usability improvements
+  are welcome alongside code.
+- **Security:** read the [security policy](SECURITY.md) before sharing sensitive details.
+- **Follow development:** see [releases](https://github.com/ZEACENT/klogg/releases),
+  the [historical changelog](CHANGELOG.md), and the [backlog](docs/BACKLOG.md).
+  Backlog entries are plans, not shipped-feature promises.
 
-Please refer to the
-[technical documentation](docs/TECHNICAL_DOCUMENTATION.md)
-page.
+## Open source, with a long history
 
-You can open issues on the [klogg issues page](https://github.com/ZEACENT/klogg/issues).
+This is the **ZEACENT fork of [variar/klogg](https://github.com/variar/klogg)**,
+continuing a project that began as a fork of
+[Nicolas Bonnefon's glogg](https://github.com/nickbnf/glogg) in 2016.
+It builds on the work of [Anton Filimonov](https://github.com/variar),
+[Nicolas Bonnefon](https://github.com/nickbnf), and the
+[contributors](https://github.com/ZEACENT/klogg/graphs/contributors).
 
-## Contributing
-
-Contributions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for details on the code of conduct and development process.
-
-## License
-
-This project is licensed under the GPLv3 or later — see [COPYING](COPYING) file for details.
-
-## Authors
-
-* **[Anton Filimonov](https://github.com/variar)**
-* *Initial work* — **[Nicolas Bonnefon](https://github.com/nickbnf)**
-
-See also the list of [contributors](https://github.com/ZEACENT/klogg/graphs/contributors) who participated in this project.
-
-## Backlog
-
-See [docs/BACKLOG.md](docs/BACKLOG.md) for the task backlog and planned features.
+klogg is free and open source under **GPLv3 or later**.
+See [COPYING](COPYING) for the license and [NOTICE](NOTICE) for third-party notices.

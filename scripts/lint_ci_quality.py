@@ -29,7 +29,6 @@ REVIEWED_ACTION_REVISIONS = {
     "docker/build-push-action": "53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
     "docker/setup-buildx-action": "bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
     "github/codeql-action": "cdf488f595d80d6e07e03d4674febd5ab45fa938",
-    "ilshidur/action-discord": "d2594079a10f1d6739ee50a2471f0ca57418b554",
     "joncloud/makensis-action": "971ef20f43e4f9f3af2c7f276cb7348d033da1cd",
     "jurplel/install-qt-action": "48d3ad6db93f3627c8ee7a0454bc6f3744f7e730",
     "lukka/get-cmake": "fffaaafeea488556c2c12dad60690008bc1caacb",

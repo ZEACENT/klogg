@@ -39,7 +39,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at klogg@filimonov.dev. All complaints will be reviewed and investigated promptly and fairly.
+GitHub is this project's only communication channel. Report abusive, harassing, or otherwise unacceptable behavior to the project maintainers through the [GitHub repository](https://github.com/ZEACENT/klogg). Do not publish private evidence or personal information in an issue; ask how to provide a confidential report through GitHub before sharing sensitive details. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

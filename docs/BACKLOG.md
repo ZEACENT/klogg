@@ -1,5 +1,12 @@
 # Klogg Task Backlog
 
+This is a planning record, not a list of shipped features. Completed work is
+marked separately; planned entries describe proposals and may need fresh
+validation before implementation. In particular, the Chart Panel and persistent
+Filters Panel are **not shipped**. Existing search, filter favorites, and
+highlighting must not be confused with those proposed dock panels.
+See the [documentation hub](README.md) for current user and architecture guides.
+
 | ID | Task | Priority | Status | Related |
 |----|------|----------|--------|---------|
 | TASK-001 | [Search generation ID refactoring](#task-001-search-generation-id-refactoring) | Low | Done | [PR #11](https://github.com/ZEACENT/klogg/pull/11) |

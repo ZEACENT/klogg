@@ -528,15 +528,19 @@ publish_component(
         )
         self.assertNotIn("Create continuous candidate draft", required_text(CI_BUILD))
 
+    def test_stable_release_has_no_discord_notification_integration(self):
+        self.assertIsNone(
+            re.search(r"discord", required_text(CI_RELEASE), re.IGNORECASE),
+            "Stable releases must use GitHub only, without Discord webhooks or actions",
+        )
+
     def test_stable_release_uses_continuous_commit_and_remains_draft_until_verified(self):
         workflow = required_text(CI_RELEASE)
         self.assertIn("continuous-publication/klogg-source-publication-manifest.json", workflow)
         self.assertIn("KLOGG_SOURCE_COMMIT", workflow)
-        publication = section(
-            workflow,
-            "- name: Promote verified Continuous publication to Stable",
-            "- name: Discord notification",
-        )
+        publication = workflow[
+            workflow.index("- name: Promote verified Continuous publication to Stable") :
+        ]
         self.assertNotIn('--commit "${GITHUB_SHA}"', publication)
         self.assertIn("target_commitish: ${{ env.KLOGG_SOURCE_COMMIT }}", publication)
         create = publication.index("- name: Create GitHub Release")
@@ -587,15 +591,11 @@ publish_component(
         self.assertIn('gh api -X DELETE "/repos/${repo}/releases/${RELEASE_ID}"', rollback)
         self.assertIn('if [ "$final_ref_owned" = true ]', rollback)
         self.assertIn('delete_ref_if_present "$final_tag"', rollback)
-        cancellation = section(
-            release,
-            "- name: Roll back failed or cancelled stable promotion",
-            "- name: Discord notification",
-        )
+        cancellation = release[
+            release.index("- name: Roll back failed or cancelled stable promotion") :
+        ]
         self.assertIn("failure() || cancelled()", cancellation)
         self.assertIn('releases/${RELEASE_ID}', cancellation)
-        notification = release.split("- name: Discord notification", 1)[1]
-        self.assertIn("continue-on-error: true", notification)
         before_create = release.index(
             "- name: Recheck Continuous snapshot before stable draft creation"
         )

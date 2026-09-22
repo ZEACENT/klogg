@@ -3,26 +3,36 @@ weight: 3
 bookFlatSection: true
 ---
 
-## Github
+## Contribute to this fork
 
-Feel free to submit bug reports, feature requests, questions and pull requests on [Github project](https://github.com/ZEACENT/klogg).
+**GitHub is this project's only communication channel.** Use the
+[ZEACENT/klogg repository](https://github.com/ZEACENT/klogg) for ordinary bug
+reports, feature requests, questions, and pull requests. Documentation, usability,
+translations, and reproducible examples are welcome alongside code.
 
-## Chats with developers
-There is a [Discord server](https://discord.gg/DruNyQftzB), [Telegram group](https://t.me/joinchat/JeIBxstIfp4xZTk6) 
-and [Gitter community](https://app.gitter.im/#/room/#klogg_log_viewer_community:gitter.im).
+Start with the authoritative
+[contribution guide](https://github.com/ZEACENT/klogg/blob/master/CONTRIBUTING.md),
+[build guide](https://github.com/ZEACENT/klogg/blob/master/docs/BUILD.md), and
+[documentation hub](https://github.com/ZEACENT/klogg/blob/master/docs/README.md).
+Do not attach private log data. Read the
+[security policy](https://github.com/ZEACENT/klogg/blob/master/SECURITY.md) before
+sharing a security concern.
 
-## Mailing list
-_glogg_ has a mailing list where bugs, features and future development are discussed. Sometimes these ideas end up in _klogg_ earlier.
+## Acknowledgements
 
-The mailing list address is glogg-devel@googlegroups.com and the archive is found on [Google Groups](https://groups.google.com/g/glogg-devel).
+These inherited acknowledgements recognize upstream contributions; they do not
+create additional support or communication channels for this project.
 
-## Sponsors
-Big thanks to everyone sponsoring _klogg_. This helps running code-signing infrastructure
- - PetbkA
+### Historical upstream sponsorship
 
-## Contributors
+The upstream site thanked PetbkA for supporting its infrastructure. This
+acknowledgement does not imply that this fork's packages are signed or notarized.
 
-Thanks to all people who help develop _klogg_
+### Contributors
+
+Thanks to everyone who has helped develop _klogg_. See the
+[current contributor history](https://github.com/ZEACENT/klogg/graphs/contributors)
+as well as these inherited upstream acknowledgements:
 
  - Alexander Hirsch
  - Alexei Colin

@@ -1,7 +1,16 @@
 # Regex Search Benchmarks
 
-This document defines the regular-expression benchmark used for klogg's end-to-end search path.
-It covers corpus generation, engine variants, runtime environment expectations, and the generated result artifacts committed under [docs/benchmarks](./benchmarks/).
+This document defines the regular-expression benchmark used for klogg's search
+pipeline, not application startup or end-to-end UI painting. It covers corpus
+generation, engine variants, runtime environment expectations, and the generated
+result artifacts under [benchmarks](./benchmarks/).
+
+[Documentation hub](README.md) · [Build guide](BUILD.md) ·
+[Recorded results](benchmarks/regex-benchmark-results.md)
+
+The committed results are a dated snapshot, not measurements of every release.
+Preserve their environment and input details when quoting a number. The tool's
+`500MB` label means 500 MiB, as defined below; README uses the recorded label.
 
 ## Scope
 
@@ -137,13 +146,19 @@ Follow these steps to produce reproducible, commit-worthy benchmark results.
 
 ### 1. Prerequisites
 
-- macOS: `brew install cmake ninja qt@6 boost ragel`
-- Linux: `sudo apt-get install build-essential cmake qtbase5-dev libboost-all-dev ragel`
+- Install the platform prerequisites from the [build guide](BUILD.md), including
+  the selected Qt development modules, Boost, Ragel, Git, and Python 3.
+- Use an optimized, non-sanitizer build and record its source revision.
 - A memory-backed filesystem:
   - macOS: create a RAM disk (`diskutil erasevolume HFS+ RAMDisk $(hdiutil attach -nomount ram://2097152)`)
   - Linux: use `/dev/shm/klogg-bench`
 
 ### 2. Build three engine variants
+
+The explicit commands below are an **Intel macOS/Homebrew example**, followed by
+RAM-disk run commands. On Linux, omit the Homebrew `Qt6_DIR` argument or select
+your own Qt installation, and use `/dev/shm/klogg-bench`. The AVX comparison is
+an x86 comparison; do not describe an ARM64 native build as an AVX measurement.
 
 ```bash
 ROOT_DIR="$(pwd)"
@@ -157,7 +172,7 @@ cmake -S "$ROOT_DIR" -B "$ROOT_DIR/build-bench-qt" \
   -DQt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6
 cmake --build "$ROOT_DIR/build-bench-qt" --config Release --target regex_search_benchmark
 
-# Vectorscan generic (no SIMD)
+# Vectorscan generic (no AVX2/AVX512 codegen; baseline SIMD remains)
 cmake -S "$ROOT_DIR" -B "$ROOT_DIR/build-bench-vs-generic" \
   -DCMAKE_BUILD_TYPE=Release \
   -DKLOGG_BUILD_BENCHMARKS=ON \

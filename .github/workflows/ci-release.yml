@@ -16,7 +16,6 @@ jobs:
     permissions:
       contents: write
     env:
-      KLOGG_HAS_DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK != '' && 'true' || 'false' }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Reject non-master stable dispatch
@@ -513,13 +512,3 @@ jobs:
             delete_ref_if_present "$final_tag"
           fi
           delete_ref_if_present "$candidate_tag"
-
-      - name: Discord notification
-        if: success() && env.KLOGG_HAS_DISCORD_WEBHOOK == 'true'
-        continue-on-error: true
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_NEW_VERSIONS_WEBHOOK }}
-          DISCORD_EMBEDS: '[{"title": "Release v${{ env.KLOGG_VERSION }}", "url": "https://github.com/ZEACENT/klogg/releases/tag/v${{ env.KLOGG_VERSION }}"}]'
-        uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
-        with:
-          args: 'New release v${{ env.KLOGG_VERSION }} has been published!'
