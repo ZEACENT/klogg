@@ -67,9 +67,19 @@ int configuredTeardownTimeoutMs( int defaultTimeoutMs )
 void configureTestTempDir()
 {
     // Use the executable directory instead of the process working directory so
-    // direct runs and CTest runs use the same temp-file location.
-    const auto tempDir = QDir::cleanPath( QCoreApplication::applicationDirPath() + QDir::separator()
-                                          + QLatin1String( "test_tmp" ) );
+    // direct runs and CTest runs use the same temp-file location. A subprocess
+    // must use a child directory: clearing the parent's test_tmp would remove
+    // fixtures still owned by its running test.
+    const auto testRoot = QDir::cleanPath( QCoreApplication::applicationDirPath()
+                                           + QDir::separator() + QLatin1String( "test_tmp" ) );
+    const auto childTempDir = qEnvironmentVariable( "KLOGG_UI_TEST_CHILD_TEMP_DIR" );
+    const auto tempDir = childTempDir.isEmpty() ? testRoot : QDir::cleanPath( childTempDir );
+    if ( !childTempDir.isEmpty()
+         && !QDir::fromNativeSeparators( tempDir ).startsWith(
+             QDir::fromNativeSeparators( testRoot ) + QLatin1Char( '/' ) ) ) {
+        std::fprintf( stderr, "Invalid UI test child temp directory\n" );
+        std::exit( EXIT_FAILURE );
+    }
 
     // Keep UI tests deterministic in local reruns: stale files from previous runs
     // can accumulate native watcher resources and hit low per-process fd limits.

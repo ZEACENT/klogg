@@ -22,6 +22,7 @@
 
 #include <optional>
 
+#include <QList>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -129,6 +130,7 @@ class TabbedCrawlerWidget : public QTabWidget {
   Q_SIGNALS:
     void tabsReordered();
     void crawlerAdded();
+    void tabsCloseRequested( const QList<QWidget*>& tabs );
 
   protected:
     void keyPressEvent( QKeyEvent* event ) override;
