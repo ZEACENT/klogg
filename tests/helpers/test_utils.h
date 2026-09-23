@@ -117,16 +117,18 @@ class ScopedEnvironmentVariable final {
 };
 
 // Performance budgets must never gate CI on runner speed. Budget assertions
-// go through KLOGG_CHECK_PERF_BUDGET so the measurement is always reported
-// (Catch2 CAPTURE-style INFO keeps it visible in failure logs) but the
+// go through KLOGG_CHECK_PERF_BUDGET; report measurements separately with
+// CAPTURE or INFO when needed. The expression is only evaluated and the
 // assertion only fires when a developer opts in locally with
 // KLOGG_PERF_GATES=1 -- scripts/run_perf_gates.py sets it. CI never sets the
 // variable, so a slow or loaded hosted runner cannot flake the merge gate on
 // a wall-clock threshold.
 //
 // The flip side: an expression behind this macro is NOT checked in CI. Mark
-// every call site with '// lint-allow: perf-budget' (the determinism lint
-// enforces the marker), and route only genuine speed budgets through it. A
+// every call site with '// lint-allow: perf-budget -- <nonempty reason>' in
+// a comment within the assertion's line span. The determinism lint requires
+// the reason on the marker's own line; explain why skipping the budget in CI
+// is safe, and route only genuine speed budgets through this macro. A
 // correctness or liveness property -- "this call only dispatches and never
 // runs the work on the caller's thread", "the contended lock waited for the
 // configured timeout" -- must be asserted deterministically (observe the

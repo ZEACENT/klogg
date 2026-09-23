@@ -375,15 +375,23 @@ Tests are built by default. To turn them off pass `-DKLOGG_BUILD_TESTS=OFF` to C
 Tests use Catch2 (provided by the dependency build) and the Qt Test module for
 the selected Qt major version. Run CTest from the repository root:
 
-```bash
-ctest --test-dir build_root --build-config RelWithDebInfo --verbose
+```sh
+cmake -E chdir build_root ctest --build-config RelWithDebInfo --verbose
 ```
+
+`cmake -E chdir` works with the supported CMake 3.14 baseline and does not
+require platform-specific shell directory commands.
 
 Tests can run in parallel; every registered test gets its own
 capture-coordination root (`KLOGG_CAPTURE_COORDINATION_ROOT`) and portable
-config directory (`KLOGG_PORTABLE_CONFIG_DIR`), so
-`ctest --test-dir build_root --parallel $(getconf _NPROCESSORS_ONLN)` can run
-independent test entries concurrently (CI also uses parallel CTest).
+config directory (`KLOGG_PORTABLE_CONFIG_DIR`). For example, run up to four
+independent entries at once (adjust the count for your machine):
+
+```sh
+cmake -E chdir build_root ctest --build-config RelWithDebInfo --parallel 4
+```
+
+CI also runs independent test entries concurrently.
 
 ### Performance budgets (local-only gates)
 
@@ -404,8 +412,9 @@ new raw wall-clock assertions and unbounded timing patterns in tests.
 Because the macro's expression is skipped unless `KLOGG_PERF_GATES=1`, and CI
 never sets it, a `KLOGG_CHECK_PERF_BUDGET` call site is a statement that **CI
 does not check that property**. Route only genuine speed budgets through it,
-and mark every call site with `// lint-allow: perf-budget` plus the reason (the
-lint enforces the marker). A *correctness* or *liveness* property — "the call
+and mark every call site with `// lint-allow: perf-budget -- <reason>` in a real
+comment within the assertion span. The lint requires a nonempty reason on that
+same line; strings and bare markers do not qualify. A *correctness* or *liveness* property — "the call
 only dispatches and never runs the work on the caller's thread", "the
 contended lock was waited on for the configured timeout" — must be asserted
 deterministically so it runs on every CI leg, by observing the mechanism

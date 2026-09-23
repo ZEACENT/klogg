@@ -687,7 +687,7 @@ TEST_CASE( "FolderSearchEngine destruction does not wait for blocked enumeration
     // Local-only latency budget on a cancellation path: CI covers the contract
     // through the cancellationObserved/returned handshake below, not through
     // the time this destruction took.
-    KLOGG_CHECK_PERF_BUDGET( destructionTimer.elapsed() < 1000 );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( destructionTimer.elapsed() < 1000 );  // lint-allow: perf-budget -- Local destruction speed; CI checks cancellation.
 
     state->release.release();
     REQUIRE( waitUntil( [ &state ] { return state->returned.load(); } ) );

@@ -1722,7 +1722,7 @@ TEST_CASE( "ProcessLiveSourceTransport async disconnect returns immediately" )
     // Disconnect should complete in well under 100ms (no blocking
     // waitForFinished). Local-only budget: CI covers the non-blocking contract
     // through the deferred-cleanup drain and state assertions below.
-    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( elapsed < 100 );  // lint-allow: perf-budget -- Local disconnect speed; CI still drains deferred cleanup.
 
     // Drain async cleanup deterministically (fixpoint DeferredDelete delivery).
     drainLiveSourceEvents( 200 );
@@ -2399,7 +2399,7 @@ TEST_CASE( "AdbLogcatSource clears disconnected ADB capture without waiting for 
     REQUIRE( source.clearAndRestart() );
     // Local-only latency budget for the async clear/restart: CI covers the
     // contract through the line-count and state assertions around it.
-    KLOGG_CHECK_PERF_BUDGET( clearTimer.elapsed() < 2000 );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( clearTimer.elapsed() < 2000 );  // lint-allow: perf-budget -- Local restart speed; CI checks cleared line count.
     REQUIRE( waitForLineCount( logData, 0 ) );
 
     source.disconnectSource();

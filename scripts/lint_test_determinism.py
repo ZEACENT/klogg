@@ -26,27 +26,32 @@ repository:
 * Wall-clock budget assertions (``CHECK( elapsed < N )``, including the
   ``timer.elapsed() < N`` call form, ``now() - start`` chrono diffs, and
   line-wrapped assertions) are performance
-  gates. They must be marked ``lint-allow: perf-budget`` AND live inside a
-  Catch2 case tagged ``[.perf]`` so CI (which runs the default tag set)
-  never executes them; developers run them locally via ``ctest -L perf``.
+  gates. They must have a ``// lint-allow: perf-budget -- <nonempty reason>``
+  comment AND live inside a Catch2 case tagged ``[.perf]`` so CI (which runs
+  the default tag set) never executes them; developers run them locally via
+  ``ctest -L perf``.
   Assertion polarity matters: ``CHECK_FALSE( elapsed < N )`` and
   ``CHECK( elapsed >= N )`` demand a *minimum* duration, so they are
   correctness assertions and stay in the default CI run.
 * ``KLOGG_CHECK_PERF_BUDGET( expr )`` never evaluates ``expr`` in CI --
   the macro only fires when ``KLOGG_PERF_GATES=1`` is set, and CI never
-  sets it. Every call site therefore needs a ``lint-allow: perf-budget``
-  marker stating why skipping it is safe. Routing a *correctness* or
+  sets it. Every call site therefore needs a
+  ``// lint-allow: perf-budget -- <nonempty reason>`` comment stating why
+  skipping it is safe. Routing a *correctness* or
   *liveness* property through the macro silently drops CI coverage (PR
   #76 did this to the "returns immediately" and "gate timeout" checks);
   those must be asserted deterministically instead -- observe the
   mechanism (dispatch thread, effective timeout) rather than the elapsed
   time.
 
-When a pattern is genuinely intentional, add a trailing comment on the same
-line: ``// lint-allow: test-timing`` (waits/sleeps) or
-``// lint-allow: perf-budget`` (budget assertions and
-``KLOGG_CHECK_PERF_BUDGET`` call sites). The legacy
-``// lint-allow: platform-fragile`` marker is accepted for waits/sleeps.
+When a wait/sleep is genuinely intentional, add a trailing comment on the
+same line: ``// lint-allow: test-timing``. The legacy
+``// lint-allow: platform-fragile`` marker is also accepted for waits/sleeps.
+Budget assertions and ``KLOGG_CHECK_PERF_BUDGET`` call sites require a genuine
+``// lint-allow: perf-budget -- <nonempty reason>`` comment within the
+assertion's line span (including its closing line). The reason must be on
+the same comment line as the marker; literals and unrelated comments do not
+satisfy the allowance.
 
 Usage:
     python3 scripts/lint_test_determinism.py
@@ -70,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lint_platform_fragile import _strip_cpp_comments, _strip_cpp_literals
 
 TIMING_MARKERS = ("lint-allow: test-timing", "lint-allow: platform-fragile")
-PERF_MARKER = "lint-allow: perf-budget"
+PERF_MARKER_RE = re.compile(r"//[ \t]*lint-allow: perf-budget[ \t]+--[ \t]+\S")
 
 MAX_QWAIT_MS = 500
 
@@ -175,11 +180,11 @@ def _is_negated_assertion(logical: str) -> bool:
 
 
 def _span_has_perf_marker(
-    original_lines: list[str], start: int, end: int
+    comment_lines: list[str], start: int, end: int
 ) -> bool:
     return any(
-        PERF_MARKER in original_lines[j]
-        for j in range(start, min(end + 1, len(original_lines)))
+        PERF_MARKER_RE.search(comment_lines[j]) is not None
+        for j in range(start, min(end + 1, len(comment_lines)))
     )
 
 
@@ -187,7 +192,14 @@ def check_text(text: str, path: Path) -> list[Finding]:
     if not _is_test_source(path):
         return []
     original_lines = text.splitlines()
-    uncommented = _strip_cpp_comments(text).splitlines()
+    comment_masked = _strip_cpp_comments(text)
+    # The existing lexer preserves positions and literals. Invert its comment
+    # mask so strings cannot spoof allowances and quotes in reasons stay intact.
+    comment_lines = "".join(
+        original if original != masked or original == "\n" else " "
+        for original, masked in zip(text, comment_masked)
+    ).splitlines()
+    uncommented = comment_masked.splitlines()
     stripped = _strip_cpp_literals("\n".join(uncommented)).splitlines()
     findings: list[Finding] = []
     for index, code in enumerate(stripped):
@@ -268,7 +280,7 @@ def check_text(text: str, path: Path) -> list[Finding]:
             # Preprocessor lines are the macro's own #define/#undef, not a
             # call site.
             _, budget_span_end = _assertion_span(stripped, index)
-            if not _span_has_perf_marker(original_lines, index, budget_span_end):
+            if not _span_has_perf_marker(comment_lines, index, budget_span_end):
                 findings.append(
                     Finding(
                         "perf-budget-unmarked",
@@ -276,7 +288,8 @@ def check_text(text: str, path: Path) -> list[Finding]:
                         line_no,
                         "KLOGG_CHECK_PERF_BUDGET never runs in CI: its expression is "
                         "skipped unless KLOGG_PERF_GATES=1 is set, and CI never sets "
-                        "it. Add '// lint-allow: perf-budget' with the reason, and keep "
+                        "it. Add '// lint-allow: perf-budget -- <nonempty reason>' "
+                        "within the assertion span, and keep "
                         "the property covered in CI -- a genuine speed budget belongs "
                         "to scripts/run_perf_gates.py, while a correctness or liveness "
                         "property (which thread ran the work, which timeout reached "
@@ -290,14 +303,15 @@ def check_text(text: str, path: Path) -> list[Finding]:
                 or _is_chrono_budget(logical)
             )
             if is_budget and not _is_negated_assertion(logical):
-                if not _span_has_perf_marker(original_lines, index, span_end):
+                if not _span_has_perf_marker(comment_lines, index, span_end):
                     findings.append(
                         Finding(
                             "perf-budget-assertion",
                             path,
                             line_no,
                             "Wall-clock budget assertions are performance gates; add "
-                            "'// lint-allow: perf-budget' and tag the case '[.perf]' "
+                            "'// lint-allow: perf-budget -- <nonempty reason>' within "
+                            "the assertion span and tag the case '[.perf]' "
                             "so CI never gates on runner speed.",
                         )
                     )

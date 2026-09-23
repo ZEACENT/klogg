@@ -2118,7 +2118,7 @@ TEST_CASE( "CaptureStore cleanupUnusedCapturesAsync removes orphan captures off 
     INFO( "cleanup scheduling elapsed ms: " << elapsedMs );
     // Local-only: CI checks the async contract through the orphan-directory
     // wait below, not through this scheduling latency.
-    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( elapsedMs < 200 );  // lint-allow: perf-budget -- Local scheduling speed; CI checks orphan removal.
     REQUIRE( QDir{ retainedPath }.exists() );
 
     QElapsedTimer deadline;
@@ -4000,7 +4000,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches within a linear-time budget
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     // Multi-sample speed budget, local-only by design: CI must not gate on
     // hosted-runner speed, and every correctness assertion above still runs.
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < 2000 );  // lint-allow: perf-budget -- Local append speed; CI checks line counts and contents.
 #endif
 }
 
@@ -4046,7 +4046,7 @@ TEST_CASE( "CaptureStore appends large UTF-8 batches with low per-line metadata 
 #if !defined( KLOGG_SANITIZER_BUILD ) && defined( NDEBUG )
     constexpr int MetadataOverheadBudgetMs = 200;
     // Multi-sample speed budget, local-only by design (see the sibling case).
-    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );  // lint-allow: perf-budget
+    KLOGG_CHECK_PERF_BUDGET( bestElapsedMs < MetadataOverheadBudgetMs );  // lint-allow: perf-budget -- Local metadata speed; CI checks contents and memory accounting.
 #endif
 }
 
