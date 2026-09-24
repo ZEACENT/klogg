@@ -35,6 +35,16 @@ chmod a+x linuxdeployqt-continuous-x86_64.AppImage
 
 VERSION=$KLOGG_VERSION ./linuxdeployqt-continuous-x86_64.AppImage appdir/usr/share/applications/*.desktop -bundle-non-qt-libs
 
+# linuxdeployqt only deploys the linked xcb platform plugin. Bundle offscreen
+# next to it so the shipped AppImage can start headless (version/smoke checks).
+platform_dir=$(dirname "$(find appdir -name libqxcb.so -print -quit)")
+offscreen_src=$(find /usr/lib -path '*/qt5/plugins/platforms/libqoffscreen.so' -print -quit)
+test -n "$platform_dir" && test -f "$offscreen_src" || {
+  echo "ERROR: cannot locate deployed xcb plugin or Qt offscreen plugin source"
+  exit 1
+}
+cp "$offscreen_src" "$platform_dir/libqoffscreen.so"
+
 mkdir -p appdir/usr/lib
 cp /lib/x86_64-linux-gnu/libssl* appdir/usr/lib
 

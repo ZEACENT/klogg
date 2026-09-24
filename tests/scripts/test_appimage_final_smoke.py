@@ -22,6 +22,13 @@ class AppImageFinalSmokeTest(unittest.TestCase):
         self.assertIn("squashfs-root/usr/bin/helpers/adb", block)
         self.assertNotRegex(block, r"smoke_adb_helper\.py \\\n\s+--adb appdir")
 
+    def test_offscreen_platform_plugin_is_bundled_before_packaging(self):
+        bundle = self.text.index("-bundle-non-qt-libs")
+        packaging = self.text.index("appdir/usr/share/applications/*.desktop -appimage")
+        block = self.text[bundle:packaging]
+        self.assertIn("libqoffscreen.so", block)
+        self.assertIn("libqxcb.so", block)
+
     def test_extracted_tree_passes_the_existing_package_verifier(self):
         final = self.text.index("-appimage")
         receipt = self.text.index("--package-file")
