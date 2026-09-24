@@ -89,6 +89,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _close_error(error):
+    """Close an HTTP error body if it has one.
+
+    Real urlopen errors carry a response file; synthesized test errors and some
+    Python versions have none, and close() must never mask the real failure.
+    """
+    try:
+        error.close()
+    except Exception:
+        pass
+
+
 class RegistryClient:
     """Fetch only public metadata from the project's one environment package."""
 
@@ -112,7 +124,7 @@ class RegistryClient:
             except urllib.error.HTTPError as error:
                 if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 3:
                     raise
-                error.close()
+                _close_error(error)
             except (urllib.error.URLError, OSError, http.client.IncompleteRead):
                 if attempt == 3:
                     raise
@@ -163,7 +175,7 @@ class RegistryClient:
                     return self._read(url, redirects=redirects)
                 raise RegistryError("public registry request failed (HTTP {})".format(error.code)) from error
             finally:
-                error.close()
+                _close_error(error)
         except (urllib.error.URLError, OSError, http.client.IncompleteRead) as error:
             raise RegistryError("public registry request failed") from error
 
