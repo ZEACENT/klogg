@@ -180,12 +180,25 @@ class CiBuildMetricsTest(unittest.TestCase):
     def test_rejects_wrong_log_version_and_invalid_database(self):
         for database, header in (([], "# ninja log v4\n"), ({}, "# ninja log v5\n"),
                                  ([None], "# ninja log v5\n"),
+                                 ([], "# ninja log v99\n"),
                                  ([{"file": "a.cpp", "arguments": "cc -o a.o"}], "# ninja log v5\n")):
             with self.subTest(database=database, header=header):
                 result = self.invoke("", database, header=header)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("error:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
+
+    def test_ninja_v6_and_v7_logs_keep_the_five_fields_we_use(self):
+        # Ninja 1.13 (Ubuntu 26.04) writes v7 with nanosecond mtimes; the
+        # start/end/output/hash fields keep their units and order.
+        for version in ("v5", "v6", "v7"):
+            with self.subTest(version=version):
+                report = self.report(
+                    f"0\t100\t1790269820796937594\ta.o\tabc\n",
+                    [entry("/repo/src/a.cpp", "a.o")],
+                    header=f"# ninja log {version}\n")
+                self.assertEqual(report["compilation"]["parallel_work_ms"], 100)
+                self.assertEqual(report["categories"]["first_party"]["edges"], 1)
 
     def test_rejects_negative_or_inconsistent_provided_build_wall_time(self):
         for wall in ("-1", "9"):

@@ -155,8 +155,10 @@ def compile_owners(database: Any, paths: Paths) -> dict[str, str]:
 
 def log_edges(text: str, paths: Paths) -> tuple[list[dict[str, Any]], int]:
     lines = text.splitlines()
-    if not lines or lines[0] != "# ninja log v5":
-        raise ValueError("expected a fresh Ninja log with '# ninja log v5' header")
+    # Ninja 1.13 (Ubuntu 26.04) writes v7; v6/v7 only changed the mtime field,
+    # which this report never reads. start/end keep millisecond units.
+    if not lines or not re.fullmatch(r"# ninja log v[5-7]", lines[0]):
+        raise ValueError("expected a fresh Ninja v5-v7 log")
     edges: list[dict[str, Any]] = []
     records = 0
     for number, line in enumerate(lines[1:], 2):
